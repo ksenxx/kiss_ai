@@ -5,10 +5,10 @@
 //
 // End-to-end tests for the per-panel event timestamp badge.
 //
-// REQUIREMENT: every event panel in the chat webview (tool_call,
-// tool_result error, tool output, Result, Prompt, System Prompt,
-// Thoughts) must show a human-readable timestamp of the event — its
-// FULL DATE plus a SECONDS-precision time of day
+// REQUIREMENT: every TOP-LEVEL event panel in the chat webview
+// (tool_call, Result, Prompt, System Prompt, Thoughts) must show a
+// human-readable timestamp of the event — its FULL DATE plus a
+// SECONDS-precision time of day
 // ("Mar 5, 2021 2:07:33 PM") — from the event's ``ts`` field (ms
 // since epoch) at the LEFT of the panel's
 // BOTTOM footer bar — the same ``div.panel-time`` bar whose RIGHT
@@ -17,6 +17,13 @@
 // and the remote web app (which boot the very same media/chat.html +
 // panelCopy.js + main.js).  The badge must NOT render in the panel's
 // title row.
+//
+// SUB-panels nested INSIDE a tool-call event panel (the inline bash
+// output panel, a successful tool_result output panel, and the
+// FAILED tool_result panel) must show NO timestamp badge at all —
+// the owning tool-call panel's own footer badge already carries the
+// event time.  A tool_result panel that lands at TOP level (no
+// owning tool_call panel in the stream) still stamps its own badge.
 //
 // Additional invariants covered:
 //   * the footer bar is the panel's LAST child (bottom), the badge is
@@ -254,6 +261,20 @@ function assertBadge(panel, ts, what) {
   }
 }
 
+/**
+ * Assert that ``panel`` — a SUB-panel nested inside a tool-call event
+ * panel — carries NO ``.panel-ts`` timestamp badge anywhere in its
+ * subtree: the owning tool-call panel's footer badge already shows
+ * the event time.
+ */
+function assertNoBadge(panel, what) {
+  assert.strictEqual(
+    panel.querySelectorAll('.panel-ts').length,
+    0,
+    `${what}: a sub-panel of a tool-call panel must show NO timestamp badge`,
+  );
+}
+
 /** Drive one full agent turn and assert every panel shows its badge. */
 async function runFullTranscript(wv, contextName) {
   const win = wv.win;
@@ -306,7 +327,7 @@ async function runFullTranscript(wv, contextName) {
   assertBadge(tc, now, `${contextName}: tool_call`);
   const bp = tc.querySelector('.bash-panel');
   assert.ok(bp, `${contextName}: inline bash panel exists`);
-  assertBadge(bp, now, `${contextName}: inline bash panel`);
+  assertNoBadge(bp, `${contextName}: inline bash panel`);
   send(win, {type: 'system_output', text: 'README.md\n', tabId: TAB});
   send(win, {
     type: 'tool_result',
@@ -336,7 +357,13 @@ async function runFullTranscript(wv, contextName) {
   const readTc = tcs[tcs.length - 1];
   const op = readTc.querySelector('.bash-panel');
   assert.ok(op, `${contextName}: tool_result output panel exists`);
-  assertBadge(op, now, `${contextName}: tool_result output`);
+  assertNoBadge(op, `${contextName}: tool_result output`);
+  // The owning tool-call panel keeps exactly ONE badge — its own.
+  assert.strictEqual(
+    readTc.querySelectorAll('.panel-ts').length,
+    1,
+    `${contextName}: the tool-call panel keeps only its own badge`,
+  );
 
   // Failing tool call → FAILED panel.
   send(win, {
@@ -356,7 +383,7 @@ async function runFullTranscript(wv, contextName) {
   await flushMicrotasks();
   const trErr = output.querySelector('.ev.tr.err');
   assert.ok(trErr, `${contextName}: FAILED tool_result panel exists`);
-  assertBadge(trErr, now, `${contextName}: FAILED tool_result`);
+  assertNoBadge(trErr, `${contextName}: FAILED tool_result`);
 
   // Result panel.
   send(win, {
@@ -443,6 +470,42 @@ async function run() {
       0,
       'no badge without ts',
     );
+    win.close();
+  });
+
+  // -------------------------------------------------------------------
+  // 3b. A tool_result with NO owning tool_call panel in the stream
+  //     lands at top level and still stamps its own badge (both the
+  //     FAILED and the successful-output shapes).
+  // -------------------------------------------------------------------
+  await test('top-level tool_result panels (no owning tool_call) keep their badge', async () => {
+    const wv = makeWebview();
+    const win = wv.win;
+    const TAB = tabIdOf(wv);
+    const output = win.document.getElementById('output');
+    const now = Date.now();
+    send(win, {type: 'clear', chat_id: 'chat-toplevel-tr', tabId: TAB});
+    send(win, {
+      type: 'tool_result',
+      content: 'orphan failure',
+      is_error: true,
+      tabId: TAB,
+      ts: now,
+    });
+    send(win, {
+      type: 'tool_result',
+      content: 'orphan output',
+      is_error: false,
+      tabId: TAB,
+      ts: now,
+    });
+    await flushMicrotasks();
+    const trErr = output.querySelector('.ev.tr.err');
+    assert.ok(trErr, 'top-level FAILED panel exists');
+    assertBadge(trErr, now, 'top-level FAILED tool_result');
+    const op = output.querySelector('.bash-panel');
+    assert.ok(op, 'top-level output panel exists');
+    assertBadge(op, now, 'top-level tool_result output');
     win.close();
   });
 
