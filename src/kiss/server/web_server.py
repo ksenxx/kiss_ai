@@ -2427,6 +2427,42 @@ class WebPrinter(JsonPrinter):
                     self._send_locks[endpoint] = lock
             return lock
 
+    async def flush_pending_sends(self, endpoint: Any) -> None:
+        """Await every send already scheduled to *endpoint*.
+
+        :meth:`_schedule_send` registers each outbound payload's
+        ``run_coroutine_threadsafe`` future in ``_pending_sends`` the
+        instant it is scheduled — synchronously, in the calling thread,
+        BEFORE the ``_locked_send`` coroutine's first step runs.
+        Awaiting a snapshot of those futures therefore guarantees every
+        payload queued *before* this call has actually reached the wire.
+
+        :meth:`RemoteAccessServer._handle_ready` uses this to replay an
+        in-flight ``merge_data`` strictly AFTER the ``task_events`` that
+        ``resumeSession`` scheduled from its executor thread.  The
+        per-endpoint :meth:`send_lock` alone is insufficient: it only
+        orders senders that have already reached ``async with
+        send_lock``, so under scheduler pressure the directly-awaited
+        ``merge_data`` send can grab the lock before the
+        ``run_coroutine_threadsafe``-scheduled ``task_events`` send has
+        even started — inverting wire order and erasing the recovered
+        merge panel on refresh.  Draining the pending futures first
+        closes that window deterministically.
+
+        Args:
+            endpoint: The client connection whose queued sends to await.
+        """
+        with self._ws_lock:
+            pending = list(self._pending_sends.get(endpoint, ()))
+        for fut in pending:
+            try:
+                await asyncio.wrap_future(fut)
+            except Exception:
+                # A cancelled/failed send (dead peer) must not abort the
+                # merge replay for a still-live connection; the send
+                # lock and per-endpoint teardown handle those paths.
+                logger.debug("flush_pending_sends await failed", exc_info=True)
+
     async def _locked_send(self, endpoint: Any, data: str) -> None:
         """Send one payload to one endpoint under its FIFO send lock.
 
@@ -5364,6 +5400,16 @@ class RemoteAccessServer:
             if rt_id and rt_id not in seen_merge_tabs:
                 merge_tabs_to_replay.append(rt_id)
                 seen_merge_tabs.add(rt_id)
+        if merge_tabs_to_replay:
+            # Drain every send already scheduled to this endpoint —
+            # crucially the ``task_events`` that the ``resumeSession``
+            # calls above fanned out from their executor threads — so
+            # the ``merge_data`` replay below reaches the wire strictly
+            # AFTER them.  Without this the merge send can overtake a
+            # not-yet-started ``task_events`` send under load, and the
+            # frontend's history replay then erases the recovered merge
+            # panel (see :meth:`WebPrinter.flush_pending_sends`).
+            await self._printer.flush_pending_sends(websocket)
         for merge_tab_id in merge_tabs_to_replay:
             await self._replay_merge_review(merge_tab_id, websocket)
         # Finally, tell a freshly-opened REMOTE page about every task
