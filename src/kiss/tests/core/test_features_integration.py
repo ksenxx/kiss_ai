@@ -277,12 +277,14 @@ class TestWebBrowserToggle:
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
-        monkeypatch.setattr(
-            "kiss.core.vscode_config.CONFIG_DIR", fake_home / ".kiss",
-        )
-        monkeypatch.setattr(
-            "kiss.core.vscode_config.CONFIG_PATH",
-            fake_home / ".kiss" / "config.json",
+        # ``CONFIG_DIR``/``CONFIG_PATH`` are PEP 562 lazy attributes;
+        # ``setattr`` would pin the computed (stale tmp) Path at
+        # teardown.  ``setitem`` deletes the pin instead.
+        import kiss.core.vscode_config as _vc
+
+        monkeypatch.setitem(vars(_vc), "CONFIG_DIR", fake_home / ".kiss")
+        monkeypatch.setitem(
+            vars(_vc), "CONFIG_PATH", fake_home / ".kiss" / "config.json",
         )
         save_config({"use_web_browser": False})
         cfg = load_config()
@@ -299,12 +301,14 @@ class TestApiKeySetupAndDeletion:
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
-        monkeypatch.setattr(
-            "kiss.core.vscode_config.CONFIG_DIR", fake_home / ".kiss",
-        )
-        monkeypatch.setattr(
-            "kiss.core.vscode_config.CONFIG_PATH",
-            fake_home / ".kiss" / "config.json",
+        # ``CONFIG_DIR``/``CONFIG_PATH`` are PEP 562 lazy attributes;
+        # ``setattr`` would pin the computed (stale tmp) Path at
+        # teardown.  ``setitem`` deletes the pin instead.
+        import kiss.core.vscode_config as _vc
+
+        monkeypatch.setitem(vars(_vc), "CONFIG_DIR", fake_home / ".kiss")
+        monkeypatch.setitem(
+            vars(_vc), "CONFIG_PATH", fake_home / ".kiss" / "config.json",
         )
         monkeypatch.setenv("SHELL", "/bin/zsh")
         for k in API_KEY_ENV_VARS:

@@ -357,6 +357,15 @@ _TUNNEL_FORCE_RESTART_COOLDOWN_MAX = 3600
 # minimum cool-down.
 _TUNNEL_FORCE_RESTART_RESET_AFTER_HEALTHY = 600
 
+# Fail-fast window (seconds) used by ``_spawn_cloudflared``: after
+# spawning, wait up to this long for the child to exit so a bind
+# collision (TOCTOU on the pre-picked metrics port) is detected and
+# retried with a fresh port.  Healthy cloudflared takes seconds to
+# start, so it never exits within this window.  Module-level so tests
+# can widen the window on heavily loaded machines where even a
+# fail-fast child may take longer than 1s to exec and exit.
+_SPAWN_FAILFAST_WINDOW = 1.0
+
 # Substrings (case-insensitive) in cloudflared's stderr that indicate
 # trycloudflare.com is rate-limiting the local egress IP.  Matching is
 # done line-by-line via :func:`_is_rate_limit_line`.
@@ -1635,6 +1644,70 @@ def _snapshot_active_tabs() -> list[str]:
     return active_tabs
 
 
+def _snapshot_running_task_rows() -> list[dict[str, Any]]:
+    """Return one ``{chatId, taskId, title, startTs}`` dict per running chat.
+
+    Snapshots :attr:`_RunningAgentState.running_agent_states` (under its
+    registry lock — same discipline as :func:`_snapshot_active_tabs`)
+    and keeps only top-level running tasks:
+
+    * ``is_task_active`` must be true (a task is actually in flight);
+    * sub-agent states are skipped — their chats are reopened by the
+      parent tab's own ``resumeSession`` replay
+      (``_open_persisted_subagent_tabs``), so listing them here would
+      duplicate tabs on the client;
+    * states without a ``chat_id`` are skipped — there is nothing a
+      client-side ``resumeSession`` could resume yet;
+    * duplicate ``chat_id`` values are collapsed to one row (several
+      viewer tabs may share one live chat).
+
+    ``startTs`` is the ``task_history.start_ts`` of the in-flight task
+    (``0`` when the row is missing) and the result is sorted by it
+    ascending, so a client opening one tab per row in order naturally
+    ends focused on the tab running the LATEST task.  ``title`` is the
+    task's user prompt for an immediate tab label; the follow-up
+    ``resumeSession`` replay repaints the tab with the real events.
+    """
+    from kiss.agents.sorcar.persistence import _get_task_start_ts
+    from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+
+    try:
+        with _RunningAgentState._registry_lock:
+            states = list(_RunningAgentState.running_agent_states.values())
+    except Exception:
+        try:
+            states = list(_RunningAgentState.running_agent_states.values())
+        except Exception:
+            logger.debug(
+                "unlocked registry snapshot failed", exc_info=True,
+            )
+            states = []
+    rows: list[dict[str, Any]] = []
+    seen_chats: set[str] = set()
+    for state in states:
+        try:
+            if not state.is_task_active or state.is_subagent:
+                continue
+            chat_id = state.chat_id
+            if not chat_id or chat_id in seen_chats:
+                continue
+            task_id = str(state.task_history_id or state.last_task_id or "")
+            rows.append({
+                "chatId": chat_id,
+                "taskId": task_id,
+                "title": state.last_user_prompt or "",
+                "startTs": _get_task_start_ts(task_id),
+            })
+            seen_chats.add(chat_id)
+        except Exception:
+            logger.debug(
+                "skipping malformed state in running-task snapshot",
+                exc_info=True,
+            )
+    rows.sort(key=lambda r: r["startTs"])
+    return rows
+
+
 def _rss_mb() -> float:
     """Return this process's peak RSS in megabytes, or ``-1.0`` on failure.
 
@@ -2353,6 +2426,42 @@ class WebPrinter(JsonPrinter):
                 if endpoint in self._pending_sends:
                     self._send_locks[endpoint] = lock
             return lock
+
+    async def flush_pending_sends(self, endpoint: Any) -> None:
+        """Await every send already scheduled to *endpoint*.
+
+        :meth:`_schedule_send` registers each outbound payload's
+        ``run_coroutine_threadsafe`` future in ``_pending_sends`` the
+        instant it is scheduled — synchronously, in the calling thread,
+        BEFORE the ``_locked_send`` coroutine's first step runs.
+        Awaiting a snapshot of those futures therefore guarantees every
+        payload queued *before* this call has actually reached the wire.
+
+        :meth:`RemoteAccessServer._handle_ready` uses this to replay an
+        in-flight ``merge_data`` strictly AFTER the ``task_events`` that
+        ``resumeSession`` scheduled from its executor thread.  The
+        per-endpoint :meth:`send_lock` alone is insufficient: it only
+        orders senders that have already reached ``async with
+        send_lock``, so under scheduler pressure the directly-awaited
+        ``merge_data`` send can grab the lock before the
+        ``run_coroutine_threadsafe``-scheduled ``task_events`` send has
+        even started — inverting wire order and erasing the recovered
+        merge panel on refresh.  Draining the pending futures first
+        closes that window deterministically.
+
+        Args:
+            endpoint: The client connection whose queued sends to await.
+        """
+        with self._ws_lock:
+            pending = list(self._pending_sends.get(endpoint, ()))
+        for fut in pending:
+            try:
+                await asyncio.wrap_future(fut)
+            except Exception:
+                # A cancelled/failed send (dead peer) must not abort the
+                # merge replay for a still-live connection; the send
+                # lock and per-endpoint teardown handle those paths.
+                logger.debug("flush_pending_sends await failed", exc_info=True)
 
     async def _locked_send(self, endpoint: Any, data: str) -> None:
         """Send one payload to one endpoint under its FIFO send lock.
@@ -4471,7 +4580,7 @@ class RemoteAccessServer:
                         if rt_id not in local_tabs:
                             local_tabs.add(rt_id)
                             self._printer.register_local_uds_tab(rt_id)
-            await self._handle_ready(cmd, endpoint)
+            await self._handle_ready(cmd, endpoint, is_uds=is_uds)
             return
         if cmd_type == "submit":
             await self._handle_submit(cmd)
@@ -5170,7 +5279,7 @@ class RemoteAccessServer:
         return cleaned
 
     async def _handle_ready(
-        self, cmd: dict[str, Any], websocket: Any,
+        self, cmd: dict[str, Any], websocket: Any, *, is_uds: bool = False,
     ) -> None:
         """Translate the webview ``ready`` command into backend commands.
 
@@ -5193,6 +5302,11 @@ class RemoteAccessServer:
                 stamped with the connection's ``connId`` by
                 :meth:`_dispatch_client_command`).
             websocket: The client connection (for direct replies).
+            is_uds: True when the ``ready`` arrived over the local UDS
+                (VS Code extension host / CLI) transport.  Only
+                remote-web (WSS) clients get the ``openRunningTasks``
+                push at the end — VS Code windows manage their own tab
+                restoration in the extension host.
         """
         tab_id = cmd.get("tabId", "")
         if not isinstance(tab_id, str):
@@ -5286,8 +5400,53 @@ class RemoteAccessServer:
             if rt_id and rt_id not in seen_merge_tabs:
                 merge_tabs_to_replay.append(rt_id)
                 seen_merge_tabs.add(rt_id)
+        if merge_tabs_to_replay:
+            # Drain every send already scheduled to this endpoint —
+            # crucially the ``task_events`` that the ``resumeSession``
+            # calls above fanned out from their executor threads — so
+            # the ``merge_data`` replay below reaches the wire strictly
+            # AFTER them.  Without this the merge send can overtake a
+            # not-yet-started ``task_events`` send under load, and the
+            # frontend's history replay then erases the recovered merge
+            # panel (see :meth:`WebPrinter.flush_pending_sends`).
+            await self._printer.flush_pending_sends(websocket)
         for merge_tab_id in merge_tabs_to_replay:
             await self._replay_merge_review(merge_tab_id, websocket)
+        # Finally, tell a freshly-opened REMOTE page about every task
+        # that is currently running in the backend so it can open one
+        # chat tab per running task and focus the tab running the
+        # LATEST one.  A brand-new browser session has no persisted
+        # ``restoredTabs`` (the shim's state lives in per-tab
+        # sessionStorage), so without this push running tasks are
+        # invisible until the user digs them out of the History
+        # sidebar.  The send is targeted at the connecting endpoint
+        # only, and the client dedupes by backend chat id, so a reload
+        # that DID restore the chat's tab never shows it twice.  UDS
+        # (VS Code / CLI) clients are exempt: the extension host owns
+        # their tab restoration.
+        if not is_uds:
+            try:
+                running_rows = await asyncio.to_thread(
+                    _snapshot_running_task_rows,
+                )
+            except Exception:
+                logger.debug(
+                    "running-task snapshot for ready failed", exc_info=True,
+                )
+                running_rows = []
+            if running_rows:
+                try:
+                    await self._endpoint_send(
+                        websocket,
+                        json.dumps({
+                            "type": "openRunningTasks",
+                            "tasks": running_rows,
+                        }),
+                    )
+                except Exception:
+                    logger.debug(
+                        "ready openRunningTasks send failed", exc_info=True,
+                    )
 
     async def _replay_merge_review(self, tab_id: str, websocket: Any) -> None:
         """Re-send an in-flight merge review to a reconnecting client.
@@ -5787,15 +5946,16 @@ class RemoteAccessServer:
             )
             # Give cloudflared a brief moment to fail-fast on a bind
             # collision.  Healthy cloudflared takes seconds to start
-            # so it will not have exited within 1s.  ``wait`` (rather
-            # than a fixed ``sleep`` + ``poll``) returns as soon as a
-            # fail-fast child exits — typically a few ms — and also
-            # reaps it, while tolerating up to 1s of scheduling delay
-            # under heavy machine load (a loaded box can take >250ms
-            # just to exec and exit the child, which used to
-            # misclassify a doomed spawn as healthy).
+            # so it will not have exited within the window.  ``wait``
+            # (rather than a fixed ``sleep`` + ``poll``) returns as
+            # soon as a fail-fast child exits — typically a few ms —
+            # and also reaps it, while tolerating scheduling delay up
+            # to :data:`_SPAWN_FAILFAST_WINDOW` under heavy machine
+            # load (a loaded box can take >250ms just to exec and
+            # exit the child, which used to misclassify a doomed
+            # spawn as healthy).
             try:
-                proc.wait(timeout=1.0)
+                proc.wait(timeout=_SPAWN_FAILFAST_WINDOW)
             except subprocess.TimeoutExpired:
                 pass
             if proc.poll() is None:

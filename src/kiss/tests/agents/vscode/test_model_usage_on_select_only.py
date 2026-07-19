@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import tempfile
 from collections.abc import Generator
+from pathlib import Path
 
 import pytest
 
@@ -42,8 +43,11 @@ def _isolate_db(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     # config path must be redirected into the same temp dir for the
     # ``_load_last_model``/``_save_last_model`` assertions to be isolated.
     cfg_path = os.path.join(tmpdir, "config.json")
-    monkeypatch.setattr(vc, "CONFIG_DIR", type(vc.CONFIG_DIR)(tmpdir))
-    monkeypatch.setattr(vc, "CONFIG_PATH", type(vc.CONFIG_PATH)(cfg_path))
+    # ``CONFIG_DIR``/``CONFIG_PATH`` are PEP 562 lazy attributes;
+    # ``setattr`` would pin the computed (stale tmp) Path at teardown.
+    # ``setitem`` deletes the pin instead, restoring lazy resolution.
+    monkeypatch.setitem(vars(vc), "CONFIG_DIR", Path(tmpdir))
+    monkeypatch.setitem(vars(vc), "CONFIG_PATH", Path(cfg_path))
     yield
     _close_db()
 
