@@ -377,6 +377,7 @@ Full model list:
 - `gemini-embedding-001`
 - `gemini-embedding-2`
 - `gemini-embedding-2-preview`
+- `gemini-omni-flash-preview`
 - `google/gemma-2-27b-it`
 - `google/gemma-3n-E4B-it`
 - `google/gemma-4-31B-it`
@@ -525,7 +526,6 @@ Full model list:
 - `openrouter/anthropic/claude-sonnet-4.5`
 - `openrouter/anthropic/claude-sonnet-4.6`
 - `openrouter/anthropic/claude-sonnet-5`
-- `openrouter/arcee-ai/coder-large`
 - `openrouter/arcee-ai/trinity-large-thinking`
 - `openrouter/arcee-ai/virtuoso-large`
 - `openrouter/baidu/ernie-4.5-vl-424b-a47b`
@@ -586,17 +586,19 @@ Full model list:
 - `openrouter/inclusionai/ring-2.6-1t`
 - `openrouter/inflection/inflection-3-pi`
 - `openrouter/inflection/inflection-3-productivity`
+- `openrouter/kwaipilot/kat-coder-air-v2.5`
 - `openrouter/kwaipilot/kat-coder-pro-v2`
+- `openrouter/kwaipilot/kat-coder-pro-v2.5`
 - `openrouter/mancer/weaver`
 - `openrouter/meta-llama/llama-3.1-70b-instruct`
 - `openrouter/meta-llama/llama-3.1-8b-instruct`
-- `openrouter/meta-llama/llama-3.2-11b-vision-instruct`
 - `openrouter/meta-llama/llama-3.2-1b-instruct`
 - `openrouter/meta-llama/llama-3.2-3b-instruct`
 - `openrouter/meta-llama/llama-3.3-70b-instruct`
 - `openrouter/meta-llama/llama-4-maverick`
 - `openrouter/meta-llama/llama-4-scout`
 - `openrouter/meta-llama/llama-guard-4-12b`
+- `openrouter/meta/muse-spark-1.1`
 - `openrouter/microsoft/phi-4`
 - `openrouter/microsoft/wizardlm-2-8x22b`
 - `openrouter/mistralai/codestral-2508`
@@ -624,6 +626,7 @@ Full model list:
 - `openrouter/moonshotai/kimi-k2.5`
 - `openrouter/moonshotai/kimi-k2.6`
 - `openrouter/moonshotai/kimi-k2.7-code`
+- `openrouter/moonshotai/kimi-k3`
 - `openrouter/morph/morph-v3-fast`
 - `openrouter/morph/morph-v3-large`
 - `openrouter/nex-agi/nex-n2-mini`
@@ -632,7 +635,6 @@ Full model list:
 - `openrouter/nousresearch/hermes-3-llama-3.1-70b`
 - `openrouter/nousresearch/hermes-4-405b`
 - `openrouter/nousresearch/hermes-4-70b`
-- `openrouter/nvidia/llama-3.3-nemotron-super-49b-v1.5`
 - `openrouter/nvidia/nemotron-3-nano-30b-a3b`
 - `openrouter/nvidia/nemotron-3-super-120b-a12b`
 - `openrouter/nvidia/nemotron-3-ultra-550b-a55b`
@@ -755,7 +757,6 @@ Full model list:
 - `openrouter/relace/relace-search`
 - `openrouter/sakana/fugu-ultra`
 - `openrouter/sao10k/l3-lunaris-8b`
-- `openrouter/sao10k/l3.1-70b-hanami-x1`
 - `openrouter/sao10k/l3.1-euryale-70b`
 - `openrouter/sao10k/l3.3-euryale-70b`
 - `openrouter/stepfun/step-3.5-flash`
@@ -767,6 +768,7 @@ Full model list:
 - `openrouter/thedrummer/rocinante-12b`
 - `openrouter/thedrummer/skyfall-36b-v2`
 - `openrouter/thedrummer/unslopnemo-12b`
+- `openrouter/thinkingmachines/inkling`
 - `openrouter/undi95/remm-slerp-l2-13b`
 - `openrouter/upstage/solar-pro-3`
 - `openrouter/writer/palmyra-x5`
