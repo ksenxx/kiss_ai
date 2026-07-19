@@ -1766,6 +1766,39 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 .sidebar-section .search-wrap { margin-bottom: 10px; }
 #history-search:focus { border-color: var(--accent); }
 
+/* Collapsible "Filters" panel wrapping the whole filter bar (status
+   chips + From/To date range).  The header is a disclosure <button>
+   titled "Filters"; clicking it toggles the [hidden] attribute on
+   #history-filters-body and rotates the chevron.  Shared by the
+   extension webview and the remote web chat. */
+.history-filters-panel { margin-bottom: 4px; }
+
+.history-filters-toggle {
+  display: flex; align-items: center; gap: 4px;
+  width: 100%; padding: 2px 0; margin: 0 0 6px;
+  background: none; border: none;
+  color: var(--fg);
+  font-family: inherit; font-size: var(--fs-md); font-weight: 600;
+  text-align: left;
+  cursor: pointer; user-select: none;
+}
+.history-filters-toggle:hover { color: var(--accent); }
+
+.history-filters-toggle:focus-visible {
+  outline: 1px solid var(--accent); outline-offset: 1px;
+}
+
+.history-filters-chevron { flex: none; transition: transform 0.2s ease; }
+
+.history-filters-toggle.expanded .history-filters-chevron {
+  transform: rotate(90deg);
+}
+
+/* Keep the collapsed body hidden even if a display rule is ever
+   added to .history-filters-body (author rules beat the UA [hidden]
+   default). */
+.history-filters-body[hidden] { display: none !important; }
+
 /* History filter bar: a row of Material-style filter chips (pill
    toggles with a hidden checkbox + status dot / icon) followed by
    one unified From → To date-range pill.  Lives between the search
