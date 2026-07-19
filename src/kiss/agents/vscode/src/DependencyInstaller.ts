@@ -22,6 +22,7 @@ import {
   decideRestart,
 } from './daemonHealth';
 import {verifyDaemonStartup} from './daemonRestartVerify';
+import {restartLaunchAgent} from './macLaunchd';
 import {
   showErrorNotification,
   showInformationNotification,
@@ -1149,7 +1150,7 @@ async function restartKissWebDaemon(
   // no-ops), leaving NOTHING loaded, so the daemon never respawns and
   // the webview hangs forever on the "KISS Sorcar Server is
   // starting ..." overlay.
-  let reissueRestart: (() => void) | null = null;
+  let reissueRestart: (() => void | Promise<void>) | null = null;
 
   if (process.platform === 'darwin') {
     const plistLabel = 'com.kiss.web-server';
@@ -1186,6 +1187,8 @@ async function restartKissWebDaemon(
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
     <key>StandardOutPath</key>
     <string>${xLogDir}/kiss-web-stdout.log</string>
     <key>StandardErrorPath</key>
@@ -1206,46 +1209,32 @@ async function restartKissWebDaemon(
       // metacharacters (HOME_DIR is user-controlled) cannot inject
       // arbitrary shell commands.
       const uid = execFileSync('id', ['-u'], {encoding: 'utf-8'}).trim();
-      reissueRestart = () => {
-        try {
-          execFileSync('launchctl', ['bootout', `gui/${uid}/${plistLabel}`], {
-            stdio: 'ignore',
-            timeout: 5000,
-          });
-        } catch {
-          /* not loaded — ok */
-        }
-        try {
-          execFileSync('launchctl', ['bootstrap', `gui/${uid}`, plistFile], {
-            stdio: 'ignore',
-            timeout: 5000,
-          });
-        } catch {
-          // Fall back to older load command — same argv-form to avoid
-          // shell interpolation of plistFile.
-          execFileSync('launchctl', ['load', '-w', plistFile], {
-            stdio: 'ignore',
-            timeout: 5000,
-          });
-        }
-        // ``bootstrap`` (and ``load``) register the unit but do not
-        // guarantee the process is running — on a fresh install or
-        // after ``bootout`` the agent may sit in "loaded but not
-        // started" state.  ``kickstart -k`` forces an immediate
-        // (re)start so the daemon is actually alive when the
-        // extension continues to query models via the UDS.
-        try {
-          execFileSync(
-            'launchctl',
-            ['kickstart', '-k', `gui/${uid}/${plistLabel}`],
-            {stdio: 'ignore', timeout: 5000},
-          );
-        } catch {
-          /* best-effort — KeepAlive will start it eventually */
-        }
+      // Drain-aware launchctl sequence (macLaunchd.js): bootout, POLL
+      // until launchd has really removed the service, THEN bootstrap
+      // (with retry) + kickstart.  The old back-to-back
+      // bootout→bootstrap→kickstart sequence lost the fresh
+      // registration whenever the old instance was still draining —
+      // the pending bootout removed the whole service when the old
+      // process finally exited, so NOTHING was loaded and every
+      // post-update launch burned verifyDaemonStartup's full 15s
+      // re-restart delay plus launchd's 10s respawn throttle (~26s
+      // observed from SIGTERM to "Server starting" on every restart).
+      reissueRestart = async () => {
+        const res = await restartLaunchAgent({
+          serviceTarget: `gui/${uid}/${plistLabel}`,
+          domainTarget: `gui/${uid}`,
+          plistFile,
+          log,
+        });
+        log(
+          `kiss-web LaunchAgent restart (${plistFile}): ` +
+            `drained=${res.drained} (${res.drainedMs}ms), ` +
+            `bootstrapped=${res.bootstrapped} ` +
+            `(${res.bootstrapAttempts} attempt(s)), ` +
+            `registered=${res.registered}, kickstarted=${res.kickstarted}`,
+        );
       };
-      reissueRestart();
-      log(`kiss-web macOS LaunchAgent bootstrapped: ${plistFile}`);
+      await reissueRestart();
     } catch (err) {
       log(
         `Failed to restart kiss-web daemon (macOS): ${err instanceof Error ? err.message : err}`,
@@ -1324,7 +1313,9 @@ WantedBy=default.target
     // daemon directly so the UDS socket is created and tasks can run.
     if (!systemdOk) {
       reissueRestart = () => spawnKissWebDirect(kissWebBin, workDir);
-      reissueRestart();
+      // Synchronous callback — ``void`` documents that there is no
+      // promise to await here (the union type allows async callbacks).
+      void reissueRestart();
     }
   }
 
