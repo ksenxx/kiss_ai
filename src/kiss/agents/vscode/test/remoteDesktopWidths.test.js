@@ -14,10 +14,11 @@
 //          baseline, dblclick reset) from 25% of window.innerWidth
 //          instead of a fixed 300px;
 //        * an explicitly dragged/persisted width still wins.
-//   2. Let the chat panels (children of #output), the pinned task
-//      panel (#task-panel), and the composer (#input-container) span
-//      90% of the chat webview (#app column) instead of the old
-//      768px / 85% / 75% caps.
+//   2. Let the chat panels (children of #output) and the pinned task
+//      panel (#task-panel) span 90% of the chat webview (#app column)
+//      instead of the old 768px / 85% / 75% caps, while the composer
+//      (#input-container — the panel with the input textbox and the
+//      buttons) spans the FULL chat webview width with no cap at all.
 //
 // jsdom performs no layout, so the width RULES are asserted from the
 // parsed remote-codex.css and the dynamic behavior (defaults, drag,
@@ -211,18 +212,22 @@ function testCssTaskPanelNinetyPercent() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. CSS: the composer card spans 90% of the chat webview (was 768px)
-//    and stays centered.
+// 4. CSS: the composer card (input textbox + buttons) spans the FULL
+//    chat webview width — no max-width cap, no centered margin.
 // ---------------------------------------------------------------------------
-function testCssComposerNinetyPercent() {
+function testCssComposerFullWidth() {
   const rule = cssRule('body.remote-chat #input-container');
   assert.ok(
-    /max-width:\s*90%/.test(rule),
-    `the composer must span 90% of the chat webview — got: ${rule.trim()}`,
+    !/max-width/.test(rule),
+    `the composer must have NO width cap so it is as wide as the ` +
+      `chat webview — got: ${rule.trim()}`,
+  );
+  assert.ok(
+    !rule.includes('margin: 0 auto'),
+    'the composer must not be a centered narrow column',
   );
   assert.ok(!rule.includes('768px'), 'the old 768px cap must be gone');
-  assert.ok(rule.includes('margin: 0 auto'), 'composer stays centered');
-  console.log('PASS CSS composer spans 90% of the chat webview');
+  console.log('PASS CSS composer spans the full chat webview width');
 }
 
 // ---------------------------------------------------------------------------
@@ -342,7 +347,7 @@ function testVsCodeWebviewIsolation() {
 testCssSidebarQuarterScreenDefault();
 testCssChatPanelsNinetyPercent();
 testCssTaskPanelNinetyPercent();
-testCssComposerNinetyPercent();
+testCssComposerFullWidth();
 testDefaultSeededFromQuarterWindow();
 testKeyboardBaselineQuarterWindow();
 testDoubleClickResetsToQuarterWindow();
