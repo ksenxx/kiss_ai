@@ -21,6 +21,7 @@ import {
   daemonHasActiveTasks,
   decideRestart,
 } from './daemonHealth';
+import {verifyDaemonStartup} from './daemonRestartVerify';
 import {
   showErrorNotification,
   showInformationNotification,
@@ -1140,6 +1141,16 @@ async function restartKissWebDaemon(
   // ``https://localhost:8787``, which the new kiss-web re-binds.
   killProcessOnPort(8787);
 
+  // Re-invocable restart action handed to ``verifyDaemonStartup`` below.
+  // Re-running the FULL platform (re)start sequence — not just a
+  // kickstart — is what heals the launchctl bootout→bootstrap race:
+  // the first ``bootstrap`` can fail with EEXIST while the old job
+  // instance is still draining (the ``load -w`` fallback silently
+  // no-ops), leaving NOTHING loaded, so the daemon never respawns and
+  // the webview hangs forever on the "KISS Sorcar Server is
+  // starting ..." overlay.
+  let reissueRestart: (() => void) | null = null;
+
   if (process.platform === 'darwin') {
     const plistLabel = 'com.kiss.web-server';
     const plistDir = path.join(HOME_DIR, 'Library', 'LaunchAgents');
@@ -1195,43 +1206,46 @@ async function restartKissWebDaemon(
       // metacharacters (HOME_DIR is user-controlled) cannot inject
       // arbitrary shell commands.
       const uid = execFileSync('id', ['-u'], {encoding: 'utf-8'}).trim();
-      try {
-        execFileSync('launchctl', ['bootout', `gui/${uid}/${plistLabel}`], {
-          stdio: 'ignore',
-          timeout: 5000,
-        });
-      } catch {
-        /* not loaded — ok */
-      }
-      try {
-        execFileSync('launchctl', ['bootstrap', `gui/${uid}`, plistFile], {
-          stdio: 'ignore',
-          timeout: 5000,
-        });
-      } catch {
-        // Fall back to older load command — same argv-form to avoid
-        // shell interpolation of plistFile.
-        execFileSync('launchctl', ['load', '-w', plistFile], {
-          stdio: 'ignore',
-          timeout: 5000,
-        });
-      }
-      // ``bootstrap`` (and ``load``) register the unit but do not
-      // guarantee the process is running — on a fresh install or
-      // after ``bootout`` the agent may sit in "loaded but not
-      // started" state.  ``kickstart -k`` forces an immediate
-      // (re)start so the daemon is actually alive when the
-      // extension continues to query models via the UDS.
-      try {
-        execFileSync(
-          'launchctl',
-          ['kickstart', '-k', `gui/${uid}/${plistLabel}`],
-          {stdio: 'ignore', timeout: 5000},
-        );
-      } catch {
-        /* best-effort — KeepAlive will start it eventually */
-      }
-      log(`kiss-web macOS LaunchAgent restarted: ${plistFile}`);
+      reissueRestart = () => {
+        try {
+          execFileSync('launchctl', ['bootout', `gui/${uid}/${plistLabel}`], {
+            stdio: 'ignore',
+            timeout: 5000,
+          });
+        } catch {
+          /* not loaded — ok */
+        }
+        try {
+          execFileSync('launchctl', ['bootstrap', `gui/${uid}`, plistFile], {
+            stdio: 'ignore',
+            timeout: 5000,
+          });
+        } catch {
+          // Fall back to older load command — same argv-form to avoid
+          // shell interpolation of plistFile.
+          execFileSync('launchctl', ['load', '-w', plistFile], {
+            stdio: 'ignore',
+            timeout: 5000,
+          });
+        }
+        // ``bootstrap`` (and ``load``) register the unit but do not
+        // guarantee the process is running — on a fresh install or
+        // after ``bootout`` the agent may sit in "loaded but not
+        // started" state.  ``kickstart -k`` forces an immediate
+        // (re)start so the daemon is actually alive when the
+        // extension continues to query models via the UDS.
+        try {
+          execFileSync(
+            'launchctl',
+            ['kickstart', '-k', `gui/${uid}/${plistLabel}`],
+            {stdio: 'ignore', timeout: 5000},
+          );
+        } catch {
+          /* best-effort — KeepAlive will start it eventually */
+        }
+      };
+      reissueRestart();
+      log(`kiss-web macOS LaunchAgent bootstrapped: ${plistFile}`);
     } catch (err) {
       log(
         `Failed to restart kiss-web daemon (macOS): ${err instanceof Error ? err.message : err}`,
@@ -1292,6 +1306,12 @@ WantedBy=default.target
       }
       log(`kiss-web systemd user service restarted: ${serviceFile}`);
       systemdOk = true;
+      reissueRestart = () => {
+        execSync('systemctl --user restart kiss-web', {
+          stdio: 'ignore',
+          timeout: 10000,
+        });
+      };
     } catch (err) {
       log(
         'Failed to restart kiss-web daemon via systemd (Linux): ' +
@@ -1303,9 +1323,55 @@ WantedBy=default.target
     // containers, minimal VMs, some WSL setups) reach here.  Start the
     // daemon directly so the UDS socket is created and tasks can run.
     if (!systemdOk) {
-      spawnKissWebDirect(kissWebBin, workDir);
+      reissueRestart = () => spawnKissWebDirect(kissWebBin, workDir);
+      reissueRestart();
     }
   }
+
+  // Verify the daemon actually came back up — the restart commands
+  // above are fire-and-forget (``stdio: 'ignore'``) and two real
+  // production races leave the daemon down with no recovery path,
+  // stranding the user on the "KISS Sorcar Server is starting ..."
+  // overlay after ``./install.sh``:
+  //
+  //   1. ``launchctl bootstrap`` fails (EEXIST) while the old job
+  //      instance is still draining → nothing is loaded → no respawn.
+  //   2. A concurrent ``code --install-extension --force`` wipes the
+  //      extension venv, so launchd's exec of ``kiss-web`` fails
+  //      silently on every KeepAlive tick until the venv is rebuilt
+  //      (observed 2 m 16 s outage on 2026-07-19).
+  //
+  // ``verifyDaemonStartup`` polls the real daemon state (TCP probe +
+  // UDS socket file) and re-issues the full restart while the port is
+  // provably dead and the binary exists.
+  const verdict = await verifyDaemonStartup({
+    binPath: kissWebBin,
+    sockPath,
+    port: 8787,
+    restart: reissueRestart,
+    log,
+  });
+  if (!verdict.ok) {
+    // Do NOT record the fingerprint: the next activation must see a
+    // mismatch and retry the restart instead of skipping it as
+    // "healthy-unchanged".
+    log(
+      `kiss-web daemon did NOT come up within ${verdict.waitedMs}ms of the ` +
+        `restart (reason=${verdict.reason}, extra restart attempts=` +
+        `${verdict.restarts}) — fingerprint not recorded so the next ` +
+        'activation retries',
+    );
+    return;
+  }
+  log(
+    `kiss-web daemon verified up ${verdict.waitedMs}ms after restart` +
+      (verdict.restarts > 0
+        ? ` (needed ${verdict.restarts} extra restart attempt(s))`
+        : '') +
+      (verdict.binaryVanished
+        ? ' (kiss-web binary was transiently missing — concurrent reinstall)'
+        : ''),
+  );
 
   // Record the fingerprint so the next activation can skip the
   // restart when nothing has changed.  Best-effort: a write failure
