@@ -1,0 +1,321 @@
+\documentclass{article}
+% NOTE: the NeurIPS 2027 style file is not yet distributed; we use the 2026
+% style as a placeholder and will switch on release.
+\usepackage[preprint,nonatbib]{neurips_2026}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{amsfonts}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{float}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{mdframed}
+\usepackage{amsmath}
+
+\newenvironment{promptbox}{\begin{mdframed}[linewidth=0.4pt,linecolor=black,innerleftmargin=5pt,innerrightmargin=5pt,innertopmargin=5pt,innerbottommargin=5pt,skipabove=2pt,skipbelow=5pt]\setlength{\parskip}{0pt}\setlength{\parindent}{0pt}\ttfamily\scriptsize\raggedright\frenchspacing\obeylines\leavevmode\strut\ignorespaces}{\end{mdframed}}
+
+% ---------------------------------------------------------------------------
+% Result constants.  Every number in the paper is defined once here so the
+% text, tables, and abstract cannot drift out of sync.
+% ---------------------------------------------------------------------------
+\newcommand{\FASTERBase}{0.93}          % FASTER median Mops/s, same box/harness
+\newcommand{\HydraFinal}{5.51}          % final hardened engine, original workload
+\newcommand{\HydraFinalRuns}{5.51 / 5.51 / 5.53}
+\newcommand{\SpeedupFinal}{5.9$\times$}
+\newcommand{\HydraOrigVFourC}{5.48}     % v4c engine, original workload
+\newcommand{\HydraSparse}{5.67}
+\newcommand{\HydraClustered}{5.56}
+\newcommand{\HydraDrift}{3.97}
+\newcommand{\HydraHoldout}{3.87}
+\newcommand{\HoldoutRuns}{3.87 / 3.87 / 3.21}
+\newcommand{\HydraFirst}{1.85}          % first (dense-index) engine
+\newcommand{\NKeys}{250{,}000{,}000}
+\newcommand{\NKeysShort}{250M}
+\newcommand{\ValueBytes}{100}
+\newcommand{\MemBudget}{8\,GiB}
+\newcommand{\DataSize}{$\sim$25\,GB}
+\newcommand{\FioIops}{718k}
+\newcommand{\FioBw}{2.8\,GB/s}
+\newcommand{\FioLat}{$\sim$350\,$\mu$s}
+\newcommand{\HitRate}{77\%}
+\newcommand{\HitNeeded}{$\approx$86\%}
+\newcommand{\FixedPoint}{$\approx$6.2}
+\newcommand{\CovLines}{92.84\%}
+\newcommand{\CovBranches}{93.42\%}
+\newcommand{\EngineLoc}{$\sim$2{,}050}
+
+\title{HydraKV: Adversarial AI Discovery of a Larger-than-Memory\\
+       Key-Value Store that Outperforms FASTER on Skewed YCSB-A}
+
+\author{%
+  Koushik Sen \\
+  EECS Department, UC Berkeley \\
+  \texttt{ksen@berkeley.edu} \\
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We report on HydraKV, a larger-than-memory key-value store that was designed, implemented, debugged, and hardened almost entirely by an AI agent framework (KISS Sorcar~\cite{kisssorcar}) through a sequence of natural-language tasks, and on the \emph{adversarial AI discovery} methodology used to keep the agent from overfitting the benchmark it was scored on. The setting is precisely specified: YCSB-A~\cite{ycsb} (50\% reads, 50\% blind upserts, Zipfian $\theta=0.95$) over \NKeysShort{} keys with \ValueBytes-byte values (\DataSize{} of data) under a hard \MemBudget{} memory budget, on a 64-vCPU machine with eight local NVMe SSDs in RAID0. On this configuration Microsoft's FASTER~\cite{faster}, a state-of-the-art larger-than-memory store built for exactly this kind of point-operation workload, sustains \FASTERBase{} Mops/s with the same harness. The final HydraKV engine sustains \HydraFinal{} Mops/s on the same workload (median of three cold-cache runs: \HydraFinalRuns; \SpeedupFinal), about 88\% of the miss-bandwidth bound implied by the measured device ceiling and cache-hit rate. HydraKV is \EngineLoc{} lines of dependency-free C++17 combining an append-only O\_DIRECT slot log, a lock-free fingerprint hash index with disk-verified reads, a set-associative write-back cache with segmented second-chance insertion~\cite{slru} and a doorkeeper admission filter in the spirit of TinyLFU~\cite{tinylfu}, and raw \texttt{io\_uring}~\cite{iouring} read-miss handling. None of these mechanisms is individually new; what we examine is whether an agent can find, combine, and correctly implement them under adversarial pressure.
+
+The methodology alternates two agent activities: generating literature-informed synthetic workload variants intended to break the current engine (sparse SplitMix64~\cite{splitmix} key spaces, clustered and drifting hot sets motivated by published workload studies~\cite{cao-fast20,yang-osdi20}), and repairing the engine until it meets the goal on all variants, finishing with a held-out variant generated after engine work stopped and used only for measurement. The loop worked as intended at least once: the agent's first engine, which beat FASTER by $\approx$2$\times$ on the published trace, was OOM-killed by the first variant because it had baked in the trace's dense key space. The pre-hardening engine revision scored 3.87--5.67 Mops/s across all five workloads including the holdout; a subsequent hardening task (end-to-end workload tests across six build and sanitizer configurations, \CovLines{} line coverage, cross-model code review, and version bisection) fixed a delete/read resurrection race and a fingerprint-alias bug, and the hardened engine was then re-scored on the original workload at \HydraFinal{} Mops/s. We describe the engine, the evaluation and its scope limits, the measured throughput ceiling that led the agent to argue---with numbers rather than a hacked result---that a mid-task goal of 10\,Mops/s was out of reach for this design on this machine, and what the exercise suggests about keeping optimizing agents honest.
+\end{abstract}
+
+%------------------------------------------------------------
+\section{Introduction}
+\label{sec:intro}
+
+Point-operation key-value stores sit under a remarkable fraction of internet infrastructure: session stores, feature stores, ML embedding services, social-graph caches~\cite{cachelib,cao-fast20,yang-osdi20}. The economically interesting regime is \emph{larger-than-memory with a hard RAM budget}: the data set (here \DataSize) is a few times bigger than the memory the operator is willing to give the store (here \MemBudget), the SSD is fast but not free, and the access pattern is heavily skewed (Zipfian $\theta=0.95$; a small hot set dominates). Update-heavy skew is the setting YCSB workload~A models~\cite{ycsb} and the setting FASTER~\cite{faster} was engineered for: FASTER's hybrid log gives in-place updates for the in-memory hot tail and spills the cold majority to storage, and its paper reports throughput up to 160M ops/s when the working set fits in memory. When the data does \emph{not} fit---\NKeysShort{} keys, \ValueBytes-byte values, an \MemBudget{} budget, reads that must return verbatim stored bytes---FASTER on our reference machine sustains \FASTERBase{} Mops/s. That number is the baseline this paper's artifact was asked to beat.
+
+We did not set out to write a key-value store. We set out to test whether a general-purpose AI agent, given a machine, a benchmark harness, and a precise task specification, could produce one that is fast \emph{and} robust---and whether it could be prevented from doing what optimizing agents notoriously do: overfitting to the one trace they are scored on. Systems that score candidate programs against a fixed evaluator, from evolutionary code search~\cite{alphaevolve} to prompt optimization~\cite{gepa}, face this evaluator-overfitting risk structurally; GEPA, for instance, guards against it with explicit train/validation/test splits. The vehicle here was KISS Sorcar~\cite{kisssorcar}, an open-source agent framework for long-horizon software engineering, driven by three successive natural-language tasks (Section~\ref{sec:sorcar}): build an engine that beats FASTER by $2\times$; then run an \emph{adversarial discovery loop} that alternates between generating workload variants that break the engine and repairing the engine until it survives them, finishing with a held-out workload; then find and fix every bug, race, and redundancy the previous work left behind, without giving back the performance.
+
+The surviving artifact, HydraKV, is \EngineLoc{} lines of self-contained C++17 (no dependencies beyond pthreads and raw Linux syscalls). Its architecture (Section~\ref{sec:design}) is a deliberately conservative composition of known ideas: an append-only 128-byte-slot log on O\_DIRECT storage, in the family of log-structured designs~\cite{lsm,faster}; a cache-line-bucketed fingerprint hash index with lock-free CAS insertion, similar in role to FASTER's hash table but mapping keys to positions in an immutable log; a set-associative write-back RAM cache whose insertion policy is a segmented second-chance scheme modeled on SLRU~\cite{slru}, guarded by a probabilistic doorkeeper bitmap in the spirit of TinyLFU~\cite{tinylfu}; and an asynchronous read-miss path built on hand-rolled \texttt{io\_uring} rings~\cite{iouring} (the target machine has no liburing). The engine contains no constant derived from the workload's key count, key density, skew parameter, or trace files; its cache-entry geometry does assume the benchmark interface's small-value regime (Section~\ref{sec:design}).
+
+On the original workload the final engine sustains \HydraFinal{} Mops/s (median of three cold-cache 30-second runs, \HydraFinalRuns; \SpeedupFinal{} FASTER's \FASTERBase) while staying under the enforced \MemBudget{} resident cap, and passes an untimed read-back validation of all \NKeys{} keys. On the four adversarial variants---sparse keys, clustered hot sets, drifting hot sets, and a mixed held-out workload generated with fresh seeds after engine work stopped---the pre-hardening engine revision (``v4c'') sustained \HydraSparse, \HydraClustered, \HydraDrift, and \HydraHoldout{} Mops/s (Section~\ref{sec:eval}; the scored variant matrix was not re-run after hardening, a scope limit we state wherever it matters). A roofline-style argument (Section~\ref{sec:ceiling}) shows the original-workload number sits close to the bound implied by the measured device ceiling (\FioIops{} 4\,KiB random-read IOPS) and the \HitRate{} cache-hit rate observed across every admission policy tried; the same arithmetic is why a mid-task goal of 10\,Mops/s was, in our judgment, out of reach for this class of design on this machine---a conclusion the agent reached, documented with measurements, and declined to circumvent by exploiting the OS page cache outside its budget.
+
+\paragraph{Contributions.}
+\begin{enumerate}[nosep,leftmargin=1.4em]
+\item \textbf{An artifact.} A \EngineLoc-line, dependency-free, larger-than-memory KV store that outperforms FASTER by \SpeedupFinal{} on one demanding, fully specified YCSB-A configuration, with the engine, variant generator, and test suite released alongside the paper.\footnote{\texttt{kv\_adversarial/} in \url{https://github.com/ksenxx/kiss_ai}: \texttt{hydra.cc} (engine), \texttt{gen\_variant.cc} (trace generator), \texttt{test\_hydra.cc} and \texttt{run\_all\_tests.sh} (test matrix).}
+\item \textbf{A methodology.} \emph{Adversarial AI discovery}: an agent-driven loop alternating workload-variant generation (kept within the operation mix, value size, key count, and skew regime of the target workload, with shift axes motivated by published workload studies~\cite{cao-fast20,yang-osdi20}) with engine repair, terminated by a held-out variant. The loop demonstrably prevented one class of overfitting: it immediately killed a dense-key-index design that looked excellent on the published trace.
+\item \textbf{A hardening protocol.} A separate task combining end-to-end workload tests across six build configurations (including ASan/UBSan, a TSan subset, and an \texttt{io\_uring}-disabled fallback), cross-model read-only review, and version bisection. It removed real concurrency bugs---including a delete/read resurrection race that survived two plausible-looking fixes---while a performance gate (median at least the previous best) kept the fixes from quietly costing throughput.
+\item \textbf{A measured ceiling instead of a hacked number.} A quantitative argument for why 10\,Mops/s was unreachable for this design on this hardware, and a description of the reward-hacking opportunities (page-cache exploitation, value regeneration, trace precomputation) that the task specification and the agent's audits closed off.
+\end{enumerate}
+
+\paragraph{Non-contributions and scope.} HydraKV contains no individually novel data structure or replacement policy. It is a benchmark-shaped engine, not a deployable store: it lacks log compaction and crash recovery (Section~\ref{sec:limits}), both core features of RocksDB~\cite{rocksdb} and FASTER. All absolute throughput numbers are specific to one machine, one harness, and one engine version each (Table~\ref{tab:main}); we compare against FASTER only on the original workload, the one configuration where both systems were measured. The claim we defend is narrower than ``a better KV store'': that a carefully instructed agent navigated this design space, implemented the result correctly enough to survive sanitizers and adversarial end-to-end tests, and was kept honest while doing so.
+
+%------------------------------------------------------------
+\section{Problem Setting}
+\label{sec:setting}
+
+The benchmark is fixed by a harness the engine may not modify. Each operation is a read or a blind upsert with equal probability (YCSB-A~\cite{ycsb}, unseeded RNG); keys are drawn Zipfian with $\theta=0.95$ from \NKeys{} unique 64-bit keys; values are exactly \ValueBytes{} bytes, an 8-byte counter plus random bytes, stored verbatim. A load phase inserts all \NKeysShort{} keys (untimed); the scored phase is a fixed 30.0-second window driven by 16 worker threads pinned to one NUMA node, with reads issued asynchronously up to 256 in flight per worker. The score is the median of three runs, with \texttt{drop\_caches} before each, so every scored run starts from a cold cache.
+
+Correctness is enforced by three separate instruments, with different strengths. A separate untimed validation run reads back all \NKeys{} loaded keys and verifies full values against FNV-1a checksums. During scored runs, an auditor thread performs randomized cross-thread read-after-write checks, and the harness verifies the 8-byte counter of every read. The harness documentation is explicit that the random suffix bytes of \emph{run-phase} overwrites are not re-verified during scoring (only their counters are, plus all load-phase values in validation), and equally explicit that exploiting this---e.g., regenerating or compressing values---is forbidden and treated as an integrity failure; the engine's own test suite uses deterministic full-value oracles precisely to cover this blind spot at smaller scales.
+
+The machine is a GCP \texttt{n2-standard-64} (2$\times$ Cascade Lake Xeon, 64 vCPUs, 251\,GB RAM) with eight 375\,GB local NVMe SSDs in RAID0 (ext4, 512\,KiB chunk). The engine's resident data is capped at \MemBudget---runs that exceed it score zero---and the whole process runs in a 14\,GiB cgroup with swap disabled, the headroom covering the harness's own key and checksum arrays. Since \DataSize{} of live data cannot fit in \MemBudget, the engine must spill to SSD and cache a hot subset. The RAID0 device's random-read limits, measured with \texttt{fio} (4\,KiB O\_DIRECT random reads at high queue depth on the RAID device; the filesystem's 4096-byte logical block size makes 4\,KiB the smallest read the engine issues), are \FioIops{} IOPS and \FioBw{} at \FioLat{} latency. FASTER, run on this machine with this harness at the same budget, sustains \FASTERBase{} Mops/s; that is the baseline used throughout. We report FASTER as configured by the benchmark's maintainers for this harness and did not tune it ourselves, a caveat that applies symmetrically: neither engine was tuned by the other's authors.
+
+%------------------------------------------------------------
+\section{State of the Art and Its Limitations}
+\label{sec:sota}
+
+\paragraph{LSM-trees.} RocksDB~\cite{rocksdb} and its LSM~\cite{lsm} relatives are the workhorses of persistent KV deployment; the Facebook study~\cite{cao-fast20} characterizes three of its production use cases in detail. LSMs earn their complexity on write-heavy traffic with range scans. For pure point operations on NVMe, however, the machinery becomes overhead: KVell~\cite{kvell} showed that on modern NVMe SSDs---where random and sequential bandwidth are comparable---LSM and B-tree stores become \emph{CPU}-bound on compaction, sorting, and synchronization, and that an unsorted, shared-nothing design with batched device access recovers $2$--$5\times$ throughput. Our workload has no scans, so sorted storage buys nothing.
+
+\paragraph{Hash-index log stores.} FASTER~\cite{faster} is the natural baseline: a cache-optimized concurrent hash index over a hybrid log whose in-memory tail supports in-place updates, with epoch-based synchronization. Its headline numbers are for in-memory working sets; larger-than-memory reads go through asynchronous disk I/O and an admit-on-miss read-cache region. One structural limitation is documented in its own design: records fetched from disk are admitted unconditionally, so the one-touch tail of a Zipf distribution continuously evicts hot entries---admission control is absent. Beyond that we can only offer hypotheses for the measured gap, since we did not instrument FASTER's internals on this harness: candidate costs include index and log-page metadata competing with cached values for the \MemBudget{} budget at 100-byte records, and per-pending-operation completion overhead on the miss path. We flag these as unverified; the measured fact is the \FASTERBase{} Mops/s baseline itself.
+
+\paragraph{Caching engines.} The systems that take admission and scan resistance seriously are caches, not stores: segmented LRU~\cite{slru}, CLOCK-style second-chance recency~\cite{clock}, TinyLFU admission with its doorkeeper filter~\cite{tinylfu}, and the engineering synthesis in CacheLib~\cite{cachelib}. The Twitter trace study~\cite{yang-osdi20} found production skew often stronger and more dynamic than synthetic benchmarks assume, which is exactly what makes naive LRU fragile. But caches may drop data; a store may not. HydraKV's design question is therefore: how much of the cache literature's admission machinery can be bolted onto a log-structured store without breaking last-write-wins semantics under 16-way concurrency? Section~\ref{sec:design} is the answer the agent converged on.
+
+%------------------------------------------------------------
+\section{HydraKV Design}
+\label{sec:design}
+
+HydraKV is a single C++17 translation unit of \EngineLoc{} lines implementing the harness's \texttt{IKVStore} interface (\texttt{Read}, \texttt{ReadAsync}/\texttt{CompletePending}, \texttt{Upsert}, \texttt{RMW}, \texttt{Delete}, \texttt{Checkpoint}). At a high level:
+
+\paragraph{Disk tier: an append-only slot log.}
+Values live in fixed 128-byte slots in a single O\_DIRECT file: 8 bytes of key, 4 of size, 4 of \texttt{prev} (a back-pointer forming per-key temporal chains that also route fingerprint aliases), and up to 112 bytes of data. Slots are staged into per-session 1\,MiB chunk buffers and landed with sequential writes; landed pages are immutable except for tombstoning by \texttt{Delete}. There is no garbage collection: every write-back of an overwritten key appends a fresh slot, so under sustained update traffic the log grows without bound until an offline rewrite---in the 30-second scored window the observed growth is modest, but the design itself does not bound it, and the 32-bit position field caps the useful log at roughly 512\,GiB. Sessions reserve disjoint 8{,}192-slot extents, which makes loading embarrassingly parallel but also means slot position is \emph{not} a global write-order (a fact with correctness consequences discussed below).
+
+\paragraph{Position index: fingerprint hashing with disk-verified reads.}
+An open-addressing table of 8-byte words, each packing a 32-bit key fingerprint and a 32-bit slot position, in 64-byte buckets scanned with linear probing and populated by lock-free CAS. The table is the largest power of two fitting in a quarter of the memory budget (2\,GiB at \MemBudget). Fingerprints alone collide constantly at this scale (millions of expected 32-bit pairs among \NKeysShort{} keys), so no read ever trusts the index: every candidate position is verified against the full key stored in the on-disk slot, and same-signature candidates are chained through \texttt{prev} pointers. The event that actually matters is rarer: two keys agreeing in both the 32-bit fingerprint and the table's 25 bucket-selection bits---an effective 57-bit signature, colliding somewhere in the key population with probability $\approx$20\% per run. An engine revision that treated such aliases carelessly could abort or bury a live key; the cross-model review of Section~\ref{sec:sorcar} caught this, and the shipped read path takes the highest-position verified match across \emph{all} candidate chains. One residual risk remains open and we state it plainly: because sessions pre-reserve extents, position order is not globally temporal, and a crafted pair of same-signature keys whose \emph{first} inserts race on different sessions can in principle create multiple index roots for which highest-position is not newest. The scored workload's single-threaded-per-key load cannot produce this, our alias tests (which craft same-signature keys deliberately) did not, and no fix was attempted; a store promoting this design to production would need one.
+
+\paragraph{Memory tier: segmented write-back cache with a doorkeeper.}
+The remaining budget (5.25\,GiB at \MemBudget, after 2\,GiB of index, 0.25\,GiB of doorkeeper, and 0.5\,GiB of slack) forms an 8-way set-associative cache of 120-byte entries---about 47M values. Entries inline values up to 101 bytes; larger values fall back to an unbounded in-memory overflow map, which is adequate for the benchmark's interface but forfeits the memory-budget property (Section~\ref{sec:limits}). Two mechanisms keep the Zipf tail from churning the hot set. First, a \emph{doorkeeper} in the spirit of TinyLFU~\cite{tinylfu}, though simpler than TinyLFU proper: two rotating generations of budget-sized hash bitmaps (2$\times$128\,MiB), no frequency sketch. A read miss is admitted only if its key was already marked in a recent generation, so most one-hit wonders are read once and forgotten (hash collisions admit a small fraction early). Second, \emph{segmented insertion} modeled on SLRU~\cite{slru}: each set has four probation and four protected ways with one-bit second-chance recency (CLOCK~\cite{clock}) rather than true LRU ordering; new admissions normally evict within probation only, and protected ways are populated by promoting entries re-referenced while recent---plus two pragmatic exceptions (empty protected ways may be filled directly, and a forward-progress fallback may evict a clean protected entry when a set is pathologically pinned). One-pass scans therefore churn roughly the probation half of the cache rather than all of it. Blind upserts of uncached keys are absorbed as dirty entries and written back lazily; upserts of cached keys update in place under a per-set spinlock with a version bump.
+
+\paragraph{Write-back: cleaners and pin-ownership landing.}
+Four background cleaner threads scan probation ways for \emph{cold} dirty entries (hot dirty keys stay cached and coalesce their overwrites), stage them into flush chunks, and land them with sequential appends, after which the index is repointed old$\to$new position by CAS. Landing is guarded by a \emph{pin-ownership} protocol: a staged entry is pinned in a \texttt{FLUSHING} state, its 32-bit version field overwritten with a fresh staging token (unique until 32-bit wrap---an accepted, documented risk horizon); the flush record may touch the index only if the exact pin (key, state, token, old position) is still present under the set lock at landing time. A concurrent upsert or delete invalidates the pin, and the orphaned record lands as dead bytes in the log but never reaches the index. This protocol is what finally closed the delete/read resurrection race of Section~\ref{sec:sorcar}; two earlier epoch-counter designs looked correct and were not, because a relocation staged \emph{before} a delete could land \emph{after} the tombstone pass.
+
+\paragraph{Read misses: raw \texttt{io\_uring}.}
+\texttt{ReadAsync} completes cache hits inline; misses are sharded to eight dedicated I/O threads, each owning a hand-rolled \texttt{io\_uring} ring (queue depth 128; direct \texttt{io\_uring\_setup}/\texttt{io\_uring\_enter} syscalls with explicit acquire/release barriers on the shared rings~\cite{iouring}, since the machine lacks liburing) driving a state machine that reads the 4\,KiB page, verifies the key, walks alias chains if needed, consults the doorkeeper, and completes the harness's read slot. If ring setup fails the engine degrades to a 48-thread synchronous \texttt{pread} pool; a runtime environment knob (\texttt{HYDRA\_NO\_URING}) forces this path so tests cover it. \texttt{Delete} is supported via a deleted-key registry whose fast path is a single atomic load when no delete is in flight; a deletion mark persists until the key is re-upserted. \texttt{Checkpoint} flushes the calling session's partial chunk and all currently-dirty cache entries with 32 parallel workers, then \texttt{fdatasync}s; it cannot drain \emph{other} live sessions' partially filled chunks, so its durability contract assumes quiescent or stopped sessions---a stated precondition, not a discovered bug.
+
+\paragraph{Sizing and workload assumptions.}
+Index, doorkeeper, and cache are all sized from \texttt{mem\_budget\_bytes}; keys are hashed with a SplitMix64-style finalizer~\cite{splitmix} so dense and sparse key spaces behave identically; the engine never reads the trace files. Two classes of fixed constants remain, and we name them rather than claim their absence: the slot/entry geometry (128-byte slots, 120-byte entries, 101-byte inline cap) is chosen for the interface's small-value regime and would need re-derivation for larger values, and the thread-pool widths (8 rings, 4 cleaners, 48 fallback readers, 32 checkpoint workers) are tuned to this machine class rather than derived from it.
+
+%------------------------------------------------------------
+\section{Experimental Evaluation}
+\label{sec:eval}
+
+\subsection{Main results}
+\label{sec:mainresults}
+
+All runs use the unmodified harness, cold caches, the enforced \MemBudget{} resident cap, and the scored environment (100-byte values, asynchronous reads with pipeline depth 256, integrity auditor on). Every configuration first passes the untimed validation run: all \NKeys{} keys read back with correct checksums, zero missing, zero wrong, zero cross-thread audit failures.
+
+\begin{table}[t]
+\centering
+\caption{Throughput on the reference machine (median of three 30\,s cold-cache runs, 16 workers; per-run values where recorded). The adversarial matrix (lower block) was scored with the pre-hardening v4c engine and frozen when the hardening task began; only the original workload was re-scored with the final engine. FASTER was measured only on the original workload, so no speedup is reported for the variants. The holdout used fresh seeds, was generated after all engine work stopped, and received no tuning; its first measurement launch was killed externally mid-run after scoring 3.86 and was relaunched without any engine change (runs \HoldoutRuns). StoreRSS stayed $\leq$ \MemBudget{} on every scored run.}
+\label{tab:main}
+\small
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}llrr@{}}
+\toprule
+\textbf{System} & \textbf{Workload} & \textbf{Mops/s} & \textbf{vs.\ FASTER} \\
+\midrule
+FASTER              & original (Zipf $\theta{=}0.95$)      & \FASTERBase & 1.0$\times$ \\
+HydraKV, first cut  & original                             & \HydraFirst & $\approx$2$\times$ \\
+\textbf{HydraKV, final} & \textbf{original} (runs \HydraFinalRuns) & \textbf{\HydraFinal} & \textbf{\SpeedupFinal} \\
+\midrule
+HydraKV, v4c        & original                             & \HydraOrigVFourC & --- \\
+HydraKV, v4c        & V1: sparse SplitMix64 keys           & \HydraSparse & --- \\
+HydraKV, v4c        & V2: clustered hot set                & \HydraClustered & --- \\
+HydraKV, v4c        & V3: drifting hot set                 & \HydraDrift & --- \\
+HydraKV, v4c        & Holdout: 60/25/15 mix, $\theta{=}0.92$ & \HydraHoldout & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The final engine's three runs on the original workload were \HydraFinalRuns{} Mops/s. For calibration: the first engine the agent wrote (a dense flat-array index, Section~\ref{sec:sorcar}) reached \HydraFirst{} Mops/s, just under $2\times$ FASTER; the remaining $3\times$ accumulated across the adversarial loop's redesigns---log-append write-back instead of in-place 4\,KiB read-modify-writes, doorkeeper admission, segmented insertion, and the \texttt{io\_uring} miss path. Each was adopted or reverted after measurement on the scored configuration, but the measurements were taken on an evolving code base, so per-mechanism scores (Section~\ref{sec:negative}) should be read as an engineering log rather than a controlled ablation.
+
+\subsection{Adversarial variants and the holdout}
+\label{sec:adversarial}
+
+The variant generator (released with the engine) produces load/run trace pairs in the harness's format. All generated variants draw keys as SplitMix64 hashes of insertion indices---i.e., sparse, uniformly scattered 64-bit keys, unlike the published trace's dense key space---and vary three knobs: skew $\theta$, hot-set geometry, and RNG seeds. The geometries are \emph{scrambled} (hot keys scattered arbitrarily), \emph{clustered} (hot keys drawn from contiguous \emph{insertion-index} ranges, which after hashing concentrates them in on-disk placement rather than in external key ranges---a deliberate stressor for placement locality, \emph{inspired by} but not an implementation of the key-range locality documented at Facebook~\cite{cao-fast20}), \emph{drift} (the hot set crossfades between epoch-specific scrambles across the run, an author-designed temporal-shift stressor motivated by the observation that production popularity is dynamic~\cite{yang-osdi20}), and \emph{mix} (a seeded blend of the three). Variants were constrained to stay within the target workload's operation mix, value size, key count, and skew regime, so that a variant could not ``win'' by being physically incapable of high throughput (a uniform-random variant would prove nothing on this device). These are literature-informed synthetic stressors, not trace replays; fidelity to production workloads is a threat to validity we do not claim to have eliminated.
+
+V1 (sparse keys) immediately falsified the first engine: its flat 4-byte-per-key position array assumed the dense $[0,N)$ key space of the published trace, and on sparse 64-bit keys the process was OOM-killed. This is the overfitting the loop exists to catch; the fingerprint hash index that replaced it costs memory and CPU but generalizes to arbitrary keys. V2 and V3 were then generated against the improved engine. The clustered variant scored slightly higher than the scrambled original (\HydraClustered{} vs.\ \HydraOrigVFourC); the difference is about 1.5\% and we did not collect the I/O-level measurements needed to attribute it, so we leave it uninterpreted. Drift (V3) is genuinely harder (\HydraDrift): a moving hot set halves the effective lifetime of every admission decision, the measured hit rate falls accordingly, and no engine change we tried recovered the difference without hurting the stationary workloads. The holdout---fresh seeds, mixed geometry, $\theta=0.92$, generated only after all engine work stopped---landed at \HydraHoldout{} Mops/s, slightly below the drift variant, consistent with its drift component dominating its difficulty. One measurement caveat, disclosed in Table~\ref{tab:main}: the holdout's first \texttt{run.sh} launch was killed by an external signal mid-way (after a 3.86 first run) and the measurement was relaunched; no engine or configuration change occurred between launches, so the no-adaptation property holds, but ``evaluated in one launch'' would be false and we do not claim it.
+
+\subsection{The throughput ceiling, and the 10\,Mops/s goal}
+\label{sec:ceiling}
+
+Midway through the discovery loop the target was raised from $2\times$ FASTER to a flat 10\,Mops/s. The agent's eventual response was a measured ceiling argument rather than a number; we reproduce it with its scope made explicit. Each scored run starts cold and lasts 30\,s. At 50\% reads, $T$ Mops/s implies $T/2$ million read ops/s, of which a fraction $1-h$ miss the cache and, in this design, cost one 4\,KiB device read each. The device delivers at most \FioIops{} such reads/s. Sustaining $T{=}10$ therefore needs $h \geq 1 - 0.718/5$, i.e., \HitNeeded. But across every admission policy the agent tried---doorkeeper generations and thresholds, neighbor co-admission, frequency variants---the hit rate of a cold 30-second window pinned at 76.8--77.1\%: at $\sim$5.5\,Mops/s the window simply does not re-reference enough distinct keys often enough for any of them to do better. At $h{=}\HitRate$ the miss-bandwidth fixed point is $2 \times 0.718/0.23 \approx 6.2$ Mops/s; the engine's \HydraFinal{} is about 88\% of that bound, the remainder going to write-back I/O contention and CPU. We are careful about what this argument is: an empirical bound for \emph{this class of design} (one 4\,KiB read per miss, admission-based caching, \MemBudget{} of honest memory) supported by a policy sweep, not an impossibility proof over all designs---a scheme that co-locates hot records on shared pages could in principle beat it, though our attempt at exactly that scored worse (Section~\ref{sec:negative}). Breaking \HitNeeded{} within this class would require more effective cache than \MemBudget. The one cheap way to get it---letting the OS page cache inside the 14\,GiB cgroup absorb the spill file---was rejected as violating the budget's intent, an explicit anti-reward-hacking call the agent made and documented; the engine opens its log O\_DIRECT precisely so its disk traffic cannot ride the page cache.
+
+\subsection{Correctness, testing, and what the tests caught}
+\label{sec:testing}
+
+The hardening task (Section~\ref{sec:sorcar}) produced an end-to-end test suite (a 935-line test program plus a 44-line matrix runner) that drives the real engine through real files with scaled workloads---no mocks---covering concurrent read/upsert/delete/checkpoint interleavings, fingerprint-alias key sets crafted by inverting the index hash, oversized-value paths, the \texttt{io\_uring}-disabled fallback, and delete-resurrection oracles (four readers hammering keys while a writer flaps upsert/delete, with per-key issue/completion interval brackets making ``value from the wrong phase'' detectable). The matrix runs six configurations: optimized, buffered-I/O on tmpfs, no-\texttt{io\_uring}, ASan+UBSan, TSan (a nine-suite subset, since TSan's slowdown makes the full suite impractical), and a coverage build; all pass, with \CovLines{} of engine lines and \CovBranches{} of branches executed at least once under gcov (the uncovered remainder is dominated by fail-stop I/O-error paths and sub-microsecond race windows, per manual inspection of the gcov report). Known residuals the suite does \emph{not} exercise are listed in Section~\ref{sec:limits}. The delete-resurrection oracle is the suite's strongest result: against two successive fixes that looked plausible under review it reliably drove the failure counter to the test's abort threshold within seconds, and it went green only under the pin-ownership protocol of Section~\ref{sec:design}. A final audit confirmed the engine performs no trace reads and contains no key-population constants.
+
+\subsection{Negative results}
+\label{sec:negative}
+
+Discovery-loop bookkeeping (an append-only ideas ledger the agent maintained to avoid retrying failures) records the ideas that measured worse and were reverted, each scored on the original workload against the then-current base---so the numbers are comparable to their own base, not to each other: strict-probation segmentation (0.78\,Mops/s; forward progress stalls when probation fills with pinned entries), 2-way probation (0.95), page-neighbor co-admission on read misses (1.98; admitting a missed page's other residents pollutes probation faster than it prefetches), always admitting load-phase-clean keys (4.17), cleaners that flush \emph{any} dirty entry rather than only cold ones (0.47; hot-key reflush storms saturate write bandwidth), and a heat-clustered relocation scheme that groups hot keys onto shared pages (4.03--4.34; the extra write traffic exceeded the locality benefit at this value size). The last entry matters beyond its number: the hardening task's initial 3.6\,Mops/s ``regression'' turned out to be correctness fixes layered onto this already-rejected relocation branch rather than onto the fastest revision; only bisection against archived scored revisions exposed it. Optimization work without an immutable ledger of what was tried, on what base, at what score, is quietly lossy---for agents and humans alike.
+
+%------------------------------------------------------------
+\section{How HydraKV Was Built: a Task Sequence in KISS Sorcar}
+\label{sec:sorcar}
+
+HydraKV's development is inseparable from its methodology, so we document it as the single case study it is; the process observations below are from this one project, not controlled comparisons. All work ran in KISS Sorcar~\cite{kisssorcar}, whose relevant properties here are: long-horizon task execution with automatic continuation across context windows, unattended operation against a remote benchmark machine over SSH, mixing models from different vendors inside one task via prompts, and persistent per-repository progress notes that later sessions read. The human contribution was three prompts and two mid-task steering messages; the agent wrote every line of engine and test code. Development used \texttt{claude-fable-5}; each major engine revision was additionally reviewed by \texttt{gpt-5.6-sol} in a read-only debugging role, an arrangement the prompts fixed explicitly. Total model-API spend across all sessions, summed from the framework's per-session budget accounting, was under \$200.
+
+\paragraph{Task 1: baseline and first engine.}
+The first task asked the agent to set up the benchmark repository on the remote machine and pass its acceptance criteria ($2\times$ FASTER). The agent produced a first-principles engine in one session: a flat 4-byte-per-key position array (exploiting the published trace's dense key space), fixed 128-byte slots written sequentially at load, in-place 4\,KiB read-modify-writes for write-back, and a version-checked write-back cache. It validated (\NKeys/\NKeys{} keys) and scored \HydraFirst{} Mops/s---just under $2\times$ FASTER, and a textbook example of benchmark overfitting waiting to be exposed.
+
+\paragraph{Task 2: adversarial AI discovery.}
+The second task installed the loop. Its prompt is short enough to quote in relevant part:
+
+\begin{promptbox}
+Generate a variant workload that is realistic like the original workload, but breaks the performance gain of the engine. Do extensive internet search to understand how to make the variant workload realistic to real-world workloads and robust to reward hacking or cheating. Then run the engine on the variant workload. If the goals are not met, use AI discovery to improve the engine on all workloads until you achieve the goals without cheating using the workloads. Then generate a new workload and repeat [...] until the engine can achieve the goals on a new test workload on which AI discovery was not performed.
+\end{promptbox}
+
+The agent grounded its variant axes in the workload-characterization literature it retrieved (key locality at Facebook~\cite{cao-fast20}, skew and temporal dynamics at Twitter~\cite{yang-osdi20}, YCSB's generator design~\cite{ycsb}), wrote the variant generator, and executed the loop of Section~\ref{sec:adversarial}: V1 broke the dense index (OOM); the rebuilt fingerprint-index engine passed V1 at 1.91 Mops/s; the mid-task goal raise to 10\,Mops/s triggered the profiling-driven redesign (log-append write-back, sharded I/O queues, doorkeeper, then \texttt{io\_uring} rings and segmented insertion) that reached 5.50; V2/V3 and the holdout closed the loop. Two disciplines were enforced by the prompt and are visible in the artifact: the same binary ran every workload, and each accepted idea appears in the ledger with its measured score, each rejected one with its failure number (Section~\ref{sec:negative}). The 10\,Mops/s goal ended as the ceiling argument of Section~\ref{sec:ceiling} instead of a hacked number.
+
+\paragraph{Task 3: find every bug, keep the speed.}
+The third task asked for redundancies, inconsistencies, corner-case bugs, races, and deadlocks---validated by end-to-end workload tests, with an honest self-audit for workload-knowledge cheating---under a hard floor: the median must not drop below the previous best. This task consumed three sessions and is where the multi-model structure earned its keep. The \texttt{gpt-5.6-sol} reviews produced dozens of line-referenced findings, of which the serious ones were: the fingerprint-alias hazard of Section~\ref{sec:design} (an effective-signature collision is $\approx$20\% likely per run at this key count and, in the pre-fix engine, could abort the process or bury a live key); the observation that slot position is not a valid recency order across pre-reserved extents, which invalidated a chain-walk guard; a delete/in-flight-admission race; and \texttt{io\_uring} partial-submission accounting. The new delete-resurrection test then falsified two successive epoch-based fixes for the delete race before the pin-ownership protocol survived it. When the assembled fixes scored 3.6\,Mops/s, the agent bisected archived engine revisions, discovered the fixes had been layered onto the rejected relocation branch, re-based all of them onto the fastest revision, and re-ran the full matrix and the scored gate: \HydraFinalRuns---slightly above the floor, the recovery coming from two prefetch hints found during the re-port.
+
+\paragraph{Observations.}
+Three things stood out, offered as observations from one case study rather than findings. (1)~\emph{Adversarial self-evaluation was cheap and decisive.} Generating a distribution shift and re-scoring cost minutes and immediately exposed the dense-index overfit; the held-out variant then bounded how much the repairs themselves had overfit the loop. (2)~\emph{Cross-model review surfaced different bugs than same-model review.} The reviewer model, prompted read-only with no authorship stake, repeatedly flagged concurrency hazards the developer model had rationalized; the resurrection race was ultimately found by a test the reviewer's findings inspired, not by either model's reading of the code. (3)~\emph{Agents need immutable experimental provenance.} Both failure modes hit during development---retrying known-bad ideas, and hardening the wrong engine version---were provenance failures, repaired by artifacts (the ideas ledger, archived scored revisions) that cost almost nothing to maintain.
+
+%------------------------------------------------------------
+\section{Limitations}
+\label{sec:limits}
+
+HydraKV is a benchmark-shaped engine, and we list where it falls short of the production systems it is compared against, together with the residual risks left open at the end of hardening.
+
+\emph{Missing subsystems.} The append-only log has no garbage collection or compaction; sustained update, insert, or delete traffic grows the spill file until an offline rewrite, and the 32-bit position space is exhausted at roughly 512\,GiB of log. Crash recovery is not implemented: the spill file is truncated at initialization, and there is no metadata snapshot from which the index and cache could be rebuilt---\texttt{Checkpoint} is a flush primitive with a quiescent-sessions precondition (Section~\ref{sec:design}), not a recovery story. FASTER and RocksDB provide both as core features; calling HydraKV a store, rather than an engine for a store, would overstate it.
+
+\emph{Known residual risks, disclosed rather than fixed.} The multi-root freshness hazard for same-signature keys whose first inserts race across sessions (Section~\ref{sec:design}); the 32-bit staging-token wrap horizon; cross-session partially-filled-chunk interactions (a \texttt{Checkpoint} or stop cannot drain another live session's partial chunk); RMW-vs-Upsert atomicity under one specific interleaving; return-value semantics of overlapping \texttt{Delete}s; unbounded RAM growth of the oversized-value overflow map, which forfeits the memory-budget property for workloads with values above 101 bytes; and formal (not observed) object-lifetime concerns for atomics in \texttt{mmap}ed memory. None is reachable by the scored workload; several are reachable through the public interface by workloads the harness does not generate.
+
+\emph{Evaluation scope.} The adversarial matrix in Table~\ref{tab:main} was scored with the v4c engine; only the original workload was re-scored after hardening (at \HydraFinal), so the variant numbers carry the pre-hardening engine's identity---the hardened engine passes all functional tests on variant-style workloads, but we did not re-run the scored matrix. FASTER was measured only on the original workload; no per-variant comparison exists. We report medians with per-run values where recorded, but no dispersion statistics beyond that, and no CPU/I/O utilization breakdowns for the headline runs; the negative-result scores of Section~\ref{sec:negative} are single measurements on evolving bases. Absolute Mops/s are specific to one machine and one 30-second cold-start window; the multiplier over FASTER is a same-box, same-harness, same-workload comparison and we make no claim about other hardware, other value sizes, longer windows, or production traces. Finally, the variants are synthetic stressors from one generator family; surviving them is evidence against the specific overfits they probe, not evidence of production readiness.
+
+%------------------------------------------------------------
+\section{Related Work}
+\label{sec:related}
+
+\paragraph{Key-value stores.} FASTER~\cite{faster} is the direct baseline and the closest design: hash index over a log with a memory-resident mutable region. HydraKV differs in making the RAM tier an admission-controlled cache of individual values rather than a log prefix, and in verifying every index hit against the disk-resident key. KVell~\cite{kvell} argued for unsorted, shared-nothing NVMe designs; HydraKV follows its spirit (no sorting, batched I/O) while keeping a shared cache because the skewed workload rewards it. RocksDB~\cite{rocksdb} and the LSM lineage~\cite{lsm} target a broader operation mix (scans, transactions, compaction-based space reclamation) that this workload does not exercise. Redis~\cite{redis} serves the in-memory regime and does not natively address a larger-than-memory budget.
+
+\paragraph{Caching.} The admission-and-segmentation toolkit HydraKV borrows is from the caching literature: segmented LRU~\cite{slru}, CLOCK-style recency~\cite{clock}, the TinyLFU/W-TinyLFU admission line with its doorkeeper filter~\cite{tinylfu}, and the engineering synthesis in CacheLib~\cite{cachelib}. The workload studies that motivated the adversarial variant axes are the Facebook RocksDB characterization~\cite{cao-fast20} (key-space locality, and YCSB's lack of it) and the Twitter cache analysis~\cite{yang-osdi20} (write-heavy skew, temporal dynamics). YCSB itself~\cite{ycsb} defines the workload family and Zipfian setting used throughout.
+
+\paragraph{AI-driven code discovery.} Evolutionary and agentic code-optimization systems score candidate programs against evaluators---AlphaEvolve~\cite{alphaevolve} against automated metrics, GEPA~\cite{gepa} against task scores with explicit train/validation/test splits to control overfitting to the evaluation set. The adversarial workload loop used here is a domain-specific instance of the same concern: it makes the evaluator a moving, realism-constrained target with a held-out final measurement, closer in spirit to adversarial evaluation practice in ML robustness than to static benchmarking. The agent framework, its layered architecture, and its multi-model task execution are described in the KISS Sorcar paper~\cite{kisssorcar}; this paper is a case study of that framework doing sustained systems work.
+
+%------------------------------------------------------------
+\section{Conclusion}
+\label{sec:conclusion}
+
+A general-purpose AI agent, steered by three natural-language tasks, produced a \EngineLoc-line key-value store engine that outperforms FASTER by \SpeedupFinal{} on a demanding larger-than-memory YCSB-A configuration, together with evidence---adversarial variants, a held-out workload, sanitizer-clean end-to-end tests, and a disclosed list of residual risks---about exactly how far that number generalizes and where it stops. The mechanisms that made the exercise trustworthy were not clever prompts but ordinary experimental hygiene, enforced on the agent: distribution shifts with a post-hoc holdout, a hard memory budget with the page-cache loophole explicitly closed, cross-model review with no authorship stake, end-to-end tests under sanitizers, a performance floor on every fix, and an immutable ledger of what was tried on which engine at what score. Where a goal exceeded the measured ceiling of the design class, the agent said so with arithmetic instead of gaming the metric. We suspect this recipe---adversarial self-evaluation, provenance, independent review---transfers to most performance engineering an agent might be asked to do; establishing that beyond a single case study is future work.
+
+\section*{Acknowledgments}
+This research is supported in part by gifts from Accenture, Amazon, AMD, Anyscale, Broadcom, Google, IBM, Intel, Intesa Sanpaolo, Lambda, Lightspeed, Mibura, NVIDIA, Samsung SDS, SAP, by the U.S. Department of Energy, Office of Science, Office of Advanced Scientific Computing Research through the X-STACK: Programming Environments for Scientific Computing program (DESC0021982,) and the Defense Advanced Research Projects Agency (DARPA) under Agreement No. HR00112590134.
+
+%------------------------------------------------------------
+\begin{thebibliography}{99}
+
+\bibitem{faster} B.~Chandramouli, G.~Prasaad, D.~Kossmann, J.~Levandoski, J.~Hunter, and M.~Barnett.
+FASTER: A Concurrent Key-Value Store with In-Place Updates.
+In \emph{ACM SIGMOD International Conference on Management of Data (SIGMOD)}, 2018.
+
+\bibitem{ycsb} B.~F.~Cooper, A.~Silberstein, E.~Tam, R.~Ramakrishnan, and R.~Sears.
+Benchmarking Cloud Serving Systems with YCSB.
+In \emph{ACM Symposium on Cloud Computing (SoCC)}, pages 143--154, 2010. DOI 10.1145/1807128.1807152.
+
+\bibitem{kvell} B.~Lepers, O.~Balmau, K.~Gupta, and W.~Zwaenepoel.
+KVell: the Design and Implementation of a Fast Persistent Key-Value Store.
+In \emph{ACM Symposium on Operating Systems Principles (SOSP)}, pages 447--461, 2019. DOI 10.1145/3341301.3359628.
+
+\bibitem{cao-fast20} Z.~Cao, S.~Dong, S.~Vemuri, and D.~H.~C.~Du.
+Characterizing, Modeling, and Benchmarking RocksDB Key-Value Workloads at Facebook.
+In \emph{USENIX Conference on File and Storage Technologies (FAST)}, 2020.
+
+\bibitem{yang-osdi20} J.~Yang, Y.~Yue, and K.~V.~Rashmi.
+A Large Scale Analysis of Hundreds of In-Memory Cache Clusters at Twitter.
+In \emph{USENIX Symposium on Operating Systems Design and Implementation (OSDI)}, 2020.
+
+\bibitem{cachelib} B.~Berg, D.~S.~Berger, S.~McAllister, I.~Grosof, S.~Gunasekar, J.~Lu, M.~Uhlar, J.~Carrig, N.~Beckmann, M.~Harchol-Balter, and G.~R.~Ganger.
+The CacheLib Caching Engine: Design and Experiences at Scale.
+In \emph{USENIX Symposium on Operating Systems Design and Implementation (OSDI)}, 2020.
+
+\bibitem{tinylfu} G.~Einziger, R.~Friedman, and B.~Manes.
+TinyLFU: A Highly Efficient Cache Admission Policy.
+\emph{ACM Transactions on Storage}, 13(4), 2017. arXiv:1512.00727.
+
+\bibitem{slru} R.~Karedla, J.~S.~Love, and B.~G.~Wherry.
+Caching Strategies to Improve Disk System Performance.
+\emph{IEEE Computer}, 27(3):38--46, 1994.
+
+\bibitem{clock} F.~J.~Corbat\'o.
+A Paging Experiment with the Multics System.
+In \emph{In Honor of Philip M. Morse} (H.~Feshbach and K.~U.~Ingard, eds.), MIT Press, 1969.
+
+\bibitem{lsm} P.~O'Neil, E.~Cheng, D.~Gawlick, and E.~O'Neil.
+The Log-Structured Merge-Tree (LSM-Tree).
+\emph{Acta Informatica}, 33:351--385, 1996. DOI 10.1007/s002360050048.
+
+\bibitem{rocksdb} Meta Platforms, Inc.
+RocksDB: A Persistent Key-Value Store for Fast Storage Environments.
+\url{https://rocksdb.org}, accessed 2026.
+
+\bibitem{redis} Redis Ltd.
+Redis: An In-Memory Data Store.
+\url{https://redis.io}, accessed 2026.
+
+\bibitem{iouring} J.~Axboe.
+Efficient IO with io\_uring, 2019; and io\_uring(7), Linux Programmer's Manual, \url{https://man7.org/linux/man-pages/man7/io_uring.7.html}, accessed 2026.
+
+\bibitem{splitmix} G.~L.~Steele~Jr., D.~Lea, and C.~H.~Flood.
+Fast Splittable Pseudorandom Number Generators.
+In \emph{ACM Conference on Object-Oriented Programming, Systems, Languages, and Applications (OOPSLA)}, pages 453--472, 2014. DOI 10.1145/2660193.2660195.
+
+\bibitem{kisssorcar} K.~Sen.
+KISS Sorcar: A Stupidly-Simple General-Purpose and Software Engineering AI Assistant.
+\url{https://github.com/ksenxx/kiss_ai} (paper at \texttt{papers/kisssorcar/}), 2026.
+
+\bibitem{alphaevolve} A.~Novikov, N.~V\~u, M.~Eisenberger, E.~Dupont, P.-S.~Huang, A.~Z.~Wagner, S.~Shirobokov, B.~Kozlovskii, F.~J.~R.~Ruiz, A.~Mehrabian, M.~P.~Kumar, A.~See, S.~Chaudhuri, G.~Holland, A.~Davies, S.~Nowozin, P.~Kohli, and M.~Balog.
+AlphaEvolve: A Coding Agent for Scientific and Algorithmic Discovery.
+arXiv:2506.13131, 2025.
+
+\bibitem{gepa} L.~A.~Agrawal, S.~Tan, D.~Soylu, N.~Ziems, R.~Khare, K.~Opsahl-Ong, A.~Singhvi, H.~Shandilya, M.~J.~Ryan, M.~Jiang, C.~Potts, K.~Sen, A.~G.~Dimakis, I.~Stoica, D.~Klein, M.~Zaharia, and O.~Khattab.
+GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning.
+In \emph{International Conference on Learning Representations (ICLR)}, 2026. arXiv:2507.19457.
+
+\end{thebibliography}
+
+\end{document}
