@@ -3775,7 +3775,9 @@
           const bpContent = mkEl('div', 'bash-panel-content');
           bp.appendChild(bpContent);
           addCopyButton(bp);
-          addPanelTimestamp(bp, ev.ts);
+          // No event-timestamp badge here: the inline bash output
+          // panel is a SUB-panel of the tool-call panel, whose own
+          // footer badge already shows the event time.
           c.appendChild(bp);
           tState.bashPanel = bpContent;
         }
@@ -3821,7 +3823,15 @@
             '</div>';
           // Raw tool-result error text for the Copy button.
           r.dataset.rawText = 'FAILED\n' + (ev.content || '');
-          addCollapse(r, r.querySelector('.rl'), ev.ts);
+          // Sub-panels of a tool-call panel never repeat the event
+          // timestamp — the owning panel's footer badge already shows
+          // it.  Only a FAILED panel that lands at TOP level (no
+          // owning tool_call panel) stamps its own badge.
+          addCollapse(
+            r,
+            r.querySelector('.rl'),
+            tState.lastToolCallEl ? undefined : ev.ts,
+          );
           resultTarget.appendChild(r);
           const trBody = r.querySelector('.tr-content');
           if (trBody) linkifyFilePaths(trBody);
@@ -3832,7 +3842,10 @@
           linkifyFilePaths(opContent);
           op.appendChild(opContent);
           addCopyButton(op);
-          addPanelTimestamp(op, ev.ts);
+          // Same rule as the FAILED panel above: no event-timestamp
+          // badge when the output panel nests inside its tool-call
+          // panel; only a top-level output panel stamps one.
+          if (!tState.lastToolCallEl) addPanelTimestamp(op, ev.ts);
           resultTarget.appendChild(op);
         }
         break;
