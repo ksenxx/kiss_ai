@@ -127,6 +127,16 @@ class KISSAgent(Base):
         # ``appendUserMessage`` command — see
         # :meth:`kiss.agents.sorcar.sorcar_agent.SorcarAgent.run`).
         self.pre_step_hook: Callable[..., None] | None = None
+        # Optional guard consulted BEFORE every tool call.  Receives
+        # ``(tool_name, tool_args)`` and returns ``None`` to allow the
+        # call or a string to BLOCK it: the string becomes the tool's
+        # error result (printed with ``is_error=True``) and the tool
+        # is not executed.  A blocked ``finish`` is NOT terminal — the
+        # step loop continues so the model can satisfy the guard (e.g.
+        # ``ChatSorcarAgent``'s every-5-steps ``summary`` gate) and
+        # retry.  Copied onto each per-session executor by
+        # :class:`kiss.core.relentless_agent.RelentlessAgent`.
+        self.tool_call_guard: Callable[[str, dict[str, Any]], str | None] | None = None
         # Size of the LIVE conversation in tokens (last call's full
         # prompt + completion).  Also (re)set in ``_reset``; initialized
         # here so the attribute exists on agents that are constructed
@@ -601,11 +611,14 @@ class KISSAgent(Base):
         finish_result: str | None = None
 
         for fc in function_calls:
-            name, response_str = self._execute_tool(fc)
+            blocked: str | None = None
+            if self.tool_call_guard is not None:
+                blocked = self.tool_call_guard(fc["name"], _call_args(fc))
+            name, response_str = self._execute_tool(fc, blocked=blocked)
             args_str = ", ".join(f"{k}={v!r}" for k, v in _call_args(fc).items())
             call_reprs.append(f"```python\n{name}({args_str})\n```")
             function_results.append((name, {"result": response_str}))
-            if name == "finish":
+            if name == "finish" and blocked is None:
                 finish_result = response_str
             else:
                 # A tool such as ``run_parallel`` can attribute a large
@@ -644,8 +657,16 @@ class KISSAgent(Base):
     def _execute_tool(
         self,
         function_call: dict[str, Any],
+        blocked: str | None = None,
     ) -> tuple[str, str]:
         """Execute a single tool call.
+
+        Args:
+            function_call: The tool call dict with ``name`` and
+                ``arguments``.
+            blocked: When not ``None``, the :attr:`tool_call_guard`
+                rejection message — the tool is NOT executed and
+                *blocked* is returned as an error result instead.
 
         Returns:
             tuple[str, str]: (function_name, function_response_string).
@@ -655,6 +676,17 @@ class KISSAgent(Base):
 
         if self.printer:
             self.printer.print(function_name, type="tool_call", tool_input=function_args)
+
+        if blocked is not None:
+            if self.printer:
+                self.printer.print(
+                    blocked,
+                    type="tool_result",
+                    tool_name=function_name,
+                    tool_input=function_args,
+                    is_error=True,
+                )
+            return function_name, blocked
 
         is_error = False
         try:
