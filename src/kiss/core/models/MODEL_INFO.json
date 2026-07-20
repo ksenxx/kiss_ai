@@ -1286,55 +1286,67 @@
     "context_length": 128000,
     "input_price_per_1M": 2.5,
     "output_price_per_1M": 10.0,
+    "audio_input_price_per_1M": 32.0,
+    "audio_output_price_per_1M": 64.0,
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "NEW"
+    "comment": "Audio tokens $32 in / $64 out per 1M (developers.openai.com model page + openrouter.ai, verified 2026-07)"
   },
   "gpt-audio-1.5": {
     "context_length": 128000,
     "input_price_per_1M": 2.5,
     "output_price_per_1M": 10.0,
+    "audio_input_price_per_1M": 32.0,
+    "audio_output_price_per_1M": 64.0,
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "NEW"
+    "comment": "Audio tokens $32 in / $64 out per 1M (developers.openai.com model page + openrouter.ai, verified 2026-07)"
   },
   "gpt-audio-2025-08-28": {
     "context_length": 128000,
     "input_price_per_1M": 2.5,
     "output_price_per_1M": 10.0,
+    "audio_input_price_per_1M": 32.0,
+    "audio_output_price_per_1M": 64.0,
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "NEW"
+    "comment": "Audio tokens $32 in / $64 out per 1M (developers.openai.com model page + openrouter.ai, verified 2026-07)"
   },
   "gpt-audio-mini": {
     "context_length": 128000,
     "input_price_per_1M": 0.6,
     "output_price_per_1M": 2.4,
+    "audio_input_price_per_1M": 0.6,
+    "audio_output_price_per_1M": 2.4,
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "NEW"
+    "comment": "Audio tokens $0.60 in / $2.40 out per 1M, same as text (openrouter.ai/openai/gpt-audio-mini provider table, verified 2026-07)"
   },
   "gpt-audio-mini-2025-10-06": {
     "context_length": 128000,
     "input_price_per_1M": 0.6,
     "output_price_per_1M": 2.4,
+    "audio_input_price_per_1M": 0.6,
+    "audio_output_price_per_1M": 2.4,
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "NEW"
+    "comment": "Audio tokens $0.60 in / $2.40 out per 1M, same as text (openrouter.ai/openai/gpt-audio-mini provider table, verified 2026-07)"
   },
   "gpt-audio-mini-2025-12-15": {
     "context_length": 128000,
     "input_price_per_1M": 0.6,
     "output_price_per_1M": 2.4,
+    "audio_input_price_per_1M": 0.6,
+    "audio_output_price_per_1M": 2.4,
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "NEW"
+    "comment": "Audio tokens $0.60 in / $2.40 out per 1M, same as text (openrouter.ai/openai/gpt-audio-mini provider table, verified 2026-07)"
   },
   "gpt-image-1": {
     "context_length": 32768,
@@ -3300,17 +3312,23 @@
     "context_length": 128000,
     "input_price_per_1M": 2.5,
     "output_price_per_1M": 10.0,
+    "audio_input_price_per_1M": 32.0,
+    "audio_output_price_per_1M": 64.0,
     "fc": false,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "comment": "Audio tokens $32 in / $64 out per 1M (openrouter.ai provider table, verified 2026-07)"
   },
   "openrouter/openai/gpt-audio-mini": {
     "context_length": 128000,
     "input_price_per_1M": 0.6,
     "output_price_per_1M": 2.4,
+    "audio_input_price_per_1M": 0.6,
+    "audio_output_price_per_1M": 2.4,
     "fc": false,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "comment": "Audio tokens $0.60 in / $2.40 out per 1M, same as text (openrouter.ai provider table, verified 2026-07)"
   },
   "openrouter/openai/gpt-chat-latest": {
     "context_length": 400000,
