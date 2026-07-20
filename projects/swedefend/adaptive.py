@@ -350,7 +350,7 @@ def run_adaptive_evaluation(
     per_iter_refused: list[int] = [0] * max_iters
     per_iter_success: list[int] = [0] * max_iters
     n_seeds = 0
-    out_dir = Path("swedefend/results")
+    out_dir = Path("projects/swedefend/results")
     out_dir.mkdir(parents=True, exist_ok=True)
     partial = out_dir / "adaptive_partial.csv"
     with partial.open("w") as f:
