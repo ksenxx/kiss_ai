@@ -401,6 +401,28 @@ def _attribute_sub_usage(agent: Any, budget: float, tokens: int, steps: int) -> 
             pass
 
 
+def _attribute_tts_usage(agent: Any, usage: dict[str, Any]) -> None:
+    """Attribute a ``talk``-tool TTS synthesis call's spend to *agent*.
+
+    ``synthesize_talk_audio`` runs a throwaway single-shot
+    ``TalkSynthesisAgent`` (gpt-audio-1.5, whose audio output bills
+    $64/M tokens) whose ``budget_used`` would otherwise vanish from the
+    task's accounting — the reported per-task cost would lie low (July
+    2026 cost audit).  Steps are NOT attributed: the synthesis is one
+    non-agentic model call, not an agent step.
+
+    Args:
+        agent: The Sorcar agent whose task accounting receives the spend.
+        usage: The ``usage_out`` dict filled by ``synthesize_talk_audio``
+            (``budget_used`` USD, ``total_tokens_used``); empty when the
+            synthesis never issued an API call.
+    """
+    budget = float(usage.get("budget_used", 0.0) or 0.0)
+    tokens = int(usage.get("total_tokens_used", 0) or 0)
+    if budget > 0 or tokens > 0:
+        _attribute_sub_usage(agent, budget, tokens, 0)
+
+
 # Base URLs the ``model()`` factory itself assigns when routing a model
 # name to its provider.  ``set_model`` must NOT carry one of these into the
 # new model's ``model_config``: the factory bypasses provider routing
@@ -681,12 +703,19 @@ class SorcarAgent(RelentlessAgent):
             # synthesis failed or audio playback is unavailable/blocked
             # on the device (the CLI terminal alone falls back to the
             # system TTS command).
+            tts_usage: dict[str, Any] = {}
             try:
                 from kiss.core.speech_synthesis import synthesize_talk_audio
 
-                synthesized = synthesize_talk_audio(text, language, emotion)
+                synthesized = synthesize_talk_audio(
+                    text, language, emotion, usage_out=tts_usage,
+                )
             except Exception:
                 synthesized = None
+            # Fold the synthesis agent's real spend into THIS task's
+            # accounting — otherwise every talk() call's TTS cost is
+            # missing from the reported per-task cost.
+            _attribute_tts_usage(self, tts_usage)
             if synthesized:
                 payload["audioB64"], payload["audioMime"] = synthesized
                 # Attach the clip to the recorded/persisted ``talk``

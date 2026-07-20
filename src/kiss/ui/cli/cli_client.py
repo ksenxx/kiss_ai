@@ -341,8 +341,12 @@ class _EventDispatcher:
             # Forward the question to the REPL thread; the loop
             # thread MUST NOT call ``input()`` itself because that
             # would block every other inbound event for the duration
-            # of the user's typing.
-            self.ask_user_q.put(str(event.get("question", "")))
+            # of the user's typing.  ``event.get("question", "")``
+            # only falls back when the key is absent — ``question:
+            # null`` still yields ``None`` and the REPL would show
+            # the literal question "None" (the review #36 coercion
+            # hardening missed this branch).
+            self.ask_user_q.put(str(event.get("question") or ""))
             return
         if et == "error":
             # ``event.get("text", "")`` only falls back when the key
@@ -458,21 +462,28 @@ class _EventDispatcher:
             self.printer.print(event.get("text") or "", type="bash_stream")
             return
         if et == "usage_info":
+            # ``or``-coerce the numeric/cost fields too: ``total_tokens:
+            # null`` yields ``None`` from ``event.get(..., 0)`` and the
+            # printer's offset arithmetic raises ``TypeError`` — the
+            # loop thread swallows it and the panel silently vanishes.
             self.printer.print(
                 event.get("text") or "",
                 type="usage_info",
-                total_tokens=event.get("total_tokens", 0),
-                cost=event.get("cost", "N/A"),
-                total_steps=event.get("total_steps", 0),
+                total_tokens=event.get("total_tokens") or 0,
+                cost=event.get("cost") or "N/A",
+                total_steps=event.get("total_steps") or 0,
             )
             return
         if et == "result":
+            # Same null-coercion as ``usage_info`` above: a ``result``
+            # with ``total_tokens: null`` used to raise inside the
+            # printer, silently dropping the user's final Result panel.
             self.printer.print(
                 event.get("text") or "(no result)",
                 type="result",
-                total_tokens=event.get("total_tokens", 0),
-                cost=event.get("cost", "N/A"),
-                step_count=event.get("step_count", 0),
+                total_tokens=event.get("total_tokens") or 0,
+                cost=event.get("cost") or "N/A",
+                step_count=event.get("step_count") or 0,
             )
             return
         if et == "notification":
