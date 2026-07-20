@@ -5,7 +5,7 @@
 Engines: **HydraKV** (KISS Sorcar / Koushik) `hydra.cc` (2,064 lines) · **kv_5050** (reference) `src/{store,cache,cold_tier,index,record,uring}.h`.
 Workload: YCSB-A 50/50, Zipf θ=0.95, 250M × 100 B, 8 GiB budget, larger-than-memory. FASTER = 0.93 Mops.
 
----
+______________________________________________________________________
 
 ## ★ SUMMARY
 
@@ -36,7 +36,7 @@ Both are **genuine, non-reward-hacked** engines that beat FASTER on the exact wo
 
 **Tally (prod axes):** kv_5050 wins 3 (recovery, fault-handling, value-size) + fault-injection/differential gates · Hydra wins 1 (index-collision) · sanitizers ≈ tie · rest tie, incl. the shared no-compaction gap.
 
----
+______________________________________________________________________
 
 ### Full detail (click any section to expand)
 
@@ -68,6 +68,7 @@ HydraKV **5.51 Mops = 5.9× FASTER** (paper-reported, non-hacked verified). kv_5
 <summary><b>3 · Disk compaction vs in-memory GC — exact state</b></summary>
 
 **Both lack disk compaction; both bound RAM by CLOCK eviction.** Symmetric — not a point against either alone:
+
 - **Hydra:** append-only, superseded versions leak until an offline compactor (`hydra.cc:12,939,1925`); RAM bounded by cache eviction; unbounded overflow map exists but is off-workload.
 - **kv_5050:** monotonic cursor, dead space for overwrites never reclaimed (`cold_tier.h:16`); RAM bounded by CLOCK; no unbounded container.
 
@@ -112,6 +113,7 @@ Differences: Hydra adds the **doorkeeper** (admit only on 2nd recent touch) + ve
 <summary><b>6 · Testing rigor — which is better tested</b></summary>
 
 **Both use sanitizers; the split is coverage-style vs prod-property gates:**
+
 - **HydraKV:** 14 e2e cases (basic, lww, async, audit, oversized, delete, updel, **alias**, tiny, nodisk, rmw, twostores, **ckpt**, **rywrite**) × **6 build configs: opt / buffered / no-uring / ASan+UBSan / TSan (9-suite subset) / coverage** (paper: 92.8% line / 93.4% branch). Strong sanitizer + coverage discipline; the delete-resurrection oracle + crafted fingerprint-alias keys are genuinely good. (`test_hydra.cc` 935 lines, `run_all_tests.sh`.)
 - **kv_5050:** ~20 **prod-invariant gates with TEETH**, re-run under **ASan+UBSan and TSan on targeted paths** (`AUDIT_FINDINGS.md`; op-gates run under sanitizers at the scored operating point) — `check_durability`, `check_recover_read_fault` (**fault-injected recovery**), `check_write_error_surface`, `check_checkpoint_durability_faults`, `check_lost_update_readmiss` (+ `impl_good`/`impl_bad` **differential**), `check_concurrent_rmw` (TSan teeth), `check_delete_no_resurrect`, `check_bounded_memory`, `check_value_oversize`, `check_addr_cap_surface`. **Caveat:** **not full-engine TSan** (A20 accepted-scope — io_uring isn't TSan-instrumentable).
 

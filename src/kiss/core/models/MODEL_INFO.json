@@ -1387,26 +1387,46 @@
   "kimi-k2.5": {
     "context_length": 262144,
     "input_price_per_1M": 0.6,
-    "output_price_per_1M": 2.5,
+    "output_price_per_1M": 3.0,
+    "cache_read_price_per_1M": 0.1,
+    "cache_write_price_per_1M": 0.0,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "comment": "platform.kimi.ai 2026-07: $0.10 hit / $0.60 miss / $3.00 out; free cache writes"
   },
   "kimi-k2.6": {
     "context_length": 262144,
-    "input_price_per_1M": 0.6,
-    "output_price_per_1M": 2.5,
+    "input_price_per_1M": 0.95,
+    "output_price_per_1M": 4.0,
+    "cache_read_price_per_1M": 0.16,
+    "cache_write_price_per_1M": 0.0,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "comment": "platform.kimi.ai 2026-07: $0.16 hit / $0.95 miss / $4.00 out"
   },
   "kimi-k2.7-code": {
     "context_length": 262144,
-    "input_price_per_1M": 0.6,
-    "output_price_per_1M": 2.5,
+    "input_price_per_1M": 0.95,
+    "output_price_per_1M": 4.0,
+    "cache_read_price_per_1M": 0.19,
+    "cache_write_price_per_1M": 0.0,
     "fc": true,
     "emb": false,
-    "gen": true
+    "gen": true,
+    "comment": "platform.kimi.ai 2026-07: $0.19 hit / $0.95 miss / $4.00 out"
+  },
+  "kimi-k3": {
+    "context_length": 1048576,
+    "input_price_per_1M": 3.0,
+    "output_price_per_1M": 15.0,
+    "cache_read_price_per_1M": 0.3,
+    "cache_write_price_per_1M": 0.0,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "platform.kimi.ai 2026-07: $0.30 hit / $3.00 miss / $15.00 out, 1M ctx"
   },
   "meta-llama/Llama-3-70b-chat-hf": {
     "context_length": 8192,
@@ -2829,10 +2849,12 @@
     "context_length": 1048576,
     "input_price_per_1M": 3.0,
     "output_price_per_1M": 15.0,
+    "cache_read_price_per_1M": 0.3,
+    "cache_write_price_per_1M": 0.0,
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "NEW"
+    "comment": "openrouter.ai 2026-07: cache read $0.30 (0.1x, not the 0.25x default)"
   },
   "openrouter/morph/morph-v3-fast": {
     "context_length": 81920,
