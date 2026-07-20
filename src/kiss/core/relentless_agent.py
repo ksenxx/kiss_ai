@@ -202,6 +202,11 @@ class RelentlessAgent(Base):
         # can hook into model calls without re-implementing the
         # per-session executor.
         self.pre_step_hook: Callable[..., None] | None = None
+        # See :attr:`kiss.core.kiss_agent.KISSAgent.tool_call_guard`.
+        # Propagated to every inner per-session executor alongside
+        # ``pre_step_hook`` so subclasses can veto individual tool
+        # calls (e.g. ``ChatSorcarAgent``'s every-5-steps summary gate).
+        self.tool_call_guard: Callable[[str, dict[str, Any]], str | None] | None = None
         self.set_printer(printer, verbose=verbose)
 
     def _accumulate_usage(self, agent: Base) -> None:
@@ -306,6 +311,10 @@ class RelentlessAgent(Base):
             # drain) to the per-session inner executor — that's the
             # layer that actually calls the model.
             executor.pre_step_hook = getattr(self, "pre_step_hook", None)
+            # Propagate the per-tool-call guard (e.g. ``ChatSorcarAgent``'s
+            # every-5-steps summary gate) so the executor consults it
+            # before dispatching EVERY tool call, including ``finish``.
+            executor.tool_call_guard = getattr(self, "tool_call_guard", None)
             # Enforce the parent task's TOTAL budget from inside the
             # executor's step loop — the executor's own ``budget_used``
             # never sees spend attributed to the parent mid-session by

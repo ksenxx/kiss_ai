@@ -347,6 +347,18 @@ def _parse_diff_hunks(
         if current_file and line.startswith("Binary files "):
             hunks.setdefault(current_file, [])
             continue
+        # Detect mode-only changes: git emits ``old mode NNNNNN`` /
+        # ``new mode NNNNNN`` header lines (and NO hunks) when only
+        # the file mode changed (e.g. ``chmod +x`` / ``chmod -x``).
+        # Without an entry here such a change was completely invisible
+        # to the merge review — ``_prepare_merge_view`` reported
+        # "No changes" while ``git status`` showed the file modified,
+        # and rejecting the (never-shown) change could not restore the
+        # original mode.  The empty hunk list makes the file a
+        # whole-file review decision, exactly like a binary change.
+        if current_file and line.startswith("old mode "):
+            hunks.setdefault(current_file, [])
+            continue
         hunk = _parse_hunk_line(line)
         if hunk and current_file:
             hunks.setdefault(current_file, []).append(hunk)
@@ -788,6 +800,46 @@ def _write_base_copy(
     return base_path
 
 
+def _base_exec_state(
+    ub_dir: Path, base_modes: dict[str, str], fname: str,
+) -> bool | None:
+    """Return the pre-task executable state of *fname*, or ``None``.
+
+    The reject path must restore the file's PRE-TASK mode: set the
+    exec bits when the base was executable, clear them when it was
+    not.  The pre-task truth is, in precedence order:
+
+    1. The saved pre-task base copy in *ub_dir* (``shutil.copy2``
+       preserves the mode) — this covers the non-worktree flow's
+       pre-task-dirty and untracked files, whose git mode (if any)
+       may not match what the user actually had on disk.
+    2. The git mode at the merge's base ref: ``100755`` → executable,
+       ``100644`` → not executable.
+
+    Args:
+        ub_dir: Directory holding saved pre-task base copies.
+        base_modes: Git modes at the base ref, from :func:`_base_modes`.
+        fname: Relative path of the reviewed file.
+
+    Returns:
+        ``True``/``False`` when the pre-task mode is known, ``None``
+        when it is not (e.g. an agent-created file) — the reject path
+        then leaves the on-disk mode alone.
+    """
+    saved = ub_dir / fname
+    try:
+        if saved.is_file():
+            return bool(saved.stat().st_mode & 0o100)
+    except OSError:  # pragma: no cover — unreadable saved copy
+        return None
+    mode = base_modes.get(fname)
+    if mode == "100755":
+        return True
+    if mode == "100644":
+        return False
+    return None
+
+
 def _prepare_merge_view(
     work_dir: str,
     data_dir: str,
@@ -846,15 +898,15 @@ def _prepare_merge_view(
             # working directory lives.
             continue
         if not hunks:
-            # An empty hunk list can ONLY come from git printing
-            # "Binary files … differ" (mode-only changes never create
-            # a post_hunks entry at all).  This covers deleted
-            # binaries AND files forced binary via .gitattributes
-            # whose on-disk bytes are pure text — the NUL-byte sniff
-            # in _is_binary_file cannot see the attribute, so gating
-            # on it here silently dropped such files from the review
-            # entirely.  All of them must be reviewable as whole-file
-            # binary decisions (and restorable on reject).
+            # An empty hunk list comes from git printing "Binary
+            # files … differ" OR from a mode-only change (``old mode``
+            # / ``new mode`` header lines with no hunks — see
+            # ``_parse_diff_hunks``).  This covers deleted binaries,
+            # files forced binary via .gitattributes whose on-disk
+            # bytes are pure text (the NUL-byte sniff in
+            # _is_binary_file cannot see the attribute), and
+            # ``chmod``-only changes.  All of them must be reviewable
+            # as whole-file decisions (and restorable on reject).
             binary_files.add(fname)
             continue
         filtered = _agent_file_hunks(work_dir, fname, ub_dir, pre_hunks, hunks)
@@ -922,7 +974,13 @@ def _prepare_merge_view(
     # rejected deletion re-creates the file — otherwise a full
     # reject-all leaves the tree dirty (old mode 100755 / new mode
     # 100644) and the restored script is no longer runnable.
-    exec_files = {f for f, mode in base_modes.items() if mode == "100755"}
+    # Symmetrically, an exec bit the agent ADDED to a mode-100644 file
+    # must be CLEARED on reject, or a full reject-all leaves the tree
+    # dirty the other way around (old mode 100644 / new mode 100755).
+    # ``exec`` is therefore stamped tri-state on each manifest entry:
+    # ``True`` (ensure exec bits), ``False`` (ensure no exec bits) or
+    # absent (mode unknown — never touch it), computed by
+    # :func:`_base_exec_state` from the pre-task truth.
     for fname, mode in base_modes.items():
         if mode != "120000":
             continue
@@ -967,8 +1025,9 @@ def _prepare_merge_view(
             "target": str(target_path),
             "hunks": fh,
         }
-        if fname in exec_files:
-            text_entry["exec"] = True
+        exec_state = _base_exec_state(ub_dir, base_modes, fname)
+        if exec_state is not None:
+            text_entry["exec"] = exec_state
         manifest_files.append(text_entry)
     for fname in sorted(binary_files):
         target_path = Path(work_dir) / fname
@@ -998,8 +1057,10 @@ def _prepare_merge_view(
             # Rejecting this entry must restore the symlink itself,
             # not write the blob's target string as file content.
             entry["link_target"] = link_targets[fname]
-        if fname in exec_files:
-            entry["exec"] = True
+        else:
+            exec_state = _base_exec_state(ub_dir, base_modes, fname)
+            if exec_state is not None:
+                entry["exec"] = exec_state
         manifest_files.append(entry)
     if not manifest_files:
         return {"error": "No changes"}
