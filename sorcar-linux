@@ -76,9 +76,12 @@ mkdir -p "$LOG_DIR" "$HOME/.local/bin"
 rinfo() { printf '\033[0;36m[%s]\033[0m %s\n' "$(hostname)" "$*"; }
 
 # --- 3a. code-server -------------------------------------------------------
+# Use the standalone method (installs into ~/.local, no sudo) because this
+# non-interactive SSH session has no TTY for a sudo password prompt.
 if ! command -v code-server &>/dev/null; then
-    rinfo "Installing code-server..."
-    curl -fsSL https://code-server.dev/install.sh | sh
+    rinfo "Installing code-server (standalone, no sudo)..."
+    curl -fsSL https://code-server.dev/install.sh \
+        | sh -s -- --method=standalone --prefix="$HOME/.local"
 else
     rinfo "code-server already installed."
 fi
