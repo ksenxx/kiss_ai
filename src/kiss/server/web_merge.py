@@ -177,8 +177,44 @@ def _apply_exec_bit(path: str) -> None:
     Args:
         path: File whose mode should gain exec bits.
     """
+    _apply_exec_state(path, True)
+
+
+def _apply_exec_state(path: str, executable: bool) -> None:
+    """Set or clear the executable bits of *path*.
+
+    Setting mirrors git's checkout behavior for mode-``100755``
+    entries (execute permission granted wherever read permission is
+    present); clearing removes every exec bit so a rejected
+    ``chmod +x`` leaves the tree clean (git mode ``100644``).
+
+    Args:
+        path: File whose mode should be adjusted.
+        executable: ``True`` to grant exec bits, ``False`` to clear.
+    """
     mode = os.stat(path).st_mode
-    os.chmod(path, mode | ((mode & 0o444) >> 2))
+    if executable:
+        os.chmod(path, mode | ((mode & 0o444) >> 2))
+    else:
+        os.chmod(path, mode & ~0o111)
+
+
+def _exec_flag(file_data: dict[str, Any]) -> bool | None:
+    """Return a manifest entry's tri-state ``exec`` flag.
+
+    ``True`` — the base is executable (restore must set exec bits);
+    ``False`` — the base is non-executable (restore must clear them);
+    ``None`` — the base mode is unknown (restore must not touch it,
+    e.g. legacy manifests and agent-created files).
+
+    Args:
+        file_data: File entry from merge data.
+
+    Returns:
+        The flag when present and boolean, else ``None``.
+    """
+    val = file_data.get("exec")
+    return val if isinstance(val, bool) else None
 
 
 def _restore_base_bytes(
@@ -186,7 +222,7 @@ def _restore_base_bytes(
     write_to: str,
     link_target: str | None = None,
     *,
-    make_executable: bool = False,
+    make_executable: bool | None = None,
 ) -> None:
     """Restore *write_to* to the exact bytes of *base_path*.
 
@@ -206,9 +242,12 @@ def _restore_base_bytes(
         write_to: Real workspace path to restore.
         link_target: Target string of the base symlink, or ``None``
             for regular content.
-        make_executable: True when the base mode is ``100755`` — the
-            restored file gets its exec bit back so rejecting a
-            deleted script leaves a clean tree and a runnable file.
+        make_executable: Tri-state base mode: ``True`` when the base
+            mode is ``100755`` (the restored file gets its exec bit
+            back so rejecting a deleted script leaves a clean tree and
+            a runnable file), ``False`` when it is ``100644`` (an exec
+            bit the agent added is cleared), ``None`` when unknown
+            (the on-disk mode is left untouched).
     """
     dest = Path(write_to)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -227,8 +266,8 @@ def _restore_base_bytes(
     if dest.is_symlink():
         dest.unlink()
     dest.write_bytes(data)
-    if make_executable:
-        _apply_exec_bit(write_to)
+    if make_executable is not None:
+        _apply_exec_state(write_to, make_executable)
 
 
 def _reject_hunk_in_file(
@@ -239,7 +278,7 @@ def _reject_hunk_in_file(
     *,
     binary: bool = False,
     link_target: str | None = None,
-    make_executable: bool = False,
+    make_executable: bool | None = None,
 ) -> None:
     """Revert a single hunk in the current file to the base version.
 
@@ -276,8 +315,9 @@ def _reject_hunk_in_file(
             the base bytes wholesale.
         link_target: Target string when the base is a symlink blob;
             the link itself is restored (see ``_restore_base_bytes``).
-        make_executable: True when the base mode is ``100755``; the
-            rewritten file gets its exec bit re-applied.
+        make_executable: Tri-state base mode (see
+            :func:`_restore_base_bytes`): ``True`` re-applies the exec
+            bit, ``False`` clears it, ``None`` leaves the mode alone.
     """
     write_to = target_path or current_path
     if binary or link_target is not None:
@@ -325,8 +365,8 @@ def _reject_hunk_in_file(
         dest.unlink()
     with open(write_to, "w", encoding="utf-8", newline="") as f:
         f.write("".join(new_lines))
-    if make_executable:
-        _apply_exec_bit(write_to)
+    if make_executable is not None:
+        _apply_exec_state(write_to, make_executable)
 
 
 def _record_hunk_rejected(
@@ -411,7 +451,7 @@ def _reject_all_hunks_in_file(
                 file_data["base"],
                 file_data.get("target") or file_data["current"],
                 file_data.get("link_target"),
-                make_executable=bool(file_data.get("exec")),
+                make_executable=_exec_flag(file_data),
             )
         return
     pending = set(hunk_indices)
@@ -420,7 +460,7 @@ def _reject_all_hunks_in_file(
         _reject_hunk_in_file(
             file_data["current"], file_data["base"], hunk,
             file_data.get("target"),
-            make_executable=bool(file_data.get("exec")),
+            make_executable=_exec_flag(file_data),
         )
         pending.discard(hi)
         _record_hunk_rejected(hunks, hi, pending.__contains__)

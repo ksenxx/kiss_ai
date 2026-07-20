@@ -73,7 +73,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('kissSorcar.runSelection', () => {
+    vscode.commands.registerCommand('kissSorcar.runSelection', async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor) return;
       const sel = editor.document.getText(editor.selection);
@@ -81,7 +81,10 @@ export function activate(context: vscode.ExtensionContext): void {
         showInformationNotification('No text selected');
         return;
       }
-      sidebarView!.submitTask(sel.trim());
+      // Copy the highlighted text, paste it into the chat webview's
+      // input textbox and submit it to the agent (opens/resolves the
+      // sidebar webview first when it is closed).
+      await sidebarView!.submitTask(sel.trim());
     }),
   );
 
@@ -171,6 +174,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     sidebarView!.onCommitMessage(ev => {
+      // This handler owns the SCM input box, whose generations run
+      // under tabId '' — a commit message generated for a chat tab
+      // must not clobber the SCM box (or wipe its countdown).
+      if ((ev.tabId ?? '') !== '') return;
       const countdownWasRunning = stopCommitCountdown !== undefined;
       stopCommitCountdown?.();
       if (ev.error) {

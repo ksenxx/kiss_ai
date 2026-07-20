@@ -727,7 +727,11 @@ class Model(ABC):
     @abstractmethod
     def extract_input_output_token_counts_from_response(
         self, response: Any
-    ) -> tuple[int, int, int, int] | tuple[int, int, int, int, int]:
+    ) -> (
+        tuple[int, int, int, int]
+        | tuple[int, int, int, int, int]
+        | tuple[int, int, int, int, int, int, int]
+    ):
         """Extracts token counts from an API response.
 
         Args:
@@ -735,8 +739,11 @@ class Model(ABC):
 
         Returns:
             A 4-tuple ``(input_tokens, output_tokens, cache_read_tokens,
-            cache_write_tokens)`` or a 5-tuple whose last element is the
-            Anthropic one-hour cache-write token count.
+            cache_write_tokens)``, a 5-tuple whose last element is the
+            Anthropic one-hour cache-write token count, or a 7-tuple
+            whose last two elements are the audio input/output token
+            subsets of an OpenAI audio-chat response (billed at the
+            model's separate audio rates).
         """
         pass  # pragma: no cover
 

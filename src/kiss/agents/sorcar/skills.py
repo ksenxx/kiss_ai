@@ -59,7 +59,14 @@ logger = logging.getLogger(__name__)
 
 # ``---\n<yaml>\n---`` frontmatter block at the very start of the file.
 # Shared with custom_commands.py via :func:`parse_frontmatter`.
-_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+# The YAML part is matched line-wise (``(?:.*\n)*?`` — zero or more
+# whole lines, non-greedy) so an EMPTY block (``---\n---\n``, legal in
+# every frontmatter dialect) is stripped too; the old ``\n(.*?)\n``
+# shape required at least one line between the markers and leaked the
+# literal ``---`` lines into the body.  The closing marker must start
+# at a line boundary; ``[^\S\n]*`` (whitespace except newline) allows
+# trailing spaces / a stray ``\r`` without swallowing following lines.
+_FRONTMATTER_RE = re.compile(r"\A---[^\S\n]*\n((?:.*\n)*?)---[^\S\n]*\n?")
 
 
 def claude_config_dir() -> Path:

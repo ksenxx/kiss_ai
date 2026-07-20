@@ -24,14 +24,15 @@
 //      disclosure semantics: ``aria-expanded`` reflecting the state
 //      and ``aria-controls="history-filters-body"``.
 //
-//   3. The panel is EXPANDED by default: the body is not hidden and
-//      every filter control (five chip checkboxes, two date inputs,
-//      two picker buttons) is present inside it — i.e. the filter
-//      buttons and dates are visible whenever the panel is
-//      uncollapsed.
+//   3. The panel is COLLAPSED by default: the body carries the
+//      ``hidden`` attribute and ``aria-expanded`` is "false".  Once
+//      the user expands it, every filter control (five chip
+//      checkboxes, two date inputs, two picker buttons) is present
+//      and visible inside it — i.e. the filter buttons and dates are
+//      visible whenever the panel is uncollapsed.
 //
-//   4. Clicking the toggle collapses the panel (``hidden`` body,
-//      ``aria-expanded="false"``) and clicking again expands it.
+//   4. Clicking the toggle expands the panel (body not hidden,
+//      ``aria-expanded="true"``) and clicking again collapses it.
 //
 //   5. The collapsed/expanded choice persists across webview
 //      reloads via ``localStorage``.
@@ -282,7 +283,7 @@ function testFiltersPanelMarkup() {
   console.log('  ok - Filters panel markup: toggle + body wrap the bar');
 }
 
-function testDefaultExpandedControlsVisible() {
+function testDefaultCollapsedThenControlsVisibleOnExpand() {
   const {win} = makeWebview();
   const doc = win.document;
 
@@ -295,16 +296,18 @@ function testDefaultExpandedControlsVisible() {
   const body = doc.getElementById('history-filters-body');
   assert.strictEqual(
     toggle.getAttribute('aria-expanded'),
-    'true',
-    'the Filters panel must be expanded by default',
+    'false',
+    'the Filters panel must be collapsed by default',
   );
   assert.strictEqual(
     body.hidden,
-    false,
-    'the body must NOT be hidden while the panel is uncollapsed',
+    true,
+    'the body must carry the hidden attribute while collapsed',
   );
-  // Every filter button and date input is visible (not inside any
-  // hidden ancestor and not display:none itself).
+
+  // Expanding reveals every filter button and date input (not inside
+  // any hidden ancestor and not display:none itself).
+  clickToggle(win);
   for (const id of FILTER_CONTROL_IDS) {
     let el = doc.getElementById(id);
     for (; el; el = el.parentElement) {
@@ -317,10 +320,10 @@ function testDefaultExpandedControlsVisible() {
   }
 
   win.close();
-  console.log('  ok - expanded by default; buttons and dates visible');
+  console.log('  ok - collapsed by default; expanding reveals controls');
 }
 
-function testToggleCollapsesAndExpands() {
+function testToggleExpandsAndCollapses() {
   const {win} = makeWebview();
   const doc = win.document;
   const toggle = doc.getElementById('history-filters-toggle');
@@ -329,33 +332,33 @@ function testToggleCollapsesAndExpands() {
   clickToggle(win);
   assert.strictEqual(
     toggle.getAttribute('aria-expanded'),
-    'false',
-    'clicking the header must collapse the panel',
+    'true',
+    'clicking the header must expand the panel',
   );
   assert.strictEqual(
     body.hidden,
-    true,
-    'the collapsed body must carry the hidden attribute',
+    false,
+    'the expanded body must not be hidden',
   );
 
   clickToggle(win);
   assert.strictEqual(
     toggle.getAttribute('aria-expanded'),
-    'true',
-    'clicking the header again must expand the panel',
+    'false',
+    'clicking the header again must collapse the panel',
   );
   assert.strictEqual(
     body.hidden,
-    false,
-    'the re-expanded body must not be hidden',
+    true,
+    'the re-collapsed body must carry the hidden attribute',
   );
 
   win.close();
-  console.log('  ok - toggle collapses and re-expands the panel');
+  console.log('  ok - toggle expands and re-collapses the panel');
 }
 
-function testCollapsedStatePersists() {
-  // Collapse the panel and capture what was persisted.
+function testExpandedStatePersists() {
+  // Expand the panel and capture what was persisted.
   const first = makeWebview();
   clickToggle(first.win);
   const persistedItems = {};
@@ -366,10 +369,10 @@ function testCollapsedStatePersists() {
   first.win.close();
   assert.ok(
     Object.keys(persistedItems).length > 0,
-    'collapsing must persist the choice in localStorage',
+    'expanding must persist the choice in localStorage',
   );
 
-  // A fresh webview seeded with the SAME storage restores collapsed.
+  // A fresh webview seeded with the SAME storage restores expanded.
   const second = makeWebview(win => {
     for (const [k, v] of Object.entries(persistedItems)) {
       win.localStorage.setItem(k, v);
@@ -379,26 +382,26 @@ function testCollapsedStatePersists() {
     second.win.document
       .getElementById('history-filters-toggle')
       .getAttribute('aria-expanded'),
-    'false',
-    'a reloaded webview must restore the collapsed state',
+    'true',
+    'a reloaded webview must restore the expanded state',
   );
   assert.strictEqual(
     second.win.document.getElementById('history-filters-body').hidden,
-    true,
-    'a reloaded webview must keep the body hidden',
+    false,
+    'a reloaded webview must keep the body visible',
   );
 
-  // Expanding again also persists, and a third webview restores it.
+  // Collapsing again also persists, and a third webview restores it.
   clickToggle(second.win);
-  const expandedItems = {};
+  const collapsedItems = {};
   for (let i = 0; i < second.win.localStorage.length; i++) {
     const k = second.win.localStorage.key(i);
-    expandedItems[k] = second.win.localStorage.getItem(k);
+    collapsedItems[k] = second.win.localStorage.getItem(k);
   }
   second.win.close();
 
   const third = makeWebview(win => {
-    for (const [k, v] of Object.entries(expandedItems)) {
+    for (const [k, v] of Object.entries(collapsedItems)) {
       win.localStorage.setItem(k, v);
     }
   });
@@ -406,13 +409,13 @@ function testCollapsedStatePersists() {
     third.win.document
       .getElementById('history-filters-toggle')
       .getAttribute('aria-expanded'),
-    'true',
-    'a reloaded webview must restore the re-expanded state',
+    'false',
+    'a reloaded webview must restore the re-collapsed state',
   );
   assert.strictEqual(
     third.win.document.getElementById('history-filters-body').hidden,
-    false,
-    'a reloaded webview must show the body again',
+    true,
+    'a reloaded webview must hide the body again',
   );
   third.win.close();
 
@@ -426,8 +429,11 @@ function testFilteringStillWorksInsidePanel() {
   assert.deepStrictEqual(
     visibleTitles(win).sort(),
     ['errored task', 'running task', 'succeeded task'],
-    'all three rows visible with the default expanded panel',
+    'all three rows visible with the default collapsed panel',
   );
+
+  // Expand the panel so the user can reach the filter chips.
+  clickToggle(win);
 
   const toggle = (id, checked) => {
     const chk = win.document.getElementById(id);
@@ -461,9 +467,9 @@ function testFilteringStillWorksInsidePanel() {
   console.log('  ok - filtering still works inside the Filters panel');
 }
 
-function testLocalStorageUnavailableFallsBackToExpanded() {
+function testLocalStorageUnavailableFallsBackToCollapsed() {
   // Some embedders deny localStorage entirely (the accessor throws).
-  // The panel must still default to expanded and stay toggleable —
+  // The panel must still default to collapsed and stay toggleable —
   // this drives the two catch branches of the persistence wiring.
   const {win} = makeWebview(w => {
     Object.defineProperty(w, 'localStorage', {
@@ -477,20 +483,20 @@ function testLocalStorageUnavailableFallsBackToExpanded() {
   const body = win.document.getElementById('history-filters-body');
   assert.strictEqual(
     toggle.getAttribute('aria-expanded'),
-    'true',
-    'without localStorage the panel must still default to expanded',
-  );
-  clickToggle(win);
-  assert.strictEqual(
-    body.hidden,
-    true,
-    'without localStorage the toggle must still collapse the panel',
+    'false',
+    'without localStorage the panel must still default to collapsed',
   );
   clickToggle(win);
   assert.strictEqual(
     body.hidden,
     false,
     'without localStorage the toggle must still expand the panel',
+  );
+  clickToggle(win);
+  assert.strictEqual(
+    body.hidden,
+    true,
+    'without localStorage the toggle must still collapse the panel',
   );
   win.close();
   console.log('  ok - denied localStorage still yields a working panel');
@@ -520,11 +526,11 @@ function testFiltersPanelCss() {
 
 function main() {
   testFiltersPanelMarkup();
-  testDefaultExpandedControlsVisible();
-  testToggleCollapsesAndExpands();
-  testCollapsedStatePersists();
+  testDefaultCollapsedThenControlsVisibleOnExpand();
+  testToggleExpandsAndCollapses();
+  testExpandedStatePersists();
   testFilteringStillWorksInsidePanel();
-  testLocalStorageUnavailableFallsBackToExpanded();
+  testLocalStorageUnavailableFallsBackToCollapsed();
   testFiltersPanelCss();
   console.log('historyFiltersCollapsible.test.js: all assertions passed.');
 }
