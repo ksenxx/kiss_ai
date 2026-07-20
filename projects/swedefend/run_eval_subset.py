@@ -65,7 +65,7 @@ results = [
     ),
 ]
 
-out_dir = Path("swedefend/results")
+out_dir = Path("projects/swedefend/results")
 out_dir.mkdir(parents=True, exist_ok=True)
 with (out_dir / "ablation_quick.csv").open("w", newline="") as f:
     writer = csv.writer(f)
@@ -76,4 +76,4 @@ with (out_dir / "ablation_quick.csv").open("w", newline="") as f:
 print("\nQuick Ablation Summary:")
 for layer, mal_blk, catch, fpr in results:
     print(f"  {layer}: catch={catch:.2%}, FPR={fpr:.2%}")
-print("\nWrote swedefend/results/ablation_quick.csv")
+print("\nWrote projects/swedefend/results/ablation_quick.csv")
