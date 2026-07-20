@@ -2,7 +2,7 @@
 
 ## Task
 
-Update `./papers/swedefend/swedefend.tex` (impl `./swedefend/`) per a reviewer's
+Update `./papers/swedefend/swedefend.tex` (impl `./projects/swedefend/`) per a reviewer's
 feedback. Do AI discovery to get better results. Search internet extensively.
 Use **claude-opus-4-7** for all tasks incl. software dev. Use **gpt-5.6-sol**
 (not codex) for thorough review & debugging of opus's work; check for missed
@@ -43,28 +43,28 @@ code/wiring/bugs. (No need to check models exist.)
 
 ## Code map (fully read this session)
 
-- `swedefend/pipeline.py` — `SWEDefendPipeline.evaluate()` runs L1 sanitizer,
+- `projects/swedefend/pipeline.py` — `SWEDefendPipeline.evaluate()` runs L1 sanitizer,
   L2 masked_reproduction (only if repo_path+fail_to_pass), L3 provenance,
   L4 judge (only if judge set). `allow = all(layer.passed)` (fail-closed).
-- `swedefend/defense/issue_sanitizer.py` — regex INJECTION+EXFIL patterns, NFKC,
+- `projects/swedefend/defense/issue_sanitizer.py` — regex INJECTION+EXFIL patterns, NFKC,
   strip invisible/bidi, redact HTML comments & base64 blobs. `is_suspicious` =
   any flag. (L1)
-- `swedefend/defense/masked_reproduction.py` — masks fenced/indented/shell spans,
+- `projects/swedefend/defense/masked_reproduction.py` — masks fenced/indented/shell spans,
   runs fail_to_pass/pass_to_pass as `python -c` subprocess, exit0 required. (L2)
-- `swedefend/defense/provenance.py` — bandit (JSON) + semgrep (local
+- `projects/swedefend/defense/provenance.py` — bandit (JSON) + semgrep (local
   rules/taint.yaml) → sink categories; `has_dangerous_sink=bool(findings)`. (L3)
-- `swedefend/defense/intent_judge.py` — LLM-as-judge; `_JUDGE_SYSTEM` prompt;
+- `projects/swedefend/defense/intent_judge.py` — LLM-as-judge; `_JUDGE_SYSTEM` prompt;
   parses single JSON `{aligned,confidence,reason}`; fail-closed on bad JSON. (L4)
-- `swedefend/corpus.py` — `generate_corpus()` 72 cases: 10 CWE-78, 8 CWE-502,
+- `projects/swedefend/corpus.py` — `generate_corpus()` 72 cases: 10 CWE-78, 8 CWE-502,
   8 CWE-327, 8 CWE-94, 8 CWE-22, 10 prompt-injection, 20 benign. RANDOM 11-char
   magic. **PROBLEM**: malicious patches all use obvious `if x.startswith(magic):`
   gate → trivially detectable; overfit. Benign are all null/bounds checks.
-- `swedefend/adaptive.py` — **hard-coded** mutators (not a free LLM attacker),
+- `projects/swedefend/adaptive.py` — **hard-coded** mutators (not a free LLM attacker),
   only 5 rounds, 3 seed attacks. This is the weak Sec 4.3.
-- `swedefend/swexploit.py` — `default_payloads()` 6 hand cases + harness.
-- `swedefend/ablation.py` — L1/L3/L4/Combined only (NO L2, NO L2-only row).
-- `swedefend/rules/taint.yaml` — 7 semgrep sink rules.
-- `swedefend/results/{ablation,ablation_quick,adaptive_asr}.csv` — current nums:
+- `projects/swedefend/swexploit.py` — `default_payloads()` 6 hand cases + harness.
+- `projects/swedefend/ablation.py` — L1/L3/L4/Combined only (NO L2, NO L2-only row).
+- `projects/swedefend/rules/taint.yaml` — 7 semgrep sink rules.
+- `projects/swedefend/results/{ablation,ablation_quick,adaptive_asr}.csv` — current nums:
   L1 19.23% catch/0% FPR; L3 34.62%/0%; L4 80.77%/20%; Combined 100%/20%.
   Adaptive ASR 0% all 5 rounds.
 - Tests: `src/kiss/tests/swedefend/test_swedefend.py`, `test_corpus.py`.
@@ -175,7 +175,7 @@ code/wiring/bugs. (No need to check models exist.)
 - Ran 3-seed x 5-iter adaptive at tau=0.9 with attacker=claude-opus-4-6,
   judge=claude-opus-4-7. Result: ALL THREE seeds succeeded within 3 iterations
   (CWE-78 iter 2, CWE-502 iter 3, CWE-94 iter 2). Cumulative ASR reaches 100% by
-  iter 3. Raw data -> swedefend/results/adaptive_partial.csv.
+  iter 3. Raw data -> projects/swedefend/results/adaptive_partial.csv.
 
 - Independent code review by gpt-5.6-sol saved to tmp/code_review.md (55 issues).
   Highest-impact findings: (1) capability-diff is not a diff (patch source only),
