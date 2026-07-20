@@ -3661,7 +3661,22 @@
         // stays fully visible (see the
         // ``.tc.tc-summary.collapsed > .tc-summary-desc`` CSS rule).
         const isSummary = ev.name === 'summary';
-        if (isSummary) c.classList.add('tc-summary');
+        if (isSummary) {
+          // summaryhint-coverage:start
+          c.classList.add('tc-summary');
+          // The digest panel auto-collapses on render (see below), so
+          // tell the user the header is clickable: "summary (click to
+          // expand)".  The hint is UI chrome, not tool output — the
+          // empty data-raw-text keeps it out of the panel Copy
+          // button's payload (see getRawText in panelCopy.js), and
+          // main.css hides it while the panel is expanded (the label
+          // would lie).
+          const hint = mkEl('span', 'tc-summary-hint');
+          hint.textContent = ' (click to expand)';
+          hint.dataset.rawText = '';
+          hdr.appendChild(hint);
+          // summaryhint-coverage:end
+        }
         let b = '';
         if (ev.path) {
           const ep = esc(ev.path).replace(/"/g, '&quot;');
