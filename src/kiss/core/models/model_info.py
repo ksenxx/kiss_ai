@@ -657,11 +657,12 @@ def _apply_cache_pricing(name: str, info: ModelInfo) -> None:
         info.cache_write_price_per_1M = 0.0
         return
     if name.startswith(("kimi-", "moonshot-")):
-        # Direct Moonshot API: cache hits are billed at 25% of the
-        # cache-miss (input) price for the K2.x family (K2.5: $0.15 hit
-        # vs $0.60 miss per MTok, per platform.kimi.ai pricing).  Newer
-        # families with a different ratio (e.g. K3 at 0.10x) must set an
-        # explicit ``cache_read_price_per_1M`` in MODEL_INFO.json.
+        # Direct Moonshot API cache-hit ratios vary per family (July 2026,
+        # platform.kimi.ai: K2.5 $0.10/$0.60 = 0.167x, K2.6 $0.16/$0.95 =
+        # 0.168x, K2.7-Code $0.19/$0.95 = 0.20x, K3 $0.30/$3.00 = 0.10x),
+        # so every kimi-* entry in MODEL_INFO.json carries an explicit
+        # ``cache_read_price_per_1M``.  This 0.25x fallback is a
+        # conservative safety net for entries that omit it.
         info.cache_read_price_per_1M = inp * 0.25
         info.cache_write_price_per_1M = 0.0
         return
@@ -1091,21 +1092,25 @@ def _openai_long_context_prices(
     if bare.startswith(_OPENAI_OPENROUTER_PREFIXES):
         bare = bare.split("/", 2)[2]
     bare = _strip_xhigh_alias(bare)
+    # OpenAI's published rule (developers.openai.com model pages for
+    # gpt-5.6-sol/terra, gpt-5.5, gpt-5.4): "Prompts with >272K input
+    # tokens are priced at 2x input and 1.5x output for the full
+    # request."  The threshold is 272,000 INPUT tokens, not 200k.
     if bare.startswith("gpt-5.6-sol"):
-        return 200_000, 10.00, 45.00, 1.00, 12.50
+        return 272_000, 10.00, 45.00, 1.00, 12.50
     if bare.startswith("gpt-5.6-terra"):
-        return 200_000, 5.00, 22.50, 0.50, 6.25
+        return 272_000, 5.00, 22.50, 0.50, 6.25
     if bare.startswith("gpt-5.6-luna"):
-        return 200_000, 2.00, 9.00, 0.20, 2.50
+        return 272_000, 2.00, 9.00, 0.20, 2.50
     if bare.startswith("gpt-5.5") and "-pro" not in bare:
-        return 200_000, 10.00, 45.00, 1.00, None
+        return 272_000, 10.00, 45.00, 1.00, None
     if (
         bare.startswith("gpt-5.4")
         and "-pro" not in bare
         and "-mini" not in bare
         and "-nano" not in bare
     ):
-        return 200_000, 5.00, 22.50, 0.50, None
+        return 272_000, 5.00, 22.50, 0.50, None
     return None
 
 
@@ -1189,7 +1194,12 @@ def calculate_cost(
     long_prices = _openai_long_context_prices(model_name) or _gemini_long_context_prices(
         model_name
     )
-    if long_prices is not None and total_tokens > long_prices[0]:
+    # Long-context tiers key off the PROMPT size (Google: "prompts
+    # <= 200k tokens"; OpenAI bills the higher tier when the input
+    # context exceeds the threshold).  Output tokens do not count
+    # toward the tier decision, so they are excluded here.
+    prompt_tokens = total_tokens - num_output_tokens
+    if long_prices is not None and prompt_tokens > long_prices[0]:
         _, input_price, output_price, cr_price, long_cw_price = long_prices
         if long_cw_price is not None:
             cw_price = long_cw_price
