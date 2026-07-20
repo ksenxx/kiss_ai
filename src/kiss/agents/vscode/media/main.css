@@ -870,6 +870,28 @@ body.remote-chat #welcome-config { display: none !important; }
    keep their own previews when individually collapsed. */
 .tc-summary > .tc-h > .collapse-preview { display: none; }
 
+/* "(click to expand)" affordance next to the ``summary`` label in the
+   panel header (see the summary branch of ``case 'tool_call':`` in
+   main.js).  Dimmed and italicised out of the orange label so it
+   reads as UI chrome, and hidden once the panel IS expanded — the hint
+   would lie.  Direct child combinators for the same adoption-safety
+   reason as the preview rule above. */
+.tc-summary > .tc-h > .tc-summary-hint {
+  color: var(--dim);
+  font-weight: 400;
+  font-style: italic;
+
+  /* The header uppercases its label (.tc-h) — the hint must keep the
+     user-requested literal text "(click to expand)", not "(CLICK TO
+     EXPAND)". */
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.tc.tc-summary:not(.collapsed) > .tc-h > .tc-summary-hint {
+  display: none;
+}
+
 .summary-sub {
   margin: 4px 8px 6px 16px;
   padding-left: 10px;
