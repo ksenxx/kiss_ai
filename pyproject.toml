@@ -108,7 +108,7 @@ exclude = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/kiss", "swedefend"]
+packages = ["src/kiss", "projects/swedefend"]
 
 [dependency-groups]
 dev = [
@@ -343,6 +343,9 @@ ignore_missing_imports = true
 [tool.ruff]
 line-length = 100
 target-version = "py313"
+# "projects" makes ruff's isort keep treating the swedefend package
+# (now at projects/swedefend) as first-party.
+src = [".", "src", "projects"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP"]

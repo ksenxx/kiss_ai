@@ -2568,6 +2568,15 @@
     "emb": false,
     "gen": true
   },
+  "openrouter/meituan/longcat-2.0": {
+    "context_length": 1048756,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 1.2,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW"
+  },
   "openrouter/meta-llama/llama-3.1-70b-instruct": {
     "context_length": 131072,
     "input_price_per_1M": 0.4,
@@ -3591,8 +3600,8 @@
   },
   "openrouter/qwen/qwen3-235b-a22b-thinking-2507": {
     "context_length": 262144,
-    "input_price_per_1M": 0.15,
-    "output_price_per_1M": 1.495,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 3.0,
     "fc": true,
     "emb": false,
     "gen": true
@@ -4170,9 +4179,9 @@
     "gen": true
   },
   "openrouter/z-ai/glm-5": {
-    "context_length": 202752,
+    "context_length": 204800,
     "input_price_per_1M": 0.95,
-    "output_price_per_1M": 3.15,
+    "output_price_per_1M": 2.55,
     "fc": true,
     "emb": false,
     "gen": true
@@ -4195,8 +4204,8 @@
   },
   "openrouter/z-ai/glm-5.2": {
     "context_length": 1048576,
-    "input_price_per_1M": 0.244,
-    "output_price_per_1M": 0.766,
+    "input_price_per_1M": 0.952,
+    "output_price_per_1M": 2.992,
     "fc": true,
     "emb": false,
     "gen": true
