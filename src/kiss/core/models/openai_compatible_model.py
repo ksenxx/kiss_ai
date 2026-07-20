@@ -1489,7 +1489,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
 
     def extract_input_output_token_counts_from_response(
         self, response: Any
-    ) -> tuple[int, int, int, int]:
+    ) -> tuple[int, int, int, int] | tuple[int, int, int, int, int, int, int]:
         """Extract token counts from an API response.
 
         Returns:
@@ -1528,12 +1528,38 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             completion_tokens = getattr(usage, "completion_tokens", None) or 0
             cached_tokens = 0
             cache_write_tokens = 0
+            audio_input_tokens = 0
+            audio_output_tokens = 0
             details = getattr(usage, "prompt_tokens_details", None)
             if details is not None:
                 cached_tokens = getattr(details, "cached_tokens", 0) or 0
                 cache_write_tokens = getattr(details, "cache_write_tokens", 0) or 0
+                audio_input_tokens = getattr(details, "audio_tokens", 0) or 0
+            completion_details = getattr(usage, "completion_tokens_details", None)
+            if completion_details is not None:
+                audio_output_tokens = getattr(completion_details, "audio_tokens", 0) or 0
+            text_input_tokens = max(
+                0,
+                prompt_tokens - cached_tokens - cache_write_tokens - audio_input_tokens,
+            )
+            text_output_tokens = max(0, completion_tokens - audio_output_tokens)
+            if audio_input_tokens or audio_output_tokens:
+                # Audio-chat traffic (gpt-audio family): audio tokens are
+                # SUBSETS of prompt/completion totals and bill at the
+                # model's separate audio rates ($32/$64 per 1M for
+                # gpt-audio-1.5 vs $2.50/$10 text), so they are split out
+                # and reported as the 7-tuple's last two elements.
+                return (
+                    text_input_tokens,
+                    text_output_tokens,
+                    cached_tokens,
+                    cache_write_tokens,
+                    0,
+                    audio_input_tokens,
+                    audio_output_tokens,
+                )
             return (
-                max(0, prompt_tokens - cached_tokens - cache_write_tokens),
+                text_input_tokens,
                 completion_tokens,
                 cached_tokens,
                 cache_write_tokens,
