@@ -847,7 +847,7 @@ body.remote-chat #welcome-config { display: none !important; }
   background: color-mix(in srgb, var(--cyan) 8%, transparent); color: var(--cyan);
 }
 .tc-h.tc-h-bash:hover { color: var(--fg); }
-.tc.collapsed > :not(.tc-h, .panel-copy-btn, .panel-ts) { display: none; }
+.tc.collapsed > :not(.tc-h, .panel-copy-btn) { display: none; }
 
 /* ``summary`` tool panels (see the ``case 'tool_call':`` summary
    branch in main.js): the agent's periodic activity summary adopts
@@ -869,6 +869,28 @@ body.remote-chat #welcome-config { display: none !important; }
    child combinators only: tool panels ADOPTED into a summary must
    keep their own previews when individually collapsed. */
 .tc-summary > .tc-h > .collapse-preview { display: none; }
+
+/* "(click to expand)" affordance next to the ``summary`` label in the
+   panel header (see the summary branch of ``case 'tool_call':`` in
+   main.js).  Dimmed and italicised out of the orange label so it
+   reads as UI chrome, and hidden once the panel IS expanded — the hint
+   would lie.  Direct child combinators for the same adoption-safety
+   reason as the preview rule above. */
+.tc-summary > .tc-h > .tc-summary-hint {
+  color: var(--dim);
+  font-weight: 400;
+  font-style: italic;
+
+  /* The header uppercases its label (.tc-h) — the hint must keep the
+     user-requested literal text "(click to expand)", not "(CLICK TO
+     EXPAND)". */
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.tc.tc-summary:not(.collapsed) > .tc-h > .tc-summary-hint {
+  display: none;
+}
 
 .summary-sub {
   margin: 4px 8px 6px 16px;
@@ -2781,22 +2803,33 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   display: flex; align-items: center; padding-bottom: 4px;
 }
 .llm-panel-hdr:hover { color: var(--fg); }
-.llm-panel.collapsed > :not(.llm-panel-hdr, .panel-copy-btn, .panel-ts) { display: none; }
+.llm-panel.collapsed > :not(.llm-panel-hdr, .panel-copy-btn) { display: none; }
 
-/* Per-panel "time spent" footer — appended as the LAST child of every
-   .llm-panel and .tc tool-call panel by finalizePanelTime().  Sits
-   right-aligned and dim at the bottom of each panel.  Collapsing a
-   panel hides this footer via the existing
+/* Per-panel bottom footer bar — kept as the LAST child of every event
+   panel (ensurePanelFoot in panelCopy.js).  A dim flex row whose LEFT
+   side holds the date + seconds event-timestamp badge (span.panel-ts) and
+   whose RIGHT side holds the "time spent" label (span.panel-elapsed,
+   written by finalizePanelTime / the live 1-second ticker).
+   Collapsing a panel hides this bar via the existing
    ``.llm-panel.collapsed > :not(.llm-panel-hdr, .panel-copy-btn)`` and
    ``.tc.collapsed > :not(.tc-h, .panel-copy-btn)`` rules. */
 .panel-time {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
   font-size: var(--fs-sm);
   color: var(--dim);
-  text-align: right;
   margin-top: 6px;
   padding: 2px 4px 0;
   font-family: var(--vscode-editor-font-family, monospace);
   opacity: 0.75;
+}
+
+/* Right-aligned "time spent" label inside the footer bar. */
+.panel-elapsed {
+  margin-left: auto;
+  text-align: right;
+  white-space: nowrap;
 }
 
 /* Panel copy button — anchored top-right of any .copyable panel. */
@@ -2825,18 +2858,11 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .panel-copy-btn.copied { color: var(--green); }
 
 /* Compact event-time badge (span.panel-ts, added by panelCopy.js's
-   addPanelTimestamp) — anchored in the panel's title row immediately
-   to the LEFT of the Copy button (right offset clears the button's
-   6px inset + ~28px footprint).  pointer-events: none keeps the
-   header's collapse click-through intact. */
+   addPanelTimestamp) — the LEFT side of the panel's bottom footer bar
+   (div.panel-time), in the same row as the right-aligned "time spent"
+   label.  Font, size, color and opacity are inherited from the bar. */
 .panel-ts {
-  position: absolute; top: 8px; right: 38px; z-index: 5;
-  font-size: var(--fs-sm);
-  color: var(--dim);
-  font-family: var(--vscode-editor-font-family, monospace);
   white-space: nowrap;
-  pointer-events: none;
-  opacity: 0.75;
 }
 
 .system-prompt.collapsed .system-prompt-body,

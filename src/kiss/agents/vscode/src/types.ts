@@ -226,6 +226,7 @@ type ToWebviewMessageBody =
     }
   | {type: 'setTaskText'; text: string}
   | {type: 'appendToInput'; text: string}
+  | {type: 'insertAndSubmit'; text: string}
   | {type: 'focusInput'}
   | {type: 'worktree_created'; worktreeDir: string; branch: string}
   | {

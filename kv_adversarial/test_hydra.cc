@@ -22,16 +22,44 @@
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <random>
 #include <string>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 extern IKVStore* create_kvstore();
+
+// ── production-hardening stats seam (implemented by hydra.cc) ────────────────
+// Non-virtual side channel: the IKVStore interface is frozen (the benchmark
+// harness owns it), so production observability is exported through a plain
+// extern "C" function resolved at link time within this single test binary.
+struct HydraProdStats {
+    uint64_t durable_ok;         // 1 = no write/sync failure ever observed
+    uint64_t recover_ok;         // 1 = InitExtended recovered an existing log
+    uint64_t recovered_keys;     // index entries rebuilt by the last recovery
+    uint64_t recover_torn_slots; // CRC-invalid slots skipped by recovery
+    uint64_t write_errors;       // failed slot-log/tombstone writes (sticky ctr)
+    uint64_t read_errors;        // failed or unexpectedly-short page reads
+    uint64_t rejected_oversize;  // oversized upserts refused (budget cap)
+    uint64_t oversize_bytes;     // bytes currently charged to the oversize map
+    uint64_t compactions_run;    // completed compaction regions
+    uint64_t log_bytes;          // allocated-and-unreclaimed slot-log bytes
+    uint64_t live_bytes;         // indexed (live) slot bytes estimate
+    uint64_t reclaimed_bytes;    // bytes reclaimed (punched and/or reusable)
+    uint64_t buffered_fallback;  // 1 = O_DIRECT unavailable, buffered fd used
+    uint64_t punch_unsupported;  // 1 = FALLOC_FL_PUNCH_HOLE unsupported here
+};
+extern "C" bool hydra_get_prod_stats(IKVStore* st, HydraProdStats* out);
+
+static const char* g_argv0 = nullptr;   // for fork+exec child helpers
 
 static std::atomic<int> g_failures{0};
 static int g_scale = 1;
@@ -913,7 +941,602 @@ static void test_rywrite() {
     fprintf(stderr, "PASS rywrite\n");
 }
 
+// ── child-process modes (crash / rlimit fault injection) ─────────────────────
+// Children are spawned fork+exec so the child is a clean single-threaded
+// process (fork alone from a threaded test would be undefined-behavior soup).
+
+// --crashchild <dir> <N> <wfd>: load N keys (ctr=1), Checkpoint, signal the
+// parent over pipe fd, then keep writing NEW keys (ctr=2) until SIGKILLed.
+static int crash_child(const char* dir, uint64_t N, int wfd) {
+    IKVStore* st = create_kvstore();
+    st->InitExtended(1ull << 20, 16ull << 30, 128ull << 20, dir);
+    st->StartSession();
+    GenValue v;
+    for (uint64_t k = 0; k < N; ++k) { make_value(k, 1, 100, v); st->Upsert(k, v); }
+    st->Checkpoint();
+    if (write(wfd, "R", 1) != 1) _Exit(3);
+    uint64_t k = N;
+    for (;;) {
+        make_value(k, 2, 100, v);
+        st->Upsert(k, v);
+        if ((++k & 4095) == 0) st->Checkpoint();
+    }
+}
+
+// --enospcchild <dir>: run the store against an 8 MB RLIMIT_FSIZE so slot-log
+// writes fail with EFBIG (same fail-soft path as ENOSPC), verify the engine
+// stays alive/correct/honest, then raise the limit and verify full recovery
+// of durability (dirty entries were retained and reflushed).
+static int enospc_child(const char* dir) {
+    signal(SIGXFSZ, SIG_IGN);   // hit the pwrite EFBIG path, not a signal kill
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_FSIZE, &rl) != 0) _Exit(3);
+    struct rlimit low = rl;
+    low.rlim_cur = 8ull << 20;
+    if (setrlimit(RLIMIT_FSIZE, &low) != 0) _Exit(3);
+
+    IKVStore* st = create_kvstore();
+    st->InitExtended(1ull << 20, 16ull << 30, 512ull << 20, dir);   // cache >> data
+    st->StartSession();
+    GenValue v, out;
+    HydraProdStats ps{};
+    uint64_t k = 0;
+    while (k < 2000000) {   // write until the disk "fills"
+        make_value(k, 1, 100, v);
+        st->Upsert(k, v);
+        ++k;
+        if ((k & 4095) == 0) {
+            CHECK(hydra_get_prod_stats(st, &ps), "prod stats unavailable");
+            if (ps.write_errors > 0) break;
+        }
+    }
+    CHECK(ps.write_errors > 0, "no write error surfaced under RLIMIT_FSIZE");
+    CHECK(ps.durable_ok == 0, "durable_ok not sticky after write error");
+    // Writes must keep succeeding (in cache / overflow), no crash, no hang.
+    uint64_t extra_base = k;
+    for (uint64_t i = 0; i < 50000; ++i) {
+        make_value(extra_base + i, 1, 100, v);
+        st->Upsert(extra_base + i, v);
+    }
+    uint64_t total = extra_base + 50000;
+    // Already-written keys must still read back correctly (cache-resident).
+    uint64_t bad = 0;
+    for (uint64_t i = 0; i < total; i += 97)
+        if (!st->Read(i, out) || check_value(i, out, 100) != 1) bad++;
+    CHECK(bad == 0, "enospc: %" PRIu64 " bad reads while disk full", bad);
+    st->Checkpoint();   // must not abort or hang; durability stays degraded
+    CHECK(hydra_get_prod_stats(st, &ps), "prod stats unavailable");
+    CHECK(ps.durable_ok == 0, "durable_ok flipped back on without cause");
+    uint64_t errs_at_full = ps.write_errors;
+    CHECK(errs_at_full > 0, "write_errors reset unexpectedly");
+
+    // "Disk repaired": raise the soft limit back; retained dirty state must
+    // land on the next Checkpoint and survive a clean restart.
+    if (setrlimit(RLIMIT_FSIZE, &rl) != 0) _Exit(3);
+    st->Checkpoint();
+    struct stat sb;
+    std::string f = std::string(dir) + "/hydra_slots.dat";
+    CHECK(stat(f.c_str(), &sb) == 0 && (uint64_t)sb.st_size > (8ull << 20),
+          "slot log did not grow after limit lift (no reflush)");
+    st->StopSession();
+    delete st;
+    IKVStore* st2 = create_kvstore();
+    st2->InitExtended(1ull << 20, 16ull << 30, 512ull << 20, dir);
+    st2->StartSession();
+    bad = 0;
+    for (uint64_t i = 0; i < total; i += 89)
+        if (!st2->Read(i, out) || check_value(i, out, 100) != 1) bad++;
+    CHECK(bad == 0, "enospc: %" PRIu64 " keys lost after repair+restart", bad);
+    st2->StopSession();
+    delete st2;
+    return g_failures.load() ? 1 : 0;
+}
+
+// Spawn "<argv0> <mode> <args...>", return child's exit status (or -1).
+static int spawn_child(const std::vector<std::string>& args) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        std::vector<const char*> cargs;
+        cargs.push_back(g_argv0);
+        for (auto& a : args) cargs.push_back(a.c_str());
+        cargs.push_back(nullptr);
+        execv(g_argv0, const_cast<char* const*>(cargs.data()));
+        _Exit(127);
+    }
+    int stat = 0;
+    if (waitpid(pid, &stat, 0) != pid) return -1;
+    return stat;
+}
+
+// ── T15: clean-shutdown recovery on the same path ────────────────────────────
+static IKVStore* open_store(const char* name, size_t budget, bool wipe) {
+    std::string dir = g_parent + "/" + name;
+    if (wipe) {
+        std::string cmd = "rm -rf " + dir;
+        (void)system(cmd.c_str());
+    }
+    mkdir(dir.c_str(), 0755);
+    IKVStore* st = create_kvstore();
+    st->InitExtended(1ull << 20, 16ull << 30, budget, dir.c_str());
+    return st;
+}
+
+static void test_recover() {
+    const uint64_t N = 20000 / (uint64_t)g_scale;
+    IKVStore* st = open_store("recov", 128ull << 20, true);
+    st->StartSession();
+    GenValue v, out;
+    for (uint64_t i = 0; i < N; ++i) { make_value(i, 1, 100, v); st->Upsert(i, v); }
+    for (uint64_t i = 0; i < N; i += 3) { make_value(i, 2, 100, v); st->Upsert(i, v); }
+    // oversized values (must be persisted by Checkpoint and recovered)
+    const uint64_t OB = 1ull << 40, ONUM = 200;
+    for (uint64_t i = 0; i < ONUM; ++i) {
+        make_value(OB + i, 1, 300, v);
+        st->Upsert(OB + i, v);
+    }
+    for (uint64_t i = 0; i < ONUM; i += 2) {
+        make_value(OB + i, 2, 2000, v);
+        st->Upsert(OB + i, v);
+    }
+    // deletes: inline and oversized, must stay deleted across restart
+    for (uint64_t i = 0; i < N; i += 5) st->Delete(i);
+    for (uint64_t i = 0; i < ONUM; i += 4) st->Delete(OB + i);
+    // size-class transitions
+    uint64_t tk1 = OB + 100000, tk2 = OB + 100001;
+    make_value(tk1, 5, 300, v); st->Upsert(tk1, v);
+    make_value(tk1, 7, 100, v); st->Upsert(tk1, v);    // oversized -> inline
+    make_value(tk2, 6, 100, v); st->Upsert(tk2, v);
+    make_value(tk2, 8, 400, v); st->Upsert(tk2, v);    // inline -> oversized
+    st->Checkpoint();
+    st->StopSession();
+    delete st;   // clean shutdown
+
+    IKVStore* st2 = open_store("recov", 128ull << 20, false);
+    st2->StartSession();
+    HydraProdStats ps{};
+    CHECK(hydra_get_prod_stats(st2, &ps), "prod stats unavailable");
+    CHECK(ps.recover_ok == 1, "recover_ok not set after reopening a log");
+    CHECK(ps.recovered_keys > 0, "recovery rebuilt no index entries");
+    uint64_t bad = 0;
+    for (uint64_t i = 0; i < N; ++i) {
+        bool found = st2->Read(i, out);
+        if (i % 5 == 0) {
+            if (found) { CHECK(false, "recover: deleted %" PRIu64 " resurrected", i); bad++; }
+        } else {
+            uint64_t want = (i % 3 == 0) ? 2 : 1;
+            if (!found || check_value(i, out, 100) != want) bad++;
+        }
+    }
+    CHECK(bad == 0, "recover: %" PRIu64 " inline keys wrong/lost", bad);
+    bad = 0;
+    for (uint64_t i = 0; i < ONUM; ++i) {
+        bool found = read_async1(st2, OB + i, out);
+        if (i % 4 == 0) {
+            if (found) { CHECK(false, "recover: deleted oversized %" PRIu64 " back", i); bad++; }
+        } else if (i % 2 == 0) {
+            if (!found || check_value(OB + i, out, 2000) != 2) bad++;
+        } else {
+            if (!found || check_value(OB + i, out, 300) != 1) bad++;
+        }
+    }
+    CHECK(bad == 0, "recover: %" PRIu64 " oversized keys wrong/lost", bad);
+    CHECK(st2->Read(tk1, out) && check_value(tk1, out, 100) == 7, "recover tk1");
+    CHECK(st2->Read(tk2, out) && check_value(tk2, out, 400) == 8, "recover tk2");
+    CHECK(!st2->Read(N + 424242, out), "recover: absent key found");
+    // store must be fully usable post-recovery (writes, LWW, delete)
+    make_value(3, 9, 100, v); st2->Upsert(3, v);
+    CHECK(st2->Read(3, out) && check_value(3, out, 100) == 9, "recover LWW");
+    CHECK(st2->Delete(1), "recover: delete of recovered key");
+    CHECK(!st2->Read(1, out), "recover: deleted-after-recovery visible");
+    st2->StopSession();
+    drop_store(st2, "recov");
+    fprintf(stderr, "PASS recover\n");
+}
+
+// ── T16: SIGKILL crash recovery with torn-tail detection ─────────────────────
+static void test_crashrecover() {
+    const uint64_t N = 30000 / (uint64_t)g_scale;
+    std::string dir = g_parent + "/crashrec";
+    { std::string cmd = "rm -rf " + dir; (void)system(cmd.c_str()); }
+    mkdir(dir.c_str(), 0755);
+    int p[2];
+    CHECK(pipe(p) == 0, "pipe failed");
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(p[0]);
+        char nbuf[32], fdbuf[16];
+        snprintf(nbuf, sizeof nbuf, "%" PRIu64, N);
+        snprintf(fdbuf, sizeof fdbuf, "%d", p[1]);
+        execl(g_argv0, g_argv0, "--crashchild", dir.c_str(), nbuf, fdbuf,
+              (char*)nullptr);
+        _Exit(127);
+    }
+    CHECK(pid > 0, "fork failed");
+    close(p[1]);
+    char c = 0;
+    CHECK(read(p[0], &c, 1) == 1 && c == 'R', "crash child never checkpointed");
+    close(p[0]);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    kill(pid, SIGKILL);
+    int stat = 0;
+    waitpid(pid, &stat, 0);
+    CHECK(WIFSIGNALED(stat) && WTERMSIG(stat) == SIGKILL, "child not SIGKILLed");
+
+    IKVStore* st = open_store("crashrec", 128ull << 20, false);
+    st->StartSession();
+    HydraProdStats ps{};
+    CHECK(hydra_get_prod_stats(st, &ps), "prod stats unavailable");
+    CHECK(ps.recover_ok == 1, "crash recovery did not run");
+    GenValue out;
+    uint64_t bad = 0;
+    for (uint64_t k = 0; k < N; ++k)
+        if (!st->Read(k, out) || check_value(k, out, 100) != 1) bad++;
+    CHECK(bad == 0, "crashrecover: %" PRIu64 " checkpointed keys lost", bad);
+    // Post-checkpoint keys are best-effort, but anything visible must be an
+    // EXACT complete value (torn slots must have been CRC-skipped).
+    uint64_t seen = 0;
+    for (uint64_t k = N; k < N + 300000; ++k) {
+        if (!st->Read(k, out)) continue;
+        seen++;
+        CHECK(check_value(k, out, 100) == 2,
+              "crashrecover: torn/corrupt value served k=%" PRIu64, k);
+    }
+    fprintf(stderr, "  crashrecover: %" PRIu64 " post-ckpt keys survived, "
+            "%" PRIu64 " torn slots skipped\n", seen, ps.recover_torn_slots);
+    st->StopSession();
+    drop_store(st, "crashrec");
+    fprintf(stderr, "PASS crashrecover\n");
+}
+
+// ── T17: disk-full (EFBIG/ENOSPC-class) fail-soft ────────────────────────────
+static void test_enospc() {
+    std::string dir = g_parent + "/enospc";
+    { std::string cmd = "rm -rf " + dir; (void)system(cmd.c_str()); }
+    mkdir(dir.c_str(), 0755);
+    int stat = spawn_child({"--enospcchild", dir});
+    CHECK(stat >= 0, "spawn failed");
+    CHECK(WIFEXITED(stat), "enospc child crashed (sig %d) — engine aborted",
+          WIFSIGNALED(stat) ? WTERMSIG(stat) : 0);
+    CHECK(WIFEXITED(stat) && WEXITSTATUS(stat) == 0,
+          "enospc child failed (exit %d)", WEXITSTATUS(stat));
+    { std::string cmd = "rm -rf " + dir; (void)system(cmd.c_str()); }
+    fprintf(stderr, "PASS enospc\n");
+}
+
+// ── T18: external log truncation — reads fail soft, never abort ─────────────
+static void test_readfault() {
+    const uint64_t N = 400000 / (uint64_t)g_scale;
+    IKVStore* st = open_store("rdfault", 32ull << 20, true);   // tiny cache
+    st->StartSession();
+    GenValue v, out;
+    for (uint64_t i = 0; i < N; ++i) { make_value(i, 1, 100, v); st->Upsert(i, v); }
+    st->Checkpoint();
+    std::string f = g_parent + "/rdfault/hydra_slots.dat";
+    struct stat sb;
+    CHECK(stat(f.c_str(), &sb) == 0, "slot log missing");
+    // Cut the file mid-way at a NON-page-aligned offset: forces short reads
+    // below the landed high-water mark on the miss path.
+    CHECK(truncate(f.c_str(), sb.st_size / 2 + 100) == 0, "truncate failed");
+    uint64_t found = 0, lost = 0;
+    for (uint64_t i = 0; i < N; i += 3) {
+        if (st->Read(i, out)) {
+            found++;
+            CHECK(check_value(i, out, 100) == 1,
+                  "readfault: corrupt value served i=%" PRIu64, i);
+        } else {
+            lost++;
+        }
+    }
+    // Async path across the truncated region too.
+    for (uint64_t i = 1; i < N; i += 101) {
+        if (read_async1(st, i, out))
+            CHECK(check_value(i, out, 100) == 1, "readfault async corrupt");
+    }
+    HydraProdStats ps{};
+    CHECK(hydra_get_prod_stats(st, &ps), "prod stats unavailable");
+    CHECK(ps.read_errors > 0, "read_errors did not increment on truncation");
+    CHECK(lost > 0, "truncation had no effect (test setup broken?)");
+    CHECK(found > 0, "intact half fully lost");
+    // Engine must remain writable and readable after read faults.
+    make_value(N + 7, 3, 100, v);
+    st->Upsert(N + 7, v);
+    CHECK(st->Read(N + 7, out) && check_value(N + 7, out, 100) == 3,
+          "readfault: store unusable after fault");
+    st->StopSession();
+    drop_store(st, "rdfault");
+    fprintf(stderr, "PASS readfault\n");
+}
+
+// ── T19: bounded oversize map with honest rejection ──────────────────────────
+static void test_oversizebound() {
+    IKVStore* st = open_store("osbound", 64ull << 20, true);  // cap = budget/8
+    st->StartSession();
+    GenValue v, out;
+    HydraProdStats ps{};
+    uint64_t i = 0, accepted = 0;
+    for (;;) {
+        CHECK(i < 100000, "no oversize rejection after 100k x 4KB upserts");
+        if (i >= 100000) break;
+        make_value(i, 1, 4096, v);
+        st->Upsert(i, v);
+        CHECK(hydra_get_prod_stats(st, &ps), "prod stats unavailable");
+        if (ps.rejected_oversize > 0) break;
+        accepted = ++i;
+    }
+    CHECK(accepted > 0, "first oversized upsert rejected (cap broken)");
+    CHECK(ps.oversize_bytes <= (64ull << 20) / 8 + 8192,
+          "oversize_bytes above cap: %" PRIu64, ps.oversize_bytes);
+    // every ACCEPTED value is intact; the REJECTED key reads NotFound (never
+    // truncated / partially stored)
+    uint64_t bad = 0;
+    for (uint64_t k = 0; k < accepted; ++k)
+        if (!st->Read(k, out) || check_value(k, out, 4096) != 1) bad++;
+    CHECK(bad == 0, "oversizebound: %" PRIu64 " accepted values damaged", bad);
+    CHECK(!st->Read(accepted, out), "rejected key partially stored");
+    // same-size overwrite of an EXISTING oversized key needs no new budget
+    make_value(0, 2, 4096, v);
+    st->Upsert(0, v);
+    CHECK(st->Read(0, out) && check_value(0, out, 4096) == 2,
+          "oversizebound: same-size overwrite rejected/lost");
+    // a fresh oversized key is still rejected, and surfaces in the counter
+    uint64_t rej0 = ps.rejected_oversize;
+    make_value(4000000, 1, 4096, v);
+    st->Upsert(4000000, v);
+    CHECK(hydra_get_prod_stats(st, &ps), "prod stats unavailable");
+    CHECK(ps.rejected_oversize > rej0, "rejection not counted");
+    CHECK(!st->Read(4000000, out), "rejected key visible");
+    // shrinking key 1 to inline frees budget -> a new oversized key fits
+    make_value(1, 3, 100, v);
+    st->Upsert(1, v);
+    CHECK(st->Read(1, out) && check_value(1, out, 100) == 3, "shrink lost");
+    make_value(4000001, 1, 2048, v);
+    st->Upsert(4000001, v);
+    CHECK(st->Read(4000001, out) && check_value(4000001, out, 2048) == 1,
+          "freed budget not reusable after shrink-to-inline");
+    // Delete frees budget too
+    CHECK(st->Delete(2), "oversizebound delete");
+    make_value(4000002, 1, 2048, v);
+    st->Upsert(4000002, v);
+    CHECK(st->Read(4000002, out) && check_value(4000002, out, 2048) == 1,
+          "freed budget not reusable after delete");
+    st->StopSession();
+    drop_store(st, "osbound");
+    fprintf(stderr, "PASS oversizebound\n");
+}
+
+// ── T20: log compaction under concurrent readers ─────────────────────────────
+static void test_compact() {
+    setenv("HYDRA_COMPACT_FLOOR_MB", "4", 1);
+    setenv("HYDRA_COMPACT_FACTOR", "2", 1);
+    IKVStore* st = open_store("compact", 64ull << 20, true);
+    unsetenv("HYDRA_COMPACT_FLOOR_MB");
+    unsetenv("HYDRA_COMPACT_FACTOR");
+    st->StartSession();
+    const uint64_t K = 4096;
+    const uint64_t ROUNDS = (uint64_t)(g_scale > 1 ? 120 : 400);
+    std::vector<std::atomic<uint64_t>> comp(K), issue(K);
+    for (uint64_t k = 0; k < K; ++k) { comp[k].store(0); issue[k].store(0); }
+    std::atomic<bool> stop{false};
+    std::vector<std::thread> rd;
+    for (int r = 0; r < 2; ++r) {
+        rd.emplace_back([&, r] {
+            st->StartSession();
+            std::mt19937_64 rng(9000 + r);
+            GenValue o;
+            while (!stop.load(std::memory_order_relaxed)) {
+                uint64_t k = rng() % K;
+                uint64_t lo = comp[k].load(std::memory_order_acquire);
+                if (lo == 0) continue;
+                bool ok = st->Read(k, o);
+                uint64_t hi = issue[k].load(std::memory_order_acquire);
+                CHECK(ok, "compact: key %" PRIu64 " lost mid-compaction", k);
+                if (ok) {
+                    uint64_t c = check_value(k, o, 100);
+                    CHECK(c >= lo && c <= hi,
+                          "compact STALE k=%" PRIu64 " c=%" PRIu64
+                          " lo=%" PRIu64 " hi=%" PRIu64, k, c, lo, hi);
+                }
+            }
+            st->StopSession();
+        });
+    }
+    GenValue v;
+    std::string f = g_parent + "/compact/hydra_slots.dat";
+    struct stat sb;
+    uint64_t peak_blocks = 0, peak_log = 0;
+    HydraProdStats ps{};
+    for (uint64_t rnd = 1; rnd <= ROUNDS; ++rnd) {
+        for (uint64_t k = 0; k < K; ++k) {
+            issue[k].store(rnd, std::memory_order_release);
+            make_value(k, rnd, 100, v);
+            st->Upsert(k, v);
+            comp[k].store(rnd, std::memory_order_release);
+        }
+        st->Checkpoint();   // force every version to land (log grows)
+        if (stat(f.c_str(), &sb) == 0 && (uint64_t)sb.st_blocks > peak_blocks)
+            peak_blocks = (uint64_t)sb.st_blocks;
+        CHECK(hydra_get_prod_stats(st, &ps), "prod stats unavailable");
+        if (ps.log_bytes > peak_log) peak_log = ps.log_bytes;
+    }
+    // give the compactor time to catch up, then settle
+    for (int i = 0; i < 600 && ps.compactions_run == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        CHECK(hydra_get_prod_stats(st, &ps), "prod stats unavailable");
+    }
+    stop.store(true);
+    for (auto& t : rd) t.join();
+    CHECK(ps.compactions_run > 0, "compaction never triggered (log %.1f MB, "
+          "live %.1f MB)", ps.log_bytes / 1e6, ps.live_bytes / 1e6);
+    CHECK(ps.reclaimed_bytes > 0, "compaction reclaimed nothing");
+    // On-disk footprint must shrink from its peak (hole punch), or — where
+    // punching is unsupported — allocated blocks must stop tracking the
+    // logical write volume (extent reuse). Poll: the compactor is async.
+    uint64_t now_blocks = peak_blocks;
+    for (int i = 0; i < 600; ++i) {
+        CHECK(stat(f.c_str(), &sb) == 0, "slot log missing");
+        now_blocks = (uint64_t)sb.st_blocks;
+        CHECK(hydra_get_prod_stats(st, &ps), "prod stats unavailable");
+        if (ps.punch_unsupported == 0 && now_blocks < (peak_blocks * 3) / 4) break;
+        if (ps.punch_unsupported == 1 && ps.reclaimed_bytes > peak_log / 4) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    if (ps.punch_unsupported == 0)
+        CHECK(now_blocks < (peak_blocks * 3) / 4,
+              "st_blocks did not shrink: peak=%" PRIu64 " now=%" PRIu64,
+              peak_blocks, now_blocks);
+    // Position space is being recycled (the 512 GiB / 32-bit ceiling fix):
+    CHECK(ps.log_bytes < peak_log + (16ull << 20),
+          "log_bytes still growing without bound");
+    // full correctness after compaction settles
+    GenValue out;
+    uint64_t bad = 0;
+    for (uint64_t k = 0; k < K; ++k)
+        if (!st->Read(k, out) || check_value(k, out, 100) != ROUNDS) bad++;
+    CHECK(bad == 0, "compact: %" PRIu64 " keys wrong after compaction", bad);
+    // ...and after a restart on the compacted (holey) log
+    st->Checkpoint();
+    st->StopSession();
+    delete st;
+    IKVStore* st2 = open_store("compact", 64ull << 20, false);
+    st2->StartSession();
+    bad = 0;
+    for (uint64_t k = 0; k < K; ++k)
+        if (!st2->Read(k, out) || check_value(k, out, 100) != ROUNDS) bad++;
+    CHECK(bad == 0, "compact: %" PRIu64 " keys lost across restart", bad);
+    st2->StopSession();
+    drop_store(st2, "compact");
+    fprintf(stderr, "PASS compact\n");
+}
+
+// ── T21: compaction of UNCACHED keys + deletes + oversize sidecar lifecycle ─
+// A tiny budget (8 MiB -> ~32k cache entries) with 60k keys forces most keys
+// out of cache, so the compactor must take its uncached-relocation path
+// (verified_lookup + CLEAN admission) instead of the cache-resident one that
+// test_compact exercises. Also covers: dead-slot skips for deleted keys and
+// keys that moved to the overflow map, HYDRA_OVERSIZE_CAP_MB, recovery on a
+// compacted log with a sidecar, and sidecar unlink once the last oversized
+// key is deleted.
+static void test_compactcold() {
+    setenv("HYDRA_COMPACT_FLOOR_MB", "4", 1);
+    setenv("HYDRA_COMPACT_FACTOR", "2", 1);
+    setenv("HYDRA_OVERSIZE_CAP_MB", "1", 1);
+    IKVStore* st = open_store("compactcold", 8ull << 20, true);
+    unsetenv("HYDRA_COMPACT_FLOOR_MB");
+    unsetenv("HYDRA_COMPACT_FACTOR");
+    unsetenv("HYDRA_OVERSIZE_CAP_MB");
+    st->StartSession();
+    const uint64_t K = 60000;
+    const uint64_t ROUNDS = 3;
+    GenValue v, out;
+    for (uint64_t rnd = 1; rnd <= ROUNDS; ++rnd) {
+        for (uint64_t k = 0; k < K; ++k) {
+            make_value(k, rnd, 100, v);
+            st->Upsert(k, v);
+        }
+        st->Checkpoint();   // land every version: dead versions pile up
+    }
+    // Move keys 0..31 to the overflow map (their landed slots become dead;
+    // the compactor must consult overflow_contains to see they moved).
+    for (uint64_t k = 0; k < 32; ++k) {
+        make_value(k, ROUNDS + 1, 2048, v);
+        st->Upsert(k, v);
+    }
+    st->Checkpoint();
+    std::string side = g_parent + "/compactcold/hydra_overflow.dat";
+    struct stat sb;
+    CHECK(stat(side.c_str(), &sb) == 0, "overflow sidecar not written");
+    // Tombstone a slice (compactor must skip deleted keys' old slots and
+    // relocate their tombstones instead of dropping them).
+    HydraProdStats ps{};
+    CHECK(hydra_get_prod_stats(st, &ps), "prod stats unavailable");
+    uint64_t comp0 = ps.compactions_run;
+    for (uint64_t k = 32; k < K; k += 16)
+        CHECK(st->Delete(k), "compactcold delete failed");
+    st->Checkpoint();
+    // Wait for at least one compaction pass that RAN AFTER the deletes, so
+    // the deleted keys' slots/tombstones are actually processed.
+    for (int i = 0; i < 600 && ps.compactions_run <= comp0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        CHECK(hydra_get_prod_stats(st, &ps), "prod stats unavailable");
+    }
+    CHECK(ps.compactions_run > comp0, "cold compaction never ran post-delete "
+          "(log %.1f MB, live %.1f MB)", ps.log_bytes / 1e6, ps.live_bytes / 1e6);
+    CHECK(ps.reclaimed_bytes > 0, "cold compaction reclaimed nothing");
+    // Full correctness while/after compaction: overflow keys, deleted keys,
+    // and plain keys all read their exact last state.
+    uint64_t bad = 0;
+    for (uint64_t k = 0; k < K; ++k) {
+        bool deleted = (k >= 32 && (k - 32) % 16 == 0);
+        bool oversized = k < 32;
+        bool ok = st->Read(k, out);
+        if (deleted) { if (ok) bad++; continue; }
+        if (!ok) { bad++; continue; }
+        uint64_t c = check_value(k, out, oversized ? 2048 : 100);
+        if (c != (oversized ? ROUNDS + 1 : ROUNDS)) bad++;
+    }
+    CHECK(bad == 0, "compactcold: %" PRIu64 " keys wrong after compaction", bad);
+    st->Checkpoint();
+    st->StopSession();
+    delete st;
+    // Restart on the compacted log + sidecar: everything must survive.
+    IKVStore* st2 = open_store("compactcold", 8ull << 20, false);
+    st2->StartSession();
+    bad = 0;
+    for (uint64_t k = 0; k < K; ++k) {
+        bool deleted = (k >= 32 && (k - 32) % 16 == 0);
+        bool oversized = k < 32;
+        bool ok = st2->Read(k, out);
+        uint64_t c = ok ? check_value(k, out, oversized ? 2048 : 100)
+                        : UINT64_MAX;
+        bool wrong = deleted ? ok
+                             : (!ok || c != (oversized ? ROUNDS + 1 : ROUNDS));
+        if (wrong && bad < 8)
+            fprintf(stderr, "compactcold BAD k=%" PRIu64 " del=%d ovsz=%d "
+                    "ok=%d size=%u ctr=%" PRIu64 "\n", k, (int)deleted,
+                    (int)oversized, (int)ok, ok ? out.size : 0, c);
+        if (wrong) bad++;
+    }
+    CHECK(bad == 0, "compactcold: %" PRIu64 " keys wrong after restart", bad);
+    // Deleting EVERY remaining key empties the overflow map (the engine may
+    // have absorbed inline keys into it under pin pressure — a documented
+    // last-resort path — so deleting only the oversized keys is not enough).
+    // An empty map must unlink the sidecar at the next Checkpoint.
+    for (uint64_t k = 0; k < 32; ++k)
+        CHECK(st2->Delete(k), "compactcold oversized delete failed");
+    for (uint64_t k = 32; k < K; ++k) {
+        bool deleted = (k >= 32 && (k - 32) % 16 == 0);
+        if (!deleted) st2->Delete(k);
+    }
+    st2->Checkpoint();
+    CHECK(stat(side.c_str(), &sb) != 0, "empty overflow sidecar not unlinked");
+    st2->StopSession();
+    delete st2;
+    // Generation 3: every key was deleted in generation 2 — after ANOTHER
+    // restart they must all stay deleted (recovery re-marks tombstone
+    // winners, and compaction relocates rather than drops the tombstones
+    // of still-deleted keys, so no stale copy can win the LSN race).
+    IKVStore* st3 = open_store("compactcold", 8ull << 20, false);
+    st3->StartSession();
+    bad = 0;
+    for (uint64_t k = 0; k < K; ++k)
+        if (st3->Read(k, out)) bad++;
+    CHECK(bad == 0,
+          "compactcold: %" PRIu64 " deleted keys resurrected in gen 3", bad);
+    st3->StopSession();
+    drop_store(st3, "compactcold");
+    fprintf(stderr, "PASS compactcold\n");
+}
+
 int main(int argc, char** argv) {
+    g_argv0 = argv[0];
+    if (argc >= 3 && strcmp(argv[1], "--crashchild") == 0)
+        return crash_child(argv[2], strtoull(argv[3], nullptr, 10),
+                           atoi(argv[4]));
+    if (argc >= 3 && strcmp(argv[1], "--enospcchild") == 0) {
+        g_parent = "/";   // unused in child
+        return enospc_child(argv[2]);
+    }
     if (argc < 2) { fprintf(stderr, "usage: %s <spill_parent> [filter] [scale]\n", argv[0]); return 2; }
     g_parent = argv[1];
     const char* filter = argc > 2 ? argv[2] : "";
@@ -926,6 +1549,10 @@ int main(int argc, char** argv) {
         {"tiny", test_tiny},
         {"nodisk", test_nodisk}, {"rmw", test_rmw},       {"twostores", test_twostores},
         {"ckpt", test_ckpt},     {"rywrite", test_rywrite},
+        {"recover", test_recover}, {"crashrecover", test_crashrecover},
+        {"enospc", test_enospc},   {"readfault", test_readfault},
+        {"oversizebound", test_oversizebound}, {"compact", test_compact},
+        {"compactcold", test_compactcold},
     };
     for (auto& t : tests)
         if (strstr(t.name, filter) || !*filter) t.fn();

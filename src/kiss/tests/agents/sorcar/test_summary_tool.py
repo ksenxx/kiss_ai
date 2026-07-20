@@ -78,14 +78,142 @@ def test_chat_agent_registers_summary_tool() -> None:
     assert tool("one. two. three. four. five.") == "Summary recorded."
 
 
-def test_live_agent_calls_summary_every_5_steps() -> None:
-    """A real run calls summary(description=...) after ~5 steps.
+def test_summary_guard_rejects_every_tool_until_summary() -> None:
+    """While a summary is due, every other tool call is blocked.
+
+    Exercises ``ChatSorcarAgent.tool_call_guard`` (the real
+    :meth:`_summary_tool_guard`) against a real executor object: with
+    the gate armed, Bash / finish / arbitrary caller tools are all
+    blocked with the instructive rejection; a ``summary`` call clears
+    the gate; and the gate keeps rejecting indefinitely (no escape
+    hatch) until summary is called.
+    """
+    from kiss.agents.sorcar.chat_sorcar_agent import _SUMMARY_GATE_REJECTION
+    from kiss.core.kiss_agent import KISSAgent
+
+    agent = ChatSorcarAgent("summary-guard-verify")
+    guard = agent.tool_call_guard
+    # ``Any``-typed on purpose: the gate stores its ``_summary_due``
+    # state as a dynamic attribute on the per-session executor (same
+    # pattern as ``_summary_reminder_step``).
+    executor: Any = KISSAgent("summary-guard-executor")
+
+    # No executor yet: everything is allowed.
+    assert guard("Bash", {"command": "ls"}) is None
+
+    agent._current_executor = executor
+    # Gate not armed: everything is allowed.
+    assert guard("Bash", {"command": "ls"}) is None
+    assert guard("finish", {"result": "done"}) is None
+
+    # Armed: every tool — including finish and custom tools — is
+    # blocked; the gate never opens by itself.
+    executor._summary_due = True
+    for _ in range(5):
+        assert guard("Bash", {"command": "ls"}) == _SUMMARY_GATE_REJECTION
+        assert guard("finish", {"result": "done"}) == _SUMMARY_GATE_REJECTION
+        assert guard("my_custom_tool", {}) == _SUMMARY_GATE_REJECTION
+    assert executor._summary_due is True
+
+    # A summary call clears the gate; subsequent calls run again.
+    assert guard("summary", {"description": "one. two. three."}) is None
+    assert executor._summary_due is False
+    assert guard("Bash", {"command": "ls"}) is None
+    assert guard("finish", {"result": "done"}) is None
+
+
+def test_blocked_finish_is_not_terminal_and_prints_error() -> None:
+    """A guard-blocked tool is not executed; blocked finish not terminal.
+
+    Drives the real ``KISSAgent._execute_tool`` dispatch with a guard
+    rejection: the tool function must NOT run, the rejection must be
+    returned as the result, and the printed ``tool_result`` event must
+    carry ``is_error=True`` so the webview renders the red FAILED
+    panel (a plain-string rejection would otherwise be hidden inside a
+    streamed Bash panel).
+    """
+    from kiss.core.kiss_agent import KISSAgent
+
+    printer = _RecordingPrinter()
+    executor: Any = KISSAgent("guard-dispatch-executor")
+    executor.printer = printer
+    executor.verbose = False
+    calls: list[str] = []
+
+    def finish(result: str) -> str:
+        """Terminal finish stand-in recording invocations.
+
+        Args:
+            result: The final result.
+
+        Returns:
+            The result unchanged.
+        """
+        calls.append(result)
+        return result
+
+    executor.function_map = {"finish": finish}
+    name, response = executor._execute_tool(
+        {"name": "finish", "arguments": {"result": "done"}},
+        blocked="Error: call summary first.",
+    )
+    assert name == "finish"
+    assert response == "Error: call summary first."
+    assert calls == [], "a blocked tool must not execute"
+    results = [
+        (content, kwargs)
+        for etype, content, kwargs in printer.events
+        if etype == "tool_result"
+    ]
+    assert len(results) == 1
+    assert results[0][0] == "Error: call summary first."
+    assert results[0][1].get("is_error") is True
+
+    # Unblocked, the same call executes and returns normally.
+    name, response = executor._execute_tool(
+        {"name": "finish", "arguments": {"result": "done"}}
+    )
+    assert (name, response) == ("finish", "done")
+    assert calls == ["done"]
+
+
+def _tool_calls_by_step(
+    events: list[tuple[str, Any, dict[str, Any]]],
+) -> list[tuple[int, str]]:
+    """Attribute recorded tool_call events to executor step numbers.
+
+    ``KISSAgent._execute_step`` prints the step's ``usage_info`` event
+    (carrying ``total_steps``) right after ``generate`` and BEFORE the
+    step's ``tool_call`` events, so every ``tool_call`` belongs to the
+    most recently seen ``total_steps``.
+
+    Args:
+        events: The (type, content, kwargs) tuples recorded by the
+            printer.
+
+    Returns:
+        Ordered (step, tool_name) pairs.
+    """
+    step = 0
+    calls: list[tuple[int, str]] = []
+    for etype, content, kwargs in events:
+        if etype == "usage_info":
+            step = int(kwargs.get("total_steps", step) or step)
+        elif etype == "tool_call":
+            calls.append((step, str(content)))
+    return calls
+
+
+def test_live_agent_calls_summary_on_every_step_divisible_by_5() -> None:
+    """A real run calls summary exactly on steps 5, 10, 15, ....
 
     Gives the agent a task whose steps are data-dependent (each Bash
     command needs the previous command's output), forcing one tool
-    call per model step so the step counter actually crosses 5, and
-    asserts the live model interleaves a ``summary`` tool call with a
-    multi-sentence natural-language description.
+    call per model step so the step counter crosses several 5-step
+    boundaries, and asserts the live model calls ``summary`` (with a
+    multi-sentence natural-language description) on EVERY step
+    divisible by 5 — the enforcement gate rejects any other tool call
+    on those steps, so compliance is no longer best-effort.
     """
     tmpdir = tempfile.mkdtemp(prefix="kiss_summary_live_")
     printer = _RecordingPrinter()
@@ -111,31 +239,40 @@ def test_live_agent_calls_summary_every_5_steps() -> None:
             max_steps=30,
             web_tools=False,
         )
-        tool_calls = [
-            (content, kwargs.get("tool_input") or {})
-            for (etype, content, kwargs) in printer.events
-            if etype == "tool_call"
-        ]
-        summary_calls = [tc for tc in tool_calls if tc[0] == "summary"]
-        assert summary_calls, (
+        calls = _tool_calls_by_step(printer.events)
+        assert calls, "no tool calls recorded"
+        summary_steps = sorted({s for s, name in calls if name == "summary"})
+        assert summary_steps, (
             "the agent never called the summary tool; tool calls were: "
-            f"{[name for name, _ in tool_calls]}"
+            f"{calls}"
         )
-        description = str(summary_calls[0][1].get("description", ""))
-        assert description.strip(), "summary called without a description"
-        sentences = [s for s in description.replace("\n", " ").split(".") if s.strip()]
-        assert len(sentences) >= 3, (
-            "description must be a natural-language summary of several "
-            f"sentences, got: {description!r}"
+        # Every summary call must land on a step divisible by 5.
+        off_boundary = [s for s in summary_steps if s % 5]
+        assert not off_boundary, (
+            f"summary called on steps not divisible by 5: {off_boundary}; "
+            f"all calls: {calls}"
         )
-        # The first summary must come after roughly 5 working steps —
-        # i.e. at least 4 non-summary tool calls precede it.
-        first_idx = next(
-            i for i, (name, _) in enumerate(tool_calls) if name == "summary"
+        # Every 5-step boundary reached before the final step must have
+        # a summary call (the run may finish before the last boundary).
+        max_step = max(s for s, _ in calls)
+        expected = list(range(5, max_step + 1, 5))
+        missed = [b for b in expected if b not in summary_steps]
+        assert not missed, (
+            f"summary missing on boundary steps {missed}; all calls: {calls}"
         )
-        assert first_idx >= 4, (
-            "summary was called too early (after only "
-            f"{first_idx} tool calls): {[name for name, _ in tool_calls]}"
-        )
+        # The description must be a multi-sentence natural summary.
+        descriptions = [
+            str((kwargs.get("tool_input") or {}).get("description", ""))
+            for (etype, content, kwargs) in printer.events
+            if etype == "tool_call" and content == "summary"
+        ]
+        for description in descriptions:
+            sentences = [
+                s for s in description.replace("\n", " ").split(".") if s.strip()
+            ]
+            assert len(sentences) >= 3, (
+                "description must be a natural-language summary of several "
+                f"sentences, got: {description!r}"
+            )
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

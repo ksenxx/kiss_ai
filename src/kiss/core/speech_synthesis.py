@@ -32,6 +32,7 @@ import base64
 import math
 import os
 import sys
+from typing import Any
 
 from kiss.core.kiss_agent import KISSAgent
 
@@ -132,6 +133,7 @@ def synthesize_talk_audio(
     emotion: str = "",
     model: str = DEFAULT_TTS_MODEL,
     voice: str = DEFAULT_TTS_VOICE,
+    usage_out: dict[str, Any] | None = None,
 ) -> tuple[str, str] | None:
     """Synthesize *text* as natural speech with a GPT audio model.
 
@@ -144,6 +146,13 @@ def synthesize_talk_audio(
             into the reading-tone instruction when provided.
         model: GPT audio-chat model name from MODEL_INFO.json.
         voice: OpenAI built-in voice name.
+        usage_out: Optional dict that receives the synthesis agent's
+            spend (``budget_used`` USD and ``total_tokens_used``) so the
+            CALLER can attribute it to its own task accounting.  The
+            synthesis agent is a throwaway; without this, its spend
+            (audio output bills $64/M tokens on gpt-audio-1.5) would
+            silently vanish from the reported per-task cost.  Filled
+            even when synthesis fails after the API call spent money.
 
     Returns:
         ``(audio_b64, mime)`` — base64-encoded MP3 bytes and its MIME
@@ -160,19 +169,26 @@ def synthesize_talk_audio(
         system += f" The script's language tag is {language}."
     try:
         agent = TalkSynthesisAgent("talk-speech-synthesis")
-        agent.run(
-            model_name=model,
-            prompt_template="Script:\n{script}",
-            arguments={"script": text},
-            system_prompt=system,
-            is_agentic=False,
-            model_config={
-                "modalities": ["text", "audio"],
-                "audio": {"voice": voice, "format": "mp3"},
-                "timeout": audio_timeout_seconds(),
-            },
-            verbose=False,
-        )
+        try:
+            agent.run(
+                model_name=model,
+                prompt_template="Script:\n{script}",
+                arguments={"script": text},
+                system_prompt=system,
+                is_agentic=False,
+                model_config={
+                    "modalities": ["text", "audio"],
+                    "audio": {"voice": voice, "format": "mp3"},
+                    "timeout": audio_timeout_seconds(),
+                },
+                verbose=False,
+            )
+        finally:
+            # Report the spend BEFORE any result validation: a failed
+            # or invalid synthesis may still have billed the API call.
+            if usage_out is not None:
+                usage_out["budget_used"] = float(agent.budget_used or 0.0)
+                usage_out["total_tokens_used"] = int(agent.total_tokens_used or 0)
         data = getattr(agent.model, "last_audio_data", None)
         if not data:
             return None

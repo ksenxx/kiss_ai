@@ -338,10 +338,15 @@ def _extract_file(rel_path: str, source: bytes, lang: str) -> dict[str, Any] | N
                 callee_field = call_types[child.type]
                 callee = child.child_by_field_name(callee_field)
                 if callee is not None:
-                    # keep only the last identifier segment
-                    # (self.g → g, pkg.mod.fn → fn, w.draw → draw)
-                    name = _node_text(callee).split("(")[0]
-                    name = re.split(r"[.:>]", name)[-1].strip()
+                    # Keep only the last identifier segment
+                    # (self.g → g, pkg.mod.fn → fn, w.draw → draw).
+                    # Split on the separators FIRST, then strip a
+                    # trailing call-argument tail: a CHAINED call like
+                    # ``Application().start`` must resolve to ``start``
+                    # — truncating at the first ``(`` before taking the
+                    # last segment misattributed it to ``Application``.
+                    name = re.split(r"[.:>]", _node_text(callee))[-1]
+                    name = name.split("(")[0].strip()
                     if name and re.fullmatch(r"\w+", name):
                         calls.append({"caller": enclosing, "callee": name})
             walk(child, new_enclosing)
@@ -986,6 +991,10 @@ _FLAGS_WITH_VALUE = {
     "-g", "-t", "-T", "--type", "--glob", "--max-count",
 }
 _PATTERN_FLAGS = {"-e", "--regexp"}
+# Flags naming a FILE the patterns are read from: the remaining
+# operands are search targets, so the command line carries no inline
+# pattern for the graph to answer.
+_PATTERN_FILE_FLAGS = {"-f", "--file"}
 
 
 def _grep_pattern(command: str) -> str | None:
@@ -994,7 +1003,8 @@ def _grep_pattern(command: str) -> str | None:
     Returns:
         The first non-flag argument after the grep executable, or
         ``None`` when *command* is not a grep-family invocation or has
-        no pattern.
+        no pattern (including ``-f``/``--file`` invocations, whose
+        patterns live in a file and whose operands are search targets).
     """
     try:
         argv = shlex.split(command)
@@ -1006,7 +1016,21 @@ def _grep_pattern(command: str) -> str | None:
     while i < len(argv):
         arg = argv[i]
         if arg.startswith("-"):
+            if arg == "--":
+                # POSIX end-of-options marker: the next token is an
+                # operand — the pattern (unless -e/-f already supplied
+                # it).  The old parser skipped it like a flag, so
+                # ``grep -- -pat file`` misparsed ``file`` as pattern.
+                return argv[i + 1] if i + 1 < len(argv) else None
             flag, separator, value = arg.partition("=")
+            if flag in _PATTERN_FILE_FLAGS or (
+                arg.startswith("-f") and not arg.startswith("--")
+            ):
+                # ``-f pats.txt`` / ``-fpats.txt`` / ``--file[=]...``:
+                # no inline pattern exists; returning a later operand
+                # would let grep_hint suppress a real grep based on
+                # its TARGET path.
+                return None
             if flag in _PATTERN_FLAGS:
                 if separator:
                     return value or None
