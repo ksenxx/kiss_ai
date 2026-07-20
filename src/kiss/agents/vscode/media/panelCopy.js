@@ -43,6 +43,7 @@
     'collapse-chv',
     'collapse-preview',
     'panel-ts',
+    'panel-time',
   ];
 
   function shouldSkip(el) {
@@ -171,62 +172,101 @@
 
   // panelts-coverage:start
   /**
-   * Format an event timestamp (ms since epoch) as a compact
-   * human-readable label in the user's locale.
+   * Format an event timestamp (ms since epoch) as a human-readable
+   * label in the user's locale.
    *
-   * Rules: a same-day event shows only its time of day ("2:07 PM");
-   * an event from another day of the current year prefixes the date
-   * ("Mar 5 2:07 PM"); an event from another year also carries the
-   * year ("Mar 5, 2021 2:07 PM").  Invalid / missing / non-positive
-   * inputs format as the empty string so callers can skip the badge.
+   * Every label carries the FULL date and a seconds-precision time
+   * of day ("Mar 5, 2021 2:07:33 PM") so an event's exact moment is
+   * always visible, even for same-day events.  Invalid / missing /
+   * non-positive inputs format as the empty string so callers can
+   * skip the badge.
    *
    * @param {number} ts - event time in ms since the epoch.
-   * @param {Date} [now] - "current" time anchor (defaults to
-   *   ``new Date()``); injectable for deterministic tests.
-   * @returns {string} the compact label, or '' when *ts* is unusable.
+   * @returns {string} the "date time" label, or '' when *ts* is
+   *   unusable.
    */
-  function formatEventTs(ts, now) {
+  function formatEventTs(ts) {
     const n = Number(ts);
     if (!isFinite(n) || n <= 0) return '';
     const d = new Date(n);
     // A finite ms value can still overflow the ECMAScript Date range
     // (±8.64e15); such a Date formats as "Invalid Date" — skip it.
     if (!isFinite(d.getTime())) return '';
-    // Duck-type the anchor (not ``instanceof Date``): a Date created
-    // in another realm (jsdom test host, iframe) must still be usable.
-    const anchor =
-      now && typeof now.getFullYear === 'function' ? now : new Date();
-    const time = d.toLocaleTimeString([], {
-      hour: 'numeric',
-      minute: '2-digit',
-    });
-    if (
-      d.getFullYear() === anchor.getFullYear() &&
-      d.getMonth() === anchor.getMonth() &&
-      d.getDate() === anchor.getDate()
-    ) {
-      return time;
-    }
-    if (d.getFullYear() === anchor.getFullYear()) {
-      const day = d.toLocaleDateString([], {month: 'short', day: 'numeric'});
-      return day + ' ' + time;
-    }
-    const dayYear = d.toLocaleDateString([], {
+    const day = d.toLocaleDateString([], {
       month: 'short',
       day: 'numeric',
       year: 'numeric',
     });
-    return dayYear + ' ' + time;
+    const time = d.toLocaleTimeString([], {
+      hour: 'numeric',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+    return day + ' ' + time;
   }
 
   /**
-   * Attach a compact event-timestamp badge to a chat panel's title row.
+   * Return (creating on demand) the panel's bottom footer bar — the
+   * ``div.panel-time`` element that renders as the LAST child of every
+   * event panel.  The bar is shared by the event-timestamp badge
+   * (``span.panel-ts``, left side) and the live "time spent" label
+   * (``span.panel-elapsed``, right side, written by ``main.js``).
    *
-   * The badge (``span.panel-ts``) is a direct child of ``panelEl``,
-   * inserted immediately BEFORE the panel's Copy button so it renders
-   * to the button's left (both are absolutely anchored to the panel's
-   * top-right corner by ``main.css``).  Its full ``toLocaleString``
-   * form is exposed as a hover tooltip.  ``panel-ts`` is in
+   * The first call also attaches a one-time ``MutationObserver`` that
+   * re-anchors the bar as the panel's last child whenever later
+   * content (streamed thoughts, a tool_result output panel, ...) is
+   * appended after it, so the bar always renders at the bottom — even
+   * for replayed panels that never enter the live 1-second ticker.
+   *
+   * ``panel-time`` is in ``SKIP_CLASSES`` so nothing in the bar leaks
+   * into the clipboard payload.
+   *
+   * @param {HTMLElement} panelEl - panel container to stamp.
+   * @returns {HTMLElement} the panel's ``div.panel-time`` footer bar.
+   */
+  function ensurePanelFoot(panelEl) {
+    const doc = panelEl.ownerDocument || document;
+    // Find an existing direct-child bar (scan from the end; avoid
+    // matching bars inside nested panels).
+    let bar = null;
+    for (let i = panelEl.children.length - 1; i >= 0; i--) {
+      const c = panelEl.children[i];
+      if (c.classList && c.classList.contains('panel-time')) {
+        bar = c;
+        break;
+      }
+    }
+    if (!bar) {
+      bar = doc.createElement('div');
+      bar.className = 'panel-time';
+      panelEl.appendChild(bar);
+    }
+    if (!panelEl._kissPanelFootObs) {
+      const found = bar;
+      const obs = new doc.defaultView.MutationObserver(() => {
+        if (
+          found.parentNode === panelEl &&
+          found !== panelEl.lastElementChild
+        ) {
+          panelEl.appendChild(found);
+        }
+      });
+      obs.observe(panelEl, {childList: true});
+      panelEl._kissPanelFootObs = obs;
+    }
+    return bar;
+  }
+
+  /**
+   * Attach a date + seconds event-timestamp badge to a chat panel's bottom
+   * footer bar.
+   *
+   * The badge (``span.panel-ts``) is inserted as the FIRST child of
+   * the panel's ``div.panel-time`` footer bar (see
+   * ``ensurePanelFoot``) so it renders bottom-LEFT — in the same bar
+   * as, and to the left of, the right-aligned "time spent" label
+   * (``span.panel-elapsed``).  Its full ``toLocaleString`` form is
+   * exposed as a hover tooltip.  ``panel-time`` is in
    * ``SKIP_CLASSES`` so the badge never leaks into the clipboard
    * payload.
    *
@@ -242,17 +282,15 @@
     if (!panelEl) return null;
     const label = formatEventTs(ts);
     if (!label) return null;
-    const existing = panelEl.querySelector(':scope > .panel-ts');
+    const existing = panelEl.querySelector(':scope > .panel-time > .panel-ts');
     if (existing) return existing;
-    panelEl.classList.add('copyable');
+    const bar = ensurePanelFoot(panelEl);
     const doc = panelEl.ownerDocument || document;
     const span = doc.createElement('span');
     span.className = 'panel-ts';
     span.textContent = label;
     span.title = new Date(Number(ts)).toLocaleString();
-    const btn = panelEl.querySelector(':scope > .panel-copy-btn');
-    if (btn) panelEl.insertBefore(span, btn);
-    else panelEl.appendChild(span);
+    bar.insertBefore(span, bar.firstChild);
     return span;
   }
   // panelts-coverage:end
@@ -262,6 +300,7 @@
     addCopyButton: addCopyButton,
     normalise: normalise,
     formatEventTs: formatEventTs,
+    ensurePanelFoot: ensurePanelFoot,
     addPanelTimestamp: addPanelTimestamp,
     PANEL_COPY_SVG: PANEL_COPY_SVG,
     PANEL_CHECK_SVG: PANEL_CHECK_SVG,
