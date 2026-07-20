@@ -65,42 +65,41 @@
   }
 
   /**
-   * Render (create or refresh) the ``.panel-time`` footer for ``el``
-   * using its ``data-start-ms`` stamp.  Shared by the live 1-second
-   * ticker and by ``finalizePanelTime`` so the in-progress footer and
-   * the final footer use identical anchoring/formatting logic.
+   * Render (create or refresh) the "time spent" label of ``el``'s
+   * bottom footer bar using its ``data-start-ms`` stamp.  Shared by
+   * the live 1-second ticker and by ``finalizePanelTime`` so the
+   * in-progress label and the final label use identical
+   * anchoring/formatting logic.
+   *
+   * The footer bar (``div.panel-time``, obtained via
+   * ``PanelCopy.ensurePanelFoot``) is shared with the event-timestamp
+   * badge (``span.panel-ts``, left side); the elapsed time renders in
+   * its own right-aligned ``span.panel-elapsed``.
    *
    * No-op if the panel was never stamped (e.g. replayed events) so the
    * historical view stays clean.
    */
+  // panelts-coverage:start
   function _renderPanelTime(el) {
     if (!el) return;
     const startMs = Number(el.dataset.startMs || 0);
     if (!startMs) return;
     const ms = Date.now() - startMs;
-    let footer = null;
-    // Find an existing direct-child footer (avoid matching footers
-    // inside nested panels).
-    for (let i = el.children.length - 1; i >= 0; i--) {
-      const c = el.children[i];
-      if (c.classList && c.classList.contains('panel-time')) {
-        footer = c;
-        break;
-      }
+    const footer = window.PanelCopy.ensurePanelFoot(el);
+    // Keep the footer anchored as the LAST child so it always renders
+    // visually at the bottom of the panel, even when later content
+    // (e.g. a tool_result bash-panel) is appended after the initial
+    // finalisation.
+    if (footer !== el.lastElementChild) el.appendChild(footer);
+    let span = footer.querySelector(':scope > .panel-elapsed');
+    if (!span) {
+      span = document.createElement('span');
+      span.className = 'panel-elapsed';
+      footer.appendChild(span);
     }
-    if (!footer) {
-      footer = document.createElement('div');
-      footer.className = 'panel-time';
-      el.appendChild(footer);
-    } else if (footer !== el.lastElementChild) {
-      // Keep the footer anchored as the LAST child so it always
-      // renders visually at the bottom of the panel, even when later
-      // content (e.g. a tool_result bash-panel) is appended after the
-      // initial finalisation.
-      el.appendChild(footer);
-    }
-    footer.textContent = fmtElapsedMs(ms);
+    span.textContent = fmtElapsedMs(ms);
   }
+  // panelts-coverage:end
 
   /**
    * Start the shared 1-second interval that re-renders the
@@ -745,7 +744,8 @@
   /**
    * Create a fresh collapsible 'Thoughts' llm-panel.  *ts* (optional,
    * ms since epoch) is the timestamp of the event that opened the
-   * panel; it renders as the title row's compact time badge.
+   * panel; it renders as the date + seconds time badge at the left of the
+   * panel's bottom footer bar.
    */
   function mkThoughtsPanel(ts) {
     const panel = mkEl('div', 'llm-panel');
@@ -2376,6 +2376,19 @@
       clearTimeout(overscrollTimer);
       overscrollTimer = null;
     }
+    // taskwheel-coverage:start
+    // Panel-wheel state is per-task/per-tab: a half-accumulated wheel
+    // gesture or a pinned target from the PREVIOUS task/tab must not
+    // leak into the one being shown now.
+    taskWheelPendingDir = '';
+    taskWheelLastTarget = null;
+    taskWheelAccum = 0;
+    taskWheelDir = '';
+    if (taskWheelTimer) {
+      clearTimeout(taskWheelTimer);
+      taskWheelTimer = null;
+    }
+    // taskwheel-coverage:end
   }
 
   function showAdjacentLoader(direction) {
@@ -2399,6 +2412,12 @@
   function renderAdjacentTask(direction, task, events, taskId) {
     removeAdjacentLoader();
     adjacentLoading = false;
+    // taskwheel-coverage:start
+    // A task-panel wheel step asked for this load: once the task is in
+    // the DOM, its events must be scrolled to the top of the viewport.
+    const wheelScrollPending = taskWheelPendingDir === direction;
+    taskWheelPendingDir = '';
+    // taskwheel-coverage:end
 
     // Only latch "no more tasks" when the backend genuinely found no
     // adjacent row: it then replies with task:'' AND task_id:null.  A
@@ -2472,6 +2491,14 @@
     }
     const tab = getTab(activeTabId);
     if (tab) applyChevronState(!!tab.panelsExpandedMap[taskLabel], taskLabel);
+    // taskwheel-coverage:start
+    if (wheelScrollPending)
+      scrollTaskRegionToTop({
+        task: taskLabel,
+        first: container,
+        last: container,
+      });
+    // taskwheel-coverage:end
   }
 
   function clearOutput() {
@@ -2812,7 +2839,8 @@
         node.classList.contains('panel-copy-btn') ||
         node.classList.contains('collapse-chv') ||
         node.classList.contains('collapse-preview') ||
-        node.classList.contains('panel-ts')
+        node.classList.contains('panel-ts') ||
+        node.classList.contains('panel-time')
       )
         return '';
     }
@@ -2900,8 +2928,10 @@
       }, 0);
     });
     addCopyButton(panelEl);
-    // Compact event-time badge in the title row, left of the Copy
-    // button (only when the rendered event carried a ``ts`` stamp).
+    // Compact event-time badge at the LEFT of the panel's bottom
+    // footer bar — the same bar whose right side shows the "time
+    // spent" label (only when the rendered event carried a ``ts``
+    // stamp).
     addPanelTimestamp(panelEl, ts);
   }
 
@@ -3745,7 +3775,9 @@
           const bpContent = mkEl('div', 'bash-panel-content');
           bp.appendChild(bpContent);
           addCopyButton(bp);
-          addPanelTimestamp(bp, ev.ts);
+          // No event-timestamp badge here: the inline bash output
+          // panel is a SUB-panel of the tool-call panel, whose own
+          // footer badge already shows the event time.
           c.appendChild(bp);
           tState.bashPanel = bpContent;
         }
@@ -3791,7 +3823,15 @@
             '</div>';
           // Raw tool-result error text for the Copy button.
           r.dataset.rawText = 'FAILED\n' + (ev.content || '');
-          addCollapse(r, r.querySelector('.rl'), ev.ts);
+          // Sub-panels of a tool-call panel never repeat the event
+          // timestamp — the owning panel's footer badge already shows
+          // it.  Only a FAILED panel that lands at TOP level (no
+          // owning tool_call panel) stamps its own badge.
+          addCollapse(
+            r,
+            r.querySelector('.rl'),
+            tState.lastToolCallEl ? undefined : ev.ts,
+          );
           resultTarget.appendChild(r);
           const trBody = r.querySelector('.tr-content');
           if (trBody) linkifyFilePaths(trBody);
@@ -3802,7 +3842,10 @@
           linkifyFilePaths(opContent);
           op.appendChild(opContent);
           addCopyButton(op);
-          addPanelTimestamp(op, ev.ts);
+          // Same rule as the FAILED panel above: no event-timestamp
+          // badge when the output panel nests inside its tool-call
+          // panel; only a top-level output panel stamps one.
+          if (!tState.lastToolCallEl) addPanelTimestamp(op, ev.ts);
           resultTarget.appendChild(op);
         }
         break;
@@ -4403,18 +4446,36 @@
   function updateVisibleTask() {
     const adjacentTasks = O.querySelectorAll('.adjacent-task[data-task]');
     if (!adjacentTasks.length) return;
-    const outputRect = O.getBoundingClientRect();
-    const checkY = outputRect.top + outputRect.height * 0.3;
     let visibleTask = currentTaskName;
     let visibleContainer = null;
-    for (let i = 0; i < adjacentTasks.length; i++) {
-      const rect = adjacentTasks[i].getBoundingClientRect();
-      if (rect.top <= checkY && rect.bottom > checkY) {
-        visibleTask = adjacentTasks[i].dataset.task;
-        visibleContainer = adjacentTasks[i];
-        break;
+    // taskwheel-coverage:start
+    // A panel-wheel step pinned its target task to the top of the
+    // viewport.  While the scroll position stays exactly where that
+    // step put it, the pinned task IS the visible one: the 30% probe
+    // below would resolve a pinned task SHORTER than 30% of the
+    // viewport to the task after it (and a clamped scroll position —
+    // short LAST task — never brings the target up to the probe).
+    const pinned = wheelPinnedTarget();
+    if (pinned) {
+      if (pinned.el.classList.contains('adjacent-task')) {
+        visibleTask = pinned.el.dataset.task || currentTaskName;
+        visibleContainer = pinned.el;
       }
+    } else {
+      // taskwheel-coverage:end
+      const outputRect = O.getBoundingClientRect();
+      const checkY = outputRect.top + outputRect.height * 0.3;
+      for (let i = 0; i < adjacentTasks.length; i++) {
+        const rect = adjacentTasks[i].getBoundingClientRect();
+        if (rect.top <= checkY && rect.bottom > checkY) {
+          visibleTask = adjacentTasks[i].dataset.task;
+          visibleContainer = adjacentTasks[i];
+          break;
+        }
+      }
+      // taskwheel-coverage:start
     }
+    // taskwheel-coverage:end
     setTaskText(visibleTask);
     // Sync the collapse button to the visible task's expanded state
     const vTab = getTab(activeTabId);
@@ -4463,6 +4524,197 @@
   new MutationObserver(() => {
     if (isRunning) sb();
   }).observe(O, {childList: true, subtree: true, characterData: true});
+
+  // --- Task-panel wheel navigation ---
+  // Scrolling the mouse wheel over the FIXED task panel steps the chat
+  // to the previous (wheel up) or next (wheel down) task of the chat
+  // and aligns that task's first event with the top of the viewport,
+  // so the user can rapidly flip through the tasks of a chat without
+  // dragging through their (possibly huge) trajectories.
+  // taskwheel-coverage:start
+  const TASK_WHEEL_STEP = 60; // accumulated |deltaY| px per task step
+  let taskWheelAccum = 0;
+  let taskWheelDir = '';
+  let taskWheelTimer = null;
+  // When a panel-wheel step runs past the loaded tasks, the adjacent
+  // task is fetched from the backend; this remembers the direction so
+  // renderAdjacentTask scrolls the freshly rendered task to the top.
+  let taskWheelPendingDir = '';
+  // The last panel-wheel navigation target: {el, scrollTop} where `el`
+  // is the target region's first element and `scrollTop` the (possibly
+  // clamped) position the step landed on.  While the view stays there,
+  // this region — not the 30% probe — is the "current task" for both
+  // the panel text and the next wheel step; see wheelPinnedTarget().
+  let taskWheelLastTarget = null;
+
+  /**
+   * Return the still-valid pinned panel-wheel target, or null.  The
+   * pin dissolves as soon as the user scrolls away from the position
+   * the wheel step landed on, or its element leaves the DOM (task
+   * deleted, tab content swapped).
+   */
+  function wheelPinnedTarget() {
+    if (!taskWheelLastTarget) return null;
+    if (O.scrollTop !== taskWheelLastTarget.scrollTop) {
+      taskWheelLastTarget = null;
+      return null;
+    }
+    if (!O.contains(taskWheelLastTarget.el)) {
+      taskWheelLastTarget = null;
+      return null;
+    }
+    return taskWheelLastTarget;
+  }
+
+  /**
+   * Ordered top-to-bottom list of the task regions rendered in
+   * #output.  Each .adjacent-task container is one region; the
+   * contiguous run of every other child (the current/main task's
+   * panels) forms one region labeled with currentTaskName.  The static
+   * #welcome block and the transient #adjacent-loader are not tasks.
+   * Returns [{task, first, last}] where first/last delimit the region.
+   */
+  function getTaskRegions() {
+    const regions = [];
+    let mainFirst = null;
+    let mainLast = null;
+    const children = O.children;
+    for (let i = 0; i < children.length; i++) {
+      const el = children[i];
+      if (el.id === 'welcome' || el.id === 'adjacent-loader') continue;
+      // display:none panels ("Uncollapse Chats" tucks non-result
+      // panels away via .chv-hidden) have zero rects and can not
+      // delimit a region's on-screen bounds.
+      if (el.classList.contains('chv-hidden')) continue;
+      if (el.classList.contains('adjacent-task')) {
+        if (mainFirst) {
+          regions.push({
+            task: currentTaskName,
+            first: mainFirst,
+            last: mainLast,
+          });
+          mainFirst = null;
+          mainLast = null;
+        }
+        regions.push({task: el.dataset.task || '', first: el, last: el});
+      } else {
+        if (!mainFirst) mainFirst = el;
+        mainLast = el;
+      }
+    }
+    if (mainFirst)
+      regions.push({task: currentTaskName, first: mainFirst, last: mainLast});
+    return regions;
+  }
+
+  /**
+   * Index of the region the viewport currently shows, using the same
+   * 30%-from-top check line as updateVisibleTask.  When no region
+   * straddles the line the viewport sits before the first region
+   * (index 0) or past the last one (last index).
+   */
+  function getVisibleRegionIndex(regions) {
+    // A still-pinned panel-wheel target IS the current region, even
+    // when it is too short for the 30% probe or scroll clamping kept
+    // it from reaching the top of the viewport (short LAST task).
+    const pinned = wheelPinnedTarget();
+    if (pinned)
+      for (let i = 0; i < regions.length; i++)
+        if (regions[i].first === pinned.el) return i;
+    const outputRect = O.getBoundingClientRect();
+    const checkY = outputRect.top + outputRect.height * 0.3;
+    for (let i = 0; i < regions.length; i++) {
+      const top = regions[i].first.getBoundingClientRect().top;
+      const bottom = regions[i].last.getBoundingClientRect().bottom;
+      if (top <= checkY && bottom > checkY) return i;
+    }
+    if (regions[0].first.getBoundingClientRect().top > checkY) return 0;
+    return regions.length - 1;
+  }
+
+  /**
+   * Scroll #output so the first element of `region` sits at the top of
+   * the viewport — the task's events start right below the fixed task
+   * panel — then resync the panel text and header metrics.
+   */
+  function scrollTaskRegionToTop(region) {
+    const outputRect = O.getBoundingClientRect();
+    const top = region.first.getBoundingClientRect().top;
+    O.scrollTop += top - outputRect.top;
+    // Pin the target (reading scrollTop back captures the browser's
+    // clamped value): the panel text and the next wheel step key off
+    // the task the user navigated to, not the 30% probe.
+    taskWheelLastTarget = {el: region.first, scrollTop: O.scrollTop};
+    updateVisibleTask();
+  }
+
+  /**
+   * One task-panel wheel step: scroll the chat to the task adjacent to
+   * the currently visible one ('prev' = above, 'next' = below).  When
+   * that task is not loaded yet, request it from the backend exactly
+   * like the #output overscroll path does, and remember to scroll to
+   * it once it renders.
+   */
+  function stepTaskFromPanel(dir) {
+    // Sub-agent tabs render exactly one task — nothing to step to.
+    const tab = getTab(activeTabId);
+    if (tab && tab.isSubagentTab) return;
+    const regions = getTaskRegions();
+    if (!regions.length) return;
+    const idx = getVisibleRegionIndex(regions);
+    const targetIdx = dir === 'next' ? idx + 1 : idx - 1;
+    if (targetIdx >= 0 && targetIdx < regions.length) {
+      scrollTaskRegionToTop(regions[targetIdx]);
+      return;
+    }
+    // The target task is not loaded — fetch it, honoring the same
+    // guards as accumulateOverscroll (never request with an unknown
+    // anchor id; never past a latched end-of-chat).
+    if (adjacentLoading || !activeTabId || !currentTaskName) return;
+    if (dir === 'prev' ? noPrevTask : noNextTask) return;
+    const anchorId = dir === 'prev' ? oldestLoadedTaskId : newestLoadedTaskId;
+    if (anchorId === undefined || anchorId === null || anchorId === '') return;
+    taskWheelPendingDir = dir;
+    adjacentLoading = true;
+    showAdjacentLoader(dir);
+    vscode.postMessage({
+      type: 'getAdjacentTask',
+      tabId: activeTabId,
+      taskId: anchorId,
+      direction: dir,
+    });
+  }
+
+  if (taskPanel) {
+    taskPanel.addEventListener(
+      'wheel',
+      e => {
+        // The fixed panel itself never scrolls: a wheel gesture over
+        // it is a task-navigation command.  Swallow the event so it
+        // does not fall through and scroll the chat underneath.
+        e.preventDefault();
+        e.stopPropagation();
+        if (!e.deltaY) return;
+        const dir = e.deltaY > 0 ? 'next' : 'prev';
+        if (taskWheelDir !== dir) {
+          taskWheelAccum = 0;
+          taskWheelDir = dir;
+        }
+        taskWheelAccum += Math.abs(e.deltaY);
+        clearTimeout(taskWheelTimer);
+        taskWheelTimer = setTimeout(() => {
+          taskWheelAccum = 0;
+          taskWheelDir = '';
+        }, 300);
+        if (taskWheelAccum >= TASK_WHEEL_STEP) {
+          taskWheelAccum = 0;
+          stepTaskFromPanel(dir);
+        }
+      },
+      {passive: false},
+    );
+  }
+  // taskwheel-coverage:end
 
   // --- Timer ---
   // ``endTs`` (ms since epoch) is the agent's recorded end timestamp
@@ -5584,6 +5836,19 @@
           inp.dispatchEvent(new Event('input', {bubbles: true}));
         }
         focusInputWithRetry();
+        break;
+      case 'insertAndSubmit':
+        // Cmd+E / Ctrl+E (kissSorcar.runSelection): paste the editor
+        // selection into the chat input textbox and submit it through
+        // the normal send path — a fresh ``submit`` for an idle tab, or
+        // an ``appendUserMessage`` steering instruction for a running
+        // agent — exactly like typing the text and pressing Send.
+        if (ev.text) {
+          inp.value = ev.text;
+          inp.dispatchEvent(new Event('input', {bubbles: true}));
+          focusInputWithRetry();
+          sendMessage();
+        }
         break;
       case 'focusInput':
         focusInputWithRetry();
@@ -7902,8 +8167,8 @@
     // Both the VS Code extension webview and the remote web chat load
     // this file, so a single wiring covers both views.  The
     // collapsed/expanded choice persists across reloads via
-    // localStorage; the panel defaults to expanded so the filter
-    // buttons and dates are visible whenever it is uncollapsed.
+    // localStorage; the panel defaults to COLLAPSED to keep the
+    // History sidebar compact until the user expands it.
     const historyFiltersToggle = document.getElementById(
       'history-filters-toggle',
     );
@@ -7918,12 +8183,12 @@
         );
         historyFiltersToggle.classList.toggle('expanded', expanded);
       };
-      let filtersCollapsed = false;
+      let filtersCollapsed = true;
       try {
         filtersCollapsed =
-          window.localStorage.getItem(HISTORY_FILTERS_COLLAPSED_KEY) === '1';
+          window.localStorage.getItem(HISTORY_FILTERS_COLLAPSED_KEY) !== '0';
       } catch {
-        // localStorage unavailable — start expanded.
+        // localStorage unavailable — start collapsed.
       }
       setHistoryFiltersExpanded(!filtersCollapsed);
       historyFiltersToggle.addEventListener('click', () => {
