@@ -95,6 +95,7 @@ from kiss.server.voice_wake import (
 )
 from kiss.server.web_merge import (
     _apply_exec_bit,  # noqa: F401  (re-exported for external tests)
+    _exec_flag,
     _hunk_unresolved,
     _record_hunk_rejected,
     _reject_all_hunks_in_file,
@@ -5997,7 +5998,7 @@ class RemoteAccessServer:
                             fd.get("target"),
                             binary=bool(fd.get("binary")),
                             link_target=fd.get("link_target"),
-                            make_executable=bool(fd.get("exec")),
+                            make_executable=_exec_flag(fd),
                         ),
                     )
                 except OSError as exc:

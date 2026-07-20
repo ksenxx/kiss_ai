@@ -7,9 +7,9 @@
 
 The task-status filter chips (Running / Errored / Succeeded /
 Workspace / Favorites) and the From/To date range must sit under a
-collapsible panel titled "Filters".  The filter buttons and dates
-MUST be visible whenever that panel is uncollapsed, and hidden while
-it is collapsed.
+collapsible panel titled "Filters" that starts COLLAPSED by default.
+The filter buttons and dates MUST be visible whenever that panel is
+uncollapsed, and hidden while it is collapsed.
 
 Coverage is split across three surfaces:
 
@@ -93,10 +93,11 @@ class TestRemoteWebViewFiltersPanel(unittest.TestCase):
         self.assertIn('id="history-filters-toggle"', panel)
         self.assertIn('id="history-filters-body"', panel)
         # Disclosure semantics: the toggle is a button titled
-        # "Filters" that controls the body and starts expanded.
+        # "Filters" that controls the body and starts collapsed
+        # (default flipped by "collapse Filters panel by default").
         toggle = panel.split('id="history-filters-toggle"', 1)[1]
         toggle = toggle.split("</button>", 1)[0]
-        self.assertIn('aria-expanded="true"', toggle)
+        self.assertIn('aria-expanded="false"', toggle)
         self.assertIn('aria-controls="history-filters-body"', toggle)
         self.assertIn(">Filters<", toggle)
         # Every filter control lives inside the collapsible body.
@@ -247,7 +248,8 @@ class TestFiltersPanelRealBrowser:
     """Painted-geometry checks for the collapsible Filters panel."""
 
     def test_uncollapsed_panel_shows_buttons_and_dates(self, _browser):
-        """Expanded by default: header + every control painted."""
+        """Collapsed by default: header painted, controls hidden until
+        the panel is expanded, then every control painted."""
         context, page = _open_history_page(_browser)
         try:
             assert _visible(page, "history-filters-toggle"), (
@@ -255,8 +257,14 @@ class TestFiltersPanelRealBrowser:
             )
             assert (
                 page.get_attribute("#history-filters-toggle", "aria-expanded")
-                == "true"
-            ), "the Filters panel must start uncollapsed"
+                == "false"
+            ), "the Filters panel must start collapsed"
+            for cid in FILTER_CONTROL_IDS:
+                assert not _visible(page, cid), (
+                    f"#{cid} must be hidden while the Filters panel "
+                    "starts collapsed"
+                )
+            page.click("#history-filters-toggle")
             for cid in FILTER_CONTROL_IDS:
                 assert _visible(page, cid), (
                     f"#{cid} must be visible while the Filters panel "
@@ -266,32 +274,32 @@ class TestFiltersPanelRealBrowser:
             context.close()
 
     def test_click_collapses_then_expands(self, _browser):
-        """Clicking the header hides every control; clicking again
-        repaints them all."""
+        """Clicking the header paints every control; clicking again
+        hides them all."""
         context, page = _open_history_page(_browser)
         try:
             page.click("#history-filters-toggle")
             assert (
                 page.get_attribute("#history-filters-toggle", "aria-expanded")
-                == "false"
-            ), "clicking the header must collapse the panel"
+                == "true"
+            ), "clicking the header must uncollapse the panel"
             for cid in FILTER_CONTROL_IDS:
-                assert not _visible(page, cid), (
-                    f"#{cid} must be hidden while the Filters panel "
-                    "is collapsed"
+                assert _visible(page, cid), (
+                    f"#{cid} must be visible while the Filters panel "
+                    "is uncollapsed"
                 )
             # The header itself must stay visible so the panel can be
-            # reopened.
+            # collapsed again.
             assert _visible(page, "history-filters-toggle")
 
             page.click("#history-filters-toggle")
             assert (
                 page.get_attribute("#history-filters-toggle", "aria-expanded")
-                == "true"
-            ), "clicking the header again must uncollapse the panel"
+                == "false"
+            ), "clicking the header again must collapse the panel"
             for cid in FILTER_CONTROL_IDS:
-                assert _visible(page, cid), (
-                    f"#{cid} must be visible again after uncollapsing"
+                assert not _visible(page, cid), (
+                    f"#{cid} must be hidden again after collapsing"
                 )
         finally:
             context.close()
@@ -303,6 +311,7 @@ class TestFiltersPanelRealBrowser:
             assert _visible(page, "history-filters-toggle"), (
                 "the Filters header must be visible in the remote skin"
             )
+            page.click("#history-filters-toggle")
             for cid in FILTER_CONTROL_IDS:
                 assert _visible(page, cid), (
                     f"#{cid} must be visible in the remote skin while "
