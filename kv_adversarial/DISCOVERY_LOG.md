@@ -22,9 +22,11 @@ auto-recovery; bounded in-RAM buffering while degraded), man fallocate(2)
 
 ## Slot layout chosen (idea #1 — KEPT)
 
-    [0..7] key | [8..11] size+1 | [12..15] prev pos+1 |
-    [16..116] value (zero-padded to 101) | [117..123] LSN (56-bit) |
-    [124..127] CRC-32C over bytes [0..123]
+```
+[0..7] key | [8..11] size+1 | [12..15] prev pos+1 |
+[16..116] value (zero-padded to 101) | [117..123] LSN (56-bit) |
+[124..127] CRC-32C over bytes [0..123]
+```
 
 - kSlotBytes stays 128. kSlotDataMax 112 → 101: the 11 freed bytes hold a
   7-byte LSN + 4-byte CRC. Values > 101 B never entered slots anyway (they
@@ -76,20 +78,20 @@ auto-recovery; bounded in-RAM buffering while degraded), man fallocate(2)
   and every staged entry stays PINNED in cache with its value authoritative
   (the RAM copy is the source of truth — the fsyncgate lesson), retried on
   the next flush_chunk (cleaner/Checkpoint/StopSession/destructor/full-chunk
-  trigger). Sticky write_errors_ + durable_ok_=false.
+  trigger). Sticky write_errors\_ + durable_ok\_=false.
 - Livelock bounds (found by reasoning through the ENOSPC test before it
   existed): a full-but-unlanded chunk refuses further staging; upsert_inline
   retries the landing ≤16 times, then absorbs the write in the overflow map
   (bounded by cache pressure, honest, never hangs); find_victim exhaustion
   falls back the same way after 64 attempts.
-- Read path: read_page zero-fills + counts read_errors_ on error; a SHORT
-  read below the landed high-water mark (landed_hw_, advanced only by
+- Read path: read_page zero-fills + counts read_errors\_ on error; a SHORT
+  read below the landed high-water mark (landed_hw\_, advanced only by
   successful landings) is counted as a fault (external truncation), while
   EOF beyond it is the normal pre-reserved-extent case. io_uring completions:
   -EINTR/-EAGAIN resubmit; other negatives count + abandon that chain only;
   mid-page short reads RESUBMIT THE REMAINDER (per-op `filled` cursor)
   instead of zero-filling bytes the device still owes (audit LOW-12).
-- fdatasync failure (Checkpoint + destructor): sticky durable_ok_=false,
+- fdatasync failure (Checkpoint + destructor): sticky durable_ok\_=false,
   never abort, never "retry and trust" (kernel may have dropped the pages).
 - O_DIRECT→buffered fallback now logged at open and surfaced as
   buffered_fallback in prod stats (audit LOW-11).
@@ -103,12 +105,12 @@ auto-recovery; bounded in-RAM buffering while degraded), man fallocate(2)
 ## Bounded oversize (audit LOW-6 — KEPT)
 
 - Overflow map entries now carry {bytes, lsn}; oversized entries are charged
-  size+64 against oversize_cap_ (budget/8, env HYDRA_OVERSIZE_CAP_MB).
+  size+64 against oversize_cap\_ (budget/8, env HYDRA_OVERSIZE_CAP_MB).
 - Oversized Upsert checks the cap BEFORE touching any state: a rejected
   upsert cannot damage the key's current value (rejection-ordering bug
   avoided by design; the test overwrites and re-reads around rejections).
   Same-size overwrites of an existing oversized key are always accepted
-  (delta-based check). rejected_oversize_ counts every refusal.
+  (delta-based check). rejected_oversize\_ counts every refusal.
 - Bounded overshoot: concurrent oversized upserts can pass the advisory
   check together and overshoot the cap by ≤ one value per in-flight thread.
   Accepted (bounded, honest) instead of a global oversize mutex.
@@ -138,7 +140,7 @@ auto-recovery; bounded in-RAM buffering while degraded), man fallocate(2)
   (FALLOC_FL_PUNCH_HOLE|KEEP_SIZE) and its position range pushed to the
   free-extent list that ensure_chunk() recycles (relaxed counter keeps the
   scored path lock-free while the list is empty). This is what removes the
-  512 GiB / 32-bit position ceiling: position space is REUSED, so next_slot_
+  512 GiB / 32-bit position ceiling: position space is REUSED, so next_slot\_
   stops growing once reclamation keeps pace.
 - Punch failure (EOPNOTSUPP filesystems) is nonfatal and surfaced
   (punch_unsupported): extent reuse alone stops file growth, and ANY stale
@@ -211,6 +213,7 @@ auto-recovery; bounded in-RAM buffering while degraded), man fallocate(2)
   what correctness needs.
 
 ## Adversarial discovery round 2: the compactcold test and the
+
 ## deleted-key resurrection bug (found AFTER the first full matrix passed)
 
 - IDEA: the first matrix's coverage (90.1% lines) showed compact_region's
@@ -236,13 +239,13 @@ auto-recovery; bounded in-RAM buffering while degraded), man fallocate(2)
      reseal the just-landed orphan as a tombstone in place, under the set
      lock (Delete's own discipline: a concurrent reinsert cannot land a
      newer value with a LOWER LSN than the tombstone).
-  2. compact_region: a still-deleted key's tombstone is RELOCATED
+  1. compact_region: a still-deleted key's tombstone is RELOCATED
      (restage_tombstone: fresh meta-less tombstone slot, sealed under the
      key's set lock after re-checking the mark) instead of dropped; if it
      cannot be restaged the region stays unreclaimed. A deleted key's last
      durable tombstone can therefore never be punched while stale copies
      of the key may survive elsewhere in the log.
-  3. recover_log: tombstone-winning keys (tracked in an rt scratch array,
+  1. recover_log: tombstone-winning keys (tracked in an rt scratch array,
      freed with rk/rl) are re-marked in the delete registry after
      load_overflow_file (keys whose overflow entry outlived the tombstone
      stay live), so fix #2's invariant holds across restart GENERATIONS.
@@ -258,14 +261,14 @@ auto-recovery; bounded in-RAM buffering while degraded), man fallocate(2)
 - Earlier in this round: matrix phases SHM/NOURING failed on
   "compaction reclaimed nothing" — reclaimed_bytes is NET (extent reuse
   decrements it), so a poll could legitimately read 0. Added cumulative
-  reclaimed_total_ (never decremented) as the stats surface.
+  reclaimed_total\_ (never decremented) as the stats surface.
 
 ## Round 3 — perf recovery (raise scored median back to >= 5.5, stretch 7.0)
 
 Research inputs (10-site pass, notes in session tmp): travisdowns concurrency
 cost hierarchy (contended fetch_add ~100ns+, cost tracks the NUMBER of
 contended RMWs; sharded/batched counters escape), cppreference+GCC docs
-([[likely]] is C++20 — scored build is C++17, use __builtin_expect; cold/
+(\[[likely]\] is C++20 — scored build is C++17, use \_\_builtin_expect; cold/
 noinline attributes), RocksDB write-group leader sequence allocation
 (one range per batch group), corsix.org fast CRC32C (HW crc32 ~21 b/cycle:
 a 124-B slot seal ≈ 48 cycles ≈ 15 ns — NOT a regression candidate),
@@ -281,16 +284,17 @@ kernel THP docs (MADV_HUGEPAGE for the big anonymous mmaps).
   "regression" is partly box noise. Gate target unchanged: >= 5.50 median.
 
 ### Idea R3-1: cache-line isolation of hot atomics (alignas(64)) — measuring
-- Evidence from code reading: flush_epoch_ (LOADED per verified-lookup page
-  check) was declared adjacent to occupancy_ (WRITTEN per admission);
-  dk_cur_/dk_bits_/dk_mask_ (loaded per miss) adjacent to dk_marks_
-  (written per miss); landed_hw_ (loaded per read_page) adjacent to lsn_
-  (written per staged slot); del_active_ (loaded per admission/landing)
-  and overflow_count_ (loaded per read) shared lines with neighbors;
-  free_count_ shared a line with free_mu_/vectors. Classic false sharing.
-- Change: alignas(64) on next_slot_; stage_ver_+lsn_ grouped on one
-  write-hot line; landed_hw_, free_count_, dk_bits_ group, dk_marks_,
-  overflow_count_, flush_epoch_, occupancy_, del_active_ each isolated.
+
+- Evidence from code reading: flush_epoch\_ (LOADED per verified-lookup page
+  check) was declared adjacent to occupancy\_ (WRITTEN per admission);
+  dk_cur\_/dk_bits\_/dk_mask\_ (loaded per miss) adjacent to dk_marks\_
+  (written per miss); landed_hw\_ (loaded per read_page) adjacent to lsn\_
+  (written per staged slot); del_active\_ (loaded per admission/landing)
+  and overflow_count\_ (loaded per read) shared lines with neighbors;
+  free_count\_ shared a line with free_mu\_/vectors. Classic false sharing.
+- Change: alignas(64) on next_slot\_; stage_ver\_+lsn\_ grouped on one
+  write-hot line; landed_hw\_, free_count\_, dk_bits\_ group, dk_marks\_,
+  overflow_count\_, flush_epoch\_, occupancy\_, del_active\_ each isolated.
   No semantic change; ten alignas(64) specifiers, +408 B object growth
   (sizeof(HydraStore) 81,000 -> 81,408 on g++ 11.4; 6.375 cache lines of
   padding — negligible vs the 512 MiB cache-sizing reserve).
@@ -300,6 +304,7 @@ kernel THP docs (MADV_HUGEPAGE for the big anonymous mmaps).
   sharing hazard.
 
 ### Idea R3-2: MADV_HUGEPAGE on index / entries cache / doorkeeper — measuring
+
 - Server THP config: enabled=[madvise], defrag=[madvise] => the advisory
   actively promotes to 2 MiB pages. The index (~2 GiB), cache (~5 GiB) and
   doorkeeper (2x128 MiB) are anonymous, fully-populated, uniformly randomly
@@ -314,27 +319,31 @@ kernel THP docs (MADV_HUGEPAGE for the big anonymous mmaps).
   high dTLB-miss rates, retry with explicit hugepage-aligned mappings.)
 
 ### Idea R3-3: per-session/batched hot stat counters — REJECTED without
+
 ### measurement (evidence-based deprioritization)
-- Code reading: dk_marks_.fetch_add fires only for NOT-seen keys (Zipf-hot
+
+- Code reading: dk_marks\_.fetch_add fires only for NOT-seen keys (Zipf-hot
   traffic is mostly seen); the rotation threshold load runs only in
-  cleaner 0; occupancy_ RMWs happen per admission/eviction (~0.6 M/s
+  cleaner 0; occupancy\_ RMWs happen per admission/eviction (~0.6 M/s
   total across 16 workers ≈ well under 1% of worker CPU). dk_seen_and_mark's
   scored cost is the inherent random DRAM touch on 2x128 MiB bitmaps, not
   the counter. Expected value below measurement noise; not worth a run.
 
 ### Ideas considered but not implemented (logged so they are not retried
+
 ### blindly)
+
 - Batched/sharded LSN allocation: per-session LSN blocks break per-key
   monotonicity (a session holding an older block can seal a NEWER version
   of a key with a LOWER LSN after crossing a set-lock happens-before edge);
   every provable repair (per-set last-LSN, resync-with-block-abandon on
   every set-lock acquisition) either adds memory (8 B x nsets) or
   degenerates back to one fetch_add per staging. The load-phase profile
-  shows Upsert-path work (75%) dominated by cache/set-lock work, not lsn_;
+  shows Upsert-path work (75%) dominated by cache/set-lock work, not lsn\_;
   in the scored window staging happens at cleaner rates (~1 M slots/s
   shared by 4 cleaners), where one extra contended RMW is noise. Would
-  revisit only with perf c2c evidence of lsn_ line contention.
-- __builtin_expect on fail-soft branches: expected effect below the
+  revisit only with perf c2c evidence of lsn\_ line contention.
+- \_\_builtin_expect on fail-soft branches: expected effect below the
   +-0.02 Mops/s run-to-run noise on this harness (error branches already
   compile to forward-not-taken layout at -O3); skipped to keep the diff
   minimal and every accepted change measurement-backed.
@@ -343,9 +352,10 @@ kernel THP docs (MADV_HUGEPAGE for the big anonymous mmaps).
   orders below the regression size. Nothing to recover.
 
 ### Round 3 final state
+
 - Accepted: R3-1 only (alignas(64) cache-line isolation; zero semantics).
 - Scored: BASELINE 5.50 median -> FINAL median-of-3 5.51 (see final gate
-  below for the six-run confirmation), RSS 7.90 GB <= 8 GiB.
+  below for the six-run confirmation), RSS 7.90 GB \<= 8 GiB.
 - FINAL GATE (2026-07-19): matrix 6/6 PASS; coverage 93.12%/95.10%
   (74.15% taken-at-least-once) after targeted top-up cov runs;
   validate.sh rc=0; six scored runs 5.50/5.51/5.53 + 5.51/5.53/5.53 ->
