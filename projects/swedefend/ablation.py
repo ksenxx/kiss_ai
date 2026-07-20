@@ -203,7 +203,7 @@ def _score(
 def run_ablation(
     judge_model: str = "claude-opus-4-7",
     taus: tuple[float, ...] = (0.5, 0.7, 0.9),
-    out_dir: Path | str = "swedefend/results",
+    out_dir: Path | str = "projects/swedefend/results",
 ) -> Path:
     """Run the full ablation and write ``ablation.csv``.
 
