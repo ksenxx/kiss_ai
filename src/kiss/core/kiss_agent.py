@@ -791,13 +791,34 @@ class KISSAgent(Base):
         """Updates token counter and budget from API response."""
         try:
             usage = self.model.extract_input_output_token_counts_from_response(response)
+            audio_input = 0
+            audio_output = 0
             if len(usage) == 4:
                 input_tokens, output_tokens, cache_read, cache_write = usage
                 cache_write_1h = 0
-            else:
+            elif len(usage) == 5:
                 input_tokens, output_tokens, cache_read, cache_write, cache_write_1h = usage
+            else:
+                # Audio-chat responses (gpt-audio family) additionally
+                # report the audio-token subsets, which bill at the
+                # model's separate audio rates.
+                (
+                    input_tokens,
+                    output_tokens,
+                    cache_read,
+                    cache_write,
+                    cache_write_1h,
+                    audio_input,
+                    audio_output,
+                ) = usage
             call_tokens = (
-                input_tokens + output_tokens + cache_read + cache_write + cache_write_1h
+                input_tokens
+                + output_tokens
+                + cache_read
+                + cache_write
+                + cache_write_1h
+                + audio_input
+                + audio_output
             )
             self.total_tokens_used += call_tokens
             # The last call's full prompt + completion approximates the
@@ -815,6 +836,8 @@ class KISSAgent(Base):
                 cache_read,
                 cache_write,
                 cache_write_1h,
+                num_audio_input_tokens=audio_input,
+                num_audio_output_tokens=audio_output,
             )
             self.budget_used += cost
         except KISSError:
