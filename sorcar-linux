@@ -6,10 +6,14 @@
 # Run KISS Sorcar on a remote Linux machine over SSH and use it from your
 # local VS Code (browser-based code-server).
 #
-# Usage:  ./sorcar-linux user@ip-address [PORT]
+# Usage:  ./sorcar-linux [--force] user@ip-address [PORT]
 #
 # Flow:
 #   1. SSH into user@ip-address.
+#   1b. Idempotency probe: if the host already has code-server, ~/kiss_ai and
+#       the KISS Sorcar extension, skip reinstalling — either reuse the
+#       already-running code-server or just relaunch it.  Pass --force to
+#       reprovision anyway.
 #   2. Install code-server (https://code-server.dev) if it is missing.
 #   3. Install KISS Sorcar (kiss_ai) with the README curl one-liner
 #      ( curl -fsSL .../scripts/install.sh | bash ) — only if ~/kiss_ai is
@@ -37,11 +41,19 @@ die()  { printf '\033[0;31m[ERR]\033[0m  %s\n' "$*" >&2; exit 1; }
 # ---------------------------------------------------------------------------
 # 1. Parse arguments
 # ---------------------------------------------------------------------------
-TARGET="${1:-}"
-PORT="${2:-8080}"
+FORCE=0
+ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --force|-f) FORCE=1 ;;
+        *) ARGS+=("$arg") ;;
+    esac
+done
+TARGET="${ARGS[0]:-}"
+PORT="${ARGS[1]:-8080}"
 
 if [[ -z "$TARGET" ]]; then
-    die "Usage: $0 user@ip-address [PORT]"
+    die "Usage: $0 [--force] user@ip-address [PORT]"
 fi
 if [[ "$TARGET" != *"@"* ]]; then
     warn "TARGET '$TARGET' has no 'user@' part; using the SSH default user."
@@ -60,20 +72,76 @@ ssh -o ConnectTimeout=15 -o BatchMode=no "$TARGET" 'echo ok' >/dev/null \
 info "SSH connection OK"
 
 # ---------------------------------------------------------------------------
-# 3. Remote bootstrap: code-server + kiss_ai + launch code-server.
+# 2b. Idempotency probe: is the host already provisioned?
 #
-# The heredoc is single-quoted so nothing is expanded locally; PORT is passed
-# through the environment on the ssh command line instead.
+# Classifies the remote host as one of:
+#   provisioned-running : code-server + ~/kiss_ai + KISS Sorcar extension are
+#                         all present AND code-server is already answering on
+#                         127.0.0.1:$PORT -> skip provisioning entirely.
+#   provisioned-stopped : everything is installed but code-server is not
+#                         serving on $PORT -> skip installs, only relaunch.
+#   unprovisioned       : something is missing -> run the full setup.
+# --force skips the probe and always runs the full setup.
 # ---------------------------------------------------------------------------
-step "Provisioning KISS Sorcar on $TARGET (this can take several minutes)..."
-ssh "$TARGET" "PORT='$PORT' bash -s" <<'REMOTE'
+if [[ "$FORCE" == "1" ]]; then
+    STATUS="forced"
+    warn "--force given: reprovisioning $TARGET even if already set up."
+else
+    step "Checking whether $TARGET is already provisioned..."
+    STATUS=$(ssh "$TARGET" "PORT='$PORT' bash -s" <<'PROBE' || echo unprovisioned
+PORT="${PORT:-8080}"
+export PATH="$HOME/.local/bin:$PATH"
+command -v code-server >/dev/null 2>&1        || { echo unprovisioned; exit 0; }
+[ -d "$HOME/kiss_ai" ]                        || { echo unprovisioned; exit 0; }
+code-server --list-extensions 2>/dev/null | grep -qi 'ksenxx.kiss-sorcar' \
+                                              || { echo unprovisioned; exit 0; }
+if curl -sf "http://127.0.0.1:$PORT/healthz" -o /dev/null 2>/dev/null \
+   || curl -sf "http://127.0.0.1:$PORT" -o /dev/null 2>/dev/null; then
+    echo provisioned-running
+else
+    echo provisioned-stopped
+fi
+PROBE
+    )
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Remote bootstrap: code-server + kiss_ai + launch code-server.
+#    Skipped entirely when the probe found a healthy, already-running
+#    install; runs in relaunch-only mode (SKIP_INSTALL=1) when everything is
+#    installed but code-server is down.
+#
+# The heredoc is single-quoted so nothing is expanded locally; PORT and
+# SKIP_INSTALL are passed through the environment on the ssh command line.
+# ---------------------------------------------------------------------------
+if [[ "$STATUS" == "provisioned-running" ]]; then
+    info "$TARGET is already provisioned: code-server + kiss_ai + extension found,"
+    info "code-server already serving on 127.0.0.1:$PORT — skipping reinstall."
+    info "(Use --force to reprovision from scratch.)"
+else
+    SKIP_INSTALL=0
+    if [[ "$STATUS" == "provisioned-stopped" ]]; then
+        SKIP_INSTALL=1
+        info "$TARGET already has code-server + kiss_ai — skipping reinstall,"
+        info "only relaunching code-server on 127.0.0.1:$PORT."
+        step "Restarting code-server on $TARGET..."
+    else
+        step "Provisioning KISS Sorcar on $TARGET (this can take several minutes)..."
+    fi
+    ssh "$TARGET" "PORT='$PORT' SKIP_INSTALL='$SKIP_INSTALL' bash -s" <<'REMOTE'
 set -e
 PORT="${PORT:-8080}"
+SKIP_INSTALL="${SKIP_INSTALL:-0}"
+WORKSPACE="$HOME/kiss_ai"
 export PATH="$HOME/.local/bin:$PATH"
 LOG_DIR="$HOME/.kiss"
 mkdir -p "$LOG_DIR" "$HOME/.local/bin"
 
 rinfo() { printf '\033[0;36m[%s]\033[0m %s\n' "$(hostname)" "$*"; }
+
+if [ "$SKIP_INSTALL" = "1" ]; then
+    rinfo "Already provisioned — skipping code-server/kiss_ai install steps."
+else
 
 # --- 3a. code-server -------------------------------------------------------
 # Use the standalone method (installs into ~/.local, no sudo) because this
@@ -114,7 +182,6 @@ else
     rinfo "kiss_ai already installed at ~/kiss_ai — skipping install."
 fi
 [ -d "$HOME/kiss_ai" ] || { echo "ERROR: kiss_ai install failed (~/kiss_ai missing)" >&2; exit 1; }
-WORKSPACE="$HOME/kiss_ai"
 
 # --- 3d. code-server settings: never block on workspace-trust prompts ------
 SETTINGS_DIR="$HOME/.local/share/code-server/User"
@@ -143,6 +210,8 @@ if ! code-server --list-extensions 2>/dev/null | grep -qi 'ksenxx.kiss-sorcar'; 
     fi
 fi
 
+fi # end of SKIP_INSTALL guard around install steps 3a-3e
+
 # --- 3f. (Re)launch code-server on 127.0.0.1:$PORT -------------------------
 # Kill any code-server we previously started on this port, then start a fresh
 # detached instance that survives the SSH session closing.
@@ -168,8 +237,8 @@ done
 echo "ERROR: code-server did not come up on 127.0.0.1:$PORT (see ~/.kiss/code-server.log)" >&2
 exit 1
 REMOTE
-
-info "Remote KISS Sorcar / code-server is ready."
+    info "Remote KISS Sorcar / code-server is ready."
+fi
 
 # ---------------------------------------------------------------------------
 # 4. Open the browser once the tunnel is live, in the background.
