@@ -61,7 +61,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~2850** | Unknown | Unknown |
-| **Models in bundled catalog** | 534 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 538 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -221,25 +221,25 @@ These agents live in `src/kiss/agents/third_party_agents/`.
 
 ## 🤖 Models Supported
 
-KISS Sorcar ships a catalog of **534 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
+KISS Sorcar ships a catalog of **538 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
 
 | Provider category | Catalog entries |
 |---|---:|
 | OpenAI | 84 |
 | Anthropic | 14 |
-| Gemini / Google | 25 |
+| Gemini / Google | 27 |
 | Together AI | 79 |
 | Z.AI | 8 |
 | Moonshot AI | 7 |
-| OpenRouter | 305 |
+| OpenRouter | 307 |
 | Claude Code CLI (`cc/*`) | 3 |
 | Codex CLI (`codex/*`) | 9 |
 
 Current catalog capability totals:
 
-- **517** generation-capable models
-- **365** function-calling-capable models
-- **8** embedding models
+- **521** generation-capable models
+- **369** function-calling-capable models
+- **10** embedding models
 
 Full model list:
 
@@ -354,7 +354,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Gemini / Google (25)</strong></summary>
+<summary><strong>Gemini / Google (27)</strong></summary>
 
 - `gemini-2.0-flash`
 - `gemini-2.0-flash-001`
@@ -496,7 +496,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (305)</strong></summary>
+<summary><strong>OpenRouter (307)</strong></summary>
 
 - `openrouter/ai21/jamba-large-1.7`
 - `openrouter/aion-labs/aion-2.0`
