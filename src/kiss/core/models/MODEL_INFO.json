@@ -707,6 +707,24 @@
     "emb": false,
     "gen": true
   },
+  "gemini-3.5-flash-lite": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 2.5,
+    "fc": true,
+    "emb": true,
+    "gen": true,
+    "comment": "NEW"
+  },
+  "gemini-3.6-flash": {
+    "context_length": 1048576,
+    "input_price_per_1M": 1.5,
+    "output_price_per_1M": 7.5,
+    "fc": true,
+    "emb": true,
+    "gen": true,
+    "comment": "NEW"
+  },
   "gemini-embedding-001": {
     "context_length": 2048,
     "input_price_per_1M": 0.15,
@@ -2240,7 +2258,7 @@
   "openrouter/deepseek/deepseek-v4-flash": {
     "context_length": 1048576,
     "input_price_per_1M": 0.098,
-    "output_price_per_1M": 0.196,
+    "output_price_per_1M": 0.188,
     "fc": true,
     "emb": false,
     "gen": true
@@ -2390,6 +2408,24 @@
     "emb": false,
     "gen": true
   },
+  "openrouter/google/gemini-3.5-flash-lite": {
+    "context_length": 1048576,
+    "input_price_per_1M": 0.3,
+    "output_price_per_1M": 2.5,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW"
+  },
+  "openrouter/google/gemini-3.6-flash": {
+    "context_length": 1048576,
+    "input_price_per_1M": 1.5,
+    "output_price_per_1M": 7.5,
+    "fc": true,
+    "emb": false,
+    "gen": true,
+    "comment": "NEW"
+  },
   "openrouter/google/gemma-2-27b-it": {
     "context_length": 8192,
     "input_price_per_1M": 0.65,
@@ -2440,8 +2476,8 @@
   },
   "openrouter/google/gemma-4-31b-it": {
     "context_length": 262144,
-    "input_price_per_1M": 0.22,
-    "output_price_per_1M": 0.55,
+    "input_price_per_1M": 0.12,
+    "output_price_per_1M": 0.37,
     "fc": true,
     "emb": false,
     "gen": true
@@ -2860,8 +2896,8 @@
   },
   "openrouter/moonshotai/kimi-k2.7-code": {
     "context_length": 262144,
-    "input_price_per_1M": 0.85,
-    "output_price_per_1M": 3.8,
+    "input_price_per_1M": 0.82,
+    "output_price_per_1M": 3.75,
     "fc": true,
     "emb": false,
     "gen": true
@@ -2953,8 +2989,8 @@
   },
   "openrouter/nvidia/nemotron-3-super-120b-a12b": {
     "context_length": 1000000,
-    "input_price_per_1M": 0.085,
-    "output_price_per_1M": 0.4,
+    "input_price_per_1M": 0.08,
+    "output_price_per_1M": 0.45,
     "fc": true,
     "emb": false,
     "gen": true
@@ -3705,7 +3741,7 @@
   "openrouter/qwen/qwen3-next-80b-a3b-instruct": {
     "context_length": 262144,
     "input_price_per_1M": 0.1,
-    "output_price_per_1M": 1.1,
+    "output_price_per_1M": 0.78,
     "fc": true,
     "emb": false,
     "gen": true
@@ -3985,8 +4021,8 @@
   },
   "openrouter/tencent/hy3": {
     "context_length": 262144,
-    "input_price_per_1M": 0.2,
-    "output_price_per_1M": 0.8,
+    "input_price_per_1M": 0.14,
+    "output_price_per_1M": 0.58,
     "fc": true,
     "emb": false,
     "gen": true,
@@ -4204,8 +4240,8 @@
   },
   "openrouter/z-ai/glm-5.2": {
     "context_length": 1048576,
-    "input_price_per_1M": 0.952,
-    "output_price_per_1M": 2.992,
+    "input_price_per_1M": 0.808,
+    "output_price_per_1M": 2.539,
     "fc": true,
     "emb": false,
     "gen": true
@@ -4254,7 +4290,7 @@
   "openrouter/~google/gemini-flash-latest": {
     "context_length": 1048576,
     "input_price_per_1M": 1.5,
-    "output_price_per_1M": 9.0,
+    "output_price_per_1M": 7.5,
     "fc": true,
     "emb": false,
     "gen": true

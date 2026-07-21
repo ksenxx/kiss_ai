@@ -571,46 +571,16 @@ body {
 }
 #task-panel.visible { display: block; }
 
+/* Expanded task drawer: show the ENTIRE task text.  The height is
+   viewport-bounded (60vh) so the panel always remains within the chat
+   webview — overlong tasks scroll inside the panel instead of pushing
+   the events area and the composer off screen. */
 #task-panel-text {
-  max-height: calc(var(--vscode-editor-font-size) * 1.6 * 3);
+  max-height: 60vh;
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-word;
 }
-
-#task-panel-collapse-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  margin-top: 6px;
-  padding: 2px 10px 2px 7px;
-  appearance: none;
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
-  border-radius: 999px;
-  color: var(--dim);
-  font-family: inherit;
-  font-size: var(--fs-sm);
-  line-height: 1.5;
-  cursor: pointer;
-  transition: color 0.15s, background 0.15s, border-color 0.15s;
-  user-select: none;
-}
-#task-panel-collapse-btn * { user-select: none; }
-
-#task-panel-collapse-btn:hover {
-  color: var(--fg);
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
-}
-
-#task-panel-collapse-btn:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: 1px;
-}
-
-#task-panel-collapse-btn svg { transition: transform 0.2s ease; }
-#task-panel-collapse-btn.expanded svg { transform: rotate(90deg); }
 
 #task-panel-copy {
   position: absolute;
@@ -670,7 +640,7 @@ body {
 #task-panel-drawer-btn[aria-expanded="false"] svg { transform: rotate(180deg); }
 
 /* Collapsed task drawer: a slim bar with the task clamped to one
-   ellipsized line; the Collapse/Uncollapse Chats row is tucked away. */
+   ellipsized line. */
 #task-panel.drawer-collapsed {
   padding-top: 4px;
   padding-bottom: 4px;
@@ -681,8 +651,6 @@ body {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
-
-#task-panel.drawer-collapsed #task-panel-collapse-btn { display: none; }
 
 /* ── Output Area ────────────────────────────────────── */
 #output {
@@ -2872,10 +2840,8 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 
 .merge-info.collapsed .merge-info-body { display: none; }
 
-/* Collapse-button-driven hide: when the fixed task panel's
-   "Uncollapse Chats"/"Collapse Chats" button is in the collapsed
-   state, non-result panels of completed tasks are fully hidden (not
-   just body-collapsed). */
+/* Chevron collapse-pass hide (applyChevronState): non-result panels
+   of completed tasks are fully hidden (not just body-collapsed). */
 .chv-hidden { display: none !important; }
 
 

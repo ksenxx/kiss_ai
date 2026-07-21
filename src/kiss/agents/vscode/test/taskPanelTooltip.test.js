@@ -26,7 +26,7 @@
 //   * mouseout hides the tooltip again.
 //
 // Exercises the real ``media/chat.html`` + ``media/main.js`` in jsdom
-// (same harness as taskPanelCollapseButton.test.js).  Run directly:
+// (same harness as taskPanelExpandFullText.test.js).  Run directly:
 //
 //     node src/kiss/agents/vscode/test/taskPanelTooltip.test.js
 

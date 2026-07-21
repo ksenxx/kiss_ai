@@ -67,7 +67,6 @@ CONTROL_IDS = [
     "status-steps",
     "task-panel",
     "task-panel-text",
-    "task-panel-collapse-btn",
     "task-panel-copy",
     "output",
     "welcome",
