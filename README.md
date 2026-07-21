@@ -374,6 +374,8 @@ Full model list:
 - `gemini-3.1-flash-tts-preview`
 - `gemini-3.1-pro-preview`
 - `gemini-3.5-flash`
+- `gemini-3.5-flash-lite`
+- `gemini-3.6-flash`
 - `gemini-embedding-001`
 - `gemini-embedding-2`
 - `gemini-embedding-2-preview`
@@ -489,6 +491,7 @@ Full model list:
 - `kimi-k2.5`
 - `kimi-k2.6`
 - `kimi-k2.7-code`
+- `kimi-k3`
 - `moonshot-v1-128k`
 - `moonshot-v1-32k`
 - `moonshot-v1-8k`
@@ -568,6 +571,8 @@ Full model list:
 - `openrouter/google/gemini-3.1-pro-preview`
 - `openrouter/google/gemini-3.1-pro-preview-customtools`
 - `openrouter/google/gemini-3.5-flash`
+- `openrouter/google/gemini-3.5-flash-lite`
+- `openrouter/google/gemini-3.6-flash`
 - `openrouter/google/gemma-2-27b-it`
 - `openrouter/google/gemma-3-12b-it`
 - `openrouter/google/gemma-3-27b-it`
@@ -590,6 +595,7 @@ Full model list:
 - `openrouter/kwaipilot/kat-coder-pro-v2`
 - `openrouter/kwaipilot/kat-coder-pro-v2.5`
 - `openrouter/mancer/weaver`
+- `openrouter/meituan/longcat-2.0`
 - `openrouter/meta-llama/llama-3.1-70b-instruct`
 - `openrouter/meta-llama/llama-3.1-8b-instruct`
 - `openrouter/meta-llama/llama-3.2-1b-instruct`
