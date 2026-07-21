@@ -1,3 +1,34 @@
+# PROGRESS — Website: add P. C. Sorcar sentence to "What is in the Name?"
+
+Task: add the sentence "the legendary Bengali magician, evoking the idea of an
+agent that performs feats that appear magical yet are grounded in disciplined
+engineering." to the "What is in the Name?" section of kisssorcar.github.io
+and update the live website.
+
+## DONE (single session) — COMPLETE
+
+1. Located the section in `website/kisssorcar.github.io/index.html` (§ 05,
+   `#name` card). Old text: "KISS Sorcar is named after <a ...>P. C. Sorcar,
+   the Bengali magician</a>. Note: ...". New text:
+
+   ```html
+   <p>KISS Sorcar is named after <a href="https://en.wikipedia.org/wiki/P._C._Sorcar">P. C. Sorcar</a>,
+   the legendary Bengali magician, evoking the idea of an agent that performs feats that appear
+   magical yet are grounded in disciplined engineering. Note: <strong>Sorcar</strong> also means
+   <em>government</em> in Bengali.</p>
+   ```
+
+2. Applied the same edit to the deployed clone `~/work/kisssorcar.github.io`,
+   committed (932cb2d "Add P. C. Sorcar sentence to 'What is in the Name?'
+   section"), rebased on origin (which had a new hydra_kv.pdf commit), and
+   pushed to `kisssorcar/kisssorcar.github.io` main.
+3. `docs/overview.md`, `llms-full.txt`, and the `index.html.md` footer already
+   contained the wording — no changes needed there.
+4. Verified live at https://kisssorcar.github.io/#name — the updated sentence
+   renders in the "Named after P. C. Sorcar." card.
+
+---
+
 # PROGRESS — HydraKV paper update (papers/kvstorepaper/) for the latest engine
 
 Task: update papers/kvstorepaper/hydra_kv.tex for the post-publication engine
@@ -382,47 +413,3 @@ Fixes (6 edits):
 
 Build: pdflatex x2 — 0 errors/warnings, 19 pages. pdftotext: removed
 phrases 0 hits, replacements present. Committed tex+pdf+PROGRESS.md.
-
-## SESSION (Hacker News post for the HydraKV paper) — COMPLETE
-
-Task: write a Hacker News post based on the HydraKV paper, emphasizing
-(1) the new engine and how it compares to the state of the art, and
-(2) KISS Sorcar and what it makes possible, connected to the LinkedIn
-post urn:li:activity:7485166552271495168 ("push AI to its limits...").
-Required tone: modest, attention-grabbing, no AI-generated feel.
-
-Steps done:
-1. Identified "the paper" as papers/kvstorepaper/hydra_kv.tex (HydraKV,
-   the only paper about a new *engine* vs. state of the art: 5.51 vs
-   FASTER's 0.93 Mops/s = 5.9x on skewed larger-than-memory YCSB-A).
-2. Read the paper's abstract, intro, design, ceiling argument, Section 6
-   (six verbatim prompts, two steering messages, cross-model review,
-   two audits, <$200 spend), and limitations.
-3. Fetched the LinkedIn post text via browser: "if we keep doing tasks
-   AI can handle, we may struggle to stay relevant unless we adapt...
-   it's only by pushing it to its limits that I've started to notice
-   the problems it genuinely cannot solve." Used as the post's opening
-   hook and linked explicitly.
-4. Web research, 10 sites logged in ./tmp/information-hnpost.md:
-   HN guidelines, Show HN rules, dang's Show HN tips (hand-written text
-   only, no LLM-edited text, factual language, backstory), kiss_ai repo,
-   microsoft/FASTER repo + research-papers page, HN Algolia searches
-   (KV-store posts score well; AI-built posts need honesty + artifacts),
-   kv_adversarial artifact dir (verified all public claims), arXiv
-   2604.23822.
-5. Wrote papers/kvstorepaper/social/hackernews.md: recommended title
-   "Show HN: HydraKV – an AI-built KV store, 5.9x FASTER on skewed
-   YCSB-A" (the 5.9x FASTER pun is factual), alternative title, ~9
-   paragraph body (LinkedIn hook -> fully specified problem -> 5.9x and
-   the 89%-of-roofline scoping -> six-prompts/two-nudges story with the
-   "Did you start with the most performant variant?" quote ->
-   adversarial loop + cross-model review + "not reward-hacked, not
-   copied" audit verdict -> what the engine is -> honest limits -> what
-   KISS Sorcar is (2,850 LoC core, Terminal Bench 62.2% vs 58/61.7,
-   built itself) -> links -> "Happy to answer questions, including the
-   uncomfortable ones."), plus submission notes.
-   Style: first person, no em dashes in prose, no marker vocabulary,
-   scope limits quoted from the paper (per the AI-slop review rules
-   from the previous two sessions).
-6. Every number cross-checked against hydra_kv.tex result constants and
-   the kv_adversarial README.
