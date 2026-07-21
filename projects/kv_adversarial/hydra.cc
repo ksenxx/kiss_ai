@@ -743,7 +743,7 @@ private:
     // smaller-budget reopen must degrade to counted drops, never OOM).
     uint64_t load_overflow_file(const uint64_t* rk, const uint64_t* rl);
     void write_overflow_file();          // Checkpoint: persist oversize map
-    void sync_dir();                     // fsync dir_ (sidecar rename/unlink)
+    bool sync_dir();                     // fsync dir_ (sidecar rename/unlink)
     // Background log compaction: relocate live slots out of a region, then
     // punch the region and recycle its position space.
     void compactor_main();
@@ -892,6 +892,40 @@ private:
     std::atomic<uint64_t> diag_nf_walk_{0};       // NotFound: walk exhausted
     std::atomic<uint64_t> diag_nf_xdata_{0};      // NotFound: xrec data gate
     std::atomic<uint64_t> tomb_refused_{0};       // stale-position tombstones
+    // S_BUFFERED entries a Checkpoint could NOT persist (July-21 audit
+    // Bug 6): first-inserts parked in OTHER still-active sessions' partial
+    // chunk buffers are single-owner state — stealing them mid-run would
+    // race the owner's staging. Checkpoint's contract is therefore
+    // "sessions quiescent" (StopSession lands partials; the destructor
+    // lands every session's). The gap is surfaced LOUDLY, not silently:
+    // counted per Checkpoint here, warned once per Checkpoint, and
+    // reported in the stats dump.
+    std::atomic<uint64_t> ckpt_unflushed_{0};
+    // Sessions with un-landed chunk data (0<->1 per chunk transition, owner
+    // thread only; release so a truncation-gate acquire load sees every
+    // increment that happened-before a Delete's sweep). Nonzero means SOME
+    // staged record may still land as a live-looking slot AFTER a newer
+    // tombstone reseal — the dlog must not be truncated then (reviewer
+    // CRITICAL: Checkpoint truncation vs foreign parked/in-flight chunks).
+    std::atomic<uint64_t> unlanded_chunks_{0};
+    // Sticky: the dlog could not be fully/validly replayed at recovery
+    // (read failure or CRC-torn records). recover_ok degrades and the
+    // file is never truncated by this instance.
+    std::atomic<bool> dlog_degraded_{false};
+    // Truncation-gate evidence (reviewer round 2). poison_fail_: any
+    // tombstoning failure the write/refusal counters would miss (failed
+    // header/page reads, exhausted poison passes) — a consumed reaper item
+    // whose tombstone may not exist. del_unmarks_: total registry unmarks;
+    // an unmark DURING a Checkpoint means a concurrent reinsert may have
+    // no-op'ed a queued poison while itself still being non-durable
+    // (S_DIRTY past its stripe scan) — the intent must then outlive this
+    // Checkpoint. recover_clean_: false when the recovery scan skipped
+    // unreadable slot regions (an intent's key may be invisible to replay
+    // resolution — destroying the intent could resurrect the key on a
+    // later healthy reopen).
+    std::atomic<uint64_t> poison_fail_{0};
+    std::atomic<uint64_t> del_unmarks_{0};
+    std::atomic<bool> recover_clean_{true};
                                                   // refused (key/size gate)
     std::atomic<uint64_t> recover_dropped_{0}; // keys dropped by recovery
     uint64_t              oversize_cap_ = 0;   // budget/8 (HYDRA_OVERSIZE_CAP_MB)
@@ -969,19 +1003,49 @@ private:
         std::lock_guard<std::mutex> g(sh.mu);
         return sh.set.count(key) != 0;
     }
+    // Registry RAM is charged (July-21 audit Bug 7): each mark costs about
+    // one unordered_set node + bucket slot; kDelMarkCharge is a conservative
+    // per-mark estimate. Charged bytes share the misc-RAM pool with the
+    // overflow map (oversize_would_fit adds them), so a large registry
+    // honestly backpressures overflow admissions instead of silently
+    // growing past the budget. Marks themselves are never refused or
+    // trimmed — they are load-bearing for correctness (read gating until
+    // tombstones land, and compaction's still-deleted tombstone restaging
+    // across restarts) — so the registry is bounded by the number of
+    // distinct live-deleted keys; crossing the pool cap is surfaced loudly
+    // once rather than hidden.
+    static constexpr uint64_t kDelMarkCharge = 64;
+    std::atomic<uint64_t> del_bytes_{0};       // registry RAM charge
+    std::atomic<bool> del_warned_{false};
     bool del_mark(uint64_t key) {    // true iff key was not already marked
         DelShard& sh = del_shard(key);
         std::lock_guard<std::mutex> g(sh.mu);
         bool fresh = sh.set.insert(key).second;
-        if (fresh) del_active_.fetch_add(1, std::memory_order_release);
+        if (fresh) {
+            del_active_.fetch_add(1, std::memory_order_release);
+            uint64_t b = del_bytes_.fetch_add(kDelMarkCharge,
+                                              std::memory_order_relaxed)
+                         + kDelMarkCharge;
+            if (b > oversize_cap_ &&
+                !del_warned_.exchange(true, std::memory_order_relaxed))
+                fprintf(stderr, "hydra: WARNING delete registry (%llu bytes)"
+                        " exceeds the misc-RAM cap (%llu) — overflow"
+                        " admissions will be refused until deleted keys are"
+                        " re-upserted or the budget is raised\n",
+                        (unsigned long long)b,
+                        (unsigned long long)oversize_cap_);
+        }
         return fresh;
     }
     void del_unmark(uint64_t key) {
         if (del_active_.load(std::memory_order_acquire) == 0) return;
         DelShard& sh = del_shard(key);
         std::lock_guard<std::mutex> g(sh.mu);
-        if (sh.set.erase(key))
+        if (sh.set.erase(key)) {
             del_active_.fetch_sub(1, std::memory_order_release);
+            del_bytes_.fetch_sub(kDelMarkCharge, std::memory_order_relaxed);
+            del_unmarks_.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 
     // Deferred on-disk delete poisoning ("reaper"). Delete() marks the key,
@@ -1007,8 +1071,38 @@ private:
         reap_q_.push_back(key);
         return true;
     }
-    void reap_drain(Session* se);       // drain queue (any thread, reentrant)
+    // Drain queue (any thread, reentrant). force=false (cleaners only)
+    // honors the HYDRA_REAP_PAUSE test hook, which makes delete
+    // crash-durability tests deterministic (recovery must rely on the
+    // dlog, not on reaper timing luck); Checkpoint/shutdown always drain.
+    void reap_drain(Session* se, bool force = true);
     void poison_versions(uint64_t key, Session* se);
+
+    // Delete-intent log ("dlog", July-21 audit Bug 5). The reaper made
+    // Delete() cheap but NOT crash-durable: a crash after Delete returned
+    // and before the reaper/Checkpoint wrote the on-disk tombstones let
+    // recovery resurrect the key's durable (previously checkpointed)
+    // versions — and a resurrected delete is a worse failure class than a
+    // lost recent write. Fix: Delete() appends a 24-byte intent record
+    // [key 8 | lsn 8 | crc32c 4 | pad 4] to a buffered sidecar file BEFORE
+    // returning. One buffered write(2) (~1–2 µs) reaches the KERNEL page
+    // cache, so the intent survives process death (SIGKILL) immediately;
+    // Checkpoint's fdatasync extends that to power loss — deletes are now
+    // durable at least as strongly as writes at every point in time.
+    // Recovery replays the intents newest-LSN-wins (dlog_replay): an intent
+    // newer than the key's newest recovered version re-marks the key
+    // deleted, re-queues its durable tombstoning, and erases a stale
+    // sidecar-loaded overflow value it beats. The file is truncated by
+    // Checkpoint once every logged intent's tombstones are durable
+    // (quiescent-reaper check under dlog_mu_), so it stays tiny.
+    // Zero cost while nothing is deleted (the scored workload never pays).
+    int dfd_ = -1;
+    std::mutex dlog_mu_;                 // serializes appends vs truncation
+    uint64_t dlog_appends_ = 0;          // guarded by dlog_mu_
+    std::atomic<uint64_t> dlog_bytes_{0};
+    std::atomic<uint64_t> dlog_replayed_{0};
+    bool dlog_append(uint64_t key, uint64_t lsn);   // call under dlog_mu_
+    void dlog_replay(const uint64_t* rk, uint64_t* rl, uint8_t* rt);
     // Inline-sized budget-capped absorb (disk-full / index-full fallback).
     // Called under the key's set lock. False = refused (counted, sticky).
     bool overflow_absorb(uint64_t key, const uint8_t* data, size_t size) {
@@ -1138,6 +1232,38 @@ void HydraStore::InitExtended(size_t hash_table_size, size_t,
             fprintf(stderr, "hydra: cannot reopen %s\n", file.c_str());
             abort();
         }
+        // Delete-intent log (see dfd_ member comment). NO O_TRUNC: unsynced
+        // intents from a crashed run are replayed by recover_log. A torn
+        // tail (crash mid-append) is overwritten: round the append offset
+        // DOWN to a whole 24-byte record so post-crash appends stay
+        // record-aligned for the next replay (the torn record itself is
+        // also CRC-gated).
+        std::string dpath = dir_ + "/hydra_dlog.dat";
+        dfd_ = open(dpath.c_str(), O_RDWR | O_CREAT, 0644);
+        if (dfd_ < 0) {
+            fprintf(stderr, "hydra: cannot open %s\n", dpath.c_str());
+            abort();
+        }
+        struct stat dsb;
+        if (fstat(dfd_, &dsb) != 0) {
+            // Unknown length (reviewer R2-M2): appends would clobber
+            // offset 0 and any surviving intents would be skipped.
+            // Disable the dlog outright — appends then fail and Delete
+            // degrades to its checked synchronous fallbacks — and stay
+            // degraded (recover_ok=0, never truncate).
+            fprintf(stderr, "hydra: dlog fstat failed (errno=%d) — "
+                    "delete-intent log disabled, recovery degraded\n",
+                    errno);
+            close(dfd_);
+            dfd_ = -1;
+            dlog_degraded_.store(true, std::memory_order_relaxed);
+        }
+        uint64_t dsz = (dfd_ >= 0 && dsb.st_size > 0)
+                           ? (uint64_t)dsb.st_size : 0;
+        dlog_bytes_.store(dsz - dsz % 24, std::memory_order_relaxed);
+        // Make the file's CREATION power-loss durable: fdatasync(dfd_)
+        // alone does not persist a new directory entry.
+        sync_dir();
 
         // X-extent registry (before recovery: the scan marks x extents).
         void* xm = mmap(nullptr, kMaxExtents / 8, PROT_READ | PROT_WRITE,
@@ -1184,7 +1310,13 @@ void HydraStore::InitExtended(size_t hash_table_size, size_t,
         struct stat sb, ov;
         bool have_sidecar =
             stat((dir_ + "/hydra_overflow.dat").c_str(), &ov) == 0;
-        if (fstat(fd_, &sb) == 0 && (sb.st_size > 0 || have_sidecar))
+        // A nonempty dlog beside an empty log/sidecar must ALSO trigger
+        // recovery: skipping it would restart lsn_ at 1, and a later
+        // reinsert could then lose to a stale surviving intent at the
+        // NEXT recovery (reviewer CRITICAL: dlog-only restart).
+        if (fstat(fd_, &sb) == 0 &&
+            (sb.st_size > 0 || have_sidecar ||
+             dlog_bytes_.load(std::memory_order_relaxed) > 0))
             recover_log((uint64_t)sb.st_size);
     }
 
@@ -1297,6 +1429,7 @@ HydraStore::~HydraStore() {
         if (dk_bits_[g]) munmap(dk_bits_[g], (dk_mask_ + 1) / 8);
     if (fd_ >= 0) close(fd_);
     if (fd2_ >= 0) close(fd2_);
+    if (dfd_ >= 0) close(dfd_);
     uint64_t mism = key_mismatch_.load();
     if (mism) fprintf(stderr, "hydra: WARNING %llu slot key mismatches\n",
                       (unsigned long long)mism);
@@ -1308,12 +1441,16 @@ HydraStore::~HydraStore() {
                 "hydra: stats xrec=%llu xfail_pwrite=%llu xfail_pos=%llu "
                 "xfail_link=%llu xabsorb=%llu rej_over=%llu rej_mem=%llu "
                 "nf_walk=%llu nf_xdata=%llu read_err=%llu write_err=%llu "
-                "key_mism=%llu ovf_cnt=%llu ovf_bytes=%llu tomb_ref=%llu\n",
+                "key_mism=%llu ovf_cnt=%llu ovf_bytes=%llu tomb_ref=%llu "
+                "del_marks=%llu del_bytes=%llu dlog_bytes=%llu "
+                "dlog_replayed=%llu ckpt_unflushed=%llu\n",
                 v(diag_xlink_ok_), v(diag_xfail_pwrite_), v(diag_xfail_pos_),
                 v(diag_xfail_link_), v(diag_xabsorb_), v(rejected_oversize_),
                 v(rejected_mem_), v(diag_nf_walk_), v(diag_nf_xdata_),
                 v(read_errors_), v(write_errors_), v(key_mismatch_),
-                v(overflow_count_), v(oversize_bytes_), v(tomb_refused_));
+                v(overflow_count_), v(oversize_bytes_), v(tomb_refused_),
+                v(del_active_), v(del_bytes_), v(dlog_bytes_),
+                v(dlog_replayed_), v(ckpt_unflushed_));
     }
 }
 
@@ -1434,7 +1571,13 @@ void HydraStore::tombstone_slot(uint64_t position, uint64_t key,
                 // NEIGHBORING slot never touches these bytes; a racing
                 // tombstoner of THIS slot is serialized by the caller's
                 // set lock — the re-read is defensive).
-                if (xpread(fd2_, hb, kXHdrBytes, off) == (ssize_t)kXHdrBytes) {
+                if (xpread(fd2_, hb, kXHdrBytes, off) != (ssize_t)kXHdrBytes) {
+                    // Consumed work item with NO tombstone written and no
+                    // other counter bumped (reviewer R2-C3): record it so
+                    // Checkpoint can never claim this delete's tombstones
+                    // are durable.
+                    poison_fail_.fetch_add(1, std::memory_order_relaxed);
+                } else {
                     memcpy(&xsz1, hb + 8, 4);
                     uint64_t hkey;
                     memcpy(&hkey, hb, 8);
@@ -1476,7 +1619,11 @@ void HydraStore::tombstone_slot(uint64_t position, uint64_t key,
     uint64_t page = position / kSlotsPerPage;
     SpinLock& pl = page_locks_[page % kPageLockCount];
     pl.lock();
-    if (!read_page(page, se->rmw_buf)) { pl.unlock(); return; }  // fail-soft
+    if (!read_page(page, se->rmw_buf)) {   // fail-soft, but COUNTED: the
+        pl.unlock();                       // work item is consumed with no
+        poison_fail_.fetch_add(1, std::memory_order_relaxed);   // tombstone
+        return;
+    }
     uint8_t* slot = se->rmw_buf + (position % kSlotsPerPage) * kSlotBytes;
     uint64_t skey;
     uint32_t cur_sz1;
@@ -1544,6 +1691,8 @@ bool HydraStore::restage_tombstone(uint64_t key, Session* se) {
         uint32_t sz1 = 0xFFFFFFFFu;     // size 0xFFFFFFFE: unmatchable
         memcpy(slot + 8, &sz1, 4);      // prev = 0: no chain
         slot_seal(slot, lsn_.fetch_add(1, std::memory_order_relaxed));
+        if (se->chunk_fill == 0)
+            unlanded_chunks_.fetch_add(1, std::memory_order_release);
         se->chunk_fill++;
         bool full = (se->chunk_fill == se->chunk_cap);
         set_locks_[s].unlock();
@@ -1583,6 +1732,8 @@ bool HydraStore::stage_flush(uint64_t s, int w, Session* se) {
     memcpy(slot + 16, e.data, e.size);
     memset(slot + 16 + e.size, 0, kSlotDataMax - e.size);
     slot_seal(slot, lsn_.fetch_add(1, std::memory_order_relaxed));
+    if (se->chunk_fill == 0)
+        unlanded_chunks_.fetch_add(1, std::memory_order_release);
     se->chunk_fill++;
     e.ver = stage_ver_.fetch_add(1, std::memory_order_relaxed);  // unique pin
     se->chunk_meta.push_back(
@@ -1801,6 +1952,7 @@ void HydraStore::flush_chunk(Session* se) {
         se->chunk_active = false;
         note_extent_done(se->extent_base);   // compactor may touch it now
     }
+    unlanded_chunks_.fetch_sub(1, std::memory_order_release);
     se->chunk_fill = 0;
     se->chunk_meta.clear();
 }
@@ -1957,7 +2109,10 @@ bool HydraStore::oversize_would_fit(uint64_t key, size_t size) {
         if (it != sh.map.end())
             credit = ovf_charge(it->second.bytes.size());
     }
-    return oversize_bytes_.load(std::memory_order_relaxed) + ovf_charge(size)
+    // del_bytes_: the delete registry shares this pool (July-21 audit
+    // Bug 7) — see the kDelMarkCharge comment.
+    return oversize_bytes_.load(std::memory_order_relaxed)
+           + del_bytes_.load(std::memory_order_relaxed) + ovf_charge(size)
            <= oversize_cap_ + credit;
 }
 
@@ -2718,6 +2873,8 @@ void HydraStore::upsert_inline(uint64_t key, const uint8_t* data, uint16_t size)
             memcpy(slot + 16, data, size);
             memset(slot + 16 + size, 0, kSlotDataMax - size);
             slot_seal(slot, lsn_.fetch_add(1, std::memory_order_relaxed));
+            if (se->chunk_fill == 0)
+                unlanded_chunks_.fetch_add(1, std::memory_order_release);
             se->chunk_fill++;
             p1 = (uint32_t)position + 1;
             new_state = S_BUFFERED;
@@ -3048,15 +3205,35 @@ void HydraStore::RMW(uint64_t key, const uint8_t* mod_data, size_t mod_size) {
 
 bool HydraStore::Delete(uint64_t key) {
     if (!disk_mode_) return overflow_erase(key);
-    // Mark FIRST. Every admission path and every flush landing re-checks
-    // the registry / pin ownership under the key's set lock, so any copy
-    // staged after our sweep below sees the mark and is skipped/dropped,
-    // and any copy staged before is visible to the sweep. Reads that start
-    // after Delete returns observe the mark and report NotFound even while
-    // a stale copy is still somewhere in flight.
-    bool newly = del_mark(key);
-    bool existed = overflow_erase(key);
     uint64_t s = set_of(key);
+    // The ENTIRE delete linearization — registry mark, intent-LSN
+    // allocation, overflow+cache sweep, dlog append and reaper enqueue —
+    // runs under the key's SET LOCK, the same lock every Upsert path
+    // publishes its value and calls del_unmark under. This closes the
+    // reviewer's race (R2-C1): an Upsert could previously publish V1 and
+    // clear a mark BETWEEN our mark and our sweep, so this Delete swept V1,
+    // the poison no-op'ed on the cleared mark, and the key's OLD
+    // checkpointed version resurfaced at runtime while recovery honored
+    // the intent. With the mark/LSN/sweep/append atomic against
+    // publication, either the Upsert is fully before us (we sweep its
+    // value, our fresher intent wins everywhere) or fully after (it
+    // unmarks, republishes and out-LSNs the intent everywhere). Lock
+    // order: set -> del-shard/overflow-shard -> dlog_mu_ -> reap_mu_;
+    // cycle-free — no path acquires a set lock while holding any of these.
+    set_locks_[s].lock();
+    // Mark FIRST (under the lock). Every admission path and every flush
+    // landing re-checks the registry / pin ownership under this same set
+    // lock, so any copy staged after our sweep sees the mark and is
+    // skipped/dropped, and any copy staged before is visible to the sweep.
+    // Reads that start after Delete returns observe the mark and report
+    // NotFound even while a stale copy is still somewhere in flight.
+    bool newly = del_mark(key);
+    // Intent LSN allocated AT the mark (the delete's linearization point):
+    // any reinsert unmarks + republishes under this lock AFTER we release
+    // it and seals with a fresher flush-time LSN, so recovery's replay
+    // agrees with runtime reads (reinsert wins both).
+    uint64_t dlsn = newly ? lsn_.fetch_add(1, std::memory_order_relaxed) : 0;
+    bool existed = overflow_erase(key);
     // Sweep the cache — SINGLE pass, never blocks. (Blocking here until a
     // BUFFERED pin landed livelocked when the pin belonged to ANOTHER
     // session's parked partial chunk and that session was idle — the
@@ -3068,7 +3245,6 @@ bool HydraStore::Delete(uint64_t key) {
     // LANDING reseals that slot as a tombstone and drops the entry
     // (flush_chunk, old_p1 == 0 branch). Readers meanwhile are gated by the
     // registry mark, so the key reads NotFound the instant we return.
-    set_locks_[s].lock();
     Entry* base = set_base(s);
     for (size_t w = 0; w < kAssoc; ++w) {
         Entry& e = base[w];
@@ -3081,7 +3257,6 @@ bool HydraStore::Delete(uint64_t key) {
             break;
         }
     }
-    set_locks_[s].unlock();
     // Landed on-disk versions are unlinked ASYNCHRONOUSLY by the reaper
     // (poison_versions): a synchronous pread+pwrite per version made Delete
     // ~160x an Upsert (audit). The registry mark keeps every reader correct
@@ -3093,10 +3268,44 @@ bool HydraStore::Delete(uint64_t key) {
     // fingerprint-collision candidate can overstate `existed` for an
     // absent-key delete with ~2^-32 probability — documented residual, the
     // same class as the engine's other fingerprint residuals.)
-    if (index_.first_candidate(mix64(key)) != 0) {
-        existed = true;
-        if (newly && !reap_try_enqueue(key))
-            poison_versions(key, session());   // backpressure: queue full
+    bool landed = index_.first_candidate(mix64(key)) != 0;
+    if (landed) existed = true;
+    bool sync_poison = false, sync_sidecar = false;
+    if (newly && existed) {
+        // Crash-durability (July-21 audit Bug 5): append the delete intent
+        // to the dlog BEFORE returning, so a crash before the reaper or
+        // the next Checkpoint writes the on-disk tombstones cannot
+        // resurrect the key's durable versions at recovery. The intent's
+        // LSN is allocated NOW: it beats every already-landed version and
+        // loses to any later reinsert (values seal at flush time with a
+        // fresher LSN). Append and reaper-enqueue share ONE dlog_mu_
+        // critical section so Checkpoint's truncation (also under
+        // dlog_mu_) can never observe a quiescent reaper while an
+        // appended intent's tombstones are not yet durable.
+        bool logged;
+        {
+            std::lock_guard<std::mutex> lk(dlog_mu_);
+            logged = dlog_append(key, dlsn);
+            // Append failure: no durable intent exists — degrade to the
+            // old synchronous poison so the tombstones themselves become
+            // the (device-)durable record. Queue-full backpressure takes
+            // the same path. Poison runs OUTSIDE dlog_mu_ and the set lock
+            // (it does page I/O and itself takes the set lock).
+            sync_poison = landed && (!logged || !reap_try_enqueue(key));
+            // Register the synchronous poison as IN-FLIGHT before any lock
+            // is released (reviewer R2-C7): Checkpoint's truncation proof
+            // waits on reap_inflight_ == 0, so an intent whose tombstoning
+            // runs synchronously in this thread can never be retired while
+            // that poison is pending or unfinished.
+            if (sync_poison)
+                reap_inflight_.fetch_add(1, std::memory_order_acq_rel);
+        }
+        // Overflow-only key (nothing landed to poison) whose intent could
+        // not be logged: the rewritten sidecar is the only possible durable
+        // delete evidence — rewrite it synchronously below (reviewer
+        // R2-C6). If that also fails, write_errors_ stays nonzero and the
+        // dlog is never truncated again (sticky, fail-soft).
+        sync_sidecar = !landed && !logged;
     }
     // Nothing existed anywhere (absent-key delete): drop the mark again so
     // the registry cannot grow without bound under absent-delete churn.
@@ -3104,6 +3313,12 @@ bool HydraStore::Delete(uint64_t key) {
     // concurrent Upsert's value is legitimately visible (Upsert-after-
     // Delete unmarks anyway).
     if (newly && !existed) del_unmark(key);
+    set_locks_[s].unlock();
+    if (sync_poison) {
+        poison_versions(key, session());
+        reap_inflight_.fetch_sub(1, std::memory_order_acq_rel);
+    }
+    if (sync_sidecar) write_overflow_file();
     // Idempotence: a second Delete with no re-insert in between returns
     // false even if it swept up residue of the first one.
     return newly && existed;
@@ -3125,7 +3340,12 @@ void HydraStore::poison_versions(uint64_t key, Session* se) {
     uint32_t p1;
     int poison_passes = 0;
     while ((p1 = verified_lookup(key, se)) != 0) {
-        if (++poison_passes > 4096) break;
+        if (++poison_passes > 4096) {
+            // Bound exhausted with the key still resolvable: some version
+            // may remain un-tombstoned — counted so the dlog is retained.
+            poison_fail_.fetch_add(1, std::memory_order_relaxed);
+            break;
+        }
         // Re-check the mark UNDER THE SET LOCK before each tombstone: a
         // concurrent Upsert republishes the key and unmarks it under this
         // same lock, and its relanded slot would otherwise be poisoned here
@@ -3142,11 +3362,164 @@ void HydraStore::poison_versions(uint64_t key, Session* se) {
     }
 }
 
+// Append one delete intent to the dlog (see dfd_ member comment). Called
+// under dlog_mu_. One buffered pwrite: the record reaches the kernel page
+// cache before Delete returns (process-crash durable); Checkpoint's
+// fdatasync makes it power-loss durable. Fail-soft on I/O error: the
+// in-process delete stays correct (registry mark + reaper), only its
+// crash-durability degrades, surfaced by the sticky flags.
+bool HydraStore::dlog_append(uint64_t key, uint64_t lsn) {
+    if (dfd_ < 0) return false;
+    uint8_t rec[24];
+    memcpy(rec, &key, 8);
+    memcpy(rec + 8, &lsn, 8);
+    uint32_t crc = crc32c(rec, 16);
+    memcpy(rec + 16, &crc, 4);
+    memset(rec + 20, 0, 4);
+    off_t off = (off_t)dlog_bytes_.load(std::memory_order_relaxed);
+    if (!xpwrite(dfd_, rec, sizeof rec, off)) {
+        write_errors_.fetch_add(1, std::memory_order_relaxed);
+        durable_ok_.store(false, std::memory_order_relaxed);
+        return false;
+    }
+    dlog_bytes_.store((uint64_t)off + sizeof rec, std::memory_order_relaxed);
+    dlog_appends_++;
+    return true;
+}
+
+// Recovery replay of the delete-intent log (July-21 audit Bug 5): an intent
+// (key, lsn) NEWER than the key's newest recovered slot-log version means
+// the delete was acknowledged but its on-disk tombstones never became
+// durable — the key must stay deleted. Newest-LSN-wins keeps reinserts
+// alive: a re-upsert after the delete sealed with a fresher LSN and beats
+// the intent. Winning intents update the caller's rl/rt scratch (the
+// caller's registry re-mark loop then marks them, unless a NEWER overflow
+// value keeps the key live) and re-queue the key for durable tombstoning;
+// stale sidecar-loaded overflow values the intent beats are erased (the
+// audit's overflow-resurrection facet). The dlog itself is NOT truncated
+// here: the replayed tombstones are not durable yet — the next quiescent
+// Checkpoint truncates it.
+void HydraStore::dlog_replay(const uint64_t* rk, uint64_t* rl, uint8_t* rt) {
+    uint64_t sz = dlog_bytes_.load(std::memory_order_relaxed);
+    if (dfd_ < 0 || sz == 0) return;
+    // Stream in ~1 MiB whole-record chunks: the dlog can be large after a
+    // long delete interval and recovery RAM is budgeted (reviewer MAJOR:
+    // no unbounded whole-file allocation at init).
+    const uint64_t kRChunk = 24ull * 43690;
+    std::vector<uint8_t> buf((size_t)std::min<uint64_t>(sz, kRChunk));
+    const uint64_t nwords = index_.nwords;
+    uint64_t replayed = 0, max_dlsn = 0;
+    for (uint64_t base = 0; base < sz; base += kRChunk) {
+      uint64_t want = std::min<uint64_t>(kRChunk, sz - base);
+      ssize_t got = xpread(dfd_, buf.data(), (size_t)want, (off_t)base);
+      if (got < 0) {   // unreadable: DEGRADED — never truncate, recover_ok=0
+          read_errors_.fetch_add(1, std::memory_order_relaxed);
+          dlog_degraded_.store(true, std::memory_order_relaxed);
+          break;
+      }
+      bool short_read = (uint64_t)got < want;
+      if (short_read) {
+          want = (uint64_t)got - (uint64_t)got % 24;
+          dlog_degraded_.store(true, std::memory_order_relaxed);
+      }
+      for (uint64_t o = 0; o + 24 <= want; o += 24) {
+        const uint8_t* rec = buf.data() + o;
+        uint64_t key, dlsn;
+        uint32_t crc;
+        memcpy(&key, rec, 8);
+        memcpy(&dlsn, rec + 8, 8);
+        memcpy(&crc, rec + 16, 4);
+        if (crc != crc32c(rec, 16)) {
+            // A CRC-invalid FULL record is indistinguishable from
+            // corruption even at the tail (a genuinely torn tail is
+            // non-record-aligned and was rounded off at open): the lost
+            // intent's key and LSN are unknown — DEGRADED, recover_ok=0,
+            // never truncate (reviewer R2-M2).
+            recover_torn_.fetch_add(1, std::memory_order_relaxed);
+            dlog_degraded_.store(true, std::memory_order_relaxed);
+            continue;
+        }
+        if (dlsn > max_dlsn) max_dlsn = dlsn;
+        // Erase a sidecar-loaded overflow value the intent beats. A NEWER
+        // overflow value (re-upsert after the delete) survives AND keeps
+        // the key live: it must suppress the registry mark below.
+        bool ovf_newer = false;
+        if (overflow_count_.load(std::memory_order_relaxed)) {
+            OverflowShard& sh = shard(key);
+            bool stale;
+            {
+                std::lock_guard<std::mutex> g(sh.mu);
+                auto mit = sh.map.find(key);
+                stale = mit != sh.map.end() && mit->second.lsn < dlsn;
+                ovf_newer = mit != sh.map.end() && mit->second.lsn >= dlsn;
+            }
+            if (stale) overflow_erase(key);
+        }
+        if (ovf_newer) continue;
+        // Newest recovered slot-log version of the key.
+        uint64_t h = mix64(key);
+        const uint64_t fp = h & 0xFFFFFFFF00000000ULL;
+        uint64_t it = index_.start_of(h);
+        for (uint64_t scanned = 0; scanned < nwords; ++scanned) {
+            uint64_t w = index_.words[it].load(std::memory_order_relaxed);
+            if (w == 0) break;
+            if ((w & 0xFFFFFFFF00000000ULL) == fp && rk[it] == key) {
+                if (rl[it] < dlsn) {          // the delete intent wins
+                    rl[it] = dlsn;
+                    rt[it] = 1;
+                    // Mark NOW (the caller's rt loop re-marks idempotently;
+                    // the mark also DEDUPES repeated intents for one key)
+                    // and enqueue the durable re-tombstoning DIRECTLY —
+                    // unbounded here, but bounded by the dlog's distinct
+                    // keys. NEVER poison synchronously at init: the cache
+                    // sets/locks are not constructed yet (reviewer
+                    // CRITICAL: replay ran poison_versions before nsets_/
+                    // set_locks_ existed past the 64K queue bound).
+                    if (del_mark(key)) {
+                        std::lock_guard<std::mutex> rq(reap_mu_);
+                        reap_q_.push_back(key);
+                    }
+                    replayed++;
+                }
+                break;
+            }
+            it = (it + 1) & (nwords - 1);
+        }
+      }
+      if (got < 0 || short_read) break;
+    }
+    // New LSNs must beat every replayed intent, or a post-recovery reinsert
+    // could lose to an old intent at the NEXT recovery (the dlog survives
+    // until a quiescent Checkpoint truncates it).
+    if (max_dlsn >= lsn_.load(std::memory_order_relaxed))
+        lsn_.store(max_dlsn + 1, std::memory_order_relaxed);
+    dlog_replayed_.store(replayed, std::memory_order_relaxed);
+    if (replayed)
+        fprintf(stderr, "hydra: replayed %llu delete intents (crashed "
+                "before their tombstones were durable)\n",
+                (unsigned long long)replayed);
+    // Replay queues winners DIRECTLY (the cache doesn't exist yet), past
+    // the kReapMax runtime bound: queue + registry RAM grows with the
+    // dlog's distinct deleted keys (~72 B/key). Surface it loudly instead
+    // of hiding it (reviewer R2-M1 — a genuinely bounded recovery
+    // structure is a documented future hardening; the dlog itself is
+    // truncated by every quiescent Checkpoint, so reaching this warning
+    // requires crashing inside a massive uncheckpointed delete storm).
+    if (replayed > kReapMax)
+        fprintf(stderr, "hydra: WARNING %llu replayed delete intents "
+                "exceed the runtime reaper bound (%zu) — recovery "
+                "queue/registry RAM grows with distinct deleted keys; "
+                "checkpoint promptly to retire them\n",
+                (unsigned long long)replayed, kReapMax);
+}
+
 // Drain the reaper queue. Reentrant: cleaners, Checkpoint and the
 // destructor may all drain concurrently — pops are serialized by reap_mu_,
 // per-key poisoning by the set/page locks. reap_inflight_ lets a drainer
 // wait for keys other drainers popped but have not finished poisoning.
-void HydraStore::reap_drain(Session* se) {
+void HydraStore::reap_drain(Session* se, bool force) {
+    static const bool pause = getenv("HYDRA_REAP_PAUSE") != nullptr;
+    if (pause && !force) return;   // test hook, see declaration
     for (;;) {
         uint64_t key;
         {
@@ -3212,7 +3585,7 @@ void HydraStore::cleaner_main(int id) {
         // Poison landed versions of recently deleted keys (deferred from
         // Delete, which must never do synchronous disk I/O). No-op unless
         // deletes happened.
-        reap_drain(se);
+        reap_drain(se, /*force=*/false);
         if (id == 0) dk_maybe_rotate();
         // Pacing: cleaners are an optimization only — find_victim's
         // sync-assist staging bounds eviction latency — so cap background
@@ -3227,10 +3600,15 @@ void HydraStore::cleaner_main(int id) {
 // [lo, hi) through this thread's session, landing chunks as they fill.
 void HydraStore::checkpoint_stripe(uint64_t lo, uint64_t hi) {
     Session* se = session();
+    uint64_t buffered = 0;
     for (uint64_t s = lo; s < hi; ++s) {
         Entry* base = set_base(s);
         for (int w = 0; w < (int)kAssoc; ++w) {
             set_locks_[s].lock();
+            // S_BUFFERED/S_FLUSHING = pinned to another session's un-landed
+            // chunk: not persistable from here (see ckpt_unflushed_).
+            if (base[w].state == S_BUFFERED || base[w].state == S_FLUSHING)
+                buffered++;
             if (base[w].state != S_DIRTY) { set_locks_[s].unlock(); continue; }
             bool full = stage_flush(s, w, se);
             set_locks_[s].unlock();
@@ -3238,14 +3616,28 @@ void HydraStore::checkpoint_stripe(uint64_t lo, uint64_t hi) {
         }
     }
     flush_partials(se);
+    if (buffered)
+        ckpt_unflushed_.fetch_add(buffered, std::memory_order_relaxed);
 }
 
 void HydraStore::Checkpoint() {
     if (!disk_mode_) return;
     // Land the CALLER's partial chunk first: its own completed Upserts may
     // still sit BUFFERED in RAM. (Other sessions' partials land at their own
-    // flush/StopSession — single-owner chunks cannot be stolen.)
+    // flush/StopSession — single-owner chunks cannot be stolen; any their
+    // stripes still see as S_BUFFERED is counted and warned about below.)
     flush_partials(session());
+    ckpt_unflushed_.store(0, std::memory_order_relaxed);
+    // Unmark snapshot, taken BEFORE the stripe scan (reviewer R2-C2): a
+    // del_unmark after this point means a concurrent reinsert republished
+    // a delete-marked key DURING this Checkpoint. Its new value may be an
+    // ordinary S_DIRTY overwrite in a set this Checkpoint already scanned
+    // (so nothing below persists it, and unlanded_chunks_ never saw it),
+    // while the reinsert's unmark makes the queued poison a no-op. The
+    // old intent is then the ONLY thing keeping the key's durable old
+    // version from resurrecting on a crash — it must outlive this
+    // Checkpoint whenever any unmark interleaved.
+    uint64_t unm_snap = del_unmarks_.load(std::memory_order_relaxed);
     uint64_t stripe = (nsets_ + kCheckpointThreads - 1) / kCheckpointThreads;
     // NEVER throw past this frame: Checkpoint runs from the (noexcept)
     // destructor, and std::thread construction can fail under RLIMIT_NPROC /
@@ -3279,9 +3671,16 @@ void HydraStore::Checkpoint() {
     // fdatasync below. Drain the queue, then wait out keys a concurrent
     // cleaner popped but has not finished poisoning (bounded: one key's
     // poison loop).
+    uint64_t dlog_snap;
+    {   // Snapshot BEFORE the drain: intents appended after this point may
+        // have tombstones the fdatasync below does not cover.
+        std::lock_guard<std::mutex> lk(dlog_mu_);
+        dlog_snap = dlog_appends_;
+    }
     reap_drain(session());
     while (reap_inflight_.load(std::memory_order_acquire) != 0)
         std::this_thread::yield();
+    bool slots_synced = true;
     while (fdatasync(fd_) < 0) {
         if (errno == EINTR) continue;
         // FAIL-SOFT: durability is degraded, not the process. The sticky
@@ -3290,10 +3689,86 @@ void HydraStore::Checkpoint() {
         fprintf(stderr, "hydra: fdatasync failed (errno=%d)\n", errno);
         write_errors_.fetch_add(1, std::memory_order_relaxed);
         durable_ok_.store(false, std::memory_order_relaxed);
+        slots_synced = false;
         break;
     }
-    // Persist the oversize/overflow map (atomic tmp+rename sidecar).
+    // Persist the oversize/overflow map (atomic tmp+rename sidecar) BEFORE
+    // any dlog retirement below: an overflow-only key's delete leaves no
+    // slot-log tombstone — the rewritten/unlinked sidecar IS its durable
+    // record, and its intent must outlive the old sidecar (reviewer
+    // CRITICAL 1). Sidecar failures bump write_errors_, gating truncation.
     write_overflow_file();
+    // Delete-intent log maintenance (July-21 audit Bug 5). An intent is
+    // provably redundant only when its tombstones are durable on the
+    // device. Truncate the file only when ALL hold (else keep + fdatasync
+    // so pending intents survive power loss):
+    //   - nothing was appended since the pre-drain snapshot (checked under
+    //     dlog_mu_, which Delete holds across append+enqueue), the reaper
+    //     is quiescent AND no synchronous poison is in flight
+    //     (reap_inflight_ covers both drained pops and Delete's queue-
+    //     full/append-failure fallback, registered before its locks drop);
+    //   - fdatasync(fd_) succeeded and this instance has NEVER seen a
+    //     write, tombstone-refusal, poison or directory-fsync fault
+    //     (LIFETIME zero, not per-Checkpoint deltas — reviewer R2-C3: a
+    //     failed poison consumed BETWEEN Checkpoints must also forbid
+    //     retirement forever; after any such fault the dlog is only ever
+    //     fdatasync'd, never truncated, and sticky durable_ok_ agrees);
+    //   - no del_unmark happened since before the stripe scan (R2-C2, see
+    //     the unm_snap comment above);
+    //   - no session holds un-landed chunk data (a staged record could
+    //     still land as a live-looking slot after this Checkpoint, with a
+    //     tombstone reseal only after that — a crash between the two would
+    //     need the intent);
+    //   - this instance's recovery dropped no keys (a dropped key's live
+    //     slot is invisible to replay resolution but could resurrect under
+    //     a larger-budget reopen), skipped no unreadable slot regions
+    //     (R2-C5: an intent whose key sits in a skipped region is
+    //     unresolvable — destroying it could resurrect the key on a later
+    //     healthy reopen) and replayed the dlog cleanly.
+    if (dfd_ >= 0 && dlog_bytes_.load(std::memory_order_relaxed) != 0) {
+        std::lock_guard<std::mutex> lk(dlog_mu_);
+        bool quiescent = dlog_appends_ == dlog_snap;
+        if (quiescent) {
+            std::lock_guard<std::mutex> rq(reap_mu_);
+            quiescent = reap_q_.empty();
+        }
+        quiescent = quiescent &&
+                    reap_inflight_.load(std::memory_order_acquire) == 0;
+        bool safe =
+            quiescent && slots_synced &&
+            durable_ok_.load(std::memory_order_relaxed) &&
+            write_errors_.load(std::memory_order_relaxed) == 0 &&
+            tomb_refused_.load(std::memory_order_relaxed) == 0 &&
+            poison_fail_.load(std::memory_order_relaxed) == 0 &&
+            del_unmarks_.load(std::memory_order_relaxed) == unm_snap &&
+            unlanded_chunks_.load(std::memory_order_acquire) == 0 &&
+            recover_dropped_.load(std::memory_order_relaxed) == 0 &&
+            recover_clean_.load(std::memory_order_relaxed) &&
+            !dlog_degraded_.load(std::memory_order_relaxed);
+        if (safe && ftruncate(dfd_, 0) == 0) {
+            dlog_bytes_.store(0, std::memory_order_relaxed);
+        } else {
+            if (safe)   // ftruncate itself failed
+                write_errors_.fetch_add(1, std::memory_order_relaxed);
+            while (fdatasync(dfd_) < 0) {
+                if (errno == EINTR) continue;
+                write_errors_.fetch_add(1, std::memory_order_relaxed);
+                durable_ok_.store(false, std::memory_order_relaxed);
+                break;
+            }
+        }
+    }
+    // Surface (July-21 audit Bug 6): entries parked in other ACTIVE
+    // sessions' partial chunks were not persistable by this Checkpoint.
+    // Their durability point is the owner's next flush/StopSession (or the
+    // destructor). Sessions must be quiescent for full-coverage snapshots.
+    uint64_t unflushed = ckpt_unflushed_.load(std::memory_order_relaxed);
+    if (unflushed)
+        fprintf(stderr, "hydra: WARNING Checkpoint left %llu entr%s parked "
+                "in still-active sessions' chunk buffers (not durable until "
+                "the owning sessions flush/stop — quiesce sessions before "
+                "Checkpoint for a full snapshot)\n",
+                (unsigned long long)unflushed, unflushed == 1 ? "y" : "ies");
 }
 
 // ── Crash recovery ───────────────────────────────────────────────────────────
@@ -3454,6 +3929,9 @@ void HydraStore::recover_log(uint64_t file_bytes) {
     // needs rk/rl for LSN ordering; cap-refused sidecar entries are DROPS
     uint64_t ovf_refused = load_overflow_file(rk, rl);
     dropped += ovf_refused;
+    // Replay delete intents (needs rk/rl/rt AND the loaded overflow map:
+    // an intent beats older overflow values and loses to newer ones).
+    dlog_replay(rk, rl, rt);
     // Re-mark tombstone-winning keys in the delete registry, so the
     // "compaction relocates a still-deleted key's tombstone" invariant
     // (restage_tombstone) holds across restart generations too — otherwise
@@ -3478,7 +3956,13 @@ void HydraStore::recover_log(uint64_t file_bytes) {
     // a smaller-budget reopen silently lost keys while still reporting
     // recover_ok=1; drops now fail the recovery status and are counted in
     // recover_dropped_keys).
+    // Unreadable slot regions leave delete intents unresolvable (their
+    // keys may live in the skipped region): permanently forbid dlog
+    // truncation in this instance (reviewer R2-C5).
+    if (scan_errors)
+        recover_clean_.store(false, std::memory_order_relaxed);
     recover_ok_.store((scan_errors == 0 && dropped == 0 &&
+                       !dlog_degraded_.load(std::memory_order_relaxed) &&
                        (file_bytes / kSlotBytes) * kSlotBytes == data_bytes)
                           ? 1 : 0,
                       std::memory_order_relaxed);
@@ -3558,13 +4042,21 @@ void HydraStore::write_overflow_file() {
     overflow_file_seen_ = true;
 }
 
-// fsync the store directory so a rename()/unlink() of the sidecar survives
-// power loss (fail-soft: sticky durability flag on failure).
-void HydraStore::sync_dir() {
+// fsync the store directory so a rename()/unlink() of the sidecar (or the
+// dlog's creation) survives power loss. Failure is COUNTED into
+// write_errors_ (reviewer R2-C4): a successful rename/unlink whose
+// directory fsync failed must gate dlog truncation exactly like the
+// rename/unlink failing outright, or a power loss could restore the old
+// sidecar with the protecting intent already destroyed.
+bool HydraStore::sync_dir() {
     int dfd = open(dir_.c_str(), O_RDONLY | O_DIRECTORY);
-    if (dfd < 0 || fsync(dfd) < 0)
+    bool ok = dfd >= 0 && fsync(dfd) == 0;
+    if (!ok) {
         durable_ok_.store(false, std::memory_order_relaxed);
+        write_errors_.fetch_add(1, std::memory_order_relaxed);
+    }
     if (dfd >= 0) close(dfd);
+    return ok;
 }
 
 uint64_t HydraStore::load_overflow_file(const uint64_t* rk,
@@ -3952,7 +4444,8 @@ CacheStats HydraStore::GetCacheStats() const {
         }
     }
     cs.hot_bytes = occupancy_.load() * kEntryBytes +
-                   oversize_bytes_.load(std::memory_order_relaxed);
+                   oversize_bytes_.load(std::memory_order_relaxed) +
+                   del_bytes_.load(std::memory_order_relaxed);
     cs.total_bytes = next_slot_.load() * kSlotBytes + cs.hot_bytes;
     cs.budget_bytes = mem_budget_;
     return cs;

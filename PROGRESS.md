@@ -538,3 +538,47 @@ verdict REQUEST_CHANGES). All findings addressed:
 Final verification: 8/8 stall tests; 969 passed across
 src/kiss/tests/core/models + test_fable5_fallback.py +
 test_kiss_agent.py; `uv run check --full` all green.
+
+## 2026-07-21 (cont.): July-21 audit — Bug 5/6/7 fixes, review rounds 1+2 (sessions 2–3)
+
+Task: test/fix regressions reported in github.com/shubham3-ucb/baselines-kiss-sorcar
+(branch hydra-audit, July_21/). Dev model claude-fable-5; reviewer gpt-5.6-sol.
+
+Session 2–3 log (continues the session-1 dlog implementation, commit d62de225):
+
+1. Hardened test_delcrash per review m14 (commit 7e20c01c): setenv
+   HYDRA_REAP_PAUSE in the child (recovery provably dlog-dependent),
+   oversized reinsert-after-post-ckpt-delete leg (i%8==1 -> ctr=2,
+   x-record LSN must beat the intent), fixed stale comment.
+2. Node chain8 had failed at Phase 0: session 1 had wrongly uploaded
+   test_hydra.cc into baseline/ (duplicate main). Removed it, uploaded the
+   7e20c01c engine, ran chain9: ALL 4 audit repros CLEAN (minimal 0/5000
+   resurrected, resur 0/97K, rein 200000/200000, dcost Delete 1.0us = 1x
+   Upsert), SCORED 5.49/5.50/5.52 -> MEDIAN 5.50 Mops/s, w0100 5.13 /
+   w9505 5.18 / ts8 0.08 all rc=0. (chain9 unit/TSan phases failed to
+   build: unit_test_area/ was missing kvstore_interface.h — re-uploaded.)
+3. gpt-5.6-sol ROUND-2 review (tmp/review_round2.md, REQUEST_CHANGES):
+   R2-C1 Delete/Upsert mark-vs-publication race (runtime resurrection),
+   R2-C2 reinsert-racing-Checkpoint truncation hole, R2-C3 delta-based
+   error gate misses faults consumed between Checkpoints, R2-C4 sync_dir
+   uncounted, R2-C5 recovery scan errors don't block truncation, R2-C6
+   overflow-only append-failure ack, R2-C7 queue-full sync poison
+   invisible to the retirement proof, R2-M1 replay memory bound bypass,
+   R2-M2 dlog fstat/final-CRC handling. Review cleared lock ordering,
+   unlanded_chunks_ pairing, REAP_PAUSE semantics, scored-path perf.
+4. ALL implemented (commit 57829402): Delete linearization fully under the
+   key's set lock (lock order set -> shards -> dlog_mu_ -> reap_mu_,
+   cycle-free); sync-poison registered in reap_inflight_ before locks drop;
+   sidecar-rewrite fallback for overflow-only keys on append failure;
+   truncation gate rewritten to lifetime-zero write_errors_/tomb_refused_/
+   poison_fail_ + sticky durable_ok_ + del_unmarks_ pre-scan snapshot +
+   recover_clean_ + dlog_degraded_; poison_fail_ counts the previously
+   silent tombstone_slot read failures and the poison pass-bound;
+   sync_dir returns counted bool; dlog fstat failure disables the dlog;
+   any CRC-invalid full dlog record degrades; replay >64K warning.
+   Test: delcrash phase-2 reinsert-racing-Checkpoint leg (k%16==0 -> ctr=9
+   or NotFound, never the pre-delete value).
+5. Local: full 28-test suite PASSES with the final engine
+   (hydra.cc ffbc339e, test_hydra.cc 208b4aa8). Docs: AUDIT3_FIXES.md.
+6. Node chain10 (final engine) launched: rebuild + repros + scored + wl
+   spots + unit scale 4 + TSan delcrash/updel x10 (setarch -R).

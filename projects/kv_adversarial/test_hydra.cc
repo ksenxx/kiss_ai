@@ -1943,8 +1943,195 @@ static void test_capwarn() {
     fprintf(stderr, "PASS capwarn\n");
 }
 
+// ── T28: delete crash-durability (July-21 audit Bug 5) ───────────────────────
+// A Delete() that returned must survive a SIGKILL BEFORE any Checkpoint: the
+// old async-reaper design left the on-disk tombstones to background work, so
+// recovery resurrected durably-checkpointed values (audit: 60K of 97K keys).
+// The delete-intent log (dlog) must suppress that for inline AND oversized
+// (x-record) values, keep checkpointed reinserts alive, stay correct across
+// a SECOND crash (the dlog survives until a quiescent Checkpoint), and be
+// truncated once tombstones are durable.
+static constexpr uint64_t kDcN  = 30000;         // inline keys
+static constexpr uint64_t kDcOB = 1ull << 41;    // oversized key base
+static constexpr uint64_t kDcON = 400;           // oversized keys (300 B)
+
+// --delcrashchild <dir> <phase> <wfd>
+static int delcrash_child(const char* dir, int phase, int wfd) {
+    // Pause the background/cleaner reaper drains: only forced drains
+    // (Checkpoint, destructor) may write tombstones. Post-checkpoint
+    // deletes therefore depend PROVABLY on the dlog for crash durability —
+    // the test can no longer pass by reaper luck (review item m14).
+    setenv("HYDRA_REAP_PAUSE", "1", 1);
+    IKVStore* st = create_kvstore();
+    st->InitExtended(1ull << 20, 16ull << 30, 256ull << 20, dir);
+    st->StartSession();
+    GenValue v;
+    if (phase == 1) {
+        for (uint64_t k = 0; k < kDcN; ++k) {
+            make_value(k, 1, 100, v);
+            st->Upsert(k, v);
+        }
+        for (uint64_t i = 0; i < kDcON; ++i) {
+            make_value(kDcOB + i, 1, 300, v);
+            st->Upsert(kDcOB + i, v);
+        }
+        st->Checkpoint();                        // everything durable
+        for (uint64_t k = 0; k < kDcN; k += 2) st->Delete(k);
+        for (uint64_t i = 0; i < kDcON; i += 2) st->Delete(kDcOB + i);
+        for (uint64_t k = 0; k < kDcN; k += 4) {         // reinsert subset
+            make_value(k, 2, 100, v);
+            st->Upsert(k, v);
+        }
+        st->Checkpoint();       // tombstones + reinserts durable, dlog reset
+        // Post-checkpoint deletes: crash-durability rests on the dlog only.
+        for (uint64_t k = 0; k < kDcN; k += 8) st->Delete(k);
+        for (uint64_t i = 1; i < kDcON; i += 4) st->Delete(kDcOB + i);
+        // Oversized reinsert AFTER a post-ckpt delete: the x-record writes
+        // through with an LSN above the intent's, so recovery must keep it
+        // (fresher-upsert-beats-intent, oversized facet).
+        for (uint64_t i = 1; i < kDcON; i += 8) {
+            make_value(kDcOB + i, 2, 300, v);
+            st->Upsert(kDcOB + i, v);
+        }
+    } else {                                     // phase 2: second crash
+        // Reinsert gen-1-DELETED keys RACING a Checkpoint (reviewer
+        // R2-C2): each reinsert unmarks its key and may publish an
+        // S_DIRTY overwrite into a set the checkpoint stripe already
+        // scanned, no-op'ing the queued poison while the new value is
+        // not itself durable. Legal post-crash states for these keys:
+        // the reinsert (ctr=9) or NotFound (intent applied) — NEVER the
+        // original pre-delete value (ctr=1/2).
+        std::thread ck([&] { st->Checkpoint(); });
+        for (uint64_t k = 0; k < kDcN; k += 16) {
+            make_value(k, 9, 100, v);
+            st->Upsert(k, v);
+        }
+        ck.join();
+        for (uint64_t k = 1; k < kDcN; k += 10) st->Delete(k);
+    }
+    if (write(wfd, "R", 1) != 1) _Exit(3);
+    for (;;) std::this_thread::sleep_for(std::chrono::seconds(1));
+}
+
+static int delcrash_spawn(const std::string& dir, int phase) {
+    int p[2];
+    if (pipe(p) != 0) return -1;
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        close(p[0]);
+        char ph[8], fdbuf[16];
+        snprintf(ph, sizeof ph, "%d", phase);
+        snprintf(fdbuf, sizeof fdbuf, "%d", p[1]);
+        execl(g_argv0, g_argv0, "--delcrashchild", dir.c_str(), ph, fdbuf,
+              (char*)nullptr);
+        _Exit(127);
+    }
+    close(p[1]);
+    char c = 0;
+    bool ready = read(p[0], &c, 1) == 1 && c == 'R';
+    close(p[0]);
+    if (!ready) { kill(pid, SIGKILL); waitpid(pid, nullptr, 0); return -1; }
+    kill(pid, SIGKILL);
+    int stat = 0;
+    waitpid(pid, &stat, 0);
+    return WIFSIGNALED(stat) && WTERMSIG(stat) == SIGKILL ? 0 : -1;
+}
+
+static void test_delcrash() {
+    std::string dir = g_parent + "/delcrash";
+    std::string cmd = "rm -rf " + dir + " && mkdir -p " + dir;
+    CHECK(system(cmd.c_str()) == 0, "mkdir failed");
+    CHECK(delcrash_spawn(dir, 1) == 0, "phase-1 child failed");
+
+    IKVStore* st = open_store("delcrash", 256ull << 20, false);
+    st->StartSession();
+    GenValue out;
+    uint64_t resur = 0, lost = 0, badctr = 0;
+    for (uint64_t k = 0; k < kDcN; ++k) {
+        bool found = st->Read(k, out);
+        if (k % 8 == 0 || (k % 2 == 0 && k % 4 != 0)) {
+            if (found) resur++;                  // deleted: must stay dead
+        } else if (k % 4 == 0) {                 // reinserted + checkpointed
+            if (!found) lost++;
+            else if (check_value(k, out, 100) != 2) badctr++;
+        } else {                                 // odd: untouched
+            if (!found) lost++;
+            else if (check_value(k, out, 100) != 1) badctr++;
+        }
+    }
+    uint64_t xresur = 0, xlost = 0;
+    for (uint64_t i = 0; i < kDcON; ++i) {
+        bool found = st->Read(kDcOB + i, out);
+        bool dead = i % 2 == 0 || (i % 4 == 1 && i % 8 != 1);
+        if (dead) {
+            if (found) xresur++;
+        } else {
+            int expect = (i % 8 == 1) ? 2 : 1;  // reinserted-after-delete
+            if (!found || check_value(kDcOB + i, out, 300) != expect)
+                xlost++;
+        }
+    }
+    CHECK(resur == 0, "crash resurrected %" PRIu64 " deleted inline keys "
+          "(Bug 5)", resur);
+    CHECK(xresur == 0, "crash resurrected %" PRIu64 " deleted oversized "
+          "keys (Bug 5 x-record facet)", xresur);
+    CHECK(lost == 0 && badctr == 0, "lost=%" PRIu64 " badctr=%" PRIu64
+          " live inline keys after crash", lost, badctr);
+    CHECK(xlost == 0, "lost %" PRIu64 " live oversized keys", xlost);
+    st->StopSession();
+    delete st;   // clean close (destructor Checkpoint may truncate the dlog)
+
+    // Second crash generation: deletes on the RECOVERED store, no Checkpoint.
+    CHECK(delcrash_spawn(dir, 2) == 0, "phase-2 child failed");
+    st = open_store("delcrash", 256ull << 20, false);
+    st->StartSession();
+    resur = 0; lost = 0;
+    for (uint64_t k = 0; k < kDcN; ++k) {
+        bool found = st->Read(k, out);
+        bool gen1_dead = k % 8 == 0 || (k % 2 == 0 && k % 4 != 0);
+        bool gen2_dead = k % 2 == 1 && k % 10 == 1;
+        if (k % 16 == 0) {
+            // Reinserted racing the phase-2 Checkpoint: ctr=9 or NotFound
+            // are legal; the pre-delete value resurfacing is not (R2-C2).
+            if (found && check_value(k, out, 100) != 9) resur++;
+        } else if (gen1_dead || gen2_dead) { if (found) resur++; }
+        else if (!found) lost++;
+    }
+    CHECK(resur == 0, "%" PRIu64 " deleted keys resurrected after SECOND "
+          "crash", resur);
+    CHECK(lost == 0, "%" PRIu64 " live keys lost after second crash", lost);
+
+    // Quiescent Checkpoint must truncate the dlog (tombstones now durable).
+    st->Checkpoint();
+    struct stat sb;
+    std::string dlog = dir + "/hydra_dlog.dat";
+    CHECK(stat(dlog.c_str(), &sb) == 0 && sb.st_size == 0,
+          "dlog not truncated by quiescent Checkpoint (size=%lld)",
+          (long long)(stat(dlog.c_str(), &sb) == 0 ? sb.st_size : -1));
+
+    // Delete + reinsert + clean restart: the intent must NOT outlive the
+    // fresher reinsert (LSN ordering).
+    GenValue v;
+    st->Delete(3);
+    make_value(3, 7, 100, v);
+    st->Upsert(3, v);
+    st->StopSession();
+    delete st;
+    st = open_store("delcrash", 256ull << 20, false);
+    st->StartSession();
+    CHECK(st->Read(3, out) && check_value(3, out, 100) == 7,
+          "reinsert after delete lost across restart");
+    CHECK(!st->Read(8, out), "key 8 resurrected after clean restart");
+    st->StopSession();
+    drop_store(st, "delcrash");
+    fprintf(stderr, "PASS delcrash\n");
+}
+
 int main(int argc, char** argv) {
     g_argv0 = argv[0];
+    if (argc >= 5 && strcmp(argv[1], "--delcrashchild") == 0)
+        return delcrash_child(argv[2], atoi(argv[3]), atoi(argv[4]));
     if (argc >= 3 && strcmp(argv[1], "--crashchild") == 0)
         return crash_child(argv[2], strtoull(argv[3], nullptr, 10),
                            atoi(argv[4]));
@@ -1970,7 +2157,7 @@ int main(int argc, char** argv) {
         {"enospc", test_enospc},   {"readfault", test_readfault},
         {"oversizebound", test_oversizebound}, {"compact", test_compact},
         {"compactcold", test_compactcold}, {"bimodal", test_bimodal},
-        {"capwarn", test_capwarn},
+        {"capwarn", test_capwarn}, {"delcrash", test_delcrash},
     };
     for (auto& t : tests)
         if (strstr(t.name, filter) || !*filter) t.fn();
