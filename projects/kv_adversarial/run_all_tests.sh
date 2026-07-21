@@ -33,7 +33,7 @@ echo "=== PHASE tsan scale8 (subset)"
 # setarch -R: disable ASLR — this kernel's vm.mmap_rnd_bits=32 exceeds what
 # gcc's TSAN runtime can map ("FATAL: unexpected memory mapping" otherwise).
 TSAN_FAIL=0
-for t in audit rywrite ckpt oversized tiny alias twostores delete updel recover compact oversizebound; do
+for t in audit rywrite ckpt oversized tiny alias twostores delete updel recover compact oversizebound delcost memfull; do
   TSAN_OPTIONS="halt_on_error=0 history_size=7" setarch "$(uname -m)" -R \
     ./test_tsan $P $t 8 > phase_tsan_$t.log 2>&1 || TSAN_FAIL=1
 done
