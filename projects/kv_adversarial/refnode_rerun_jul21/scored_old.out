@@ -1,0 +1,4 @@
+run 1: 5.50 Mops/s   (StoreRSS=7903934 kB; ok)
+run 2: 5.50 Mops/s   (StoreRSS=7903586 kB; ok)
+run 3: 5.49 Mops/s   (StoreRSS=7903486 kB; ok)
+MEDIAN: 5.50 Mops/s   (target: beat FASTER 0.93; StoreRSS<=8GiB enforced)

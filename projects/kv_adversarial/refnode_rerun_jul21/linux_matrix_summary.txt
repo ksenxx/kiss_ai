@@ -1,0 +1,18 @@
+=== BUILD sanitizer/coverage binaries
+=== PHASE opt scale1
+PHASE_OPT PASS
+=== PHASE buffered-fd tmpfs scale4
+PHASE_SHM PASS
+=== PHASE no-uring scale4
+PHASE_NOURING PASS
+=== PHASE asan+ubsan scale4
+PHASE_ASAN PASS
+=== PHASE tsan scale8 (subset)
+PHASE_TSAN PASS
+=== PHASE coverage
+PHASE_COV PASS
+=== gcov:
+Lines executed:92.52% of 1765
+Branches executed:94.77% of 1376
+Taken at least once:73.69% of 1376
+ALL_PHASES_DONE

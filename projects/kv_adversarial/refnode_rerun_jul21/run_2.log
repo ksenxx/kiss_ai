@@ -1,0 +1,27 @@
+Value size overridden: 100 B
+Eval path: ASYNC (pipeline depth=256, complete_pending_interval=64)
+Loading 250000000 load keys from /mnt/ssd/ksen/kv50-benchmark/task/traces/load_250M.dat ...
+OK
+Loading 250000000 run keys from /mnt/ssd/ksen/kv50-benchmark/task/traces/run_250M.dat ...
+OK
+hydra: init budget=8.59 GB cache=5.64 GB sets=5872025 assoc=8 disk=/mnt/ssd/ksen/kv_spill
+Memory-constrained mode: budget=8.00 GB, storage=/mnt/ssd/ksen/kv_spill
+Correctness preflight: 250000000 load keys into 134217728 hinted buckets (load factor 1.863). Implementations that keep only one resident item per bucket must provide collision resolution or alternate storage.
+Loading 250000000 keys with 16 threads ...
+Load done in 75.7 s (3.3 M keys/s)
+VALIDATION SKIPPED: KVSTORE_VALIDATE_LOAD_KEYS disabled.
+Running workload 0 with 16 threads for 30 s ...
+INTEGRITY: cross-thread audit checked 80558 upserts, 0 failures
+Total: 5.50 Mops/s  (0.34 Mops/s/thread)
+OpBreakdown: reads=2.75 upserts=2.75 rmws=0.00 Mops/s
+VmRSS:	11810020 kB
+StoreRSS:	7903770 kB
+StoreMemUtil:	7.54 / 8.00 GB (94% of budget)
+ReadCacheHit:	76.80% (63490329 / 82668110)
+CacheSizeRatio:	5.25 / 35.96 GB (14.6%)
+CacheBudgetUtil:	5.25 / 8.00 GB (65.6%)
+DiskIO:	read_iops=19177490 write_iops=30260 read_mb=74912.1 write_mb=917.8 read_mb_s=2495.6 write_mb_s=30.6
+OpLatency:	p50=0.50 p99=5.46 p999=669.70 max=3188.26 us (n=161159)
+EvictionRate:	241173413 evictions (8034454.6 evictions/s)
+hydra: WARNING 1 slot key mismatches
+Finished benchmark: 0 thread checkpoints completed;  343594.08 ops/second/thread
