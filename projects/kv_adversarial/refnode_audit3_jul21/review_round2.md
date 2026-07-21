@@ -1,7 +1,7 @@
 # HydraKV delete-intent log — round-2 read-only review
 
-**Reviewer model:** `gpt-5.6-sol`  
-**Reviewed:** current `projects/kv_adversarial/hydra.cc`, current `test_hydra.cc`, `tmp/review_bug5.md`, `tmp/round1_fixes.patch`, and `tmp/test_hardening.patch`  
+**Reviewer model:** `gpt-5.6-sol`\
+**Reviewed:** current `projects/kv_adversarial/hydra.cc`, current `test_hydra.cc`, `tmp/review_bug5.md`, `tmp/round1_fixes.patch`, and `tmp/test_hardening.patch`\
 **Verdict: REQUEST_CHANGES**
 
 The happy-path Bug-5 reproduction is materially improved: a successful `Delete()` appends an intent before returning, a valid dlog-only restart now invokes recovery and advances the LSN, replay no longer calls cache-dependent poisoning before cache construction, overflow persistence is attempted before dlog retirement, and `HYDRA_REAP_PAUSE` makes the main crash test genuinely dependent on replay rather than reaper luck.
@@ -9,16 +9,16 @@ The happy-path Bug-5 reproduction is materially improved: a successful `Delete()
 Approval is nevertheless unsafe. Several round-1 critical findings are only partially fixed, and the new global truncation proof has additional holes. In particular:
 
 1. `Delete()` and Upsert publication are still not serialized as one per-key generation, so an Upsert can remove the delete mark before `Delete()` sweeps; the completed Delete can immediately expose an old value at runtime while recovery applies the intent.
-2. Checkpoint can retire an intent after a concurrent reinsert has made the reaper no-op even though that reinsert was created after its stripe was scanned and is only `S_DIRTY`, hence not durable and not covered by `unlanded_chunks_`.
-3. A failed poison consumed before the current Checkpoint is forgotten. The gate compares only error-counter deltas, does not check sticky `durable_ok_`, and poisoning has no success result or retry state.
-4. Sidecar `rename`/`unlink` directory-fsync failure is not reflected in `write_errors_`, so Checkpoint can truncate the only intent protecting an overflow-only delete.
-5. Recovery scan errors set `recover_ok=0` but do not block dlog truncation; an intent for a key in a temporarily unreadable region can be destroyed and that key can resurrect on a later healthy reopen.
-6. Dlog append failure still permits an acknowledged Delete with no recoverable evidence, especially for overflow-only keys.
-7. Recovery bypasses the 64K reaper bound and the delete registry remains unbounded, so the memory-hardening claims are not met.
+1. Checkpoint can retire an intent after a concurrent reinsert has made the reaper no-op even though that reinsert was created after its stripe was scanned and is only `S_DIRTY`, hence not durable and not covered by `unlanded_chunks_`.
+1. A failed poison consumed before the current Checkpoint is forgotten. The gate compares only error-counter deltas, does not check sticky `durable_ok_`, and poisoning has no success result or retry state.
+1. Sidecar `rename`/`unlink` directory-fsync failure is not reflected in `write_errors_`, so Checkpoint can truncate the only intent protecting an overflow-only delete.
+1. Recovery scan errors set `recover_ok=0` but do not block dlog truncation; an intent for a key in a temporarily unreadable region can be destroyed and that key can resurrect on a later healthy reopen.
+1. Dlog append failure still permits an acknowledged Delete with no recoverable evidence, especially for overflow-only keys.
+1. Recovery bypasses the 64K reaper bound and the delete registry remains unbounded, so the memory-hardening claims are not met.
 
 No source files were modified during this review.
 
----
+______________________________________________________________________
 
 ## Round-1 item verification table
 
@@ -39,7 +39,7 @@ No source files were modified during this review.
 | **m13 — global dlog serialization / poisoning while locked** | **PARTIAL, worst part fixed** | Synchronous poison was correctly moved outside `dlog_mu_` (`3236-3249`), removing page I/O from the global critical section. Every successful Delete still serializes through one mutex and one 24-byte `pwrite`, and Checkpoint can hold that mutex across `fdatasync(dfd_)` on the retain path (`3630-3657`). This is a delete-heavy latency/throughput concern, not a scored Read/Upsert concern. |
 | **m14 — test vacuity and missing facets** | **PARTIAL** | The core post-checkpoint test is now non-vacuous: the child is `exec`'d (`test_hydra.cc:2003-2025`), sets `HYDRA_REAP_PAUSE` before Init (`1959-1967`), and performs only ~3.9K post-checkpoint deletes, below queue backpressure, so cleaners cannot have tombstoned them before SIGKILL. The x-record reinsert leg genuinely exercises replay LSN ordering (`1986-1995`, `2050-2060`). The test still has no overflow-only value, >64K replay, foreign `S_BUFFERED`/`S_FLUSHING`, dlog-only store, smaller-index reopen, I/O/fsync/sidecar failure, concurrent Delete-vs-Upsert, or checkpoint/reinsert race. The inline clean-reinsert leg still destructively Checkpoints before reopening (`2096-2107`), and phase 2 uses a fresh dlog after the parent's destructor may truncate phase 1 (`2069-2074`). `delcrash` runs in the full opt/tmpfs/no-uring/ASan/coverage phases but is absent from the explicit TSan subset. |
 
----
+______________________________________________________________________
 
 ## Blocking findings
 
@@ -52,18 +52,18 @@ No source files were modified during this review.
 Concrete completed-operation failure:
 
 1. `V0` is checkpointed. Its cache entry is `S_CLEAN`.
-2. Upsert(U) acquires the set lock and updates the cache to `V1`/`S_DIRTY`.
-3. While U still owns the set lock, Delete(D) calls `del_mark(key)` and allocates dlog LSN `N`; D then waits for the set lock.
-4. U calls `del_unmark(key)`, unlocks, and returns.
-5. D acquires the set lock, erases `V1`, appends intent `N`, queues poison, and returns true.
-6. Poison sees `is_deleted(key) == false` and stops without tombstoning `V0`.
-7. A Read after both operations can return old checkpointed `V0` immediately because the mark is gone. Recovery, in contrast, sees intent `N > lsn(V0)` and reports NotFound.
+1. Upsert(U) acquires the set lock and updates the cache to `V1`/`S_DIRTY`.
+1. While U still owns the set lock, Delete(D) calls `del_mark(key)` and allocates dlog LSN `N`; D then waits for the set lock.
+1. U calls `del_unmark(key)`, unlocks, and returns.
+1. D acquires the set lock, erases `V1`, appends intent `N`, queues poison, and returns true.
+1. Poison sees `is_deleted(key) == false` and stops without tombstoning `V0`.
+1. A Read after both operations can return old checkpointed `V0` immediately because the mark is gone. Recovery, in contrast, sees intent `N > lsn(V0)` and reports NotFound.
 
 U completed before D, so the only valid real-time order is U then D; returning `V0` after D is not linearizable. The oversized and fallback-overflow publication paths have the same generation problem. A second Delete that sees the old mark before a concurrent reinsert unmarks it can also sweep the new generation while `newly == false`, emit no intent, and return false.
 
 **Required direction:** make mark/generation creation, intent timestamp assignment, cache/overflow sweep, and Upsert publication participate in one per-key serialization protocol. Merely moving the atomic LSN fetch earlier is not enough. The protocol must distinguish a delete generation from a later reinsert and prevent an older Delete from clearing/sweeping that later generation.
 
----
+______________________________________________________________________
 
 ### R2-C2 — CRITICAL: Checkpoint can truncate an old intent because a concurrent non-durable reinsert made poison no-op
 
@@ -74,18 +74,18 @@ U completed before D, so the only valid real-time order is U then D; returning `
 Concrete failure without any I/O fault:
 
 1. `V0` is durable. Delete(D) returns and leaves a valid dlog intent plus a queued reaper key.
-2. Checkpoint scans the key's set while it has no dirty live value.
-3. A concurrent inline Upsert publishes `V1` against the existing index head, making the cache entry `S_DIRTY`, then unmarks the key. Since this is not a first insert, it stages no chunk and leaves `unlanded_chunks_ == 0`.
-4. Checkpoint drains D's reaper item. `poison_versions()` sees the removed mark and writes no tombstone.
-5. Checkpoint's earlier stripe will never revisit the new `S_DIRTY` entry. `fdatasync(fd_)` therefore persists only old `V0`.
-6. Queue/inflight are empty, error deltas are zero, and the unlanded counter is zero, so Checkpoint truncates the intent.
-7. Crash/reopen loses `V1` and recovers `V0`.
+1. Checkpoint scans the key's set while it has no dirty live value.
+1. A concurrent inline Upsert publishes `V1` against the existing index head, making the cache entry `S_DIRTY`, then unmarks the key. Since this is not a first insert, it stages no chunk and leaves `unlanded_chunks_ == 0`.
+1. Checkpoint drains D's reaper item. `poison_versions()` sees the removed mark and writes no tombstone.
+1. Checkpoint's earlier stripe will never revisit the new `S_DIRTY` entry. `fdatasync(fd_)` therefore persists only old `V0`.
+1. Queue/inflight are empty, error deltas are zero, and the unlanded counter is zero, so Checkpoint truncates the intent.
+1. Crash/reopen loses `V1` and recovers `V0`.
 
 The Upsert was concurrent with Checkpoint and may legitimately be omitted from that checkpoint, but D completed before Checkpoint. A legal recovered prefix must therefore contain either D (NotFound) or, if U is included, `V1`; `V0` is not legal.
 
 **Required direction:** add a real checkpoint epoch/barrier, or retain/compact intents per key until there is a proven durable tombstone or a proven durable superseding value. A globally empty reaper plus `unlanded_chunks_ == 0` is not such proof.
 
----
+______________________________________________________________________
 
 ### R2-C3 — CRITICAL: poison failures consumed before a Checkpoint are forgotten and the dlog is later truncated
 
@@ -96,16 +96,16 @@ The fix snapshots counters at Checkpoint entry and rejects truncation only if th
 Concrete failure:
 
 1. Delete appends an intent and enqueues the key.
-2. A cleaner pops it. `tombstone_slot()` suffers EIO/ENOSPC/read failure and leaves the live old slot untouched; the queue item is nevertheless consumed.
-3. No Checkpoint is in progress, so `write_errors_`/`read_errors_`/`tomb_refused_` increments before the next snapshots.
-4. Storage recovers. A later Checkpoint snapshots the already-incremented counters, sees no new failures, an empty queue, and a successful `fdatasync`.
-5. It truncates the dlog. Crash/reopen serves the old value.
+1. A cleaner pops it. `tombstone_slot()` suffers EIO/ENOSPC/read failure and leaves the live old slot untouched; the queue item is nevertheless consumed.
+1. No Checkpoint is in progress, so `write_errors_`/`read_errors_`/`tomb_refused_` increments before the next snapshots.
+1. Storage recovers. A later Checkpoint snapshots the already-incremented counters, sees no new failures, an empty queue, and a successful `fdatasync`.
+1. It truncates the dlog. Crash/reopen serves the old value.
 
 The sticky `durable_ok_ == false` is explicitly intended never to recover, but the retirement gate ignores it. In addition, when the first x-header read succeeds and the second read under the page lock fails, `tombstone_slot()` returns without incrementing any error/refusal counter (`1546-1571`), so even a same-Checkpoint failure can evade the delta gate.
 
 **Required direction:** return a result from tombstoning/poisoning, retain or retry failed work, and associate completion with the intent it proves redundant. At minimum, any sticky durability/recovery fault must forbid global truncation; counter snapshots cannot replace per-intent success.
 
----
+______________________________________________________________________
 
 ### R2-C4 — CRITICAL: directory-fsync failure can still retire the only protection for an overflow-only delete
 
@@ -116,16 +116,16 @@ The sticky `durable_ok_ == false` is explicitly intended never to recover, but t
 Concrete power-loss failure:
 
 1. An overflow-only value is durable in `hydra_overflow.dat`.
-2. Delete removes it in memory and appends an intent.
-3. Checkpoint successfully `unlink`s the empty sidecar (or renames a replacement without the key), but `fsync(store_directory)` fails.
-4. The `write_errors_` delta remains zero, so the `safe` predicate passes and dlog is truncated.
-5. Power loss restores the old directory entry/old sidecar; there is no intent, and the deleted key resurrects.
+1. Delete removes it in memory and appends an intent.
+1. Checkpoint successfully `unlink`s the empty sidecar (or renames a replacement without the key), but `fsync(store_directory)` fails.
+1. The `write_errors_` delta remains zero, so the `safe` predicate passes and dlog is truncated.
+1. Power loss restores the old directory entry/old sidecar; there is no intent, and the deleted key resurrects.
 
 The same defect leaves initial dlog filename durability conditional: the Init call to `sync_dir()` is not a checked prerequisite for accepting crash-durable deletes.
 
 **Required direction:** make `sync_dir()` return checked success and count failure; make sidecar persistence return a checked end-to-end result; never retire intents unless rename/unlink **and** directory fsync succeeded. Retry or fail initialization if dlog creation cannot be made durable for the claimed power-loss contract.
 
----
+______________________________________________________________________
 
 ### R2-C5 — CRITICAL: `recover_ok=0` from an unreadable slot region does not prevent dlog destruction
 
@@ -136,14 +136,14 @@ The capacity-drop guard checks only `recover_dropped_`. A slot-region read error
 Concrete failure:
 
 1. A live old slot and a newer delete intent exist.
-2. Reopen experiences a transient EIO for the slot's 1 MiB region. Recovery skips it; dlog replay cannot find the key in `rk/index_`, so it neither marks nor queues it.
-3. Recovery correctly reports `recover_ok=0`, but a later Checkpoint snapshots the already-recorded read error and sees `recover_dropped_ == 0`, clean dlog replay, and no queue.
-4. Checkpoint truncates the intent.
-5. The storage fault clears; a later reopen reads the old slot and resurrects the key.
+1. Reopen experiences a transient EIO for the slot's 1 MiB region. Recovery skips it; dlog replay cannot find the key in `rk/index_`, so it neither marks nor queues it.
+1. Recovery correctly reports `recover_ok=0`, but a later Checkpoint snapshots the already-recorded read error and sees `recover_dropped_ == 0`, clean dlog replay, and no queue.
+1. Checkpoint truncates the intent.
+1. The storage fault clears; a later reopen reads the old slot and resurrects the key.
 
 **Required direction:** a degraded slot/sidecar recovery must conservatively retain all dlog evidence. Gate retirement on a clean recovery proof (not merely `recover_dropped_ == 0`), and ideally resolve each intent independently of runtime index placement.
 
----
+______________________________________________________________________
 
 ### R2-C6 — CRITICAL: dlog append failure still allows a successful Delete with no recovery evidence
 
@@ -152,16 +152,16 @@ Concrete failure:
 Concrete overflow-only failure:
 
 1. A sidecar-only value exists durably and has no index candidate (`landed == false`).
-2. Delete erases the RAM copy, sets `existed = true`, and `dlog_append()` fails.
-3. `sync_poison` is false because it is gated by `landed`; there is no slot to poison and no sidecar rewrite before return.
-4. Delete returns true. SIGKILL occurs before a successful Checkpoint.
-5. The old sidecar reloads and resurrects the value.
+1. Delete erases the RAM copy, sets `existed = true`, and `dlog_append()` fails.
+1. `sync_poison` is false because it is gated by `landed`; there is no slot to poison and no sidecar rewrite before return.
+1. Delete returns true. SIGKILL occurs before a successful Checkpoint.
+1. The old sidecar reloads and resurrects the value.
 
 For landed keys, synchronous poison also has no result and no fdatasync guarantee. A retrying Delete cannot repair the missing intent because `del_mark()` returns false on the existing mark.
 
 **Required direction:** do not acknowledge Delete unless a recoverable intent was appended or a checked durable fallback completed. This requires a usable failure result/backpressure path and retryable per-key intent state; a sticky metric is not recovery evidence.
 
----
+______________________________________________________________________
 
 ### R2-C7 — CRITICAL: queue-full synchronous poison is invisible to the Checkpoint retirement protocol
 
@@ -172,14 +172,14 @@ When the bounded queue is full, Delete successfully appends the intent, releases
 Concrete failure:
 
 1. The queue is full (deterministic with `HYDRA_REAP_PAUSE`). Target Delete appends its intent, fails `reap_try_enqueue()`, releases `dlog_mu_`, and is descheduled before `poison_versions()`.
-2. Checkpoint snapshots the append count, drains the pre-existing queue, syncs slots, sees queue/inflight empty, and truncates the dlog—including the target intent.
-3. Target Delete resumes. Its poison occurs after the checkpoint's slot `fdatasync`; if the poison read/write fails, it still returns true. Even if it succeeds, that Checkpoint did not make the tombstone power-loss durable despite having snapshotted the intent.
+1. Checkpoint snapshots the append count, drains the pre-existing queue, syncs slots, sees queue/inflight empty, and truncates the dlog—including the target intent.
+1. Target Delete resumes. Its poison occurs after the checkpoint's slot `fdatasync`; if the poison read/write fails, it still returns true. Even if it succeeds, that Checkpoint did not make the tombstone power-loss durable despite having snapshotted the intent.
 
 This is a new hole created by moving expensive poisoning outside `dlog_mu_` without adding a separate in-flight token. Moving it outside was correct for lock latency, but the retirement proof must track it.
 
 **Required direction:** register synchronous poison as in-flight while still under `dlog_mu_`/the same intent protocol, clear it only after checked completion, and make Checkpoint include it in the drain-and-sync proof.
 
----
+______________________________________________________________________
 
 ## Major and minor findings
 
@@ -219,7 +219,7 @@ All Deletes serialize on `dlog_mu_` and one small `pwrite`. Checkpoint may hold 
 
 The deterministic pause test should be kept; it is not vacuous. Add focused tests for every blocking scenario above, especially the two no-fault concurrency histories (R2-C1 and R2-C2). The new test is not included in the TSan subset, and its current post-checkpoint delete count cannot exercise the 64K queue-full path.
 
----
+______________________________________________________________________
 
 ## Targeted protocol checks requested by the task
 
@@ -270,19 +270,19 @@ The counter is nevertheless not a checkpoint barrier and does not cover `S_DIRTY
 
 Normal `Read` and normal in-place/dirty Upsert do **not** acquire `dlog_mu_`. The only new inline staging cost is one `unlanded_chunks_` atomic transition per chunk, not per operation (`chunk_fill == 0`). Dlog open and directory sync are initialization-only. I therefore see no direct reason for a 50:50 delete-free score regression from these fixes. Delete-heavy workloads do pay one globally serialized buffered write per successful Delete.
 
----
+______________________________________________________________________
 
 ## Minimum tests required before approval
 
 1. Deterministically interleave Upsert inside its set lock with Delete's mark/sweep and assert both immediate runtime reads and crash recovery agree (R2-C1).
-2. Pause a queued delete; let Checkpoint scan; publish an `S_DIRTY` reinsert before reaper drain; crash after Checkpoint and assert recovery is either deleted or the reinsert, never the old value (R2-C2).
-3. Fail poison before Checkpoint, allow the next Checkpoint's I/O to succeed, and verify dlog is retained and no resurrection occurs (R2-C3).
-4. Fail the second x-header pread specifically and verify the intent cannot be retired.
-5. Persist an overflow-only value; fail sidecar directory fsync after rename/unlink; verify dlog retention and power-prefix recovery (R2-C4).
-6. Inject a transient slot-region read error during recovery, call Checkpoint, then reopen with reads restored; verify the intent still suppresses the key (R2-C5).
-7. Fail dlog append for an overflow-only and a landed key; Delete must report failure or complete a checked durable fallback (R2-C6).
-8. Fill the 64K queue under `HYDRA_REAP_PAUSE`, trigger queue-full synchronous poison concurrently with Checkpoint, and verify Checkpoint cannot retire the in-flight intent (R2-C7).
-9. Replay substantially more than 64K distinct intents under a strict RSS limit, plus millions of duplicate intents, and assert bounded memory/no Init crash.
-10. Exercise dlog-only recovery, capacity-drop retention, final full-record CRC corruption, dlog `fstat` failure, and concurrent Checkpoints.
+1. Pause a queued delete; let Checkpoint scan; publish an `S_DIRTY` reinsert before reaper drain; crash after Checkpoint and assert recovery is either deleted or the reinsert, never the old value (R2-C2).
+1. Fail poison before Checkpoint, allow the next Checkpoint's I/O to succeed, and verify dlog is retained and no resurrection occurs (R2-C3).
+1. Fail the second x-header pread specifically and verify the intent cannot be retired.
+1. Persist an overflow-only value; fail sidecar directory fsync after rename/unlink; verify dlog retention and power-prefix recovery (R2-C4).
+1. Inject a transient slot-region read error during recovery, call Checkpoint, then reopen with reads restored; verify the intent still suppresses the key (R2-C5).
+1. Fail dlog append for an overflow-only and a landed key; Delete must report failure or complete a checked durable fallback (R2-C6).
+1. Fill the 64K queue under `HYDRA_REAP_PAUSE`, trigger queue-full synchronous poison concurrently with Checkpoint, and verify Checkpoint cannot retire the in-flight intent (R2-C7).
+1. Replay substantially more than 64K distinct intents under a strict RSS limit, plus millions of duplicate intents, and assert bounded memory/no Init crash.
+1. Exercise dlog-only recovery, capacity-drop retention, final full-record CRC corruption, dlog `fstat` failure, and concurrent Checkpoints.
 
 Until these protocol holes are fixed, the implementation does not establish the promised property that every acknowledged Delete survives SIGKILL/recovery and every successful Checkpoint safely retires its delete intents.
