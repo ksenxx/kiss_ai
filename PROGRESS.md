@@ -413,3 +413,27 @@ Fixes (6 edits):
 
 Build: pdflatex x2 — 0 errors/warnings, 19 pages. pdftotext: removed
 phrases 0 hits, replacements present. Committed tex+pdf+PROGRESS.md.
+
+## Session: README.md sync with latest code (2026-07)
+
+Task: "update ./README.md based on the latest code in the project".
+
+Audit performed (every README claim checked against code):
+- Version 2026.7.30 (src/kiss/core/_version.py, badge) — OK.
+- Model catalog (src/kiss/core/models/MODEL_INFO.json): 538 total; per-provider
+  84/14/27/79/8/7/307/3/9 and capability totals 521 gen / 369 fc / 10 emb — table OK.
+- Diff of expandable model lists vs JSON found 6 models missing (added in commit
+  29a4f5a1 which synced only the totals): gemini-3.5-flash-lite, gemini-3.6-flash,
+  kimi-k3, openrouter/google/gemini-3.5-flash-lite, openrouter/google/gemini-3.6-flash,
+  openrouter/meituan/longcat-2.0.
+- CLI flags (cli_helpers.py argparse, allow_abbrev=False), slash commands, mcp
+  subcommands (mcp_cli.py: add/list/get/remove/auth/logout/debug), skills/commands
+  dirs, INJECTIONS.md / SAMPLE_TASKS.md / MY_TASK_TEMPLATES.md behavior, 23
+  third-party messaging agents + govee.py, env var names (config.py), assets,
+  entry points (pyproject [project.scripts]) — all OK, no edits needed.
+- Core Agents LoC "~2850": recomputed significant LoC of the 5 core agent classes;
+  2767 (excluding all docstrings) to 3312 (paper metric); kept the published figure.
+
+Fix: inserted the 6 missing models into README.md lists in sorted order.
+Verified: 538/538 exact match between README lists and MODEL_INFO.json; all
+9 section header counts equal their bullet counts.
