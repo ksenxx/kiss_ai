@@ -73,3 +73,46 @@ work (AUDIT2 remediation + multi-workload hardening) and rebuild the PDF.
 
 4. Cleanup + commit: removed ./tmp/kvpages renders; committed hydra_kv.tex +
    hydra_kv.pdf.
+
+## Session: remove bug-found-and-fixed narratives (reader-facing revision)
+
+User request: "In the paper there is no need to describe what bug you found
+and fixed. The readers only want to know how the engine works."
+
+Changes to papers/kvstorepaper/hydra_kv.tex (no number/constant changes):
+1. Abstract: hardening/audit/deployment tasks now described by the subsystems
+   they added (crash recovery, fail-soft I/O, compaction, x-records,
+   non-blocking deletes) and their scores; removed the resurrection-race,
+   fingerprint-alias-bug, four-defect, and "eight further bugs" narratives.
+2. Intro/contributions: contribution 3 no longer names the delete/read
+   resurrection race; contribution 5 drops the coverage-exposed race;
+   contribution 6 drops the defect list; non-contributions paragraph
+   generalized.
+3. Design (Sec 4): fingerprint-alias, overflow-map, pin-ownership,
+   Delete/reaper, and clean-shutdown paragraphs rewritten as present-tense
+   mechanism descriptions with design rationale (e.g., why landing-time pin
+   re-check and tombstone relocation are load-bearing) instead of bug history.
+4. Sec 4.1: audit gap list condensed; "O_TRUNC is gone"/"eleven abort()
+   sites are gone" replaced with positive statements of current behavior.
+5. Sec 4.2 fully rewritten: "Deployment hardening: a second audit and an
+   all-workload sweep" -> "Deployment subsystems: oversized values, deletes,
+   and shutdown" with four mechanism paragraphs (x-records; non-blocking
+   deletes + tombstone_slot guards + compaction tombstone restaging + epoch
+   retry; honest accounting/recovery/shutdown; validation across workloads
+   with the A/B throughput controls). Audit's genuineness verification kept;
+   defect reproductions removed.
+6. Sec 5.4 retitled "Correctness and testing"; removed the compactcold
+   four-step race story and the stale-position tombstone tale; tests are now
+   described by the contracts they verify. Sec 5.1 "after all eight fixes" ->
+   "after the campaign".
+7. Sec 6: verbatim prompts kept (they are the spec); Task 3/4/5/6 narratives
+   condensed to process level (findings counts, review rounds, gates);
+   observations (2), (4), (5) generalized away from specific bugs.
+8. Limitations: dropped 480K-drop and audit-flagged-false-NotFound historical
+   parentheticals; Conclusion: "steered by two independent audits and an
+   all-workload sweep", defect framing removed.
+
+Build: pdflatex x2 (at /Library/TeX/texbin, not on default PATH) — 0 errors,
+0 overfull, no undefined refs; PDF now 21 pages (was 22). Verified via
+pdftotext: 0 hits for "resurrection race"/"eight bugs"; only bug-word hits
+remaining are inside the verbatim task prompts.
