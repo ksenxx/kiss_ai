@@ -591,16 +591,16 @@ function testSpawnWhileCollapsedDefersTabs() {
 }
 
 // ---------------------------------------------------------------------------
-// 8. The "Collapse Chats" toggle (task-panel-collapse-btn) hides every
-//    panel of the finished task — hiding the run_parallel panel counts
-//    as collapsing it, so its sub-agent tabs must close, and the
-//    "Uncollapse Chats" click must reopen them.
+// 8. The task-end collapse pass (applyChevronState) hides every panel
+//    of the finished task — hiding the run_parallel panel counts as
+//    collapsing it, so its sub-agent tabs must close.  The old
+//    "Collapse/Uncollapse Chats" button is gone for good.
 // ---------------------------------------------------------------------------
-function testCollapseChatsToggleClosesSubTabs() {
-  const {win, posted, panel, parentId, taskIds} = bootParallelRun(2);
+function testTaskEndCollapsePassClosesSubTabs() {
+  const {win, panel, parentId} = bootParallelRun(2);
 
   // Finish the parent task so applyChevronState does not skip the
-  // panel as "running" (the toggle never hides running-task panels).
+  // panel as "running" (the pass never hides running-task panels).
   send(win, {
     type: 'tool_result',
     tabId: parentId,
@@ -608,29 +608,15 @@ function testCollapseChatsToggleClosesSubTabs() {
   });
   send(win, {type: 'result', tabId: parentId, summary: 'done', success: true});
   send(win, {type: 'status', running: false, tabId: parentId});
+  // A trailing post-task event (the daemon streams usage_info after
+  // the result) re-runs the consistency pass with isRunning=false,
+  // which tucks the finished task's panels away.
+  send(win, {type: 'usage_info', tabId: parentId});
   // The task-end collapse pass collapses the finished fan-out's panel,
   // which closes its sub-agent tabs (collapsed panel ⇒ tabs closed).
-  assert.strictEqual(
-    subagentTabEls(win).length,
-    0,
-    'the task-end collapse of the finished run_parallel panel must ' +
-      'close its sub-agent tabs',
-  );
-
-  const btn = win.document.getElementById('task-panel-collapse-btn');
-  assert.ok(btn, 'task-panel-collapse-btn must exist');
-  // First click: "Uncollapse Chats" → expand-all (bookkeeping starts
-  // in the collapsed-label state).  Second click: "Collapse Chats".
-  btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  assert.strictEqual(
-    subagentTabEls(win).length,
-    2,
-    'expand-all must reopen the finished fan-out\'s sub-agent tabs',
-  );
-  btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   assert.ok(
     panel.classList.contains('chv-hidden'),
-    'Collapse Chats must hide the run_parallel panel',
+    'the task-end collapse pass must hide the run_parallel panel',
   );
   assert.ok(
     panel.classList.contains('collapsed'),
@@ -639,33 +625,16 @@ function testCollapseChatsToggleClosesSubTabs() {
   assert.strictEqual(
     subagentTabEls(win).length,
     0,
-    'INVARIANT VIOLATED: Collapse Chats hid the run_parallel panel ' +
-      'but its sub-agent tabs are still open',
-  );
-
-  const before = posted.length;
-  btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  assert.ok(
-    !panel.classList.contains('chv-hidden') &&
-      !panel.classList.contains('collapsed'),
-    'Uncollapse Chats must reveal and uncollapse the panel',
+    'the task-end collapse of the finished run_parallel panel must ' +
+      'close its sub-agent tabs',
   );
   assert.strictEqual(
-    subagentTabEls(win).length,
-    2,
-    'INVARIANT VIOLATED: Uncollapse Chats uncollapsed the ' +
-      'run_parallel panel but its sub-agent tabs did not reopen',
+    win.document.getElementById('task-panel-collapse-btn'),
+    null,
+    'the removed Collapse/Uncollapse Chats button must not exist',
   );
-  for (const taskId of taskIds) {
-    assert.ok(
-      posted
-        .slice(before)
-        .some(m => m.type === 'resumeSession' && m.taskId === taskId),
-      'reopened sub-agent tab must resume backend task ' + taskId,
-    );
-  }
   win.close();
-  console.log('  ok - Collapse Chats toggle closes/reopens sub tabs');
+  console.log('  ok - task-end collapse pass closes sub tabs');
 }
 
 // ---------------------------------------------------------------------------
@@ -908,7 +877,7 @@ async function main() {
     testDelayedOpenSubagentTabDoesNotReopenCollapsedPanel,
     testOpenSubagentTabOnlyPathIsAssociated,
     testSpawnWhileCollapsedDefersTabs,
-    testCollapseChatsToggleClosesSubTabs,
+    testTaskEndCollapsePassClosesSubTabs,
     testRunParallelFinishAutoCollapseClosesSubTabs,
     testRunningFanOutStaysExemptFromAutoCollapse,
     testParentReplayAdoptsOpenSubTabsBeforeFinishedCollapse,

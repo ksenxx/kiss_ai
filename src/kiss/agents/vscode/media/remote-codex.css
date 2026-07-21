@@ -135,18 +135,6 @@ body.remote-chat #task-panel {
   padding: 10px 58px 10px 16px;
 }
 
-body.remote-chat #task-panel-collapse-btn {
-  background: rgb(255 255 255 / 6%);
-  border-color: rgb(255 255 255 / 15%);
-  color: #afafaf;
-}
-
-body.remote-chat #task-panel-collapse-btn:hover {
-  background: rgb(255 255 255 / 12%);
-  border-color: rgb(255 255 255 / 25%);
-  color: #ececec;
-}
-
 body.remote-chat #task-panel-copy { color: #8e8e8e; }
 body.remote-chat #task-panel-copy:hover { color: #ececec; }
 

@@ -650,66 +650,6 @@ async function testUserScrollDuringPendingSbEventLocks() {
 }
 
 /**
- * The task-panel "Uncollapse Chats" button is another way the user
- * uncollapses event panels: it must hold auto-scroll exactly like a
- * panel-header expansion — and NOT hold when nothing grew (view still
- * at the very end), nor when collapsing.
- */
-async function testUncollapseChatsButtonHoldsScroll() {
-  const {win, posted, scrollCalls} = makeWebview({remote: true});
-  const O = win.document.getElementById('output');
-  const geo = {sh: 3000, ch: 500};
-  fakeGeometry(O, geo);
-  startRunningTask(win, posted);
-  send(win, {type: 'setTaskText', text: 'demo task'});
-  send(win, {type: 'tool_call', name: 'Bash', command: 'ls'});
-  send(win, {type: 'tool_call', name: 'Bash', command: 'pwd'});
-  const btn = win.document.getElementById('task-panel-collapse-btn');
-  assert.ok(btn, 'task-panel collapse button must exist');
-  O.scrollTop = geo.sh - geo.ch; // user at the end
-
-  // Click "Uncollapse Chats": panels above expand, content grows, the
-  // view is no longer at the end → hold.
-  geo.sh += 600;
-  btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  const before = scrollCalls.length;
-  const posBefore = O.scrollTop;
-  await streamOutput(win, geo, 'a'.repeat(50));
-  assert.strictEqual(
-    autoScrollsSince(scrollCalls, O, before).length,
-    0,
-    'BUG: the chat auto-scrolled to the end right after the user ' +
-      'clicked "Uncollapse Chats"',
-  );
-  assert.strictEqual(O.scrollTop, posBefore, 'reading position preserved');
-
-  // Click "Collapse Chats" (second click): content shrinks back; the
-  // user returns to the end → tailing resumes (no hold from collapse).
-  geo.sh -= 600;
-  btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  userScrollTo(win, O, geo.sh - geo.ch);
-  const before2 = scrollCalls.length;
-  await streamOutput(win, geo, 'b'.repeat(50));
-  assert.ok(
-    autoScrollsSince(scrollCalls, O, before2).length > 0,
-    'collapsing via the button must not hold tailing',
-  );
-
-  // Click "Uncollapse Chats" again while it changes NOTHING (view
-  // stays at the very end): tailing must keep working.
-  btn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  const before3 = scrollCalls.length;
-  await streamOutput(win, geo, 'c'.repeat(50));
-  assert.ok(
-    autoScrollsSince(scrollCalls, O, before3).length > 0,
-    'an expansion that leaves the view at the very end must not ' +
-      'suspend tailing',
-  );
-  win.close();
-  console.log('  ok - "Uncollapse Chats" button holds; collapse does not');
-}
-
-/**
  * Expand→collapse cycle at the end WITHOUT any intervening user
  * scroll: collapsing shrinks the content back so the view rests at
  * the very end again — the expansion hold must release by itself and
@@ -819,7 +759,6 @@ async function runTests() {
   await testNoStaleProgrammaticMarkAfterNoopScroll();
   await testPendingFrameStandsDownDuringHeaderClick();
   await testUserScrollDuringPendingSbEventLocks();
-  await testUncollapseChatsButtonHoldsScroll();
   await testExpandCollapseCycleAtEndResumesTailing();
   await testExpandWithNoGrowthKeepsTailing();
 }
