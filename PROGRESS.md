@@ -256,3 +256,50 @@ Build: pdflatex x2 - 0 errors, 0 overfull, 0 undefined refs; 20 pages (was
 21). pdftotext: removed narrative phrases 0 hits; the only "hardening task"
 mention left is inside Section 6's ideas paragraph. Visual check of page 9
 (Table 1 + 4.2 paragraphs) OK.
+
+## Session: de-emphasize methodology in Abstract/Introduction (2026-07-21)
+
+Task: no elaborate discussion of Adversarial AI Discovery / KISS Sorcar
+outside Section 6 plus one introduction paragraph; drop the intermediate
+"first engine beat FASTER by ~2x then was OOM-killed" story from the
+Abstract; readers should meet the engine first.
+
+Changes to papers/kvstorepaper/hydra_kv.tex:
+- Abstract rewritten: opens with the engine ("a larger-than-memory key-value
+  store for skewed point-operation workloads"), reports 5.51 Mops/s (5.9x)
+  plus the 3.87-5.67 adversarial-variant range in one results sentence,
+  keeps the architecture list and the test/fault-injection/audit evidence,
+  and ends with a single provenance sentence ("designed, implemented, and
+  tested almost entirely by an AI agent framework~\cite{kisssorcar} through
+  a sequence of natural-language tasks; the development record is reproduced
+  in the paper"). Removed: the adversarial-AI-discovery methodology framing,
+  the two-agent-activities description, the first-engine OOM story, and
+  "keeping optimizing agents honest".
+- Introduction: paragraph 2 is now the single designated methodology
+  paragraph ("HydraKV was not written by hand. It was produced by KISS
+  Sorcar..."), condensing the six tasks, the reward-hacking motivation, the
+  adversarial discovery loop, the correctness apparatus, and a pointer that
+  Section 6 documents the process and evolution, closing with "The rest of
+  the paper describes the engine as it stands." Paragraph 3 now starts
+  "HydraKV is" (was "The surviving artifact, HydraKV, is"). Results
+  paragraph: agent-refused-page-cache sentence replaced by an engine fact
+  (O_DIRECT log). Contributions cut from 4 to 3: the "A methodology" bullet
+  deleted (its held-out-variant element folded into the verification bullet,
+  which also lost "tests required to fail first" and "cross-model review");
+  "the agent's audits" -> "the audits". Scope paragraph's closing claim is
+  now engine-focused (conservative composition + released evidence), not
+  "a carefully instructed agent... kept honest".
+- Section 3 caching paragraph: "every heavier policy the agent tried" ->
+  "every heavier policy tried during development"; "the answer the agent
+  converged on" -> "the answer".
+- Section 5.3: "the agent's documented response" -> "the reason";
+  "every admission policy the agent tried" -> "every admission policy tried".
+- Conclusion: development-hygiene list condensed to one pointer sentence
+  ("The development process, and the experimental hygiene that kept it
+  honest, are documented in Section 6...").
+- Section 6 untouched; Related Work's AI-driven-code-discovery positioning
+  kept (citation-bearing literature comparison, not a development narrative).
+
+Build: pdflatex x2 (/Library/TeX/texbin; note: pdflatex is NOT on the default
+PATH in this environment) - 0 errors, 0 undefined refs, 0 overfull; 20 pages.
+pdftotext verification: all removed phrases 0 hits; all new phrasings present.
