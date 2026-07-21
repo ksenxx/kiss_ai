@@ -15,7 +15,8 @@ control re-ran the ORIGINAL pre-fix engine on the same box: 5.50/5.50/5.49 →
 day-to-day machine noise, not a regression (details in the Verification
 section below).
 
-## Bug 1 — Deadlock/livelock: concurrent Upsert + Delete  ✅ FIXED
+## Bug 1 — Deadlock/livelock: concurrent Upsert + Delete ✅ FIXED
+
 *Was:* `Delete` block-waited for a `S_BUFFERED` pin to land, but could only
 flush its OWN session's partial chunk — a key staged in an idle foreign
 session's chunk spun forever.
@@ -31,7 +32,8 @@ the chunk lands. The same non-waiting treatment was applied to the oversized
 asserts prompt return, immediate NotFound, correctness across the later
 landing AND across a restart. Runs under TSan too (filter `updel`).
 
-## Bug 2 — OOM on disk-full: uncharged inline overflow absorptions  ✅ FIXED
+## Bug 2 — OOM on disk-full: uncharged inline overflow absorptions ✅ FIXED
+
 *Was:* inline (≤101 B) values absorbed into the in-memory overflow map by the
 disk-full / pin-up / index-capacity fallbacks were **uncharged**
 (`oversize_bytes` stayed 0), so a full disk grew RSS past the whole 8 GiB
@@ -49,7 +51,8 @@ its cap and rejects past it too.
 `missing ≤ rejected_mem` (no silent loss). `tiny` keeps exercising the
 fallback itself under an explicit larger cap (`HYDRA_OVERSIZE_CAP_MB`).
 
-## Bug 3 — Recovery loses data but reports success  ✅ FIXED
+## Bug 3 — Recovery loses data but reports success ✅ FIXED
+
 *Was:* a smaller-budget reopen silently dropped over-index-capacity keys
 (stderr WARNING only) while `recover_ok` stayed 1.
 *Fix:* `recover_ok` is now 0 whenever `dropped != 0` (as well as on scan
@@ -60,7 +63,8 @@ with a budget ≥ the writer's).
 `recover_dropped_keys > 0` and `recover_ok == 0`, and that kept keys are
 intact.
 
-## Bug 4 — Delete ≈160× slower than Upsert  ✅ FIXED
+## Bug 4 — Delete ≈160× slower than Upsert ✅ FIXED
+
 *Was:* every `Delete` synchronously tombstone-poisoned each on-disk version
 (pread + pwrite per version): 244 µs vs 1.5 µs.
 *Fix:* the poison loop moved to a background **reaper** queue drained by the
@@ -75,6 +79,7 @@ measured and accepted for writes).
 engine measured ~160×.
 
 ## Design gaps (code-confirmed in AUDIT2) — fixed or bounded + documented
+
 - **Compaction vs in-flight read → transient false-NotFound:** reads now
   snapshot `compact_epoch_` (bumped by `compact_region` before any move and
   after the punch); a NotFound that overlapped a compaction retries once
@@ -95,12 +100,15 @@ engine measured ~160×.
   rejection instead of unbounded growth or a hang.
 
 ## Retracted items
+
 No action needed — and one was already fixed before this pass (the delete
 registry is sharded, `kDelShards` mutexes, keeping the zero-deletes fast path
 a single relaxed load).
 
 ## Independent model review (gpt-5.6-sol, read-only) → additional fixes
+
 A second-model review of the diff found real issues, all fixed:
+
 - **Checkpoint/reaper race:** `reap_inflight_` was incremented after
   releasing `reap_mu_`, so Checkpoint could see queue-empty + inflight-zero
   between a drainer's pop and its increment and `fdatasync` before the
@@ -127,8 +135,10 @@ A second-model review of the diff found real issues, all fixed:
   the fields were appended, never reordered).
 
 ## Verification (all on this box: macOS arm64, clang, `__APPLE__` shim —
+
 `O_DIRECT`→0, `fdatasync`→`fsync`; the shim is compiled out on Linux so the
 scored Linux build is textually additive-guard only)
+
 - opt build, full suite, scale 1 **and** scale 4: `ALL TESTS PASSED`
   (27 tests, including the 4 new regressions).
 - ASan+UBSan, full suite, scale 4: `ALL TESTS PASSED`, zero reports.
@@ -136,29 +146,33 @@ scored Linux build is textually additive-guard only)
   `recoverdrop`, `compact`, `delcost`, `memfull`), scale 8: zero warnings.
 
 ## Reference-node verification (July 21 — n2-standard-64, Ubuntu 22.04,
+
 kernel 6.8, g++ 11.4, 8× NVMe RAID0 `/mnt/ssd`, the AUDIT2 box)
 Scored `run.sh` protocol exactly as in AUDIT2 (harness `benchmark_harness.cc`
-+ identical `kvstore_interface.h`, same 250M-key traces by inode, 16 threads
-NUMA node 0, user cgroup MemoryMax=14 GiB / no swap, KVSTORE_VALUE_SIZE=100,
-KVSTORE_AUDIT=1, StoreRSS ≤ 8 GiB enforced, 30 s window, median of 3):
-- **Fixed engine (this commit), suite A:** 5.44 / 5.50 / 5.50 → **median
+
+- identical `kvstore_interface.h`, same 250M-key traces by inode, 16 threads
+  NUMA node 0, user cgroup MemoryMax=14 GiB / no swap, KVSTORE_VALUE_SIZE=100,
+  KVSTORE_AUDIT=1, StoreRSS ≤ 8 GiB enforced, 30 s window, median of 3):
+
+* **Fixed engine (this commit), suite A:** 5.44 / 5.50 / 5.50 → **median
   5.50 Mops/s**; suite B: 5.52 / 5.50 / 5.49 → **median 5.50 Mops/s**.
   Every run: StoreMemUtil **7.54 / 8.00 GB (94%)**, StoreRSS ≈ 7.90 GB ok,
   `INTEGRITY: cross-thread audit ... 0 failures`.
-- **Same-day A/B control — ORIGINAL pre-fix engine** (the exact `hydra.cc`
+* **Same-day A/B control — ORIGINAL pre-fix engine** (the exact `hydra.cc`
   that scored 5.51 on July 20) rebuilt and re-run on the same box/layout:
   5.50 / 5.50 / 5.49 → **median 5.50 Mops/s**. Identical median ⇒ the
   0.01 Mops/s difference vs the July-20 5.51 is day-to-day machine noise;
   **the fixes cost zero measurable throughput** (fixed engine's best run,
   5.52, exceeded the control's best, 5.50).
-- The benign shutdown-time `hydra: WARNING 1 slot key mismatches` line also
+* The benign shutdown-time `hydra: WARNING 1 slot key mismatches` line also
   appears in the original July-20 scored logs — pre-existing, not introduced.
-- **Linux `run_all_tests.sh` matrix on the same node (fixed engine): ALL
+* **Linux `run_all_tests.sh` matrix on the same node (fixed engine): ALL
   PHASES PASS** — opt scale1, buffered-fd tmpfs scale4, no-uring scale4,
   ASan+UBSan scale4, TSan scale8 subset (zero warnings), coverage
   (92.52% of 1765 lines executed, 94.77% of branches executed).
 
 ## Hot-path impact audit (why the score cannot regress)
+
 | Scored-path site | Change | Cost |
 |---|---|---|
 | `Read`/`ReadAsync` hit path | none | 0 |
