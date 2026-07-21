@@ -712,7 +712,7 @@
     "input_price_per_1M": 0.3,
     "output_price_per_1M": 2.5,
     "fc": true,
-    "emb": true,
+    "emb": false,
     "gen": true,
     "comment": "NEW"
   },
@@ -721,7 +721,7 @@
     "input_price_per_1M": 1.5,
     "output_price_per_1M": 7.5,
     "fc": true,
-    "emb": true,
+    "emb": false,
     "gen": true,
     "comment": "NEW"
   },
