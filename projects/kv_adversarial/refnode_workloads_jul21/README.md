@@ -3,13 +3,15 @@
 Node: the AUDIT2 reference box (GCP n2-standard-64, 64 vCPU Cascade Lake,
 251 GB RAM, Ubuntu 22.04, 8x NVMe RAID0). Scored protocol identical to the
 original scored run: run.sh median-of-3, 16 threads NUMA node 0, 14 GiB
-cgroup, 100 B values, integrity auditor ON, StoreRSS <= 8 GiB enforced.
+cgroup, 100 B values, integrity auditor ON, StoreRSS \<= 8 GiB enforced.
 
 Engines (see `../WORKLOAD_HARDENING.md` for the fixes):
+
 - chain5 = commit 4138924c (tombstone key-verify + capwarn).
 - chain6/chain7 = commit 5050e98f (FINAL: + review fixes M1/M2/minors).
 
 Files:
+
 - `chain5.out` — engine 4138924c: TSan compact loop 15/15 rc=0 (the
   previously-flaky combo), full matrix ALL_PHASES_DONE, scored
   5.54/5.49/5.52 -> median 5.52 Mops/s, bimodal/v1k/0:100/5:95 spot
@@ -31,4 +33,4 @@ Files:
 - `matrix5.out` / `matrix6.out` — full run_all_tests.sh outputs.
 
 Raw per-run harness logs remain on the node under
-/mnt/ssd/ksen/kv50-benchmark/task (wl_*7.log, run_*.log).
+/mnt/ssd/ksen/kv50-benchmark/task (wl\_*7.log, run\_*.log).
