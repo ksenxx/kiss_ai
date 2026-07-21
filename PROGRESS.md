@@ -158,3 +158,43 @@ narratives intentionally retained).
 
 Build: pdflatex x2 (/Library/TeX/texbin) — 0 errors, 0 overfull, 0 undefined
 refs, 21 pages. pdftotext confirms all edits present and stale phrases gone.
+
+## Session: AI-slop / AI-tell review of papers/kvstorepaper/hydra_kv.tex (2026-07-21)
+
+Task: review the paper for AI slop or other issues that make it look AI-generated.
+
+Research (10 web sources logged in tmp/information-aislop.md, deleted after
+use): Wikipedia:Signs_of_AI_writing (+AI-generated-comments), AI slop article,
+Kobak et al. excess-vocabulary (Sci. Adv. 2025), Reinhart et al. rhetorical
+styles (PNAS 2025), Simon Willison slop post, Sean Goedecke em-dash analysis,
+Google SERP, The Ringer and Night Water em-dash counterpoints.
+
+Diagnosis of the paper:
+- LLM marker vocabulary (delve/showcase/underscore/pivotal/tapestry/leverage/
+  crucial/meticulous...): ABSENT. No puffery, no "-ing" superficial analyses,
+  no boldface/markdown/curly-quote artifacts, no formulaic transitions.
+- Real tells found: (a) ~30 prose em dashes, mostly paired parenthetical
+  "---X---" constructions (the most recognized tell); (b) high density of
+  negative parallelisms ("X, not Y" — WP:AIPARALLEL); (c) rhetorical fragment
+  flourishes ("That table's shape is the design speaking", "The measured fact
+  is the baseline itself"); (d) repeated signature words: honest x9,
+  exactly/precisely x17, load-bearing x2; (e) ~20 single-word rhetorical
+  italics (\emph{not}, \emph{before}, \emph{are}...); (f) acknowledgments
+  typo "(DESC0021982,)".
+
+Fixes (43 edits, all in hydra_kv.tex; numbers/tables/citations untouched):
+- Every paired prose em-dash parenthetical converted to parentheses, commas,
+  colons, or split sentences (abstract, intro, contributions item 5, design,
+  prod, deploy, testing, observations, limitations, related work,
+  conclusion). Remaining "---" are % banners and Table 1 placeholders.
+- Both "load-bearing" uses, "the design speaking", "verified the strong way",
+  "made loud", and the "not only X but Y" construction reworded.
+- exactly/precisely cut where intensifying (9 removals); honest -> counted/
+  accounted where it described mechanisms (4), kept the 2 thematic uses.
+- Negative parallelisms reduced ("stated precondition, not a discovered bug",
+  "relocated, never dropped", "backpressure, not growth", etc.).
+- 17 rhetorical single-word italics removed; term-introduction italics kept.
+- Acknowledgments comma typo fixed.
+
+Build: pdflatex x2 — 0 errors, 0 overfull boxes, 0 undefined refs, 21 pages.
+pdftotext verified: old phrases 0 hits, new phrasings present.
