@@ -12,9 +12,8 @@
 //
 //   1. #task-panel carries a drawer toggle (#task-panel-drawer-btn).
 //      Collapsing tucks the panel into a slim one-line drawer: the
-//      task text is clamped to a single ellipsized line and the
-//      "Collapse/Uncollapse Chats" button row is hidden.  Expanding
-//      restores the full panel.
+//      task text is clamped to a single ellipsized line.  Expanding
+//      restores the full panel showing the entire task text.
 //   2. #input-area carries a drawer toggle (#input-drawer-btn).
 //      Collapsing hides EVERY child of #input-area except the handle
 //      itself — the composer (#input-container), the #autocomplete
@@ -372,11 +371,6 @@ function testTaskDrawerToggle() {
     'collapsed task drawer must ellipsize the clamped text',
   );
   assert.strictEqual(
-    cs(win, 'task-panel-collapse-btn').display,
-    'none',
-    'collapsed task drawer must hide the Collapse Chats button row',
-  );
-  assert.strictEqual(
     cs(win, 'task-panel').display,
     'block',
     'the slim task drawer itself must stay visible',
@@ -397,11 +391,6 @@ function testTaskDrawerToggle() {
     cs(win, 'task-panel-text').whiteSpace,
     'pre-wrap',
     'expanded task drawer must restore the wrapped task text',
-  );
-  assert.notStrictEqual(
-    cs(win, 'task-panel-collapse-btn').display,
-    'none',
-    'expanded task drawer must restore the Collapse Chats button',
   );
   win.close();
 }
@@ -566,28 +555,21 @@ function testDrawerStateSurvivesTaskChurn() {
   win.close();
 }
 
-// ── 8. Existing Collapse Chats button is untouched by the drawers ───
-function testChatsCollapseButtonUnaffected() {
+// ── 8. The removed Collapse Chats button never comes back ───────────
+function testChatsCollapseButtonRemoved() {
   persistedState = undefined;
   const {win, posted} = makeWebview();
   showTaskPanel(win, posted);
   const d = win.document;
-  const chatsBtn = d.getElementById('task-panel-collapse-btn');
-  const before = chatsBtn.getAttribute('aria-expanded');
-
-  click(win, 'task-panel-drawer-btn');
-  click(win, 'task-panel-drawer-btn');
   assert.strictEqual(
-    chatsBtn.getAttribute('aria-expanded'),
-    before,
-    'the drawer toggle must not drive the Collapse Chats button state',
+    d.getElementById('task-panel-collapse-btn'),
+    null,
+    'the Collapse/Uncollapse Chats button must not exist',
   );
-
-  // And vice versa: Collapse Chats must not collapse the drawer.
-  chatsBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
-  assert.ok(
-    !d.getElementById('task-panel').classList.contains('drawer-collapsed'),
-    'the Collapse Chats button must not drive the drawer state',
+  assert.strictEqual(
+    d.getElementById('task-panel-collapse-label'),
+    null,
+    'the Collapse/Uncollapse Chats label must not exist',
   );
   win.close();
 }
@@ -966,7 +948,7 @@ function runTests() {
     testPersistenceSingleDrawer,
     testRemoteWebApp,
     testDrawerStateSurvivesTaskChurn,
-    testChatsCollapseButtonUnaffected,
+    testChatsCollapseButtonRemoved,
     testDrawerButtonsBigEnough,
     testDrawerButtonsLoseFocusAfterClick,
     testRemoteCollapsedPadding,

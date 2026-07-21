@@ -39,9 +39,9 @@ Behaviours verified by the underlying JS test (see file for details):
   are associated with the owning run_parallel panel;
 * sub-agents spawned while the panel is collapsed do not open tabs —
   their tabs open when the panel is expanded;
-* the "Collapse Chats" toggle (``task-panel-collapse-btn``) that hides
-  a finished task's panels also collapses the run_parallel panel and
-  closes its sub-agent tabs, and "Uncollapse Chats" reopens them;
+* the task-end collapse pass (``applyChevronState``) that hides a
+  finished task's panels also collapses the run_parallel panel and
+  closes its sub-agent tabs;
 * once the run_parallel tool FINISHES (its ``tool_result`` arrives) the
   automatic collapse passes collapse the panel like any other tool
   panel — closing the fan-out's sub-agent tabs (manually expanding the
