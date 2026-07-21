@@ -11,16 +11,16 @@ Development model: `claude-fable-5`. Read-only review + debugging model:
 
 ## Bugs found
 
-* **Bug 5 — Delete crash-resurrection (CRITICAL, confirmed).** `Delete()`
+- **Bug 5 — Delete crash-resurrection (CRITICAL, confirmed).** `Delete()`
   returned after marking the RAM registry and enqueueing the key for the
   background reaper. A SIGKILL before the reaper / next `Checkpoint()` wrote
   the on-disk tombstones let recovery resurrect the key's durably
   checkpointed versions (audit: 60K of 97K keys; minimal repro 5000/5000).
   Facets: inline slots, oversized x-records, overflow-sidecar values.
-* **Bug 6 — Checkpoint doesn't persist other active sessions' parked
+- **Bug 6 — Checkpoint doesn't persist other active sessions' parked
   chunks.** Entries staged `S_BUFFERED`/`S_FLUSHING` in ANOTHER session's
   un-landed chunk are single-owner and cannot be persisted by the caller.
-* **Bug 7 — delete-registry RAM uncharged.** The `del_shards_` mark registry
+- **Bug 7 — delete-registry RAM uncharged.** The `del_shards_` mark registry
   grew unbounded and uncounted.
 
 ## Fixes
@@ -44,16 +44,16 @@ loss. The gate (all must hold):
 1. no intent appended since the pre-drain snapshot, reaper queue empty,
    `reap_inflight_ == 0` (covers queue-full/append-failure **synchronous**
    poisons, registered in-flight before Delete drops its locks);
-2. `fdatasync(fd_)` succeeded, sticky `durable_ok_` still true, and
+1. `fdatasync(fd_)` succeeded, sticky `durable_ok_` still true, and
    **lifetime-zero** `write_errors_`, `tomb_refused_`, `poison_fail_`
    (per-Checkpoint deltas were provably insufficient: a poison failure
    consumed *between* Checkpoints must also forbid retirement forever);
-3. no `del_unmark` since before the stripe scan (a reinsert racing the
+1. no `del_unmark` since before the stripe scan (a reinsert racing the
    Checkpoint can no-op a queued poison while its own S_DIRTY value is not
    yet durable — the intent must then outlive this Checkpoint);
-4. `unlanded_chunks_ == 0` (no session holds staged-but-unlanded chunk
+1. `unlanded_chunks_ == 0` (no session holds staged-but-unlanded chunk
    data);
-5. this instance recovered cleanly: no dropped keys, no skipped unreadable
+1. this instance recovered cleanly: no dropped keys, no skipped unreadable
    slot regions (`recover_clean_`), dlog replay not degraded
    (`dlog_degraded_`: read failures, short reads, any CRC-invalid full
    record, `fstat` failure — the last also disables the dlog so appends
@@ -92,12 +92,12 @@ correctness (read gating, compaction tombstone restaging).
 
 ## Reviews (gpt-5.6-sol, read-only)
 
-* **Round 1** (on the first dlog implementation): 7 critical, 5 major, 2
+- **Round 1** (on the first dlog implementation): 7 critical, 5 major, 2
   minor — all implemented (truncation reordering after sidecar persistence,
   streamed replay, dlog-only-restart recovery + LSN advance, init-time
   direct enqueue instead of pre-cache poisoning, early intent LSN,
   `HYDRA_REAP_PAUSE` test hook, dir fsync at dlog creation, …).
-* **Round 2** (on the round-1 fixes): found the R2-C1 linearization race,
+- **Round 2** (on the round-1 fixes): found the R2-C1 linearization race,
   the R2-C2 reinsert-vs-Checkpoint truncation hole, the R2-C7 invisible
   synchronous poison, delta-vs-lifetime gate holes (R2-C3), uncounted
   `sync_dir` (R2-C4), unreadable-region recovery vs truncation (R2-C5),
@@ -110,31 +110,31 @@ correctness (read gating, compaction tombstone restaging).
 
 ## Documented residuals (honest limits, all surfaced loudly)
 
-* Delete durability degrades fail-soft, never fail-stop: after any
+- Delete durability degrades fail-soft, never fail-stop: after any
   counted I/O fault the dlog is retained forever (fdatasync'd each
   Checkpoint) and sticky flags/stats report it; acknowledged deletes whose
   *every* fallback also failed (dead disk) are only process-crash safe.
-* Recovery replay queues intents past the 64K runtime reaper bound
+- Recovery replay queues intents past the 64K runtime reaper bound
   (~72 B/distinct key), loudly warned; requires crashing inside a massive
   uncheckpointed delete storm.
-* `Checkpoint()` has no snapshot barrier for values (contract: quiesce
+- `Checkpoint()` has no snapshot barrier for values (contract: quiesce
   sessions); delete correctness does not depend on it (gate items 1–4).
-* All Deletes serialize on `dlog_mu_` for one 24-byte buffered pwrite
+- All Deletes serialize on `dlog_mu_` for one 24-byte buffered pwrite
   (~1 µs); the scored Read/Upsert hot path is untouched.
 
 ## Verification
 
-* All 4 audit repros clean on the reference node: `minimal` 0/5000
+- All 4 audit repros clean on the reference node: `minimal` 0/5000
   resurrected, `resur` 0/97K, `rein` 200000/200000 + 0 lost in the
   16-thread flap, `dcost` Delete 1.0 µs (1× Upsert).
-* New permanent test `delcrash` (T28): fork+exec SIGKILL children, 2 crash
+- New permanent test `delcrash` (T28): fork+exec SIGKILL children, 2 crash
   generations, `HYDRA_REAP_PAUSE` (recovery provably dlog-dependent, not
   reaper luck), inline + oversized facets, checkpointed reinserts,
   oversized reinsert-after-post-ckpt-delete (LSN-beats-intent),
   reinsert-racing-Checkpoint (R2-C2: recovers as the reinsert or NotFound,
   never the pre-delete value), dlog truncation by a quiescent Checkpoint,
   reinsert-LSN ordering across a clean restart.
-* Full local suite (28 tests) passes; node: scored median unchanged
+- Full local suite (28 tests) passes; node: scored median unchanged
   (5.50 Mops/s pre-fix chain9 vs 5.51 with the final engine, machine noise
   band), workload spots w0100/w9505/ts8 clean, unit tests at scale 4, TSan
   delcrash/updel loop ×10 clean (see `refnode_workloads_jul21/` and

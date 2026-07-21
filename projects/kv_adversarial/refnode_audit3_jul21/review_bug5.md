@@ -15,16 +15,16 @@ The patch addresses the common-path SIGKILL reproduction, and the basic lock ord
 Concrete failure:
 
 1. A fallback/overflow-only value is checkpointed into `hydra_overflow.dat`.
-2. `Delete(key)` erases it in RAM and appends an intent; there is no slot/index version to poison.
-3. `Checkpoint()` drains an empty reaper and truncates the dlog.
-4. The process is killed before the sidecar rename/unlink, or `write_overflow_file()` fails at `3778-3784` / `3822-3826`.
-5. Recovery loads the old sidecar and there is no intent left to suppress it: the deleted key resurrects.
+1. `Delete(key)` erases it in RAM and appends an intent; there is no slot/index version to poison.
+1. `Checkpoint()` drains an empty reaper and truncates the dlog.
+1. The process is killed before the sidecar rename/unlink, or `write_overflow_file()` fails at `3778-3784` / `3822-3826`.
+1. Recovery loads the old sidecar and there is no intent left to suppress it: the deleted key resurrects.
 
 This is reproducible even with SIGKILL in the same kernel if sidecar update is fault-injected after the successful `ftruncate`; it is not merely a speculative power-ordering issue. The new test never creates an overflow-only key—300-byte values are x-records in the slot log—so it does not cover the audit's sidecar facet.
 
 **Required direction:** persist the new overflow state (including directory fsync) before retiring any intent that guards it, make `write_overflow_file()` return a checked success result, and keep/`fdatasync` the dlog on every failure. Global truncation needs proof for every intent, not merely an empty reaper queue.
 
----
+______________________________________________________________________
 
 ### CRITICAL 2 — Quiescent reaper does not imply successful/durable tombstones; dlog is truncated after I/O failure
 
@@ -36,7 +36,7 @@ Thus ENOSPC/EIO, a read fault, a refused stale position, or a failed slot `fdata
 
 **Required direction:** poisoning must return a durable/provable result, failed work must remain pending (or the intent must remain in the dlog), and dlog retirement must be forbidden if any tombstone/read/sync operation involved in the checkpoint failed. In particular, successful `fdatasync(fd_)` must be an explicit prerequisite, not a best-effort side effect.
 
----
+______________________________________________________________________
 
 ### CRITICAL 3 — Foreign staged chunks make dlog truncation unsafe and Bug 6 compounds Bug 5
 
@@ -47,16 +47,16 @@ Checkpoint only flushes the caller's partial chunk. It counts `S_BUFFERED` entri
 This creates a direct resurrection window:
 
 1. Session A has a foreign `S_BUFFERED` first insert, or an `S_FLUSHING` record, parked in its partial chunk.
-2. Session B deletes the key and logs an intent. The reaper cannot poison the not-yet-landed record.
-3. Session B calls `Checkpoint()`. It warns at most, fdatasyncs the current slot file, and truncates the dlog.
-4. Session A later calls `StopSession()`. `flush_chunk()` first writes a **live-looking** whole chunk at `1753-1763`, then tombstones the deleted record at `1807-1812` / `1830-1840`.
-5. SIGKILL between those writes leaves a live record and no dlog; recovery resurrects it.
+1. Session B deletes the key and logs an intent. The reaper cannot poison the not-yet-landed record.
+1. Session B calls `Checkpoint()`. It warns at most, fdatasyncs the current slot file, and truncates the dlog.
+1. Session A later calls `StopSession()`. `flush_chunk()` first writes a **live-looking** whole chunk at `1753-1763`, then tombstones the deleted record at `1807-1812` / `1830-1840`.
+1. SIGKILL between those writes leaves a live record and no dlog; recovery resurrects it.
 
 This also shows why `ckpt_unflushed_` cannot merely be consulted before truncation: it misses S_FLUSHING/orphan metadata. The interface says Checkpoint persists current in-memory state; a stderr warning with no return status is not an implementation of that contract. Bug 6 remains open.
 
 **Required direction:** add a real checkpoint/session barrier or per-session chunk synchronization, flush every pre-barrier staged record, and prevent new pre-snapshot work from escaping the barrier. At minimum, never retire delete intents while any session-owned staged record that could contain the key remains unresolved.
 
----
+______________________________________________________________________
 
 ### CRITICAL 4 — A dlog-only restart skips replay and reuses LSNs, allowing an old intent to delete a new reinsert
 
@@ -67,15 +67,15 @@ Initialization invokes `recover_log()` only when the slot file is nonempty or `h
 Concrete scenario:
 
 1. A first inline insert is parked `S_BUFFERED`; its slot file is still empty.
-2. The key is deleted. The volatile index candidate makes `Delete()` append an intent with (for example) LSN 2.
-3. SIGKILL leaves only the dlog durable in the kernel page cache.
-4. Reopen skips `recover_log(0)`, so `lsn_` restarts at 1 and the old dlog remains unread.
-5. Reinsert the same key as an x-record; it is written through immediately with LSN 1. SIGKILL again before Checkpoint.
-6. The next reopen now sees a nonempty slot file, replays the old LSN-2 intent, and deletes the post-restart reinsert.
+1. The key is deleted. The volatile index candidate makes `Delete()` append an intent with (for example) LSN 2.
+1. SIGKILL leaves only the dlog durable in the kernel page cache.
+1. Reopen skips `recover_log(0)`, so `lsn_` restarts at 1 and the old dlog remains unread.
+1. Reinsert the same key as an x-record; it is written through immediately with LSN 1. SIGKILL again before Checkpoint.
+1. The next reopen now sees a nonempty slot file, replays the old LSN-2 intent, and deletes the post-restart reinsert.
 
 **Required direction:** include `dlog_bytes_ != 0` in the recovery trigger, replay dlog even with an empty slot log and no sidecar, and advance `lsn_` past every valid intent before accepting writes.
 
----
+______________________________________________________________________
 
 ### CRITICAL 5 — Replay cannot protect keys dropped by recovery's index-capacity limit
 
@@ -87,7 +87,7 @@ The current small-budget instance reports degraded recovery, but its next Checkp
 
 **Required direction:** intent resolution must not depend on successful placement in the runtime index. Scan/track the newest slot LSN for every dlog key independently (for example, parse/compact intents first and track those keys during the log scan), and never retire unresolved intents.
 
----
+______________________________________________________________________
 
 ### CRITICAL 6 — Replay can call `poison_versions()` before `nsets_`/`set_locks_` exist
 
@@ -99,7 +99,7 @@ More than 64K winning records can occur during a delete storm (queue contents pl
 
 **Required direction:** never perform set/cache-dependent poisoning until cache initialization is complete. During replay, deduplicate to the newest intent per key and stage recovery work in a structure that cannot invoke the runtime fallback prematurely.
 
----
+______________________________________________________________________
 
 ### CRITICAL 7 — Delete/Upsert overlap can produce runtime/recovery disagreement because the intent LSN is allocated too late
 
@@ -110,15 +110,15 @@ More than 64K winning records can occur during a delete storm (queue contents pl
 A concrete x-record ordering is:
 
 1. Delete marks the key.
-2. Upsert acquires the set lock, writes/links an x-record with LSN N, unmarks, and returns.
-3. Delete observes a landed candidate, appends intent LSN N+1, and returns. The reaper refuses to poison because the key is now unmarked.
-4. Runtime reads return the Upsert value, but after crash the newer intent wins and deletes it.
+1. Upsert acquires the set lock, writes/links an x-record with LSN N, unmarks, and returns.
+1. Delete observes a landed candidate, appends intent LSN N+1, and returns. The reaper refuses to poison because the key is now unmarked.
+1. Runtime reads return the Upsert value, but after crash the newer intent wins and deletes it.
 
 There is no linearization order that explains both states: placing Delete before Upsert requires the reinsert to survive recovery; placing Delete after Upsert requires immediate runtime reads to be absent. Inline/cache interleavings have related sweep-after-unmark anomalies.
 
 **Required direction:** make mark/sweep/intent ordering and Upsert publication share a per-key serialization/generation protocol. The intent's logical timestamp must correspond to the Delete linearization point, not to a later bookkeeping step.
 
----
+______________________________________________________________________
 
 ### MAJOR 8 — An acknowledged Delete has no recovery guarantee when dlog append fails, and retries cannot repair it
 
@@ -128,7 +128,7 @@ There is no linearization order that explains both states: placing Delete before
 
 For the stated property (“a Delete that returned survives SIGKILL”), append failure must either make the operation report failure through a usable API, fall back to a successful synchronous durable tombstone, or retain retryable intent state. A custom sticky metric cannot reconstruct the lost intent.
 
----
+______________________________________________________________________
 
 ### MAJOR 9 — Bug 7 is not actually bounded or fully charged
 
@@ -138,14 +138,14 @@ For the stated property (“a Delete that returned survives SIGKILL”), append 
 
 The accounting is also incomplete:
 
-* `GetCacheStats().hot_bytes` includes cache + overflow but omits `del_bytes_`, so normal memory reporting remains understated.
-* `FillProdStats` does not export delete-registry bytes/counts; they appear only in an optional destructor stderr line.
-* `unordered_set::erase` generally retains bucket arrays (and allocators may retain freed nodes), while `del_unmark()` subtracts the full 64-byte logical charge. Historical peak allocation can remain resident while the reported charge falls to zero.
-* Recovery loads overflow values before reconstructing delete marks, so the claimed shared cap is not jointly enforced on that path.
+- `GetCacheStats().hot_bytes` includes cache + overflow but omits `del_bytes_`, so normal memory reporting remains understated.
+- `FillProdStats` does not export delete-registry bytes/counts; they appear only in an optional destructor stderr line.
+- `unordered_set::erase` generally retains bucket arrays (and allocators may retain freed nodes), while `del_unmark()` subtracts the full 64-byte logical charge. Historical peak allocation can remain resident while the reported charge falls to zero.
+- Recovery loads overflow values before reconstructing delete marks, so the claimed shared cap is not jointly enforced on that path.
 
 **Required direction:** use a genuinely bounded representation or durable on-disk delete state that permits marks to be reclaimed after a proved checkpoint; account actual/container capacity conservatively; include it in all budget/stats paths; and provide backpressure before allocation rather than a post-allocation warning.
 
----
+______________________________________________________________________
 
 ### MAJOR 10 — Recovery reads the entire dlog into unbudgeted RAM and does not mark recovery degraded on dlog failure
 
@@ -157,7 +157,7 @@ If `xpread` fails, replay simply increments `read_errors_` and returns. CRC-inva
 
 **Required direction:** stream fixed-size chunks, bound/deduplicate intent state, and feed dlog read/CRC failures into an explicit degraded-recovery result. Do not retire a dlog that was not fully and validly replayed.
 
----
+______________________________________________________________________
 
 ### MAJOR 11 — The Checkpoint warning is racy, incomplete, and not machine-actionable
 
@@ -167,7 +167,7 @@ Even as telemetry, `ckpt_unflushed_` is not a reliable snapshot. An active write
 
 The existing checkpoint test stops and joins all workers before validating, and store destruction then flushes all sessions. It never crashes immediately after a Checkpoint while a foreign owner remains parked, so it cannot detect Bug 6.
 
----
+______________________________________________________________________
 
 ### MAJOR 12 — Power-loss claim omits dlog file-creation/name durability
 
@@ -175,7 +175,7 @@ The existing checkpoint test stops and joins all workers before validating, and 
 
 `hydra_dlog.dat` is opened with `O_CREAT`, but creation of its directory entry is never fsynced. `fdatasync(dfd_)` does not portably guarantee that a newly created filename survives power loss. The comments claim Checkpoint extends pending intents to power-loss durability, which is not established for a newly created dlog. The file should be created as part of a directory-synced store initialization (and all rename/unlink ordering must be included in the checkpoint protocol).
 
----
+______________________________________________________________________
 
 ### MINOR 13 — Global dlog serialization and synchronous poisoning under that mutex can severely stall delete workloads
 
@@ -183,30 +183,30 @@ The existing checkpoint test stops and joins all workers before validating, and 
 
 Every Delete takes one global mutex and one 24-byte `pwrite`. When the reaper queue is full, Delete holds `dlog_mu_` across `poison_versions()`, which can perform thousands of reads/page rewrites. This blocks all Deletes and Checkpoint dlog maintenance. It does not affect the scored delete-free workload, but it is a meaningful regression risk for the delete-heavy production path. Batching/per-thread append reservation or a dedicated log writer would avoid this serialization.
 
----
+______________________________________________________________________
 
 ### MINOR 14 — `test_delcrash` does not establish several claims in its own header
 
 **Lines:** `test_hydra.cc:1946-2093`.
 
-* Background cleaners remain enabled; by the time the child signals readiness at `1987`, the reaper may already have written tombstones. The test does not prove recovery relied on dlog. A deterministic pause/failpoint is needed.
-* Post-checkpoint phase-1 deletes number only about 3.9K, far below the 64K replay boundary.
-* 300-byte values are x-records, not overflow-sidecar-only values.
-* `delete st` at `2055` invokes the destructor's full Checkpoint, so the comment “clean close (keeps dlog)” is false; it normally drains and truncates the dlog. The second generation does not test the same surviving dlog.
-* The delete/reinsert leg at `2084-2088` also cleanly stops/destructs, causing Checkpoint/truncation; it does not test replay choosing a newer reinsert while an older intent remains.
-* There is no foreign-session checkpoint/crash, dlog-only store, index-drop reopen, dlog/read/write/fsync/sidecar fault injection, concurrent Delete-vs-Upsert writer, or power-loss ordering test.
+- Background cleaners remain enabled; by the time the child signals readiness at `1987`, the reaper may already have written tombstones. The test does not prove recovery relied on dlog. A deterministic pause/failpoint is needed.
+- Post-checkpoint phase-1 deletes number only about 3.9K, far below the 64K replay boundary.
+- 300-byte values are x-records, not overflow-sidecar-only values.
+- `delete st` at `2055` invokes the destructor's full Checkpoint, so the comment “clean close (keeps dlog)” is false; it normally drains and truncates the dlog. The second generation does not test the same surviving dlog.
+- The delete/reinsert leg at `2084-2088` also cleanly stops/destructs, causing Checkpoint/truncation; it does not test replay choosing a newer reinsert while an older intent remains.
+- There is no foreign-session checkpoint/crash, dlog-only store, index-drop reopen, dlog/read/write/fsync/sidecar fault injection, concurrent Delete-vs-Upsert writer, or power-loss ordering test.
 
----
+______________________________________________________________________
 
 ## Wiring paths checked and dispositioned
 
-* **RMW:** deleted-key slow path eventually calls `Upsert()` and gets normal reinsert publication; the resident fast path has a pre-lock delete check and can linearize before an overlapping Delete. No separate dlog record should be emitted by RMW itself. The broader mark/publication race in CRITICAL 7 still needs a per-key protocol.
-* **Compaction/restage:** `restage_tombstone()` is maintenance for an existing delete and should not append a new user intent. Its durability-before-punch ordering is separate and appears appropriate. The dlog must nevertheless remain until all staged/orphan records covered by the original intent are resolved.
-* **Other `overflow_erase()` callers:** Upsert/RMW erasures supersede overflow with a new value and should not log a delete. The Delete and replay erasures are the paths requiring the sidecar ordering in CRITICAL 1.
-* **Pure in-memory mode:** there is no storage path and `Delete()` directly erases the overflow map; a disk dlog is not applicable.
-* **Buffered slot-file fallback / x-record fd:** `fd_` and `fd2_` reference the same inode, so successful `fdatasync(fd_)` should cover buffered x-record/tombstone writes on Linux. The defect is that success is not required before dlog retirement.
-* **Lock ordering:** current code consistently takes `dlog_mu_` before `reap_mu_`; reapers release `reap_mu_` before set/page locks. I found no present lock cycle. The long synchronous-poison critical section remains a latency/liveness concern.
-* **`dlog_bytes_`:** runtime append/truncate operations are serialized by `dlog_mu_`; atomic access is sufficient for stats. The major problems are semantic retirement and recovery, not a torn in-process counter.
+- **RMW:** deleted-key slow path eventually calls `Upsert()` and gets normal reinsert publication; the resident fast path has a pre-lock delete check and can linearize before an overlapping Delete. No separate dlog record should be emitted by RMW itself. The broader mark/publication race in CRITICAL 7 still needs a per-key protocol.
+- **Compaction/restage:** `restage_tombstone()` is maintenance for an existing delete and should not append a new user intent. Its durability-before-punch ordering is separate and appears appropriate. The dlog must nevertheless remain until all staged/orphan records covered by the original intent are resolved.
+- **Other `overflow_erase()` callers:** Upsert/RMW erasures supersede overflow with a new value and should not log a delete. The Delete and replay erasures are the paths requiring the sidecar ordering in CRITICAL 1.
+- **Pure in-memory mode:** there is no storage path and `Delete()` directly erases the overflow map; a disk dlog is not applicable.
+- **Buffered slot-file fallback / x-record fd:** `fd_` and `fd2_` reference the same inode, so successful `fdatasync(fd_)` should cover buffered x-record/tombstone writes on Linux. The defect is that success is not required before dlog retirement.
+- **Lock ordering:** current code consistently takes `dlog_mu_` before `reap_mu_`; reapers release `reap_mu_` before set/page locks. I found no present lock cycle. The long synchronous-poison critical section remains a latency/liveness concern.
+- **`dlog_bytes_`:** runtime append/truncate operations are serialized by `dlog_mu_`; atomic access is sufficient for stats. The major problems are semantic retirement and recovery, not a torn in-process counter.
 
 ## Performance / score assessment
 
@@ -215,12 +215,12 @@ The scored workload is delete-free. The patch adds no load to normal Read/Upsert
 ## Minimum regression tests required before approval
 
 1. Deterministically pause the reaper, Delete checkpointed inline and x-record values, SIGKILL, and verify dlog—not tombstone luck—suppresses them.
-2. Force an overflow-only persisted value; Delete it; inject sidecar unlink/rename/fsync failure and SIGKILL after dlog maintenance; verify no resurrection.
-3. Park foreign S_BUFFERED and S_FLUSHING records, Delete them, call Checkpoint from another session, then kill exactly after chunk write/before tombstone; verify durability.
-4. Create a dlog-only store, reopen, reinsert with x-record, crash, and verify old intent cannot beat the new value.
-5. Reopen under an index too small to place an intent's key, checkpoint, then reopen large; verify the delete remains permanent.
-6. Replay more than 64K winning/duplicate intents and verify Init neither crashes nor exceeds memory.
-7. Fail the Nth dlog write, tombstone write/read, slot `fdatasync`, dlog `fdatasync`, sidecar rename/unlink, and directory fsync; verify intent retention and recovery status.
-8. Race independent Upsert/Delete writers on the same keys, crash at random points, and compare runtime/recovered outcomes with a linearizable history oracle.
-9. Delete enough distinct keys to exceed the intended registry pool and assert RSS/accounting remains bounded.
-10. Add crash-prefix/power-loss replay for slot tombstone, dlog append/truncate, sidecar rename/unlink, and directory-fsync ordering.
+1. Force an overflow-only persisted value; Delete it; inject sidecar unlink/rename/fsync failure and SIGKILL after dlog maintenance; verify no resurrection.
+1. Park foreign S_BUFFERED and S_FLUSHING records, Delete them, call Checkpoint from another session, then kill exactly after chunk write/before tombstone; verify durability.
+1. Create a dlog-only store, reopen, reinsert with x-record, crash, and verify old intent cannot beat the new value.
+1. Reopen under an index too small to place an intent's key, checkpoint, then reopen large; verify the delete remains permanent.
+1. Replay more than 64K winning/duplicate intents and verify Init neither crashes nor exceeds memory.
+1. Fail the Nth dlog write, tombstone write/read, slot `fdatasync`, dlog `fdatasync`, sidecar rename/unlink, and directory fsync; verify intent retention and recovery status.
+1. Race independent Upsert/Delete writers on the same keys, crash at random points, and compare runtime/recovered outcomes with a linearizable history oracle.
+1. Delete enough distinct keys to exceed the intended registry pool and assert RSS/accounting remains bounded.
+1. Add crash-prefix/power-loss replay for slot tombstone, dlog append/truncate, sidecar rename/unlink, and directory-fsync ordering.
