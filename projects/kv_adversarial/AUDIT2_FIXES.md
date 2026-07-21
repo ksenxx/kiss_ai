@@ -6,7 +6,14 @@ OFF-benchmark paths (Delete / disk-full / recovery / compaction races), so the
 scored 30 s Read+Upsert window is untouched: the only hot-path additions are
 single relaxed atomic loads on already-cold branches (details per fix below),
 which is the design argument that the verified 5.51 Mops/s / 7.54 GiB result
-is preserved (confirm with a scored re-run on the reference node).
+is preserved. **CONFIRMED on the reference node (July 21):** scored `run.sh`
+median-of-3, fixed engine, two independent suites — 5.44/5.50/5.50 → **5.50**
+and 5.52/5.50/5.49 → **5.50 Mops/s**, StoreMemUtil **7.54 / 8.00 GB** on every
+run, StoreRSS ≤ 8 GiB enforced-ok, integrity audit 0 failures. A same-day A/B
+control re-ran the ORIGINAL pre-fix engine on the same box: 5.50/5.50/5.49 →
+**5.50 Mops/s** — identical median, so the 0.01 delta vs the July-20 5.51 is
+day-to-day machine noise, not a regression (details in the Verification
+section below).
 
 ## Bug 1 — Deadlock/livelock: concurrent Upsert + Delete  ✅ FIXED
 *Was:* `Delete` block-waited for a `S_BUFFERED` pin to land, but could only
@@ -127,11 +134,29 @@ scored Linux build is textually additive-guard only)
 - ASan+UBSan, full suite, scale 4: `ALL TESTS PASSED`, zero reports.
 - TSan, 10-filter subset (incl. `delete`, `updel`+`updel2`, `recover`+
   `recoverdrop`, `compact`, `delcost`, `memfull`), scale 8: zero warnings.
-- NOT re-run here (no Linux reference box in this environment): the Linux
-  `run_all_tests.sh` matrix and the scored `run.sh` median-of-3. The pre-fix
-  engine passed both (AUDIT2); the hot-path table below is the argument that
-  the score is preserved — re-run both on the reference node before calling
-  the number verified.
+
+## Reference-node verification (July 21 — n2-standard-64, Ubuntu 22.04,
+kernel 6.8, g++ 11.4, 8× NVMe RAID0 `/mnt/ssd`, the AUDIT2 box)
+Scored `run.sh` protocol exactly as in AUDIT2 (harness `benchmark_harness.cc`
++ identical `kvstore_interface.h`, same 250M-key traces by inode, 16 threads
+NUMA node 0, user cgroup MemoryMax=14 GiB / no swap, KVSTORE_VALUE_SIZE=100,
+KVSTORE_AUDIT=1, StoreRSS ≤ 8 GiB enforced, 30 s window, median of 3):
+- **Fixed engine (this commit), suite A:** 5.44 / 5.50 / 5.50 → **median
+  5.50 Mops/s**; suite B: 5.52 / 5.50 / 5.49 → **median 5.50 Mops/s**.
+  Every run: StoreMemUtil **7.54 / 8.00 GB (94%)**, StoreRSS ≈ 7.90 GB ok,
+  `INTEGRITY: cross-thread audit ... 0 failures`.
+- **Same-day A/B control — ORIGINAL pre-fix engine** (the exact `hydra.cc`
+  that scored 5.51 on July 20) rebuilt and re-run on the same box/layout:
+  5.50 / 5.50 / 5.49 → **median 5.50 Mops/s**. Identical median ⇒ the
+  0.01 Mops/s difference vs the July-20 5.51 is day-to-day machine noise;
+  **the fixes cost zero measurable throughput** (fixed engine's best run,
+  5.52, exceeded the control's best, 5.50).
+- The benign shutdown-time `hydra: WARNING 1 slot key mismatches` line also
+  appears in the original July-20 scored logs — pre-existing, not introduced.
+- **Linux `run_all_tests.sh` matrix on the same node (fixed engine): ALL
+  PHASES PASS** — opt scale1, buffered-fd tmpfs scale4, no-uring scale4,
+  ASan+UBSan scale4, TSan scale8 subset (zero warnings), coverage
+  (92.52% of 1765 lines executed, 94.77% of branches executed).
 
 ## Hot-path impact audit (why the score cannot regress)
 | Scored-path site | Change | Cost |
