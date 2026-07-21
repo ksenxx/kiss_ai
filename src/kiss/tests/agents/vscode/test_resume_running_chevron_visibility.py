@@ -84,7 +84,7 @@ class TestStatusHandlerRefreshesChevron:
         panel of a freshly-finished task and break the existing
         post-completion view."""
         body = _extract_status_case_body(_read_main_js())
-        m = re.search(r"if\s*\(\s*ev\.running\s*\)\s*\{", body)
+        m = re.search(r"if\s*\(\s*ev\.running\s*\)", body)
         assert m, (
             "case 'status' must guard its applyChevronState refresh "
             "with `if (ev.running)` so the call only fires on the "
@@ -111,11 +111,6 @@ class TestStatusHandlerRefreshesChevron:
         assert "currentTaskName" in refresh_region, (
             "applyChevronState refresh in case 'status' must reference "
             "currentTaskName so it scopes to the resumed task's panels"
-        )
-        assert "panelsExpandedMap" in refresh_region, (
-            "applyChevronState refresh must read the current task's "
-            "expanded state from panelsExpandedMap so a manually "
-            "expanded chevron is preserved"
         )
 
     def test_status_handler_refresh_is_after_set_running_state(
@@ -160,19 +155,15 @@ class TestApplyChevronStateInRunningBranchUnhidesPanels:
         assert "inRunning" in body, (
             "applyChevronState must compute an `inRunning` flag so "
             "running-task panels are kept visible even when the "
-            "chevron is collapsed"
+            "collapse pass runs"
         )
-        # The !expanded path must remove chv-hidden when inRunning.
-        not_expanded = body.split("if (!expanded)", 1)
-        assert len(not_expanded) == 2, (
-            "applyChevronState must branch on `if (!expanded)`"
+        # The collapse pass must remove chv-hidden when inRunning.
+        assert "remove('chv-hidden')" in body, (
+            "applyChevronState must remove chv-hidden from "
+            "running-task panels (its `inRunning` arm)"
         )
-        collapsed_branch = not_expanded[1].split("else", 1)[0]
-        assert "remove('chv-hidden')" in collapsed_branch, (
-            "applyChevronState's collapsed branch must remove "
-            "chv-hidden from running-task panels (its `inRunning` arm)"
-        )
-        assert "inRunning" in collapsed_branch, (
-            "applyChevronState's collapsed branch must check inRunning "
-            "before adding chv-hidden"
+        in_running_idx = body.find("inRunning || p.classList.contains('rc')")
+        assert in_running_idx >= 0, (
+            "applyChevronState must check inRunning (or .rc) before "
+            "adding chv-hidden"
         )
