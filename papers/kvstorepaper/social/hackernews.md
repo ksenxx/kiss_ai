@@ -43,9 +43,9 @@ IOPS and cache hit rate allow; two stretch goals (10, then 7 Mops/s) were
 never met, and the paper shows the arithmetic for why.
 
 The part I find more interesting than the number: I didn't write the engine.
-It was written by KISS Sorcar, an open-source agent framework I've been
-building for the past several months. My entire contribution was six task
-prompts and two short steering messages. 
+It was written by KISS Sorcar (https://kisssorcar.github.io/), an open-source 
+agent framework I've been building for the past several months. My entire 
+contribution was six task prompts and two short steering messages. 
 
 Because an agent optimizing against a fixed benchmark will overfit it, the
 prompts forced an adversarial loop: the agent generated workload variants
