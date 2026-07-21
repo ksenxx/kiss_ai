@@ -303,3 +303,47 @@ Changes to papers/kvstorepaper/hydra_kv.tex:
 Build: pdflatex x2 (/Library/TeX/texbin; note: pdflatex is NOT on the default
 PATH in this environment) - 0 errors, 0 undefined refs, 0 overfull; 20 pages.
 pdftotext verification: all removed phrases 0 hits; all new phrasings present.
+
+## Session: read-through of Sections 3-5 + Conclusion for residual agent/Sorcar/intermediate-engine references
+
+Task: confirm no residual references to "the agent", KISS Sorcar, or the
+intermediate engine outside the sanctioned Section 6 / Introduction
+methodology paragraph, in Sections 3-5 and the Conclusion; reword stragglers
+to name the engine directly.
+
+Read-through findings (Sections 3-5, plus Limitations/Related Work checked
+for completeness):
+- Section 3 (State of the Art): clean. "every heavier policy tried during
+  development" and "HydraKV, built without consulting it, converged on the
+  same problem statement" have the engine/development as subject.
+- Section 4 (incl. 4.1, 4.2): clean. The two parentheticals pointing audit
+  artifacts and the development record at Section 6 are sanctioned pointers,
+  not narratives.
+- Section 5: clean. 5.2's V1 sentence names "the engine revision that
+  assumed it" (design-space fact, history pointed at Section 6); 5.3's
+  ceiling section references the task-sequence goals via Section 6 only.
+- Limitations/Related Work: no "agent" outside the citation-bearing
+  AI-driven-code-discovery paragraph (kept deliberately in a prior session).
+- Grep proof: all "agent"/"Sorcar"/"\HydraFirst"/"intermediate" hits outside
+  Section 6 are in sanctioned spots (Abstract closing provenance sentence,
+  Intro paragraph 2, Related Work) -- except two stragglers in the
+  Conclusion.
+
+Fixes (2 edits, both in the Conclusion):
+- Opener "A general-purpose AI agent, steered by six natural-language tasks
+  and two independent audits, produced a \EngineLocFinal-line key-value
+  store engine that outperforms... together with evidence (...)" ->
+  "HydraKV is a \EngineLocFinal-line key-value store engine that
+  outperforms... and it ships with evidence (...)".
+- Closer "...that recipe transfers to most performance engineering an agent
+  might be asked to do" -> "The development process that produced the
+  engine, and the experimental hygiene that kept it honest, are documented
+  in Section 6; we suspect that recipe transfers to most performance
+  engineering of this kind...".
+
+Build: pdflatex x2 - 0 errors, 0 undefined refs, 0 overfull; PDF now 19
+pages (the shorter conclusion pulled the bibliography up one page).
+pdftotext verification: "general-purpose AI agent" and "an agent might be
+asked" 0 hits; new phrasings present; all 18 remaining "agent" occurrences
+in the PDF are in the Abstract's closing sentence, Intro paragraph 2,
+Section 6, or Related Work's AI-discovery paragraph (all sanctioned).
