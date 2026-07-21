@@ -347,3 +347,38 @@ pdftotext verification: "general-purpose AI agent" and "an agent might be
 asked" 0 hits; new phrasings present; all 18 remaining "agent" occurrences
 in the PDF are in the Abstract's closing sentence, Intro paragraph 2,
 Section 6, or Related Work's AI-discovery paragraph (all sanctioned).
+
+## SESSION (AI-slop review round 2, post Tasks 5-7 rewrite) — COMPLETE
+
+Task: re-review papers/kvstorepaper/hydra_kv.tex for AI-writing tells,
+since the paper was heavily rewritten (Tasks 5-7) after the first slop
+pass.
+
+Research: 10 sites visited (WP:Signs of AI writing, WikiProject AI Cleanup
+catchphrases, Kobak et al. excess-vocabulary arXiv:2406.07016, Reinhart et
+al. PNAS 2422455122, Goedecke em-dash post + its HN thread, Simon
+Willison slop definition, Wikipedia AI-slop article, GPTZero overused-
+phrases list, Guardian "AI-ese" article).
+
+Verified clean (no action): marker vocabulary (delve/showcase/underscore/
+pivotal/crucial/tapestry/leverage/vibrant/boasts/moreover/notably...) 0
+hits; prose em dashes 0 (only comment banners + Table 1 placeholders);
+no curly quotes/Unicode artifacts; no Markdown residue; GPTZero phrases
+(aligns/plays a role/aims to/fast-paced) 0 hits except a factual
+"surpass best-known results" about FunSearch; semicolon density normal;
+\emph{} usage almost entirely term introductions; "X, not Y" contrasts
+all carry technical content; citations all real.
+
+Fixes (6 edits):
+1. Sec 3 caching paragraph: rhetorical question + "Section 4 is the
+   answer." punchline -> declarative "The design question for HydraKV,
+   addressed in Section 4, is how much...".
+2. Limitations: "The picture is this:" -> "Against that bar:".
+3. Sec 5.2: rhetorical italics \emph{inspired by} -> plain.
+4. Limitations residual risks: \emph{different} -> plain.
+5+6. Sec 4 memory tier: "serves as a fail-soft absorber for failure
+   paths" ("serves as" is a WP:AISIGNS words-to-watch) -> "is a
+   fail-soft absorber for failure paths".
+
+Build: pdflatex x2 — 0 errors/warnings, 19 pages. pdftotext: removed
+phrases 0 hits, replacements present. Committed tex+pdf+PROGRESS.md.
