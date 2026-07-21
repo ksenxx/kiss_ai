@@ -582,3 +582,26 @@ Session 2–3 log (continues the session-1 dlog implementation, commit d62de225)
    (hydra.cc ffbc339e, test_hydra.cc 208b4aa8). Docs: AUDIT3_FIXES.md.
 6. Node chain10 (final engine) launched: rebuild + repros + scored + wl
    spots + unit scale 4 + TSan delcrash/updel x10 (setarch -R).
+   Chain10 verified (see commit 3029a2d9 message): all 4 repros clean,
+   SCORED 5.50/5.50/5.52 -> MEDIAN 5.50 (same-day pre-fix control 5.50),
+   w0100 5.13 / w9505 5.19, 28/28 unit tests scale 4, TSan x10 clean.
+
+## 2026-07-21 (cont.): paper updated for the AUDIT3/Task-7 fixes
+
+papers/kvstorepaper/hydra_kv.tex + rebuilt hydra_kv.pdf (21 pp, pdflatex
+clean). Changes: audits 2 -> 3 everywhere (abstract, intro, contribs,
+footnote incl. AUDIT3_FIXES.md + refnode_audit3_jul21/); tasks 6 -> 7 with
+a new verbatim-prompt "Task 7: the audit of the fix" paragraph (Bug 5/6/7,
+dlog repair, 2 review rounds incl. the no-fault linearizability race,
+node verification, score-neutrality); delete durability rewritten in
+Design §4 (two-layer: 24-B buffered intent at Delete-return = process-crash
+durable ~1 us; reaper tombstoning + Checkpoint fdatasync = power loss) and
+§4.2 ("Non-blocking, crash-durable deletes": set-lock linearization,
+5-condition retirement proof, counted failure ladder); accounting adds
+64 B/mark registry charging + parked-chunk warning; constants: new final
+\HydraFinalWL{5.50} (runs 5.50/5.50/5.52), \HydraHardenedWL{5.51} for the
+task-6 engine, 0:100 5.13, 5:95 5.19, LoC ~4,470; testing 27 -> 28 tests
+(2,170-line program, delcrash described, gcov 89.3% qualified); tab:wl
+caption re-attributed; Limitations (asymmetric delete durability, new
+fail-soft residuals, registry charged); Observation 5 + Conclusion note
+the third-audit lesson.
