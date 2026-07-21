@@ -20,8 +20,24 @@
 set -euo pipefail
 
 JOB_NAME="kiss-slack-sorcar-poller"
-VENV_PYTHON="$HOME/.vscode/extensions/ksenxx.kiss-sorcar-2026.7.18/kiss_project/.venv/bin/python"
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
+# Resolve the venv python of the newest installed KISS Sorcar extension
+# at run time.  A hardcoded extension path breaks silently on every
+# extension upgrade (the old version's .venv is deleted), so pick the
+# highest-versioned ksenxx.kiss-sorcar-* directory that actually has a
+# working venv python.
+find_venv_python() {
+    local ext
+    for ext in $(ls -d "$HOME"/.vscode/extensions/ksenxx.kiss-sorcar-* 2>/dev/null \
+                 | sort -t- -k2,2V -r); do
+        if [ -x "$ext/kiss_project/.venv/bin/python" ]; then
+            echo "$ext/kiss_project/.venv/bin/python"
+            return 0
+        fi
+    done
+    return 1
+}
 CRON_LINE="* * * * * $SCRIPT_PATH >> $HOME/.kiss/slack_channel_sorcar_poller/cron.log 2>&1 # $JOB_NAME"
 
 install_cron() {
@@ -52,6 +68,10 @@ run_poller() {
     export KISS_SLACK_WORKSPACE="${KISS_SLACK_WORKSPACE:-learningsystems}"
     export KISS_SLACK_USER="${KISS_SLACK_USER:-ksen}"
     export KISS_SLACK_CHANNEL="${KISS_SLACK_CHANNEL:-sorcar}"
+    VENV_PYTHON="$(find_venv_python)" || {
+        echo "$(date '+%Y-%m-%d %H:%M:%S') ERROR: no KISS Sorcar extension venv python found" >&2
+        exit 1
+    }
     exec "$VENV_PYTHON" -m kiss.agents.third_party_agents.slack_channel_sorcar_poller
 }
 
