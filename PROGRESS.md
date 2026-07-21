@@ -628,3 +628,31 @@ test-suite fixes from the previous session). Resolve manually and merge.
    7/7; `uv run check` all green.
 1. Committed the squash merge, then deleted branch
    `kiss/wt-1784660080-8f239a9d`.
+
+______________________________________________________________________
+
+# PROGRESS — Full test suite run (8-way parallel), 2nd pass
+
+Task: run all tests, split by test-method count into cores−2 (10−2=8)
+splits, run splits in parallel via run_parallel, triage failures as
+project vs test bugs, and fix accordingly.
+
+## DONE (single session) — COMPLETE, ALL GREEN
+
+1. Collected 6,849 tests (78 deselected) with `pytest --collect-only -q`;
+   grouped per file (759 files) and greedy-bin-packed by test count into
+   8 splits of 856–857 tests each.
+1. Ran all 8 splits concurrently with run_parallel, each split executing
+   `uv run pytest -q -p no:cacheprovider --timeout=600` on its file list.
+1. Result: 6,836 passed + 13 skipped = 6,849 — exactly the collected
+   count; zero FAILED/ERROR lines in any of the 8 logs (verified directly
+   by tail/grep on each log, not just the runners' reports).
+1. Splits 0 and 2 each needed one detached-session relaunch: a suite test
+   performs name/process-group kills and took down the sibling pytest
+   process mid-run (same known hazard as the previous session). The
+   detached reruns were fully green, so the kills were operational
+   collateral, not real failures.
+1. Verdict: no project bugs and no test bugs found this pass — the fixes
+   from the previous 8-way run (commit f3d1b48b, squash-merged as
+   76e78ed6) hold; nothing to fix.
+1. No source files modified; only this PROGRESS.md log added.
