@@ -1,5 +1,11 @@
 # July 20 — Remediation of AUDIT2.md findings
 
+> **Follow-up (July 21):** the multi-workload end-to-end hardening pass
+> (all harness workload mixes incl. the user's 0:100 and 5:95, large/bimodal
+> values, tiny budgets, TSan compact stress) found and fixed 8 further
+> defects — see `WORKLOAD_HARDENING.md` and the evidence in
+> `refnode_workloads_jul21/`.
+
 Every defect reproduced in `AUDIT2.md` is fixed in `hydra.cc`, each with a
 self-asserting regression test in `test_hydra.cc`. All fixes live on
 OFF-benchmark paths (Delete / disk-full / recovery / compaction races), so the

@@ -372,6 +372,58 @@ static inline bool slot_crc_ok(const uint8_t* slot) {
     return c == crc32c(slot, kSlotCrcOff);
 }
 
+// ── Oversized records ("x-records") ──────────────────────────────────────────
+// Values larger than kSlotDataMax (102..4096 B) are stored as MULTI-SLOT
+// records in the SAME slot log (disk-resident like every other value — the
+// audit-class bug was a budget-capped in-RAM side map silently dropping them).
+// Header layout (32 B, always inside the record's first slot):
+//   [0]  key   u64
+//   [8]  sz1   u32  value size+1 (103..4097); kXTombBit set = tombstoned
+//   [12] prev  u32  previous version position+1 (chain, like inline slots)
+//   [16] lsn   u64  full 64-bit LSN
+//   [24] dcrc  u32  crc32c over data[0..size)   (never changes)
+//   [28] hcrc  u32  crc32c over header[0..28)   (resealed by tombstoning)
+// Data follows at offset 32; the record occupies ceil((32+size)/128) slots
+// (<= 33), zero-padded to a slot boundary, and NEVER crosses an 8192-slot
+// extent boundary (so linear scans — recovery, compaction — stay in sync).
+// Split header/data CRCs let Delete tombstone a record by rewriting ONLY the
+// 32-byte header (buffered fd, byte-granular) without re-reading the data.
+static constexpr size_t   kXDataMax  = GenValue::kMaxSize;   // 4096
+static constexpr size_t   kXHdrBytes = 32;
+static constexpr uint32_t kXTombBit  = 0x80000000u;
+static inline uint32_t xrec_slots(size_t size) {
+    return (uint32_t)((kXHdrBytes + size + kSlotBytes - 1) / kSlotBytes);
+}
+// Live x-record header? (size strictly between the inline max and kXDataMax;
+// bit31 clear excludes x-tombstones and the 0xFFFFFFFF single-slot tombstone.)
+static inline bool sz1_is_xhead(uint32_t sz1) {
+    return !(sz1 & kXTombBit) && (uint64_t)(sz1 - 1) > kSlotDataMax &&
+           (uint64_t)(sz1 - 1) <= kXDataMax;
+}
+// Tombstoned x-record header? (kXTombBit set, original length still encoded
+// so length-aware scans keep walking correctly; 0xFFFFFFFF is the single-slot
+// tombstone and is excluded.)
+static inline bool sz1_is_xtomb(uint32_t sz1) {
+    if (!(sz1 & kXTombBit) || sz1 == 0xFFFFFFFFu) return false;
+    uint32_t s1 = sz1 & ~kXTombBit;
+    return (uint64_t)(s1 - 1) > kSlotDataMax && (uint64_t)(s1 - 1) <= kXDataMax;
+}
+static inline uint64_t xrec_lsn(const uint8_t* h) {
+    uint64_t v;
+    memcpy(&v, h + 16, 8);
+    return v;
+}
+static inline void xrec_seal_hdr(uint8_t* h, uint64_t lsn) {
+    memcpy(h + 16, &lsn, 8);
+    uint32_t c = crc32c(h, 28);
+    memcpy(h + 28, &c, 4);
+}
+static inline bool xrec_hdr_ok(const uint8_t* h) {
+    uint32_t c;
+    memcpy(&c, h + 28, 4);
+    return c == crc32c(h, 28);
+}
+
 // EINTR/EAGAIN-safe pread. Returns bytes read (< n only at EOF), or -1 on a
 // real I/O error (FAIL-SOFT: callers count the error and treat the data as
 // unavailable — the process never dies for a disk fault).
@@ -573,6 +625,16 @@ struct Session {
     // scratch page for read-modify-write flushes
     uint8_t* rmw_buf = nullptr;
 
+    // Oversized-record (x-record) write-through state: a private extent the
+    // session packs variable-length records into (FRESH extents only, never
+    // recycled ones, so records stay region-aligned), plus a scratch buffer
+    // large enough for one maximal record (33 slots).
+    uint8_t* xbuf = nullptr;
+    uint64_t xbase = 0;        // next x-record slot position
+    uint32_t xcap = 0;         // slots remaining in the reserved x extent
+    uint64_t xext_base = 0;    // reserved x extent origin (ownership registry)
+    bool     xactive = false;
+
     // stats — written only by the owning thread via bump() (a relaxed atomic
     // store compiling to a plain MOV), read concurrently by GetCacheStats
     // with relaxed loads: race-free, zero hot-path cost.
@@ -582,6 +644,7 @@ struct Session {
 
     ~Session() {
         free(chunk_buf);
+        free(xbuf);
         free(page_buf);
         free(rmw_buf);
     }
@@ -653,7 +716,15 @@ private:
     bool restage_tombstone(uint64_t key, Session* se);
     // Overwrite a landed slot's size field with an unmatchable value so no
     // read can ever match it again (prev chain stays intact). Delete-only.
-    void tombstone_slot(uint64_t position, Session* se);
+    void tombstone_slot(uint64_t position, uint64_t key, Session* se);
+    // Write-through upsert of an oversized value as a multi-slot x-record;
+    // false = the disk or index refused (caller falls back to the capped
+    // overflow absorb).
+    bool xrec_upsert(uint64_t key, const uint8_t* data, size_t size);
+    // Read an x-record's data (position = record head slot) via the buffered
+    // fd, verifying key/size/data-CRC. False = torn or superseded record.
+    bool xrec_read_data(uint64_t position, uint64_t key, uint32_t size,
+                        GenValue& out, Session* se);
     void flush_chunk(Session* se);
     void flush_partials(Session* se);  // land a partially-filled chunk
     // Doorkeeper admission filter (two-generation bitmaps).
@@ -666,6 +737,7 @@ private:
     void stop_background();
     // Crash recovery: rebuild the index from the slot log (per-slot CRC
     // verified, newest-LSN-wins, tombstone-aware). Runs once from Init.
+    void checkpoint_stripe(uint64_t lo, uint64_t hi);
     void recover_log(uint64_t file_bytes);
     // Returns the number of sidecar entries REFUSED by the budget cap (a
     // smaller-budget reopen must degrade to counted drops, never OOM).
@@ -698,6 +770,7 @@ private:
         uint32_t  filled = 0;        // bytes of the current page already read
         uint64_t  cepoch = 0;        // compact_epoch_ at op start (race guard)
         uint16_t  best_sz = 0;
+        uint32_t  best_xsz = 0;      // nonzero: best is an x-record (size)
         uint8_t   best_data[kSlotDataMax];
     };
     void io_main_uring(int shard);
@@ -734,6 +807,11 @@ private:
     size_t   mem_budget_ = 0;
     bool     disk_mode_ = false;
     int      fd_ = -1;
+    // Second, BUFFERED fd on the same slot file: x-records are variable-
+    // length (no O_DIRECT alignment) and page-cache reads through it are
+    // coherent the instant a record is published. fdatasync(fd_) flushes the
+    // inode's dirty pages regardless of which fd wrote them.
+    int      fd2_ = -1;
     std::string dir_;
     uint64_t gen_ = 0;             // unique per-instance id (TLS validation)
 
@@ -778,7 +856,43 @@ private:
     std::atomic<uint64_t> recover_torn_{0};
     std::atomic<uint64_t> rejected_oversize_{0};
     std::atomic<uint64_t> oversize_bytes_{0};  // charged bytes in overflow map
+    // X-extent registry: one bit per kChunkSlots extent over the full 32-bit
+    // position space (64 KiB). Set when an extent is reserved for x-records
+    // (xrec_upsert) or recognized as one during recovery; never cleared —
+    // extents never change type (x extents are never punched or recycled).
+    // Page reads route on it: x-extent pages are BUFFERED-written (fd2_), so
+    // they must also be READ through fd2_ — an O_DIRECT read of a page that
+    // is dirty in the page cache races writeback and can fault or go stale
+    // (measured on ext4/md0: ~2K faulted preads per 30 s bimodal run, each a
+    // false NotFound). Chunk extents stay on O_DIRECT fd_ untouched.
+    static constexpr uint64_t kMaxExtents = (1ULL << 32) / kChunkSlots;
+    std::atomic<uint64_t>* xext_map_ = nullptr;   // 64 KiB, zero-initialized
+    void mark_x_extent(uint64_t slot) {
+        uint64_t e = slot / kChunkSlots;
+        xext_map_[e >> 6].fetch_or(1ULL << (e & 63), std::memory_order_release);
+    }
+    bool is_x_page(uint64_t page) const {
+        uint64_t e = page * kSlotsPerPage / kChunkSlots;
+        return (xext_map_[e >> 6].load(std::memory_order_acquire) >>
+                (e & 63)) & 1;
+    }
+    // Per-page read fd: buffered for x extents, O_DIRECT for chunk extents.
+    int page_fd(uint64_t page) const { return is_x_page(page) ? fd2_ : fd_; }
+    // x-records ever written or recovered. 0 keeps every fast path exactly
+    // as before (one relaxed load on cold branches); it never decrements.
+    std::atomic<uint64_t> xrec_count_{0};
     std::atomic<uint64_t> rejected_mem_{0};    // inline writes refused at cap
+    // Failure-cause diagnostics (cold paths only; dumped at shutdown when
+    // HYDRA_STATS=1 — production triage for integrity regressions).
+    std::atomic<uint64_t> diag_xlink_ok_{0};      // x-records linked (exact)
+    std::atomic<uint64_t> diag_xfail_pwrite_{0};  // xrec pwrite refused
+    std::atomic<uint64_t> diag_xfail_pos_{0};     // xrec position space full
+    std::atomic<uint64_t> diag_xfail_link_{0};    // xrec index link refused
+    std::atomic<uint64_t> diag_xabsorb_{0};       // xrec fell back to absorb
+    std::atomic<uint64_t> diag_nf_walk_{0};       // NotFound: walk exhausted
+    std::atomic<uint64_t> diag_nf_xdata_{0};      // NotFound: xrec data gate
+    std::atomic<uint64_t> tomb_refused_{0};       // stale-position tombstones
+                                                  // refused (key/size gate)
     std::atomic<uint64_t> recover_dropped_{0}; // keys dropped by recovery
     uint64_t              oversize_cap_ = 0;   // budget/8 (HYDRA_OVERSIZE_CAP_MB)
     std::atomic<uint64_t> compactions_run_{0};
@@ -975,7 +1089,8 @@ void HydraStore::StopSession() {
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
-void HydraStore::InitExtended(size_t, size_t, size_t mem_budget_bytes,
+void HydraStore::InitExtended(size_t hash_table_size, size_t,
+                              size_t mem_budget_bytes,
                               const char* storage_path) {
     gen_ = g_store_gen.fetch_add(1, std::memory_order_relaxed);
     mem_budget_ = mem_budget_bytes ? mem_budget_bytes : (8ULL << 30);
@@ -1017,12 +1132,50 @@ void HydraStore::InitExtended(size_t, size_t, size_t mem_budget_bytes,
             fprintf(stderr, "hydra: cannot open %s\n", file.c_str());
             abort();
         }
+        // Buffered fd for x-records (see fd2_ member comment).
+        fd2_ = open(file.c_str(), O_RDWR, 0644);
+        if (fd2_ < 0) {
+            fprintf(stderr, "hydra: cannot reopen %s\n", file.c_str());
+            abort();
+        }
+
+        // X-extent registry (before recovery: the scan marks x extents).
+        void* xm = mmap(nullptr, kMaxExtents / 8, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (xm == MAP_FAILED) {
+            fprintf(stderr, "hydra: xext mmap failed\n");
+            abort();
+        }
+        xext_map_ = static_cast<std::atomic<uint64_t>*>(xm);
 
         // Fingerprint hash index: largest power-of-two word count whose
         // footprint is <= budget/4 (2 GiB / 268M entries at an 8 GiB budget).
         uint64_t words = 64;
         while (words * 2 * 8 <= mem_budget_ / 4) words *= 2;
         index_.init(words);
+
+        // RAM-index capacity floor (LOUD, init-time): the fingerprint index
+        // needs ~8 bytes of budget-charged RAM per distinct key (word) and
+        // hard-stops at ~97% fill — past that, new keys degrade to honest
+        // rejection (rejected/rej_mem stats), which a capacity-planning
+        // mistake would otherwise only surface under load. The caller's
+        // hash_table_size hint is the expected distinct-key scale, so warn
+        // NOW when it cannot fit, with the budget that would.
+        if (hash_table_size > index_.cap) {
+            uint64_t need_words = words;
+            while (need_words - need_words / 32 < hash_table_size &&
+                   need_words < (1ULL << 58))   // wrap guard: absurd hints
+                need_words *= 2;
+            fprintf(stderr,
+                    "hydra: WARNING: hash_table_size hint %zu exceeds the "
+                    "RAM index capacity %llu for a %.1f GiB budget "
+                    "(~8 B/key, index gets budget/4). Keys past the cap "
+                    "are rejected (counted in prod stats). Use a budget "
+                    ">= %.1f GiB for this key count.\n",
+                    hash_table_size, (unsigned long long)index_.cap,
+                    mem_budget_ / 1073741824.0,
+                    need_words * 64.0 / 1073741824.0);
+        }
 
         // Crash / restart recovery: a non-empty log is scanned (CRC-checked,
         // newest-LSN-wins) to rebuild the index before anything else runs.
@@ -1122,28 +1275,46 @@ void HydraStore::stop_background() {
 HydraStore::~HydraStore() {
     stop_background();
     if (disk_mode_ && fd_ >= 0) {
-        // Clean-shutdown durability (best effort): land every session's
-        // parked partial chunk, poison outstanding deletes, persist the
-        // oversize map, fdatasync. All threads are joined — single-threaded
-        // from here.
+        // Clean-shutdown durability: land every session's parked partial
+        // chunk, then run a full Checkpoint — it stages and lands EVERY
+        // remaining S_DIRTY cache entry (a clean shutdown must not lose
+        // acknowledged writes: before this, dirty cache-resident values
+        // silently reverted to older landed versions after a reopen —
+        // caught by test_bimodal's restart verify), drains outstanding
+        // deletes, fdatasyncs and persists the oversize sidecar.
         {
             std::lock_guard<std::mutex> lk(sess_mu_);
             for (auto& se : sessions_)
                 if (se->chunk_buf && se->chunk_fill > 0) flush_chunk(se.get());
         }
-        reap_drain(session());
-        write_overflow_file();
-        if (fdatasync(fd_) < 0) durable_ok_.store(false);
+        Checkpoint();
     }
     if (entries_) munmap(entries_, nsets_ * kAssoc * sizeof(Entry));
+    if (xext_map_) munmap(xext_map_, kMaxExtents / 8);
     delete[] set_locks_;
     index_.destroy();
     for (int g = 0; g < 2; ++g)
         if (dk_bits_[g]) munmap(dk_bits_[g], (dk_mask_ + 1) / 8);
     if (fd_ >= 0) close(fd_);
+    if (fd2_ >= 0) close(fd2_);
     uint64_t mism = key_mismatch_.load();
     if (mism) fprintf(stderr, "hydra: WARNING %llu slot key mismatches\n",
                       (unsigned long long)mism);
+    if (getenv("HYDRA_STATS")) {
+        auto v = [](const std::atomic<uint64_t>& a) {
+            return (unsigned long long)a.load(std::memory_order_relaxed);
+        };
+        fprintf(stderr,
+                "hydra: stats xrec=%llu xfail_pwrite=%llu xfail_pos=%llu "
+                "xfail_link=%llu xabsorb=%llu rej_over=%llu rej_mem=%llu "
+                "nf_walk=%llu nf_xdata=%llu read_err=%llu write_err=%llu "
+                "key_mism=%llu ovf_cnt=%llu ovf_bytes=%llu tomb_ref=%llu\n",
+                v(diag_xlink_ok_), v(diag_xfail_pwrite_), v(diag_xfail_pos_),
+                v(diag_xfail_link_), v(diag_xabsorb_), v(rejected_oversize_),
+                v(rejected_mem_), v(diag_nf_walk_), v(diag_nf_xdata_),
+                v(read_errors_), v(write_errors_), v(key_mismatch_),
+                v(overflow_count_), v(oversize_bytes_), v(tomb_refused_));
+    }
 }
 
 // ── Disk primitives ──────────────────────────────────────────────────────────
@@ -1151,7 +1322,15 @@ HydraStore::~HydraStore() {
 // counts a read error, and returns false; the caller's lookup degrades to
 // NotFound instead of killing the process.
 bool HydraStore::read_page(uint64_t page, uint8_t* buf) {
-    ssize_t n = xpread(fd_, buf, kPageBytes, (off_t)(page * kPageBytes));
+    // X-extent pages are buffered-written: they MUST be read through the
+    // buffered fd2_ (page-cache coherent). An O_DIRECT read of the tail
+    // page of the log fails outright with EINVAL on ext4 when buffered
+    // x-appends leave i_size non-block-aligned (measured on the reference
+    // node: ~2K EINVAL preads per 30 s bimodal run — every one surfaced as
+    // a false NotFound), and O_DIRECT reads of buffered-dirty pages race
+    // writeback. Chunk extents are O_DIRECT-written and stay on fd_.
+    ssize_t n = xpread(page_fd(page), buf, kPageBytes,
+                       (off_t)(page * kPageBytes));
     if (n < 0) {
         read_errors_.fetch_add(1, std::memory_order_relaxed);
         memset(buf, 0, kPageBytes);
@@ -1194,10 +1373,17 @@ uint32_t HydraStore::verified_lookup(uint64_t key, Session* se) {
             // Size must be plausible for a match: Delete tombstones a slot
             // by setting an out-of-range size, which must never match again.
             // CRC guards against trusting torn slots after a crash. Newest
-            // is decided by LSN (positions are not temporal).
+            // is decided by LSN (positions are not temporal). Live x-record
+            // heads match too (header CRC only — Delete needs position+LSN,
+            // not the data bytes).
             if (skey == key && (uint64_t)(sz1 - 1) <= kSlotDataMax &&
                 slot_crc_ok(slot)) {
                 uint64_t l = slot_lsn(slot);
+                if (l > best_lsn) { best_lsn = l; best = cur; }
+                break;
+            }
+            if (skey == key && sz1_is_xhead(sz1) && xrec_hdr_ok(slot)) {
+                uint64_t l = xrec_lsn(slot);
                 if (l > best_lsn) { best_lsn = l; best = cur; }
                 break;
             }
@@ -1216,13 +1402,96 @@ uint32_t HydraStore::verified_lookup(uint64_t key, Session* se) {
 // while its prev pointer keeps older chain links traversable for OTHER keys.
 // Landed pages are never rewritten by the log-append flush path, so the only
 // writers of a landed page are Delete calls, serialized by the page lock.
-void HydraStore::tombstone_slot(uint64_t position, Session* se) {
+//
+// `key` is the key being deleted: the slot's STORED key must match it or
+// the tombstone is refused. A position can go stale between the caller's
+// verified_lookup and this write (the compactor may relocate the slot and
+// the extent be punched/reused meanwhile); an unverified tombstone here
+// would reseal ANOTHER key's newest record with a fresh highest LSN,
+// making recovery silently drop that innocent key ("deleted" wins).
+// Refusal is safe: the caller's loop re-runs verified_lookup, which can
+// no longer return the recycled position for this key.
+void HydraStore::tombstone_slot(uint64_t position, uint64_t key,
+                                Session* se) {
+    if (xrec_count_.load(std::memory_order_relaxed)) {
+        // X-record head? Tombstone by rewriting ONLY its 32-byte header
+        // through the buffered fd (byte-granular): kXTombBit keeps the
+        // length encoded so linear scans stay in step, and the whole-page
+        // O_DIRECT read-modify-write below must never run on an x page —
+        // it would clobber records a concurrent xrec_upsert is appending
+        // to the same page.
+        uint8_t hb[kXHdrBytes];
+        off_t off = (off_t)(position * kSlotBytes);
+        if (xpread(fd2_, hb, kXHdrBytes, off) == (ssize_t)kXHdrBytes) {
+            uint32_t xsz1;
+            memcpy(&xsz1, hb + 8, 4);
+            if (sz1_is_xtomb(xsz1)) return;   // already tombstoned
+            if (sz1_is_xhead(xsz1)) {
+                uint64_t page = position / kSlotsPerPage;
+                SpinLock& pl = page_locks_[page % kPageLockCount];
+                pl.lock();
+                // Re-read under the page lock (a racing tombstoner of a
+                // NEIGHBORING slot never touches these bytes; a racing
+                // tombstoner of THIS slot is serialized by the caller's
+                // set lock — the re-read is defensive).
+                if (xpread(fd2_, hb, kXHdrBytes, off) == (ssize_t)kXHdrBytes) {
+                    memcpy(&xsz1, hb + 8, 4);
+                    uint64_t hkey;
+                    memcpy(&hkey, hb, 8);
+                    if (sz1_is_xhead(xsz1) && hkey != key)
+                        tomb_refused_.fetch_add(1,
+                                                std::memory_order_relaxed);
+                    if (sz1_is_xhead(xsz1) && hkey == key) {
+                        xsz1 |= kXTombBit;
+                        memcpy(hb + 8, &xsz1, 4);
+                        // Fresh LSN + header reseal: the tombstone must be
+                        // the key's newest version so recovery keeps the
+                        // key deleted (newest-LSN-wins). dcrc is untouched.
+                        xrec_seal_hdr(hb, lsn_.fetch_add(
+                                              1, std::memory_order_relaxed));
+                        if (!xpwrite(fd2_, hb, kXHdrBytes, off)) {
+                            write_errors_.fetch_add(
+                                1, std::memory_order_relaxed);
+                            durable_ok_.store(false,
+                                              std::memory_order_relaxed);
+                        }
+                    }
+                }
+                pl.unlock();
+                flush_epoch_.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+        }
+    }
+    // Never whole-page-RMW an x page: a stale position inside an x extent
+    // whose bytes at `position` no longer parse as an x-head (mid-record
+    // data, or the head moved) must be refused outright — the O_DIRECT
+    // page write below would clobber records a concurrent xrec_upsert is
+    // appending to the same page through the buffered fd.
+    if (is_x_page(position / kSlotsPerPage)) {
+        tomb_refused_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     if (!se->rmw_buf) se->rmw_buf = alloc_aligned(kPageBytes);
     uint64_t page = position / kSlotsPerPage;
     SpinLock& pl = page_locks_[page % kPageLockCount];
     pl.lock();
     if (!read_page(page, se->rmw_buf)) { pl.unlock(); return; }  // fail-soft
     uint8_t* slot = se->rmw_buf + (position % kSlotsPerPage) * kSlotBytes;
+    uint64_t skey;
+    uint32_t cur_sz1;
+    memcpy(&skey, slot, 8);
+    memcpy(&cur_sz1, slot + 8, 4);
+    // Refuse stale positions: the stored key must match AND the slot must
+    // parse as a LIVE record. The size gate matters even for a matching
+    // key: a punched page reads back as zeros, so for the legal key value
+    // 0 the key check alone would pass on a hole and the page RMW below
+    // could clobber a recycled extent's freshly landed slots.
+    if (skey != key || (uint64_t)(cur_sz1 - 1) > kSlotDataMax) {
+        pl.unlock();
+        tomb_refused_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     uint32_t sz1 = 0xFFFFFFFFu;   // size 0xFFFFFFFE: unmatchable, non-zero
     memcpy(slot + 8, &sz1, 4);
     // Fresh LSN + reseal: the tombstone must be the key's NEWEST version so
@@ -1351,9 +1620,16 @@ void HydraStore::ensure_chunk(Session* se) {
             }
         }
         if (slots == 0) {
+            // Fresh reservation must be ATOMIC w.r.t. the compactor: the
+            // next_slot_ advance and the ownership registration happen in
+            // ONE free_mu_ critical section. Split (fetch_add, then lock),
+            // compact_region could read the enlarged next_slot_, scan
+            // owned_extents_/free_extents_ before our entry lands, pass
+            // both gates, and punch the region we are about to fill.
+            std::lock_guard<std::mutex> lk(free_mu_);
             base = next_slot_.fetch_add(kChunkSlots, std::memory_order_relaxed);
             slots = (uint32_t)kChunkSlots;
-            note_extent_owned(base, slots);
+            owned_extents_.push_back({base, slots});
         }
         se->chunk_base = base;
         se->chunk_cap = slots;
@@ -1448,7 +1724,7 @@ void HydraStore::flush_chunk(Session* se) {
                     own->state = S_EMPTY;
                     occupancy_.fetch_sub(1, std::memory_order_relaxed);
                 }
-                tombstone_slot((uint64_t)rec.new_p1 - 1, se);
+                tombstone_slot((uint64_t)rec.new_p1 - 1, rec.key, se);
             }
             set_locks_[s].unlock();
             continue;
@@ -1476,7 +1752,7 @@ void HydraStore::flush_chunk(Session* se) {
             // deleted key from the orphan once the regions holding the
             // real tombstones are compacted away.
             if (is_deleted(rec.key))
-                tombstone_slot((uint64_t)rec.new_p1 - 1, se);
+                tombstone_slot((uint64_t)rec.new_p1 - 1, rec.key, se);
             set_locks_[s].unlock();
             continue;
         }
@@ -1805,6 +2081,7 @@ retry_lookup:
     uint32_t best_p1 = 0;
     uint64_t best_lsn = 0;
     uint16_t best_sz = 0;
+    uint32_t best_xsz = 0;      // nonzero: best is an x-record of this size
     uint8_t best_data[kSlotDataMax];
     while ((p1 = index_.next_candidate(h, itc, scanned)) != 0) {
         uint32_t cur = p1, hops = 0;
@@ -1826,6 +2103,21 @@ retry_lookup:
             memcpy(&skey, slot, 8);
             memcpy(&sz1, slot + 8, 4);
             memcpy(&prev, slot + 12, 4);
+            uint8_t hdr2[kSlotBytes];   // full slot: inline parse reads 128 B
+            if (sz1 == 0 && is_x_page(page)) {
+                // A just-published x-record can trail the SESSION-CACHED
+                // page image (se->page_buf may predate the record's pwrite;
+                // the index word is already visible). Re-read the slot
+                // through the buffered fd before trusting the zeros.
+                if (xpread(fd2_, hdr2, kSlotBytes,
+                           (off_t)((uint64_t)position * kSlotBytes)) ==
+                    (ssize_t)kSlotBytes) {
+                    memcpy(&skey, hdr2, 8);
+                    memcpy(&sz1, hdr2 + 8, 4);
+                    memcpy(&prev, hdr2 + 12, 4);
+                    if (sz1 != 0) { slot = hdr2; se->page_no = ~0ULL; }
+                }
+            }
             if (sz1 == 0) {
                 // Candidate slot has not landed yet. If it is really ours,
                 // our value is pinned in cache (BUFFERED/FLUSHING) —
@@ -1834,7 +2126,7 @@ retry_lookup:
                 if (cache_probe(key, out)) return OpStatus::Ok;
                 break;
             }
-            uint16_t sz = (uint16_t)(sz1 - 1);
+            uint32_t sz = sz1 - 1;
             if (skey == key && sz <= kSlotDataMax) {
                 // CRC gate: torn crash remnants must never be served. LSN
                 // decides "newest" across chains (positions not temporal).
@@ -1843,9 +2135,21 @@ retry_lookup:
                     if (l > best_lsn) {
                         best_lsn = l;
                         best_p1 = cur;
-                        best_sz = sz;
+                        best_sz = (uint16_t)sz;
+                        best_xsz = 0;
                         memcpy(best_data, slot + 16, sz);
                     }
+                }
+                break;   // newest match within this chain
+            }
+            if (skey == key && sz1_is_xhead(sz1) && xrec_hdr_ok(slot)) {
+                // Oversized (x-record) match: remember it; the data bytes
+                // are fetched once, after the newest version is known.
+                uint64_t l = xrec_lsn(slot);
+                if (l > best_lsn) {
+                    best_lsn = l;
+                    best_p1 = cur;
+                    best_xsz = sz;
                 }
                 break;   // newest match within this chain
             }
@@ -1863,6 +2167,7 @@ retry_lookup:
             retried = true;
             goto retry_lookup;
         }
+        diag_nf_walk_.fetch_add(1, std::memory_order_relaxed);
         return OpStatus::NotFound;
     }
 
@@ -1870,6 +2175,16 @@ retry_lookup:
     // cached copy supersedes the disk copy.
     if (cache_probe(key, out)) return OpStatus::Ok;
 
+    if (best_xsz != 0) {
+        // Oversized winner: fetch the data through the buffered fd. A torn
+        // record (crash remnant) fails its data CRC — fail-soft NotFound,
+        // never served bytes.
+        if (xrec_read_data((uint64_t)best_p1 - 1, key, best_xsz, out, se))
+            return OpStatus::Ok;
+        diag_nf_xdata_.fetch_add(1, std::memory_order_relaxed);
+        read_errors_.fetch_add(1, std::memory_order_relaxed);
+        return OpStatus::NotFound;
+    }
     out.size = best_sz;
     memcpy(out.data, best_data, best_sz);
 
@@ -2070,7 +2385,8 @@ bool HydraStore::uring_start(MissOp& op, uint32_t oi, Uring& ring,
     }
     op.cur = p1;
     op.page = (uint64_t)(op.cur - 1) / kSlotsPerPage;
-    ring.prep_read(fd_, op.buf, kPageBytes, (off_t)(op.page * kPageBytes), oi);
+    ring.prep_read(page_fd(op.page), op.buf, kPageBytes,
+                   (off_t)(op.page * kPageBytes), oi);
     return true;
 }
 
@@ -2084,7 +2400,8 @@ bool HydraStore::uring_advance(MissOp& op, uint32_t oi, Uring& ring, int res,
     const uint64_t key = slot->key;
     if (res < 0) {
         if (res == -EINTR || res == -EAGAIN) {   // transient: retry remainder
-            ring.prep_read(fd_, op.buf + op.filled, kPageBytes - op.filled,
+            ring.prep_read(page_fd(op.page), op.buf + op.filled,
+                           kPageBytes - op.filled,
                            (off_t)(op.page * kPageBytes) + op.filled, oi);
             return true;
         }
@@ -2099,7 +2416,8 @@ bool HydraStore::uring_advance(MissOp& op, uint32_t oi, Uring& ring, int res,
             // Mid-page short read: resubmit the remainder instead of
             // zero-filling bytes the device still owes us.
             op.filled += (uint32_t)res;
-            ring.prep_read(fd_, op.buf + op.filled, kPageBytes - op.filled,
+            ring.prep_read(page_fd(op.page), op.buf + op.filled,
+                           kPageBytes - op.filled,
                            (off_t)(op.page * kPageBytes) + op.filled, oi);
             return true;
         }
@@ -2130,11 +2448,28 @@ bool HydraStore::uring_advance(MissOp& op, uint32_t oi, Uring& ring, int res,
                         finish_slot(slot, op.sess, OpStatus::Ok);
                         return false;
                     }
+                    diag_nf_walk_.fetch_add(1, std::memory_order_relaxed);
                     finish_slot(slot, op.sess, OpStatus::NotFound);
                     return false;
                 }
                 // Freshness: a value cached while we did IO supersedes disk.
                 if (!cache_probe(key, slot->out)) {
+                    if (op.best_xsz != 0) {
+                        // Oversized winner: one synchronous, page-cache-
+                        // coherent buffered read in this io thread (the
+                        // oversized path is the rare path by design).
+                        if (!xrec_read_data((uint64_t)op.best_p1 - 1, key,
+                                            op.best_xsz, slot->out, io_se)) {
+                            diag_nf_xdata_.fetch_add(
+                                1, std::memory_order_relaxed);
+                            read_errors_.fetch_add(
+                                1, std::memory_order_relaxed);
+                            finish_slot(slot, op.sess, OpStatus::NotFound);
+                            return false;
+                        }
+                        finish_slot(slot, op.sess, OpStatus::Ok);
+                        return false;
+                    }
                     slot->out.size = op.best_sz;
                     memcpy(slot->out.data, op.best_data, op.best_sz);
                     if (op.best_sz <= kInlineMax)
@@ -2152,7 +2487,7 @@ bool HydraStore::uring_advance(MissOp& op, uint32_t oi, Uring& ring, int res,
         if (page != op.page) {
             op.page = page;
             op.filled = 0;
-            ring.prep_read(fd_, op.buf, kPageBytes,
+            ring.prep_read(page_fd(page), op.buf, kPageBytes,
                            (off_t)(page * kPageBytes), oi);
             return true;
         }
@@ -2161,6 +2496,23 @@ bool HydraStore::uring_advance(MissOp& op, uint32_t oi, Uring& ring, int res,
         memcpy(&skey, sp, 8);
         memcpy(&sz1, sp + 8, 4);
         memcpy(&prev, sp + 12, 4);
+        uint8_t hdr2[kSlotBytes];   // full slot: inline parse reads 128 B
+        if (sz1 == 0 && is_x_page(op.page)) {
+            // Coherency backstop (see miss_read): a just-published x-record
+            // may trail this op's page image (read before the record's
+            // pwrite); a fresh buffered re-read never does.
+            if (xpread(fd2_, hdr2, kSlotBytes,
+                       (off_t)((uint64_t)position * kSlotBytes)) ==
+                (ssize_t)kSlotBytes) {
+                memcpy(&skey, hdr2, 8);
+                memcpy(&sz1, hdr2 + 8, 4);
+                memcpy(&prev, hdr2 + 12, 4);
+                if (sz1 != 0) {
+                    sp = hdr2;
+                    op.page = ~0ULL;   // don't trust the cached page image
+                }
+            }
+        }
         if (sz1 == 0) {
             // Candidate slot has not landed yet. If it is really ours, our
             // value is pinned in cache (BUFFERED/FLUSHING) — re-probe.
@@ -2171,7 +2523,7 @@ bool HydraStore::uring_advance(MissOp& op, uint32_t oi, Uring& ring, int res,
             op.cur = 0;   // chain dead-ends: try the next candidate
             continue;
         }
-        uint16_t sz = (uint16_t)(sz1 - 1);
+        uint32_t sz = sz1 - 1;
         if (skey == key && sz <= kSlotDataMax) {
             // CRC-gated; newest across chains decided by LSN (positions
             // are not temporal; compaction recycles them).
@@ -2180,9 +2532,22 @@ bool HydraStore::uring_advance(MissOp& op, uint32_t oi, Uring& ring, int res,
                 if (l > op.best_lsn) {
                     op.best_lsn = l;
                     op.best_p1 = op.cur;
-                    op.best_sz = sz;
+                    op.best_sz = (uint16_t)sz;
+                    op.best_xsz = 0;
                     memcpy(op.best_data, sp + 16, sz);
                 }
+            }
+            op.cur = 0;   // done with this chain: try the next candidate
+            continue;
+        }
+        if (skey == key && sz1_is_xhead(sz1) && xrec_hdr_ok(sp)) {
+            // Oversized (x-record) match: data is fetched once at
+            // completion, only if this stays the newest version.
+            uint64_t l = xrec_lsn(sp);
+            if (l > op.best_lsn) {
+                op.best_lsn = l;
+                op.best_p1 = op.cur;
+                op.best_xsz = sz;
             }
             op.cur = 0;   // done with this chain: try the next candidate
             continue;
@@ -2386,6 +2751,172 @@ void HydraStore::upsert_inline(uint64_t key, const uint8_t* data, uint16_t size)
     }
 }
 
+// Write-through upsert for an oversized value: append a zero-padded
+// multi-slot x-record via the buffered fd (byte-granular, page-cache
+// coherent), link it into the fingerprint index under the key's set lock,
+// then erase the stale inline/overflow copies and unmark a pending delete —
+// the exact publication discipline of upsert_inline. Returns false if the
+// disk or the index refuses (caller falls back to the capped absorb).
+bool HydraStore::xrec_upsert(uint64_t key, const uint8_t* data, size_t size) {
+    Session* se = session();
+    const uint32_t need = xrec_slots(size);
+    if (!se->xbuf) se->xbuf = alloc_aligned(xrec_slots(kXDataMax) * kSlotBytes);
+    uint64_t s = set_of(key);
+    set_locks_[s].lock();
+    // Reserve `need` slots from the session's private x-extent. FRESH
+    // extents only (never recycled/split ones): bases stay multiples of
+    // kChunkSlots, so records never straddle a compaction region or a
+    // recovery scan block. A too-small extent tail is left zero (parse-safe
+    // for every linear scan) and the extent is released.
+    if (se->xactive && se->xcap < need) {
+        note_extent_done(se->xext_base);
+        se->xactive = false;
+    }
+    if (!se->xactive) {
+        uint64_t base;
+        {
+            // ONE free_mu_ critical section for next_slot_ advance +
+            // ownership + type marking: compact_region scans ownership
+            // under the same lock, so a region inside its pre-read
+            // next_slot_ snapshot always has its owner (and x bit)
+            // visible by the time the compactor can acquire the lock.
+            std::lock_guard<std::mutex> lk(free_mu_);
+            base = next_slot_.fetch_add(kChunkSlots,
+                                        std::memory_order_relaxed);
+            owned_extents_.push_back({base, (uint32_t)kChunkSlots});
+            // Route this extent's page READS through the buffered fd from
+            // now on (marked before the first record can be index-linked).
+            if (base / kChunkSlots < kMaxExtents) mark_x_extent(base);
+        }
+        se->xbase = base;
+        se->xcap = (uint32_t)kChunkSlots;
+        se->xext_base = base;
+        se->xactive = true;
+    }
+    uint64_t position = se->xbase;
+    if (position + need > 0xFFFFFFFFULL) {   // 32-bit position space full
+        diag_xfail_pos_.fetch_add(1, std::memory_order_relaxed);
+        set_locks_[s].unlock();
+        return false;
+    }
+    uint8_t* rec = se->xbuf;
+    size_t reclen = (size_t)need * kSlotBytes;
+    uint32_t sz1 = (uint32_t)size + 1;
+    memcpy(rec, &key, 8);
+    memcpy(rec + 8, &sz1, 4);
+    memcpy(rec + kXHdrBytes, data, size);
+    memset(rec + kXHdrBytes + size, 0, reclen - kXHdrBytes - size);
+    uint32_t dcrc = crc32c(data, size);
+    memcpy(rec + 24, &dcrc, 4);
+    uint64_t h = mix64(key);
+    // Raise the x gate BEFORE the record can become reachable: readers load
+    // xrec_count_ AFTER seeing our index word, and the fd2_ coherency
+    // backstop must already be armed for the FIRST x-record (an over-count
+    // from a failed attempt below is harmless — the gate is a high-water
+    // flag, not an exact census).
+    xrec_count_.fetch_add(1, std::memory_order_relaxed);
+    for (int tries = 0;; ++tries) {
+        uint32_t prev = index_.first_candidate(h);
+        memcpy(rec + 12, &prev, 4);
+        xrec_seal_hdr(rec, lsn_.fetch_add(1, std::memory_order_relaxed));
+        if (!xpwrite(fd2_, rec, reclen, (off_t)(position * kSlotBytes))) {
+            // ENOSPC/EIO: nothing linked, the key's current value is intact.
+            diag_xfail_pwrite_.fetch_add(1, std::memory_order_relaxed);
+            write_errors_.fetch_add(1, std::memory_order_relaxed);
+            durable_ok_.store(false, std::memory_order_relaxed);
+            set_locks_[s].unlock();
+            return false;
+        }
+        bool linked = prev
+            ? index_.update(h, prev, (uint32_t)position + 1)
+            : index_.insert(h, (uint32_t)position + 1);
+        if (linked) break;
+        if (prev == 0 || tries >= 64) {
+            // Index-word exhaustion (or pathological head contention):
+            // refuse. The written record is unlinked but carries the key's
+            // HIGHEST LSN — recovery scans every slot, so left intact it
+            // would RESURRECT this refused upsert after a restart (the
+            // caller may reject it; the old value must win). Zero the
+            // header: the scan then sees a hole and the CRC-gated
+            // continuation bytes are ordinary garbage.
+            uint8_t zero_hdr[kXHdrBytes] = {0};
+            diag_xfail_link_.fetch_add(1, std::memory_order_relaxed);
+            if (!xpwrite(fd2_, zero_hdr, kXHdrBytes,
+                         (off_t)(position * kSlotBytes))) {
+                write_errors_.fetch_add(1, std::memory_order_relaxed);
+                durable_ok_.store(false, std::memory_order_relaxed);
+            }
+            set_locks_[s].unlock();
+            return false;
+        }
+        // Lost the head to a same-fp key's landing (index words are per
+        // FINGERPRINT, not per set, so our set lock does not serialize
+        // them). The record is not linked yet, so rewriting its prev
+        // pointer is invisible; re-read the head and retry.
+    }
+    se->xbase += need;
+    se->xcap -= need;
+    if (se->xcap == 0) {
+        note_extent_done(se->xext_base);
+        se->xactive = false;
+    }
+    // Landed high-water mark: read_page must treat short reads below this
+    // as real faults, and uring EOF accounting uses it too.
+    uint64_t hw = (position + need) * kSlotBytes;
+    uint64_t cur_hw = landed_hw_.load(std::memory_order_relaxed);
+    while (cur_hw < hw && !landed_hw_.compare_exchange_weak(
+                              cur_hw, hw, std::memory_order_relaxed)) {}
+    // Exact success census for the stats line (xrec_count_ is only a
+    // high-water GATE: it over-counts failed attempts by design).
+    diag_xlink_ok_.fetch_add(1, std::memory_order_relaxed);
+    // Publication (all under the set lock): erase the stale inline entry
+    // (pinned BUFFERED/FLUSHING entries are erased outright — the landing's
+    // ownership recheck abandons their staged slots, and this record's
+    // higher LSN supersedes any stale landed copy), drop an older
+    // overflow-absorbed copy, then unmark a pending delete.
+    Entry* base = set_base(s);
+    for (size_t w = 0; w < kAssoc; ++w) {
+        Entry& e = base[w];
+        if (e.state != S_EMPTY && e.key == key) {
+            e.state = S_EMPTY;
+            occupancy_.fetch_sub(1, std::memory_order_relaxed);
+            break;
+        }
+    }
+    if (overflow_count_.load(std::memory_order_relaxed)) overflow_erase(key);
+    del_unmark(key);
+    set_locks_[s].unlock();
+    // Invalidate per-session page caches: a reader holding a pre-write page
+    // image (zeros at our positions) must re-read once it sees our index
+    // word. (Backstop for the remaining relaxed-ordering window: the
+    // sz1==0 fd2_ re-read in the lookup paths.)
+    flush_epoch_.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+// Fetch an x-record's data through the buffered fd (coherent with the
+// writer's page cache), gated by key, size and the data CRC. The header may
+// legitimately have been tombstoned since the caller selected this record
+// (a racing Delete — serving the pre-delete value is linearizable), so only
+// key/size/dcrc are checked, all of which tombstoning leaves intact.
+bool HydraStore::xrec_read_data(uint64_t position, uint64_t key,
+                                uint32_t size, GenValue& out, Session* se) {
+    if (!se->xbuf) se->xbuf = alloc_aligned(xrec_slots(kXDataMax) * kSlotBytes);
+    size_t len = kXHdrBytes + size;
+    ssize_t n = xpread(fd2_, se->xbuf, len, (off_t)(position * kSlotBytes));
+    if (n < 0 || (size_t)n < len) return false;
+    uint64_t skey;
+    uint32_t sz1, dcrc;
+    memcpy(&skey, se->xbuf, 8);
+    memcpy(&sz1, se->xbuf + 8, 4);
+    memcpy(&dcrc, se->xbuf + 24, 4);
+    if (skey != key || (sz1 & ~kXTombBit) != size + 1) return false;
+    if (dcrc != crc32c(se->xbuf + kXHdrBytes, size)) return false;
+    out.size = size;
+    memcpy(out.data, se->xbuf + kXHdrBytes, size);
+    return true;
+}
+
 void HydraStore::Upsert(uint64_t key, const GenValue& value) {
     // Re-inserting a deleted key: the mark is cleared AT THE PUBLICATION
     // POINT, under the key's set lock (upsert_inline / the oversized path
@@ -2410,34 +2941,29 @@ void HydraStore::Upsert(uint64_t key, const GenValue& value) {
         return;
     }
     if (value.size > kInlineMax) {
-        // Bounded oversize: reject (and count) before touching ANY state, so
-        // a rejected upsert can never damage the key's current value.
+        // Oversized value: write-through as a variable-length multi-slot
+        // x-record in the slot log — DISK-resident like every other value.
+        // (Audit-class bug: routing these into a budget-capped in-RAM side
+        // map silently dropped every oversized upsert past ~1 GiB — 100%
+        // stale reads at KVSTORE_VALUE_SIZE=1024 and millions of false
+        // NotFounds on the bimodal workload.) Publication — index link,
+        // stale inline/overflow erase, del_unmark — happens under the key's
+        // set lock inside xrec_upsert, mirroring upsert_inline.
+        if (value.size <= kXDataMax && xrec_upsert(key, value.data, value.size))
+            return;
+        // Disk or index refused (ENOSPC, position/index-word exhaustion):
+        // degrade to the budget-capped overflow absorb — honest, counted
+        // rejection past the cap, never silent damage to the OLD value.
+        diag_xabsorb_.fetch_add(1, std::memory_order_relaxed);
         if (!oversize_would_fit(key, value.size)) {
             rejected_oversize_.fetch_add(1, std::memory_order_relaxed);
             return;
         }
-        // Drop any stale inline cache entry so reads see the overflow value.
-        // Pinned entries (BUFFERED/FLUSHING) are erased OUTRIGHT — blocking
-        // here until a possibly-foreign chunk landed livelocked exactly like
-        // the audit's Delete bug. Safe without the pin: reads and admissions
-        // consult the overflow map before the index (miss_read, admit
-        // gates), a landing whose pin broke abandons the staged slot without
-        // linking it (flush_chunk), and on recovery the sidecar entry's
-        // higher LSN supersedes any stale landed slot. The orphan slot bytes
-        // are leaked until compaction reclaims them (compact_region treats
-        // overflow-resident keys' slots as dead), the same class as
-        // Delete's leaked slots.
         uint64_t s = set_of(key);
         set_locks_[s].lock();
         // PUBLISH FIRST, then erase: readers probe the cache LOCK-FREE, so
         // erasing the (possibly still-unlanded BUFFERED) inline entry before
-        // the overflow value is visible opens a "nothing anywhere" window —
-        // a reader would miss the cache, miss the overflow map, and find no
-        // landed slot on disk: a false NotFound for a key that always
-        // exists. With the overflow value published first, a reader either
-        // still sees the inline entry (bounded stale-by-one, legal for a
-        // mid-upsert read) or sees the erase and is guaranteed to find the
-        // overflow value (shard-mutex acquire orders the two).
+        // the overflow value is visible opens a "nothing anywhere" window.
         overflow_put(key, value.data, value.size);
         Entry* base = set_base(s);
         for (size_t w = 0; w < kAssoc; ++w) {
@@ -2611,7 +3137,7 @@ void HydraStore::poison_versions(uint64_t key, Session* se) {
         // lock). Lock order set -> page is shared with the landing path.
         set_locks_[s].lock();
         if (!is_deleted(key)) { set_locks_[s].unlock(); break; }
-        tombstone_slot((uint64_t)p1 - 1, se);
+        tombstone_slot((uint64_t)p1 - 1, key, se);
         set_locks_[s].unlock();
     }
 }
@@ -2697,32 +3223,56 @@ void HydraStore::cleaner_main(int id) {
 }
 
 // ── Checkpoint: flush all dirty entries, then fdatasync ─────────────────────
+// One checkpoint worker's share: stage-flush every S_DIRTY entry in sets
+// [lo, hi) through this thread's session, landing chunks as they fill.
+void HydraStore::checkpoint_stripe(uint64_t lo, uint64_t hi) {
+    Session* se = session();
+    for (uint64_t s = lo; s < hi; ++s) {
+        Entry* base = set_base(s);
+        for (int w = 0; w < (int)kAssoc; ++w) {
+            set_locks_[s].lock();
+            if (base[w].state != S_DIRTY) { set_locks_[s].unlock(); continue; }
+            bool full = stage_flush(s, w, se);
+            set_locks_[s].unlock();
+            if (full) flush_chunk(se);
+        }
+    }
+    flush_partials(se);
+}
+
 void HydraStore::Checkpoint() {
     if (!disk_mode_) return;
     // Land the CALLER's partial chunk first: its own completed Upserts may
     // still sit BUFFERED in RAM. (Other sessions' partials land at their own
     // flush/StopSession — single-owner chunks cannot be stolen.)
     flush_partials(session());
-    std::vector<std::thread> ts;
     uint64_t stripe = (nsets_ + kCheckpointThreads - 1) / kCheckpointThreads;
-    for (int t = 0; t < kCheckpointThreads; ++t) {
-        ts.emplace_back([this, t, stripe] {
-            Session* se = session();
-            uint64_t lo = stripe * (uint64_t)t;
-            uint64_t hi = std::min<uint64_t>(lo + stripe, nsets_);
-            for (uint64_t s = lo; s < hi; ++s) {
-                Entry* base = set_base(s);
-                for (int w = 0; w < (int)kAssoc; ++w) {
-                    set_locks_[s].lock();
-                    if (base[w].state != S_DIRTY) { set_locks_[s].unlock(); continue; }
-                    bool full = stage_flush(s, w, se);
-                    set_locks_[s].unlock();
-                    if (full) flush_chunk(se);
-                }
-            }
-            StopSession();   // flush partials + recycle the session
-        });
+    // NEVER throw past this frame: Checkpoint runs from the (noexcept)
+    // destructor, and std::thread construction can fail under RLIMIT_NPROC /
+    // cgroup pids / memory pressure. A spawn failure must degrade to doing
+    // the work synchronously, not std::terminate a clean shutdown before
+    // the dirty sweep and fdatasync.
+    std::vector<std::thread> ts;
+    int spawned = 1;   // stripe 0 always runs in the caller
+    try {
+        ts.reserve(kCheckpointThreads);
+        for (int t = 1; t < kCheckpointThreads; ++t) {
+            ts.emplace_back([this, t, stripe] {
+                checkpoint_stripe(stripe * (uint64_t)t,
+                                  std::min<uint64_t>(stripe * (uint64_t)t
+                                                     + stripe, nsets_));
+                StopSession();   // flush partials + recycle the session
+            });
+            spawned = t + 1;
+        }
+    } catch (...) {
+        // Resource pressure: the unspawned stripes run inline below.
     }
+    checkpoint_stripe(0, std::min<uint64_t>(stripe, nsets_));
+    for (int t = spawned; t < kCheckpointThreads; ++t)
+        checkpoint_stripe(stripe * (uint64_t)t,
+                          std::min<uint64_t>(stripe * (uint64_t)t + stripe,
+                                             nsets_));
     for (auto& t : ts) t.join();
     // Deletes share the writes' durability contract: every delete issued
     // before this Checkpoint has its on-disk versions tombstoned before the
@@ -2776,31 +3326,83 @@ void HydraStore::recover_log(uint64_t file_bytes) {
     const uint64_t kMaxBytes = 0xFFFFFFFEULL * kSlotBytes;
     if (scan_bytes > kMaxBytes) scan_bytes = kMaxBytes;
     const uint64_t data_bytes = scan_bytes;
-    uint64_t max_lsn = 0, dropped = 0, scan_errors = 0;
+    uint64_t max_lsn = 0, dropped = 0, scan_errors = 0, xrecs = 0;
     for (uint64_t base = 0; base < data_bytes; base += kScan) {
         size_t want = (size_t)std::min<uint64_t>(kScan, data_bytes - base);
         size_t aligned = (want + kPageBytes - 1) & ~(kPageBytes - 1);
-        ssize_t got = xpread(fd_, buf, aligned, (off_t)base);
+        // Scan through the BUFFERED fd2_: the log interleaves O_DIRECT
+        // chunk extents with buffered x extents, and after a crash an
+        // O_DIRECT read of a block that crosses a non-aligned i_size fails
+        // with EINVAL on ext4 (and buffered-dirty x pages could read
+        // stale). fd_ would fail-soft-skip the whole 1 MiB region — losing
+        // every record in it. The page cache is cold at init, so the
+        // buffered sequential scan costs the same I/O.
+        ssize_t got = xpread(fd2_, buf, aligned, (off_t)base);
         if (got < 0) {   // unreadable region: skip (fail-soft, degraded)
             read_errors_.fetch_add(1, std::memory_order_relaxed);
             scan_errors++;
             continue;
         }
         if ((size_t)got < want) memset(buf + got, 0, want - (size_t)got);
-        for (size_t o = 0; o + kSlotBytes <= want; o += kSlotBytes) {
+        size_t o = 0;
+        while (o + kSlotBytes <= want) {
             const uint8_t* slot = buf + o;
+            size_t advance = kSlotBytes;
             uint32_t sz1;
             memcpy(&sz1, slot + 8, 4);
-            if (sz1 == 0) continue;              // hole / never landed
-            if (!slot_crc_ok(slot)) {            // torn write: never served
+            if (sz1 == 0) { o += kSlotBytes; continue; }   // hole
+            uint64_t key, lsn;
+            uint8_t tomb;
+            if (sz1_is_xhead(sz1) || sz1_is_xtomb(sz1)) {
+                // Multi-slot x-record: LENGTH-AWARE walk (extents are
+                // 1 MiB-aligned — see next_slot_ below — so a record never
+                // crosses a scan block). A torn header cannot be trusted
+                // for length: advance one slot; the continuation bytes it
+                // orphans are CRC-gated like any garbage.
+                if (!xrec_hdr_ok(slot)) {
+                    recover_torn_.fetch_add(1, std::memory_order_relaxed);
+                    o += kSlotBytes;
+                    continue;
+                }
+                uint32_t xsz = (sz1 & ~kXTombBit) - 1;
+                size_t rlen = (size_t)xrec_slots(xsz) * kSlotBytes;
+                if (o + rlen > want) {   // truncated tail (crash mid-write)
+                    recover_torn_.fetch_add(1, std::memory_order_relaxed);
+                    o += kSlotBytes;
+                    continue;
+                }
+                tomb = sz1_is_xtomb(sz1) ? 1 : 0;
+                if (!tomb) {
+                    uint32_t dcrc;
+                    memcpy(&dcrc, slot + 24, 4);
+                    if (dcrc != crc32c(slot + kXHdrBytes, xsz)) {
+                        // Torn data (crash mid-record): never served. The
+                        // header is intact, so the length stays good.
+                        recover_torn_.fetch_add(1, std::memory_order_relaxed);
+                        o += rlen;
+                        continue;
+                    }
+                }
+                memcpy(&key, slot, 8);
+                lsn = xrec_lsn(slot);
+                advance = rlen;
+                xrecs++;
+                // Restored x extents keep buffered read routing: delete
+                // tombstoning rewrites their headers through fd2_ after
+                // restart, which must never race O_DIRECT reads.
+                uint64_t xslot = (base + o) / kSlotBytes;
+                if (xslot / kChunkSlots < kMaxExtents) mark_x_extent(xslot);
+            } else if (!slot_crc_ok(slot)) {     // torn write: never served
                 recover_torn_.fetch_add(1, std::memory_order_relaxed);
+                o += kSlotBytes;
                 continue;
+            } else {
+                lsn = slot_lsn(slot);
+                memcpy(&key, slot, 8);
+                tomb = (uint64_t)(sz1 - 1) > kSlotDataMax ? 1 : 0;
             }
-            uint64_t key, lsn = slot_lsn(slot);
-            memcpy(&key, slot, 8);
             uint32_t p1 = (uint32_t)((base + o) / kSlotBytes) + 1;
             if (lsn > max_lsn) max_lsn = lsn;
-            uint8_t tomb = (uint64_t)(sz1 - 1) > kSlotDataMax ? 1 : 0;
             uint64_t h = mix64(key);
             const uint64_t fp = h & 0xFFFFFFFF00000000ULL;
             uint64_t it = index_.start_of(h);
@@ -2833,13 +3435,19 @@ void HydraStore::recover_log(uint64_t file_bytes) {
                 it = (it + 1) & (nwords - 1);
             }
             if (!placed) dropped++;
+            o += advance;
         }
     }
     free(buf);
-    // Resume appends at the next page boundary past the recovered log; the
+    xrec_count_.store(xrecs, std::memory_order_relaxed);
+    diag_xlink_ok_.store(xrecs, std::memory_order_relaxed);
+    // Resume appends at the next EXTENT (1 MiB) boundary past the recovered
+    // log — extents must stay kChunkSlots-aligned so x-records never
+    // straddle a compaction region or a recovery scan block across restart
+    // generations (costs < 1 MiB of position space per restart). The
     // recovered log itself is the landed high-water mark.
     uint64_t nslots = (file_bytes + kSlotBytes - 1) / kSlotBytes;
-    uint64_t next = (nslots + kSlotsPerPage - 1) & ~(uint64_t)(kSlotsPerPage - 1);
+    uint64_t next = (nslots + kChunkSlots - 1) & ~(uint64_t)(kChunkSlots - 1);
     next_slot_.store(next, std::memory_order_relaxed);
     landed_hw_.store(file_bytes & ~(uint64_t)(kPageBytes - 1),
                      std::memory_order_relaxed);
@@ -3081,6 +3689,13 @@ bool HydraStore::compact_region(Session* se, uint64_t base) {
             if (e.first < base + nslots && base < e.first + e.second)
                 return false;
     }
+    // X extents are NEVER reclaimed — authoritative bitmap gate (the xhead
+    // content sniff below stays as defense in depth: an O_DIRECT snapshot
+    // of a buffered-dirty x region could otherwise read as zeros and make
+    // live x-records look reclaimable).
+    for (uint64_t sl = base; sl < base + nslots; sl += kChunkSlots)
+        if (sl / kChunkSlots < kMaxExtents && is_x_page(sl / kSlotsPerPage))
+            return false;
     // Readers snapshot this epoch and retry a NotFound that overlapped a
     // compaction (see miss_read / uring_step): bump before any slot moves,
     // and again after the punch below, so every overlap is detectable.
@@ -3109,6 +3724,16 @@ bool HydraStore::compact_region(Session* se, uint64_t base) {
         uint32_t sz1;
         memcpy(&sz1, slot + 8, 4);
         if (sz1 == 0) continue;                   // hole / never landed
+        if (sz1_is_xhead(sz1) || sz1_is_xtomb(sz1)) {
+            // X-record extent: NEVER reclaimed. The records are written
+            // through the buffered fd and referenced by the index directly;
+            // relocating them would need the full landing protocol, and
+            // punching would recycle positions that xrec_read_data still
+            // dereferences. Leave the whole region alone (the same
+            // documented leak class as Delete's poisoned slots).
+            all_clear = false;
+            break;
+        }
         if (!slot_crc_ok(slot)) continue;         // torn garbage: reclaimable
         uint64_t sz = (uint64_t)(sz1 - 1);
         uint64_t key;
@@ -3151,7 +3776,20 @@ bool HydraStore::compact_region(Session* se, uint64_t base) {
         }
         set_locks_[s].unlock();
         // Uncached: is this slot the key's newest version anywhere?
-        if (is_deleted(key) || overflow_contains(key)) continue;   // dead
+        // A still-deleted key's LIVE slot is unreadable (the registry mark
+        // gates every reader), but punching it is only safe if a NEWER
+        // tombstone survives on disk: a same-fp key's flush can take over
+        // the fp word and strand the deleted key's copies with no routing
+        // word, so the reaper's verified_lookup may have found NOTHING to
+        // poison — this slot (or an unlinked sibling in another region)
+        // could then be the key's highest-LSN survivor and recovery would
+        // resurrect it. Restage a fresh tombstone (newest LSN, relocation
+        // protocol shared with the tombstone case above) before reclaiming.
+        if (is_deleted(key)) {
+            if (!restage_tombstone(key, se)) all_clear = false;
+            continue;
+        }
+        if (overflow_contains(key)) continue;                      // dead
         if (verified_lookup(key, se) != p1) continue;              // dead
         // Admit CLEAN, then relocate through the normal flush protocol.
         set_locks_[s].lock();
