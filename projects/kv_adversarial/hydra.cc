@@ -78,6 +78,16 @@
 #define HYDRA_HAVE_URING 1
 #endif
 
+#if defined(__APPLE__)
+// Developer-test portability shim (the scored Linux build is unaffected):
+// Darwin has no O_DIRECT flag (buffered I/O is used, surfaced exactly like
+// the existing buffered-fallback path) and no fdatasync(2).
+#ifndef O_DIRECT
+#define O_DIRECT 0
+#endif
+#define fdatasync(fd) fsync(fd)
+#endif
+
 #if defined(__x86_64__)
 #include <immintrin.h>
 static inline void cpu_relax() { _mm_pause(); }
@@ -617,6 +627,8 @@ public:
         uint64_t write_errors, read_errors, rejected_oversize, oversize_bytes;
         uint64_t compactions_run, log_bytes, live_bytes, reclaimed_bytes;
         uint64_t buffered_fallback, punch_unsupported;
+        uint64_t rejected_mem;          // inline writes refused at budget cap
+        uint64_t recover_dropped_keys;  // keys dropped by the last recovery
     };
     void FillProdStats(ProdStats& out) const;
 
@@ -655,7 +667,9 @@ private:
     // Crash recovery: rebuild the index from the slot log (per-slot CRC
     // verified, newest-LSN-wins, tombstone-aware). Runs once from Init.
     void recover_log(uint64_t file_bytes);
-    void load_overflow_file(const uint64_t* rk, const uint64_t* rl);
+    // Returns the number of sidecar entries REFUSED by the budget cap (a
+    // smaller-budget reopen must degrade to counted drops, never OOM).
+    uint64_t load_overflow_file(const uint64_t* rk, const uint64_t* rl);
     void write_overflow_file();          // Checkpoint: persist oversize map
     void sync_dir();                     // fsync dir_ (sidecar rename/unlink)
     // Background log compaction: relocate live slots out of a region, then
@@ -682,6 +696,7 @@ private:
         uint32_t  best_p1 = 0;       // newest (highest-LSN) verified match
         uint64_t  best_lsn = 0;
         uint32_t  filled = 0;        // bytes of the current page already read
+        uint64_t  cepoch = 0;        // compact_epoch_ at op start (race guard)
         uint16_t  best_sz = 0;
         uint8_t   best_data[kSlotDataMax];
     };
@@ -763,6 +778,8 @@ private:
     std::atomic<uint64_t> recover_torn_{0};
     std::atomic<uint64_t> rejected_oversize_{0};
     std::atomic<uint64_t> oversize_bytes_{0};  // charged bytes in overflow map
+    std::atomic<uint64_t> rejected_mem_{0};    // inline writes refused at cap
+    std::atomic<uint64_t> recover_dropped_{0}; // keys dropped by recovery
     uint64_t              oversize_cap_ = 0;   // budget/8 (HYDRA_OVERSIZE_CAP_MB)
     std::atomic<uint64_t> compactions_run_{0};
     std::atomic<uint64_t> reclaimed_bytes_{0};   // net outstanding (reuse subtracts)
@@ -802,6 +819,9 @@ private:
     // flush_epoch_ is loaded per verified-lookup page-buffer check; keep it
     // away from the admission-rate occupancy_ counter.
     alignas(64) std::atomic<uint64_t> flush_epoch_{0};  // invalidates session page bufs
+    // Bumped by compact_region around relocation/punch so a read that raced
+    // a compaction can detect it and retry instead of a false NotFound.
+    alignas(64) std::atomic<uint64_t> compact_epoch_{0};
     alignas(64) std::atomic<uint64_t> occupancy_{0};
     std::atomic<uint64_t> key_mismatch_{0};
 
@@ -848,6 +868,43 @@ private:
         std::lock_guard<std::mutex> g(sh.mu);
         if (sh.set.erase(key))
             del_active_.fetch_sub(1, std::memory_order_release);
+    }
+
+    // Deferred on-disk delete poisoning ("reaper"). Delete() marks the key,
+    // sweeps the cache and ENQUEUES it here; background cleaners tombstone
+    // the landed versions asynchronously (audit: a synchronous pread+pwrite
+    // per version made Delete ~160x an Upsert). The registry mark keeps
+    // every reader correct in the meantime; Checkpoint() and shutdown drain
+    // the queue BEFORE fdatasync, so deletes share the writes' durability
+    // contract (durable at each checkpoint / clean shutdown).
+    std::mutex reap_mu_;
+    std::deque<uint64_t> reap_q_;
+    std::atomic<uint64_t> reap_inflight_{0};   // popped, poison in progress
+    // Bounded queue = bounded memory AND write backpressure: past the bound
+    // (sustained delete storms outrunning the drainers) Delete falls back
+    // to the old synchronous poison — still correct, just slower — instead
+    // of growing the queue without bound (the audit's OOM class). 64K keys
+    // = 512 KiB worst case. The mutex is uncontended off a storm and is
+    // touched only by Delete + drainers, never by reads/upserts.
+    static constexpr size_t kReapMax = 1 << 16;
+    bool reap_try_enqueue(uint64_t key) {
+        std::lock_guard<std::mutex> lk(reap_mu_);
+        if (reap_q_.size() >= kReapMax) return false;
+        reap_q_.push_back(key);
+        return true;
+    }
+    void reap_drain(Session* se);       // drain queue (any thread, reentrant)
+    void poison_versions(uint64_t key, Session* se);
+    // Inline-sized budget-capped absorb (disk-full / index-full fallback).
+    // Called under the key's set lock. False = refused (counted, sticky).
+    bool overflow_absorb(uint64_t key, const uint8_t* data, size_t size) {
+        if (!oversize_would_fit(key, size)) {
+            rejected_mem_.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        overflow_put(key, data, size);
+        del_unmark(key);
+        return true;
     }
 
     // sessions
@@ -924,9 +981,13 @@ void HydraStore::InitExtended(size_t, size_t, size_t mem_budget_bytes,
     mem_budget_ = mem_budget_bytes ? mem_budget_bytes : (8ULL << 30);
     disk_mode_ = storage_path && storage_path[0];
 
-    // Oversize budget cap: the overflow map is charged against the memory
-    // budget and hard-capped; over-cap upserts are rejected and counted.
-    oversize_cap_ = mem_budget_ / 8;
+    // Oversize budget cap: EVERY overflow-map entry (oversized values AND
+    // inline-sized fallback absorptions) is charged against this cap;
+    // over-cap upserts are rejected and counted, so a full disk or an
+    // exhausted index degrades to honest rejection instead of unbounded
+    // memory growth. In pure in-memory mode the overflow map IS the store,
+    // so it gets the full budget.
+    oversize_cap_ = disk_mode_ ? mem_budget_ / 8 : mem_budget_;
     if (const char* e = getenv("HYDRA_OVERSIZE_CAP_MB"))
         oversize_cap_ = strtoull(e, nullptr, 10) << 20;
     if (const char* e = getenv("HYDRA_COMPACT_FACTOR")) {
@@ -1062,13 +1123,15 @@ HydraStore::~HydraStore() {
     stop_background();
     if (disk_mode_ && fd_ >= 0) {
         // Clean-shutdown durability (best effort): land every session's
-        // parked partial chunk, persist the oversize map, fdatasync. All
-        // threads are joined — single-threaded from here.
+        // parked partial chunk, poison outstanding deletes, persist the
+        // oversize map, fdatasync. All threads are joined — single-threaded
+        // from here.
         {
             std::lock_guard<std::mutex> lk(sess_mu_);
             for (auto& se : sessions_)
                 if (se->chunk_buf && se->chunk_fill > 0) flush_chunk(se.get());
         }
+        reap_drain(session());
         write_overflow_file();
         if (fdatasync(fd_) < 0) durable_ok_.store(false);
     }
@@ -1364,14 +1427,28 @@ void HydraStore::flush_chunk(Session* se) {
             if (e.state != S_EMPTY && e.key == rec.key) { own = &e; break; }
         }
         if (rec.old_p1 == 0) {
-            // First insert: its index word was inserted at stage time, and
-            // Delete waits for BUFFERED pins, so the pin is still present.
+            // First insert: its index word was inserted at stage time.
             if (own && own->state == S_BUFFERED) {
                 if (own->ver == rec.ver) {
                     own->state = S_CLEAN;
                 } else {
                     own->state = S_DIRTY;   // newer value needs another flush
                 }
+            }
+            // Deleted while BUFFERED: Delete() never waits for (possibly
+            // foreign) chunk pins — waiting livelocked concurrent
+            // Upsert+Delete (audit bug #1) — so the LANDING keeps the
+            // delete crash-durable instead: reseal the just-landed slot as
+            // a tombstone and drop the entry. Correct under the set lock:
+            // a reinsert unmarks at its publication point under this same
+            // lock, so is_deleted here proves the entry's bytes (and the
+            // landed slot) predate the delete.
+            if (is_deleted(rec.key)) {
+                if (own && own->state != S_EMPTY) {
+                    own->state = S_EMPTY;
+                    occupancy_.fetch_sub(1, std::memory_order_relaxed);
+                }
+                tombstone_slot((uint64_t)rec.new_p1 - 1, se);
             }
             set_locks_[s].unlock();
             continue;
@@ -1557,12 +1634,16 @@ bool HydraStore::overflow_get(uint64_t key, GenValue& out) {
 void HydraStore::overflow_put(uint64_t key, const uint8_t* data, size_t size) {
     OverflowShard& sh = shard(key);
     std::lock_guard<std::mutex> lk(sh.mu);
-    int64_t delta = (size > kInlineMax) ? (int64_t)ovf_charge(size) : 0;
+    // EVERY overflow entry is charged against the budget cap — inline-sized
+    // fallback absorptions included. (Audit bug: inline values absorbed on
+    // disk-full/index-full paths were uncharged, so the map could grow past
+    // the whole memory budget and get the process OOM-killed. All absorb
+    // paths now gate on oversize_would_fit and reject honestly instead.)
+    int64_t delta = (int64_t)ovf_charge(size);
     uint64_t lsn = lsn_.fetch_add(1, std::memory_order_relaxed);
     auto it = sh.map.find(key);
     if (it != sh.map.end()) {
-        if (it->second.bytes.size() > kInlineMax)
-            delta -= (int64_t)ovf_charge(it->second.bytes.size());
+        delta -= (int64_t)ovf_charge(it->second.bytes.size());
         it->second.bytes.assign(reinterpret_cast<const char*>(data), size);
         it->second.lsn = lsn;
     } else {
@@ -1580,9 +1661,8 @@ bool HydraStore::overflow_erase(uint64_t key) {
     std::lock_guard<std::mutex> lk(sh.mu);
     auto it = sh.map.find(key);
     if (it == sh.map.end()) return false;
-    if (it->second.bytes.size() > kInlineMax)
-        oversize_bytes_.fetch_sub(ovf_charge(it->second.bytes.size()),
-                                  std::memory_order_relaxed);
+    oversize_bytes_.fetch_sub(ovf_charge(it->second.bytes.size()),
+                              std::memory_order_relaxed);
     sh.map.erase(it);
     overflow_count_.fetch_sub(1, std::memory_order_relaxed);
     return true;
@@ -1598,7 +1678,7 @@ bool HydraStore::oversize_would_fit(uint64_t key, size_t size) {
         OverflowShard& sh = shard(key);
         std::lock_guard<std::mutex> lk(sh.mu);
         auto it = sh.map.find(key);
-        if (it != sh.map.end() && it->second.bytes.size() > kInlineMax)
+        if (it != sh.map.end())
             credit = ovf_charge(it->second.bytes.size());
     }
     return oversize_bytes_.load(std::memory_order_relaxed) + ovf_charge(size)
@@ -1709,6 +1789,17 @@ OpStatus HydraStore::miss_read(uint64_t key, GenValue& out, Session* se) {
     // the FIRST match is the newest (versions are prepended in temporal
     // order).
     uint64_t h = mix64(key);
+    // Compaction-race guard: a lookup racing compact_region can read a
+    // just-punched slot (zeros) or a mid-move page and conclude a FALSE
+    // NotFound (audit design gap). Snapshot the compaction epoch; if a
+    // NotFound lookup observed a moved epoch, retry once against the
+    // post-move index (relocations are published before the old region is
+    // punched, so the retry cannot race the same move). Costs one relaxed
+    // load per miss; the retry never triggers unless a compaction ran
+    // mid-lookup.
+    uint64_t cepoch = compact_epoch_.load(std::memory_order_acquire);
+    bool retried = false;
+retry_lookup:
     uint64_t itc = index_.start_of(h), scanned = 0;
     uint32_t p1;
     uint32_t best_p1 = 0;
@@ -1765,7 +1856,15 @@ OpStatus HydraStore::miss_read(uint64_t key, GenValue& out, Session* se) {
             cur = prev;               // walk the version chain
         }
     }
-    if (best_p1 == 0) return OpStatus::NotFound;
+    if (best_p1 == 0) {
+        uint64_t ce2 = compact_epoch_.load(std::memory_order_acquire);
+        if (!retried && ce2 != cepoch) {   // raced a compaction: retry once
+            cepoch = ce2;
+            retried = true;
+            goto retry_lookup;
+        }
+        return OpStatus::NotFound;
+    }
 
     // Freshness: if the key entered the cache while we were doing I/O, the
     // cached copy supersedes the disk copy.
@@ -1963,6 +2062,7 @@ bool HydraStore::uring_start(MissOp& op, uint32_t oi, Uring& ring,
     op.best_lsn = 0;
     op.best_sz = 0;
     op.filled = 0;
+    op.cepoch = compact_epoch_.load(std::memory_order_acquire);
     uint32_t p1 = index_.next_candidate(op.h, op.it, op.scanned);
     if (p1 == 0) {
         finish_slot(slot, op.sess, OpStatus::NotFound);
@@ -2020,6 +2120,16 @@ bool HydraStore::uring_advance(MissOp& op, uint32_t oi, Uring& ring, int res,
                 // All candidate chains examined: serve the newest verified
                 // match (highest position; the log only appends), if any.
                 if (op.best_p1 == 0) {
+                    // Compaction-race guard (see miss_read): if a compaction
+                    // moved slots mid-op, re-check synchronously (with THIS
+                    // io thread's private session) before publishing a
+                    // false NotFound.
+                    if (compact_epoch_.load(std::memory_order_acquire) !=
+                            op.cepoch &&
+                        miss_read(key, slot->out, io_se) == OpStatus::Ok) {
+                        finish_slot(slot, op.sess, OpStatus::Ok);
+                        return false;
+                    }
                     finish_slot(slot, op.sess, OpStatus::NotFound);
                     return false;
                 }
@@ -2182,10 +2292,12 @@ void HydraStore::upsert_inline(uint64_t key, const uint8_t* data, uint16_t size)
             if (++attempts > 64) {
                 // Pathological pin-up (every way pinned behind a failing
                 // disk): absorb the write in the overflow map so Upsert
-                // never livelocks and never loses the bytes.
+                // never livelocks — but only within the budget cap. Over
+                // the cap the write is REFUSED and counted (audit: an
+                // uncapped absorb grew past the whole memory budget on a
+                // full disk and got the process OOM-killed).
                 set_locks_[s].lock();
-                overflow_put(key, data, size);
-                del_unmark(key);
+                overflow_absorb(key, data, size);
                 set_locks_[s].unlock();
                 return;
             }
@@ -2210,8 +2322,10 @@ void HydraStore::upsert_inline(uint64_t key, const uint8_t* data, uint16_t size)
                     flush_chunk(se);
                     continue;
                 }
-                overflow_put(key, data, size);
-                del_unmark(key);
+                // Budget-capped absorb (see overflow_absorb): a full disk
+                // must degrade to honest rejection, never to unbounded
+                // uncharged memory growth.
+                overflow_absorb(key, data, size);
                 set_locks_[s].unlock();
                 return;
             }
@@ -2224,8 +2338,9 @@ void HydraStore::upsert_inline(uint64_t key, const uint8_t* data, uint16_t size)
                 // occupancy for a non-empty clean victim).
                 if (e.state != S_EMPTY)
                     occupancy_.fetch_add(1, std::memory_order_relaxed);
-                overflow_put(key, data, size);
-                del_unmark(key);   // publish-then-unmark under the set lock
+                // Budget-capped absorb: index/position exhaustion degrades
+                // to honest rejection once the overflow cap is reached.
+                overflow_absorb(key, data, size);
                 set_locks_[s].unlock();
                 return;
             }
@@ -2279,6 +2394,17 @@ void HydraStore::Upsert(uint64_t key, const GenValue& value) {
     // the new value is not yet visible. (del_unmark is a no-op fast path
     // while the registry is empty.)
     if (!disk_mode_) {
+        // Pure in-memory mode: the overflow map IS the store, capped at the
+        // FULL memory budget (see InitExtended). Over the cap the write is
+        // refused and counted — an in-memory store past its budget must
+        // reject, not OOM.
+        if (!oversize_would_fit(key, value.size)) {
+            if (value.size > kInlineMax)
+                rejected_oversize_.fetch_add(1, std::memory_order_relaxed);
+            else
+                rejected_mem_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
         overflow_put(key, value.data, value.size);
         del_unmark(key);
         return;
@@ -2291,37 +2417,37 @@ void HydraStore::Upsert(uint64_t key, const GenValue& value) {
             return;
         }
         // Drop any stale inline cache entry so reads see the overflow value.
-        // A BUFFERED entry stays pinned until its chunk lands (removing it
-        // early would let the stale chunk write escape its cancellation), so
-        // wait for the landing first — rare path, bounded by chunk flush.
+        // Pinned entries (BUFFERED/FLUSHING) are erased OUTRIGHT — blocking
+        // here until a possibly-foreign chunk landed livelocked exactly like
+        // the audit's Delete bug. Safe without the pin: reads and admissions
+        // consult the overflow map before the index (miss_read, admit
+        // gates), a landing whose pin broke abandons the staged slot without
+        // linking it (flush_chunk), and on recovery the sidecar entry's
+        // higher LSN supersedes any stale landed slot. The orphan slot bytes
+        // are leaked until compaction reclaims them (compact_region treats
+        // overflow-resident keys' slots as dead), the same class as
+        // Delete's leaked slots.
         uint64_t s = set_of(key);
-        int spins = 0;
-        for (;;) {
-            bool buffered = false;
-            set_locks_[s].lock();
-            Entry* base = set_base(s);
-            for (size_t w = 0; w < kAssoc; ++w) {
-                Entry& e = base[w];
-                if (e.state != S_EMPTY && e.key == key) {
-                    if (e.state == S_BUFFERED || e.state == S_FLUSHING) { buffered = true; break; }
-                    e.state = S_EMPTY;
-                    occupancy_.fetch_sub(1, std::memory_order_relaxed);
-                    break;
-                }
-            }
-            if (!buffered) break;
-            set_locks_[s].unlock();
-            Session* se = session();
-            flush_partials(se);
-            // The pin may belong to ANOTHER session's in-flight chunk; wait
-            // politely (bounded by that chunk's landing) instead of burning
-            // a core. Rare path — never taken by inline-sized workloads.
-            if (++spins > 100)
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            else
-                std::this_thread::yield();
-        }
+        set_locks_[s].lock();
+        // PUBLISH FIRST, then erase: readers probe the cache LOCK-FREE, so
+        // erasing the (possibly still-unlanded BUFFERED) inline entry before
+        // the overflow value is visible opens a "nothing anywhere" window —
+        // a reader would miss the cache, miss the overflow map, and find no
+        // landed slot on disk: a false NotFound for a key that always
+        // exists. With the overflow value published first, a reader either
+        // still sees the inline entry (bounded stale-by-one, legal for a
+        // mid-upsert read) or sees the erase and is guaranteed to find the
+        // overflow value (shard-mutex acquire orders the two).
         overflow_put(key, value.data, value.size);
+        Entry* base = set_base(s);
+        for (size_t w = 0; w < kAssoc; ++w) {
+            Entry& e = base[w];
+            if (e.state != S_EMPTY && e.key == key) {
+                e.state = S_EMPTY;
+                occupancy_.fetch_sub(1, std::memory_order_relaxed);
+                break;
+            }
+        }
         del_unmark(key);   // publish-then-unmark under the set lock
         set_locks_[s].unlock();
         return;
@@ -2405,71 +2531,46 @@ bool HydraStore::Delete(uint64_t key) {
     bool newly = del_mark(key);
     bool existed = overflow_erase(key);
     uint64_t s = set_of(key);
-    // Sweep the cache. CLEAN/DIRTY entries are erased outright. FLUSHING
-    // entries (staged in some session's in-flight chunk) are erased too:
-    // their landing re-checks pin ownership under this same lock and never
-    // links the staged slot — waiting for the landing instead could stall
-    // on another session's parked partial chunk. BUFFERED entries must land
-    // first: their index word already points at the reserved slot, so the
-    // slot has to become readable before verified_lookup below can poison
-    // it on disk.
-    int spins = 0;
-    for (;;) {
-        bool buffered = false;
-        set_locks_[s].lock();
-        Entry* base = set_base(s);
-        for (size_t w = 0; w < kAssoc; ++w) {
-            Entry& e = base[w];
-            if (e.state != S_EMPTY && e.key == key) {
-                if (e.state == S_BUFFERED) { buffered = true; break; }
+    // Sweep the cache — SINGLE pass, never blocks. (Blocking here until a
+    // BUFFERED pin landed livelocked when the pin belonged to ANOTHER
+    // session's parked partial chunk and that session was idle — the
+    // audit's concurrent Upsert+Delete freeze.) CLEAN/DIRTY entries are
+    // erased outright. FLUSHING entries are erased too: their landing
+    // re-checks pin ownership under this same lock, never links the staged
+    // slot, and reseals the orphan as a tombstone. BUFFERED entries stay
+    // pinned: their index word already points at the reserved slot, and the
+    // LANDING reseals that slot as a tombstone and drops the entry
+    // (flush_chunk, old_p1 == 0 branch). Readers meanwhile are gated by the
+    // registry mark, so the key reads NotFound the instant we return.
+    set_locks_[s].lock();
+    Entry* base = set_base(s);
+    for (size_t w = 0; w < kAssoc; ++w) {
+        Entry& e = base[w];
+        if (e.state != S_EMPTY && e.key == key) {
+            existed = true;
+            if (e.state != S_BUFFERED) {
                 e.state = S_EMPTY;
                 occupancy_.fetch_sub(1, std::memory_order_relaxed);
-                existed = true;
-                break;
             }
+            break;
         }
-        set_locks_[s].unlock();
-        if (!buffered) break;
-        flush_partials(session());
-        // Pin may belong to another session's chunk; back off politely.
-        if (++spins > 100)
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        else
-            std::this_thread::yield();
     }
-    // Unlink EVERY on-disk version of the key. Alias repair (historic) and
-    // prev chains hanging off OTHER keys' words can reach our slots —
-    // erasing a single index word would let a later read resurrect an older
-    // version. Loop: verified_lookup returns the newest still-matching
-    // slot; tombstone it on disk (unmatchable size, chain intact). The
-    // index word is KEPT: it routes same-fp chains for other keys.
-    // Terminates because each pass permanently unmatches one slot. Slot
-    // bytes are leaked until a compactor runs (log GC is out of scope, as
-    // in FASTER's manual Log.Compact).
-    Session* se = session();
-    uint32_t p1;
-    int poison_passes = 0;
-    while ((p1 = verified_lookup(key, se)) != 0) {
-        // Liveness bound: each pass normally unmatches one slot, but on a
-        // dead disk tombstone_slot's page write fails soft and the same
-        // slot keeps matching forever. In-process deletion stays correct
-        // (the registry mark gates every reader); only crash-durability is
-        // degraded, which the sticky flags already surface.
-        if (++poison_passes > 4096) break;
-        // Re-check the mark UNDER THE SET LOCK before each tombstone: a
-        // concurrent Upsert republishes the key and unmarks it under this
-        // same lock, and its relanded slot would otherwise be poisoned here
-        // ("present until eviction, then absent" — non-linearizable). Once
-        // the mark is gone, every remaining older on-disk version is
-        // shadowed by the reinsert's chain prepend, so stopping is safe.
-        // Holding the set lock across the (rare) tombstone I/O also blocks
-        // a landing from publishing a new slot mid-poison (landings take
-        // this lock). Lock order set -> page is unique to this path.
-        set_locks_[s].lock();
-        if (!is_deleted(key)) { set_locks_[s].unlock(); break; }
-        tombstone_slot((uint64_t)p1 - 1, se);
-        set_locks_[s].unlock();
+    set_locks_[s].unlock();
+    // Landed on-disk versions are unlinked ASYNCHRONOUSLY by the reaper
+    // (poison_versions): a synchronous pread+pwrite per version made Delete
+    // ~160x an Upsert (audit). The registry mark keeps every reader correct
+    // until the tombstones land; Checkpoint()/shutdown drain the queue
+    // BEFORE fdatasync, so deletes are durable at every durability point,
+    // exactly like writes. An index candidate word is evidence the key has
+    // (or once had) landed versions; the reaper's verified_lookup is exact,
+    // so a stale/foreign candidate just makes its pass a no-op. (A
+    // fingerprint-collision candidate can overstate `existed` for an
+    // absent-key delete with ~2^-32 probability — documented residual, the
+    // same class as the engine's other fingerprint residuals.)
+    if (index_.first_candidate(mix64(key)) != 0) {
         existed = true;
+        if (newly && !reap_try_enqueue(key))
+            poison_versions(key, session());   // backpressure: queue full
     }
     // Nothing existed anywhere (absent-key delete): drop the mark again so
     // the registry cannot grow without bound under absent-delete churn.
@@ -2480,6 +2581,62 @@ bool HydraStore::Delete(uint64_t key) {
     // Idempotence: a second Delete with no re-insert in between returns
     // false even if it swept up residue of the first one.
     return newly && existed;
+}
+
+// Unlink EVERY landed on-disk version of a deleted key. Alias repair
+// (historic) and prev chains hanging off OTHER keys' words can reach the
+// key's slots — erasing a single index word would let a later read
+// resurrect an older version. Loop: verified_lookup returns the newest
+// still-matching slot; tombstone it on disk (unmatchable size, chain
+// intact). The index word is KEPT: it routes same-fp chains for other keys.
+// Terminates because each pass permanently unmatches one slot; on a dead
+// disk tombstone_slot fails soft and the pass bound below stops the loop
+// (in-process deletion stays correct — the registry mark gates every
+// reader; only the delete's crash-durability is degraded, surfaced by the
+// sticky flags). Slot bytes are leaked until the compactor reclaims them.
+void HydraStore::poison_versions(uint64_t key, Session* se) {
+    uint64_t s = set_of(key);
+    uint32_t p1;
+    int poison_passes = 0;
+    while ((p1 = verified_lookup(key, se)) != 0) {
+        if (++poison_passes > 4096) break;
+        // Re-check the mark UNDER THE SET LOCK before each tombstone: a
+        // concurrent Upsert republishes the key and unmarks it under this
+        // same lock, and its relanded slot would otherwise be poisoned here
+        // ("present until eviction, then absent" — non-linearizable). Once
+        // the mark is gone, every remaining older on-disk version is
+        // shadowed by the reinsert's chain prepend, so stopping is safe.
+        // Holding the set lock across the tombstone I/O also blocks a
+        // landing from publishing a new slot mid-poison (landings take this
+        // lock). Lock order set -> page is shared with the landing path.
+        set_locks_[s].lock();
+        if (!is_deleted(key)) { set_locks_[s].unlock(); break; }
+        tombstone_slot((uint64_t)p1 - 1, se);
+        set_locks_[s].unlock();
+    }
+}
+
+// Drain the reaper queue. Reentrant: cleaners, Checkpoint and the
+// destructor may all drain concurrently — pops are serialized by reap_mu_,
+// per-key poisoning by the set/page locks. reap_inflight_ lets a drainer
+// wait for keys other drainers popped but have not finished poisoning.
+void HydraStore::reap_drain(Session* se) {
+    for (;;) {
+        uint64_t key;
+        {
+            std::lock_guard<std::mutex> lk(reap_mu_);
+            if (reap_q_.empty()) return;
+            key = reap_q_.front();
+            reap_q_.pop_front();
+            // Inside the lock: a drainer that later sees the queue empty is
+            // then GUARANTEED to observe inflight != 0 until this key's
+            // poison completes (Checkpoint's drain->wait would otherwise
+            // race a pop and fdatasync before the tombstone write).
+            reap_inflight_.fetch_add(1, std::memory_order_acq_rel);
+        }
+        poison_versions(key, se);
+        reap_inflight_.fetch_sub(1, std::memory_order_acq_rel);
+    }
 }
 
 // ── Cleaner: keep sets stocked with clean victims ────────────────────────────
@@ -2526,6 +2683,10 @@ void HydraStore::cleaner_main(int id) {
         }
         // Land partial chunks so staged (pinned) entries unpin promptly.
         flush_partials(se);
+        // Poison landed versions of recently deleted keys (deferred from
+        // Delete, which must never do synchronous disk I/O). No-op unless
+        // deletes happened.
+        reap_drain(se);
         if (id == 0) dk_maybe_rotate();
         // Pacing: cleaners are an optimization only — find_victim's
         // sync-assist staging bounds eviction latency — so cap background
@@ -2563,6 +2724,14 @@ void HydraStore::Checkpoint() {
         });
     }
     for (auto& t : ts) t.join();
+    // Deletes share the writes' durability contract: every delete issued
+    // before this Checkpoint has its on-disk versions tombstoned before the
+    // fdatasync below. Drain the queue, then wait out keys a concurrent
+    // cleaner popped but has not finished poisoning (bounded: one key's
+    // poison loop).
+    reap_drain(session());
+    while (reap_inflight_.load(std::memory_order_acquire) != 0)
+        std::this_thread::yield();
     while (fdatasync(fd_) < 0) {
         if (errno == EINTR) continue;
         // FAIL-SOFT: durability is degraded, not the process. The sticky
@@ -2674,7 +2843,9 @@ void HydraStore::recover_log(uint64_t file_bytes) {
     next_slot_.store(next, std::memory_order_relaxed);
     landed_hw_.store(file_bytes & ~(uint64_t)(kPageBytes - 1),
                      std::memory_order_relaxed);
-    load_overflow_file(rk, rl);   // needs rk/rl for LSN ordering
+    // needs rk/rl for LSN ordering; cap-refused sidecar entries are DROPS
+    uint64_t ovf_refused = load_overflow_file(rk, rl);
+    dropped += ovf_refused;
     // Re-mark tombstone-winning keys in the delete registry, so the
     // "compaction relocates a still-deleted key's tombstone" invariant
     // (restage_tombstone) holds across restart generations too — otherwise
@@ -2692,15 +2863,22 @@ void HydraStore::recover_log(uint64_t file_bytes) {
                std::memory_order_relaxed);
     recovered_keys_.store(index_.count.load(std::memory_order_relaxed),
                           std::memory_order_relaxed);
-    // recover_ok: 1 = clean, 0 = DEGRADED (unreadable regions were skipped
-    // or the file exceeded the position space — keys may be missing).
-    recover_ok_.store((scan_errors == 0 &&
+    recover_dropped_.store(dropped, std::memory_order_relaxed);
+    // recover_ok: 1 = clean, 0 = DEGRADED — unreadable regions were
+    // skipped, the file exceeded the position space, or keys were DROPPED
+    // because the index (sized from mem_budget) could not hold them (audit:
+    // a smaller-budget reopen silently lost keys while still reporting
+    // recover_ok=1; drops now fail the recovery status and are counted in
+    // recover_dropped_keys).
+    recover_ok_.store((scan_errors == 0 && dropped == 0 &&
                        (file_bytes / kSlotBytes) * kSlotBytes == data_bytes)
                           ? 1 : 0,
                       std::memory_order_relaxed);
     if (dropped)
         fprintf(stderr, "hydra: WARNING recovery dropped %llu keys "
-                "(index capacity)\n", (unsigned long long)dropped);
+                "(index capacity too small for this log — reopen with a "
+                "budget at least as large as the writer's); recover_ok=0\n",
+                (unsigned long long)dropped);
     fprintf(stderr, "hydra: recovered %llu keys, %llu torn slots skipped\n",
             (unsigned long long)recovered_keys_.load(),
             (unsigned long long)recover_torn_.load());
@@ -2781,17 +2959,19 @@ void HydraStore::sync_dir() {
     if (dfd >= 0) close(dfd);
 }
 
-void HydraStore::load_overflow_file(const uint64_t* rk, const uint64_t* rl) {
+uint64_t HydraStore::load_overflow_file(const uint64_t* rk,
+                                        const uint64_t* rl) {
     std::string path = dir_ + "/hydra_overflow.dat";
     FILE* f = fopen(path.c_str(), "rb");
-    if (!f) return;
+    if (!f) return 0;
     overflow_file_seen_ = true;
     uint64_t hdr[2];
     if (fread(hdr, 8, 2, f) != 2 || hdr[0] != kOvfMagic) {
         fclose(f);
-        return;
+        return 0;
     }
     const uint64_t nwords = index_.nwords;
+    uint64_t refused = 0;
     std::vector<uint8_t> rec;
     for (uint64_t i = 0; i < hdr[1]; ++i) {
         uint8_t head[24];
@@ -2832,19 +3012,33 @@ void HydraStore::load_overflow_file(const uint64_t* rk, const uint64_t* rl) {
             it = (it + 1) & (nwords - 1);
         }
         if (lsn <= slot_newest) continue;        // slot log wins
+        // Budget cap holds on RELOAD too: a sidecar written under a larger
+        // budget must not blow past this (smaller) instance's cap — refuse
+        // the excess, count it, and degrade recover_ok (the caller adds
+        // `refused` to recover_dropped_keys). Same-budget reopens reload
+        // everything the writer's cap admitted (the write side enforced the
+        // same bound, modulo its documented per-thread overshoot).
+        if (oversize_bytes_.load(std::memory_order_relaxed) > oversize_cap_) {
+            refused++;
+            continue;
+        }
         OverflowShard& sh = shard(key);
         std::lock_guard<std::mutex> g(sh.mu);
         if (sh.map.emplace(key, OvfVal{std::string((const char*)rec.data(),
                                                    size), lsn}).second) {
             overflow_count_.fetch_add(1, std::memory_order_relaxed);
-            if (size > kInlineMax)
-                oversize_bytes_.fetch_add(ovf_charge(size),
-                                          std::memory_order_relaxed);
+            oversize_bytes_.fetch_add(ovf_charge(size),
+                                      std::memory_order_relaxed);
         }
         if (lsn >= lsn_.load(std::memory_order_relaxed))
             lsn_.store(lsn + 1, std::memory_order_relaxed);
     }
     fclose(f);
+    if (refused)
+        fprintf(stderr, "hydra: WARNING recovery refused %llu oversize "
+                "sidecar entries (budget cap); recover_ok=0\n",
+                (unsigned long long)refused);
+    return refused;
 }
 
 // ── Background log compaction ────────────────────────────────────────────────
@@ -2887,6 +3081,10 @@ bool HydraStore::compact_region(Session* se, uint64_t base) {
             if (e.first < base + nslots && base < e.first + e.second)
                 return false;
     }
+    // Readers snapshot this epoch and retry a NotFound that overlapped a
+    // compaction (see miss_read / uring_step): bump before any slot moves,
+    // and again after the punch below, so every overlap is detectable.
+    compact_epoch_.fetch_add(1, std::memory_order_acq_rel);
     if (!se->page_buf) {
         se->page_buf = alloc_aligned(kPageBytes);
         se->page_no = ~0ULL;
@@ -3043,6 +3241,15 @@ bool HydraStore::compact_region(Session* se, uint64_t base) {
         durable_ok_.store(false, std::memory_order_relaxed);
         return false;                        // retry the region later
     }
+    // Pre-punch epoch bump: a reader that snapshotted the epoch AFTER the
+    // start bump could otherwise pread punched zeros and re-check the epoch
+    // BEFORE the post-punch bump below — a false NotFound. After this bump,
+    // any reader that can still resolve into this region carries an older
+    // snapshot and will retry. (Readers snapshotting after this bump cannot
+    // route here at all: the verification pass above proved no index word
+    // or cache entry references the region; prev-chains reaching into it
+    // touch only superseded versions, and a zeroed slot just ends the walk.)
+    compact_epoch_.fetch_add(1, std::memory_order_acq_rel);
     // Punch the region (space) and recycle it (position space). A failed
     // punch is nonfatal: extent reuse alone stops file growth, and stale
     // bytes lose every LSN comparison anyway.
@@ -3066,6 +3273,7 @@ bool HydraStore::compact_region(Session* se, uint64_t base) {
     }
     reclaimed_bytes_.fetch_add(nslots * kSlotBytes, std::memory_order_relaxed);
     reclaimed_total_.fetch_add(nslots * kSlotBytes, std::memory_order_relaxed);
+    compact_epoch_.fetch_add(1, std::memory_order_acq_rel);   // punch done
     return true;
 }
 
@@ -3088,6 +3296,9 @@ void HydraStore::FillProdStats(ProdStats& out) const {
     out.buffered_fallback = buffered_fallback_ ? 1 : 0;
     out.punch_unsupported =
         punch_unsupported_.load(std::memory_order_relaxed) ? 1 : 0;
+    out.rejected_mem = rejected_mem_.load(std::memory_order_relaxed);
+    out.recover_dropped_keys =
+        recover_dropped_.load(std::memory_order_relaxed);
 }
 
 CacheStats HydraStore::GetCacheStats() const {
