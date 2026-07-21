@@ -1,73 +1,3 @@
-# PROGRESS — Website: sync kisssorcar.github.io with latest code + README
-
-Task: update kisssorcar.github.io thoroughly and precisely using the latest
-code and ./README.md; upload the changes; verify the live website.
-
-## DONE (single session) — COMPLETE
-
-1. Audited every factual claim on the site against the code:
-   - Recomputed from `src/kiss/core/models/MODEL_INFO.json`: 538 total models,
-     OpenRouter 307, cc/* 3, codex/* 9; capabilities 521 gen / 369 fc / 10 emb.
-     Site said 530 / 303 / 514 / 359 / 7 and Gemini 24 (now 27), Moonshot 6
-     (now 7) — all stale from the 2026.7.18 era.
-   - `_version.py` = 2026.7.30; docs/overview.md and llms-full.txt said 2026.7.18.
-   - index.html hero + comparison table said "~2,900"/"~2900" LoC while
-     README/docs say ~2850 — aligned to ~2,850/~2850.
-   - Verified 23 messaging agents (third_party_agents/) and the CLI flag table
-     (docs/cli.md == README table incl. `-V/--version`) are correct.
-2. Edited in `website/kisssorcar.github.io/`: index.html (meta ×2, hero,
-   comparison table ×2, § 09 heading/sub, provider rows, capability pills,
-   JS comment), llms.txt, .well-known/llms.txt, index.html.md, docs/index.md,
-   docs/overview.md, docs/models.md, llms-full.txt. Re-grep: zero stale
-   numbers remain.
-3. Synced with the deployed clone `~/work/kisssorcar.github.io`:
-   - Copied its newer assets back into the repo copy (hydra_kv.pdf, updated
-     swedefend.pdf).
-   - Copied all updated text files to the clone, including docs/api.md,
-     docs/cli.md, llms-full.txt which gain the `-V/--version` docs that the
-     repo copy already had. `diff -rq` shows the two copies identical (.git
-     aside).
-4. Committed 10 files in the clone as 4766605 "Update site to v2026.7.30:
-   538-model catalog (Gemini 27, Moonshot 7, OpenRouter 307; 521 gen / 369 fc
-   / 10 emb), ~2850 core-agent LoC, document -V/--version flag" and pushed to
-   kisssorcar/kisssorcar.github.io main.
-5. Committed the same changes to `website/kisssorcar.github.io/` in the kiss
-   repo, and verified the live site (index page § 09 numbers, hero, docs
-   pages, llms.txt) in the browser after the GitHub Pages deploy.
-
----
-
-# PROGRESS — Website: add P. C. Sorcar sentence in "What is in the Name?"
-
-Task: add the sentence "the legendary Bengali magician, evoking the idea of an
-agent that performs feats that appear magical yet are grounded in disciplined
-engineering." to the "What is in the Name?" section of kisssorcar.github.io
-and update the live website.
-
-## DONE (single session) — COMPLETE
-
-1. Located the section in `website/kisssorcar.github.io/index.html` (§ 05,
-   `#name` card). Old text: "KISS Sorcar is named after <a ...>P. C. Sorcar,
-   the Bengali magician</a>. Note: ...". New text:
-
-   ```html
-   <p>KISS Sorcar is named after <a href="https://en.wikipedia.org/wiki/P._C._Sorcar">P. C. Sorcar</a>,
-   the legendary Bengali magician, evoking the idea of an agent that performs feats that appear
-   magical yet are grounded in disciplined engineering. Note: <strong>Sorcar</strong> also means
-   <em>government</em> in Bengali.</p>
-   ```
-
-2. Applied the same edit to the deployed clone `~/work/kisssorcar.github.io`,
-   committed (932cb2d "Add P. C. Sorcar sentence to 'What is in the Name?'
-   section"), rebased on origin (which had a new hydra_kv.pdf commit), and
-   pushed to `kisssorcar/kisssorcar.github.io` main.
-3. `docs/overview.md`, `llms-full.txt`, and the `index.html.md` footer already
-   contained the wording — no changes needed there.
-4. Verified live at https://kisssorcar.github.io/#name — the updated sentence
-   renders in the "Named after P. C. Sorcar." card.
-
----
-
 # PROGRESS — HydraKV paper update (papers/kvstorepaper/) for the latest engine
 
 Task: update papers/kvstorepaper/hydra_kv.tex for the post-publication engine
@@ -76,6 +6,7 @@ work (AUDIT2 remediation + multi-workload hardening) and rebuild the PDF.
 ## DONE (single session) — COMPLETE
 
 1. Gathered facts from the repo (no engine changes made):
+
    - `projects/kv_adversarial/AUDIT2.md` — second independent audit (July 20):
      verified 5.51 Mops/s median (5.9x FASTER) as genuine/unhacked, retracted
      its own overstated findings, reproduced 4 deployment defects on hardware
@@ -102,21 +33,22 @@ work (AUDIT2 remediation + multi-workload hardening) and rebuild the PDF.
    - Retrieved verbatim Task-5 and Task-6 prompts from ~/.kiss/sorcar.db
      (task_history ids cdde00e9..., 061e7725...).
 
-2. Updated papers/kvstorepaper/hydra_kv.tex:
-   - New constants: \HydraAuditVerified{5.51}, \HydraAuditFixed{5.50},
-     \HydraFinalWL{5.51} (+runs), sweep numbers, \EngineLocFinal{~3,970}.
+1. Updated papers/kvstorepaper/hydra_kv.tex:
+
+   - New constants: \\HydraAuditVerified{5.51}, \\HydraAuditFixed{5.50},
+     \\HydraFinalWL{5.51} (+runs), sweep numbers, \\EngineLocFinal{~3,970}.
    - Abstract: final engine 5.51 headline, x-records + delete reaper in the
      feature list, new closing narrative (second audit, task 5, task 6).
    - Intro: six tasks; final-engine results sentence; contribution #6
      (deployment-hardening loop closed by a second independent audit);
-     expanded artifact footnote (AUDIT2*, WORKLOAD_HARDENING.md, benchmark/,
-     refnode_*_jul21/); non-contributions updated.
+     expanded artifact footnote (AUDIT2\*, WORKLOAD_HARDENING.md, benchmark/,
+     refnode\_\*\_jul21/); non-contributions updated.
    - Design: LoC updated; x-records replace the RAM-only oversized path (map
      demoted to charged fail-soft absorber); Delete = background reaper with
      bounded queue + sync fallback, Checkpoint/shutdown drain; destructor now
      lands all sessions' partials + full Checkpoint; sizing paragraph notes
      the x-record path.
-   - NEW subsection 4.2 \label{sec:deploy} "Deployment hardening: a second
+   - NEW subsection 4.2 \\label{sec:deploy} "Deployment hardening: a second
      audit and an all-workload sweep" (audit findings + retractions, task-5
      fixes + A/B control, task-6 eight bugs + architectural limits).
    - Eval: Table 1 gains rows audit re-run 5.51 / audit-fixed 5.50 / final
@@ -136,12 +68,12 @@ work (AUDIT2 remediation + multi-workload hardening) and rebuild the PDF.
      obsolete "Delete waits politely"; evaluation scope lists all re-scores.
    - Conclusion: six tasks, both audits, updated evidence list.
 
-3. Built the paper: pdflatex (from /Library/TeX/texbin) twice; fixed the one
+1. Built the paper: pdflatex (from /Library/TeX/texbin) twice; fixed the one
    overfull hbox by shortening the two new Table-1 row labels. Final build:
    22 pages, 0 errors, 0 overfull, no undefined refs/citations. Visually
    verified pages 1, 9, 11 (both tables), 17 (new promptboxes) via pdftoppm.
 
-4. Cleanup + commit: removed ./tmp/kvpages renders; committed hydra_kv.tex +
+1. Cleanup + commit: removed ./tmp/kvpages renders; committed hydra_kv.tex +
    hydra_kv.pdf.
 
 ## Session: remove bug-found-and-fixed narratives (reader-facing revision)
@@ -150,35 +82,36 @@ User request: "In the paper there is no need to describe what bug you found
 and fixed. The readers only want to know how the engine works."
 
 Changes to papers/kvstorepaper/hydra_kv.tex (no number/constant changes):
+
 1. Abstract: hardening/audit/deployment tasks now described by the subsystems
    they added (crash recovery, fail-soft I/O, compaction, x-records,
    non-blocking deletes) and their scores; removed the resurrection-race,
    fingerprint-alias-bug, four-defect, and "eight further bugs" narratives.
-2. Intro/contributions: contribution 3 no longer names the delete/read
+1. Intro/contributions: contribution 3 no longer names the delete/read
    resurrection race; contribution 5 drops the coverage-exposed race;
    contribution 6 drops the defect list; non-contributions paragraph
    generalized.
-3. Design (Sec 4): fingerprint-alias, overflow-map, pin-ownership,
+1. Design (Sec 4): fingerprint-alias, overflow-map, pin-ownership,
    Delete/reaper, and clean-shutdown paragraphs rewritten as present-tense
    mechanism descriptions with design rationale (e.g., why landing-time pin
    re-check and tombstone relocation are load-bearing) instead of bug history.
-4. Sec 4.1: audit gap list condensed; "O_TRUNC is gone"/"eleven abort()
+1. Sec 4.1: audit gap list condensed; "O_TRUNC is gone"/"eleven abort()
    sites are gone" replaced with positive statements of current behavior.
-5. Sec 4.2 fully rewritten: "Deployment hardening: a second audit and an
+1. Sec 4.2 fully rewritten: "Deployment hardening: a second audit and an
    all-workload sweep" -> "Deployment subsystems: oversized values, deletes,
    and shutdown" with four mechanism paragraphs (x-records; non-blocking
    deletes + tombstone_slot guards + compaction tombstone restaging + epoch
    retry; honest accounting/recovery/shutdown; validation across workloads
    with the A/B throughput controls). Audit's genuineness verification kept;
    defect reproductions removed.
-6. Sec 5.4 retitled "Correctness and testing"; removed the compactcold
+1. Sec 5.4 retitled "Correctness and testing"; removed the compactcold
    four-step race story and the stale-position tombstone tale; tests are now
    described by the contracts they verify. Sec 5.1 "after all eight fixes" ->
    "after the campaign".
-7. Sec 6: verbatim prompts kept (they are the spec); Task 3/4/5/6 narratives
+1. Sec 6: verbatim prompts kept (they are the spec); Task 3/4/5/6 narratives
    condensed to process level (findings counts, review rounds, gates);
    observations (2), (4), (5) generalized away from specific bugs.
-8. Limitations: dropped 480K-drop and audit-flagged-false-NotFound historical
+1. Limitations: dropped 480K-drop and audit-flagged-false-NotFound historical
    parentheticals; Conclusion: "steered by two independent audits and an
    all-workload sweep", defect framing removed.
 
@@ -199,22 +132,23 @@ every suspect claim against ground truth (hydra.cc, kvstore_interface.h,
 AUDIT2_FIXES.md, PROD_READINESS.md, WORKLOAD_HARDENING.md).
 
 Findings and fixes (4 edits in hydra_kv.tex):
+
 1. Sec 4 position index: "index repair" was a dangling mechanism name (no
    such path in hydra.cc). The three newest-LSN-wins paths are miss_read,
    the io_uring completion state machine, and recover_log's index rebuild.
    -> "All paths that resolve a key to a slot (the synchronous miss path,
    the io_uring completion path, and recovery's index rebuild)".
-2. Sec 4.1 crash recovery: "Oversized values persist through a sidecar file"
+1. Sec 4.1 crash recovery: "Oversized values persist through a sidecar file"
    contradicted Sec 4.2 (x-records "need no sidecar"). In the final engine
    the sidecar persists overflow-MAP contents. -> "Overflow-map contents
    (Section 4) persist through a sidecar file ... a key with both sidecar-
    and log-resident versions recovers to the true last write."
-3. Limitations: removed "The inline index-capacity overflow path remains
+1. Limitations: removed "The inline index-capacity overflow path remains
    uncharged by design..." — stale pre-AUDIT2 residual (PROD_READINESS era);
    AUDIT2_FIXES Bug 2 + hydra.cc overflow_put/overflow_absorb show every
    absorb path (disk-full, pinned victim, index/position exhaustion) is now
    charged and budget-capped with honest counted rejection.
-4. Sec 4 memory tier: "an honest error status" was inaccurate (harness
+1. Sec 4 memory tier: "an honest error status" was inaccurate (harness
    Upsert returns void; rejection is surfaced via rejected_mem/
    rejected_oversize prod stats) -> "surfaced through rejection counters".
    Plus clarity: Sec 4.1 "the overflow keys are dropped" -> "the excess keys
@@ -240,6 +174,7 @@ styles (PNAS 2025), Simon Willison slop post, Sean Goedecke em-dash analysis,
 Google SERP, The Ringer and Night Water em-dash counterpoints.
 
 Diagnosis of the paper:
+
 - LLM marker vocabulary (delve/showcase/underscore/pivotal/tapestry/leverage/
   crucial/meticulous...): ABSENT. No puffery, no "-ing" superficial analyses,
   no boldface/markdown/curly-quote artifacts, no formulaic transitions.
@@ -249,10 +184,11 @@ Diagnosis of the paper:
   flourishes ("That table's shape is the design speaking", "The measured fact
   is the baseline itself"); (d) repeated signature words: honest x9,
   exactly/precisely x17, load-bearing x2; (e) ~20 single-word rhetorical
-  italics (\emph{not}, \emph{before}, \emph{are}...); (f) acknowledgments
+  italics (\\emph{not}, \\emph{before}, \\emph{are}...); (f) acknowledgments
   typo "(DESC0021982,)".
 
 Fixes (43 edits, all in hydra_kv.tex; numbers/tables/citations untouched):
+
 - Every paired prose em-dash parenthetical converted to parentheses, commas,
   colons, or split sentences (abstract, intro, contributions item 5, design,
   prod, deploy, testing, observations, limitations, related work,
@@ -276,6 +212,7 @@ except in the section 6? The readers want to know about the engine itself and
 not how it got hardened or correct or performant over time."
 
 Changes to papers/kvstorepaper/hydra_kv.tex:
+
 - Abstract: removed the task-by-task narrative (hardening task, production-
   readiness task, second audit re-run, deployment-hardening tasks, per-step
   scores); replaced with one verification-evidence sentence (test matrix,
@@ -284,11 +221,11 @@ Changes to papers/kvstorepaper/hydra_kv.tex:
   debugged, hardened, and finally made production-ready" -> "designed,
   implemented, and tested".
 - Intro: six-task enumeration condensed to two sentences (performance problem
-  + adversarial loop; four correctness tasks / two audits); results paragraph
-  now reports only the final engine (5.51) plus the v4c variant matrix;
-  contributions merged 6 -> 4 (hardening/production/deployment protocol items
-  folded into one "verification protocol" contribution); non-contributions
-  paragraph de-chronologized.
+  - adversarial loop; four correctness tasks / two audits); results paragraph
+    now reports only the final engine (5.51) plus the v4c variant matrix;
+    contributions merged 6 -> 4 (hardening/production/deployment protocol items
+    folded into one "verification protocol" contribution); non-contributions
+    paragraph de-chronologized.
 - Section 4: LOC-growth parenthetical removed; 4.1 and 4.2 openers rewritten
   as descriptions of present subsystems with pointers to the released audit
   artifacts and Section 6; "Why the scored number survived" -> "Cost on the
@@ -319,8 +256,8 @@ Changes to papers/kvstorepaper/hydra_kv.tex:
   and Section 6 instead of per-task re-scores).
 - Conclusion: "and then, steered by..., gave it..." -> "carries ...";
   "7 Mops/s again at production time" -> "a second time".
-- Removed now-unused macros \HydraFinal, \EngineLoc, \EngineLocProd,
-  \CovBranchesProd.
+- Removed now-unused macros \\HydraFinal, \\EngineLoc, \\EngineLocProd,
+  \\CovBranchesProd.
 
 Build: pdflatex x2 - 0 errors, 0 overfull, 0 undefined refs; 20 pages (was
 21). pdftotext: removed narrative phrases 0 hits; the only "hardening task"
@@ -335,12 +272,13 @@ outside Section 6 plus one introduction paragraph; drop the intermediate
 Abstract; readers should meet the engine first.
 
 Changes to papers/kvstorepaper/hydra_kv.tex:
+
 - Abstract rewritten: opens with the engine ("a larger-than-memory key-value
   store for skewed point-operation workloads"), reports 5.51 Mops/s (5.9x)
   plus the 3.87-5.67 adversarial-variant range in one results sentence,
   keeps the architecture list and the test/fault-injection/audit evidence,
   and ends with a single provenance sentence ("designed, implemented, and
-  tested almost entirely by an AI agent framework~\cite{kisssorcar} through
+  tested almost entirely by an AI agent framework~\\cite{kisssorcar} through
   a sequence of natural-language tasks; the development record is reproduced
   in the paper"). Removed: the adversarial-AI-discovery methodology framing,
   the two-agent-activities description, the first-engine OOM story, and
@@ -383,6 +321,7 @@ to name the engine directly.
 
 Read-through findings (Sections 3-5, plus Limitations/Related Work checked
 for completeness):
+
 - Section 3 (State of the Art): clean. "every heavier policy tried during
   development" and "HydraKV, built without consulting it, converged on the
   same problem statement" have the engine/development as subject.
@@ -394,16 +333,17 @@ for completeness):
   ceiling section references the task-sequence goals via Section 6 only.
 - Limitations/Related Work: no "agent" outside the citation-bearing
   AI-driven-code-discovery paragraph (kept deliberately in a prior session).
-- Grep proof: all "agent"/"Sorcar"/"\HydraFirst"/"intermediate" hits outside
+- Grep proof: all "agent"/"Sorcar"/"\\HydraFirst"/"intermediate" hits outside
   Section 6 are in sanctioned spots (Abstract closing provenance sentence,
   Intro paragraph 2, Related Work) -- except two stragglers in the
   Conclusion.
 
 Fixes (2 edits, both in the Conclusion):
+
 - Opener "A general-purpose AI agent, steered by six natural-language tasks
-  and two independent audits, produced a \EngineLocFinal-line key-value
+  and two independent audits, produced a \\EngineLocFinal-line key-value
   store engine that outperforms... together with evidence (...)" ->
-  "HydraKV is a \EngineLocFinal-line key-value store engine that
+  "HydraKV is a \\EngineLocFinal-line key-value store engine that
   outperforms... and it ships with evidence (...)".
 - Closer "...that recipe transfers to most performance engineering an agent
   might be asked to do" -> "The development process that produced the
@@ -436,67 +376,165 @@ hits; prose em dashes 0 (only comment banners + Table 1 placeholders);
 no curly quotes/Unicode artifacts; no Markdown residue; GPTZero phrases
 (aligns/plays a role/aims to/fast-paced) 0 hits except a factual
 "surpass best-known results" about FunSearch; semicolon density normal;
-\emph{} usage almost entirely term introductions; "X, not Y" contrasts
+\\emph{} usage almost entirely term introductions; "X, not Y" contrasts
 all carry technical content; citations all real.
 
 Fixes (6 edits):
+
 1. Sec 3 caching paragraph: rhetorical question + "Section 4 is the
    answer." punchline -> declarative "The design question for HydraKV,
    addressed in Section 4, is how much...".
-2. Limitations: "The picture is this:" -> "Against that bar:".
-3. Sec 5.2: rhetorical italics \emph{inspired by} -> plain.
-4. Limitations residual risks: \emph{different} -> plain.
-5+6. Sec 4 memory tier: "serves as a fail-soft absorber for failure
+1. Limitations: "The picture is this:" -> "Against that bar:".
+1. Sec 5.2: rhetorical italics \\emph{inspired by} -> plain.
+1. Limitations residual risks: \\emph{different} -> plain.
+   5+6. Sec 4 memory tier: "serves as a fail-soft absorber for failure
    paths" ("serves as" is a WP:AISIGNS words-to-watch) -> "is a
    fail-soft absorber for failure paths".
 
 Build: pdflatex x2 — 0 errors/warnings, 19 pages. pdftotext: removed
 phrases 0 hits, replacements present. Committed tex+pdf+PROGRESS.md.
 
-## Session: README.md sync with latest code (2026-07)
+## SESSION (Hacker News post for the HydraKV paper) — COMPLETE
 
-Task: "update ./README.md based on the latest code in the project".
+Task: write a Hacker News post based on the HydraKV paper, emphasizing
+(1) the new engine and how it compares to the state of the art, and
+(2) KISS Sorcar and what it makes possible, connected to the LinkedIn
+post urn:li:activity:7485166552271495168 ("push AI to its limits...").
+Required tone: modest, attention-grabbing, no AI-generated feel.
 
-Audit performed (every README claim checked against code):
-- Version 2026.7.30 (src/kiss/core/_version.py, badge) — OK.
-- Model catalog (src/kiss/core/models/MODEL_INFO.json): 538 total; per-provider
-  84/14/27/79/8/7/307/3/9 and capability totals 521 gen / 369 fc / 10 emb — table OK.
-- Diff of expandable model lists vs JSON found 6 models missing (added in commit
-  29a4f5a1 which synced only the totals): gemini-3.5-flash-lite, gemini-3.6-flash,
-  kimi-k3, openrouter/google/gemini-3.5-flash-lite, openrouter/google/gemini-3.6-flash,
-  openrouter/meituan/longcat-2.0.
-- CLI flags (cli_helpers.py argparse, allow_abbrev=False), slash commands, mcp
-  subcommands (mcp_cli.py: add/list/get/remove/auth/logout/debug), skills/commands
-  dirs, INJECTIONS.md / SAMPLE_TASKS.md / MY_TASK_TEMPLATES.md behavior, 23
-  third-party messaging agents + govee.py, env var names (config.py), assets,
-  entry points (pyproject [project.scripts]) — all OK, no edits needed.
-- Core Agents LoC "~2850": recomputed significant LoC of the 5 core agent classes;
-  2767 (excluding all docstrings) to 3312 (paper metric); kept the published figure.
+Steps done:
 
-Fix: inserted the 6 missing models into README.md lists in sorted order.
-Verified: 538/538 exact match between README lists and MODEL_INFO.json; all
-9 section header counts equal their bullet counts.
+1. Identified "the paper" as papers/kvstorepaper/hydra_kv.tex (HydraKV,
+   the only paper about a new *engine* vs. state of the art: 5.51 vs
+   FASTER's 0.93 Mops/s = 5.9x on skewed larger-than-memory YCSB-A).
+1. Read the paper's abstract, intro, design, ceiling argument, Section 6
+   (six verbatim prompts, two steering messages, cross-model review,
+   two audits, \<$200 spend), and limitations.
+1. Fetched the LinkedIn post text via browser: "if we keep doing tasks
+   AI can handle, we may struggle to stay relevant unless we adapt...
+   it's only by pushing it to its limits that I've started to notice
+   the problems it genuinely cannot solve." Used as the post's opening
+   hook and linked explicitly.
+1. Web research, 10 sites logged in ./tmp/information-hnpost.md:
+   HN guidelines, Show HN rules, dang's Show HN tips (hand-written text
+   only, no LLM-edited text, factual language, backstory), kiss_ai repo,
+   microsoft/FASTER repo + research-papers page, HN Algolia searches
+   (KV-store posts score well; AI-built posts need honesty + artifacts),
+   kv_adversarial artifact dir (verified all public claims), arXiv
+   2604.23822.
+1. Wrote papers/kvstorepaper/social/hackernews.md: recommended title
+   "Show HN: HydraKV – an AI-built KV store, 5.9x FASTER on skewed
+   YCSB-A" (the 5.9x FASTER pun is factual), alternative title, ~9
+   paragraph body (LinkedIn hook -> fully specified problem -> 5.9x and
+   the 89%-of-roofline scoping -> six-prompts/two-nudges story with the
+   "Did you start with the most performant variant?" quote ->
+   adversarial loop + cross-model review + "not reward-hacked, not
+   copied" audit verdict -> what the engine is -> honest limits -> what
+   KISS Sorcar is (2,850 LoC core, Terminal Bench 62.2% vs 58/61.7,
+   built itself) -> links -> "Happy to answer questions, including the
+   uncomfortable ones."), plus submission notes.
+   Style: first person, no em dashes in prose, no marker vocabulary,
+   scope limits quoted from the paper (per the AI-slop review rules
+   from the previous two sessions).
+1. Every number cross-checked against hydra_kv.tex result constants and
+   the kv_adversarial README.
 
-## Session: LinkedIn post for HydraKV (2026-07)
+## SESSION: "task stuck in thinking" root cause + fix (2026-07-21)
 
-Task: add another post to papers/kvstorepaper/social/hackernews.md suitable
-for LinkedIn.
+Task: analyze why the previous task ("update ./README.md…",
+task f554c68446fa42af89c2fd3c7cc14f63) got stuck in thinking; reproduce
+with an integration test; fix. claude-fable-5 for dev, gpt-5.6-sol for a
+read-only review (\<=20% budget).
 
-Done (single session):
-1. Appended a "# LinkedIn post — HydraKV / KISS Sorcar" section after the HN
-   submission notes, containing:
-   - a preamble stating sourcing (every number identical to the Show HN text
-     / paper) and LinkedIn constraints (plain text, <3,000 chars, ~200-char
-     hook above the "...more" fold);
-   - the post body: hook ("An AI agent just wrote a key-value store that runs
-     5.9x faster than Microsoft's FASTER..."), callback to the earlier
-     "push AI to its limits" LinkedIn post, workload spec, 0.93 vs 5.51
-     Mops/s, ~89% roofline, six prompts + two steering messages, <$200,
-     numbered trust points (adversarial self-testing, cross-vendor review,
-     independent audit "not reward-hacked, not copied"), honest limits
-     (2.78 Mops/s read-only, missed 10/7 Mops/s stretch goals), links
-     (paper, artifact, framework) and 5 hashtags;
-   - LinkedIn posting notes (no markdown rendering, hook placement, optional
-     image, links-in-first-comment option, no repost begging).
-2. Verified by script: body is 2,565 characters as pasted (limit 3,000);
-   hook is 176 characters (fold ~200). Counts recorded in the preamble.
+Diagnosis (from ~/.kiss/sorcar.db events + ~/.kiss/kiss-web-stderr.log):
+
+- The task's step 1 (Read ./SORCAR.md) completed normally. Step 2's
+  provider request started at 10:08:16,710 ("Step 2/100 start") and then
+  produced NOTHING — no stream event, no thinking delta, no log line, no
+  error — for ~5.5 minutes until the user stopped the task. Two
+  concurrent tasks in the same process kept streaming normally, so it
+  was a per-request hang, not a process-wide stall.
+- Root cause: `AnthropicModel.initialize` built `Anthropic(api_key=…)`
+  with SDK defaults (`httpx.Timeout(connect=5, read=600)` + 2 silent
+  retries) and `_create_message` iterated the stream with no stall
+  detection. A request the API accepts but never answers (or a stream
+  that dies mid-turn) blocks the step loop for 10–30 minutes with zero
+  output; KISSAgent's retry/fallback machinery reacts only to raised
+  exceptions, so it never fired. Same bug class as the earlier
+  CodexModel hang (test_codex_stream_timeout.py).
+
+Fix (src/kiss/core/models/anthropic_model.py):
+
+- New `DEFAULT_STREAM_STALL_TIMEOUT = 180.0` (and `_CONNECT_TIMEOUT = 10.0`); `__init__` reads `model_config["stream_stall_timeout"]`;
+  `initialize()` now builds the client with
+  `timeout=httpx.Timeout(stall, connect=10)` — the no-bytes-flowing
+  bound. Healthy long turns are unaffected (deltas + periodic SSE
+  `ping`s keep bytes flowing).
+- `_build_create_kwargs` pops the new config key (not an API param).
+- `_create_message` wraps the stream in `try/except httpx.TimeoutException` and re-raises a clear, retryable
+  `TimeoutError` ("Anthropic stream … stalled: no data received for
+  Ns"), because a mid-stream `httpx.ReadTimeout` is not retried by the
+  SDK and often carries an empty message.
+
+Test (src/kiss/tests/core/models/test_anthropic_stream_stall_timeout.py,
+no mocks): local ThreadingHTTPServer speaks the real Anthropic SSE wire
+format; "stall" requests send 200 + SSE headers then zero bytes (the
+production accepted-but-dead request); routing via the SDK's own
+`ANTHROPIC_BASE_URL` env var so the fixed `initialize()` path runs
+verbatim. 5 tests: tools-turn and plain-generate abort fast with an
+actionable message; conversation left unchanged for the retry; KISSAgent
+recovers when the stream stalls once (finishes "recovered", exactly 2
+requests); KISSAgent raises a visible KISSError ("consecutive errors …
+stalled") when the API stays dead. Also verified the PRE-fix client
+(SDK defaults) hangs >8s against the same server.
+
+Drive-by fix: src/kiss/core/models/MODEL_INFO.json — "gemini-3.5-flash-
+lite" and "gemini-3.6-flash" (added by an earlier catalog update) were
+wrongly flagged `"emb": true`, breaking
+test_model_implementations.py::TestModelInfo (embedding models must
+have 0 output price). Set both to `"emb": false`.
+
+Verification: new suite 5/5; all 46 anthropic-touching test files pass
+(the one remaining failure was the pre-existing MODEL_INFO one, now
+fixed); `uv run check --full` green (ruff, mypy, pyright, compileall,
+docs; mdformat after this file was formatted).
+
+Cross-model review round (gpt-5.6-sol, read-only KISSAgent with
+read_file/search/list_dir tools, $3.60 of the $40 cap, 38 steps —
+verdict REQUEST_CHANGES). All findings addressed:
+
+1. MAJOR: pre-header timeouts surface as `anthropic.APITimeoutError`
+   (not `httpx.TimeoutException`) and the SDK's 2 silent retries kept
+   the worst case at 3 x stall -> now catch `APITimeoutError` too and
+   construct the client with `max_retries=_MAX_RETRIES` (=1); new
+   `no_headers` test asserts the clear error and exactly 2 attempts.
+1. MAJOR: a wedged request sending only SSE `ping` keep-alives resets
+   the byte-level read timeout while the SDK filters pings before
+   yielding (verified in anthropic/\_streaming.py) — the agent would
+   still hang forever -> new `_StreamStallWatchdog` daemon thread
+   closes the response when no *event* is yielded within the stall
+   window; `_create_message` attributes the resulting transport error
+   to the stall; new `ping_only` test.
+1. MAJOR: `stream_stall_timeout` leaked into OpenAI request kwargs on
+   Sorcar `set_model` hand-off (both OpenAI adapters copy model_config
+   into request kwargs) -> popped in
+   `openai_compatible_model.py`'s chat-completions kwargs builder and
+   `openai_compatible_model2.py`'s responses kwargs builder;
+   gemini_model.py reads only specific keys, no leak.
+1. MAJOR: a stall after a thinking block started never emitted
+   `thinking_callback(False)`, leaving the printer/UI in "thinking"
+   mode across the retry -> `_stall_error()` closes the open bracket;
+   new `think_then_ping` test asserts `thinking_events == [True, False]`.
+1. MINOR: the tests did not bound the hang on pre-fix code -> every
+   potentially-hanging call now runs via `_run_bounded()` (daemon
+   thread + hard deadline) so a regression FAILS fast instead of
+   blocking CI.
+1. NOTEs acknowledged: persistent stalls exhaust retries without
+   trying the registered fallback (existing design for retryable
+   errors, unchanged); equivalent stall gaps exist in
+   gemini_model.py / openai_compatible_model\*.py (out of scope,
+   noted here for future work).
+
+Final verification: 8/8 stall tests; 969 passed across
+src/kiss/tests/core/models + test_fable5_fallback.py +
+test_kiss_agent.py; `uv run check --full` all green.
