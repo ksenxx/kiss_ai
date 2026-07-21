@@ -1463,56 +1463,90 @@ static void test_readfault() {
 
 // ── T19: bounded oversize map with honest rejection ──────────────────────────
 static void test_oversizebound() {
-    IKVStore* st = open_store("osbound", 64ull << 20, true);  // cap = budget/8
+    // Oversized values are DISK-resident (x-records in the slot log), so a
+    // dataset far past the old RAM cap — and past the whole memory budget —
+    // must be fully accepted with ZERO rejections and ZERO memory-cap use.
+    // (The July-21 workload sweep proved the old capped-in-RAM design
+    // silently dropped every oversized upsert past ~budget/8: 100% stale
+    // reads at KVSTORE_VALUE_SIZE=1024, millions of false NotFounds on the
+    // bimodal mix. This test pins the new contract.)
+    const size_t budget = 64ull << 20;
+    const uint64_t N = 30000;                    // 30K x 4 KB = 117 MB > budget
+    IKVStore* st = open_store("osbound", budget, true);
     st->StartSession();
     GenValue v, out;
     HydraProdStats ps{};
-    uint64_t i = 0, accepted = 0;
-    for (;;) {
-        CHECK(i < 100000, "no oversize rejection after 100k x 4KB upserts");
-        if (i >= 100000) break;
+    for (uint64_t i = 0; i < N; ++i) {
         make_value(i, 1, 4096, v);
         st->Upsert(i, v);
-        CHECK(hydra_get_prod_stats(st, &ps), "prod stats unavailable");
-        if (ps.rejected_oversize > 0) break;
-        accepted = ++i;
     }
-    CHECK(accepted > 0, "first oversized upsert rejected (cap broken)");
-    CHECK(ps.oversize_bytes <= (64ull << 20) / 8 + 8192,
-          "oversize_bytes above cap: %" PRIu64, ps.oversize_bytes);
-    // every ACCEPTED value is intact; the REJECTED key reads NotFound (never
-    // truncated / partially stored)
-    uint64_t bad = 0;
-    for (uint64_t k = 0; k < accepted; ++k)
-        if (!st->Read(k, out) || check_value(k, out, 4096) != 1) bad++;
-    CHECK(bad == 0, "oversizebound: %" PRIu64 " accepted values damaged", bad);
-    CHECK(!st->Read(accepted, out), "rejected key partially stored");
-    // same-size overwrite of an EXISTING oversized key needs no new budget
-    make_value(0, 2, 4096, v);
-    st->Upsert(0, v);
-    CHECK(st->Read(0, out) && check_value(0, out, 4096) == 2,
-          "oversizebound: same-size overwrite rejected/lost");
-    // a fresh oversized key is still rejected, and surfaces in the counter
-    uint64_t rej0 = ps.rejected_oversize;
-    make_value(4000000, 1, 4096, v);
-    st->Upsert(4000000, v);
     CHECK(hydra_get_prod_stats(st, &ps), "prod stats unavailable");
-    CHECK(ps.rejected_oversize > rej0, "rejection not counted");
-    CHECK(!st->Read(4000000, out), "rejected key visible");
-    // shrinking key 1 to inline frees budget -> a new oversized key fits
-    make_value(1, 3, 100, v);
-    st->Upsert(1, v);
-    CHECK(st->Read(1, out) && check_value(1, out, 100) == 3, "shrink lost");
-    make_value(4000001, 1, 2048, v);
-    st->Upsert(4000001, v);
-    CHECK(st->Read(4000001, out) && check_value(4000001, out, 2048) == 1,
-          "freed budget not reusable after shrink-to-inline");
-    // Delete frees budget too
-    CHECK(st->Delete(2), "oversizebound delete");
-    make_value(4000002, 1, 2048, v);
-    st->Upsert(4000002, v);
-    CHECK(st->Read(4000002, out) && check_value(4000002, out, 2048) == 1,
-          "freed budget not reusable after delete");
+    CHECK(ps.rejected_oversize == 0,
+          "healthy-disk oversized upserts rejected: %" PRIu64,
+          ps.rejected_oversize);
+    CHECK(ps.oversize_bytes <= budget / 8 + 8192,
+          "x-records charged against the RAM cap: %" PRIu64, ps.oversize_bytes);
+    uint64_t bad = 0;
+    for (uint64_t k = 0; k < N; ++k)
+        if (!st->Read(k, out) || check_value(k, out, 4096) != 1) bad++;
+    CHECK(bad == 0, "oversizebound: %" PRIu64 "/%" PRIu64 " values damaged",
+          bad, N);
+    // Cross-thread visibility of oversized OVERWRITES (the exact audit
+    // failure: writer-then-reader in different sessions must see the new
+    // counter, never the stale one), including via the async path.
+    for (uint64_t k = 0; k < 512; ++k) {
+        make_value(k, 2, 1024, v);
+        st->Upsert(k, v);
+    }
+    std::thread other([&] {
+        st->StartSession();
+        GenValue o;
+        for (uint64_t k = 0; k < 512; ++k) {
+            CHECK(st->Read(k, o) && check_value(k, o, 1024) == 2,
+                  "cross-session oversized overwrite invisible k=%" PRIu64, k);
+            CHECK(read_async1(st, k, o) && check_value(k, o, 1024) == 2,
+                  "cross-session async oversized stale k=%" PRIu64, k);
+        }
+        st->StopSession();
+    });
+    other.join();
+    // Delete an oversized key: gone now...
+    CHECK(st->Delete(7), "oversized delete");
+    CHECK(!st->Read(7, out), "deleted oversized key readable");
+    // RMW on an oversized key produces an oversized result via the slow path
+    uint8_t mod[2048];
+    make_value(11, 0, 2048, v);
+    memcpy(mod, v.data, 2048);
+    st->RMW(11, mod, 2048);
+    CHECK(st->Read(11, out) && out.size == 2048, "oversized RMW lost");
+    // ...and across a clean restart (x-records + x-tombstones must recover:
+    // length-aware scan, newest-LSN-wins, delete registry re-mark).
+    st->Checkpoint();
+    st->StopSession();
+    delete st;
+    st = open_store("osbound", budget, false);
+    st->StartSession();
+    CHECK(hydra_get_prod_stats(st, &ps), "prod stats unavailable");
+    CHECK(ps.recover_ok == 1, "oversized recovery degraded");
+    bad = 0;
+    for (uint64_t k = 0; k < N; ++k) {
+        if (k == 7 || k == 11) continue;
+        uint32_t sz = k < 512 ? 1024 : 4096;
+        uint64_t want = k < 512 ? 2 : 1;
+        if (!st->Read(k, out) || check_value(k, out, sz) != want) bad++;
+    }
+    CHECK(bad == 0, "oversizebound: %" PRIu64 " values lost across restart",
+          bad);
+    CHECK(!st->Read(7, out), "deleted oversized key resurrected by recovery");
+    CHECK(st->Read(11, out) && out.size == 2048, "RMW value lost by recovery");
+    // Inline<->oversized flapping after recovery keeps LWW.
+    for (uint64_t k = 0; k < 256; ++k) {
+        make_value(k, 3, 100, v);  st->Upsert(k, v);
+        make_value(k, 4, 4096, v); st->Upsert(k, v);
+        make_value(k, 5, 60, v);   st->Upsert(k, v);
+        CHECK(st->Read(k, out) && check_value(k, out, 60) == 5,
+              "flap after recovery k=%" PRIu64, k);
+    }
     st->StopSession();
     drop_store(st, "osbound");
     fprintf(stderr, "PASS oversizebound\n");
@@ -1649,8 +1683,11 @@ static void test_compactcold() {
         }
         st->Checkpoint();   // land every version: dead versions pile up
     }
-    // Move keys 0..31 to the overflow map (their landed slots become dead;
-    // the compactor must consult overflow_contains to see they moved).
+    // Move keys 0..31 to oversized x-records (their landed inline slots
+    // become dead versions superseded by the x-records' higher LSNs; the
+    // compactor sees them lose the verified_lookup race). Disk-resident
+    // x-records write NO overflow sidecar — that is the fixed contract
+    // (the old capped-RAM overflow map silently dropped oversized data).
     for (uint64_t k = 0; k < 32; ++k) {
         make_value(k, ROUNDS + 1, 2048, v);
         st->Upsert(k, v);
@@ -1658,7 +1695,8 @@ static void test_compactcold() {
     st->Checkpoint();
     std::string side = g_parent + "/compactcold/hydra_overflow.dat";
     struct stat sb;
-    CHECK(stat(side.c_str(), &sb) == 0, "overflow sidecar not written");
+    CHECK(stat(side.c_str(), &sb) != 0,
+          "x-resident oversized values must not create an overflow sidecar");
     // Tombstone a slice (compactor must skip deleted keys' old slots and
     // relocate their tombstones instead of dropping them).
     HydraProdStats ps{};
@@ -1741,6 +1779,170 @@ static void test_compactcold() {
     fprintf(stderr, "PASS compactcold\n");
 }
 
+// ── bimodal: mixed inline/x-record sizes under concurrent write+read ────────
+// Regression for the reference-node bimodal integrity failure: 20 B (inline)
+// and 200 B (x-record) values by key class, tiny budget => heavy spill, so
+// readers constantly walk disk chains INCLUDING the log's unaligned tail
+// page while x-appends keep moving i_size. Before the x-extent read routing
+// fix, O_DIRECT preads of that tail page failed with EINVAL on ext4 (i_size
+// not block-aligned) and every fault surfaced as a false NotFound (~2K per
+// 30 s scored-node run) or a stale read. Keys always exist here: NotFound is
+// a hard failure; counters must be fresh (>= published). Also verifies the
+// full state across a restart.
+static void test_bimodal() {
+    const uint64_t N = std::max<uint64_t>(300000 / g_scale, 1000);
+    const int W = 4, R = 4;
+    const uint64_t rounds = 4;
+    // Force the compactor to run concurrently with x-extent reservations
+    // (regression stress for the reservation-vs-compactor atomicity: a
+    // punched just-reserved extent shows up here as corrupt/NotFound).
+    setenv("HYDRA_COMPACT_FLOOR_MB", "8", 1);
+    setenv("HYDRA_COMPACT_FACTOR", "1.1", 1);
+    IKVStore* st = make_store("bimodal", 48ull << 20);   // tiny: heavy spill
+    unsetenv("HYDRA_COMPACT_FLOOR_MB");
+    unsetenv("HYDRA_COMPACT_FACTOR");
+    st->StartSession();
+    auto vsz = [](uint64_t k) -> uint32_t { return k % 10 == 0 ? 200 : 20; };
+    {
+        GenValue v;
+        for (uint64_t i = 0; i < N; ++i) {
+            make_value(i, 1, vsz(i), v);
+            st->Upsert(i, v);
+        }
+        st->StopSession();
+    }
+    // pub[i] = highest counter whose Upsert has RETURNED for key i.
+    std::vector<std::atomic<uint32_t>> pub(N);
+    for (uint64_t i = 0; i < N; ++i) pub[i].store(1, std::memory_order_relaxed);
+    std::atomic<uint64_t> nf{0}, stale{0}, bad{0};
+    // Path-coverage census: the concurrent phase must exercise sync AND
+    // async reads over inline AND x-record keys (vacuous-pass guard).
+    std::atomic<uint64_t> rd_sync{0}, rd_async{0}, rd_x{0}, rd_in{0};
+    std::atomic<bool> wdone{false};
+    std::vector<std::thread> ths;
+    for (int w = 0; w < W; ++w) {
+        ths.emplace_back([&, w] {
+            st->StartSession();
+            GenValue v;
+            for (uint64_t r = 2; r <= rounds; ++r)
+                for (uint64_t i = (uint64_t)w; i < N; i += W) {
+                    make_value(i, r, vsz(i), v);
+                    st->Upsert(i, v);
+                    pub[i].store((uint32_t)r, std::memory_order_release);
+                }
+            st->StopSession();
+        });
+    }
+    for (int t = 0; t < R; ++t) {
+        ths.emplace_back([&, t] {
+            st->StartSession();
+            GenValue out;
+            uint64_t x = 0x9E3779B97F4A7C15ULL * (uint64_t)(t + 1);
+            uint64_t myreads = 0;
+            // Keep reading past writer completion until a minimum op count:
+            // the checks must never pass vacuously on a scheduler that runs
+            // the writers to completion before any reader starts.
+            while (!wdone.load(std::memory_order_acquire) || myreads < 2000) {
+                ++myreads;
+                x = mix64(x + t + 1);
+                uint64_t i = x % N;
+                uint32_t c0 = pub[i].load(std::memory_order_acquire);
+                bool sync = (x >> 32) & 1;
+                bool ok = sync ? st->Read(i, out) : read_async1(st, i, out);
+                if (!ok) { nf.fetch_add(1); continue; }
+                (sync ? rd_sync : rd_async).fetch_add(1);
+                (i % 10 == 0 ? rd_x : rd_in).fetch_add(1);
+                uint64_t c = check_value(i, out, vsz(i));
+                if (c == UINT64_MAX) bad.fetch_add(1);
+                else if (c < c0) stale.fetch_add(1);
+                else if (c > rounds) bad.fetch_add(1);
+            }
+            st->StopSession();
+        });
+    }
+    for (int w = 0; w < W; ++w) ths[(size_t)w].join();
+    wdone.store(true, std::memory_order_release);
+    for (size_t t = W; t < ths.size(); ++t) ths[t].join();
+    CHECK(nf.load() == 0, "bimodal: %" PRIu64 " false NotFounds", nf.load());
+    CHECK(stale.load() == 0, "bimodal: %" PRIu64 " stale reads", stale.load());
+    CHECK(bad.load() == 0, "bimodal: %" PRIu64 " corrupt reads", bad.load());
+    CHECK(rd_sync.load() > 0 && rd_async.load() > 0 && rd_x.load() > 0 &&
+          rd_in.load() > 0,
+          "bimodal: vacuous run sync=%" PRIu64 " async=%" PRIu64 " x=%" PRIu64
+          " inline=%" PRIu64, rd_sync.load(), rd_async.load(), rd_x.load(),
+          rd_in.load());
+    // Full sequential verify, then across a restart.
+    st->StartSession();
+    GenValue out;
+    uint64_t miss = 0;
+    for (uint64_t i = 0; i < N; ++i)
+        if (!st->Read(i, out) || check_value(i, out, vsz(i)) != rounds) miss++;
+    CHECK(miss == 0, "bimodal: %" PRIu64 " wrong before restart", miss);
+    st->StopSession();
+    delete st;
+    IKVStore* st2 = open_store("bimodal", 48ull << 20, false);
+    st2->StartSession();
+    for (uint64_t i = 0; i < N; ++i) {
+        bool ok = st2->Read(i, out);
+        uint64_t c = ok ? check_value(i, out, vsz(i)) : 0;
+        if (!ok || c != rounds) {
+            if (miss < 5)
+                fprintf(stderr, "bimodal DBG k=%" PRIu64 " sz=%u ok=%d ctr=%"
+                        PRIu64 " outsz=%u\n", i, vsz(i), (int)ok, c,
+                        ok ? out.size : 0);
+            miss++;
+        }
+    }
+    CHECK(miss == 0, "bimodal: %" PRIu64 " wrong after restart", miss);
+    st2->StopSession();
+    drop_store(st2, "bimodal");
+    fprintf(stderr, "PASS bimodal\n");
+}
+
+// ── capwarn: init-time RAM-index capacity warning ────────────────────────────
+// A hash_table_size hint that cannot fit the budget-sized fingerprint index
+// must produce a LOUD init-time warning (a capacity-planning mistake would
+// otherwise surface only as under-load rejections); a fitting hint must
+// stay silent. Captures the store's real stderr via dup2 — no mocks.
+static void test_capwarn() {
+    std::string dir = g_parent + "/capwarn";
+    std::string cmd = "rm -rf " + dir + " && mkdir -p " + dir;
+    CHECK(system(cmd.c_str()) == 0, "capwarn mkdir failed");
+    std::string log = g_parent + "/capwarn_err.txt";
+    for (int big = 1; big >= 0; --big) {
+        fflush(stderr);
+        int saved = dup(2);
+        CHECK(saved >= 0, "capwarn dup failed");
+        FILE* lf = fopen(log.c_str(), "w");
+        CHECK(lf != nullptr, "capwarn log open failed");
+        dup2(fileno(lf), 2);
+        IKVStore* st = create_kvstore();
+        // 16 MiB budget => index capacity ~508K keys (2^19 words at ~97%
+        // fill): a 4M-key hint must warn, a 1K-key hint must not.
+        st->InitExtended(big ? (1ull << 22) : (1ull << 10), 16ull << 30,
+                         16ull << 20, dir.c_str());
+        delete st;
+        fflush(stderr);
+        dup2(saved, 2);
+        close(saved);
+        fclose(lf);
+        std::string all;
+        FILE* rf = fopen(log.c_str(), "r");
+        CHECK(rf != nullptr, "capwarn log reopen failed");
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof buf, rf)) > 0) all.append(buf, n);
+        fclose(rf);
+        bool warned =
+            all.find("WARNING: hash_table_size") != std::string::npos;
+        CHECK(warned == (big == 1), "capwarn: warning %s (big=%d)",
+              warned ? "unexpected" : "missing", big);
+    }
+    cmd = "rm -rf " + dir + " " + log;
+    (void)system(cmd.c_str());
+    fprintf(stderr, "PASS capwarn\n");
+}
+
 int main(int argc, char** argv) {
     g_argv0 = argv[0];
     if (argc >= 3 && strcmp(argv[1], "--crashchild") == 0)
@@ -1767,7 +1969,8 @@ int main(int argc, char** argv) {
         {"recover", test_recover}, {"crashrecover", test_crashrecover},
         {"enospc", test_enospc},   {"readfault", test_readfault},
         {"oversizebound", test_oversizebound}, {"compact", test_compact},
-        {"compactcold", test_compactcold},
+        {"compactcold", test_compactcold}, {"bimodal", test_bimodal},
+        {"capwarn", test_capwarn},
     };
     for (auto& t : tests)
         if (strstr(t.name, filter) || !*filter) t.fn();
