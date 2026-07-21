@@ -198,3 +198,61 @@ Fixes (43 edits, all in hydra_kv.tex; numbers/tables/citations untouched):
 
 Build: pdflatex x2 — 0 errors, 0 overfull boxes, 0 undefined refs, 21 pages.
 pdftotext verified: old phrases 0 hits, new phrasings present.
+
+## Session: confine engine-improvement chronology to Section 6 (2026-07)
+
+Task: "Can you not describe all the improvement steps of the engine in paper
+except in the section 6? The readers want to know about the engine itself and
+not how it got hardened or correct or performant over time."
+
+Changes to papers/kvstorepaper/hydra_kv.tex:
+- Abstract: removed the task-by-task narrative (hardening task, production-
+  readiness task, second audit re-run, deployment-hardening tasks, per-step
+  scores); replaced with one verification-evidence sentence (test matrix,
+  cross-model review, fault injection, all-workload sweep, two audits with
+  the genuine-and-unhacked verification at 5.51). "designed, implemented,
+  debugged, hardened, and finally made production-ready" -> "designed,
+  implemented, and tested".
+- Intro: six-task enumeration condensed to two sentences (performance problem
+  + adversarial loop; four correctness tasks / two audits); results paragraph
+  now reports only the final engine (5.51) plus the v4c variant matrix;
+  contributions merged 6 -> 4 (hardening/production/deployment protocol items
+  folded into one "verification protocol" contribution); non-contributions
+  paragraph de-chronologized.
+- Section 4: LOC-growth parenthetical removed; 4.1 and 4.2 openers rewritten
+  as descriptions of present subsystems with pointers to the released audit
+  artifacts and Section 6; "Why the scored number survived" -> "Cost on the
+  scored path" (A/B statement instead of revision comparison); 4.2's
+  "Validation across workloads" paragraph deleted (sweep facts moved to 5.1,
+  audit-verification details moved to Section 6 Task 5, A/B control already
+  in Section 6 Task 5).
+- Section 5: Table 1 reduced to FASTER + one bold HydraKV row + v4c variant
+  block (intermediate-revision rows removed; their numbers remain in Section
+  6 prose; caption states the 5.50-5.52 re-score band); 5.1 rewritten around
+  the final engine with a stability statement; 5.2's V1 story retold as a
+  design-space fact with a Section 6 pointer; 5.3's goal-raising narrative
+  and the whole micro-optimization-round paragraph removed (ceiling argument
+  kept, now cites 5.51); 5.4 rewritten: final suite only (1,980 lines / 27
+  tests / 89.3% lines), tests regrouped by subsystem (recovery+fault,
+  compaction, delete/capacity/value-size), tests-first chronology dropped;
+  subsection 5.5 "Negative results" deleted from the evaluation.
+- Section 6 (only place with chronology, unchanged prompts): Task 4 gained
+  the full micro-optimization round and the six-run median/runs; Task 5 intro
+  gained the audit verification details (RSS in budget, true O_DIRECT,
+  verbatim CRC values, "not reward-hacked, not copied"); new paragraph
+  "Accepted and rejected ideas." (label sec:negative preserved) holds the
+  moved negative results plus the accepted-side calibration (first engine
+  1.85, remaining 3x across redesigns, engineering-log caveat); fixed the
+  intra-section self-reference in Task 2.
+- Limitations: opening, prod-grade-bar, residual-risk, and evaluation-scope
+  paragraphs de-chronologized (evaluation scope now cites the 5.50-5.52 band
+  and Section 6 instead of per-task re-scores).
+- Conclusion: "and then, steered by..., gave it..." -> "carries ...";
+  "7 Mops/s again at production time" -> "a second time".
+- Removed now-unused macros \HydraFinal, \EngineLoc, \EngineLocProd,
+  \CovBranchesProd.
+
+Build: pdflatex x2 - 0 errors, 0 overfull, 0 undefined refs; 20 pages (was
+21). pdftotext: removed narrative phrases 0 hits; the only "hardening task"
+mention left is inside Section 6's ideas paragraph. Visual check of page 9
+(Table 1 + 4.2 paragraphs) OK.
