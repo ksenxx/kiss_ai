@@ -936,6 +936,10 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         kwargs = self.model_config.copy()
         kwargs.pop("system_instruction", None)
         kwargs.pop("use_responses_api", None)
+        # Anthropic-only client knob; arrives here when a live conversation
+        # (and its config) is handed over from an AnthropicModel via the
+        # Sorcar ``set_model`` tool.  Not a Chat Completions parameter.
+        kwargs.pop("stream_stall_timeout", None)
         kwargs.update({"model": self._api_model_name, "messages": messages})
         self._apply_cache_control_for_openrouter_anthropic(kwargs)
         return kwargs
