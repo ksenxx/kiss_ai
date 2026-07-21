@@ -116,3 +116,45 @@ Build: pdflatex x2 (at /Library/TeX/texbin, not on default PATH) — 0 errors,
 0 overfull, no undefined refs; PDF now 21 pages (was 22). Verified via
 pdftotext: 0 hits for "resurrection race"/"eight bugs"; only bug-word hits
 remaining are inside the verbatim task prompts.
+
+## Session 3 — consistency read-through after bug-narrative removal — COMPLETE
+
+Task: full read-through of the revised hydra_kv.tex to confirm present-tense
+mechanism descriptions still logically justify each design choice without the
+removed bug narratives; fix dangling references / broken causal transitions.
+
+Method: read the whole paper end to end; grepped for dangling causal phrases
+("described above", "the fix", "discovered", "uncharged", etc.); verified
+every suspect claim against ground truth (hydra.cc, kvstore_interface.h,
+AUDIT2_FIXES.md, PROD_READINESS.md, WORKLOAD_HARDENING.md).
+
+Findings and fixes (4 edits in hydra_kv.tex):
+1. Sec 4 position index: "index repair" was a dangling mechanism name (no
+   such path in hydra.cc). The three newest-LSN-wins paths are miss_read,
+   the io_uring completion state machine, and recover_log's index rebuild.
+   -> "All paths that resolve a key to a slot (the synchronous miss path,
+   the io_uring completion path, and recovery's index rebuild)".
+2. Sec 4.1 crash recovery: "Oversized values persist through a sidecar file"
+   contradicted Sec 4.2 (x-records "need no sidecar"). In the final engine
+   the sidecar persists overflow-MAP contents. -> "Overflow-map contents
+   (Section 4) persist through a sidecar file ... a key with both sidecar-
+   and log-resident versions recovers to the true last write."
+3. Limitations: removed "The inline index-capacity overflow path remains
+   uncharged by design..." — stale pre-AUDIT2 residual (PROD_READINESS era);
+   AUDIT2_FIXES Bug 2 + hydra.cc overflow_put/overflow_absorb show every
+   absorb path (disk-full, pinned victim, index/position exhaustion) is now
+   charged and budget-capped with honest counted rejection.
+4. Sec 4 memory tier: "an honest error status" was inaccurate (harness
+   Upsert returns void; rejection is surfaced via rejected_mem/
+   rejected_oversize prod stats) -> "surfaced through rejection counters".
+   Plus clarity: Sec 4.1 "the overflow keys are dropped" -> "the excess keys
+   are dropped ... (and recover_ok reports the failure, Section 4.2)" to
+   avoid collision with the overflow map and tie to the recover_ok contract.
+
+All other transitions checked and found self-contained (tombstone-relocation
+rationale, pin-ownership landing-time re-check, pre-punch epoch retry,
+x-record buffered-descriptor routing, A/B controls, Section 6 process
+narratives intentionally retained).
+
+Build: pdflatex x2 (/Library/TeX/texbin) — 0 errors, 0 overfull, 0 undefined
+refs, 21 pages. pdftotext confirms all edits present and stale phrases gone.
