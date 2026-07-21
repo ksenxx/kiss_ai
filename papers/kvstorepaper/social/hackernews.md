@@ -101,3 +101,87 @@ ______________________________________________________________________
   thread to answer questions.
 - Do not ask anyone to upvote or comment; do not reply to your own thread
   with booster comments.
+
+______________________________________________________________________
+
+# LinkedIn post — HydraKV / KISS Sorcar
+
+The same story, rewritten for LinkedIn. Every number is taken from the
+HydraKV paper or the artifact README, identical to the Show HN text above.
+LinkedIn constraints respected: plain text (LinkedIn renders no markdown),
+under the 3,000-character post limit (the body below is 2,565 characters,
+verified by script; the opening hook is 176 characters), short paragraphs,
+and a hook in the first two lines because LinkedIn truncates the post at
+roughly 200 characters behind a "...more" fold. It reads as a follow-up to
+the earlier "stay relevant by pushing AI to its limits" post
+(https://www.linkedin.com/feed/update/urn:li:activity:7485166552271495168/),
+so it opens by calling back to it rather than linking it.
+
+______________________________________________________________________
+
+## Post text
+
+An AI agent just wrote a key-value store that runs 5.9x faster than
+Microsoft's FASTER — on the exact workload FASTER was built for. I didn't
+write a single line of the engine.
+
+A while back I posted here that the way I try to stay relevant in the age of
+AI is to push it to its limits, because that's the only way to see what it
+genuinely cannot do. This is what that pushing produced.
+
+The problem was narrow and fully specified: YCSB-A (50% reads, 50% blind
+upserts, Zipfian theta=0.95) over 250M keys, about 25 GB of data under a hard
+8 GiB memory budget, on a 64-vCPU box with eight local NVMe SSDs in RAID0.
+FASTER sustains 0.93 Mops/s with the same harness. HydraKV — about 3,970
+lines of dependency-free C++17 — sustains 5.51 Mops/s. A roofline analysis in
+the paper puts that at about 89% of what the measured hardware allows.
+
+The engine was written end to end by KISS Sorcar, the open-source agent
+framework I've been building. My entire contribution: six task prompts and
+two short steering messages. API spend for the first three tasks: under $200.
+
+What made me trust the result more than the number itself:
+
+1. Adversarial self-testing. An agent optimizing a fixed benchmark will
+overfit it, so the prompts forced the agent to generate workload variants
+designed to break its own engine, repair it until it passed all of them, and
+finish on a held-out variant generated after all engine work stopped.
+
+2. Cross-vendor review. One model wrote the code; a second model from a
+different vendor did strictly read-only reviews and kept flagging concurrency
+hazards the first had rationalized away.
+
+3. Independent audit. A separate audit re-ran the engine on the reference
+hardware and called the result genuine — "not reward-hacked, not copied."
+
+The honest limits, straight from the paper: one machine, one harness,
+30-second cold-cache windows; read-only runs are much slower (2.78 Mops/s);
+two stretch goals (10, then 7 Mops/s) were never met, and the paper shows the
+arithmetic for why. None of HydraKV's mechanisms is individually new — the
+claim is only about the composition.
+
+Everything is public: the engine, 28 end-to-end tests, the audits, the raw
+benchmark logs, and the paper with all six prompts reproduced verbatim, typos
+included.
+
+Paper: https://github.com/ksenxx/kiss_ai/blob/main/papers/kvstorepaper/hydra_kv.pdf
+Artifact: https://github.com/ksenxx/kiss_ai/tree/main/projects/kv_adversarial
+Framework (Apache-2.0, ~2,850 lines of core agent code): https://kisssorcar.github.io/
+
+#AI #AIAgents #SystemsProgramming #Databases #OpenSource
+
+______________________________________________________________________
+
+## Posting notes (LinkedIn)
+
+- Paste as plain text; LinkedIn does not render markdown, so the post uses
+  numbered lines instead of bullets and no bold/italics.
+- The first two lines are the hook shown above the "...more" fold; do not
+  prepend anything to them.
+- Attach a visual if desired (e.g., the throughput figure from the paper);
+  posts with an image or document generally travel further, but the text
+  stands alone.
+- Links in the body can suppress reach; if that matters, move the three
+  links to the first comment and say "links in the first comment" at the
+  end of the post instead.
+- Reply to comments from the personal account; do not ask for reposts.

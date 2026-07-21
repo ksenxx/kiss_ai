@@ -476,3 +476,27 @@ Audit performed (every README claim checked against code):
 Fix: inserted the 6 missing models into README.md lists in sorted order.
 Verified: 538/538 exact match between README lists and MODEL_INFO.json; all
 9 section header counts equal their bullet counts.
+
+## Session: LinkedIn post for HydraKV (2026-07)
+
+Task: add another post to papers/kvstorepaper/social/hackernews.md suitable
+for LinkedIn.
+
+Done (single session):
+1. Appended a "# LinkedIn post — HydraKV / KISS Sorcar" section after the HN
+   submission notes, containing:
+   - a preamble stating sourcing (every number identical to the Show HN text
+     / paper) and LinkedIn constraints (plain text, <3,000 chars, ~200-char
+     hook above the "...more" fold);
+   - the post body: hook ("An AI agent just wrote a key-value store that runs
+     5.9x faster than Microsoft's FASTER..."), callback to the earlier
+     "push AI to its limits" LinkedIn post, workload spec, 0.93 vs 5.51
+     Mops/s, ~89% roofline, six prompts + two steering messages, <$200,
+     numbered trust points (adversarial self-testing, cross-vendor review,
+     independent audit "not reward-hacked, not copied"), honest limits
+     (2.78 Mops/s read-only, missed 10/7 Mops/s stretch goals), links
+     (paper, artifact, framework) and 5 hashtags;
+   - LinkedIn posting notes (no markdown rendering, hook placement, optional
+     image, links-in-first-comment option, no repost begging).
+2. Verified by script: body is 2,565 characters as pasted (limit 3,000);
+   hook is 176 characters (fold ~200). Counts recorded in the preamble.
