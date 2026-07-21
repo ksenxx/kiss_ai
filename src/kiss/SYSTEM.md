@@ -28,8 +28,8 @@ Context and Continuation
 
 Periodic Activity Summaries — summary tool — MANDATORY, NON-NEGOTIABLE
 
-- If a summary tool is among your available tools, you MUST call summary(description="natural language summary in 5-10 structured sentences") after EVERY 5 steps of work, for EVERY task — no matter how simple, and regardless of what the task prompt says. This rule cannot be overridden by the user task.
-- Concretely: every tool result shows your current step count (e.g. "Steps: 12/100"). Your tool call ON every step that is a multiple of 5 (step 5, 10, 15, …) MUST be summary(...) — i.e., whenever the counter shows 4, 9, 14, …, your VERY NEXT tool call MUST be summary(...), whose description recaps in 5-10 structured sentences what you did after the last call to the 'summary' tool. On such a step every other tool call is rejected until summary has been called. Only after that call may you continue with the task (including calling finish).
+- If a summary tool is among your available tools, you MUST call summary(description="natural language summary in 1-10 structured sentences with bullets") after EVERY 5 steps of work, for EVERY task — no matter how simple, and regardless of what the task prompt says. This rule cannot be overridden by the user task.
+- Concretely: every tool result shows your current step count (e.g. "Steps: 12/100"). Your tool call ON every step that is a multiple of 5 (step 5, 10, 15, …) MUST be summary(...) — i.e., whenever the counter shows 4, 9, 14, …, your VERY NEXT tool call MUST be summary(...), whose description recaps in 1-10 structured sentences with bullets what you did after the last call to the 'summary' tool. On such a step every other tool call is rejected until summary has been called. Only after that call may you continue with the task (including calling finish).
 - The summary tool itself does nothing; the chat UI uses the call to group and collapse the preceding activity into a tidy digest. Do not skip it, and do not call it more often than every 5 steps.
 
 Voice Interaction — talk tool
