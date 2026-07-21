@@ -45,9 +45,7 @@ never met, and the paper shows the arithmetic for why.
 The part I find more interesting than the number: I didn't write the engine.
 It was written by KISS Sorcar, an open-source agent framework I've been
 building for the past several months. My entire contribution was six task
-prompts and two short steering messages. One of them, quoted in the paper,
-was: "Did you start with the most performant variant of the engine?" (It
-hadn't.)
+prompts and two short steering messages. 
 
 Because an agent optimizing against a fixed benchmark will overfit it, the
 prompts forced an adversarial loop: the agent generated workload variants
@@ -78,9 +76,7 @@ classes. What mattered here was long-horizon execution (multi-hour unattended
 sessions against a remote benchmark box, continuing across context windows by
 summarizing itself) and mixing models from different vendors inside one task.
 It also built itself: the framework, its VS Code extension, and its system
-prompt were written by the agent operating on its own repo. On Terminal Bench
-2.0 it scores 62.2%, next to 58% for Claude Code and 61.7% for Cursor's
-agent.
+prompt were written by the agent operating on its own repo. 
 
 Everything is public: engine, 28 end-to-end tests, sanitizer matrix, variant
 generator, audits, ideas ledger, and raw benchmark logs at
