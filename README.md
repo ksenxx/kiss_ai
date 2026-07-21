@@ -67,7 +67,7 @@ ______________________________________________________________________
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
 | **Run on top of Claude Code / Codex CLI** | ✅ `cc/*` and `codex/*` namespaces | N/A | ❌ |
 | **Messaging and communication channels** | ✅ 23 third-party agents, including Slack, Gmail, Phone Control, SMS, and WhatsApp | ⚠️ Slack, mobile Remote Control, and research-preview channels for Telegram, Discord, and iMessage; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel | ⚠️ Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel |
-| **Wake work for voice interaction** | Sorcar | N/A | N/A| 
+| **Wake work for voice interaction** | Sorcar | N/A | N/A|
 
 ## What is in the Name
 
