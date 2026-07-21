@@ -1,4 +1,43 @@
-# PROGRESS — Website: add P. C. Sorcar sentence to "What is in the Name?"
+# PROGRESS — Website: sync kisssorcar.github.io with latest code + README
+
+Task: update kisssorcar.github.io thoroughly and precisely using the latest
+code and ./README.md; upload the changes; verify the live website.
+
+## DONE (single session) — COMPLETE
+
+1. Audited every factual claim on the site against the code:
+   - Recomputed from `src/kiss/core/models/MODEL_INFO.json`: 538 total models,
+     OpenRouter 307, cc/* 3, codex/* 9; capabilities 521 gen / 369 fc / 10 emb.
+     Site said 530 / 303 / 514 / 359 / 7 and Gemini 24 (now 27), Moonshot 6
+     (now 7) — all stale from the 2026.7.18 era.
+   - `_version.py` = 2026.7.30; docs/overview.md and llms-full.txt said 2026.7.18.
+   - index.html hero + comparison table said "~2,900"/"~2900" LoC while
+     README/docs say ~2850 — aligned to ~2,850/~2850.
+   - Verified 23 messaging agents (third_party_agents/) and the CLI flag table
+     (docs/cli.md == README table incl. `-V/--version`) are correct.
+2. Edited in `website/kisssorcar.github.io/`: index.html (meta ×2, hero,
+   comparison table ×2, § 09 heading/sub, provider rows, capability pills,
+   JS comment), llms.txt, .well-known/llms.txt, index.html.md, docs/index.md,
+   docs/overview.md, docs/models.md, llms-full.txt. Re-grep: zero stale
+   numbers remain.
+3. Synced with the deployed clone `~/work/kisssorcar.github.io`:
+   - Copied its newer assets back into the repo copy (hydra_kv.pdf, updated
+     swedefend.pdf).
+   - Copied all updated text files to the clone, including docs/api.md,
+     docs/cli.md, llms-full.txt which gain the `-V/--version` docs that the
+     repo copy already had. `diff -rq` shows the two copies identical (.git
+     aside).
+4. Committed 10 files in the clone as 4766605 "Update site to v2026.7.30:
+   538-model catalog (Gemini 27, Moonshot 7, OpenRouter 307; 521 gen / 369 fc
+   / 10 emb), ~2850 core-agent LoC, document -V/--version flag" and pushed to
+   kisssorcar/kisssorcar.github.io main.
+5. Committed the same changes to `website/kisssorcar.github.io/` in the kiss
+   repo, and verified the live site (index page § 09 numbers, hero, docs
+   pages, llms.txt) in the browser after the GitHub Pages deploy.
+
+---
+
+# PROGRESS — Website: add P. C. Sorcar sentence in "What is in the Name?"
 
 Task: add the sentence "the legendary Bengali magician, evoking the idea of an
 agent that performs feats that appear magical yet are grounded in disciplined

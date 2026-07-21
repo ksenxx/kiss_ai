@@ -8,7 +8,7 @@
 - [Installation](installation.md) — Install from source, pipx/uv, API-key configuration, VS Code extension, Docker
 - [CLI Reference](cli.md) — The `sorcar` CLI: modes, options, interactive features, `sorcar mcp`
 - [Python API Reference](api.md) — KISSAgent, RelentlessAgent, SorcarAgent, ChatSorcarAgent, WorktreeSorcarAgent, GitWorktreeOps
-- [Supported Models](models.md) — 530-model catalog across 9 provider categories
+- [Supported Models](models.md) — 538-model catalog across 9 provider categories
 - [Messaging & Third-Party Agents](messaging-agents.md) — 23 messaging agents plus the Govee smart-home CLI
 - [Sample Tasks](sample-tasks.md) — Ready-to-use example prompts
 - [Prompt Tricks](prompt-tricks.md) — Reusable prompt snippets that boost result quality
