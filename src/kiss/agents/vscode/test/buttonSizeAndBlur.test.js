@@ -33,7 +33,7 @@
 //
 // Exercises the real ``media/chat.html`` + ``media/main.css`` +
 // ``media/main.js`` + ``media/tips.js`` in jsdom (same harness as
-// taskPanelCollapseButton.test.js).  Run directly with node:
+// taskPanelExpandFullText.test.js).  Run directly with node:
 //
 //     node src/kiss/agents/vscode/test/buttonSizeAndBlur.test.js
 
