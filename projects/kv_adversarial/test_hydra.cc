@@ -56,6 +56,8 @@ struct HydraProdStats {
     uint64_t reclaimed_bytes;    // bytes reclaimed (punched and/or reusable)
     uint64_t buffered_fallback;  // 1 = O_DIRECT unavailable, buffered fd used
     uint64_t punch_unsupported;  // 1 = FALLOC_FL_PUNCH_HOLE unsupported here
+    uint64_t rejected_mem;       // inline writes refused at the budget cap
+    uint64_t recover_dropped_keys;  // keys dropped by the last recovery
 };
 extern "C" bool hydra_get_prod_stats(IKVStore* st, HydraProdStats* out);
 
@@ -145,6 +147,8 @@ static void drop_store(IKVStore* st, const char* name) {
     std::string cmd = "rm -rf " + g_parent + "/" + name;
     (void)system(cmd.c_str());
 }
+// Reopen an existing store dir (defined below, used by earlier tests too).
+static IKVStore* open_store(const char* name, size_t budget, bool wipe);
 
 // Synchronous read via the async interface (exercises the pipeline path).
 static bool read_async1(IKVStore* st, uint64_t key, GenValue& out) {
@@ -602,6 +606,207 @@ static void test_updel() {
     fprintf(stderr, "PASS updel\n");
 }
 
+// ── T7c: Delete of keys pinned BUFFERED in ANOTHER session's parked chunk ────
+// Audit bug #1 regression: Delete used to wait for BUFFERED pins to land,
+// but could only flush its OWN session's partial chunk — deleting a key
+// staged in an idle foreign session livelocked (froze at a handful of ops).
+// Delete must return promptly, the keys must read NotFound immediately, and
+// the deletions must survive the foreign chunk's later landing AND a restart
+// (the landing reseals deleted first-insert slots as tombstones).
+static void test_updel2() {
+    IKVStore* st = make_store("updel2", 128ull << 20);
+    const uint64_t N = 512;
+    const uint64_t B = 1ull << 57;
+    std::atomic<bool> staged{false}, done{false};
+    std::thread owner([&] {
+        st->StartSession();
+        GenValue vv;
+        for (uint64_t i = 0; i < N; ++i) {
+            uint64_t k = B + i * 0x9E3779B97F4A7C15ULL;
+            make_value(k, 1, 100, vv);
+            st->Upsert(k, vv);   // first inserts stay BUFFERED in this
+        }                        // session's partial chunk (512 << 8192)
+        staged.store(true, std::memory_order_release);
+        while (!done.load(std::memory_order_acquire))   // park IDLE — never
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        st->StopSession();       // NOW the chunk lands (tombstones deleted)
+    });
+    while (!staged.load(std::memory_order_acquire)) std::this_thread::yield();
+    st->StartSession();          // a DIFFERENT session issues the deletes
+    auto t0 = std::chrono::steady_clock::now();
+    for (uint64_t i = 0; i < N; i += 2)
+        st->Delete(B + i * 0x9E3779B97F4A7C15ULL);
+    double secs = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t0).count();
+    CHECK(secs < 10.0,
+          "updel2: %.1fs deleting foreign-buffered keys (livelock)", secs);
+    GenValue out;
+    for (uint64_t i = 0; i < N; ++i) {   // visible state while chunk parked
+        uint64_t k = B + i * 0x9E3779B97F4A7C15ULL;
+        bool found = st->Read(k, out);
+        if (i % 2 == 0) CHECK(!found, "updel2: deleted %" PRIu64 " visible", i);
+        else CHECK(found && check_value(k, out, 100) == 1,
+                   "updel2: survivor %" PRIu64 " lost", i);
+    }
+    done.store(true, std::memory_order_release);
+    owner.join();                // foreign chunk lands here
+    for (uint64_t i = 0; i < N; ++i) {   // state after the landing
+        uint64_t k = B + i * 0x9E3779B97F4A7C15ULL;
+        bool found = st->Read(k, out);
+        if (i % 2 == 0) CHECK(!found, "updel2: deleted %" PRIu64 " landed back", i);
+        else CHECK(found && check_value(k, out, 100) == 1,
+                   "updel2: survivor %" PRIu64 " lost at landing", i);
+    }
+    st->Checkpoint();
+    st->StopSession();
+    delete st;                   // clean shutdown
+    IKVStore* st2 = open_store("updel2", 128ull << 20, false);
+    st2->StartSession();
+    for (uint64_t i = 0; i < N; ++i) {   // deletions durable across restart
+        uint64_t k = B + i * 0x9E3779B97F4A7C15ULL;
+        bool found = st2->Read(k, out);
+        if (i % 2 == 0)
+            CHECK(!found, "updel2: deleted %" PRIu64 " resurrected", i);
+        else
+            CHECK(found && check_value(k, out, 100) == 1,
+                  "updel2: survivor %" PRIu64 " lost across restart", i);
+    }
+    st2->StopSession();
+    drop_store(st2, "updel2");
+    fprintf(stderr, "PASS updel2\n");
+}
+
+// ── T7d: Delete foreground cost ──────────────────────────────────────────────
+// Audit bug #4 regression: Delete used to do a synchronous pread+pwrite per
+// on-disk version (~160x an Upsert). It now defers on-disk poisoning to the
+// background reaper, so a Delete costs about as much as an Upsert.
+static void test_delcost() {
+    IKVStore* st = make_store("delcost", 128ull << 20);
+    st->StartSession();
+    GenValue v;
+    const uint64_t N = 20000 / (uint64_t)g_scale;
+    for (uint64_t i = 0; i < N; ++i) { make_value(i, 1, 100, v); st->Upsert(i, v); }
+    st->Checkpoint();   // land everything: deletes target LANDED slots
+    auto t0 = std::chrono::steady_clock::now();
+    for (uint64_t i = 0; i < N; ++i) { make_value(i, 2, 100, v); st->Upsert(i, v); }
+    double tu = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t0).count();
+    t0 = std::chrono::steady_clock::now();
+    for (uint64_t i = 0; i < N; ++i) st->Delete(i);
+    double td = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t0).count();
+    // Generous bound (sanitizer/CI-safe): the audit measured 160x; the
+    // deferred design is ~1x. Absolute slack absorbs tiny-N noise.
+    CHECK(td <= 10.0 * tu + 0.25,
+          "delcost: %" PRIu64 " deletes took %.3fs vs upserts %.3fs "
+          "(audit bug: synchronous per-version tombstone I/O)", N, td, tu);
+    GenValue out;
+    for (uint64_t i = 0; i < N; i += 17)
+        CHECK(!st->Read(i, out), "delcost: deleted %" PRIu64 " visible", i);
+    st->Checkpoint();   // drains the reaper: tombstones durable
+    st->StopSession();
+    drop_store(st, "delcost");
+    fprintf(stderr, "PASS delcost (delete %.3fs vs upsert %.3fs)\n", td, tu);
+}
+
+// ── T7e: charged + capped inline overflow absorption ────────────────────────
+// Audit bug #2 regression: inline values absorbed into the overflow map by
+// the index-capacity / disk-full fallbacks were UNCHARGED — the map could
+// grow past the whole memory budget and the process got OOM-killed. Every
+// absorption is now charged against the (default budget/8) cap; over the cap
+// the store rejects honestly and counts it.
+static void test_memfull() {
+    IKVStore* st = make_store("memfull", 16ull << 20);   // tiny index+cap
+    st->StartSession();
+    GenValue v, out;
+    // Fixed N (not scaled): must exceed the 16 MiB store's index capacity
+    // (~250K keys) plus the 2 MiB overflow cap (~13K absorptions).
+    const uint64_t N = 600000;
+    for (uint64_t i = 0; i < N; ++i) {
+        uint64_t k = mix64(i);
+        make_value(k, 1, 100, v);
+        st->Upsert(k, v);
+    }
+    HydraProdStats ps{};
+    CHECK(hydra_get_prod_stats(st, &ps), "prod stats unavailable");
+    CHECK(ps.rejected_mem > 0,
+          "memfull: no honest rejection past the absorb cap");
+    CHECK(ps.oversize_bytes <= (16ull << 20) / 8 + 8192,
+          "memfull: charged overflow bytes above cap: %" PRIu64,
+          ps.oversize_bytes);
+    // No silent damage: every key is either intact or was refused+counted.
+    uint64_t missing = 0, corrupt = 0;
+    for (uint64_t i = 0; i < N; ++i) {
+        uint64_t k = mix64(i);
+        if (!st->Read(k, out)) missing++;
+        else if (check_value(k, out, 100) != 1) corrupt++;
+    }
+    CHECK(corrupt == 0, "memfull: %" PRIu64 " corrupt values", corrupt);
+    CHECK(missing <= ps.rejected_mem,
+          "memfull: %" PRIu64 " keys missing but only %" PRIu64
+          " rejections counted (silent loss)", missing, ps.rejected_mem);
+    st->StopSession();
+    drop_store(st, "memfull");
+    fprintf(stderr, "PASS memfull (%" PRIu64 " absorbed-rejected, %" PRIu64
+            " missing)\n", ps.rejected_mem, missing);
+}
+
+// ── T7f: smaller-budget reopen must surface dropped keys ─────────────────────
+// Audit bug #3 regression: recovery dropped over-index-capacity keys with
+// only a stderr WARNING while still reporting recover_ok=1. Drops now fail
+// the recovery status and are counted.
+static void test_recoverdrop() {
+    {
+        IKVStore* st = make_store("recdrop", 256ull << 20);
+        st->StartSession();
+        GenValue v;
+        const uint64_t N = 2000000 / (uint64_t)g_scale;
+        for (uint64_t i = 0; i < N; ++i) {
+            uint64_t k = mix64(i);
+            make_value(k, 1, 100, v);
+            st->Upsert(k, v);
+        }
+        // Oversized values too: their sidecar (written under THIS larger
+        // budget's cap) must not blow past the smaller reopen's cap below.
+        for (uint64_t i = 0; i < 2000; ++i) {
+            make_value((1ull << 61) + i, 3, 2000, v);
+            st->Upsert((1ull << 61) + i, v);
+        }
+        st->Checkpoint();
+        st->StopSession();
+        delete st;   // clean shutdown, full log on disk
+    }
+    // Reopen at a budget whose index cannot hold every key.
+    IKVStore* st2 = open_store("recdrop", 4ull << 20, false);
+    st2->StartSession();
+    HydraProdStats ps{};
+    CHECK(hydra_get_prod_stats(st2, &ps), "prod stats unavailable");
+    // Sidecar reload respects the smaller budget's cap (bounded, counted).
+    CHECK(ps.oversize_bytes <= (4ull << 20) / 8 + 4096,
+          "recoverdrop: sidecar reload past cap: %" PRIu64, ps.oversize_bytes);
+    CHECK(ps.recover_dropped_keys > 0,
+          "recoverdrop: no drops counted (test sizing broken?)");
+    CHECK(ps.recover_ok == 0,
+          "recoverdrop: %" PRIu64 " keys dropped but recover_ok=1 "
+          "(silent data loss reported as clean recovery)",
+          ps.recover_dropped_keys);
+    // What recovery kept must still be served intact.
+    GenValue out;
+    uint64_t kept = 0;
+    for (uint64_t i = 0; i < 2000; ++i) {
+        uint64_t k = mix64(i);
+        if (!st2->Read(k, out)) continue;
+        kept++;
+        CHECK(check_value(k, out, 100) == 1,
+              "recoverdrop: kept key %" PRIu64 " corrupt", i);
+    }
+    (void)kept;
+    st2->StopSession();
+    drop_store(st2, "recdrop");
+    fprintf(stderr, "PASS recoverdrop (%" PRIu64 " dropped surfaced)\n",
+            ps.recover_dropped_keys);
+}
+
 // ── T8: crafted fingerprint-alias keys ───────────────────────────────────────
 // Keys whose mix64 hashes share the high-32 fingerprint AND the index bucket:
 // exercises first_candidate aliasing, prev-chain walks, index word steal +
@@ -729,7 +934,15 @@ static void test_alias() {
 
 // ── T9: tiny budget — index capacity overflow fallback ───────────────────────
 static void test_tiny() {
+    // This test intentionally drives ~3M keys through a 64 MiB store, far
+    // past the index capacity, to exercise the overflow fallback. Fallback
+    // absorptions are now CHARGED and CAPPED (audit: uncharged absorptions
+    // could OOM the process), so give this test an explicit cap that fits
+    // its whole over-capacity keyspace; test_memfull asserts the default
+    // cap's honest-rejection behavior.
+    setenv("HYDRA_OVERSIZE_CAP_MB", "1024", 1);
     IKVStore* st = make_store("tiny", 64ull << 20);
+    unsetenv("HYDRA_OVERSIZE_CAP_MB");
     const uint64_t N = 3000000 / (uint64_t)g_scale;
     const int T = 4;
     std::vector<std::thread> ths;
@@ -1546,6 +1759,8 @@ int main(int argc, char** argv) {
         {"basic", test_basic},   {"lww", test_lww},       {"async", test_async},
         {"audit", test_audit},   {"oversized", test_oversized},
         {"delete", test_delete}, {"updel", test_updel},   {"alias", test_alias},
+        {"updel2", test_updel2}, {"delcost", test_delcost},
+        {"memfull", test_memfull}, {"recoverdrop", test_recoverdrop},
         {"tiny", test_tiny},
         {"nodisk", test_nodisk}, {"rmw", test_rmw},       {"twostores", test_twostores},
         {"ckpt", test_ckpt},     {"rywrite", test_rywrite},
