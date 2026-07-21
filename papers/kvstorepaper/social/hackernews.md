@@ -43,9 +43,9 @@ IOPS and cache hit rate allow; two stretch goals (10, then 7 Mops/s) were
 never met, and the paper shows the arithmetic for why.
 
 The part I find more interesting than the number: I didn't write the engine.
-It was written by KISS Sorcar (https://kisssorcar.github.io/), an open-source 
-agent framework I've been building for the past several months. My entire 
-contribution was six task prompts and two short steering messages. 
+It was written by KISS Sorcar (https://kisssorcar.github.io/), an open-source
+agent framework I've been building for the past several months. My entire
+contribution was six task prompts and two short steering messages.
 
 Because an agent optimizing against a fixed benchmark will overfit it, the
 prompts forced an adversarial loop: the agent generated workload variants
@@ -76,7 +76,7 @@ classes. What mattered here was long-horizon execution (multi-hour unattended
 sessions against a remote benchmark box, continuing across context windows by
 summarizing itself) and mixing models from different vendors inside one task.
 It also built itself: the framework, its VS Code extension, and its system
-prompt were written by the agent operating on its own repo. 
+prompt were written by the agent operating on its own repo.
 
 Everything is public: engine, 28 end-to-end tests, sanitizer matrix, variant
 generator, audits, ideas ledger, and raw benchmark logs at
@@ -109,7 +109,7 @@ ______________________________________________________________________
 The same story, rewritten for LinkedIn. Every number is taken from the
 HydraKV paper or the artifact README, identical to the Show HN text above.
 LinkedIn constraints respected: plain text (LinkedIn renders no markdown),
-under the 3,000-character post limit (the body below is 2,565 characters,
+under the 3,000-character post limit (the body below is 2,568 characters,
 verified by script; the opening hook is 176 characters), short paragraphs,
 and a hook in the first two lines because LinkedIn truncates the post at
 roughly 200 characters behind a "...more" fold. It reads as a follow-up to
@@ -142,16 +142,16 @@ two short steering messages. API spend for the first three tasks: under $200.
 
 What made me trust the result more than the number itself:
 
-1. Adversarial self-testing. An agent optimizing a fixed benchmark will
+(1) Adversarial self-testing. An agent optimizing a fixed benchmark will
 overfit it, so the prompts forced the agent to generate workload variants
 designed to break its own engine, repair it until it passed all of them, and
 finish on a held-out variant generated after all engine work stopped.
 
-2. Cross-vendor review. One model wrote the code; a second model from a
+(2) Cross-vendor review. One model wrote the code; a second model from a
 different vendor did strictly read-only reviews and kept flagging concurrency
 hazards the first had rationalized away.
 
-3. Independent audit. A separate audit re-ran the engine on the reference
+(3) Independent audit. A separate audit re-ran the engine on the reference
 hardware and called the result genuine — "not reward-hacked, not copied."
 
 The honest limits, straight from the paper: one machine, one harness,

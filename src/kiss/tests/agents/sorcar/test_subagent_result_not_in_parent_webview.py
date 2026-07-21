@@ -122,6 +122,45 @@ def _finish_response(summary: str) -> dict[str, Any]:
     }
 
 
+def _summary_response() -> dict[str, Any]:
+    """Response that calls the mandatory every-5-steps ``summary`` tool.
+
+    ``ChatSorcarAgent`` arms a summary gate on every global step that is
+    a multiple of 5 (sub-agent steps are attributed to the parent, so
+    the parent's second step lands on global step 5) and rejects every
+    other tool call — including ``finish`` — until ``summary`` is
+    called.  The fake model must comply or the run loops forever.
+    """
+    return {
+        "id": "chatcmpl-sum",
+        "object": "chat.completion",
+        "model": "gpt-4o-mini",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_sum",
+                            "type": "function",
+                            "function": {
+                                "name": "summary",
+                                "arguments": json.dumps(
+                                    {"description": "Ran the parallel sub-tasks."},
+                                ),
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+
+
 class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         cl = int(self.headers.get("Content-Length", 0))
@@ -144,7 +183,16 @@ class _Handler(BaseHTTPRequestHandler):
         )
         is_sub = "Compute" in user_text
         has_rp_result = any(m.get("role") == "tool" for m in messages)
-        if is_sub:
+        # The every-5-steps summary gate: when the pre-step hook just
+        # demanded a summary (it appends a user message ending the
+        # conversation), the ONLY accepted tool call is ``summary``.
+        last = messages[-1] if messages else {}
+        summary_due = last.get("role") == "user" and "Call the summary tool NOW" in str(
+            last.get("content", "")
+        )
+        if summary_due:
+            resp = _summary_response()
+        elif is_sub:
             resp = _finish_response("SUB-RESULT")
         elif has_rp_result:
             resp = _finish_response("PARENT-RESULT")
