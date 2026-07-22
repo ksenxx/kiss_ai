@@ -381,6 +381,7 @@ def _wait_for_log_text(log: Path, needle: str, timeout: float = 10.0) -> str:
     return text
 
 
+@pytest.mark.process_killer
 def test_run_with_heartbeat_survives_stray_sigint(tmp_path: Path) -> None:
     """A single stray SIGINT must NOT kill the wrapped command.
 
@@ -489,6 +490,7 @@ def test_run_with_heartbeat_survives_stray_sigint(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.process_killer
 def test_run_with_heartbeat_double_sigint_aborts(tmp_path: Path) -> None:
     """A confirmed double-Ctrl+C must still abort the install.
 
