@@ -656,3 +656,45 @@ project vs test bugs, and fix accordingly.
    from the previous 8-way run (commit f3d1b48b, squash-merged as
    76e78ed6) hold; nothing to fix.
 1. No source files modified; only this PROGRESS.md log added.
+
+______________________________________________________________________
+
+# PROGRESS — Skip the tests that can kill sibling pytest processes mid-run
+
+Task: skip the suite tests that deliver process-group signals and have
+twice taken down sibling pytest processes during 8-way parallel runs
+(splits 0/2 aborted ~91% in both prior full-suite sessions).
+
+## DONE (single session) — COMPLETE
+
+1. Root-caused the hazard class: no test signals its own group or runs
+   a literal `pkill`; the dangerous tests are the install-script signal
+   tests that spawn a setsid'd bash harness and then blast its process
+   group with `os.killpg` bursts (`_kill_pgrp_repeatedly`: 3× SIGINT/
+   SIGHUP/SIGTERM ~300 ms apart) plus a `killpg(..., SIGKILL)` cleanup —
+   a PGID-reuse hazard under heavy parallel load. Verified the safe
+   lookalikes (test_useful_tools.py, test_cloudflared_survives_shutdown.py,
+   test_web_server_double_sigterm_shutdown.py, the fuzz/structural tests)
+   only signal specific child PIDs and were left untouched.
+1. pyproject.toml: registered a new marker
+   `process_killer` ("delivers signals to whole process groups; can take
+   down sibling pytest processes when many splits run concurrently") and
+   changed default `addopts` from `-m 'not slow'` to
+   `-m 'not slow and not process_killer'` so the tests are deselected by
+   default and runnable explicitly with `-m process_killer`.
+1. Marked 9 tests with `@pytest.mark.process_killer`:
+   - test_install_script_new_session_immunity.py (5):
+     test_install_sh_perl_reexec_creates_new_session_id_for_child,
+     test_install_sh_survives\_{sigint,sighup,sigterm}\_during_long_running_child,
+     test_install_sh_perl_fallback_when_unavailable (also added a
+     module-level `import pytest` and removed 4 redundant lazy imports).
+   - test_install_script_tee_subshell_signal.py (2):
+     test_install_sh_outer_trap_survives\_{sigint,sighup} (added
+     module-level `import pytest`).
+   - test_install_script_npm_ignore_scripts.py (2):
+     test_run_with_heartbeat_survives_stray_sigint,
+     test_run_with_heartbeat_double_sigint_aborts.
+1. Verified: `pytest --collect-only` on the 3 files → "11/20 tests
+   collected (9 deselected)"; `-m process_killer` runs exactly the 9
+   marked tests (all pass, ~34 s); the 11 unmarked tests still pass with
+   default options; no test asserts on addopts/marker config; `uv run check --full` → ✅ all checks passed.
