@@ -3750,7 +3750,7 @@
   "openrouter/qwen/qwen3-next-80b-a3b-instruct": {
     "context_length": 262144,
     "input_price_per_1M": 0.1,
-    "output_price_per_1M": 0.78,
+    "output_price_per_1M": 1.1,
     "fc": true,
     "emb": false,
     "gen": true
@@ -4249,8 +4249,8 @@
   },
   "openrouter/z-ai/glm-5.2": {
     "context_length": 1048576,
-    "input_price_per_1M": 0.777,
-    "output_price_per_1M": 2.442,
+    "input_price_per_1M": 0.819,
+    "output_price_per_1M": 2.574,
     "fc": true,
     "emb": false,
     "gen": true
