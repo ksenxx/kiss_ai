@@ -93,6 +93,8 @@ import textwrap
 import time
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[5]
 INSTALL_SCRIPT = REPO / "install.sh"
 
@@ -298,6 +300,7 @@ def test_install_sh_reexecs_in_new_session_via_perl() -> None:
     )
 
 
+@pytest.mark.process_killer
 def test_install_sh_perl_reexec_creates_new_session_id_for_child(
     tmp_path: Path,
 ) -> None:
@@ -313,8 +316,6 @@ def test_install_sh_perl_reexec_creates_new_session_id_for_child(
         # If perl is missing the re-exec block falls through; the
         # post-reexec body still runs but in the SAME session as the
         # harness, so this test would be a no-op.  Skip it.
-        import pytest
-
         pytest.skip("perl not available; new-session detachment cannot run")
 
     child_pid_file = tmp_path / "child.pid"
@@ -414,6 +415,7 @@ def _run_signal_immunity_test(
     )
 
 
+@pytest.mark.process_killer
 def test_install_sh_survives_sigint_during_long_running_child(
     tmp_path: Path,
 ) -> None:
@@ -425,12 +427,11 @@ def test_install_sh_survives_sigint_during_long_running_child(
     controlling TTY and the kernel cannot deliver terminal SIGINT to it.
     """
     if shutil.which("perl") is None:
-        import pytest
-
         pytest.skip("perl not available; new-session detachment cannot run")
     _run_signal_immunity_test(tmp_path, signal.SIGINT)
 
 
+@pytest.mark.process_killer
 def test_install_sh_survives_sighup_during_long_running_child(
     tmp_path: Path,
 ) -> None:
@@ -442,12 +443,11 @@ def test_install_sh_survives_sighup_during_long_running_child(
     TTY there is no SIGHUP delivery to the install body.
     """
     if shutil.which("perl") is None:
-        import pytest
-
         pytest.skip("perl not available; new-session detachment cannot run")
     _run_signal_immunity_test(tmp_path, signal.SIGHUP)
 
 
+@pytest.mark.process_killer
 def test_install_sh_survives_sigterm_during_long_running_child(
     tmp_path: Path,
 ) -> None:
@@ -459,12 +459,11 @@ def test_install_sh_survives_sigterm_during_long_running_child(
     in a different process group and is unaffected.
     """
     if shutil.which("perl") is None:
-        import pytest
-
         pytest.skip("perl not available; new-session detachment cannot run")
     _run_signal_immunity_test(tmp_path, signal.SIGTERM)
 
 
+@pytest.mark.process_killer
 def test_install_sh_perl_fallback_when_unavailable(tmp_path: Path) -> None:
     """When perl is missing the script must continue gracefully.
 
