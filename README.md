@@ -2,7 +2,7 @@
 
 ![KISS Framework](assets/KISS-Sorcar.png)
 
-[![Version](https://img.shields.io/badge/version-2026.7.30-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.7.31-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -61,12 +61,13 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~2850** | Unknown | Unknown |
-| **Models in bundled catalog** | 538 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 539 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
 | **Run on top of Claude Code / Codex CLI** | ✅ `cc/*` and `codex/*` namespaces | N/A | ❌ |
 | **Messaging and communication channels** | ✅ 23 third-party agents, including Slack, Gmail, Phone Control, SMS, and WhatsApp | ⚠️ Slack, mobile Remote Control, and research-preview channels for Telegram, Discord, and iMessage; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel | ⚠️ Slack and Microsoft Teams Cloud Agent integrations; no documented built-in Gmail, WhatsApp, phone-call, or SMS channel |
+| **Wake work for voice interaction** | Sorcar | N/A | N/A|
 
 ## What is in the Name
 
@@ -221,7 +222,7 @@ These agents live in `src/kiss/agents/third_party_agents/`.
 
 ## 🤖 Models Supported
 
-KISS Sorcar ships a catalog of **538 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
+KISS Sorcar ships a catalog of **539 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
 
 | Provider category | Catalog entries |
 |---|---:|
@@ -231,15 +232,15 @@ KISS Sorcar ships a catalog of **538 models** across **9 provider categories**, 
 | Together AI | 79 |
 | Z.AI | 8 |
 | Moonshot AI | 7 |
-| OpenRouter | 307 |
+| OpenRouter | 308 |
 | Claude Code CLI (`cc/*`) | 3 |
 | Codex CLI (`codex/*`) | 9 |
 
 Current catalog capability totals:
 
-- **521** generation-capable models
-- **369** function-calling-capable models
-- **10** embedding models
+- **522** generation-capable models
+- **370** function-calling-capable models
+- **8** embedding models
 
 Full model list:
 
@@ -374,6 +375,8 @@ Full model list:
 - `gemini-3.1-flash-tts-preview`
 - `gemini-3.1-pro-preview`
 - `gemini-3.5-flash`
+- `gemini-3.5-flash-lite`
+- `gemini-3.6-flash`
 - `gemini-embedding-001`
 - `gemini-embedding-2`
 - `gemini-embedding-2-preview`
@@ -489,6 +492,7 @@ Full model list:
 - `kimi-k2.5`
 - `kimi-k2.6`
 - `kimi-k2.7-code`
+- `kimi-k3`
 - `moonshot-v1-128k`
 - `moonshot-v1-32k`
 - `moonshot-v1-8k`
@@ -496,7 +500,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (307)</strong></summary>
+<summary><strong>OpenRouter (308)</strong></summary>
 
 - `openrouter/ai21/jamba-large-1.7`
 - `openrouter/aion-labs/aion-2.0`
@@ -568,6 +572,8 @@ Full model list:
 - `openrouter/google/gemini-3.1-pro-preview`
 - `openrouter/google/gemini-3.1-pro-preview-customtools`
 - `openrouter/google/gemini-3.5-flash`
+- `openrouter/google/gemini-3.5-flash-lite`
+- `openrouter/google/gemini-3.6-flash`
 - `openrouter/google/gemma-2-27b-it`
 - `openrouter/google/gemma-3-12b-it`
 - `openrouter/google/gemma-3-27b-it`
@@ -590,6 +596,7 @@ Full model list:
 - `openrouter/kwaipilot/kat-coder-pro-v2`
 - `openrouter/kwaipilot/kat-coder-pro-v2.5`
 - `openrouter/mancer/weaver`
+- `openrouter/meituan/longcat-2.0`
 - `openrouter/meta-llama/llama-3.1-70b-instruct`
 - `openrouter/meta-llama/llama-3.1-8b-instruct`
 - `openrouter/meta-llama/llama-3.2-1b-instruct`

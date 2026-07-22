@@ -954,6 +954,10 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         # v1-only transport-selection flag; meaningless on the Responses
         # transport, so drop it like the Chat-Completions-only keys below.
         kwargs.pop("use_responses_api", None)
+        # Anthropic-only client knob; arrives here when a live conversation
+        # (and its config) is handed over from an AnthropicModel via the
+        # Sorcar ``set_model`` tool.  Not a Responses-API parameter.
+        kwargs.pop("stream_stall_timeout", None)
         # Chat-Completions-only / legacy keys that the Responses API does
         # not accept (streaming controls, sampling knobs, legacy
         # function-calling fields).  Drop silently so v1-shaped configs
