@@ -57,13 +57,30 @@ def _extract_thinking_end_case(src: str) -> str:
 
 
 def test_main_js_does_not_contain_click_to_expand_label() -> None:
-    """The ``Thinking (click to expand)`` label is forbidden in main.js."""
+    """The ``Thinking (click to expand)`` label is forbidden in main.js.
+
+    The ban is scoped to the thinking panel: the label must not be
+    attached to the thinking UI (``Thinking (click to expand)``) and the
+    ``thinking_start`` / ``thinking_delta`` / ``thinking_end`` handlers
+    must never set it.  The unrelated ``summary`` tool panel legitimately
+    shows a "(click to expand)" header hint (see
+    ``src/kiss/agents/vscode/test/summaryHeaderExpandHint.test.js``), so a
+    blanket substring ban over all of main.js would be wrong.
+    """
     src = _read_main_js()
-    assert "click to expand" not in src, (
-        "main.js still contains the forbidden 'click to expand' label. "
-        "The user explicitly said this bar MUST NOT be shown — the "
+    assert "Thinking (click to expand)" not in src, (
+        "main.js still contains the forbidden 'Thinking (click to expand)' "
+        "label. The user explicitly said this bar MUST NOT be shown — the "
         "thinking panel must stay expanded with the streamed tokens."
     )
+    for case in ("thinking_start", "thinking_delta", "thinking_end"):
+        m = re.search(rf"case\s+'{case}':\s*(.*?)break;", src, re.DOTALL)
+        if m is None:
+            continue
+        assert "click to expand" not in m.group(1), (
+            f"the {case} handler sets a 'click to expand' label — the "
+            "thinking panel must stay expanded with the streamed tokens."
+        )
 
 
 def test_thinking_end_handler_does_not_hide_content() -> None:
