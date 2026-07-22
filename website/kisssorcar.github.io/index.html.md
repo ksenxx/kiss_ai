@@ -1,6 +1,6 @@
 # KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.
 
-> Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 530 models. Works as a VS Code extension, a Claude-Code-style CLI, and a web app.
+> Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 538 models. Works as a VS Code extension, a Claude-Code-style CLI, and a web app.
 
 This is the plain-Markdown twin of <https://kisssorcar.github.io/>. Machine-readable entry points: [/llms.txt](https://kisssorcar.github.io/llms.txt) and [/llms-full.txt](https://kisssorcar.github.io/llms-full.txt).
 
@@ -9,7 +9,7 @@ This is the plain-Markdown twin of <https://kisssorcar.github.io/>. Machine-read
 **KISS Sorcar is a free, simple, local-first, bring-your-own-key AI agent framework** for long-horizon tasks and AI discovery. It runs as a VS Code extension, a Claude-Code-style CLI (`sorcar`), and a browser/mobile web app. Your prompts and code are sent directly to the model provider or local endpoint you configure — not through our servers. It supports multi-model workflows just via prompts. All agents run as daemons. Complex AI systems/techniques can be replaced with a paragraph of prompt.
 
 - **License:** Apache-2.0 · **Source:** <https://github.com/ksenxx/kiss_ai> · **PyPI:** `kiss-agent-framework`
-- **530 models** across 9 provider categories (OpenAI, Anthropic, Gemini/Google, Together AI, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, Codex CLI)
+- **538 models** across 9 provider categories (OpenAI, Anthropic, Gemini/Google, Together AI, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, Codex CLI)
 - **23 messaging agents** (Slack, Gmail, WhatsApp, SMS, iMessage, Telegram, Discord, Signal, Phone Control, …)
 - Unique features: AI discovery via prompt, GEPA prompt optimization via prompt, multi-vendor multi-model tasks, dynamic `set_model` switching, steering-on-the-fly, git-worktree task isolation, wake-word voice chat
 

@@ -8,10 +8,13 @@
 import base64
 import json
 import logging
+import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
-from anthropic import Anthropic
+import httpx
+from anthropic import Anthropic, APITimeoutError
 
 from kiss.core.kiss_error import KISSError, ModelRefusalError
 from kiss.core.models.model import (
@@ -25,6 +28,85 @@ from kiss.core.models.model import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Maximum seconds the Anthropic streaming connection may go without
+#: delivering ANY bytes (response headers, SSE events, or the periodic
+#: ``ping`` keep-alive events the API sends during long turns) before the
+#: request is aborted with a retryable error.
+#:
+#: Without this bound the SDK default applies — ``httpx.Timeout(read=600)``
+#: with 2 silent retries — so a request that the API accepts but never
+#: answers hangs the agent for 10–30 minutes with zero output.  This was
+#: the production "task stuck in thinking" failure (task
+#: ``f554c68446fa42af89c2fd3c7cc14f63`` in ``~/.kiss/sorcar.db``,
+#: 2026-07-21 10:08): step 2's stream produced no events for 5.5 minutes,
+#: no error was ever raised, and the user had to stop the task by hand.
+#: Overridable per model via ``model_config["stream_stall_timeout"]``.
+DEFAULT_STREAM_STALL_TIMEOUT = 180.0
+#: Seconds allowed for establishing the TCP/TLS connection.
+_CONNECT_TIMEOUT = 10.0
+#: SDK-level retries for connect/timeout failures BEFORE the response
+#: starts.  The SDK default of 2 made the worst pre-header case
+#: ``3 x stall`` of silent waiting; one retry keeps resilience to
+#: transient connection failures while bounding silence at ``2 x stall``.
+#: KISSAgent adds its own, user-visible retries on top.
+_MAX_RETRIES = 1
+
+
+class _StreamStallWatchdog:
+    """Closes a message stream when no SSE *event* arrives in time.
+
+    The httpx read timeout on the client bounds byte-level silence, but the
+    Anthropic API sends periodic ``ping`` keep-alive events that the SDK
+    filters out before yielding — a wedged request that only pings would
+    reset the byte-level timeout forever while the agent sees no event at
+    all (the "stuck in thinking" symptom).  This watchdog bounds
+    *event*-level silence: :meth:`beat` is called for every yielded event,
+    and when none arrives within *timeout* seconds the underlying response
+    is closed, which makes the blocked iterator raise so the caller can
+    convert it into a retryable :class:`TimeoutError`.
+    """
+
+    def __init__(self, stream: Any, timeout: float) -> None:
+        """Start watching *stream*.
+
+        Args:
+            stream: The ``MessageStream`` whose ``close()`` aborts the
+                blocked read.
+            timeout: Seconds of event-level silence tolerated.
+        """
+        self._stream = stream
+        self._timeout = timeout
+        self._last_event = time.monotonic()
+        self._lock = threading.Lock()
+        self._done = threading.Event()
+        self.stalled = False
+        self._thread = threading.Thread(
+            target=self._watch, name="anthropic-stream-stall-watchdog", daemon=True
+        )
+        self._thread.start()
+
+    def beat(self) -> None:
+        """Record that an event arrived (resets the stall clock)."""
+        with self._lock:
+            self._last_event = time.monotonic()
+
+    def stop(self) -> None:
+        """Stop the watchdog thread (stream finished or failed)."""
+        self._done.set()
+
+    def _watch(self) -> None:
+        poll = max(0.05, min(1.0, self._timeout / 4))
+        while not self._done.wait(poll):
+            with self._lock:
+                idle = time.monotonic() - self._last_event
+            if idle >= self._timeout:
+                self.stalled = True
+                try:
+                    self._stream.close()
+                except Exception:
+                    logger.debug("Exception caught", exc_info=True)
+                return
 
 
 def _anthropic_cache_creation_tokens(usage: Any) -> tuple[int, int]:
@@ -325,6 +407,9 @@ class AnthropicModel(Model):
             thinking_callback=thinking_callback,
         )
         self.api_key = api_key
+        self._stream_stall_timeout = float(
+            self.model_config.get("stream_stall_timeout", DEFAULT_STREAM_STALL_TIMEOUT)
+        )
 
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initializes the conversation with an initial user prompt.
@@ -337,7 +422,18 @@ class AnthropicModel(Model):
                 is available; otherwise they are skipped with a warning.  Video
                 attachments are always skipped.
         """
-        self.client = Anthropic(api_key=self.api_key)
+        # Bound the time the connection may sit with NO bytes flowing
+        # (httpx read/write/pool timeouts apply between bytes, so a healthy
+        # long generation — which streams deltas and periodic ``ping``
+        # events continuously — is unaffected).  Without this, the SDK
+        # default (read=600s, 2 silent retries) let an accepted-but-dead
+        # request hang the agent for 10–30 minutes with no output: the
+        # "task stuck in thinking" production failure.
+        self.client = Anthropic(
+            api_key=self.api_key,
+            timeout=httpx.Timeout(self._stream_stall_timeout, connect=_CONNECT_TIMEOUT),
+            max_retries=_MAX_RETRIES,
+        )
         content: str | list[dict[str, Any]] = prompt
         if attachments:
             blocks = _attachments_to_blocks(attachments)
@@ -590,6 +686,8 @@ class AnthropicModel(Model):
         # native reasoning for Claude 4+ models.
         kwargs.pop("reasoning_effort", None)
         kwargs.pop("use_responses_api", None)
+        # Consumed by ``initialize`` (client construction); not an API param.
+        kwargs.pop("stream_stall_timeout", None)
 
         # Hoist OpenAI-style ``role="system"`` messages (present when the
         # conversation was handed off from an OpenAI-schema model, e.g. via
@@ -716,44 +814,108 @@ class AnthropicModel(Model):
         if msg_content:
             self.conversation.append({"role": "assistant", "content": msg_content})
 
-    def _create_message(self, kwargs: dict[str, Any]) -> Any:  # pragma: no cover – API call
+    def _create_message(self, kwargs: dict[str, Any]) -> Any:
         """Create a message, streaming tokens to the callback when set.
+
+        Aborts with a clear, retryable :class:`TimeoutError` when the
+        stream stalls for :attr:`_stream_stall_timeout` seconds at either
+        level:
+
+        * **byte level** — the client's httpx read timeout raises
+          ``httpx.ReadTimeout`` mid-iteration (SDK does not retry it, and
+          its message is often empty) or ``anthropic.APITimeoutError``
+          when the response headers never arrive (SDK retries
+          ``_MAX_RETRIES`` times first);
+        * **event level** — :class:`_StreamStallWatchdog` closes the
+          response when no SSE event is yielded in time, catching wedged
+          requests that keep the connection alive with ``ping`` events
+          (which the SDK filters out before yielding).
+
+        ``KISSAgent._run_agentic_loop`` treats ``TimeoutError`` as
+        retryable and re-asks the model instead of hanging forever.  An
+        open thinking bracket is closed before raising so the UI does not
+        stay in "thinking" mode across the retry.
 
         Args:
             kwargs: Keyword arguments for the Anthropic API call.
 
         Returns:
             The raw Anthropic response message.
+
+        Raises:
+            TimeoutError: When the streaming connection delivers no data
+                (or no events) for ``stream_stall_timeout`` seconds.
         """
-        with self.client.messages.stream(**kwargs) as stream:
-            if self.token_callback is not None:
-                in_thinking = False
-                thinking_started = False
-                for event in stream:
-                    if event.type == "content_block_start":
-                        block = getattr(event, "content_block", None)
-                        if block and getattr(block, "type", "") == "thinking":
-                            in_thinking = True
-                            thinking_started = False
-                    elif event.type == "content_block_delta":
-                        delta = event.delta
-                        delta_type = getattr(delta, "type", "")
-                        if delta_type == "thinking_delta":
-                            text = getattr(delta, "thinking", "")
-                            if text:
-                                if in_thinking and not thinking_started:
-                                    self._invoke_thinking_callback(True)
-                                    thinking_started = True
-                                self._invoke_token_callback(text)
-                        elif delta_type == "text_delta":
-                            self._invoke_token_callback(getattr(delta, "text", ""))
-                    elif event.type == "content_block_stop":
-                        if in_thinking:
-                            in_thinking = False
-                            if thinking_started:
-                                self._invoke_thinking_callback(False)
+        watchdog: _StreamStallWatchdog | None = None
+        in_thinking = False
+        thinking_started = False
+        try:
+            with self.client.messages.stream(**kwargs) as stream:
+                watchdog = _StreamStallWatchdog(stream, self._stream_stall_timeout)
+                try:
+                    for event in stream:
+                        watchdog.beat()
+                        if self.token_callback is None:
+                            continue
+                        if event.type == "content_block_start":
+                            block = getattr(event, "content_block", None)
+                            if block and getattr(block, "type", "") == "thinking":
+                                in_thinking = True
                                 thinking_started = False
-            return stream.get_final_message()
+                        elif event.type == "content_block_delta":
+                            delta = event.delta
+                            delta_type = getattr(delta, "type", "")
+                            if delta_type == "thinking_delta":
+                                text = getattr(delta, "thinking", "")
+                                if text:
+                                    if in_thinking and not thinking_started:
+                                        self._invoke_thinking_callback(True)
+                                        thinking_started = True
+                                    self._invoke_token_callback(text)
+                            elif delta_type == "text_delta":
+                                self._invoke_token_callback(getattr(delta, "text", ""))
+                        elif event.type == "content_block_stop":
+                            if in_thinking:
+                                in_thinking = False
+                                if thinking_started:
+                                    self._invoke_thinking_callback(False)
+                                    thinking_started = False
+                    return stream.get_final_message()
+                finally:
+                    watchdog.stop()
+        except (httpx.TimeoutException, APITimeoutError) as exc:
+            raise self._stall_error(thinking_started) from exc
+        except Exception as exc:
+            # The watchdog closes the response out from under the blocked
+            # iterator, which surfaces as a provider/transport error
+            # (e.g. ``httpx.StreamClosed`` or a peer-closed read error) —
+            # attribute it to the stall.
+            if watchdog is not None and watchdog.stalled:
+                raise self._stall_error(thinking_started) from exc
+            raise
+
+    def _stall_error(self, thinking_started: bool) -> TimeoutError:
+        """Build the retryable stall error, closing any open thinking bracket.
+
+        A stall can strike mid-thinking; without the closing
+        ``thinking_callback(False)`` the printer/UI would render everything
+        after the retry as "thinking" forever.
+
+        Args:
+            thinking_started: Whether ``thinking_callback(True)`` was
+                emitted without its matching ``False``.
+
+        Returns:
+            The ``TimeoutError`` for the caller to raise.
+        """
+        if thinking_started:
+            self._invoke_thinking_callback(False)
+        return TimeoutError(
+            f"Anthropic stream for model {self.model_name} stalled: no "
+            f"data received for {self._stream_stall_timeout:.0f}s "
+            f"(model_config 'stream_stall_timeout'). The request was "
+            f"aborted instead of hanging; it will be retried."
+        )
 
     def _raise_on_refusal(self, response: Any) -> None:
         """Raise :class:`ModelRefusalError` when the model refused the request.

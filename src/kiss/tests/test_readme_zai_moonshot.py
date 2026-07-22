@@ -82,7 +82,7 @@ def test_readme_provider_table_matches_catalog_categories() -> None:
     for provider, count in counts.items():
         assert f"| {provider} | {count} |" in readme
     assert "| Z.AI | 8 |" in readme
-    assert "| Moonshot AI | 6 |" in readme
+    assert "| Moonshot AI | 7 |" in readme
 
 
 def test_readme_capability_totals_match_catalog() -> None:
@@ -101,7 +101,7 @@ def test_readme_lists_zai_and_moonshot_models() -> None:
     """The full model list includes direct Z.AI and Moonshot AI sections."""
     readme = _readme_text()
     assert "<summary><strong>Z.AI (8)</strong></summary>" in readme
-    assert "<summary><strong>Moonshot AI (6)</strong></summary>" in readme
+    assert "<summary><strong>Moonshot AI (7)</strong></summary>" in readme
     for model_name in (
         "glm-4.6",
         "glm-4.7",
