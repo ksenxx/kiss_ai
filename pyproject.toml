@@ -185,6 +185,7 @@ markers = [
     "redundancy_check: marks tests for redundancy check",
     "live_cli: test spawns the real claude/codex CLI (opts out of the CLI-locator stub)",
     "live_api: test makes real HTTP calls to a provider API (skipped when the required API key is unset)",
+    "process_killer: test delivers signals (os.killpg bursts / SIGKILL cleanup) to whole process groups and can take down sibling pytest processes when many splits run concurrently; deselected by default, run explicitly with -m process_killer",
 ]
 # Disable timeout so tests run without time limit
 timeout = 0
@@ -195,7 +196,7 @@ timeout = 0
 # conftest.py registers inert fallback --cov/--cov-branch options whenever pytest-cov
 # is not loaded, so these addopts always parse cleanly. Prefer `--no-cov` to turn off
 # coverage while keeping the plugin loaded.
-addopts = "--cov=src/kiss --cov-branch -m 'not slow'"
+addopts = "--cov=src/kiss --cov-branch -m 'not slow and not process_killer'"
 # Silence non-actionable third-party DeprecationWarnings that the test
 # session cannot fix locally:
 #   * ``google.genai`` re-exports ``typing._UnionGenericAlias`` (slated

@@ -50,6 +50,8 @@ import textwrap
 import time
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[5]
 INSTALL_SCRIPT = REPO / "install.sh"
 
@@ -222,6 +224,7 @@ def _outer_trap_harness(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     return harness, log, marker, ready
 
 
+@pytest.mark.process_killer
 def test_install_sh_outer_trap_survives_sigint(tmp_path: Path) -> None:
     """SIGINT to the install body must fire the trap and keep going.
 
@@ -281,6 +284,7 @@ def test_install_sh_outer_trap_survives_sigint(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.process_killer
 def test_install_sh_outer_trap_survives_sighup(tmp_path: Path) -> None:
     """SIGHUP must trigger the re-route handler and the script must keep going.
 
