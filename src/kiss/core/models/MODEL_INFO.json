@@ -202,7 +202,7 @@
     "gen": true
   },
   "cc/opus": {
-    "context_length": 200000,
+    "context_length": 500000,
     "input_price_per_1M": 0.0,
     "output_price_per_1M": 0.0,
     "fc": true,
@@ -210,7 +210,7 @@
     "gen": true
   },
   "cc/sonnet": {
-    "context_length": 200000,
+    "context_length": 500000,
     "input_price_per_1M": 0.0,
     "output_price_per_1M": 0.0,
     "fc": true,
@@ -218,7 +218,7 @@
     "gen": true
   },
   "claude-fable-5": {
-    "context_length": 400000,
+    "context_length": 500000,
     "input_price_per_1M": 10.0,
     "output_price_per_1M": 50.0,
     "fc": true,
@@ -293,7 +293,7 @@
     "gen": true
   },
   "claude-opus-4-8": {
-    "context_length": 200000,
+    "context_length": 500000,
     "input_price_per_1M": 5.0,
     "output_price_per_1M": 25.0,
     "fc": true,
@@ -301,7 +301,7 @@
     "gen": true
   },
   "claude-opus-5": {
-    "context_length": 1000000,
+    "context_length": 500000,
     "input_price_per_1M": 5.0,
     "output_price_per_1M": 25.0,
     "fc": true,
@@ -334,7 +334,7 @@
     "gen": true
   },
   "claude-sonnet-5": {
-    "context_length": 1000000,
+    "context_length": 500000,
     "input_price_per_1M": 2.0,
     "output_price_per_1M": 10.0,
     "fc": true,
