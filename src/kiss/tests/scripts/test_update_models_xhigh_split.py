@@ -60,7 +60,7 @@ def test_new_model_with_thinking_xhigh_emits_two_entries(
     new_models = [
         {
             "name": "gpt-5.5",
-            "context_length": 1_050_000,
+            "context_length": 900_000,
             "input_price_per_1M": 5.0,
             "output_price_per_1M": 30.0,
             "source": "openai",
@@ -94,7 +94,7 @@ def test_new_model_with_thinking_xhigh_emits_two_entries(
         assert data["gpt-5.5"][field] == data["gpt-5.5-xhigh"][field], (
             f"Sibling must inherit {field}"
         )
-    assert data["gpt-5.5"]["context_length"] == 1_050_000
+    assert data["gpt-5.5"]["context_length"] == 900_000
 
 
 def test_new_model_with_thinking_high_does_not_split(
@@ -219,7 +219,7 @@ def test_update_flipping_away_from_xhigh_removes_sibling(
     _redirect_model_info(monkeypatch, target)
     initial = {
         "gpt-5.5": {
-            "context_length": 1_050_000,
+            "context_length": 900_000,
             "input_price_per_1M": 5.0,
             "output_price_per_1M": 30.0,
             "fc": True,
@@ -228,7 +228,7 @@ def test_update_flipping_away_from_xhigh_removes_sibling(
             "thinking": "high",
         },
         "gpt-5.5-xhigh": {
-            "context_length": 1_050_000,
+            "context_length": 900_000,
             "input_price_per_1M": 5.0,
             "output_price_per_1M": 30.0,
             "fc": True,
@@ -242,7 +242,7 @@ def test_update_flipping_away_from_xhigh_removes_sibling(
 
     current = {
         "gpt-5.5": {
-            "context_length": 1_050_000,
+            "context_length": 900_000,
             "input_price_per_1M": 5.0,
             "output_price_per_1M": 30.0,
             "fc": True,
@@ -251,7 +251,7 @@ def test_update_flipping_away_from_xhigh_removes_sibling(
             "thinking": "high",
         },
         "gpt-5.5-xhigh": {
-            "context_length": 1_050_000,
+            "context_length": 900_000,
             "input_price_per_1M": 5.0,
             "output_price_per_1M": 30.0,
             "fc": True,
@@ -289,7 +289,7 @@ def test_xhigh_split_idempotent_on_rerun(
     new_models_first = [
         {
             "name": "gpt-5.5",
-            "context_length": 1_050_000,
+            "context_length": 900_000,
             "input_price_per_1M": 5.0,
             "output_price_per_1M": 30.0,
             "source": "openai",
@@ -347,7 +347,7 @@ def test_xhigh_split_dry_run_does_not_write(
     new_models = [
         {
             "name": "gpt-5.5",
-            "context_length": 1_050_000,
+            "context_length": 900_000,
             "input_price_per_1M": 5.0,
             "output_price_per_1M": 30.0,
             "source": "openai",
@@ -409,7 +409,7 @@ def test_xhigh_sibling_carries_comment(
     new_models = [
         {
             "name": "gpt-5.5",
-            "context_length": 1_050_000,
+            "context_length": 900_000,
             "input_price_per_1M": 5.0,
             "output_price_per_1M": 30.0,
             "source": "openai",
@@ -439,7 +439,7 @@ def test_xhigh_split_for_openrouter_openai_model(
     new_models = [
         {
             "name": "openrouter/openai/gpt-5.5",
-            "context_length": 1_050_000,
+            "context_length": 900_000,
             "input_price_per_1M": 5.0,
             "output_price_per_1M": 30.0,
             "source": "openrouter",
@@ -478,7 +478,7 @@ def test_update_with_xhigh_when_base_entry_missing_in_data(
 
     current = {
         "gpt-5.5": {
-            "context_length": 1_050_000,
+            "context_length": 900_000,
             "input_price_per_1M": 5.0,
             "output_price_per_1M": 30.0,
             "fc": True,
@@ -497,7 +497,7 @@ def test_update_with_xhigh_when_base_entry_missing_in_data(
     assert "gpt-5.5-xhigh" in data
     assert data["gpt-5.5"]["thinking"] == "high"
     assert data["gpt-5.5-xhigh"]["thinking"] == "xhigh"
-    assert data["gpt-5.5-xhigh"]["context_length"] == 1_050_000
+    assert data["gpt-5.5-xhigh"]["context_length"] == 900_000
 
 
 def test_non_thinking_update_preserves_and_syncs_xhigh_sibling(
@@ -515,7 +515,7 @@ def test_non_thinking_update_preserves_and_syncs_xhigh_sibling(
     _redirect_model_info(monkeypatch, target)
     initial = {
         "gpt-5.5": {
-            "context_length": 1_050_000,
+            "context_length": 900_000,
             "input_price_per_1M": 5.0,
             "output_price_per_1M": 30.0,
             "fc": True,
@@ -524,7 +524,7 @@ def test_non_thinking_update_preserves_and_syncs_xhigh_sibling(
             "thinking": "high",
         },
         "gpt-5.5-xhigh": {
-            "context_length": 1_050_000,
+            "context_length": 900_000,
             "input_price_per_1M": 5.0,
             "output_price_per_1M": 30.0,
             "fc": True,
@@ -540,7 +540,7 @@ def test_non_thinking_update_preserves_and_syncs_xhigh_sibling(
         {
             "name": "gpt-5.5",
             "changes": {
-                "context_length": 1_100_000,
+                "context_length": 950_000,
                 "input_price_per_1M": 4.5,
                 "output_price_per_1M": 28.0,
                 "fc": False,
@@ -553,7 +553,7 @@ def test_non_thinking_update_preserves_and_syncs_xhigh_sibling(
     data = _read(target)
     assert "gpt-5.5-xhigh" in data, "Non-thinking updates must preserve sibling"
     for name, expected_thinking in (("gpt-5.5", "high"), ("gpt-5.5-xhigh", "xhigh")):
-        assert data[name]["context_length"] == 1_100_000
+        assert data[name]["context_length"] == 950_000
         assert data[name]["input_price_per_1M"] == 4.5
         assert data[name]["output_price_per_1M"] == 28.0
         assert data[name]["fc"] is False
@@ -590,7 +590,7 @@ def test_existing_unsplit_xhigh_entry_is_migrated_without_other_changes(
     _redirect_model_info(monkeypatch, target)
     initial = {
         "gpt-5.5": {
-            "context_length": 1_050_000,
+            "context_length": 900_000,
             "input_price_per_1M": 5.0,
             "output_price_per_1M": 30.0,
             "fc": True,
@@ -607,7 +607,7 @@ def test_existing_unsplit_xhigh_entry_is_migrated_without_other_changes(
     data = _read(target)
     assert data["gpt-5.5"]["thinking"] == "high"
     assert data["gpt-5.5-xhigh"]["thinking"] == "xhigh"
-    assert data["gpt-5.5-xhigh"]["context_length"] == 1_050_000
+    assert data["gpt-5.5-xhigh"]["context_length"] == 900_000
 
 
 def test_malformed_generated_xhigh_sibling_is_repaired(
@@ -619,7 +619,7 @@ def test_malformed_generated_xhigh_sibling_is_repaired(
     _redirect_model_info(monkeypatch, target)
     initial = {
         "gpt-5.5": {
-            "context_length": 1_050_000,
+            "context_length": 900_000,
             "input_price_per_1M": 5.0,
             "output_price_per_1M": 30.0,
             "fc": True,
@@ -658,7 +658,7 @@ def test_orphan_generated_xhigh_alias_is_removed(
     _redirect_model_info(monkeypatch, target)
     initial = {
         "gpt-5.5-xhigh": {
-            "context_length": 1_050_000,
+            "context_length": 900_000,
             "input_price_per_1M": 5.0,
             "output_price_per_1M": 30.0,
             "fc": True,
@@ -685,7 +685,7 @@ def test_main_test_existing_skips_generated_xhigh_alias(
     target = tmp_path / "MODEL_INFO.json"
     initial = {
         "gpt-5.5": {
-            "context_length": 1_050_000,
+            "context_length": 900_000,
             "input_price_per_1M": 5.0,
             "output_price_per_1M": 30.0,
             "fc": True,
@@ -694,7 +694,7 @@ def test_main_test_existing_skips_generated_xhigh_alias(
             "thinking": "high",
         },
         "gpt-5.5-xhigh": {
-            "context_length": 1_050_000,
+            "context_length": 900_000,
             "input_price_per_1M": 5.0,
             "output_price_per_1M": 30.0,
             "fc": True,
@@ -746,7 +746,7 @@ def test_deprecated_base_also_drops_xhigh_sibling(
     _redirect_model_info(monkeypatch, target)
     initial = {
         "gpt-5.5": {
-            "context_length": 1_050_000,
+            "context_length": 900_000,
             "input_price_per_1M": 5.0,
             "output_price_per_1M": 30.0,
             "fc": True,
@@ -755,7 +755,7 @@ def test_deprecated_base_also_drops_xhigh_sibling(
             "thinking": "high",
         },
         "gpt-5.5-xhigh": {
-            "context_length": 1_050_000,
+            "context_length": 900_000,
             "input_price_per_1M": 5.0,
             "output_price_per_1M": 30.0,
             "fc": True,

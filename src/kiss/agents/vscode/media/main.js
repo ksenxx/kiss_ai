@@ -3909,6 +3909,19 @@
         target.appendChild(warnDiv);
         break;
       }
+      case 'error': {
+        // Background-tab error banner (the top-level ``case 'error'``
+        // routes a LOCAL background tab's error here via
+        // ``processOutputEventForBgTab``) — rendered identically to
+        // the live ``addError`` banner so the user sees it when
+        // switching to the owning tab.  ``error`` is not a persisted
+        // display type, so replays never produce this case.
+        const errDiv = mkEl('div', 'ev tr err');
+        errDiv.innerHTML =
+          '<strong>Error:</strong> ' + esc(ev.text || ev.message || '');
+        target.appendChild(errDiv);
+        break;
+      }
     }
   }
 
@@ -5080,6 +5093,15 @@
         }
         return;
       case 'notification':
+        // Tab-stamped toasts (e.g. WorktreeSorcarAgent's auto-commit
+        // lifecycle) belong to the WINDOW that owns the tab: the
+        // daemon broadcasts tab-stamped events to every connected
+        // client, so a tabId that resolves to NO local tab is another
+        // window's toast and must not render here.  A background
+        // LOCAL tab's toast still renders (notifications are
+        // window-level UI, not transcript content); tabless
+        // notifications (server reset, updates) stay global.
+        if (ev.tabId && !getTab(ev.tabId)) break;
         updateNotification(ev);
         break;
       case 'fileContent':
@@ -5279,7 +5301,17 @@
         break;
       }
       case 'error':
-        if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
+        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
+          // Route to the owning BACKGROUND tab's saved fragment
+          // (mirrors the ``warning`` treatment) so the error is
+          // visible when the user switches to that tab — e.g. the
+          // task-start merge-guard error or a remote-web merge
+          // reject failure landing on a background tab.  Unknown
+          // tab ids (other VS Code windows) are dropped as before.
+          const bgErrTab = findTabByEvt(ev);
+          if (bgErrTab) processOutputEventForBgTab(ev, bgErrTab);
+          break;
+        }
         addError(ev.text);
         break;
       case 'notice':
@@ -6118,6 +6150,18 @@
         // unrelated chats / chat_ids.
         if (ev.parent_tab_id && !tabs.find(t => t.id === ev.parent_tab_id))
           break;
+        // A BLANK ``parent_tab_id`` means "convert an EXISTING tab in
+        // place" — the direct history-open of a sub-agent row, where
+        // the clicked webview created the target tab itself and
+        // posted ``resumeSession`` before the backend broadcast this
+        // conversion (``_resolve_parent_tab_id_for_sub`` validly
+        // returns "" when the parent task has no live backend
+        // state).  Every OTHER webview also receives the broadcast;
+        // without this guard each of them materialised a phantom
+        // sub-agent tab with the same id and the follow-up
+        // tabId-stamped ``task_events`` leaked the sub-agent's
+        // transcript into every window.
+        if (!ev.parent_tab_id && !getTab(ev.tab_id)) break;
         // Trim so trailing newlines from the backend description don't
         // bleed into taskPanelHTML and resurface in the user's clipboard
         // when they copy-select the task panel.
