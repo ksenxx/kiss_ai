@@ -2135,11 +2135,25 @@ class WebPrinter(JsonPrinter):
             # stamped ``tabId`` is stripped from the recorded copy
             # because replay re-stamps events with the subscribing
             # viewer's own tab id.  The exception is gated on
-            # ``type == "prompt"`` — other tab-stamped events (e.g.
-            # ``status``) may carry a ``taskId`` that is a
+            # ``type in ("prompt", "result")`` — other tab-stamped
+            # events (e.g. ``status``) may carry a ``taskId`` that is a
             # client-supplied CORRELATION id, not a task-stream key,
             # and must stay transient.
-            if event.get("type") == "prompt" and event.get("taskId"):
+            #
+            # ``result`` joined the exception because task_runner's
+            # failure / user-stop paths used to broadcast their
+            # terminal ``{"type": "result"}`` panel stamped with
+            # ``tabId`` only — shown live but never recorded or
+            # persisted, so reloading the webview / loading the task
+            # from history / adjacent-task scrolling showed NO Result
+            # panel for a stopped or failed task.  task_runner now
+            # broadcasts ``taskId``-only (standard record → persist →
+            # fan-out path) whenever the task row id is known, so this
+            # branch is a DEFENSIVE NET: any emitter that still
+            # broadcasts a tab-stamped result carrying a task-stream
+            # ``taskId`` gets a durable tabId-stripped copy instead of
+            # silently losing the panel on replay.
+            if event.get("type") in ("prompt", "result") and event.get("taskId"):
                 record = {k: v for k, v in event.items() if k != "tabId"}
                 with self._lock:
                     self._record_event(record)
