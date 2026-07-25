@@ -2135,11 +2135,25 @@ class WebPrinter(JsonPrinter):
             # stamped ``tabId`` is stripped from the recorded copy
             # because replay re-stamps events with the subscribing
             # viewer's own tab id.  The exception is gated on
-            # ``type == "prompt"`` — other tab-stamped events (e.g.
-            # ``status``) may carry a ``taskId`` that is a
+            # ``type in ("prompt", "result")`` — other tab-stamped
+            # events (e.g. ``status``) may carry a ``taskId`` that is a
             # client-supplied CORRELATION id, not a task-stream key,
             # and must stay transient.
-            if event.get("type") == "prompt" and event.get("taskId"):
+            #
+            # ``result`` joined the exception because task_runner's
+            # failure / user-stop paths used to broadcast their
+            # terminal ``{"type": "result"}`` panel stamped with
+            # ``tabId`` only — shown live but never recorded or
+            # persisted, so reloading the webview / loading the task
+            # from history / adjacent-task scrolling showed NO Result
+            # panel for a stopped or failed task.  task_runner now
+            # broadcasts ``taskId``-only (standard record → persist →
+            # fan-out path) whenever the task row id is known, so this
+            # branch is a DEFENSIVE NET: any emitter that still
+            # broadcasts a tab-stamped result carrying a task-stream
+            # ``taskId`` gets a durable tabId-stripped copy instead of
+            # silently losing the panel on replay.
+            if event.get("type") in ("prompt", "result") and event.get("taskId"):
                 record = {k: v for k, v in event.items() if k != "tabId"}
                 with self._lock:
                     self._record_event(record)
@@ -2207,10 +2221,20 @@ class WebPrinter(JsonPrinter):
         cheap.  ``event`` always carries at least ``type`` and
         ``taskId``, so the splice below produces exactly
         ``json.dumps({**event, "tabId": tab_id})`` (sans ordering).
+
+        Any ``tabId`` already present on *event* is stripped first:
+        events can reach this fan-out still carrying a stale stamp
+        (e.g. ``_relay_cli_event`` forwarding the CLI bridge's
+        ``subagentDone`` with its ``tabId: ""`` marker), and splicing
+        a second ``"tabId"`` member would produce ambiguous JSON with
+        duplicate keys — routed correctly today only because parsers
+        happen to keep the last member.
         """
         targets = self._fanout_targets(event.get("taskId"))
         if not targets:
             return
+        if "tabId" in event:
+            event = {k: v for k, v in event.items() if k != "tabId"}
         if event.get("type") == "talk":
             # Talk events need per-tab playback arbitration so one
             # utterance is heard exactly once per device.
@@ -2392,6 +2416,12 @@ class WebPrinter(JsonPrinter):
         targets = self._fanout_targets(event.get("taskId"))
         if not targets:
             return
+        if "tabId" in event:
+            # Same duplicate-member guard as :meth:`_fanout_stamped`:
+            # the CLI forwards its events verbatim, so a stale
+            # ``tabId`` stamp must not survive next to the spliced
+            # per-subscriber one.
+            event = {k: v for k, v in event.items() if k != "tabId"}
         base = json.dumps(event)[:-1]
         muted_base = json.dumps({**event, "muted": True})[:-1]
         for tab_id in targets:
