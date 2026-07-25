@@ -20,8 +20,9 @@ was wrong on two counts:
    ``max_input_tokens=1_000_000``.  KISS deliberately pins
    ``claude-fable-5`` to ``400_000`` (a KISS-side cap chosen to
    bound worst-case prompt cost while still leaving comfortable
-   headroom over the 200K legacy models); ``claude-sonnet-5`` still
-   tracks the live API value.
+   headroom over the 200K legacy models); ``claude-sonnet-5`` is
+   pinned to ``500_000`` by the catalog-wide >=1M context cap in
+   ``update_models.py``.
 
 This test locks in the corrected values by querying the *live*
 Anthropic ``/v1/models`` endpoint and comparing every capability
@@ -49,10 +50,14 @@ _MODELS_UNDER_TEST = ("claude-fable-5", "claude-sonnet-5")
 # KISS deliberately pins ``claude-fable-5.context_length`` below
 # Anthropic's advertised ``max_input_tokens=1_000_000`` to bound
 # worst-case prompt-cost and truncate before the tail of the window
-# where quality is known to degrade.  Models absent from this map
-# still track the live API value.
+# where quality is known to degrade.  ``claude-sonnet-5`` is pinned to
+# ``500_000`` by the catalog-wide cap in ``update_models.py``
+# (``_cap_context_length``: any context length >= 1_000_000 is written
+# as 500_000).  Models absent from this map still track the live API
+# value.
 _CONTEXT_LENGTH_OVERRIDES: dict[str, int] = {
     "claude-fable-5": 400_000,
+    "claude-sonnet-5": 500_000,
 }
 
 
