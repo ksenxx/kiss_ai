@@ -2221,10 +2221,20 @@ class WebPrinter(JsonPrinter):
         cheap.  ``event`` always carries at least ``type`` and
         ``taskId``, so the splice below produces exactly
         ``json.dumps({**event, "tabId": tab_id})`` (sans ordering).
+
+        Any ``tabId`` already present on *event* is stripped first:
+        events can reach this fan-out still carrying a stale stamp
+        (e.g. ``_relay_cli_event`` forwarding the CLI bridge's
+        ``subagentDone`` with its ``tabId: ""`` marker), and splicing
+        a second ``"tabId"`` member would produce ambiguous JSON with
+        duplicate keys — routed correctly today only because parsers
+        happen to keep the last member.
         """
         targets = self._fanout_targets(event.get("taskId"))
         if not targets:
             return
+        if "tabId" in event:
+            event = {k: v for k, v in event.items() if k != "tabId"}
         if event.get("type") == "talk":
             # Talk events need per-tab playback arbitration so one
             # utterance is heard exactly once per device.
@@ -2406,6 +2416,12 @@ class WebPrinter(JsonPrinter):
         targets = self._fanout_targets(event.get("taskId"))
         if not targets:
             return
+        if "tabId" in event:
+            # Same duplicate-member guard as :meth:`_fanout_stamped`:
+            # the CLI forwards its events verbatim, so a stale
+            # ``tabId`` stamp must not survive next to the spliced
+            # per-subscriber one.
+            event = {k: v for k, v in event.items() if k != "tabId"}
         base = json.dumps(event)[:-1]
         muted_base = json.dumps({**event, "muted": True})[:-1]
         for tab_id in targets:
