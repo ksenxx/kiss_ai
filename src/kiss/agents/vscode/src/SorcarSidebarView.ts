@@ -583,9 +583,21 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         // learned here for later tab-stamped events (merge, worktree,
         // askUser) to pass the _isOwnTab gate.
         const subMsg = msg as {tab_id?: string; parent_tab_id?: string};
+        // A blank parent_tab_id means "convert an EXISTING tab in
+        // place" (direct history-open of a sub-agent row).  The tab
+        // being converted already belongs to exactly one window —
+        // the one whose webview created it and posted resumeSession
+        // — so ownership is only confirmed when the target tab is
+        // ALREADY owned here.  Blindly adopting on a blank parent
+        // made every window claim the same tab id, so foreign
+        // tab-stamped events (merge_data, askUser, worktree_*)
+        // passed this window's _isOwnTab gate and triggered native
+        // UI side effects for another window's task.
         if (
           subMsg.tab_id &&
-          (!subMsg.parent_tab_id || this._ownTabs.has(subMsg.parent_tab_id))
+          (subMsg.parent_tab_id
+            ? this._ownTabs.has(subMsg.parent_tab_id)
+            : this._ownTabs.has(subMsg.tab_id))
         ) {
           this._ownTabs.add(subMsg.tab_id);
         }

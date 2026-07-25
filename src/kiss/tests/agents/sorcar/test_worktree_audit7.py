@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
+import kiss.core.config as kiss_config
 from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     _git,
@@ -250,8 +251,17 @@ class TestBug32Fix:
     def setup_method(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self._saved = _redirect_db(self._tmpdir)
+        # Redirect the artifact root into this test's private tmpdir so
+        # ``_merge_data_dir()`` (and the final ``rmtree`` of it) never
+        # touch the real shared ``<project>/.kiss.artifacts/merge_dir``.
+        # Without this, concurrently running test processes that create
+        # per-tab merge subdirectories race with the ``rmtree`` here
+        # (OSError: Directory not empty) and lose their merge data.
+        self._saved_project_dir = kiss_config._PROJECT_DIR
+        kiss_config._PROJECT_DIR = Path(self._tmpdir)
 
     def teardown_method(self) -> None:
+        kiss_config._PROJECT_DIR = self._saved_project_dir
         _restore_db(self._saved)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
