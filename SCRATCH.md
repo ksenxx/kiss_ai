@@ -8,11 +8,10 @@ I tried this on a hard systems problem. Over several long unattended sessions, m
 
 Writing those six short prompts took some thought. A task an agent can run with for hours needs exact goals, hard constraints, and tests the agent cannot game. That is the skill I am practicing now, and it has become my definition of a productive day: a few focused hours of task writing, while the agents do the rest (research, software development, paper writing, AI discovery).
 
-I would genuinely like to compare notes. What is the longest task you have handed to an AI agent, and did the result hold up?  Do you spend all your working time in front of Claude Code or Codex, verifying their outcomes?
+I would genuinely like to compare notes. What is the longest task you have handed to an AI agent, and did the result hold up? Do you spend all your working time in front of Claude Code or Codex, verifying their outcomes?
 
 Paper: https://kisssorcar.github.io/assets/hydra_kv.pdf
 
 Or you can use this promptlet with free OSS KISS Sorcar (https://github.com/ksenxx/kiss_ai) and see the magic happening dynamically: If ./ROUTING.md exists, use the instructions in the file for model routing. Otherwise, use the best model from ~/.kiss/MODEL_INFO.json for various subtasks. Search the internet extensively to figure out which model is best yet cheap for each sub-task. Here are some hints, but the internet has better knowledge: claude-fable-5 — best for SWE work, gpt-5.6-sol — best for reviewing, and openrouter/z-ai/glm-5.2 — for SWE tasks when budget is low, and gpt-5.5 for review when budget is low. Irrespective of whether ./ROUTING.md exists or not, after the task completes, based on your experience in completing the task, create or update the model routing strategy (as text) in ./ROUTING.md that reduces token cost while not degrading the quality of the work.
 
-
-XSS, SQL injection, Authentication bypass, insecure cryptography 
+XSS, SQL injection, Authentication bypass, insecure cryptography
