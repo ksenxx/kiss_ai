@@ -1079,17 +1079,39 @@ class _TaskRunnerMixin:
                         getattr(subtask_exc, "terminal_result_broadcast", False)
                     )
                     if not already_broadcast:
-                        self.printer.broadcast(
-                            {
-                                "type": "result",
-                                "text": result_summary,
-                                "success": False,
-                                "total_tokens": tokens_delta,
-                                "cost": f"${cost_delta:.4f}",
-                                "step_count": steps_delta,
-                                "tabId": tab_id,
-                            }
-                        )
+                        # Route by whether the run's ``task_history``
+                        # row id is known (refreshed by the per-subtask
+                        # ``finally`` above):
+                        #
+                        # * row id known — broadcast ``taskId``-only so
+                        #   ``WebPrinter.broadcast`` takes the SAME
+                        #   record → persist → per-subscriber fan-out
+                        #   path a SUCCESS result takes.  This makes
+                        #   the terminal Result durable (before the fix
+                        #   a stopped/failed task showed its Result
+                        #   panel live but LOST it on every replay —
+                        #   webview reload, history load, adjacent-task
+                        #   scroll) AND delivers it live to every tab
+                        #   viewing the chat, not only the launcher.
+                        # * no row id (failure before ``_add_task``, or
+                        #   a plain third-party agent without
+                        #   ``_last_task_id``) — there is no row to
+                        #   persist under, so fall back to the
+                        #   transient ``tabId``-scoped broadcast that
+                        #   reaches the launching tab only.
+                        failure_result: dict[str, Any] = {
+                            "type": "result",
+                            "text": result_summary,
+                            "success": False,
+                            "total_tokens": tokens_delta,
+                            "cost": f"${cost_delta:.4f}",
+                            "step_count": steps_delta,
+                        }
+                        if tab.task_history_id:
+                            failure_result["taskId"] = str(tab.task_history_id)
+                        else:
+                            failure_result["tabId"] = tab_id
+                        self.printer.broadcast(failure_result)
                     break
                 if subtask_index < len(subtasks) - 1:
                     # W2-F2: persist THIS subtask's result / end event /
@@ -1184,17 +1206,30 @@ class _TaskRunnerMixin:
                 sub_cost_base,
                 sub_steps_base,
             )
-            self.printer.broadcast(
-                {
-                    "type": "result",
-                    "text": result_summary,
-                    "success": False,
-                    "total_tokens": tokens_delta,
-                    "cost": f"${cost_delta:.4f}",
-                    "step_count": steps_delta,
-                    "tabId": tab_id,
-                }
-            )
+            # Same routing as the in-loop failure broadcast: when the
+            # current run's row id is known (``tab.task_history_id`` is
+            # reset to ``None`` at run start and refreshed by the
+            # per-subtask ``finally``, so it can never point at a
+            # PREVIOUS task here) broadcast ``taskId``-only so the
+            # terminal Result takes the standard record → persist →
+            # per-subscriber fan-out path — durable across replay
+            # (webview reload / history load / adjacent-task scroll)
+            # and delivered live to every tab viewing the chat.  With
+            # no row id there is nothing to persist under: fall back to
+            # the transient ``tabId``-scoped broadcast.
+            outer_failure_result: dict[str, Any] = {
+                "type": "result",
+                "text": result_summary,
+                "success": False,
+                "total_tokens": tokens_delta,
+                "cost": f"${cost_delta:.4f}",
+                "step_count": steps_delta,
+            }
+            if tab.task_history_id:
+                outer_failure_result["taskId"] = str(tab.task_history_id)
+            else:
+                outer_failure_result["tabId"] = tab_id
+            self.printer.broadcast(outer_failure_result)
         finally:
             try:
                 # RACE-3 fix: keep ``is_task_active = True`` through
