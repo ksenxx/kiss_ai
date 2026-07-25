@@ -90,6 +90,24 @@ _EXCLUDED_PREFIXES: tuple[str, ...] = (
 
 _SSL_CTX = ssl.create_default_context()
 
+# Context lengths at or above this threshold are capped at _CAPPED_CONTEXT_LENGTH
+# in the bundled catalog (both for freshly fetched vendor data and for entries
+# already present in MODEL_INFO.json).
+_CONTEXT_CAP_THRESHOLD = 1_000_000
+_CAPPED_CONTEXT_LENGTH = 500_000
+
+
+def _cap_context_length(ctx: int) -> int:
+    """Return ``ctx`` capped at 500000 when it is 1000000 or above.
+
+    Applied to every context length fetched from vendor APIs and to every
+    entry written to ``MODEL_INFO.json`` so the catalog never advertises a
+    context window of one million tokens or more.
+    """
+    if ctx >= _CONTEXT_CAP_THRESHOLD:
+        return _CAPPED_CONTEXT_LENGTH
+    return ctx
+
 
 def _is_excluded_provider(name: str) -> bool:
     """Return True if ``name`` belongs to a permanently excluded provider.
@@ -137,7 +155,7 @@ def fetch_openrouter(verbose: bool = False) -> dict[str, dict]:
         pricing = m.get("pricing", {})
         prompt_per_tok = float(pricing.get("prompt") or "0")
         completion_per_tok = float(pricing.get("completion") or "0")
-        ctx = m.get("context_length", 0)
+        ctx = _cap_context_length(m.get("context_length", 0) or 0)
         name = f"openrouter/{model_id}"
         if _is_excluded_provider(name):  # pragma: no branch
             continue
@@ -174,7 +192,7 @@ def fetch_together(verbose: bool = False) -> dict[str, dict]:
     for m in data:  # pragma: no branch
         model_id = m.get("id", "")
         model_type = m.get("type", "")
-        ctx = m.get("context_length", 0) or 0
+        ctx = _cap_context_length(m.get("context_length", 0) or 0)
         pricing = m.get("pricing", {})
         inp = float(pricing.get("input", 0) or 0)
         out = float(pricing.get("output", 0) or 0)
@@ -224,7 +242,7 @@ def fetch_gemini(verbose: bool = False) -> dict[str, dict]:
             continue
         if any(s in model_id for s in skip_fragments):  # pragma: no branch
             continue
-        ctx = m.get("inputTokenLimit", 0)
+        ctx = _cap_context_length(m.get("inputTokenLimit", 0) or 0)
         methods = m.get("supportedGenerationMethods", [])
         is_emb = "embedContent" in methods
         is_gen = "generateContent" in methods
@@ -718,6 +736,7 @@ def _add_codex_candidates(
             continue
         or_info = _lookup_openrouter_pricing(slug, "openai", openrouter)
         ctx = or_info["context_length"] if or_info and or_info.get("context_length") else 400000
+        ctx = _cap_context_length(ctx)
         new_models.append(
             {
                 "name": codex_name,
@@ -1108,8 +1127,28 @@ def _read_model_info_json(path: Path) -> dict[str, dict]:
     return json.loads(path.read_text(encoding="utf-8"))  # type: ignore[no-any-return]
 
 
+def _has_context_cap_changes(data: dict[str, dict]) -> bool:
+    """Return True when any entry's context length still needs capping."""
+    return any(
+        entry.get("context_length", 0) >= _CONTEXT_CAP_THRESHOLD for entry in data.values()
+    )
+
+
+def _normalize_context_caps(data: dict[str, dict]) -> None:
+    """Cap every entry's context length at 500000 when it is 1000000 or above."""
+    for entry in data.values():
+        ctx = entry.get("context_length", 0)
+        if ctx >= _CONTEXT_CAP_THRESHOLD:
+            entry["context_length"] = _CAPPED_CONTEXT_LENGTH
+
+
 def _write_model_info_json(path: Path, data: dict[str, dict]) -> None:
-    """Write ``data`` to ``path`` as sorted, pretty-printed JSON."""
+    """Write ``data`` to ``path`` as sorted, pretty-printed JSON.
+
+    Context lengths of 1000000 or above are capped at 500000 before
+    writing so the on-disk catalog never advertises a >=1M context window.
+    """
+    _normalize_context_caps(data)
     sorted_data = dict(sorted(data.items()))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(sorted_data, indent=2) + "\n", encoding="utf-8")
@@ -1438,15 +1477,16 @@ def main() -> None:
     deprecated_names = {d["name"] for d in deprecated}
     new_models = [nm for nm in new_models if nm["name"] not in deprecated_names]
 
-    needs_xhigh_normalization = _has_xhigh_normalization_changes(
-        _read_model_info_json(MODEL_INFO_PATH)
-    )
+    on_disk = _read_model_info_json(MODEL_INFO_PATH)
+    needs_xhigh_normalization = _has_xhigh_normalization_changes(on_disk)
+    needs_context_cap = _has_context_cap_changes(on_disk)
     if (  # pragma: no branch
         not updates
         and not new_models
         and not deprecated
         and not args.test_existing
         and not needs_xhigh_normalization
+        and not needs_context_cap
     ):
         print("\nEverything is up to date!")
         return

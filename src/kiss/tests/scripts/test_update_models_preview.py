@@ -166,7 +166,7 @@ def test_codex_candidate_uses_openrouter_context_when_available():
     codex_slugs = {"gpt-5.5"}
     openrouter = {
         "openrouter/openai/gpt-5.5": {
-            "context_length": 1050000,
+            "context_length": 900000,
             "input_price_per_1M": 5.0,
             "output_price_per_1M": 30.0,
             "source": "openrouter",
@@ -175,7 +175,7 @@ def test_codex_candidate_uses_openrouter_context_when_available():
     new_models: list[dict] = []
     _add_codex_candidates(codex_slugs, current, openrouter, new_models)
     [entry] = [m for m in new_models if m["name"] == "codex/gpt-5.5"]
-    assert entry["context_length"] == 1050000
+    assert entry["context_length"] == 900000
 
 
 def test_codex_candidate_only_adds_supported_slugs():
