@@ -632,6 +632,27 @@ class JsonPrinter(Printer):
         """
         stamp_event_ts(event)
         event.pop("recordOnly", None)
+        if "tabId" in event:
+            # Mirror :meth:`WebPrinter.broadcast`'s explicit-tabId
+            # semantics so the base class (production-reachable via
+            # ``VSCodeServer()``'s default printer and the CLI's
+            # ``RecordingConsolePrinter``) cannot drift: events that
+            # carry an explicit ``tabId`` are transient targeted
+            # system events — never recorded or persisted — EXCEPT
+            # task-scoped ``prompt`` / ``result`` events, whose
+            # durable copy is recorded + persisted with the ``tabId``
+            # STRIPPED (replay re-stamps events with the subscribing
+            # viewer's own tab id, so a stale frontend tab id must
+            # never survive in the recording or the DB).  Without
+            # this branch a viewer-targeted transient ``clear`` (a
+            # display type) leaked into the recording/DB and durable
+            # prompt/result copies kept the stale tab id.
+            if event.get("type") in ("prompt", "result") and event.get("taskId"):
+                record = {k: v for k, v in event.items() if k != "tabId"}
+                with self._lock:
+                    self._record_event(record)
+                self._persist_event(record)
+            return
         if event.get("type") in GLOBAL_EVENT_TYPES:
             # Global system broadcast (e.g. ``taskDeleted``): its
             # ``taskId`` is a payload field naming a just-deleted task,
