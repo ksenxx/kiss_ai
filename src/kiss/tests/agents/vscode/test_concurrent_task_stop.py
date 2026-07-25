@@ -205,7 +205,7 @@ class TestConcurrentStopScenario(unittest.TestCase):
             printer._thread_local.task_id = "wt"
             printer.start_recording()
             printer._current_block_type = "thinking"
-            printer.broadcast({"type": "thinking_start", "tabId": "wt"})
+            printer.broadcast({"type": "thinking_start", "taskId": "wt"})
             barrier.wait()
             barrier2.wait()
             delta_type = (
@@ -213,9 +213,9 @@ class TestConcurrentStopScenario(unittest.TestCase):
                 if printer._current_block_type == "thinking"
                 else "text_delta"
             )
-            printer.broadcast({"type": delta_type, "text": "reasoning...", "tabId": "wt"})
+            printer.broadcast({"type": delta_type, "text": "reasoning...", "taskId": "wt"})
             printer._current_block_type = ""
-            printer.broadcast({"type": "thinking_end", "tabId": "wt"})
+            printer.broadcast({"type": "thinking_end", "taskId": "wt"})
             wt_events.extend(printer.stop_recording())
 
         def non_wt_task() -> None:
@@ -402,7 +402,7 @@ class TestStopWtConcurrentScenario(unittest.TestCase):
             printer._thread_local.task_id = "nwt"
             printer.start_recording()
             printer._current_block_type = "thinking"
-            printer.broadcast({"type": "thinking_start", "tabId": "nwt"})
+            printer.broadcast({"type": "thinking_start", "taskId": "nwt"})
             barrier.wait()
             barrier2.wait()
             delta_type = (
@@ -410,9 +410,9 @@ class TestStopWtConcurrentScenario(unittest.TestCase):
                 if printer._current_block_type == "thinking"
                 else "text_delta"
             )
-            printer.broadcast({"type": delta_type, "text": "reasoning...", "tabId": "nwt"})
+            printer.broadcast({"type": delta_type, "text": "reasoning...", "taskId": "nwt"})
             printer._current_block_type = ""
-            printer.broadcast({"type": "thinking_end", "tabId": "nwt"})
+            printer.broadcast({"type": "thinking_end", "taskId": "nwt"})
             nwt_events.extend(printer.stop_recording())
 
         def wt_task() -> None:
