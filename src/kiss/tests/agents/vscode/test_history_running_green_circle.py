@@ -61,6 +61,7 @@ _MEDIA_DIR = (
     / "media"
 )
 _CSS = _MEDIA_DIR / "main.css"
+_API_JS = _MEDIA_DIR / "api.js"
 _JS = _MEDIA_DIR / "main.js"
 _HTML = _MEDIA_DIR / "chat.html"
 
@@ -68,6 +69,7 @@ _HTML = _MEDIA_DIR / "chat.html"
 def _build_test_page() -> str:
     """Return a self-contained HTML page that loads the real CSS+JS."""
     css = _CSS.read_text(encoding="utf-8")
+    api_js = _API_JS.read_text(encoding="utf-8")
     js = _JS.read_text(encoding="utf-8")
     html = _HTML.read_text(encoding="utf-8")
     body_start = html.find("<body")
@@ -135,6 +137,7 @@ def _build_test_page() -> str:
       if (!window.__iifeError) window.__iifeError = String(ev.error || ev.message);
     }});
   </script>
+  <script>{api_js}</script>
   <script>{js}</script>
 </body>
 </html>

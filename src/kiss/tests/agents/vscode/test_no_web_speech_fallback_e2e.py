@@ -230,6 +230,7 @@ win.acquireVsCodeApi = function () {
 };
 
 win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
+win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
 win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
 let replayDone = false;

@@ -51,6 +51,7 @@ _VSCODE_DIR = _KISS_ROOT / "agents" / "vscode"
 _MEDIA_DIR = _VSCODE_DIR / "media"
 _CSS = _MEDIA_DIR / "main.css"
 _CODEX_CSS = _MEDIA_DIR / "remote-codex.css"
+_API_JS = _MEDIA_DIR / "api.js"
 _JS = _MEDIA_DIR / "main.js"
 _HTML = _MEDIA_DIR / "chat.html"
 _TEST_JS = _VSCODE_DIR / "test" / "historyFiltersCollapsible.test.js"
@@ -117,6 +118,7 @@ def _build_test_page(remote_chat: bool = False) -> str:
     ``remote-chat``, replicating the remote web view's restyle.
     """
     css = _CSS.read_text(encoding="utf-8")
+    api_js = _API_JS.read_text(encoding="utf-8")
     js = _JS.read_text(encoding="utf-8")
     html = _HTML.read_text(encoding="utf-8")
     body_start = html.find("<body")
@@ -191,6 +193,7 @@ def _build_test_page(remote_chat: bool = False) -> str:
       }}
     }});
   </script>
+  <script>{api_js}</script>
   <script>{js}</script>
 </body>
 </html>

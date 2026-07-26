@@ -4720,6 +4720,14 @@ class RemoteAccessServer:
                 staleness), giving each window the same isolation for
                 ghost-text completions as for its work_dir.
         """
+        if cmd.get("type") in _VSCODE_ONLY_COMMANDS:
+            # Webview <-> extension-host messages that leak to the
+            # daemon transport are silently dropped BEFORE catalog
+            # validation: they are not server commands, and validating
+            # them (e.g. a ``notificationAction`` missing its ``id``)
+            # would surface a spurious error banner for a message the
+            # server was never meant to handle.
+            return
         error = sorcar_api.validate_command(cmd)
         if error:
             # Reject commands outside the server API (see
@@ -4813,8 +4821,6 @@ class RemoteAccessServer:
             # same gpt-audio call the local listener uses and reply
             # with the voiceSpeech message voice.js already handles.
             await self._handle_voice_transcribe(cmd, endpoint)
-            return
-        if cmd_type in _VSCODE_ONLY_COMMANDS:
             return
         if cmd_type == "activeTasksQuery":
             await self._handle_active_tasks_query(endpoint)
