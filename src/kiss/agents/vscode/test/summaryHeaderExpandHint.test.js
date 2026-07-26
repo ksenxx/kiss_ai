@@ -83,8 +83,13 @@ function makeWebview() {
   // The sourceURL pragma names this eval instance in V8 coverage
   // output so summaryHeaderExpandHint.coverage.js can locate it and
   // gate the summaryhint-coverage region of main.js at 100%.
+  // Evaluate api.js separately so V8 coverage offsets for the
+
+  // sourceURL-labelled main.js eval below start at character 0.
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
       '\n//# sourceURL=summaryhint-main.js',
   );
   return win;

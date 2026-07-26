@@ -169,6 +169,140 @@ def _to_task_result(
     )
 
 
+# ---------------------------------------------------------------------------
+# The Sorcar server API.
+#
+# The single source of truth for every command a user interface (the
+# VS Code extension, the remote webapp, or a CLI/Python client) may
+# send to the daemon.  Both transports (UDS and WSS) speak the same
+# newline-delimited JSON: one object per line, dispatched on its
+# ``"type"`` field.  The daemon validates every incoming command with
+# :func:`validate_command` and answers an invalid one with an
+# ``{"type": "error", "text": ...}`` event instead of processing it.
+#
+# The user interfaces consume this catalog through thin client
+# facades — ``media/api.js`` (chat webview and remote webapp) and
+# ``src/SorcarApi.ts`` (VS Code extension host) — whose methods map
+# 1:1 onto the command names below, so no UI code ever hand-builds a
+# protocol message.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ApiCommand:
+    """One command of the Sorcar server API.
+
+    Attributes:
+        name: The wire value of the command's ``"type"`` field.
+        required: Fields that must be present (and non-``None``) on
+            the command for the daemon to accept it.
+    """
+
+    name: str
+    required: tuple[str, ...] = ()
+
+
+def _catalog(*commands: ApiCommand) -> dict[str, ApiCommand]:
+    """Build a name-keyed command catalog.
+
+    Args:
+        commands: The commands making up the catalog.
+
+    Returns:
+        A dict mapping each command's name to the command.
+    """
+    return {c.name: c for c in commands}
+
+
+#: Every command the daemon accepts, keyed by wire name.
+API: dict[str, ApiCommand] = _catalog(
+    # -- session / task lifecycle ------------------------------------
+    ApiCommand("run", required=("prompt",)),
+    ApiCommand("submit", required=("prompt",)),
+    ApiCommand("appendUserMessage", required=("prompt",)),
+    ApiCommand("stop"),
+    ApiCommand("userAnswer", required=("answer",)),
+    ApiCommand("newChat"),
+    ApiCommand("closeTab", required=("tabId",)),
+    ApiCommand("resumeSession"),
+    ApiCommand("ready"),
+    # -- history / metadata ------------------------------------------
+    ApiCommand("getHistory"),
+    ApiCommand("getAdjacentTask", required=("direction",)),
+    ApiCommand("getFrequentTasks"),
+    ApiCommand("deleteTask", required=("taskId",)),
+    ApiCommand("deleteFrequentTask", required=("task",)),
+    ApiCommand("setFavorite", required=("taskId", "isFavorite")),
+    ApiCommand("getInputHistory"),
+    ApiCommand("getWelcomeSuggestions"),
+    ApiCommand("activeTasksQuery"),
+    # -- models / configuration --------------------------------------
+    ApiCommand("getModels"),
+    ApiCommand("selectModel", required=("model",)),
+    ApiCommand("getConfig"),
+    ApiCommand("saveConfig", required=("config",)),
+    ApiCommand("setWorkDir", required=("workDir",)),
+    # -- files / autocomplete ----------------------------------------
+    ApiCommand("getFiles", required=("prefix",)),
+    ApiCommand("recordFileUsage", required=("path",)),
+    ApiCommand("openFile", required=("path",)),
+    ApiCommand("complete", required=("query",)),
+    # -- worktree / merge / commit flows -----------------------------
+    ApiCommand("mergeAction", required=("action",)),
+    ApiCommand("worktreeAction", required=("action",)),
+    ApiCommand("autocommitAction", required=("action",)),
+    ApiCommand("generateCommitMessage"),
+    # -- daemon administration ---------------------------------------
+    ApiCommand("auth", required=("password",)),
+    ApiCommand("runUpdate"),
+    ApiCommand("serverReset"),
+    # -- voice ---------------------------------------------------------
+    ApiCommand("voiceTranscribe", required=("audio",)),
+    ApiCommand("voiceToggle", required=("enabled",)),
+    ApiCommand("voiceSensitivity", required=("value",)),
+    ApiCommand("voiceAck"),
+    # -- CLI bridge ----------------------------------------------------
+    ApiCommand("cliEvent", required=("event",)),
+    ApiCommand("cliTabHello", required=("tabId",)),
+    ApiCommand("cliTaskStart", required=("taskId",)),
+    ApiCommand("cliTaskEnd", required=("taskId",)),
+    ApiCommand("cliInfo"),
+    # -- VS Code-only webview messages (accepted and dropped by the
+    #    daemon so a remote webapp sharing the webview code never
+    #    triggers spurious errors) --------------------------------------
+    ApiCommand("focusEditor"),
+    ApiCommand("webviewFocusChanged"),
+    ApiCommand("notificationAction", required=("id",)),
+    ApiCommand("sizeReport"),
+    ApiCommand("resolveDroppedPaths", required=("uris",)),
+)
+
+
+def validate_command(cmd: Any) -> str | None:
+    """Validate one client command against the server API catalog.
+
+    Args:
+        cmd: The parsed JSON value received from a client.
+
+    Returns:
+        ``None`` when *cmd* is a valid API command, otherwise a
+        human-readable error string (unknown command name or missing
+        required field).
+    """
+    if not isinstance(cmd, dict):
+        return "Invalid command: expected a JSON object"
+    name = cmd.get("type")
+    if not isinstance(name, str) or not name:
+        return "Invalid command: missing 'type'"
+    spec = API.get(name)
+    if spec is None:
+        return f"Unknown command: {name}"
+    missing = [f for f in spec.required if cmd.get(f) is None]
+    if missing:
+        return f"Invalid {name} command: missing {', '.join(missing)}"
+    return None
+
+
 def run(
     prompt: str,
     *,

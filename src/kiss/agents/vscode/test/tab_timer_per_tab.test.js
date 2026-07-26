@@ -65,7 +65,13 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+  // Evaluate api.js separately so V8 coverage offsets for the
+
+  // sourceURL-labelled main.js eval below start at character 0.
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
@@ -173,9 +179,13 @@ async function testBackgroundTaskDoneShowsDurationAfterSwitch() {
   const activeId = posted.find(m => m.type === 'ready').tabId;
 
   // Materialise a LOCAL background tab the way the backend does it.
+  // The backend emitters always stamp ``parent_tab_id`` with the
+  // spawning tab's id; without it the webview (correctly) refuses to
+  // materialise a phantom tab (see the openSubagentTab guards).
   send(win, {
     type: 'openSubagentTab',
     tab_id: 'bg-tab',
+    parent_tab_id: activeId,
     description: 'background work',
   });
   // The user keeps working in the original (still active) tab.
@@ -269,6 +279,7 @@ async function testDoneLabelSurvivesTabSwitches() {
   send(win, {
     type: 'openSubagentTab',
     tab_id: 'sub-x',
+    parent_tab_id: activeId,
     description: 'sub work',
   });
   clickTab(win, 'sub-x');
@@ -290,6 +301,7 @@ async function testBackgroundReplayWithExtraTimestamps() {
   send(win, {
     type: 'openSubagentTab',
     tab_id: 'hist-tab',
+    parent_tab_id: activeId,
     description: 'history task',
   });
   // Replay a FINISHED task into the background tab (history load):
@@ -328,6 +340,7 @@ async function testRunningTabKeepsAnchorAcrossSwitches() {
   send(win, {
     type: 'openSubagentTab',
     tab_id: 'sub-y',
+    parent_tab_id: activeId,
     description: 'detour',
   });
   clickTab(win, 'sub-y');

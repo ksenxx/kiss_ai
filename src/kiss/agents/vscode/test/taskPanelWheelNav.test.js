@@ -70,8 +70,13 @@ function makeWebview() {
   // The sourceURL pragma names this eval instance in V8 coverage
   // output so taskPanelWheelNav.coverage.js can locate it and enforce
   // 100% line coverage of the taskwheel-coverage regions.
+  // Evaluate api.js separately so V8 coverage offsets for the
+
+  // sourceURL-labelled main.js eval below start at character 0.
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
       '\n//# sourceURL=taskwheel-main.js',
   );
   return {win, posted};

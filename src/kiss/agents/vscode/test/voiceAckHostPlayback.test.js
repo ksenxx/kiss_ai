@@ -251,7 +251,13 @@ async function main() {
   view.resolveWebviewView(wvv.webviewView, {}, {});
   wvv.wire();
   ctx.win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  ctx.win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+  // Evaluate api.js separately so V8 coverage offsets for the
+
+  // sourceURL-labelled main.js eval below start at character 0.
+
+  ctx.win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  ctx.win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   ctx.win.eval(fs.readFileSync(path.join(MEDIA, 'voice.js'), 'utf8'));
   await sleep(80);
 

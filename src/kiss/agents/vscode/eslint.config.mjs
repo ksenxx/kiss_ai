@@ -127,6 +127,8 @@ export default [
         fetch: "readonly",
         crypto: "readonly",
         acquireVsCodeApi: "readonly",
+        createSorcarApi: "readonly",
+        SORCAR_API_COMMANDS: "readonly",
         marked: "readonly",
         hljs: "readonly",
         NodeFilter: "readonly",

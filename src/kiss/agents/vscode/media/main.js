@@ -10,6 +10,11 @@
 (function () {
   // @ts-ignore - vscode is injected by the webview
   const vscode = acquireVsCodeApi();
+  // The Sorcar server API facade (media/api.js) — the only channel
+  // through which this UI talks to the server.  It owns all
+  // message construction; vscode.postMessage is never called
+  // directly anywhere else in this file.
+  const api = createSorcarApi(msg => vscode.postMessage(msg));
 
   /** Format a number with thousand separators (e.g. 12345 → "12,345"). */
   function fmtN(n) {
@@ -314,7 +319,7 @@
     const toast = document.querySelector(notificationSelector(id));
     if (toast && toast.parentNode) toast.parentNode.removeChild(toast);
     if (notifyExtension) {
-      vscode.postMessage({type: 'notificationAction', id: id, action: action});
+      api.notificationAction({id: id, action: action});
     }
   }
 
@@ -1167,7 +1172,7 @@
     for (const id of toClose) {
       const i = tabs.findIndex(t => t.id === id);
       if (i >= 0) tabs.splice(i, 1);
-      vscode.postMessage({type: 'closeTab', tabId: id});
+      api.closeTab({tabId: id});
     }
     // A sub-agent tab closed by hand (tab-bar ×, context menu, or a
     // cascade) must not leave its run_parallel panel uncollapsed —
@@ -1704,8 +1709,8 @@
       stopTimer();
       removeSpinner();
     }
-    vscode.postMessage({type: 'newChat', tabId: tab.id});
-    vscode.postMessage({type: 'getWelcomeSuggestions'});
+    api.newChat({tabId: tab.id});
+    api.getWelcomeSuggestions();
     focusInputWithRetry();
   }
 
@@ -2538,7 +2543,7 @@
     if (inp.value.replace(/\s/g, '').length < 2) return;
     ghostTimer = setTimeout(() => {
       ghostTimer = null;
-      vscode.postMessage({type: 'complete', query: inp.value});
+      api.complete({query: inp.value});
     }, 300);
   }
 
@@ -3110,11 +3115,7 @@
           const subTab = createBackgroundSubagentTab(panelEl._rpParentTabId);
           en.tabId = subTab.id;
           _rpTabPanel.set(subTab.id, panelEl);
-          vscode.postMessage({
-            type: 'resumeSession',
-            taskId: en.taskId,
-            tabId: subTab.id,
-          });
+          api.resumeSession({taskId: en.taskId, tabId: subTab.id});
         }
       }
     } finally {
@@ -4242,12 +4243,7 @@
       overscrollDir = '';
       adjacentLoading = true;
       showAdjacentLoader(dir);
-      vscode.postMessage({
-        type: 'getAdjacentTask',
-        tabId: activeTabId,
-        taskId: taskId,
-        direction: dir,
-      });
+      api.getAdjacentTask({tabId: activeTabId, taskId: taskId, direction: dir});
     }
   }
 
@@ -4604,12 +4600,7 @@
     taskWheelPendingDir = dir;
     adjacentLoading = true;
     showAdjacentLoader(dir);
-    vscode.postMessage({
-      type: 'getAdjacentTask',
-      tabId: activeTabId,
-      taskId: anchorId,
-      direction: dir,
-    });
+    api.getAdjacentTask({tabId: activeTabId, taskId: anchorId, direction: dir});
   }
 
   if (taskPanel) {
@@ -4755,8 +4746,7 @@
   function refreshHistory() {
     if (sidebar.classList.contains('open')) {
       resetHistoryPagination();
-      vscode.postMessage({
-        type: 'getHistory',
+      api.getHistory({
         query: historySearch.value,
         generation: historyGeneration,
       });
@@ -5453,7 +5443,7 @@
       }
       case 'tasks_updated':
         refreshHistory();
-        vscode.postMessage({type: 'getInputHistory'});
+        api.getInputHistory();
         break;
 
       case 'taskDeleted': {
@@ -5750,8 +5740,7 @@
           if (rtTab) rtTab.backendChatId = rtChatId;
           const rtTitle = String(rt.title || '').trim();
           if (rtTitle) updateActiveTabTitle(rtTitle);
-          vscode.postMessage({
-            type: 'resumeSession',
+          api.resumeSession({
             id: rtChatId,
             taskId: rt.taskId || '',
             tabId: activeTabId,
@@ -5766,7 +5755,7 @@
       }
 
       case 'triggerStop':
-        vscode.postMessage({type: 'stop', tabId: activeTabId});
+        api.stop({tabId: activeTabId});
         break;
       case 'appendToInput':
         if (ev.text) {
@@ -5801,8 +5790,7 @@
         // can read (works correctly when VS Code is maximized, which is
         // the common case on first install).
         try {
-          vscode.postMessage({
-            type: 'sizeReport',
+          api.sizeReport({
             innerWidth: window.innerWidth || 0,
             screenWidth:
               (window.screen && window.screen.availWidth) ||
@@ -6134,11 +6122,7 @@
           createNewTab();
           subAgentTabId = activeTabId;
         }
-        vscode.postMessage({
-          type: 'resumeSession',
-          taskId: ev.task_id,
-          tabId: subAgentTabId,
-        });
+        api.resumeSession({taskId: ev.task_id, tabId: subAgentTabId});
         break;
       }
       case 'openSubagentTab': {
@@ -6811,7 +6795,7 @@
             : 'Update KISS Sorcar',
           svg: UPDATE_DOWNLOAD_SVG,
           onClick: () => {
-            vscode.postMessage({type: 'runUpdate'});
+            api.runUpdate();
           },
         },
       ],
@@ -7003,7 +6987,7 @@
       btn.textContent = b.text;
       btn.addEventListener('click', () => {
         disableActionBarBtns(bar);
-        vscode.postMessage(b.msg());
+        api.send(b.msg());
       });
       btns.appendChild(btn);
     });
@@ -7367,11 +7351,7 @@
     };
     Object.keys(mergeActions).forEach(id => {
       document.getElementById(id).addEventListener('click', () => {
-        vscode.postMessage({
-          type: 'mergeAction',
-          action: mergeActions[id],
-          tabId: capturedTabId,
-        });
+        api.mergeAction({action: mergeActions[id], tabId: capturedTabId});
       });
     });
     sb();
@@ -7396,24 +7376,20 @@
       .map(t => {
         return {tabId: t.id, chatId: t.backendChatId};
       });
-    vscode.postMessage({
-      type: 'ready',
-      tabId: activeTabId,
-      restoredTabs: restoredTabs,
-    });
+    api.ready({tabId: activeTabId, restoredTabs: restoredTabs});
     // Request the current config so the welcome-page remote-password
     // mirror (welcome-cfg-remote-password) is populated before the user
     // ever opens the Settings panel.
-    vscode.postMessage({type: 'getConfig'});
+    api.getConfig();
   }
 
   function setupEventListeners() {
     sendBtn.addEventListener('click', sendMessage);
     window.addEventListener('focus', () => {
-      vscode.postMessage({type: 'webviewFocusChanged', focused: true});
+      api.webviewFocusChanged({focused: true});
     });
     window.addEventListener('blur', () => {
-      vscode.postMessage({type: 'webviewFocusChanged', focused: false});
+      api.webviewFocusChanged({focused: false});
     });
     document.addEventListener('keydown', e => {
       if (
@@ -7423,7 +7399,7 @@
         !e.altKey
       ) {
         e.preventDefault();
-        vscode.postMessage({type: 'focusEditor'});
+        api.focusEditor();
       }
       if (e.key === 'Escape' && sidebar.classList.contains('open')) {
         e.preventDefault();
@@ -7540,7 +7516,7 @@
         _demoActive = false;
         return;
       }
-      vscode.postMessage({type: 'stop', tabId: activeTabId});
+      api.stop({tabId: activeTabId});
     });
     if (demoPauseBtn) {
       demoPauseBtn.addEventListener('click', () => {
@@ -7667,7 +7643,7 @@
       updateBtn.addEventListener('click', e => {
         e.preventDefault();
         e.stopPropagation();
-        vscode.postMessage({type: 'runUpdate'});
+        api.runUpdate();
       });
     }
 
@@ -7718,7 +7694,7 @@
         if (isServerResetConfirmOpen()) return;
         const agentRunning = tabs.some(tab => tab && tab.isRunning);
         if (!agentRunning) {
-          vscode.postMessage({type: 'serverReset'});
+          api.serverReset();
           return;
         }
         openServerResetConfirm();
@@ -7730,7 +7706,7 @@
         e.preventDefault();
         e.stopPropagation();
         closeServerResetConfirm();
-        vscode.postMessage({type: 'serverReset'});
+        api.serverReset();
       });
     }
     if (serverResetConfirmCancelBtn) {
@@ -7764,8 +7740,7 @@
         // sibling checkbox.
         e.preventDefault();
         e.stopPropagation();
-        vscode.postMessage({
-          type: 'autocommitAction',
+        api.autocommitAction({
           action: 'commit',
           tabId: activeTabId,
           workDir: workDirForTab(activeTabId),
@@ -7854,8 +7829,7 @@
           sidebarOverlay.classList.add('open');
         }
         resetHistoryPagination();
-        vscode.postMessage({
-          type: 'getHistory',
+        api.getHistory({
           query: historySearch ? historySearch.value : '',
           generation: historyGeneration,
         });
@@ -7883,8 +7857,7 @@
           if (!sidebar.classList.contains('open')) {
             sidebar.classList.add('open');
             resetHistoryPagination();
-            vscode.postMessage({
-              type: 'getHistory',
+            api.getHistory({
               query: historySearch ? historySearch.value : '',
               generation: historyGeneration,
             });
@@ -8046,8 +8019,7 @@
     }
     historySearch.addEventListener('input', () => {
       resetHistoryPagination();
-      vscode.postMessage({
-        type: 'getHistory',
+      api.getHistory({
         query: historySearch.value,
         generation: historyGeneration,
       });
@@ -8059,11 +8031,7 @@
         historySearch.value = '';
         if (historySearchClear) historySearchClear.style.display = 'none';
         resetHistoryPagination();
-        vscode.postMessage({
-          type: 'getHistory',
-          query: '',
-          generation: historyGeneration,
-        });
+        api.getHistory({query: '', generation: historyGeneration});
         historySearch.focus();
       });
     }
@@ -8191,8 +8159,7 @@
         loader.id = 'history-loader';
         loader.textContent = 'Loading...';
         historyList.appendChild(loader);
-        vscode.postMessage({
-          type: 'getHistory',
+        api.getHistory({
           query: historySearch.value,
           offset: historyOffset,
           generation: historyGeneration,
@@ -8219,7 +8186,7 @@
           msg.path = match[1];
           msg.line = parseInt(match[2], 10);
         }
-        vscode.postMessage(msg);
+        api.send(msg);
       }
     });
     // Per-tab ask-user submit/keydown listeners are wired in
@@ -8266,7 +8233,7 @@
             return u && !u.startsWith('#');
           });
           if (uris.length > 0) {
-            vscode.postMessage({type: 'resolveDroppedPaths', uris: uris});
+            api.resolveDroppedPaths({uris: uris});
             return;
           }
         }
@@ -8293,7 +8260,7 @@
     // 'kiss-voice-post' events that we forward to the extension host.
     window.addEventListener('kiss-voice-post', event => {
       const detail = event && event.detail;
-      if (detail && detail.type) vscode.postMessage(detail);
+      if (detail && detail.type) api.send(detail);
     });
 
     // Voice-dictated tasks: after voice.js inserts the translated
@@ -8344,11 +8311,7 @@
     // like a normal submit, so the user can keep typing further
     // messages while the task runs.
     if (isRunning) {
-      vscode.postMessage({
-        type: 'appendUserMessage',
-        prompt: prompt,
-        tabId: activeTabId,
-      });
+      api.appendUserMessage({prompt: prompt, tabId: activeTabId});
       inp.value = '';
       inp.style.height = 'auto';
       attachments = [];
@@ -8372,7 +8335,7 @@
       autoCommit: !!(autocommitToggleBtn && autocommitToggleBtn.checked),
     };
     if (curTab && curTab.workDir) msg.workDir = curTab.workDir;
-    vscode.postMessage(msg);
+    api.send(msg);
     // Fresh local run: anchor the optimistic timer at submit time and
     // clear the previous task's end timestamp (the extension host
     // sends a startTs-less ``status running:true`` right away; the
@@ -8525,7 +8488,7 @@
   /** Submit the current answer for the given tab; clear pending question. */
   function submitAskForTab(tab) {
     const answer = tab.askInputEl ? tab.askInputEl.value : '';
-    vscode.postMessage({type: 'userAnswer', answer: answer, tabId: tab.id});
+    api.userAnswer({answer: answer, tabId: tab.id});
     clearAskForMatchingChatTabs(tab);
   }
 
@@ -8632,7 +8595,7 @@
     modelName.textContent = name;
     closeModelDD();
     renderModelList('');
-    vscode.postMessage({type: 'selectModel', model: name, tabId: activeTabId});
+    api.selectModel({model: name, tabId: activeTabId});
   }
 
   function closeModelDD() {
@@ -8924,11 +8887,7 @@
           // change without waiting for a re-render.
           div.dataset.favorite = next ? '1' : '0';
           applyHistoryFilterVisibility();
-          vscode.postMessage({
-            type: 'setFavorite',
-            taskId: s.task_id,
-            isFavorite: next,
-          });
+          api.setFavorite({taskId: s.task_id, isFavorite: next});
         });
         actions.appendChild(favBtn);
 
@@ -8970,7 +8929,7 @@
 
         confirmBtn.addEventListener('click', e => {
           e.stopPropagation();
-          vscode.postMessage({type: 'deleteTask', taskId: s.task_id});
+          api.deleteTask({taskId: s.task_id});
           div.remove();
         });
 
@@ -9206,12 +9165,7 @@
           // user can edit and resubmit it without retyping.
           inp.value = taskText;
           syncClearBtn();
-          vscode.postMessage({
-            type: 'resumeSession',
-            id: s.id,
-            taskId: s.task_id,
-            tabId: activeTabId,
-          });
+          api.resumeSession({id: s.id, taskId: s.task_id, tabId: activeTabId});
         } else {
           createNewTab();
           inp.value = s.preview || s.title || '';
@@ -9607,7 +9561,7 @@
   function saveSettingsIfPopulated() {
     if (configFormPopulated) {
       const data = collectConfigForm();
-      vscode.postMessage({type: 'saveConfig', ...data});
+      api.saveConfig({...data});
       // Standalone web client: editing the work_dir in Settings also
       // re-pins THIS instance (sessionStorage via the WS shim + the
       // server's per-connection work_dir), so the change applies to
@@ -9619,10 +9573,7 @@
         typeof data.config.work_dir === 'string' &&
         data.config.work_dir
       ) {
-        vscode.postMessage({
-          type: 'setWorkDir',
-          workDir: data.config.work_dir,
-        });
+        api.setWorkDir({workDir: data.config.work_dir});
       }
     }
   }
@@ -9666,7 +9617,7 @@
     if (!settingsPanel) return;
     setPanelOpen(settingsPanel, settingsOverlay, true);
     configFormPopulated = false;
-    vscode.postMessage({type: 'getConfig'});
+    api.getConfig();
   }
 
   /**
@@ -9685,7 +9636,7 @@
   function openFrequentPanel() {
     if (!frequentPanel) return;
     setPanelOpen(frequentPanel, frequentOverlay, true);
-    vscode.postMessage({type: 'getFrequentTasks', limit: 50});
+    api.getFrequentTasks({limit: 50});
   }
 
   /** Close the standalone Frequent tasks panel. */
@@ -9839,7 +9790,7 @@
 
       confirmBtn.addEventListener('click', e => {
         e.stopPropagation();
-        vscode.postMessage({type: 'deleteFrequentTask', task: text});
+        api.deleteFrequentTask({task: text});
         div.remove();
       });
 
@@ -9979,7 +9930,7 @@
           // ``workDirForTab`` fallback too.
           configWorkDir = pinned;
         } else if (cfg.work_dir) {
-          vscode.postMessage({type: 'setWorkDir', workDir: cfg.work_dir});
+          api.setWorkDir({workDir: cfg.work_dir});
         }
       }
     }
@@ -10055,11 +10006,7 @@
   function checkAutocomplete() {
     const atCtx = getAtCtx();
     if (atCtx) {
-      vscode.postMessage({
-        type: 'getFiles',
-        prefix: atCtx.query,
-        workDir: workDirForTab(activeTabId),
-      });
+      api.getFiles({prefix: atCtx.query, workDir: workDirForTab(activeTabId)});
     } else {
       hideAC();
     }
@@ -10186,11 +10133,7 @@
       syncClearBtn();
       const np = before.length + mention.length + sep.length;
       inp.setSelectionRange(np, np);
-      vscode.postMessage({
-        type: 'recordFileUsage',
-        path: file,
-        workDir: workDirForTab(activeTabId),
-      });
+      api.recordFileUsage({path: file, workDir: workDirForTab(activeTabId)});
     }
     hideAC();
     inp.focus();
@@ -10358,7 +10301,7 @@
       return activeTabId;
     },
     sendMessage: function (msg) {
-      vscode.postMessage(msg);
+      api.send(msg);
     },
     collapsePanels: function () {
       collapseAllExceptResult(O, activeTabId);

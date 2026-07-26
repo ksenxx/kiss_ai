@@ -90,6 +90,7 @@ function testBuildChatHtmlUsesContentVersionedMediaUrls() {
     'highlight-github-dark.min.css',
     'highlight.min.js',
     'marked.min.js',
+    'api.js',
     'panelCopy.js',
     'main.js',
     'demo.js',

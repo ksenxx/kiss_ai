@@ -409,6 +409,7 @@ export function buildChatHtml(
     NONCE_ATTR: ` nonce="${nonce}"`,
     HLJS_SRC: u('highlight.min.js'),
     MARKED_SRC: u('marked.min.js'),
+    API_SRC: u('api.js'),
     PANEL_COPY_SRC: u('panelCopy.js'),
     MAIN_SRC: u('main.js'),
     DEMO_SRC: u('demo.js'),

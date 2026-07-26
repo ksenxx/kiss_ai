@@ -60,6 +60,11 @@ function makeDomWebview() {
     fs.readFileSync(path.join(mediaDir, 'panelCopy.js'), 'utf8'),
     dom.getInternalVMContext(),
   );
+  // Evaluate api.js separately (own script) before main.js.
+  vm.runInContext(
+    fs.readFileSync(path.join(mediaDir, 'api.js'), 'utf8'),
+    dom.getInternalVMContext(),
+  );
   vm.runInContext(
     fs.readFileSync(path.join(mediaDir, 'main.js'), 'utf8'),
     dom.getInternalVMContext(),

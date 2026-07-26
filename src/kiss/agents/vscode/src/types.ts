@@ -55,7 +55,15 @@ export type FromWebviewMessage =
       tabId?: string;
       restoredTabs?: Array<{tabId: string; chatId: string}>;
     }
-  | {type: 'resumeSession'; id: string; taskId?: number; tabId?: string}
+  // The webview resumes either a whole chat (``chatId``, legacy ``id``)
+  // or a single task row (``taskId`` only, string or number).
+  | {
+      type: 'resumeSession';
+      chatId?: string;
+      id?: string;
+      taskId?: string | number | null;
+      tabId?: string;
+    }
   | {type: 'getWelcomeSuggestions'}
   | {type: 'complete'; query: string; tabId?: string}
   | {type: 'mergeAction'; action: string; tabId?: string; workDir?: string}
@@ -335,7 +343,7 @@ export interface AgentCommand {
   answer?: string;
   path?: string;
   chatId?: number | string;
-  taskId?: number | null;
+  taskId?: string | number | null;
   activeFileContent?: string;
   action?: 'merge' | 'discard' | 'all-done' | 'commit' | 'skip';
   useWorktree?: boolean;

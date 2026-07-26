@@ -78,6 +78,7 @@ from websockets.http11 import Request, Response
 
 from kiss.core.config import get_jobs_root, kiss_home
 from kiss.core.vscode_config import load_config, source_shell_env
+from kiss.server import sorcar as sorcar_api
 from kiss.server.diff_merge import _read_lines_preserved as _read_lines_preserved
 from kiss.server.json_printer import (
     GLOBAL_EVENT_TYPES,
@@ -771,6 +772,17 @@ _VSCODE_ONLY_COMMANDS = frozenset({
     # server but must not surface as "Unknown command" if a client
     # ever emits it.
     "sizeReport",
+    # Voice-bridge messages are consumed by the VS Code extension
+    # host (``SorcarSidebarView``); they carry no meaning for the
+    # daemon and must be dropped, not answered with "Unknown
+    # command", if a client ever emits them.
+    "voiceToggle",
+    "voiceSensitivity",
+    "voiceAck",
+    # ``auth`` is consumed by the WSS handshake before dispatch; a
+    # duplicate ``auth`` on an already-authenticated connection is
+    # dropped here rather than surfacing as "Unknown command".
+    "auth",
 })
 
 # Canonical KISS Sorcar source-checkout root.  The curl-piped
@@ -2854,6 +2866,7 @@ def _build_html() -> str:
         "NONCE_ATTR": "",
         "HLJS_SRC": _media_url("highlight.min.js"),
         "MARKED_SRC": _media_url("marked.min.js"),
+        "API_SRC": _media_url("api.js"),
         "PANEL_COPY_SRC": _media_url("panelCopy.js"),
         "MAIN_SRC": _media_url("main.js"),
         "DEMO_SRC": _media_url("demo.js"),
@@ -4707,6 +4720,19 @@ class RemoteAccessServer:
                 staleness), giving each window the same isolation for
                 ghost-text completions as for its work_dir.
         """
+        error = sorcar_api.validate_command(cmd)
+        if error:
+            # Reject commands outside the server API (see
+            # ``kiss.server.sorcar.API``) with a direct error reply to
+            # the sender only — mirroring ``VSCodeServer``'s
+            # unknown-command behaviour — so no other client renders
+            # an error banner for a command it never issued.
+            reply: dict[str, Any] = {"type": "error", "text": error}
+            raw_tab = cmd.get("tabId") if isinstance(cmd, dict) else None
+            if isinstance(raw_tab, str) and raw_tab:
+                reply["tabId"] = raw_tab
+            await self._endpoint_send(endpoint, json.dumps(reply))
+            return
         tab_id = cmd.get("tabId", "")
         is_uds = isinstance(endpoint, asyncio.StreamWriter)
         if isinstance(tab_id, str) and tab_id:

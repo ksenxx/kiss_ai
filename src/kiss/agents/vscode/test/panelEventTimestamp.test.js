@@ -153,8 +153,13 @@ function makeWebview(opts) {
     fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8') +
       '\n//# sourceURL=panelts-panelCopy.js',
   );
+  // Evaluate api.js separately so V8 coverage offsets for the
+
+  // sourceURL-labelled main.js eval below start at character 0.
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
       '\n//# sourceURL=panelts-main.js',
   );
 

@@ -110,8 +110,13 @@ function makeWebview(opts) {
   // The sourceURL pragma names this eval instance in V8 coverage
   // output so taskPanelExpandFullText.coverage.js can locate main.js
   // and enforce 100% line coverage of the chevron-coverage region.
+  // Evaluate api.js separately so V8 coverage offsets for the
+
+  // sourceURL-labelled main.js eval below start at character 0.
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
       '\n//# sourceURL=taskpanel-main.js',
   );
   return {win, posted};

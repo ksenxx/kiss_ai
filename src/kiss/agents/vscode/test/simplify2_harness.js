@@ -59,7 +59,7 @@ function makeWebview(opts) {
   if (opts && opts.beforeScripts) opts.beforeScripts(win);
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+  win.eval((fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8') + '\n' + fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8')));
 
   return {win, posted};
 }

@@ -159,6 +159,11 @@ function daemonHasActiveTasks(sockPath, timeoutMs) {
     sock.setEncoding('utf-8');
     sock.once('connect', () => {
       try {
+        // Transport-level health probe: this is the one deliberate
+        // exception to the "SorcarApi facade only" rule — it opens its
+        // own throwaway socket (no AgentClient) purely to check the
+        // daemon is alive.  ``activeTasksQuery`` is part of the server
+        // API catalog (src/kiss/server/sorcar.py).
         sock.write(JSON.stringify({type: 'activeTasksQuery'}) + '\n');
       } catch (err) {
         finish({ok: false, reason: 'write-failed:' + (err && err.code)});

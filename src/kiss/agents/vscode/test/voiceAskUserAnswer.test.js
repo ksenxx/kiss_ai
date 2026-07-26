@@ -67,7 +67,13 @@ function makeWebview() {
   // opt-in so wake-word listening auto-enables for these tests.
   win.localStorage.setItem('kissVoiceEnabled', '1');
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+  // Evaluate api.js separately so V8 coverage offsets for the
+
+  // sourceURL-labelled main.js eval below start at character 0.
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'voice.js'), 'utf8'));
   return {win, posted};
 }
