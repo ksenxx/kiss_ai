@@ -319,5 +319,108 @@ class TestCatalogSync(unittest.TestCase):
         )
 
 
+class TestServerApiCodeBindings(unittest.TestCase):
+    """The catalog's handler bindings define the server's code API."""
+
+    def test_every_handler_is_a_server_api_coroutine(self) -> None:
+        # Each non-drop catalog entry must name an async ServerApi
+        # method with the uniform ``handler(cmd, ctx)`` signature —
+        # the actual code API a client command invokes.
+        import inspect
+
+        from kiss.server.sorcar import ServerApi
+
+        for spec in API.values():
+            if spec.handler == "drop":
+                continue
+            method = getattr(ServerApi, spec.handler, None)
+            self.assertIsNotNone(
+                method, f"{spec.name}: no ServerApi.{spec.handler}"
+            )
+            assert method is not None
+            self.assertTrue(
+                inspect.iscoroutinefunction(method),
+                f"ServerApi.{spec.handler} must be async",
+            )
+            params = list(inspect.signature(method).parameters)
+            self.assertEqual(
+                params,
+                ["self", "cmd", "ctx"],
+                f"ServerApi.{spec.handler} has non-uniform signature",
+            )
+
+    def test_dropped_commands_match_drop_handlers(self) -> None:
+        from kiss.server.sorcar import DROPPED_COMMANDS
+
+        self.assertEqual(
+            DROPPED_COMMANDS,
+            frozenset(c.name for c in API.values() if c.handler == "drop"),
+        )
+        # The host-consumed messages historically dropped by the
+        # daemon transport must all stay in the derived set.
+        self.assertEqual(
+            DROPPED_COMMANDS,
+            frozenset({
+                "focusEditor", "webviewFocusChanged", "notificationAction",
+                "sizeReport", "resolveDroppedPaths", "voiceToggle",
+                "voiceSensitivity", "voiceAck", "auth",
+            }),
+        )
+
+    def test_unknown_handler_name_fails_at_construction(self) -> None:
+        # A routing typo in the catalog must abort daemon startup, not
+        # explode on first use of the command.
+        from kiss.server import sorcar
+        from kiss.server.sorcar import ApiCommand, ServerApi
+
+        bogus = ApiCommand("bogusCmd", handler="no_such_method")
+        sorcar.API["bogusCmd"] = bogus
+        try:
+            with self.assertRaises(TypeError):
+                ServerApi(object())  # type: ignore[arg-type]
+        finally:
+            del sorcar.API["bogusCmd"]
+
+    def test_cli_commands_bypass_work_dir_stamping(self) -> None:
+        # The CLI-bridge commands relay tasks the sorcar CLI runs
+        # itself: they never read the per-connection work_dir and must
+        # reach their handlers unmutated — even on a context whose
+        # conn_state carries no ``work_dir`` at all (the pre-refactor
+        # inline dispatcher returned before its stamping code, so this
+        # must not raise ``KeyError('work_dir')`` either).
+        from kiss.server.sorcar import ApiContext
+
+        with tempfile.TemporaryDirectory() as tmp:
+            server = RemoteAccessServer(
+                uds_path=os.path.join(tmp, "s.sock"),
+                url_file=os.path.join(tmp, "remote-url.json"),
+            )
+            ctx = ApiContext(
+                endpoint=None,
+                tabs_seen=set(),
+                conn_state={"conn_id": "conn-1"},
+                is_uds=False,
+            )
+            cmd: dict[str, Any] = {"type": "cliTabHello", "tabId": "cli-1"}
+            asyncio.run(server._server_api.dispatch(cmd, ctx))
+            self.assertNotIn("workDir", cmd)
+            self.assertEqual(cmd["connId"], "conn-1")
+
+    def test_translate_webview_command(self) -> None:
+        from kiss.server.sorcar import translate_webview_command
+
+        out = translate_webview_command(
+            {"type": "resumeSession", "id": "c1", "tabId": "t"}
+        )
+        self.assertEqual(
+            out, {"type": "resumeSession", "chatId": "c1", "tabId": "t"}
+        )
+        # Explicit chatId wins; other commands pass through unchanged.
+        keep = {"type": "resumeSession", "id": "x", "chatId": "c2"}
+        self.assertEqual(translate_webview_command(dict(keep)), keep)
+        other = {"type": "stop", "tabId": "t"}
+        self.assertEqual(translate_webview_command(dict(other)), other)
+
+
 if __name__ == "__main__":
     unittest.main()

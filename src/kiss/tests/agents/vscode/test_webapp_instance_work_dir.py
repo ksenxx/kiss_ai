@@ -10,9 +10,10 @@ instance.  The instance pins its work_dir in ``sessionStorage`` (key
 hook, and the shim replays ``setWorkDir`` to the server right after
 every successful (re)authentication — mirroring how each VS Code
 window re-announces its workspace folder on every UDS (re)connect.
-Server-side, ``RemoteAccessServer._dispatch_client_command`` records
-the folder per connection and stamps it onto every later command from
-the same connection that lacks an explicit ``workDir``.
+Server-side, the server API dispatcher
+(``kiss.server.sorcar.ServerApi.dispatch``) records the folder per
+connection and stamps it onto every later command from the same
+connection that lacks an explicit ``workDir``.
 
 Invariant under test: two webapp instances sharing one daemon can
 never observe each other's folder, across reconnects and reloads.

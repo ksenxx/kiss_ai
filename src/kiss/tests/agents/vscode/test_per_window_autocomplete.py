@@ -7,8 +7,9 @@
 Follow-up to the per-window ``work_dir`` isolation
 (``test_per_window_work_dir.py``): the daemon's remaining
 window-global autocomplete state in :class:`VSCodeServer` is now keyed
-by the ``connId`` that ``RemoteAccessServer._dispatch_client_command``
-stamps on every command (one connection == one VS Code window):
+by the ``connId`` that the server API dispatcher
+(``kiss.server.sorcar.ServerApi.dispatch``) stamps on every command
+(one connection == one VS Code window):
 
 * ``_last_active_file`` / ``_last_active_content`` — the fallback
   snapshot of the window's active editor used when a ``complete``

@@ -9,8 +9,12 @@
  * the VS Code webview and the remote webapp) talks to the KISS Sorcar
  * server.  Each method maps 1:1 onto a command of the server API
  * catalog defined in ``src/kiss/server/sorcar.py`` (the single source
- * of truth); the daemon validates every command against that catalog
- * and answers invalid ones with an ``error`` event.
+ * of truth).  Every command is a remote call into the server's code
+ * API: the daemon routes it through
+ * ``kiss.server.sorcar.ServerApi.dispatch``, which validates it
+ * against the catalog (answering invalid ones with an ``error``
+ * event) and invokes the ``ServerApi`` method the command's catalog
+ * entry names.
  *
  * Usage (main.js owns the single ``acquireVsCodeApi()`` handle):
  *

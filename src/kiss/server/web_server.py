@@ -757,34 +757,6 @@ class _HeadAwareServerConnection(ServerConnection):
 # multi-hundred-megabyte JSON frame.
 _OPEN_FILE_MAX_BYTES = 2_000_000
 
-_VSCODE_ONLY_COMMANDS = frozenset({
-    "focusEditor",
-    "webviewFocusChanged",
-    "resolveDroppedPaths",
-    # ``notificationAction`` is posted by ``media/main.js`` when the
-    # user clicks an action button on an in-webview notification; only
-    # the VS Code extension host (``SorcarSidebarView``) handles it.
-    # Listed here so it is dropped instead of surfacing as "Unknown
-    # command" if a remote-web client ever emits it.
-    "notificationAction",
-    # ``sizeReport`` is the webview's reply to the extension-only
-    # ``measureSize`` request; it never has meaning for the web
-    # server but must not surface as "Unknown command" if a client
-    # ever emits it.
-    "sizeReport",
-    # Voice-bridge messages are consumed by the VS Code extension
-    # host (``SorcarSidebarView``); they carry no meaning for the
-    # daemon and must be dropped, not answered with "Unknown
-    # command", if a client ever emits them.
-    "voiceToggle",
-    "voiceSensitivity",
-    "voiceAck",
-    # ``auth`` is consumed by the WSS handshake before dispatch; a
-    # duplicate ``auth`` on an already-authenticated connection is
-    # dropped here rather than surfacing as "Unknown command".
-    "auth",
-})
-
 # Canonical KISS Sorcar source-checkout root.  The curl-piped
 # bootstrapper (``scripts/install.sh``) clones the GitHub repo to this
 # fixed location and ``install.sh`` — which the Update button re-runs —
@@ -3656,35 +3628,10 @@ def _augment_merge_data(event: dict[str, Any]) -> dict[str, Any]:
     return event
 
 
-def _translate_webview_command(cmd: dict[str, Any]) -> dict[str, Any]:
-    """Translate a webview message into a backend command.
-
-    The VS Code TypeScript extension (``SorcarSidebarView``) intercepts
-    messages from the webview and rewrites several of them before
-    forwarding to the Python backend.  This function performs the same
-    translations so the standalone web server can relay messages
-    directly.
-
-    Translations applied:
-
-    * ``resumeSession`` → renames ``id`` field to ``chatId``
-
-    (``media/main.js`` posts ``userAnswer`` directly, so no
-    ``userActionDone`` rewrite is needed here.)
-
-    Args:
-        cmd: Raw command dictionary from the browser WebSocket.
-
-    Returns:
-        The (possibly modified) command dictionary ready for
-        ``VSCodeServer._handle_command``.
-    """
-    cmd_type = cmd.get("type", "")
-    if cmd_type == "resumeSession" and "id" in cmd and "chatId" not in cmd:
-        out = dict(cmd)
-        out["chatId"] = out.pop("id")
-        return out
-    return cmd
+# The wire→backend command translation now lives in the server API
+# module (applied by ``sorcar.ServerApi.resume_session``); this alias
+# keeps the established local name for callers and tests.
+_translate_webview_command = sorcar_api.translate_webview_command
 
 
 async def _cancel_task(task: asyncio.Task[None] | None) -> None:
@@ -3804,6 +3751,10 @@ class RemoteAccessServer:
         self._vscode_server = VSCodeServer(printer=self._printer)
         if self.work_dir:
             self._vscode_server.work_dir = self.work_dir
+        # The server's code API (see ``kiss.server.sorcar.ServerApi``):
+        # every client command received on either transport is routed
+        # through it, with this server acting as the API's backend.
+        self._server_api = sorcar_api.ServerApi(self)
 
         self._html_bytes = _build_html().encode("utf-8")
         self._tunnel_proc: subprocess.Popen[str] | None = None
@@ -4045,9 +3996,9 @@ class RemoteAccessServer:
     def _validated_cli_task_id(cmd: dict[str, Any]) -> str:
         """Extract and validate the ``taskId`` of a CLI task command.
 
-        Shared by the ``cliTaskStart`` / ``cliTaskEnd`` branches of
-        :meth:`_dispatch_client_command`, which require a non-empty
-        string task id.
+        Shared by the ``cliTaskStart`` / ``cliTaskEnd`` handlers of
+        the server API (:meth:`kiss.server.sorcar.ServerApi`), which
+        require a non-empty string task id.
 
         Args:
             cmd: The parsed ``cliTaskStart`` / ``cliTaskEnd`` command.
@@ -4680,230 +4631,43 @@ class RemoteAccessServer:
         tabs_seen: set[str],
         conn_state: dict[str, Any],
     ) -> None:
-        """Dispatch one parsed client command from a WSS or UDS peer.
+        """Hand one parsed client command to the server's code API.
 
-        Single shared per-message dispatch body for
-        :meth:`_ws_handler` (remote browsers) and :meth:`_uds_handler`
-        (the local VS Code extension), so the two transports cannot
-        drift in behaviour.  Records the command's ``tabId`` in
-        *tabs_seen* (used by the callers' ``finally`` blocks to arm
-        deferred ``closeTab`` timers), drops VS Code-only webview
-        messages, special-cases the commands the TypeScript extension
-        would otherwise translate (``ready``, ``submit``,
-        ``getWelcomeSuggestions``, ``runUpdate``, ``mergeAction``,
-        ``activeTasksQuery``), and forwards everything else through
-        :func:`_translate_webview_command` to
-        :class:`VSCodeServer._handle_command`.
+        Single shared per-message entry point for :meth:`_ws_handler`
+        (remote browsers) and :meth:`_uds_handler` (the local VS Code
+        extension), so the two transports cannot drift in behaviour.
+        This method owns NO routing: it wraps the connection's
+        transport state into a :class:`kiss.server.sorcar.ApiContext`
+        and calls :meth:`kiss.server.sorcar.ServerApi.dispatch`, which
+        validates the command against the API catalog, applies the
+        per-connection stamping (``connId``, per-window ``workDir``,
+        tab registration — see the invariant documentation on
+        :class:`ServerApi`), and invokes the API method the command's
+        catalog entry names, with this server as the backend.
 
         Args:
             cmd: The parsed JSON command dictionary.
             endpoint: The client connection — a
                 :class:`ServerConnection` (WSS) or an
                 :class:`asyncio.StreamWriter` (UDS).  Used for direct
-                replies via :meth:`_endpoint_send`.
-            tabs_seen: Per-connection set of tab ids, mutated in place.
+                replies.
+            tabs_seen: Per-connection set of tab ids, mutated in place
+                (used by the callers' ``finally`` blocks to arm
+                deferred ``closeTab`` timers).
             conn_state: Per-connection mutable state holding the
                 connection's own ``work_dir`` and unique ``conn_id``.
-                Each VS Code window owns exactly one connection and
-                announces its workspace folder via ``setWorkDir``;
-                every later command from the same connection that does
-                not carry an explicit ``workDir`` is stamped with it
-                here.  This is what guarantees the per-window work_dir
-                invariant: two windows sharing this daemon can never
-                observe each other's folder through the daemon-global
-                fallback, because their commands always arrive
-                pre-stamped with their own connection's work_dir.  The
-                ``conn_id`` is stamped (as ``connId``) on EVERY command
-                — overwriting any client-supplied value so it cannot be
-                spoofed — and keys ``VSCodeServer``'s per-connection
-                autocomplete state (active-file snapshot and request
-                staleness), giving each window the same isolation for
-                ghost-text completions as for its work_dir.
+                Each VS Code window owns exactly one connection, and
+                the API layer's stamping of these fields is what
+                guarantees the per-window work_dir and autocomplete
+                isolation invariants.
         """
-        if cmd.get("type") in _VSCODE_ONLY_COMMANDS:
-            # Webview <-> extension-host messages that leak to the
-            # daemon transport are silently dropped BEFORE catalog
-            # validation: they are not server commands, and validating
-            # them (e.g. a ``notificationAction`` missing its ``id``)
-            # would surface a spurious error banner for a message the
-            # server was never meant to handle.
-            return
-        error = sorcar_api.validate_command(cmd)
-        if error:
-            # Reject commands outside the server API (see
-            # ``kiss.server.sorcar.API``) with a direct error reply to
-            # the sender only — mirroring ``VSCodeServer``'s
-            # unknown-command behaviour — so no other client renders
-            # an error banner for a command it never issued.
-            reply: dict[str, Any] = {"type": "error", "text": error}
-            raw_tab = cmd.get("tabId") if isinstance(cmd, dict) else None
-            if isinstance(raw_tab, str) and raw_tab:
-                reply["tabId"] = raw_tab
-            await self._endpoint_send(endpoint, json.dumps(reply))
-            return
-        tab_id = cmd.get("tabId", "")
-        is_uds = isinstance(endpoint, asyncio.StreamWriter)
-        if isinstance(tab_id, str) and tab_id:
-            if tab_id not in tabs_seen:
-                tabs_seen.add(tab_id)
-            if is_uds:
-                local_tabs = conn_state.setdefault("local_tabs", set())
-                if tab_id not in local_tabs:
-                    local_tabs.add(tab_id)
-                    self._printer.register_local_uds_tab(tab_id)
-        cmd["connId"] = conn_state["conn_id"]
-        cmd_type = cmd.get("type", "")
-        if cmd_type == "cliEvent":
-            # CLI -> daemon live-stream bridge.  The sorcar CLI
-            # forwards every display event here so any chat webview
-            # subscribed to the task's chat id sees the event
-            # immediately instead of having to reload to replay it
-            # from the events DB.  See ``_relay_cli_event``.
-            ev = cmd.get("event")
-            if isinstance(ev, dict):
-                self._relay_cli_event(ev)
-            return
-        if cmd_type == "cliTabHello":
-            # A sorcar CLI REPL announces its tab id so talk-playback
-            # arbitration can tell CLI terminal players apart from
-            # webview tabs (see ``WebPrinter._fanout_talk``).  Only
-            # local UDS peers are terminal players; a WSS/browser peer
-            # cannot suppress playback on the daemon machine.
-            raw_tab = cmd.get("tabId")
-            if is_uds and isinstance(raw_tab, str) and raw_tab:
-                cli_tabs = conn_state.setdefault("cli_tabs", set())
-                if raw_tab not in cli_tabs:
-                    cli_tabs.add(raw_tab)
-                    self._printer.register_cli_tab(raw_tab)
-            return
-        if cmd_type in ("cliTaskStart", "cliTaskEnd"):
-            # ``cliTaskStart``: CLI announces a fresh running task so a
-            # webview tab that later resumes it from the history
-            # sidebar is subscribed to the live stream and shows the
-            # blinking-green-circle "running" indicator.
-            # ``cliTaskEnd``: CLI announces the task finished; the
-            # daemon stops the indicator on every subscribed webview
-            # tab.  See ``_handle_cli_task_start`` /
-            # ``_handle_cli_task_end``.
-            task_id_str = self._validated_cli_task_id(cmd)
-            if not task_id_str:
-                return
-            if cmd_type == "cliTaskStart":
-                self._handle_cli_task_start(task_id_str, conn_state)
-            else:
-                self._handle_cli_task_end(task_id_str, conn_state)
-            return
-        if cmd_type == "setWorkDir":
-            new_wd = cmd.get("workDir", "")
-            if isinstance(new_wd, str) and new_wd:
-                conn_state["work_dir"] = new_wd
-        elif conn_state["work_dir"] and not cmd.get("workDir"):
-            cmd["workDir"] = conn_state["work_dir"]
-        if cmd_type == "openFile":
-            # A remote-web (WSS) client clicked a file link in a chat
-            # webview.  The browser has no editor to open the file in,
-            # so the server reads the file and replies with its content
-            # for an in-page content tab.  UDS clients (VS Code
-            # windows) never take the WSS path: their webview's
-            # ``openFile`` is consumed by the extension host, which
-            # opens the file in a real editor tab — so a UDS-delivered
-            # ``openFile`` is dropped here as a defensive no-op.
-            if is_uds:
-                return
-            await self._handle_open_file(cmd, endpoint)
-            return
-        if cmd_type == "voiceTranscribe":
-            # A remote-web (browser mode) client heard the "Sorcar"
-            # wake word and captured the utterance that followed in
-            # the page (VS Code webviews never send this: their
-            # speech is captured and translated by the extension
-            # host's local listener).  Translate the audio with the
-            # same gpt-audio call the local listener uses and reply
-            # with the voiceSpeech message voice.js already handles.
-            await self._handle_voice_transcribe(cmd, endpoint)
-            return
-        if cmd_type == "activeTasksQuery":
-            await self._handle_active_tasks_query(endpoint)
-            return
-        if cmd_type == "ready":
-            # The deferred-close contract (see ``_ws_handler``'s
-            # ``finally``) is "schedule a closeTab for every tab id
-            # this connection touched".  ``_handle_ready`` re-claims
-            # (cancels the pending close of, and resumes) every
-            # ``restoredTabs`` entry, so those tab ids are touched by
-            # this connection too — record them in ``tabs_seen`` or a
-            # later disconnect would never re-arm their deferred
-            # close, leaking the restored backend state forever.
-            # Sanitize ONCE here (warnings included) and write the
-            # cleaned list back so ``_handle_ready``'s own sanitize
-            # pass finds nothing left to reject or truncate.
-            cmd["restoredTabs"] = self._sanitized_restored_tabs(cmd)
-            for rt in cmd["restoredTabs"]:
-                rt_id = rt["tabId"]
-                if rt_id:
-                    if rt_id not in tabs_seen:
-                        tabs_seen.add(rt_id)
-                    if is_uds:
-                        local_tabs = conn_state.setdefault(
-                            "local_tabs", set()
-                        )
-                        if rt_id not in local_tabs:
-                            local_tabs.add(rt_id)
-                            self._printer.register_local_uds_tab(rt_id)
-            await self._handle_ready(cmd, endpoint, is_uds=is_uds)
-            return
-        if cmd_type == "submit":
-            await self._handle_submit(cmd)
-            return
-        if cmd_type == "getWelcomeSuggestions":
-            await self._send_welcome_info()
-            return
-        if cmd_type == "runUpdate":
-            await self._handle_run_update(conn_state["conn_id"])
-            return
-        if cmd_type == "serverReset":
-            await self._handle_server_reset(conn_state["conn_id"])
-            return
-        if cmd_type == "mergeAction":
-            if cmd.get("action", "") != "all-done":
-                await self._handle_web_merge_action(cmd)
-                return
-            # An ``all-done`` arriving FROM a client is the VS Code
-            # extension's TS MergeManager finishing its editor-managed
-            # review (its per-hunk actions never reach the backend —
-            # see ``SorcarSidebarView.sendMergeAllDone``).  Drop the
-            # server-side shadow ``_WebMergeState`` registered when the
-            # ``merge_data`` event was broadcast: leaving it would
-            # replay a ZOMBIE review on the next webview reload
-            # (``ready`` → ``_replay_merge_review``), fire a spurious
-            # second all-done from the deferred-close path, and leak
-            # one state (with full file payloads) per finished review
-            # in the meantime.  The command still falls through to the
-            # backend ``_cmd_merge_action`` → ``_finish_merge`` below.
-            if isinstance(tab_id, str) and tab_id:
-                self._pop_merge_state(tab_id)
-        if (
-            cmd_type == "closeTab"
-            and isinstance(tab_id, str)
-            and tab_id
-            and not is_uds
-        ):
-            # A WEB client closing its chat tab destroys the only UI
-            # that could ever finish an in-flight (server-tracked)
-            # merge review for that tab: the backend ``_close_tab``
-            # would see ``is_merging=True``, flip ``frontend_closed``
-            # and wait forever for an ``all-done`` that no client can
-            # send any more.  End the review first (close = accept the
-            # remaining hunks; no disk writes) so the tab is disposed
-            # instead of leaking in ``is_merging`` limbo.  UDS (VS
-            # Code) clients are exempt: their TypeScript MergeManager
-            # owns the review in real editor tabs that survive the
-            # chat tab's closure and will still send ``all-done``.
-            merge_state = self._pop_merge_state(tab_id)
-            await self._finish_merge_and_close_tab(tab_id, merge_state)
-            return
-        cmd = _translate_webview_command(cmd)
-        await self._run_cmd(cmd)
+        ctx = sorcar_api.ApiContext(
+            endpoint=endpoint,
+            tabs_seen=tabs_seen,
+            conn_state=conn_state,
+            is_uds=isinstance(endpoint, asyncio.StreamWriter),
+        )
+        await self._server_api.dispatch(cmd, ctx)
 
     def _broadcast_to_conn(self, event: dict[str, Any], conn_id: str) -> None:
         """Broadcast *event*, stamped with *conn_id* when non-empty.
@@ -5250,7 +5014,8 @@ class RemoteAccessServer:
              "tabId": ..., "error": <message>}  # on failure
 
         Relative paths are resolved against the command's ``workDir``
-        (stamped per-connection by :meth:`_dispatch_client_command`) and
+        (stamped per-connection by
+        :meth:`kiss.server.sorcar.ServerApi.dispatch`) and
         fall back to the daemon work dir.  Missing files, unreadable
         files, files larger than :data:`_OPEN_FILE_MAX_BYTES`, and
         binary files (NUL byte in the first 8 KiB) produce an ``error``
@@ -5493,14 +5258,15 @@ class RemoteAccessServer:
         """Sanitize the ``restoredTabs`` field of a ``ready`` command.
 
         Single source of the M7 hardening shared by the ``ready``
-        branch of :meth:`_dispatch_client_command` and
+        handler of the server API
+        (:meth:`kiss.server.sorcar.ServerApi.ready`) and
         :meth:`_handle_ready`:
 
         * caps the list at ``_MAX_RESTORED_TABS`` so an
           authenticated-but-malicious or buggy client cannot flood the
           executor with thousands of ``resumeSession`` jobs;
         * skips malformed (non-dict) elements — an ``AttributeError``
-          would propagate out of ``_dispatch_client_command`` and tear
+          would propagate out of the command dispatch and tear
           down the whole authenticated connection over one bad field;
         * blanks non-str ``tabId`` / ``chatId`` values — a non-str
           ``tabId`` (e.g. a list) would raise ``TypeError`` in
@@ -5570,7 +5336,7 @@ class RemoteAccessServer:
         Args:
             cmd: The ``ready`` message from the browser (already
                 stamped with the connection's ``connId`` by
-                :meth:`_dispatch_client_command`).
+                :meth:`kiss.server.sorcar.ServerApi.dispatch`).
             websocket: The client connection (for direct replies).
             is_uds: True when the ``ready`` arrived over the local UDS
                 (VS Code extension host / CLI) transport.  Only
@@ -5843,7 +5609,7 @@ class RemoteAccessServer:
             # ``or`` (not ``dict.get`` default) so an explicit empty
             # ``workDir`` also falls back to the daemon-wide default.
             # Commands from VS Code windows arrive pre-stamped with the
-            # window's own work_dir by ``_dispatch_client_command``.
+            # window's own work_dir by ``sorcar.ServerApi.dispatch``.
             "workDir": cmd.get("workDir") or self._vscode_server.work_dir,
             "tabId": tab_id,
             "attachments": attachments,
@@ -5880,7 +5646,8 @@ class RemoteAccessServer:
         """Atomically drop *tab_id*'s merge state and per-tab action lock.
 
         Every cleanup site (deferred tab close, the client ``all-done``
-        and web ``closeTab`` branches of ``_dispatch_client_command``,
+        and web ``closeTab`` handlers of the server API
+        (``sorcar.ServerApi.merge_action`` / ``close_tab``),
         and the completion branch of ``_apply_web_merge_action``) must
         drop BOTH entries together, or one of them leaks for the
         daemon's lifetime (tab ids are fresh UUIDs, never reused).

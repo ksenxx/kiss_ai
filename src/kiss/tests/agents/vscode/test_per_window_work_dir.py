@@ -7,7 +7,7 @@
 Every VS Code window owns exactly one UDS connection to the shared
 ``kiss-web`` daemon and announces its open workspace folder via
 ``setWorkDir``.  The daemon records that folder per connection
-(``RemoteAccessServer._dispatch_client_command``) and stamps it onto
+(``kiss.server.sorcar.ServerApi.dispatch``) and stamps it onto
 every command from the same connection that lacks an explicit
 ``workDir``.
 

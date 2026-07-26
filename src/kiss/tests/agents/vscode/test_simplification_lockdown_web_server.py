@@ -223,7 +223,7 @@ class TestVscodeOnlyCommandsDropped(_ServerTestBase):
         Commands on one connection are dispatched strictly in order, so
         any (erroneous) broadcast caused by the VS Code-only commands
         would arrive before the unknown-command error sentinel.
-        ``openFile`` is no longer in ``_VSCODE_ONLY_COMMANDS`` (the web
+        ``openFile`` is not in ``sorcar.DROPPED_COMMANDS`` (the web
         server implements it for WSS clients) but must still be a
         silent defensive drop on the UDS transport.
         """

@@ -9,10 +9,15 @@
  * The ONLY way the VS Code extension talks to the kiss-web daemon.
  * Each method maps 1:1 onto a command of the server API catalog
  * defined in ``src/kiss/server/sorcar.py`` (the single source of
- * truth); the daemon validates every command against that catalog.
- * The transport (one persistent UDS connection, queuing, reconnect)
- * stays in {@link AgentClient} — this class owns all message
- * construction so no caller ever hand-builds a protocol message.
+ * truth), and every command is a remote call into the server's code
+ * API: the daemon routes it through
+ * ``kiss.server.sorcar.ServerApi.dispatch``, which validates it
+ * against the catalog and invokes the ``ServerApi`` method the
+ * command's catalog entry names — the extension never talks to
+ * ``web_server.py``'s transport internals directly.  The transport
+ * (one persistent UDS connection, queuing, reconnect) stays in
+ * {@link AgentClient} — this class owns all message construction so
+ * no caller ever hand-builds a protocol message.
  */
 
 import {AgentClient} from './AgentClient';

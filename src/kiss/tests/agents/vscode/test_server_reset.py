@@ -5,8 +5,9 @@
 """Integration tests: the settings-panel "Server reset" button.
 
 The chat webview's "Server reset" button (next to "Update") posts a
-``serverReset`` command.  ``RemoteAccessServer._dispatch_client_command``
-routes it to :meth:`RemoteAccessServer._handle_server_reset`, which
+``serverReset`` command.  The server API
+(:meth:`kiss.server.sorcar.ServerApi.server_reset`) routes it to
+:meth:`RemoteAccessServer._handle_server_reset`, which
 broadcasts a ``notification`` acknowledgement to the requesting window
 and then schedules a ``SIGTERM`` to its own process so the supervising
 LaunchAgent / systemd unit respawns a fresh daemon.

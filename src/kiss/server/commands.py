@@ -1493,9 +1493,10 @@ class _CommandsMixin:
 
         Note that ``self.work_dir`` is only the last-resort fallback:
         each connection (one per VS Code window) keeps its own
-        work_dir in ``RemoteAccessServer._dispatch_client_command``,
-        which stamps it onto every command from that connection that
-        lacks an explicit ``workDir``.  Two windows sharing this
+        work_dir in the server API dispatcher
+        (:meth:`kiss.server.sorcar.ServerApi.dispatch`), which stamps
+        it onto every command from that connection that lacks an
+        explicit ``workDir``.  Two windows sharing this
         daemon therefore never resolve to each other's folder even
         though both of their ``setWorkDir`` commands also land here.
 

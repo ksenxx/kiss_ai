@@ -13,8 +13,9 @@ event (``files``, ``ghost``, ``models``, ``history``, ``frequentTasks``,
 connected client, so e.g. typing ``@`` in window A popped the file
 picker dropdown in window B.
 
-Now ``RemoteAccessServer._dispatch_client_command`` stamps a per-
-connection ``connId`` on every command, the command handlers echo it
+Now the server API dispatcher
+(``kiss.server.sorcar.ServerApi.dispatch``) stamps a per-connection
+``connId`` on every command, the command handlers echo it
 onto their reply events, and ``WebPrinter.broadcast`` delivers a
 ``connId``-stamped event ONLY to the connection that issued the
 request (stripping the stamp from the wire payload).
@@ -22,8 +23,8 @@ request (stripping the stamp from the wire payload).
 These tests bind a temporary socket under a temp dir (not the
 production ``~/.kiss/sorcar.sock``) and open two real UDS client
 connections that simulate two windows.  The same
-``_dispatch_client_command`` body serves both the UDS transport (VS
-Code windows) and the WSS transport (remote browser windows), so the
+``ServerApi.dispatch`` body serves both the UDS transport (VS Code
+windows) and the WSS transport (remote browser windows), so the
 invariant proven here holds identically for two browser windows and
 for a browser window next to a VS Code window:
 
