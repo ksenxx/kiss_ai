@@ -178,16 +178,16 @@ function testDotRendersForRunningRow() {
   const animName = cs.getPropertyValue('animation-name') || '';
   const animShort = cs.getPropertyValue('animation') || '';
   assert.ok(
-    animName.indexOf('sidebar-running-pulse') >= 0 ||
-      animShort.indexOf('sidebar-running-pulse') >= 0,
-    `dot must animate via 'sidebar-running-pulse'; got animation-name=` +
+    animName.indexOf('running-pulse') >= 0 ||
+      animShort.indexOf('running-pulse') >= 0,
+    `dot must animate via 'running-pulse'; got animation-name=` +
       `"${animName}" animation="${animShort}"`,
   );
 
   const cssText = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
   assert.ok(
-    /@keyframes\s+sidebar-running-pulse\b/.test(cssText),
-    'main.css must define @keyframes sidebar-running-pulse',
+    /@keyframes\s+running-pulse\b/.test(cssText),
+    'main.css must define @keyframes running-pulse',
   );
 
   assert.strictEqual(running.dataset.category, 'running');

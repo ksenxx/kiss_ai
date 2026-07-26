@@ -922,13 +922,7 @@
     focusInputWithRetry();
   }
 
-  function closeContentTab(tabId) {
-    const idx = tabs.findIndex(t => {
-      return t.id === tabId;
-    });
-    if (idx < 0) return;
-    const tab = tabs[idx];
-    tabs.splice(idx, 1);
+  function disposeTabContentView(tab) {
     if (tab.contentEditor) {
       try {
         tab.contentEditor.dispose();
@@ -939,6 +933,16 @@
       tab.contentViewEl.parentNode.removeChild(tab.contentViewEl);
     }
     tab.contentViewEl = null;
+  }
+
+  function closeContentTab(tabId) {
+    const idx = tabs.findIndex(t => {
+      return t.id === tabId;
+    });
+    if (idx < 0) return;
+    const tab = tabs[idx];
+    tabs.splice(idx, 1);
+    disposeTabContentView(tab);
     if (activeTabId === tabId) {
       if (tabs.length === 0) {
         hideContentArea();
@@ -1073,15 +1077,7 @@
 
   function renderContentView(tab, ev) {
     const area = ensureContentArea();
-    if (tab.contentEditor) {
-      try {
-        tab.contentEditor.dispose();
-      } catch (_e) {}
-      tab.contentEditor = null;
-    }
-    if (tab.contentViewEl && tab.contentViewEl.parentNode) {
-      tab.contentViewEl.parentNode.removeChild(tab.contentViewEl);
-    }
+    disposeTabContentView(tab);
     const view = document.createElement('div');
     view.className = 'content-tab-view';
     view.style.display = 'none';
@@ -5898,13 +5894,15 @@
         historySearch.focus();
       });
     }
-    const hfRunning = document.getElementById('hf-running');
-    const hfErrors = document.getElementById('hf-errors');
-    const hfCompleted = document.getElementById('hf-completed');
-    const hfWorkspace = document.getElementById('hf-workspace');
-    const hfFavorite = document.getElementById('hf-favorite');
-    const hfFrom = document.getElementById('hf-from');
-    const hfTo = document.getElementById('hf-to');
+    const {
+      hfRunning,
+      hfErrors,
+      hfCompleted,
+      hfWorkspace,
+      hfFavorite,
+      hfFrom,
+      hfTo,
+    } = getHistoryFilterEls();
     [
       hfRunning,
       hfErrors,
@@ -6382,6 +6380,45 @@
     if (idx >= 0) items[idx].scrollIntoView({block: 'nearest'});
   }
 
+  function makeSidebarDeleteConfirm(opts) {
+    const delBtn = document.createElement('button');
+    delBtn.className = 'sidebar-item-delete';
+    delBtn.dataset.tooltip = 'Delete';
+    delBtn.setAttribute('aria-label', opts.ariaLabel);
+    delBtn.innerHTML =
+      '<svg width="11" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>';
+    const confirmWrap = document.createElement('span');
+    confirmWrap.className = 'sidebar-item-confirm';
+    confirmWrap.style.display = 'none';
+    const confirmBtn = document.createElement('button');
+    confirmBtn.className = 'sidebar-confirm-yes';
+    confirmBtn.dataset.tooltip = 'Confirm delete';
+    confirmBtn.textContent = 'Delete';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'sidebar-confirm-no';
+    cancelBtn.dataset.tooltip = 'Cancel';
+    cancelBtn.textContent = 'Cancel';
+    confirmWrap.appendChild(confirmBtn);
+    confirmWrap.appendChild(cancelBtn);
+    delBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      delBtn.style.display = 'none';
+      confirmWrap.style.display = '';
+      if (opts.onShowConfirm) opts.onShowConfirm();
+    });
+    confirmBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      opts.onConfirm();
+    });
+    cancelBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      confirmWrap.style.display = 'none';
+      delBtn.style.display = '';
+      if (opts.onCancel) opts.onCancel();
+    });
+    return {delBtn: delBtn, confirmWrap: confirmWrap};
+  }
+
   function makeSidebarCopyButton(text) {
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -6558,44 +6595,12 @@
         const copyBtn = makeSidebarCopyButton(s.preview || itemText);
         actions.appendChild(copyBtn);
 
-        const delBtn = document.createElement('button');
-        delBtn.className = 'sidebar-item-delete';
-        delBtn.innerHTML =
-          '<svg width="11" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>';
-
-        const confirmWrap = document.createElement('span');
-        confirmWrap.className = 'sidebar-item-confirm';
-        confirmWrap.style.display = 'none';
-
-        const confirmBtn = document.createElement('button');
-        confirmBtn.className = 'sidebar-confirm-yes';
-        confirmBtn.dataset.tooltip = 'Confirm delete';
-        confirmBtn.textContent = 'Delete';
-
-        const cancelBtn = document.createElement('button');
-        cancelBtn.className = 'sidebar-confirm-no';
-        cancelBtn.dataset.tooltip = 'Cancel';
-        cancelBtn.textContent = 'Cancel';
-
-        confirmWrap.appendChild(confirmBtn);
-        confirmWrap.appendChild(cancelBtn);
-
-        delBtn.addEventListener('click', e => {
-          e.stopPropagation();
-          delBtn.style.display = 'none';
-          confirmWrap.style.display = '';
-        });
-
-        confirmBtn.addEventListener('click', e => {
-          e.stopPropagation();
-          api.deleteTask({taskId: s.task_id});
-          div.remove();
-        });
-
-        cancelBtn.addEventListener('click', e => {
-          e.stopPropagation();
-          confirmWrap.style.display = 'none';
-          delBtn.style.display = '';
+        const {delBtn, confirmWrap} = makeSidebarDeleteConfirm({
+          ariaLabel: 'Delete task',
+          onConfirm: () => {
+            api.deleteTask({taskId: s.task_id});
+            div.remove();
+          },
         });
 
         actions.appendChild(delBtn);
@@ -6960,14 +6965,28 @@
     return isWindowsPath ? normalized.toLowerCase() : normalized;
   }
 
+  function getHistoryFilterEls() {
+    return {
+      hfRunning: document.getElementById('hf-running'),
+      hfErrors: document.getElementById('hf-errors'),
+      hfCompleted: document.getElementById('hf-completed'),
+      hfWorkspace: document.getElementById('hf-workspace'),
+      hfFavorite: document.getElementById('hf-favorite'),
+      hfFrom: document.getElementById('hf-from'),
+      hfTo: document.getElementById('hf-to'),
+    };
+  }
+
   function applyHistoryFilterVisibility() {
-    const hfRunning = document.getElementById('hf-running');
-    const hfErrors = document.getElementById('hf-errors');
-    const hfCompleted = document.getElementById('hf-completed');
-    const hfWorkspace = document.getElementById('hf-workspace');
-    const hfFavorite = document.getElementById('hf-favorite');
-    const hfFrom = document.getElementById('hf-from');
-    const hfTo = document.getElementById('hf-to');
+    const {
+      hfRunning,
+      hfErrors,
+      hfCompleted,
+      hfWorkspace,
+      hfFavorite,
+      hfFrom,
+      hfTo,
+    } = getHistoryFilterEls();
     if (!hfRunning || !hfErrors || !hfCompleted) return;
     const showRunning = hfRunning.checked;
     const showErrors = hfErrors.checked;
@@ -7162,48 +7181,18 @@
       const copyBtn = makeSidebarCopyButton(text);
       div.appendChild(copyBtn);
 
-      const delBtn = document.createElement('button');
-      delBtn.className = 'sidebar-item-delete';
-      delBtn.dataset.tooltip = 'Delete';
-      delBtn.setAttribute('aria-label', 'Delete frequent task');
-      delBtn.innerHTML =
-        '<svg width="11" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>';
-
-      const confirmWrap = document.createElement('span');
-      confirmWrap.className = 'sidebar-item-confirm';
-      confirmWrap.style.display = 'none';
-
-      const confirmBtn = document.createElement('button');
-      confirmBtn.className = 'sidebar-confirm-yes';
-      confirmBtn.dataset.tooltip = 'Confirm delete';
-      confirmBtn.textContent = 'Delete';
-
-      const cancelBtn = document.createElement('button');
-      cancelBtn.className = 'sidebar-confirm-no';
-      cancelBtn.dataset.tooltip = 'Cancel';
-      cancelBtn.textContent = 'Cancel';
-
-      confirmWrap.appendChild(confirmBtn);
-      confirmWrap.appendChild(cancelBtn);
-
-      delBtn.addEventListener('click', e => {
-        e.stopPropagation();
-        delBtn.style.display = 'none';
-        cnt.style.display = 'none';
-        confirmWrap.style.display = '';
-      });
-
-      confirmBtn.addEventListener('click', e => {
-        e.stopPropagation();
-        api.deleteFrequentTask({task: text});
-        div.remove();
-      });
-
-      cancelBtn.addEventListener('click', e => {
-        e.stopPropagation();
-        confirmWrap.style.display = 'none';
-        delBtn.style.display = '';
-        cnt.style.display = '';
+      const {delBtn, confirmWrap} = makeSidebarDeleteConfirm({
+        ariaLabel: 'Delete frequent task',
+        onShowConfirm: () => {
+          cnt.style.display = 'none';
+        },
+        onCancel: () => {
+          cnt.style.display = '';
+        },
+        onConfirm: () => {
+          api.deleteFrequentTask({task: text});
+          div.remove();
+        },
       });
 
       div.appendChild(delBtn);
@@ -7409,17 +7398,9 @@
     acIdx = -1;
   }
 
-  function renderAutocomplete(data) {
-    if (!data || !data.length) {
-      hideAC();
-      return;
-    }
+  function renderAcDropdown(data, order, labels, itemHtml, onAccept) {
     autocomplete.innerHTML = '';
     acIdx = -1;
-    const atMatch = getAtCtx();
-    const searchQ = atMatch ? atMatch.query : '';
-    const order = ['frequent', 'file'];
-    const labels = {frequent: 'Frequent', file: 'Files'};
     const groups = {};
     data.forEach(item => {
       const t = item.type;
@@ -7437,23 +7418,19 @@
       g.forEach(item => {
         const d = mkEl('div', 'ac-item');
         d.dataset.text = item.text;
-        const useSearch = searchQ && searchQ.length > 0;
-        const textHtml = useSearch
-          ? hlMatch(item.text, searchQ)
-          : _acPathHtml(item.text);
         d.innerHTML =
           '<span class="ac-icon">' +
           _acIcon(item.type) +
           '</span>' +
           '<span class="ac-text">' +
-          textHtml +
+          itemHtml(item) +
           '</span>';
         if (isFirst) {
           d.innerHTML += '<span class="ac-hint">tab</span>';
           isFirst = false;
         }
         d.addEventListener('click', () => {
-          insertAtMention(item.text);
+          onAccept(item.text);
         });
         autocomplete.appendChild(d);
       });
@@ -7466,8 +7443,26 @@
     autocomplete.appendChild(footer);
     autocomplete.style.display = 'block';
     acIdx = 0;
-    const allItems = autocomplete.querySelectorAll('.ac-item');
-    updateSel(allItems, acIdx);
+    updateSel(autocomplete.querySelectorAll('.ac-item'), acIdx);
+  }
+
+  function renderAutocomplete(data) {
+    if (!data || !data.length) {
+      hideAC();
+      return;
+    }
+    const atMatch = getAtCtx();
+    const searchQ = atMatch ? atMatch.query : '';
+    renderAcDropdown(
+      data,
+      ['frequent', 'file'],
+      {frequent: 'Frequent', file: 'Files'},
+      item =>
+        searchQ && searchQ.length > 0
+          ? hlMatch(item.text, searchQ)
+          : _acPathHtml(item.text),
+      insertAtMention,
+    );
   }
 
   function insertAtMention(file) {
@@ -7525,60 +7520,18 @@
       hideAC();
       return;
     }
-    autocomplete.innerHTML = '';
-    acIdx = -1;
-    const order = ['task', 'frequent', 'trick', 'identifier'];
-    const labels = {
-      task: 'History',
-      frequent: 'Frequent',
-      trick: 'Suggestions',
-      identifier: 'From editor',
-    };
-    const groups = {};
-    data.forEach(item => {
-      const t = item.type;
-      if (!groups[t]) groups[t] = [];
-      groups[t].push(item);
-    });
-    let isFirst = true;
-    order.forEach(type => {
-      const g = groups[type];
-      if (!g) return;
-      const lbl = labels[type] || type;
-      const hdr = mkEl('div', 'ac-section');
-      hdr.textContent = lbl;
-      autocomplete.appendChild(hdr);
-      g.forEach(item => {
-        const d = mkEl('div', 'ac-item');
-        d.dataset.text = item.text;
-        const textHtml = hlMatch(item.text, inp.value);
-        d.innerHTML =
-          '<span class="ac-icon">' +
-          _acIcon(item.type) +
-          '</span>' +
-          '<span class="ac-text">' +
-          textHtml +
-          '</span>';
-        if (isFirst) {
-          d.innerHTML += '<span class="ac-hint">tab</span>';
-          isFirst = false;
-        }
-        d.addEventListener('click', () => {
-          acceptCompletion(item.text);
-        });
-        autocomplete.appendChild(d);
-      });
-    });
-    const footer = mkEl('div', 'ac-footer');
-    footer.innerHTML =
-      '<span><kbd>\u2191\u2193</kbd> navigate</span>' +
-      '<span><kbd>Tab</kbd> accept</span>' +
-      '<span><kbd>Esc</kbd> dismiss</span>';
-    autocomplete.appendChild(footer);
-    autocomplete.style.display = 'block';
-    acIdx = 0;
-    const allItems = autocomplete.querySelectorAll('.ac-item');
-    updateSel(allItems, acIdx);
+    renderAcDropdown(
+      data,
+      ['task', 'frequent', 'trick', 'identifier'],
+      {
+        task: 'History',
+        frequent: 'Frequent',
+        trick: 'Suggestions',
+        identifier: 'From editor',
+      },
+      item => hlMatch(item.text, inp.value),
+      acceptCompletion,
+    );
   }
 
   window._demoApi = {
@@ -7589,6 +7542,7 @@
       _demoActive = !!v;
     },
     resolveEvents: null,
+    kissSanitize: kissSanitize,
     createNewTab: createNewTab,
     setInput: function (text) {
       inp.value = text;

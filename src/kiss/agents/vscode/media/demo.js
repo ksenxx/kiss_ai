@@ -63,49 +63,11 @@
 
   let demoSubTabSeq = 0;
 
+  // Delegates to main.js's sanitizer (exposed on window._demoApi) so demo
+  // replay strips exactly what live chat rendering strips — demo.js used to
+  // carry its own weaker copy that let custom elements through.
   function kissSanitize(html) {
-    const t = document.createElement('template');
-    t.innerHTML = String(html == null ? '' : html);
-    const BAD_TAGS = new Set([
-      'SCRIPT',
-      'IFRAME',
-      'OBJECT',
-      'EMBED',
-      'FORM',
-      'META',
-      'LINK',
-      'STYLE',
-      'BASE',
-      'FRAME',
-      'FRAMESET',
-    ]);
-    const URL_ATTRS = new Set([
-      'href',
-      'src',
-      'action',
-      'formaction',
-      'xlink:href',
-    ]);
-    for (const el of Array.from(t.content.querySelectorAll('*'))) {
-      if (BAD_TAGS.has(el.tagName)) {
-        el.remove();
-        continue;
-      }
-      for (const attr of Array.from(el.attributes)) {
-        const name = attr.name.toLowerCase();
-        if (name.startsWith('on')) {
-          el.removeAttribute(attr.name);
-          continue;
-        }
-        if (
-          URL_ATTRS.has(name) &&
-          /^(javascript|data|vbscript):/i.test((attr.value || '').trim())
-        ) {
-          el.removeAttribute(attr.name);
-        }
-      }
-    }
-    return t.innerHTML;
+    return getApi().kissSanitize(html);
   }
 
   function sleep(ms) {

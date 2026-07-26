@@ -229,9 +229,9 @@ function testRunningTaskAppearsWhenBurgerOpened() {
   const animName = cs.getPropertyValue('animation-name') || '';
   const animShort = cs.getPropertyValue('animation') || '';
   assert.ok(
-    animName.indexOf('sidebar-running-pulse') >= 0 ||
-      animShort.indexOf('sidebar-running-pulse') >= 0,
-    `dot must animate via 'sidebar-running-pulse'; got animation-name=` +
+    animName.indexOf('running-pulse') >= 0 ||
+      animShort.indexOf('running-pulse') >= 0,
+    `dot must animate via 'running-pulse'; got animation-name=` +
       `"${animName}" animation="${animShort}"`,
   );
 
@@ -287,8 +287,8 @@ function testRunningTaskAppearsWhenBurgerOpened() {
   const anim2Name = cs2.getPropertyValue('animation-name') || '';
   const anim2Short = cs2.getPropertyValue('animation') || '';
   assert.ok(
-    anim2Name.indexOf('sidebar-running-pulse') < 0 &&
-      anim2Short.indexOf('sidebar-running-pulse') < 0,
+    anim2Name.indexOf('running-pulse') < 0 &&
+      anim2Short.indexOf('running-pulse') < 0,
     `completed dot must NOT pulse; got animation-name="${anim2Name}" ` +
       `animation="${anim2Short}"`,
   );

@@ -2072,6 +2072,38 @@ def _events_session_dict(
     }
 
 
+def _load_events_session_row(
+    where_sql: str,
+    params: tuple[object, ...],
+) -> dict[str, object] | None:
+    """Load one ``task_history`` row and its events as a session dict.
+
+    Shared engine of :func:`_load_latest_chat_events_by_chat_id` and
+    :func:`_load_chat_events_by_task_id` — runs ``_HISTORY_SELECT``
+    plus *where_sql* under the read lock and converts the first
+    matching row via :func:`_events_session_dict`.
+
+    Args:
+        where_sql: SQL appended to ``_HISTORY_SELECT`` (the
+            WHERE/ORDER BY/LIMIT clauses).
+        params: Bind parameters for *where_sql*.
+
+    Returns:
+        A dict with ``task`` (str), ``task_id`` (str), ``events``
+        (list of event dicts), ``chat_id`` (str), and ``extra`` (str,
+        JSON metadata), or ``None`` when no row matches.
+    """
+    with _rw_lock.read_lock():
+        db = _get_db()
+        row = db.execute(_HISTORY_SELECT + where_sql, params).fetchone()
+        if row is None:
+            return None
+        return _events_session_dict(
+            db, str(row["id"]), row["task"], str(row["chat_id"] or ""),
+            _row_to_extra_json(row),
+        )
+
+
 def _load_latest_chat_events_by_chat_id(
     chat_id: str,
 ) -> dict[str, object] | None:
@@ -2100,20 +2132,11 @@ def _load_latest_chat_events_by_chat_id(
     """
     if not chat_id:
         return None
-    with _rw_lock.read_lock():
-        db = _get_db()
-        row = db.execute(
-            _HISTORY_SELECT
-            + f"WHERE chat_id = ? AND {_HISTORY_NOT_SUBAGENT} "
-            "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
-            (chat_id,),
-        ).fetchone()
-        if row is None:
-            return None
-        return _events_session_dict(
-            db, str(row["id"]), row["task"], chat_id,
-            _row_to_extra_json(row),
-        )
+    return _load_events_session_row(
+        f"WHERE chat_id = ? AND {_HISTORY_NOT_SUBAGENT} "
+        "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+        (chat_id,),
+    )
 
 
 def _load_chat_events_by_task_id(
@@ -2133,18 +2156,7 @@ def _load_chat_events_by_task_id(
         (list of event dicts), ``chat_id`` (str), and ``extra`` (str,
         JSON metadata), or ``None`` if no such row exists.
     """
-    with _rw_lock.read_lock():
-        db = _get_db()
-        row = db.execute(
-            _HISTORY_SELECT + "WHERE id = ?",
-            (task_id,),
-        ).fetchone()
-        if not row:
-            return None
-        return _events_session_dict(
-            db, str(row["id"]), row["task"], str(row["chat_id"] or ""),
-            _row_to_extra_json(row),
-        )
+    return _load_events_session_row("WHERE id = ?", (task_id,))
 
 
 def _load_subagent_rows_by_parent_task_id(

@@ -312,18 +312,14 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
     def _finalize_worktree(self) -> bool:
         """Auto-commit, remove worktree, prune.
 
-        After the LLM-driven auto-commit, a single-shot retry runs
-        :meth:`GitWorktreeOps.commit_all` with a generic message to
-        catch the very narrow remaining race where a file appears
-        between :func:`~kiss.agents.sorcar.sorcar_agent.auto_commit_changes`'s
-        second ``stage_all`` and its ``commit_staged`` call (e.g.
-        ``PROGRESS.md`` being rewritten, ``.DS_Store`` materializing
-        after an ``open`` of the report, an editor swap file
-        appearing).  Only if that retry STILL leaves uncommitted
-        state do we preserve the worktree and log a warning — and
-        that warning now includes the raw ``git status --porcelain``
-        leftover so an operator can distinguish a real pre-commit
-        rejection from a race leftover from a corrupt index without
+        Delegates the auto-commit → late-arriver-retry →
+        preserve-or-remove sequence to
+        :meth:`_commit_and_clean_worktree` (see its docstring for the
+        race being closed).  Only if the retry STILL leaves
+        uncommitted state do we preserve the worktree and log a
+        warning that includes the raw ``git status --porcelain``
+        leftover, so an operator can distinguish a real pre-commit
+        rejection from a race leftover or a corrupt index without
         sshing in.
 
         Returns:

@@ -10,7 +10,7 @@ When a ``ChatSorcarAgent`` is executed by the ``sorcar`` CLI
 (outside the VS Code / browser UI), the task row in the History
 panel sidebar MUST display the green pulsing-circle "running"
 indicator (CSS class ``sidebar-item-running``, keyframes
-``sidebar-running-pulse``) for as long as the agent is running.
+``running-pulse``) for as long as the agent is running.
 
 Pre-fix the running indicator was never set for CLI-launched tasks:
 ``VSCodeServer._get_history`` builds the ``is_running`` flag from

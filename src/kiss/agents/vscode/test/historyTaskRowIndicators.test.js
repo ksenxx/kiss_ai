@@ -302,10 +302,10 @@ function testFinishedTaskShowsSolidGreenCircle() {
   const animName = cs.getPropertyValue('animation-name') || '';
   const animShort = cs.getPropertyValue('animation') || '';
   assert.ok(
-    animName.indexOf('sidebar-running-pulse') < 0 &&
-      animShort.indexOf('sidebar-running-pulse') < 0,
+    animName.indexOf('running-pulse') < 0 &&
+      animShort.indexOf('running-pulse') < 0,
     'solid (completed) circle MUST NOT animate via ' +
-      `sidebar-running-pulse; got animation-name="${animName}" ` +
+      `running-pulse; got animation-name="${animName}" ` +
       `animation="${animShort}"`,
   );
 
@@ -430,8 +430,8 @@ function testCompletedDotKeyframesNotShared() {
   assert.ok(m, 'expected a single-rule .sidebar-item-completed block');
   const body = m[1];
   assert.ok(
-    body.indexOf('sidebar-running-pulse') < 0,
-    '.sidebar-item-completed MUST NOT use sidebar-running-pulse; ' +
+    body.indexOf('running-pulse') < 0,
+    '.sidebar-item-completed MUST NOT use running-pulse; ' +
       'the solid circle is static',
   );
   assert.ok(

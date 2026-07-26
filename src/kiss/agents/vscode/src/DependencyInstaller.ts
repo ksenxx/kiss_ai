@@ -126,24 +126,35 @@ function verifyDownloadHash(
   log(`SHA256 ok for ${path.basename(filePath)}`);
 }
 
-function fetchUvStyleSha256(assetUrl: string): Promise<string | null> {
+/**
+ * GET *url* over HTTPS and return the response body as UTF-8 text.
+ *
+ * Returns null on any failure (non-200 status, network error, abort,
+ * 15s timeout, or a malformed/non-HTTPS URL).  Redirects are not
+ * followed.  Shared transport for the SHA-256 manifest fetchers
+ * below, which previously duplicated this boilerplate.
+ */
+export function httpsGetText(url: string): Promise<string | null> {
   return new Promise(resolve => {
-    const req = https.get(assetUrl + '.sha256', {timeout: 15000}, res => {
-      if ((res.statusCode || 0) !== 200) {
-        res.resume();
-        resolve(null);
-        return;
-      }
-      const chunks: Buffer[] = [];
-      res.on('data', d => chunks.push(d));
-      res.on('end', () => {
-        const text = Buffer.concat(chunks).toString('utf-8').trim();
-        const m = /^([0-9a-fA-F]{64})/.exec(text);
-        resolve(m ? m[1] : null);
+    let req: ReturnType<typeof https.get>;
+    try {
+      req = https.get(url, {timeout: 15000}, res => {
+        if ((res.statusCode || 0) !== 200) {
+          res.resume();
+          resolve(null);
+          return;
+        }
+        const chunks: Buffer[] = [];
+        res.on('data', d => chunks.push(d));
+        res.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+        res.on('error', () => resolve(null));
+        res.on('aborted', () => resolve(null));
       });
-      res.on('error', () => resolve(null));
-      res.on('aborted', () => resolve(null));
-    });
+    } catch {
+      // e.g. malformed URL or non-HTTPS protocol throws synchronously.
+      resolve(null);
+      return;
+    }
     req.on('error', () => resolve(null));
     req.on('timeout', () => {
       req.destroy();
@@ -152,37 +163,36 @@ function fetchUvStyleSha256(assetUrl: string): Promise<string | null> {
   });
 }
 
-function fetchNodeSha256(assetName: string): Promise<string | null> {
-  const url = `https://nodejs.org/dist/${NODE_VERSION}/SHASUMS256.txt`;
-  return new Promise(resolve => {
-    const req = https.get(url, {timeout: 15000}, res => {
-      if ((res.statusCode || 0) !== 200) {
-        res.resume();
-        resolve(null);
-        return;
-      }
-      const chunks: Buffer[] = [];
-      res.on('data', d => chunks.push(d));
-      res.on('end', () => {
-        const text = Buffer.concat(chunks).toString('utf-8');
-        for (const line of text.split('\n')) {
-          const m = /^([0-9a-fA-F]{64})\s+(.+?)\s*$/.exec(line);
-          if (m && m[2] === assetName) {
-            resolve(m[1]);
-            return;
-          }
-        }
-        resolve(null);
-      });
-      res.on('error', () => resolve(null));
-      res.on('aborted', () => resolve(null));
-    });
-    req.on('error', () => resolve(null));
-    req.on('timeout', () => {
-      req.destroy();
-      resolve(null);
-    });
-  });
+/**
+ * Fetch the uv-style `<assetUrl>.sha256` manifest and return the
+ * leading 64-hex-digit digest, or null when unavailable.
+ */
+export async function fetchUvStyleSha256(
+  assetUrl: string,
+): Promise<string | null> {
+  const text = await httpsGetText(assetUrl + '.sha256');
+  if (text === null) return null;
+  const m = /^([0-9a-fA-F]{64})/.exec(text.trim());
+  return m ? m[1] : null;
+}
+
+/**
+ * Look up *assetName*'s digest in the Node.js SHASUMS256.txt manifest
+ * for NODE_VERSION, or null when unavailable or unlisted.
+ */
+export async function fetchNodeSha256(
+  assetName: string,
+  manifestUrl?: string,
+): Promise<string | null> {
+  const url =
+    manifestUrl || `https://nodejs.org/dist/${NODE_VERSION}/SHASUMS256.txt`;
+  const text = await httpsGetText(url);
+  if (text === null) return null;
+  for (const line of text.split('\n')) {
+    const m = /^([0-9a-fA-F]{64})\s+(.+?)\s*$/.exec(line);
+    if (m && m[2] === assetName) return m[1];
+  }
+  return null;
 }
 
 function sleepSync(ms: number): void {

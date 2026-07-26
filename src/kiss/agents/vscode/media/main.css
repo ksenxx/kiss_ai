@@ -412,10 +412,10 @@ body {
   width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
   background: #2e7d32;
   box-shadow: 0 0 0 1px rgb(0 0 0 / 15%);
-  animation: tab-running-pulse 1.5s ease-in-out infinite;
+  animation: running-pulse 1.5s ease-in-out infinite;
 }
 
-@keyframes tab-running-pulse {
+@keyframes running-pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 1px rgb(0 0 0 / 15%); }
   50% { opacity: 0.4; box-shadow: 0 0 6px 2px rgb(46 125 50 / 50%); }
 }
@@ -1166,22 +1166,18 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 #upload-btn:hover { color: color-mix(in srgb, var(--fg) 70%, transparent); border-color: color-mix(in srgb, var(--fg) 16%, transparent); background: color-mix(in srgb, var(--fg) 5%, transparent); }
 #upload-btn svg { width: 16px; height: 16px; }
 
-#menu-btn {
-  background: none; border: none;
-  color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
-  padding: 2px; transition: color 0.15s, opacity 0.15s;
-  display: flex; align-items: center; position: relative;
-}
-#menu-btn:hover:not(:disabled) { color: color-mix(in srgb, var(--fg) 66%, transparent); }
-#menu-btn:disabled { opacity: 0.3; cursor: not-allowed; }
-
+#menu-btn,
 .toggle-btn {
   background: none; border: none;
   color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
   padding: 2px; transition: color 0.15s, opacity 0.15s;
   display: flex; align-items: center; position: relative;
 }
+
+#menu-btn:hover:not(:disabled),
 .toggle-btn:hover:not(:disabled) { color: color-mix(in srgb, var(--fg) 66%, transparent); }
+
+#menu-btn:disabled,
 .toggle-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 .toggle-btn.active { color: var(--accent); }
 .toggle-btn.active:hover:not(:disabled) { color: color-mix(in srgb, var(--accent) 80%, transparent); }
@@ -1873,7 +1869,7 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%;
   background: #2e7d32; margin-right: 8px;
   box-shadow: 0 0 0 1px rgb(0 0 0 / 15%);
-  animation: sidebar-running-pulse 1.5s ease-in-out infinite;
+  animation: running-pulse 1.5s ease-in-out infinite;
 }
 
 .sidebar-item-completed {
@@ -1977,11 +1973,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 }
 
 .ids-copy-btn.copied { opacity: 0.9; color: #006400; }
-
-@keyframes sidebar-running-pulse {
-  0%, 100% { opacity: 1; box-shadow: 0 0 0 1px rgb(0 0 0 / 15%); }
-  50% { opacity: 0.4; box-shadow: 0 0 6px 2px rgb(46 125 50 / 50%); }
-}
 
 .sidebar-item-actions {
   display: flex;

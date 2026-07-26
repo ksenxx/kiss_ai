@@ -11,7 +11,7 @@
     current page session.  Specifically:
 
       * A *running* row renders the PULSING green dot
-        (``.sidebar-item-running`` with the ``sidebar-running-pulse``
+        (``.sidebar-item-running`` with the ``running-pulse``
         keyframe animation).
       * When a row that the current session previously rendered as
         running transitions to ``is_running:false`` and
@@ -359,7 +359,7 @@ def test_live_running_to_completed_transition_shows_solid_green(
             "document.querySelector('#history-list .sidebar-item-completed')"
             ").animationName"
         )
-        assert "sidebar-running-pulse" not in (anim or ""), (
+        assert "running-pulse" not in (anim or ""), (
             "completed dot must NOT inherit the pulse animation; "
             f"got animation-name={anim!r}"
         )

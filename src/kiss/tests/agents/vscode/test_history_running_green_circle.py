@@ -23,7 +23,7 @@ pipeline used by the History sidebar to surface the
   must render a visible ``.sidebar-item-running`` dot as the FIRST
   child of every row whose ``is_running`` is ``True``, using the
   green colour ``#2e7d32`` (``rgb(46, 125, 50)``), the
-  ``sidebar-running-pulse`` keyframe animation, and 8x8 geometry.
+  ``running-pulse`` keyframe animation, and 8x8 geometry.
   Rows whose ``is_running`` is ``False`` must NOT render the dot.
 
 * A **live update** half — a ``status: running=true`` event must
@@ -540,8 +540,8 @@ def test_running_session_renders_green_circle(_browser) -> None:
             "running dot is not the success-green colour: "
             f"background-color={dot['background']!r}; expected rgb(46, 125, 50)"
         )
-        assert dot["animationName"] == "sidebar-running-pulse", (
-            "running dot must animate via 'sidebar-running-pulse'; "
+        assert dot["animationName"] == "running-pulse", (
+            "running dot must animate via 'running-pulse'; "
             f"animation-name={dot['animationName']!r}"
         )
         assert dot["animationDuration"] == "1.5s", (
@@ -838,7 +838,7 @@ def test_search_results_can_render_running_green_circle(_browser) -> None:
                 !!dot && dot.offsetParent !== null &&
                 getComputedStyle(dot).backgroundColor === 'rgb(46, 125, 50)' &&
                 getComputedStyle(dot).animationName ===
-                  'sidebar-running-pulse';
+                  'running-pulse';
             }
             """
         )
@@ -926,7 +926,7 @@ def test_backend_history_event_renders_green_circle_end_to_end(
               return row.offsetParent !== null &&
                 dot.offsetParent !== null &&
                 cs.backgroundColor === 'rgb(46, 125, 50)' &&
-                cs.animationName === 'sidebar-running-pulse';
+                cs.animationName === 'running-pulse';
             }
             """
         )
