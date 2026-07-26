@@ -111,7 +111,6 @@ def test_codex_generate_passes_utf8_encoding(monkeypatch: pytest.MonkeyPatch) ->
     assert content == "ok"
     assert captured["kwargs"].get("text") is True
     assert captured["kwargs"].get("encoding") == "utf-8"
-    # The non-ASCII prompt was handed to the CLI verbatim.
     assert "café" in captured["proc"].stdin.written
     assert "😀" in captured["proc"].stdin.written
 

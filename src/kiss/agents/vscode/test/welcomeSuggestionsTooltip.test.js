@@ -2,11 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression test for welcome suggestion tooltips.  The
-// welcome chips clamp long SAMPLE_TASKS text to three visible lines;
-// hovering a chip must expose the full suggested text through the
-// production custom tooltip used inside VS Code webviews.
 
 'use strict';
 
@@ -51,9 +46,6 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  // Evaluate api.js separately so V8 coverage offsets for the
-
-  // sourceURL-labelled main.js eval below start at character 0.
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(

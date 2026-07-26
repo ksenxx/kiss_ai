@@ -77,8 +77,6 @@ class TestAwaitUserResponseImmediacy(unittest.TestCase):
         entered = threading.Event()
 
         def wait_for_answer() -> None:
-            # ``_thread_local`` state must be set on the waiter
-            # thread itself — that is the thread that reads it.
             self.server.printer._thread_local.task_id = "task-A"
             self.server.printer._thread_local.stop_event = stop
             entered.set()
@@ -88,7 +86,6 @@ class TestAwaitUserResponseImmediacy(unittest.TestCase):
         waiter = threading.Thread(target=wait_for_answer, daemon=True)
         waiter.start()
         entered.wait(timeout=1.0)
-        # Let the waiter enter ``q.get``.
         time.sleep(0.05)
 
         t0 = time.monotonic()
@@ -178,13 +175,9 @@ class TestEndToEndAskUserLatency(unittest.TestCase):
         waiter = threading.Thread(target=wait_for_answer, daemon=True)
         waiter.start()
         entered.wait(timeout=1.0)
-        # Let the waiter enter ``q.get``.
         time.sleep(0.05)
 
         t0 = time.monotonic()
-        # Go through the public command-dispatch entry point so the
-        # test exercises the same code path the WS / UDS handlers
-        # use when forwarding a ``userAnswer`` from the frontend.
         self.server._handle_command(
             {"type": "userAnswer", "tabId": "tab-E", "answer": "hello"},
         )
@@ -210,7 +203,7 @@ class TestEndToEndAskUserLatency(unittest.TestCase):
         """
         owner_q: queue.Queue[str] = queue.Queue(maxsize=1)
         self.server._get_tab("owner-V").user_answer_queue = owner_q
-        self.server._get_tab("viewer-V")  # no queue
+        self.server._get_tab("viewer-V")
         self.server.printer.subscribe_tab("task-V", "owner-V")
         self.server.printer.subscribe_tab("task-V", "viewer-V")
         stop = threading.Event()
@@ -270,7 +263,6 @@ class TestUserAnswerSubscriberFallback(unittest.TestCase):
         """
         owner_q: queue.Queue[str] = queue.Queue(maxsize=1)
         self.server._get_tab("owner").user_answer_queue = owner_q
-        # Viewer tab exists but never ran a task — no queue.
         self.server._get_tab("viewer")
         self.server.printer.subscribe_tab("task-X", "owner")
         self.server.printer.subscribe_tab("task-X", "viewer")
@@ -280,8 +272,7 @@ class TestUserAnswerSubscriberFallback(unittest.TestCase):
 
     def test_unknown_tab_with_no_co_subscriber_is_dropped(self) -> None:
         """An answer from an unrelated tab id is dropped silently."""
-        self.server._get_tab("stranger")  # exists, no queue, no subscription
-        # Should not raise.
+        self.server._get_tab("stranger")
         self.server._cmd_user_answer({"tabId": "stranger", "answer": "noop"})
 
     def test_owner_tab_self_routing_still_works(self) -> None:

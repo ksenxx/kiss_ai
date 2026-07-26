@@ -91,9 +91,6 @@ class BashStreamTaskRoutingTest(unittest.TestCase):
             description="stream two lines with a pause",
             timeout_seconds=30,
         )
-        # A tool_call boundary flushes any buffered bash output on the
-        # agent thread — the same thing that happens in production when
-        # the model issues its next tool call.
         printer.print("Read", type="tool_call", tool_input={})
         events = printer.stop_recording()
         return printer, events, result

@@ -28,8 +28,6 @@ import pytest
 
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 
-# ``os.kill(pid, 0)`` liveness probes, signal escalation, and
-# SingletonLock symlinks all need POSIX semantics.
 _posix_only = pytest.mark.skipif(
     sys.platform == "win32", reason="POSIX process/signal semantics required"
 )
@@ -107,7 +105,6 @@ class TestBrowserProcessKilledOnClose:
         t.join(timeout=120)
         assert not t.is_alive(), "worker thread hung"
         assert "pid" in box, "browser failed to launch in worker thread"
-        # Close from the MAIN thread: graceful close fails cross-thread.
         box["tool"].close()
         assert _wait_dead(box["pid"]), (
             f"Chromium (pid {box['pid']}) leaked after cross-thread close()"
@@ -118,8 +115,6 @@ class TestBrowserProcessKilledOnClose:
         tool = WebUseTool(user_data_dir=str(tmp_path / "prof"), headless=True)
         try:
             old_pid = _launch(tool)
-            # Simulate the renderer-crash state that forces a full teardown
-            # + relaunch in _ensure_browser (page cleared, context kept).
             tool._on_page_crash(tool._page)
             assert tool.go_to_url("about:blank").startswith("Page:")
             new_pid = tool._browser_pid
@@ -176,7 +171,6 @@ class TestCloseBrowserTool:
             assert _wait_dead(pid), (
                 f"Chromium (pid {pid}) survived close_browser()"
             )
-            # The next web tool call lazily relaunches a fresh browser.
             new_pid = _launch(tool)
             assert new_pid != pid
         finally:
@@ -217,7 +211,6 @@ class TestEphemeralProfile:
             tool.close()
             assert _wait_dead(pid1)
             assert not os.path.exists(profile)
-            # Revive: the next web tool call relaunches and recreates the dir.
             pid2 = _launch(tool)
             assert os.path.isdir(profile)
         finally:

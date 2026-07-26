@@ -157,14 +157,10 @@ class TestBridgeFollowsSockPathChanges:
 
     def test_send_event_follows_env_var_change(self) -> None:
         """Events after a sock-path change must reach the NEW daemon."""
-        # Short base dir: AF_UNIX sun_path is capped at ~104 bytes on
-        # macOS, and pytest tmp_path can exceed it.
         base = Path(tempfile.mkdtemp(prefix="bh2-", dir="/tmp"))
         server_a = _UdsLineServer(base / "a.sock")
         server_b = _UdsLineServer(base / "b.sock")
         old_env = os.environ.get("KISS_SORCAR_SOCK")
-        # Reset the module-level cached writer so a connection cached
-        # by an earlier test cannot leak into this one.
         with cli_daemon_bridge._LOCK:
             if cli_daemon_bridge._WRITER is not None:
                 try:

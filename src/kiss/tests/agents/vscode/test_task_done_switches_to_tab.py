@@ -167,8 +167,6 @@ def _open_page(_browser, width: int = 800, height: int = 900):
     iife_err = page.evaluate("() => window.__iifeError")
     if iife_err:
         pytest.fail(f"main.js IIFE setup raised: {iife_err}")
-    # Wait until the initial tab is materialised in the tab bar (the
-    # IIFE creates the first tab synchronously on init).
     page.wait_for_function(
         "document.querySelectorAll("
         "'#tab-list .chat-tab[data-tab-id]'"
@@ -180,8 +178,6 @@ def _open_page(_browser, width: int = 800, height: int = 900):
 
 def _make_two_tabs(page) -> tuple[str, str]:
     """Allocate two chat tabs and return ``(tab_a, tab_b)`` ids."""
-    # Use the demo API exposed by main.js to create a second tab.  The
-    # IIFE already minted the first one on init.
     page.evaluate("() => window._demoApi.createNewTab()")
     page.wait_for_function(
         "document.querySelectorAll("
@@ -306,8 +302,6 @@ def test_task_done_switches_to_target_tab(_browser) -> None:
         assert _active_dom_tab_id(page) == tab_a
 
         _mark_tab_running(page, tab_b)
-        # Tab B is now running in the background; tab A is still the
-        # active tab the user is viewing.
         assert _active_tab_id(page) == tab_a
 
         _post_task_done(page, tab_b)
@@ -378,7 +372,6 @@ def test_task_done_on_active_tab_keeps_focus(_browser) -> None:
         assert _active_tab_id(page) == tab_a
 
         _post_task_done(page, tab_a)
-        # Yield a turn so any re-render runs.
         page.wait_for_function(
             "() => true", timeout=500,
         )
@@ -404,7 +397,6 @@ def test_task_done_for_unknown_tab_id_is_safe(_browser) -> None:
         _switch_to_tab(page, tab_a)
 
         _post_task_done(page, "this-tab-does-not-exist")
-        # Yield a turn so any handler completes.
         page.wait_for_function(
             "() => true", timeout=500,
         )
@@ -412,7 +404,6 @@ def test_task_done_for_unknown_tab_id_is_safe(_browser) -> None:
             "task_done for an unknown tab must not change the "
             "active tab."
         )
-        # No IIFE error should have been raised.
         iife_err = page.evaluate("() => window.__iifeError")
         assert iife_err is None, (
             f"task_done for an unknown tab must not raise; got "

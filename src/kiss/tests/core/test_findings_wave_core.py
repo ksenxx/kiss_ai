@@ -47,7 +47,7 @@ def _build_summarizer_registry() -> KISSAgent:
     shell_tools = UsefulTools()
     tools: list[Callable[..., Any]] = [shell_tools.Read, shell_tools.Bash]
     tool_names = {getattr(tool, "__name__", None) for tool in tools}
-    if "finish" not in tool_names:  # same fallback as KISSAgent._setup_tools
+    if "finish" not in tool_names:
         tools.append(agent.finish)
     agent._add_functions(tools)
     return agent
@@ -78,8 +78,6 @@ class SummarizerFinishContract(unittest.TestCase):
         )
         self.assertEqual(name, "finish")
         self.assertEqual(response, "detailed summary of work done so far")
-        # relentless_agent parses the summarizer result via yaml.safe_load and
-        # uses it verbatim when it is not a dict — a plain string round-trips.
         parsed = yaml.safe_load(response)
         self.assertNotIsInstance(parsed, dict)
 

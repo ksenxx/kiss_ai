@@ -43,10 +43,6 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import run_tasks_parallel
 from kiss.server.json_printer import JsonPrinter
 
-# ---------------------------------------------------------------------------
-# Local OpenAI-compatible server that always returns a ``finish`` tool call
-# ---------------------------------------------------------------------------
-
 
 def _finish_response(model: str = "gpt-4o-mini") -> dict:
     """OpenAI chat-completion body that calls ``finish``."""
@@ -106,10 +102,6 @@ def _start_server() -> tuple[ThreadingHTTPServer, str]:
     return srv, f"http://127.0.0.1:{srv.server_port}/v1"
 
 
-# ---------------------------------------------------------------------------
-# Persistence DB redirect helpers (same pattern as the existing tests)
-# ---------------------------------------------------------------------------
-
 
 def _redirect(tmpdir: str) -> tuple:
     """Point the persistence module at a temp directory and reset the conn."""
@@ -141,10 +133,6 @@ class _CapturePrinter(JsonPrinter):
             self.captured.append(event)
         super().broadcast(event)
 
-
-# ---------------------------------------------------------------------------
-# Bug 1: ChatSorcarAgent.run must consume the ``use_worktree`` kwarg
-# ---------------------------------------------------------------------------
 
 
 class TestUseWorktreeKwargConsumed:
@@ -194,10 +182,6 @@ class TestUseWorktreeKwargConsumed:
         assert parsed.get("summary") == "done"
 
 
-# ---------------------------------------------------------------------------
-# Bug 2: run_tasks_parallel must broadcast ``subagentDone``
-# ---------------------------------------------------------------------------
-
 
 class TestRunTasksParallelSubagentDone:
     """The module-level executor must capture the parent thread's
@@ -237,7 +221,6 @@ class TestRunTasksParallelSubagentDone:
         finally:
             printer._thread_local.task_id = ""
 
-        # Both sub-agents failed fast (unknown model) but returned YAML.
         assert len(results) == 2
         for res in results:
             parsed = yaml.safe_load(res)
@@ -248,9 +231,6 @@ class TestRunTasksParallelSubagentDone:
             e for e in printer.captured if e.get("type") == "subagentDone"
         ]
         tab_ids = {e.get("tab_id") for e in done_events}
-        # fixer3-F2: the base executor broadcasts the same
-        # ``task-{parent}__sub_{idx}`` tab-id format that the chat
-        # executor registers, so chat-style deterministic tabs match.
         assert "task-parent-bughunt__sub_0" in tab_ids, (
             f"missing subagentDone for sub 0; captured={printer.captured}"
         )

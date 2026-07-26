@@ -120,7 +120,7 @@ def test_generation_model_listing_provider_and_bool_status() -> None:
 def test_generation_model_listing_excludes_embeddings_and_images() -> None:
     """Embedding-only and image-only models never appear in the listing."""
     names = {name for name, _, _ in get_generation_model_listing()}
-    assert "text-embedding-3-large" not in names  # embedding-only
-    assert "gpt-image-1" in names  # gpt-image-* are generation-capable (gen=True)
+    assert "text-embedding-3-large" not in names
+    assert "gpt-image-1" in names
     assert not MODEL_INFO["BAAI/bge-base-en-v1.5"].is_generation_supported
     assert "BAAI/bge-base-en-v1.5" not in names

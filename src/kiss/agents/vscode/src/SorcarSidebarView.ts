@@ -2,24 +2,12 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-/**
- * Sidebar chat view for Sorcar.
- * Provides a WebviewViewProvider that renders the chat UI in the
- * VS Code secondary sidebar.
- */
 
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
-/**
- * Return true when *target* (already resolved) is the same as *root* or
- * lives strictly inside *root* (after resolving symlinks).  Used to
- * defend against path-traversal in webview-supplied paths.
- *
- * H4 — guards every webview→extension file open call site.
- */
 function isPathInside(target: string, root: string): boolean {
   const rt = path.resolve(root);
   const tg = path.resolve(target);
@@ -28,36 +16,11 @@ function isPathInside(target: string, root: string): boolean {
   return rel.length > 0 && !rel.startsWith('..') && !path.isAbsolute(rel);
 }
 
-/**
- * True for the trivial "Discarded branch '<name>'." confirmation of a
- * successful worktree discard.  Discarding a worktree branch needs no
- * notification — its visible effect (the merge/discard bar going away)
- * is confirmation enough.  Mirrors ``isSilentDiscardMessage`` in
- * ``media/main.js`` which suppresses the same message in the chat
- * transcript.  Discard results that carry a warning (checkout failure,
- * undeletable branch → "Partially discarded …"), merge results, and
- * failures do NOT match and are still surfaced to the user.
- */
 function isSilentDiscardMessage(message: string | undefined): boolean {
   return /^Discarded branch '[^']+'\.$/.test(message || '');
 }
 
-/**
- * File extensions that VS Code's text editor can open without
- * corrupting the buffer.  Anything outside this set is routed to the
- * native viewer (``vscode.open``) by the ``openFile`` message handler
- * so binary / preview-only formats (images, PDFs, archives,
- * executables, fonts, audio/video) get their proper preview instead
- * of being loaded as garbled text.
- *
- * Files without an extension default to text (most config / dotfiles
- * are textual).  The list intentionally covers only the binary /
- * preview-only formats the user is likely to click in chat output;
- * adding a new text-like extension here is the only change required
- * to extend coverage.
- */
 const NATIVE_VIEWER_EXTENSIONS = new Set([
-  // Images
   '.png',
   '.jpg',
   '.jpeg',
@@ -69,9 +32,7 @@ const NATIVE_VIEWER_EXTENSIONS = new Set([
   '.tif',
   '.avif',
   '.heic',
-  // Documents
   '.pdf',
-  // Archives
   '.zip',
   '.tar',
   '.gz',
@@ -82,7 +43,6 @@ const NATIVE_VIEWER_EXTENSIONS = new Set([
   '.rar',
   '.jar',
   '.war',
-  // Office
   '.doc',
   '.docx',
   '.xls',
@@ -92,7 +52,6 @@ const NATIVE_VIEWER_EXTENSIONS = new Set([
   '.odt',
   '.ods',
   '.odp',
-  // Executables / native binaries
   '.exe',
   '.dll',
   '.so',
@@ -101,7 +60,6 @@ const NATIVE_VIEWER_EXTENSIONS = new Set([
   '.o',
   '.class',
   '.wasm',
-  // Audio / video
   '.mp3',
   '.wav',
   '.ogg',
@@ -114,13 +72,11 @@ const NATIVE_VIEWER_EXTENSIONS = new Set([
   '.avi',
   '.mkv',
   '.webm',
-  // Fonts
   '.ttf',
   '.otf',
   '.woff',
   '.woff2',
   '.eot',
-  // Compiled / data
   '.pyc',
   '.pyo',
   '.bin',
@@ -158,17 +114,6 @@ import {
   withWebviewNotificationProgress,
 } from './WebviewNotifications';
 
-/**
- * Webview messages forwarded verbatim to the daemon — message type →
- * the fields copied onto the outgoing ``AgentCommand``.  Messages that
- * need guards or extension-side side effects keep explicit ``case``
- * handlers in ``_handleMessage``.
- */
-/**
- * Webview merge-action name → ``MergeManager`` method.  Also the single
- * source of truth for the ``kissSorcar.<method>`` merge keyboard
- * commands registered in ``extension.ts``.
- */
 export const MERGE_ACTIONS = {
   accept: 'acceptChange',
   reject: 'rejectChange',
@@ -180,7 +125,6 @@ export const MERGE_ACTIONS = {
   'reject-file': 'rejectFile',
 } as const;
 
-/** A MergeManager method name dispatchable via ``handleMergeCommand``. */
 export type MergeCommand = (typeof MERGE_ACTIONS)[keyof typeof MERGE_ACTIONS];
 
 const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
@@ -198,85 +142,27 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   saveConfig: ['config', 'apiKeys'],
 };
 
-/**
- * WebviewViewProvider for the KISS Sorcar chat in the secondary sidebar.
- *
- * Hosts the chat HTML/JS/CSS over a single AgentClient connection to
- * the kiss-web daemon (multiplexes every tab on one UDS socket).
- */
 export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _view?: vscode.WebviewView;
-  /**
-   * Single persistent connection to the kiss-web daemon — multiplexes
-   * every chat tab over one UDS socket.  Lazy-initialised on first use
-   * via ``_getClient()``.  Reload survives running tasks: closing this
-   * client only ends the socket; the daemon keeps every in-flight
-   * ``_RunningAgentState`` alive for the deferred-close grace window so the next
-   * activation can reconnect and re-subscribe.
-   */
   private _client: AgentClient | null = null;
   private _api: SorcarApi | null = null;
-  /**
-   * Whether the kiss-web daemon UDS socket is currently connected.
-   *
-   * Drives the "KISS Sorcar Server is starting ..." overlay in the
-   * webview: while ``false`` the webview hides ``#app`` and renders the
-   * loading overlay; while ``true`` the regular chat UI is shown.
-   * Flipped by the ``connect``/``disconnect`` events on
-   * :class:`AgentClient`.
-   */
   private _daemonConnected: boolean = false;
-  /** The currently active tab ID (updated on every message with tabId). */
   private _activeTabId: string = '';
   private _extensionUri: vscode.Uri;
   private _selectedModel: string;
   private _runningTabs: Set<string> = new Set();
-  /**
-   * Tab ids owned by THIS window's webview.  The daemon broadcasts
-   * tab-stamped events to every connected client (every VS Code
-   * window), so native side effects (merge editor, SCM repo open,
-   * notifications, sidebar reveal) must only fire for tabs this
-   * window actually owns — otherwise one window's agent activity
-   * would disturb every other window.  Populated from every
-   * webview → extension message that carries a ``tabId`` (plus the
-   * ``restoredTabs`` list on ``ready`` and adopted sub-agent tabs);
-   * pruned on ``closeTab``.
-   */
   private _ownTabs: Set<string> = new Set();
   private _webviewHasFocus: boolean = false;
-  /**
-   * True once the CURRENT webview's script has posted its ``ready``
-   * message (i.e. ``media/main.js`` is loaded and its window message
-   * listener is installed).  Reset to false on every (re)resolve and
-   * on dispose of the active webview.  ``submitTask`` waits on this
-   * flag so an ``insertAndSubmit`` posted right after a cold sidebar
-   * open cannot be dropped by a webview whose script has not yet
-   * attached its message listener.
-   */
   private _webviewReady: boolean = false;
 
-  // Host-side "Sorcar" wake-word listener (webviews cannot capture the
-  // microphone, so the extension host runs it and forwards wake events).
   private _voiceWake: VoiceWakeService | undefined;
-  // Wake-word sensitivity (0..100) last reported by the webview's
-  // settings-panel slider; passed to the Python listener as
-  // --sensitivity on every (re)start.
   private _voiceSensitivity: number | undefined;
-  // True while the wake-word listener is stopped ONLY because the
-  // sidebar view was hidden (secondary side bar closed): the sidebar
-  // is registered with retainContextWhenHidden, so closing the bar
-  // fires onDidChangeVisibility (visible=false) — never onDidDispose —
-  // and without this suspend/resume the mic would keep listening with
-  // no visible hint.  Re-showing the view restarts the listener iff
-  // this flag is set; an explicit user voiceToggle always clears it.
   private _voiceWakeSuspendedByHide: boolean = false;
 
-  /** Per-tab MergeManager instances — each tab gets its own merge review. */
   private _mergeManagers: Map<string, MergeManager> = new Map();
   private _onCommitMessage = new vscode.EventEmitter<{
     message: string;
     error?: string;
-    /** Requesting tab ('' = the SCM flow); scopes waiters per tab. */
     tabId?: string;
   }>();
   public readonly onCommitMessage = this._onCommitMessage.event;
@@ -292,59 +178,18 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     string,
     vscode.Progress<{message?: string}>
   > = new Map();
-  /**
-   * Safety-timeout (ms) for the "Auto-committing…" progress toast.
-   *
-   * ``undefined`` (the production default) disables the auto-dismiss
-   * timer entirely — the toast stays visible until ``autocommit_done``
-   * arrives or the view is disposed.  A finite value re-enables the
-   * timer at that interval; this is used by the E2E regression test
-   * (``autocommitProgressSticky.test.js``) to reproduce the bug where
-   * a fixed timeout dismissed the toast in the middle of a slow
-   * "Generating commit message…" LLM call.
-   */
   public _autocommitProgressTimeoutMs: number | undefined = undefined;
   private _disposed: boolean = false;
-  /** Last remote URL sent to the webview — avoids redundant messages. */
   private _lastSentUrl: string = '';
-  /**
-   * Last ``remote_password`` observed in ``~/.kiss/config.json`` by the
-   * config-file watcher.  ``undefined`` until the first successful read
-   * so the watcher can distinguish "never read" from "read as empty".
-   */
   private _lastSeenRemotePassword: string | undefined;
-  /** Poll timer for ``~/.kiss/config.json``; cleared on dispose(). */
   private _configFileWatchTimer?: ReturnType<typeof setInterval>;
   private _preMergeOpenFiles: Map<string, Set<string>> = new Map();
   private _restoreChain: Promise<void> = Promise.resolve();
   private _onFirstResolve: (() => void) | undefined;
-  /** Pending resolver for the next ``sizeReport`` from the webview.
-   *  Set by ``_measureSidebar`` and cleared by the ``sizeReport`` handler. */
   private _sizeReportResolver:
     ((s: {inner: number; screen: number}) => void) | undefined;
-  /** Subscription to workspace-folder changes; disposes on dispose(). */
   private _workspaceFoldersSub: vscode.Disposable | undefined;
 
-  /**
-   * Show a notification-progress dialog backed by the chat webview.
-   *
-   * Stores the progress reporter and resolve callback in the given maps
-   * so that incoming backend events can update the message or complete
-   * the dialog.
-   *
-   * When *timeoutMs* is a finite positive number, the dialog is
-   * automatically dismissed after that many milliseconds even if no
-   * completion event has arrived.  When *timeoutMs* is ``undefined``
-   * (or non-finite, or ``<= 0``) no auto-dismiss timer is started; the
-   * dialog stays visible until either (a) the matching completion event
-   * arrives and removes the resolver from *resolveMap*, or (b)
-   * ``_resolveAllWorktreeActions`` drains the maps on dispose /
-   * disconnect.  This sticky mode is used for autocommit, where the
-   * underlying LLM call ("Generating commit message…") can legitimately
-   * take much longer than any reasonable safety timeout — dismissing
-   * the progress toast early would mislead the user into thinking the
-   * commit failed or is no longer in progress.
-   */
   private _showActionProgress(
     title: string,
     tabId: string | undefined,
@@ -352,14 +197,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     resolveMap: Map<string, () => void>,
     timeoutMs: number | undefined = 120_000,
   ): void {
-    // A previous action for this tab may still be pending (e.g. its
-    // result never arrived and the user retried).  Overwriting its
-    // resolver below would orphan the old progress promise FOREVER:
-    // the safety timeout compares map identity (``resolveMap.get(tabId)
-    // === resolve``) before resolving, so once the entry is replaced
-    // neither the completion event nor the timeout can ever close the
-    // superseded toast.  Resolve it now so its notification is closed
-    // before the replacement dialog is registered.
     if (tabId !== undefined) {
       const prev = resolveMap.get(tabId);
       if (prev) {
@@ -398,7 +235,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     );
   }
 
-  /** Resolve all pending worktree/autocommit action promises and clear maps. */
   private _resolveAllWorktreeActions(): void {
     for (const resolve of this._worktreeActionResolves.values()) resolve();
     this._worktreeActionResolves.clear();
@@ -408,36 +244,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     this._autocommitProgresses.clear();
   }
 
-  /**
-   * Register a one-time callback invoked when the webview view is first resolved.
-   *
-   * Used by the extension entry point to widen the secondary sidebar on
-   * first activation.
-   */
   public onFirstResolve(cb: () => void): void {
     this._onFirstResolve = cb;
   }
 
-  /**
-   * Eagerly push this window's VS Code workspace folder to the daemon
-   * as this connection's ``work_dir``.
-   *
-   * The daemon keeps one work_dir per client connection, and each VS
-   * Code window owns exactly one connection — so the work_dir pushed
-   * here is scoped to this window and can never be overwritten by
-   * another window opening a different workspace.
-   *
-   * Calling this method from ``activate()`` ensures the daemon's
-   * work_dir for this window matches the open workspace folder
-   * *before* any backend call (autocomplete file-list, commit-message
-   * generation, etc.) is issued.  Safe to call repeatedly — the daemon
-   * ignores no-op updates and the client queues the command if the
-   * socket is not yet connected.
-   */
   public syncWorkDir(): void {
-    // _getClient() lazily creates the AgentClient, installs the
-    // on-connect setWorkDir preamble and the workspace-folders
-    // listener, and initiates the connection.
     this._getClient();
   }
 
@@ -449,12 +260,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         .get<string>('defaultModel') || getDefaultModel();
   }
 
-  /**
-   * Get or create a MergeManager for the given tab.
-   *
-   * Each tab gets its own MergeManager so multiple tabs can show
-   * their merge/diff UI concurrently without interfering.
-   */
   private _getOrCreateMergeManager(tabId: string): MergeManager {
     const existing = this._mergeManagers.get(tabId);
     if (existing) return existing;
@@ -476,55 +281,20 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     return mgr;
   }
 
-  /**
-   * The Sorcar server API facade this window sends every daemon
-   * command through (see ``SorcarApi``).  Lazily built over the
-   * window's single ``AgentClient`` connection.
-   */
   private _getApi(): SorcarApi {
     if (!this._api) this._api = new SorcarApi(this._getClient());
     return this._api;
   }
 
-  /**
-   * Lazy-init the shared ``AgentClient`` connection to the kiss-web
-   * daemon and install the message listener exactly once.
-   *
-   * The daemon already stamps ``tabId`` onto every outgoing event, so
-   * the listener routes messages purely by ``msg.tabId``.  No per-tab
-   * process bookkeeping is required on the extension side.
-   */
   private _getClient(): AgentClient {
     if (this._client) return this._client;
     const client = new AgentClient();
     this._client = client;
     this._installClientListener(client);
-    // Sync the daemon's work_dir with this window's workspace folder
-    // on EVERY (re)connect, before any queued command is flushed.  The
-    // daemon keeps one work_dir per connection (= per VS Code window)
-    // and stamps it onto every command from this connection that does
-    // not carry an explicit ``workDir`` — so each window always
-    // operates on its own open workspace, even when several windows
-    // share the one kiss-web daemon.  Re-sending on reconnect (daemon
-    // restart, socket drop) is required because the daemon's
-    // per-connection state starts empty for each new socket.
     client.on('connect', () => {
       this._getApi().setWorkDir(this._getWorkDir());
       this._daemonConnected = true;
-      // Hide the "KISS Sorcar Server is starting ..." overlay and
-      // reveal the regular chat UI now that the daemon is reachable.
       this._sendToWebview({type: 'daemonStatus', connected: true});
-      // RACE FIX: re-issue every webview-init request the ``ready``
-      // handler had already dispatched whenever the daemon socket
-      // (re)connects AND there is a live webview that depends on the
-      // replies.  Without this, a daemon restart (or any transient
-      // socket drop) leaves the model picker blank, the input-history
-      // dropdown empty and the settings panel un-prefilled — because
-      // the original ``models`` / ``inputHistory`` / ``configData``
-      // events were broadcast to the per-connection endpoint that no
-      // longer exists, so the daemon dropped them, and the webview
-      // never re-asks on its own.  Gated on ``_view`` so a sidebar the
-      // user never opened does not spam the daemon on every reconnect.
       if (this._view) {
         this._getApi().getModels();
         this._getApi().getInputHistory();
@@ -533,24 +303,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     });
     client.on('disconnect', () => {
       this._daemonConnected = false;
-      // The daemon socket dropped (e.g. ``serverReset`` / installer
-      // restart) — re-show the loading overlay until AgentClient's
-      // auto-reconnect succeeds.
       this._sendToWebview({type: 'daemonStatus', connected: false});
-      // Any in-flight worktree / autocommit progress toast is
-      // orphaned now: the daemon's per-connection per-tab state was
-      // dropped with the socket, so ``autocommit_done`` /
-      // ``worktree_result`` can never arrive for the operation that
-      // was running pre-disconnect.  Drain the resolver maps so the
-      // sticky "Auto-committing… / Generating commit message…" toast
-      // does not linger forever — the inner promise resolves, then
-      // ``withWebviewNotificationProgress``'s ``.finally`` posts
-      // ``{close: true}`` to the still-active webview poster.
       this._resolveAllWorktreeActions();
     });
     client.connect();
-    // Keep the daemon in sync whenever the workspace folder set
-    // changes (e.g. user opens a different folder in this window).
     this._workspaceFoldersSub = vscode.workspace.onDidChangeWorkspaceFolders(
       () => {
         const wd = this._getWorkDir();
@@ -560,22 +316,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     return client;
   }
 
-  /**
-   * Install the unified message listener on the daemon client.
-   *
-   * Handles every message type (merge, worktree, status, models, etc.)
-   * and forwards them to the webview.  ``msg.tabId`` is set by the
-   * daemon for tab-scoped events; webview-side handlers route on it.
-   */
   private _installClientListener(client: AgentClient): void {
     client.on('message', (msg: ToWebviewMessage) => {
       if (msg.type === 'configData' && msg.config) {
-        // ``configData`` is broadcast to every connected client, so
-        // the ``work_dir`` it carries may belong to whichever window
-        // requested it (or to the daemon-global fallback).  This
-        // window's work_dir is ALWAYS its own workspace folder —
-        // overwrite before forwarding so the settings panel never
-        // shows another window's folder.
         msg.config.work_dir = this._getWorkDir();
       }
       if (msg.type === 'commitMessage' && this._isOwnTab(msg.tabId)) {
@@ -589,22 +332,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._selectedModel = msg.selected;
       }
       if (msg.type === 'openSubagentTab') {
-        // Adopt sub-agent tabs spawned under a parent tab this window
-        // owns: the webview materialises the tab from this very event
-        // without ever posting a command first, so ownership must be
-        // learned here for later tab-stamped events (merge, worktree,
-        // askUser) to pass the _isOwnTab gate.
         const subMsg = msg as {tab_id?: string; parent_tab_id?: string};
-        // A blank parent_tab_id means "convert an EXISTING tab in
-        // place" (direct history-open of a sub-agent row).  The tab
-        // being converted already belongs to exactly one window —
-        // the one whose webview created it and posted resumeSession
-        // — so ownership is only confirmed when the target tab is
-        // ALREADY owned here.  Blindly adopting on a blank parent
-        // made every window claim the same tab id, so foreign
-        // tab-stamped events (merge_data, askUser, worktree_*)
-        // passed this window's _isOwnTab gate and triggered native
-        // UI side effects for another window's task.
         if (
           subMsg.tab_id &&
           (subMsg.parent_tab_id
@@ -667,7 +395,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           }
           this._worktreeProgresses.delete(wrTabId);
         } else {
-          // Fallback: resolve all pending
           this._resolveAllWorktreeActions();
         }
         if (msg.success) {
@@ -714,43 +441,21 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         }
       }
 
-      // Reveal the sidebar when the agent asks a question so the user
-      // sees the modal even if they switched to another panel.  Only
-      // for questions asked by a tab this window owns — another
-      // window's askUser must not yank this window's sidebar open.
       if (msg.type === 'askUser' && this._view && this._isOwnTab(msg.tabId)) {
         this._view.show(true);
       }
 
-      // ``merge_data`` is handled exclusively by the native VS Code
-      // ``MergeManager`` above.  The daemon's ``WebPrinter`` augments
-      // every ``merge_data`` event with ``base_text``/``current_text``
-      // so browser clients can render an inline diff in chat — but in
-      // the extension we already paint the native merge editor, so
-      // forwarding the augmented event to the webview would render the
-      // diff twice (native merge editor + in-chat inline diff).  Drop
-      // it.  ``merge_started`` / ``merge_ended`` / ``merge_nav`` still
-      // reach the webview so the in-input merge toolbar (Prev / Next /
-      // Accept / Reject buttons) keeps working.
       if (msg.type !== 'merge_data') {
         this._sendToWebview(msg);
       }
       if (msg.type === 'status') {
         const statusTabId = msg.tabId;
         if (msg.running) {
-          // Track only this window's own tabs: _runningTabs drives
-          // stop-all and restart deferral for THIS window, and must
-          // not accumulate other windows' tab ids.
           if (statusTabId !== undefined && this._ownTabs.has(statusTabId)) {
             this._runningTabs.add(statusTabId);
           }
         } else {
           if (statusTabId !== undefined) this._runningTabs.delete(statusTabId);
-          // Abort a pending commit-message generation only when the tab
-          // that STOPPED is the tab that requested it (the SCM flow uses
-          // tabId '').  Checking ``.size > 0`` here fired a spurious
-          // "Commit message: Process stopped" whenever any unrelated own
-          // chat tab finished while a generation was pending.
           if (
             this._isOwnTab(statusTabId) &&
             this._commitPendingTabs.has(statusTabId ?? '')
@@ -766,33 +471,17 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     });
   }
 
-  /**
-   * Called by VS Code when the sidebar view needs to be rendered.
-   */
   resolveWebviewView(
     webviewView: vscode.WebviewView,
     _context: vscode.WebviewViewResolveContext,
     _token: vscode.CancellationToken,
   ): void {
     this._view = webviewView;
-    // The fresh webview's script has not run yet — its ``ready``
-    // message (posted by main.js init()) flips this back to true.
     this._webviewReady = false;
     setWebviewNotificationPoster(message =>
       this._sendToWebview(message as ToWebviewMessage),
     );
-    // A fresh webview is being (re)resolved — clear the disposed flag so
-    // _sendToWebview resumes forwarding daemon events.  Closing the tab
-    // fires the per-webview onDidDispose below (which sets _disposed),
-    // and without resetting it here a re-opened tab would silently drop
-    // every daemon->webview message (status, task_events, …): it would
-    // never learn the task is still running, leave isRunning=false, and
-    // ignore the user's next message (sent as a dropped ``submit``).
     this._disposed = false;
-    // The remote-URL dedup key survives webview disposal but the
-    // webview DOM does not: without a reset here, the fresh webview's
-    // ``ready`` → ``_sendRemoteUrl`` early-returns on the dedup and the
-    // welcome-page remote-URL/password/ntfy panel stays blank forever.
     this._lastSentUrl = '';
 
     webviewView.webview.options = {
@@ -814,56 +503,25 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     );
 
     webviewView.onDidChangeVisibility(() => {
-      // Ignore visibility events from a stale, superseded webview
-      // (VS Code can fire them after resolveWebviewView repointed
-      // _view at a fresh webview) so they cannot stop/start the mic.
       if (this._view !== webviewView) return;
       if (webviewView.visible) {
         this._getApi().getInputHistory();
-        // The secondary side bar was reopened: resume the wake-word
-        // listener that the hide below suspended.
         if (this._voiceWakeSuspendedByHide) {
           this._voiceWakeSuspendedByHide = false;
           this._voiceWake?.start(this._voiceSensitivity);
         }
       } else if (this._voiceWake?.running) {
-        // The secondary side bar was closed.  retainContextWhenHidden
-        // keeps the webview alive, so onDidDispose never fires — stop
-        // the microphone here (holding it open from a hidden view is a
-        // privacy hazard) and remember to resume it on re-show.
         this._voiceWakeSuspendedByHide = true;
         this._voiceWake.stop();
       }
     });
 
     webviewView.onDidDispose(() => {
-      // The webview was torn down (tab closed).  Mark disposed and drop
-      // the stale view reference so _sendToWebview no-ops until the tab
-      // is re-opened (which re-resolves the view and clears _disposed).
-      // The daemon connection (AgentClient) is intentionally kept alive
-      // so the running task survives the close/reopen cycle.
-      //
-      // CRITICAL: only mutate _disposed / _view when the webview being
-      // disposed is still the ACTIVE one.  VS Code does not guarantee
-      // dispose-before-resolve ordering: when a sidebar view is
-      // re-shown, the fresh webview is commonly resolved FIRST
-      // (resolveWebviewView clears _disposed and repoints _view) and
-      // only THEN does the stale OLD webview's onDidDispose fire.  An
-      // unconditional ``_disposed = true`` here would clobber that flag
-      // back to true and silence the newly-resolved webview — the
-      // reopened tab would again drop every daemon->webview message
-      // (status, task_events, …), keep isRunning=false, and ignore the
-      // user's next message (sent as a dropped ``submit``).  Guarding on
-      // identity makes a stale webview's late dispose a no-op.
       if (this._view === webviewView) {
         this._view = undefined;
         this._disposed = true;
         this._webviewReady = false;
         setWebviewNotificationPoster(undefined);
-        // Stop the microphone listener: with the webview gone there is
-        // nowhere to type the wake word, and holding the mic open from
-        // a closed view would be a privacy hazard.  Also drop any
-        // pending hide-suspend resume — a disposed view starts fresh.
         this._voiceWakeSuspendedByHide = false;
         this._voiceWake?.stop();
       }
@@ -877,22 +535,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
   }
 
-  /** Whether the underlying webview is currently visible. */
   get visible(): boolean {
     return this._view?.visible ?? false;
   }
 
-  /** Whether the webview currently has input focus. */
   get hasFocus(): boolean {
     return this._webviewHasFocus;
   }
 
-  /**
-   * Snapshot the file paths of all currently open editor tabs.
-   *
-   * Used before the merge UI opens so we can later close any
-   * tabs that were only opened for the merge review.
-   */
   private _getOpenEditorFiles(): Set<string> {
     const files = new Set<string>();
     for (const group of vscode.window.tabGroups.all) {
@@ -905,13 +555,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     return files;
   }
 
-  /**
-   * Close editor tabs that were not open before the merge started.
-   *
-   * Reads the snapshot from ``_preMergeOpenFiles``, compares it
-   * against the currently open tabs, closes extras, and clears
-   * the snapshot.
-   */
   private async _restorePreMergeEditors(tabId: string): Promise<void> {
     const snapshot = this._preMergeOpenFiles.get(tabId);
     this._preMergeOpenFiles.delete(tabId);
@@ -952,29 +595,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     } as ToWebviewMessage);
   }
 
-  /**
-   * Read ``~/.kiss/remote-url.json`` and post the tunnel/local URL to
-   * the webview.  Also starts a persistent file watcher that re-sends
-   * the URL whenever the file changes (e.g. after a daemon restart
-   * creates a new tunnel with a different URL).
-   */
   private _sendRemoteUrl(): void {
     const urlFile = path.join(os.homedir(), '.kiss', 'remote-url.json');
     this._tryReadAndSendUrl(urlFile);
     this._watchUrlFile(urlFile);
   }
 
-  /**
-   * Try to read the URL file and post to the webview.
-   *
-   * Always sends a ``remote_url`` message (even on a missing/empty
-   * file) so the webview can hide the welcome-page remote-password
-   * panel when no Cloudflare tunnel is active.  ``tunnelActive`` is
-   * True only when ``data.tunnel`` is present (a real tunnel URL).
-   * Dedups against ``_lastSentUrl`` using a key that combines the
-   * URL and the active flag so transitions between "no tunnel" and
-   * "tunnel established" always reach the webview.
-   */
   private _tryReadAndSendUrl(urlFile: string): void {
     let tunnel = '';
     let local = '';
@@ -982,17 +608,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       const data = JSON.parse(fs.readFileSync(urlFile, 'utf-8'));
       tunnel = data.tunnel || '';
       local = data.local || '';
-    } catch {
-      /* file missing or malformed — fall through with empty values */
-    }
+    } catch {}
     const tunnelActive = !!tunnel;
     const url = tunnel || local || '';
-    // The dedup key must cover EVERYTHING the message carries — the
-    // ntfy URL included.  ``~/.kiss/ntfy_topic`` is written by the
-    // daemon after startup, typically AFTER the first ``remote_url``
-    // send; with a URL-only key the 10 s watcher saw an unchanged URL,
-    // deduped, and the webview never learned the ntfy link until the
-    // whole webview was reloaded.
     const ntfyUrl = this._getNtfyUrl();
     const key = `${tunnelActive ? '1' : '0'}|${url}|${ntfyUrl}`;
     if (key === this._lastSentUrl) return;
@@ -1004,10 +622,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     this._sendToWebview(msg);
   }
 
-  /**
-   * Build the ``https://ntfy.sh/{topic}`` URL from ``~/.kiss/ntfy_topic``.
-   * Returns an empty string if the file is missing or empty.
-   */
   private _getNtfyUrl(): string {
     try {
       const topicFile = path.join(os.homedir(), '.kiss', 'ntfy_topic');
@@ -1015,19 +629,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       if (topic) {
         return `https://ntfy.sh/${topic}`;
       }
-    } catch {
-      /* file missing */
-    }
+    } catch {}
     return '';
   }
 
   private _urlFileWatchTimer?: ReturnType<typeof setInterval>;
 
-  /**
-   * Persistently poll ``~/.kiss/remote-url.json`` every 10 seconds.
-   * Re-sends the URL to the webview whenever the file content changes
-   * (e.g. after a daemon restart assigns a new tunnel URL).
-   */
   private _watchUrlFile(urlFile: string): void {
     if (this._urlFileWatchTimer) return;
     this._urlFileWatchTimer = setInterval(() => {
@@ -1035,20 +642,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }, 10_000);
   }
 
-  /**
-   * Poll ``~/.kiss/config.json`` and re-request ``getConfig`` from the
-   * daemon whenever its ``remote_password`` changes.
-   *
-   * On VS Code launch the daemon may still be (re)starting and the
-   * remote password may be empty or written only after the activation
-   * prompt — so the webview's initial ``getConfig`` can return a blank
-   * password, leaving the welcome-page remote-password panel empty
-   * until the user opens the Settings panel.  This watcher closes that
-   * gap: when the persisted password first becomes non-empty (or later
-   * changes), it re-issues ``getConfig`` so the daemon broadcasts a
-   * fresh ``configData`` and the webview repopulates both the welcome
-   * and settings password fields automatically.
-   */
   private _watchConfigFile(): void {
     if (this._configFileWatchTimer) return;
     this._checkConfigFile();
@@ -1058,12 +651,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     );
   }
 
-  /**
-   * Read ``~/.kiss/config.json`` once and re-request ``getConfig`` from
-   * the daemon when the persisted ``remote_password`` first becomes
-   * non-empty or later changes.  A missing / mid-write file is ignored
-   * and retried on the next poll tick.
-   */
   private _checkConfigFile(): void {
     const configFile = path.join(os.homedir(), '.kiss', 'config.json');
     let pw: string;
@@ -1071,15 +658,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       const data = JSON.parse(fs.readFileSync(configFile, 'utf-8'));
       pw = typeof data.remote_password === 'string' ? data.remote_password : '';
     } catch {
-      // File missing or mid-write — retry on the next tick.
       return;
     }
     const first = this._lastSeenRemotePassword === undefined;
     const changed = pw !== this._lastSeenRemotePassword;
     this._lastSeenRemotePassword = pw;
-    // Re-fetch when the password changed, and also on the first
-    // successful read of a non-empty password (the webview's init
-    // getConfig may have raced a transient empty/truncated config).
     if ((changed && !first) || (first && pw !== '')) {
       this._getApi().getConfig();
     }
@@ -1116,9 +699,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         'git.close',
         vscode.Uri.file(worktreeDir),
       );
-    } catch {
-      /* ignored */
-    }
+    } catch {}
   }
 
   private _startTask(
@@ -1148,27 +729,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     });
   }
 
-  /**
-   * True when a daemon event targets a tab owned by this window's
-   * webview (or carries no tabId at all, i.e. is a global event).
-   * Tab-stamped events for tabs of OTHER windows reach this listener
-   * too (the daemon broadcasts to every client); they must not
-   * trigger native UI side effects here.
-   */
   private _isOwnTab(tabId: string | undefined): boolean {
-    // '' is treated like ``undefined``: the SCM commit-message flow
-    // sends its ``generateCommitMessage`` command with tabId '' and the
-    // daemon stamps the reply with the requester's tabId, so a reply
-    // stamped '' must not be dropped (it can never be registered in
-    // ``_ownTabs`` because webview messages with a falsy tabId are
-    // never added there).
     return !tabId || this._ownTabs.has(tabId);
   }
 
   private async _handleMessage(message: FromWebviewMessage): Promise<void> {
-    // Learn tab ownership from the webview's own traffic: any message
-    // carrying a tabId proves the tab lives in THIS window.  The
-    // ``ready`` message additionally announces every restored tab.
     const msgTabId = (message as {tabId?: string}).tabId;
     if (msgTabId) {
       if (message.type === 'closeTab') this._ownTabs.delete(msgTabId);
@@ -1189,17 +754,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
     switch (message.type) {
       case 'ready': {
-        // The webview script is loaded and its message listener is
-        // installed — host→webview messages can no longer be dropped.
         this._webviewReady = true;
         const readyTabId = message.tabId;
         if (readyTabId) this._activeTabId = readyTabId;
-        // Reflect the current daemon connection state to a freshly
-        // (re)loaded webview so it knows whether to keep the
-        // "KISS Sorcar Server is starting ..." overlay up or hide it
-        // and show the regular tabs.  The HTML defaults to showing the
-        // overlay; this message decides which state to settle on once
-        // the webview script is ready.
         this._sendToWebview({
           type: 'daemonStatus',
           connected: this._daemonConnected,
@@ -1208,20 +765,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._sendWelcomeSuggestions();
         this._sendRemoteUrl();
         this._getApi().getInputHistory();
-        // Request the current config so the welcome-page remote-password
-        // panel is populated from the established connection (the webview's
-        // own init getConfig can race the daemon restart / password write).
         this._getApi().getConfig();
-        // Re-fetch config whenever ~/.kiss/config.json changes so a
-        // remote_password set after launch (e.g. via the activation prompt
-        // or a daemon restart) reaches the welcome panel without the user
-        // having to open the Settings panel.
         this._watchConfigFile();
         this._sendToWebview({type: 'focusInput'} as ToWebviewMessage);
-        // Auto-reload events for restored tabs that had active sessions.
-        // The daemon's _RunningAgentState retains state across reloads, so resumeSession
-        // either replays persisted events or re-subscribes to a still-running
-        // task via the printer's subscriber map.
         const restoredTabs = message.restoredTabs;
         if (restoredTabs && restoredTabs.length > 0) {
           for (const rt of restoredTabs) {
@@ -1235,15 +781,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         const tabId = message.tabId;
         if (tabId) this._activeTabId = tabId;
         if (tabId !== undefined && this._runningTabs.has(tabId)) {
-          // This window already knows a task is live for this tab, yet
-          // the webview sent a ``submit`` (not an ``appendUserMessage``)
-          // — a transient desync that happens after a close/reopen when
-          // the re-opened webview has not yet re-learned the running
-          // state.  NEVER silently drop the user's text: forward it to
-          // the daemon as a follow-up user message so it is injected
-          // into the running agent, exactly like a tab that loaded the
-          // task.  The daemon's ``_cmd_append_user_message`` ignores it
-          // only when no live task actually exists.
           const followUp = message.prompt.trim();
           if (followUp) {
             this._getApi().appendUserMessage(message.prompt, tabId);
@@ -1257,9 +794,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         const trimmed = message.prompt.trim();
         if (trimmed && !trimmed.includes('\n')) {
           const resolved = path.resolve(effectiveWorkDir, trimmed);
-          // H4 — only treat as a file shortcut when the resolved path is
-          // strictly inside the work dir; otherwise fall through and let
-          // the prompt run as a normal task.
           if (
             isPathInside(resolved, effectiveWorkDir) &&
             fs.existsSync(resolved) &&
@@ -1295,7 +829,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         if (stopTabId !== undefined) {
           this._getApi().stop(stopTabId);
         } else {
-          // Stop every running tab on this connection.
           for (const tab of this._runningTabs) {
             this._getApi().stop(tab);
           }
@@ -1328,10 +861,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         if (message.path) {
           const wd = this._getWorkDir();
           const filePath = path.resolve(wd, message.path);
-          // H4 — refuse to open files outside the workspace.  Use
-          // path.relative so symlinks/normalised paths are compared
-          // properly; isPathInside() avoids prefix-match false
-          // positives like "/wd-evil" matching "/wd".
           if (
             !isPathInside(filePath, wd) ||
             !fs.existsSync(filePath) ||
@@ -1345,8 +874,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           }
           const uri = vscode.Uri.file(filePath);
           if (isTextLikeExtension(filePath)) {
-            // Text-like files open in the regular VS Code editor so
-            // we can position the caret on a 1-indexed line.
             const doc = await vscode.workspace.openTextDocument(uri);
             const editor = await vscode.window.showTextDocument(doc, {
               preview: false,
@@ -1361,13 +888,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
               );
             }
           } else {
-            // Binary / non-text files (images, PDFs, archives,
-            // executables, …) are routed to the native viewer via
-            // ``vscode.open`` so VS Code picks the right preview
-            // (built-in image preview, PDF preview extension,
-            // external default app, etc.).  Loading them as text
-            // would corrupt the buffer and prevent the preview
-            // from rendering.
             await vscode.commands.executeCommand('vscode.open', uri);
           }
         }
@@ -1375,13 +895,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
       case 'resumeSession': {
         const resumeTabId = message.tabId;
-        // The daemon's _replay_session re-subscribes a still-running
-        // chat via the printer's subscriber map when chatId belongs to
-        // a live _RunningAgentState, otherwise replays persisted events.  No
-        // process-level reattachment is required on the extension
-        // side anymore.
-        // The webview sends either ``chatId`` (legacy ``id``) for a
-        // whole-chat resume or ``taskId`` alone for a single task row.
         this._getApi().resumeSession({
           chatId: message.chatId ?? message.id,
           taskId: message.taskId,
@@ -1432,13 +945,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       case 'worktreeAction': {
         const wtAction = message.action;
         const wtTabId = message.tabId;
-        // Discard is silent: no progress toast and (below) no result
-        // notification.  The webview's action bar disables its buttons
-        // on click and disappears when ``worktree_result`` arrives, so
-        // the user already gets feedback, and the backend emits no
-        // ``worktree_progress`` updates for discard anyway.  Merge
-        // keeps the toast — its "Generating commit message…" LLM phase
-        // can take a while.
         if (wtAction !== 'discard') {
           const progressTitle =
             wtAction === 'merge'
@@ -1459,17 +965,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         const acAction = message.action;
         const acTabId = message.tabId;
         if (acAction === 'commit') {
-          // No auto-dismiss timeout in production
-          // (``_autocommitProgressTimeoutMs`` is ``undefined`` by
-          // default).  The "Generating commit message…" phase is
-          // driven by an LLM call that can easily exceed any fixed
-          // timeout we might pick, so the progress toast must stay
-          // visible until ``autocommit_done`` arrives (or the view is
-          // disposed / the daemon disconnects, both of which drain
-          // the resolver map via ``_resolveAllWorktreeActions``).
-          // Tests can opt into a finite safety timer by setting
-          // ``_autocommitProgressTimeoutMs`` to reproduce the original
-          // bug.
           this._showActionProgress(
             'Auto-committing…',
             acTabId,
@@ -1521,9 +1016,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         if (typeof message.sensitivity === 'number') {
           this._voiceSensitivity = message.sensitivity;
         }
-        // An explicit user toggle overrides any pending hide-suspend
-        // auto-resume: off must stay off across hide/show, and on is
-        // already running so there is nothing left to resume.
         this._voiceWakeSuspendedByHide = false;
         if (message.enabled) this._voiceWake.start(this._voiceSensitivity);
         else this._voiceWake.stop();
@@ -1531,14 +1023,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
 
       case 'voiceAck': {
-        // "Working on it." after a voice-dictated task.  The webview
-        // cannot play the clip itself (Chromium's autoplay policy
-        // rejects Audio.play() without a recent click —
-        // microsoft/vscode#197937 — and dictation involves no click),
-        // and its old Web Speech fallback was the loud robotic "alien
-        // voice".  Play the GPT-synthesized clip natively on this
-        // machine's speakers instead; no player means silence, never
-        // the robotic voice.
         playVoiceAckClip(
           path.join(this._extensionUri.fsPath, 'media', 'working-on-it.mp3'),
         );
@@ -1546,10 +1030,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
 
       case 'voiceSensitivity': {
-        // The settings-panel slider moved: remember the value and
-        // apply it live by restarting a running listener with the new
-        // --sensitivity (a stopped listener just picks it up on the
-        // next voiceToggle start).
         if (typeof message.value !== 'number') break;
         this._voiceSensitivity = message.value;
         if (this._voiceWake?.running) {
@@ -1577,17 +1057,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
 
       case 'serverReset':
-        // Forward to the kiss-web daemon, which SIGTERMs itself so the
-        // supervising LaunchAgent/systemd unit respawns a fresh
-        // process.  The AgentClient transparently reconnects over the
-        // UDS once the new daemon is listening.
-        //
-        // The webview is responsible for surfacing an in-settings-
-        // panel floating confirmation dialog when an agent is still
-        // running on any tab — the extension only sees the
-        // ``serverReset`` message after the user has either confirmed
-        // (OK) or there was no agent running to begin with.  Cancel
-        // never reaches the extension.
         this._getApi().serverReset();
         break;
 
@@ -1605,44 +1074,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
   }
 
-  /**
-   * Run ``install.sh`` from the KISS Sorcar source checkout to update
-   * the extension and notify the user that an update is being
-   * installed.
-   *
-   * The script always lives at ``~/kiss_ai/install.sh`` because the
-   * curl-piped bootstrapper (``scripts/install.sh``) clones the repo
-   * to that fixed path — see :mod:`installerPath` for the rationale.
-   * It is executed in a dedicated integrated terminal so its progress
-   * is visible.  When the script is missing an error message points
-   * the user at the canonical install root rather than their current
-   * workspace.
-   *
-   * Pre-flight divergence reset — chicken-and-egg fix
-   * --------------------------------------------------
-   * Before invoking ``bash install.sh`` we synchronize the on-disk
-   * checkout with ``origin`` so a stale ``install.sh`` (one predating
-   * the divergence-handling fix in :func:`update_repo`) is replaced
-   * BEFORE bash reads it.  The bug it cures:
-   *
-   *     >>> Pulling latest changes...
-   *     fatal: Not possible to fast-forward, aborting.
-   *     hint: You have divergent branches and need to specify how to
-   *           reconcile them.
-   *        WARNING: git pull failed (offline or diverged); continuing
-   *        with the current checkout.
-   *
-   * The old install.sh swallowed the divergence error and then rebuilt
-   * the SAME stale source forever — so the Update button was a no-op
-   * on any machine whose ``main`` had been force-pushed (release
-   * retags, history rewrites).  Resetting to ``@{upstream}`` here
-   * means the running bash always reads the freshest install.sh, even
-   * if the user's extension predates this fix.  Dirty edits are
-   * stashed/popped around the reset so the user never loses work, and
-   * every step is best-effort (``|| true``) so an offline machine
-   * still falls through to ``bash install.sh`` (which itself handles
-   * offline / no-upstream gracefully).
-   */
   public runUpdate(): void {
     const scriptPath = findInstallScript();
     if (!scriptPath) {
@@ -1661,19 +1092,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     terminal.show();
     const escScript = scriptPath.replace(/'/g, "'\\''");
     const escDir = path.dirname(scriptPath).replace(/'/g, "'\\''");
-    // Single compound command so the terminal shows one prompt invocation.
-    // Each git step is guarded with ``|| true`` so an offline machine,
-    // a missing upstream, or a repo without ``origin`` still proceeds to
-    // ``bash install.sh`` (the script then handles those same cases).
-    // ``@{upstream}`` is the configured tracking branch (e.g.
-    // origin/main); ``origin/HEAD`` is the fallback for repos where the
-    // current branch lacks an explicit upstream config.
     const preflight = [
       `cd '${escDir}'`,
       "echo '>>> Pre-flight: synchronizing repo with origin before install.sh...'",
       'git fetch --force --tags --prune origin 2>/dev/null || true',
-      // Stash dirty / untracked edits so the hard reset below never loses
-      // user work.  We record the success so the pop is conditional.
       '_kiss_stashed=; if [ -n "$(git status --porcelain 2>/dev/null)" ]; then git stash push --include-untracked -m \'kiss-update-preflight\' >/dev/null 2>&1 && _kiss_stashed=1 || _kiss_stashed=; fi',
       "git reset --hard '@{upstream}' 2>/dev/null || git reset --hard origin/HEAD 2>/dev/null || true",
       'if [ -n "$_kiss_stashed" ]; then git stash pop >/dev/null 2>&1 || true; fi',
@@ -1682,44 +1104,19 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     terminal.sendText(preflight);
   }
 
-  /**
-   * Dispatch a merge command to the active tab's MergeManager.
-   *
-   * Used by extension.ts keyboard shortcuts that don't know the tab ID.
-   * Routes to the MergeManager of ``_activeTabId``.
-   */
   public handleMergeCommand(cmd: MergeCommand): void {
     const mgr = this._mergeManagers.get(this._activeTabId);
     if (mgr) void mgr[cmd]();
   }
 
-  /** Notify the agent that all merge changes have been reviewed. */
   public sendMergeAllDone(tabId?: string): void {
     this._getApi().mergeAction('all-done', tabId, this._getWorkDir());
   }
 
-  /**
-   * Submit a task programmatically (e.g. from the runSelection
-   * Cmd+E / Ctrl+E command).
-   *
-   * Pastes ``prompt`` into the chat webview's input textbox and
-   * submits it through the webview's normal send path, so the active
-   * tab id, selected model, worktree/auto-commit toggles and
-   * running-task steering (``appendUserMessage``) all behave exactly
-   * like the user typing the text and pressing Send.  When the sidebar
-   * webview is not yet resolved, ``focusChatInput()`` opens and
-   * resolves it first.  Only if the webview cannot be resolved at all
-   * does this fall back to starting the task directly, so the
-   * selection is never silently dropped.
-   */
   public async submitTask(prompt: string): Promise<void> {
     const text = prompt.trim();
     if (!text) return;
     await this.focusChatInput();
-    // A freshly-resolved webview may not have loaded main.js yet — a
-    // message posted before its window listener is installed would be
-    // silently dropped.  Wait (bounded, 15 × 200ms) for the webview's
-    // ``ready`` handshake before sending.
     for (let i = 0; i < 15 && this._view && !this._webviewReady; i++) {
       await new Promise(r => setTimeout(r, 200));
     }
@@ -1734,18 +1131,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     );
   }
 
-  /** Stop the currently running task in the active tab. */
   public stopTask(): void {
     this._sendToWebview({type: 'triggerStop'} as ToWebviewMessage);
   }
 
-  /** Focus the chat input in the sidebar. */
   public async focusChatInput(): Promise<void> {
     if (!this._view) {
-      // Webview not yet resolved — trigger resolution by focusing the view.
-      // The .focus command opens the secondary sidebar and resolves the
-      // webview, but resolution can be slow on first launch.  Poll up to
-      // 2 seconds (10 × 200ms) so we don't miss it.
       await vscode.commands.executeCommand(
         'kissSorcar.chatViewSecondary.focus',
       );
@@ -1760,7 +1151,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
   }
 
-  /** Append text to the chat input and focus it. */
   public async appendToInput(text: string): Promise<void> {
     if (this._view) {
       this._view.show(true);
@@ -1769,26 +1159,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
   }
 
-  /** Start a new conversation in a new tab (without affecting running tabs). */
   public newConversation(): void {
     this._sendToWebview({type: 'clearChat'});
   }
 
-  /**
-   * Ask the webview to report its current sidebar width (``window.innerWidth``)
-   * and the host screen width (``screen.availWidth``).  Returns ``undefined``
-   * if the webview does not respond within ``timeoutMs`` (default 1500ms).
-   *
-   * The host VS Code window width is not exposed by the extension API, so
-   * ``screen.availWidth`` is used as the closest proxy — it equals the VS
-   * Code window width when the window is maximized (the typical case on
-   * first install).
-   */
   private _measureSidebar(
     timeoutMs: number = 1500,
   ): Promise<{inner: number; screen: number} | undefined> {
     if (!this._view) return Promise.resolve(undefined);
-    // Drop any previous pending resolver — we only want the latest.
     this._sizeReportResolver = undefined;
     return new Promise(resolve => {
       let done = false;
@@ -1807,21 +1185,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     });
   }
 
-  /**
-   * Iteratively resize the secondary side bar so its width is approximately
-   * one-third of the VS Code window width.
-   *
-   * Algorithm: measure the current sidebar width via the webview, compare to
-   * ``screenWidth / 3``, then call ``workbench.action.increaseViewSize`` or
-   * ``workbench.action.decreaseViewSize`` (each adjusts by a fixed amount)
-   * and re-measure.  Stops when the width is within ``tolerance`` (default
-   * 6 % of target) or after ``maxIterations`` attempts (default 30).
-   *
-   * Used on first activation so the chat panel has enough room without
-   * requiring the user to drag the splitter.  The webview needs to be
-   * focused for the increase/decrease commands to apply to the secondary
-   * side bar — callers must ensure ``focusAuxiliaryBar`` is invoked first.
-   */
   public async widenToOneThird(
     maxIterations: number = 30,
     tolerance: number = 0.06,
@@ -1842,10 +1205,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           ? 'workbench.action.increaseViewSize'
           : 'workbench.action.decreaseViewSize';
       await vscode.commands.executeCommand(cmd);
-      // Give VS Code a moment to apply the resize before measuring again.
       await new Promise(r => setTimeout(r, 60));
-      // Bail out if the resize command had no effect for two consecutive
-      // iterations (e.g. we hit the min/max sidebar size).
       if (Math.abs(cur - prev) < 1) {
         stuck += 1;
         if (stuck >= 2) return;
@@ -1856,13 +1216,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
   }
 
-  /**
-   * Generate a commit message using this view's agent process.
-   *
-   * @param token Optional cancellation token.
-   * @param tabId Optional tab ID — each tab can independently request a
-   *              commit message without blocking other tabs.
-   */
   public generateCommitMessage(
     token?: vscode.CancellationToken,
     tabId: string = '',
@@ -1885,14 +1238,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         clearTimeout(timer);
         resolve();
       };
-      // Only resolve on the reply for THIS tab's request.  The daemon
-      // stamps every ``commitMessage`` with the requesting tabId, so a
-      // reply (or "Process stopped" abort) for one tab must not settle
-      // another tab's pending generation — resolving on ANY event
-      // deleted the wrong ``_commitPendingTabs`` entry and reported
-      // completion for a generation that was still in flight.  Events
-      // fired without a tabId (legacy) keep resolving the '' (SCM)
-      // waiter.
       const disposable = this._onCommitMessage.event(ev => {
         if ((ev.tabId ?? '') === tabId) done();
       });
@@ -1901,15 +1246,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     });
   }
 
-  /**
-   * Cleanup: dispose listeners and close the daemon connection.
-   *
-   * Closing the UDS socket only ends this client's connection — the
-   * daemon's ``_RunningAgentState`` lives on through the deferred-close grace
-   * window so in-flight agent tasks survive an extension reload.  A
-   * fresh activation re-connects and re-subscribes via ``ready`` /
-   * ``resumeSession`` exactly as a browser refresh does.
-   */
   public dispose(): void {
     this._disposed = true;
     setWebviewNotificationPoster(undefined);

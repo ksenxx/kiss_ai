@@ -80,7 +80,6 @@ class TestDeletedTaskIdWritesAreDropped(_TempDbTestBase):
         doomed_id, _ = _add_task("doomed task")
         assert _delete_task(doomed_id) is True
 
-        # The doomed task's cleanup ``finally`` fires after deletion.
         _save_task_result("Task failed: agent crashed", task_id=doomed_id)
 
         entry = _load_chat_events_by_task_id(victim_id)
@@ -118,8 +117,6 @@ class TestDeletedTaskIdWritesAreDropped(_TempDbTestBase):
         doomed_id, _ = _add_task("doomed task")
         assert _delete_task(doomed_id) is True
 
-        # e.g. the fire-and-forget followup-suggestion thread landing
-        # after the user deleted the task.
         _append_chat_event(
             {"type": "followup_suggestion", "text": "stale"},
             task_id=doomed_id,
@@ -186,8 +183,6 @@ class TestCorruptNumericColumnsDoNotCrashHistory(_TempDbTestBase):
         ids = {e["id"] for e in entries}
         assert ids == {good_id, bad_id}
         bad = next(e for e in entries if e["id"] == bad_id)
-        # The corrupt field degrades to its default instead of
-        # crashing the whole listing.
         assert '"cost": 0.0' in str(bad["extra"]) or bad["extra"] == ""
 
     def test_load_chat_events_survives_text_in_tokens_column(self) -> None:

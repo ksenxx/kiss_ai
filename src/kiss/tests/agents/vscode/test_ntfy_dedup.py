@@ -45,7 +45,6 @@ class _NtfyHandler(BaseHTTPRequestHandler):
     """
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
-        # Silence default stderr noise during tests.
         return
 
     def do_GET(self) -> None:  # noqa: N802
@@ -98,7 +97,6 @@ class _NtfyServerContext:
     def __init__(self) -> None:
         port = _find_free_port()
         self.server = ThreadingHTTPServer(("127.0.0.1", port), _NtfyHandler)
-        # Shared mutable state accessed by handlers.
         self.server.messages = {}  # type: ignore[attr-defined]
         self.server.posts = []  # type: ignore[attr-defined]
         self.thread = threading.Thread(
@@ -141,7 +139,6 @@ class TestNtfyDeduplication(unittest.TestCase):
         """No prior post means the URL must be published."""
         url = "https://red-fox-1234.trycloudflare.com"
         _post_url_to_message_board(url, base_url=self.ntfy.base_url)
-        # Exactly one POST hit the server with the URL as body.
         self.assertEqual(len(self.ntfy.posts), 1)
         topic, body, _headers = self.ntfy.posts[0]
         self.assertTrue(topic.startswith("kiss-"))
@@ -152,10 +149,8 @@ class TestNtfyDeduplication(unittest.TestCase):
         url = "https://red-fox-1234.trycloudflare.com"
         _post_url_to_message_board(url, base_url=self.ntfy.base_url)
         self.assertEqual(len(self.ntfy.posts), 1)
-        # Second call with the same URL must be suppressed.
         _post_url_to_message_board(url, base_url=self.ntfy.base_url)
         self.assertEqual(len(self.ntfy.posts), 1)
-        # Sanity: the cached message echoes back via fetch.
         topic = self.ntfy.posts[0][0]
         latest = _fetch_last_ntfy_message(topic, base_url=self.ntfy.base_url)
         self.assertEqual(latest, url)
@@ -169,7 +164,6 @@ class TestNtfyDeduplication(unittest.TestCase):
         self.assertEqual(len(self.ntfy.posts), 2)
         self.assertEqual(self.ntfy.posts[0][1], first)
         self.assertEqual(self.ntfy.posts[1][1], second)
-        # The latest cached message reflects the second URL.
         topic = self.ntfy.posts[0][0]
         latest = _fetch_last_ntfy_message(topic, base_url=self.ntfy.base_url)
         self.assertEqual(latest, second)
@@ -201,9 +195,6 @@ class TestNtfyDeduplication(unittest.TestCase):
         self.assertEqual(len(self.ntfy.posts), 1)
         _topic, body, headers = self.ntfy.posts[0]
         self.assertEqual(body, url)
-        # HTTP headers are case-insensitive; the BaseHTTPRequestHandler
-        # preserves the on-the-wire casing, which our client sends as
-        # ``Click``.  Look it up case-insensitively to stay robust.
         click = next(
             (v for k, v in headers.items() if k.lower() == "click"),
             None,

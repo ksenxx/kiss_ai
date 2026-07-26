@@ -97,8 +97,6 @@ class TestA1DanglingEventDoesNotDropBatch(_TempDbTestBase):
         tid_doomed, _ = _add_task("doomed task")
         assert _delete_task(tid_doomed) is True
 
-        # Queue a dangling event (deleted task) immediately followed by a
-        # valid event — both land in the same <=20ms writer batch.
         _queue_chat_event({"type": "ev_doomed"}, tid_doomed)
         _queue_chat_event({"type": "ev_live"}, tid_live)
         _flush_chat_events()
@@ -109,7 +107,6 @@ class TestA1DanglingEventDoesNotDropBatch(_TempDbTestBase):
         assert isinstance(events, list)
         assert [e["type"] for e in events] == ["ev_live"]
 
-        # The dangling event must be skipped, not persisted.
         assert _load_chat_events_by_task_id(tid_doomed) is None
 
     def test_seq_cache_stays_consistent_after_skipped_event(self) -> None:
@@ -120,7 +117,6 @@ class TestA1DanglingEventDoesNotDropBatch(_TempDbTestBase):
         _queue_chat_event({"type": "ev_doomed"}, tid_doomed)
         _queue_chat_event({"type": "first"}, tid_live)
         _flush_chat_events()
-        # A later batch for the live task must keep gapless ordering.
         _queue_chat_event({"type": "second"}, tid_live)
         _flush_chat_events()
 
@@ -129,7 +125,6 @@ class TestA1DanglingEventDoesNotDropBatch(_TempDbTestBase):
         events = loaded["events"]
         assert isinstance(events, list)
         assert [e["type"] for e in events] == ["first", "second"]
-        # The deleted task must not have been seeded into the seq cache.
         assert tid_doomed not in th._next_seq_cache
 
 
@@ -140,7 +135,6 @@ class TestA2DeleteTaskInvalidatesChatContextCache(_TempDbTestBase):
         tid, chat_id = _add_task("secret task")
         _save_task_result("secret result", task_id=tid)
 
-        # Populate the cache.
         text_before = _load_chat_context_text(chat_id)
         assert "secret task" in text_before
         assert "secret result" in text_before
@@ -160,7 +154,6 @@ class TestA3SaveTaskExtraPreservesFavorite(_TempDbTestBase):
         tid, _ = _add_task("fav task")
         assert _set_task_favorite(tid, True) is True
 
-        # Task-completion write (tokens/cost) must keep the star.
         _save_task_extra({"tokens": 5, "cost": 0.25}, task_id=tid)
 
         extra = _read_extra(tid)
@@ -172,10 +165,6 @@ class TestA3SaveTaskExtraPreservesFavorite(_TempDbTestBase):
         tid, _ = _add_task("unfav task")
         assert _set_task_favorite(tid, True) is True
 
-        # r3-H1 + r5-persistence-C2: ``_save_task_extra`` no longer
-        # honours ``is_favorite`` in the payload — it raises
-        # ``ValueError`` instead of silently dropping.
-        # ``_set_task_favorite`` is the only sanctioned writer.
         import pytest as _pytest
         with _pytest.raises(ValueError, match="_set_task_favorite"):
             _save_task_extra(
@@ -190,9 +179,6 @@ class TestA3SaveTaskExtraPreservesFavorite(_TempDbTestBase):
         _save_task_extra({"tokens": 7}, task_id=tid)
 
         extra = _read_extra(tid)
-        # r3-H3: ``_row_to_extra_json`` always emits every typed
-        # column.  Pop the defaulted ones so the test asserts ONLY
-        # the explicitly-written ``tokens`` value.
         for k in (
             "auto_commit_mode", "is_parallel", "is_worktree",
             "is_favorite", "model", "work_dir", "version",

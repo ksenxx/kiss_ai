@@ -173,8 +173,6 @@ class SorcarRunApiTest(unittest.TestCase):
                 "is_continue: false\n"
                 "summary: API test done\n"
             )
-            # Emit the terminal result event exactly like
-            # ``RelentlessAgent.run`` does on a real completion.
             printer = kwargs.get("printer") or getattr(
                 self_agent, "printer", None,
             )
@@ -200,8 +198,6 @@ class SorcarRunApiTest(unittest.TestCase):
         assert result.tokens == 1234
         assert result.steps == 7
         assert abs(result.cost - 0.4567) < 1e-9
-        # The returned ids must identify the run in the daemon's
-        # persistence: the task row exists and belongs to the chat.
         assert result.task_id
         assert result.chat_id
         assert _persistence._get_task_chat_id(result.task_id) == result.chat_id
@@ -305,8 +301,6 @@ class SorcarRunApiTest(unittest.TestCase):
         assert (
             _persistence._get_task_chat_id(second.task_id) == first.chat_id
         )
-        # The second agent's prompt embeds the first task and its
-        # result as prior chat context.
         assert len(prompts_seen) == 2
         assert "remember the magic word xyzzy" in prompts_seen[1]
         assert "first answer marker" in prompts_seen[1]
@@ -459,12 +453,7 @@ class SorcarRunApiTest(unittest.TestCase):
         )
         assert result.success is True
         assert result.text == "tools ok"
-        # Private helpers, imported functions, classes, and constants
-        # are excluded; every top-level public function is included.
         assert seen["names"] == ["get_temperature", "magic_number", "which_thread"]
-        # The daemon loaded the REAL function: full docstring and the
-        # exact signature (keyword-only marker, defaults, and return
-        # annotation) survive because nothing was serialized.
         assert seen["doc"] == (
             "Return the current temperature of a city.\n"
             "\n"
@@ -478,11 +467,7 @@ class SorcarRunApiTest(unittest.TestCase):
         )
         assert seen["r1"] == "21C in Paris"
         assert seen["r2"] == "21F in Berlin!"
-        # Native return value — an ``int``, not a stringified proxy
-        # round trip.
         assert seen["r3"] == 40
-        # The tools ran in the DAEMON's task thread (the stub agent's
-        # thread), not in the client thread blocked in ``sorcar.run``.
         assert seen["thread"] != threading.current_thread().name
 
     def test_tools_file_skips_unsuitable_functions(self) -> None:
@@ -648,7 +633,6 @@ class SorcarRunApiTest(unittest.TestCase):
         compile the source directly, and must not litter the caller's
         directory with ``__pycache__``.
         """
-        # Same byte length, written back-to-back (same mtime granule).
         tools_path = self._write_tools_file(
             "editable_tools.py",
             '''
@@ -792,17 +776,16 @@ class SorcarRunApiTest(unittest.TestCase):
 
         self._parent_class.run = stub_run
         for tools_file in (
-            42,  # not a string
-            str(Path(self.tmpdir) / "nowhere.py"),  # missing file
-            self.tmpdir,  # a directory, not a .py file
-            not_py,  # wrong suffix
-            raising,  # import-time exception
-            broken,  # syntax error
-            None,  # absent field (plain webview submits)
+            42,
+            str(Path(self.tmpdir) / "nowhere.py"),
+            self.tmpdir,
+            not_py,
+            raising,
+            broken,
+            None,
         ):
             self._raw_daemon_run(tools_file)
         assert seen["tool_lists"] == [[]] * 7
-        # The daemon survived it all: a normal API run still works.
         result = sorcar.run(
             "still alive?",
             work_dir=self.repo,
@@ -829,11 +812,11 @@ class SorcarRunApiTest(unittest.TestCase):
             return x
 
         cases: list[Any] = [
-            42,  # not a path
-            [a_tool],  # the old list-of-callables API shape
-            str(Path(self.tmpdir) / "nowhere.py"),  # missing file
-            self.tmpdir,  # a directory
-            str(Path(self.tmpdir) / "tools.txt"),  # wrong suffix
+            42,
+            [a_tool],
+            str(Path(self.tmpdir) / "nowhere.py"),
+            self.tmpdir,
+            str(Path(self.tmpdir) / "tools.txt"),
         ]
         Path(self.tmpdir, "tools.txt").write_text("not python\n")
         for tools in cases:

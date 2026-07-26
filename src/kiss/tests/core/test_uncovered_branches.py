@@ -404,8 +404,6 @@ class TestAnthropicBuildKwargs:
             == 'Use ${VAR} and {"json": true} with X'
         )
         assert substitute_prompt_args(template, None) == template
-        # Single pass: a value containing another key's placeholder is
-        # not re-expanded.
         assert (
             substitute_prompt_args("{a} {b}", {"a": "{b}", "b": "B"})
             == "{b} B"
@@ -513,5 +511,3 @@ class TestAnthropicAddFunctionResults:
         )
         last = m.conversation[-1]
         assert "Tokens: 100" in last["content"][0]["content"]
-
-

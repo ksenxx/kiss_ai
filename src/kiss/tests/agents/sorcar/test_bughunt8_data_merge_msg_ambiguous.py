@@ -76,8 +76,6 @@ def _setup_branch_and_ambiguous_file(repo: Path) -> None:
     commit = _git("commit", "-m", _AGENT_MSG, cwd=wt_dir)
     assert commit.returncode == 0, commit.stderr
 
-    # A user file on main whose name equals the branch name makes
-    # ``git log <branch>`` ambiguous (revision vs. filename).
     (repo / _BRANCH).write_text("user file that shadows the branch name\n")
     _git("add", _BRANCH, cwd=repo)
     commit = _git("commit", "-m", "add file shadowing branch name", cwd=repo)

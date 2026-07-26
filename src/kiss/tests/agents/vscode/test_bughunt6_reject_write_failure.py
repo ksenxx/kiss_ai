@@ -226,8 +226,6 @@ class TestRejectWriteFailure(IsolatedAsyncioTestCase):
         work = Path(self.tmpdir) / "work-rej-dir"
         work.mkdir()
         entry = _deleted_file_entry(work, "cfg")
-        # The agent replaced the deleted file with a directory of the
-        # same name (e.g. cfg → cfg/ with files inside).
         (work / "cfg").mkdir()
         (work / "cfg" / "inner.txt").write_text("x\n")
         self._open_review(tab_id, [entry])
@@ -238,7 +236,6 @@ class TestRejectWriteFailure(IsolatedAsyncioTestCase):
         }))
         events = await self._collect_events(ws, timeout=2.0)
 
-        # The connection must survive the failed write.
         try:
             await self._assert_connection_alive(ws)
         except Exception as exc:  # noqa: BLE001 — turn closure into a failure
@@ -247,21 +244,18 @@ class TestRejectWriteFailure(IsolatedAsyncioTestCase):
                 f"connection ({type(exc).__name__}: {exc})",
             )
 
-        # The user must be told the rejection failed.
         error_events = [e for e in events if e.get("type") == "error"]
         self.assertTrue(
             error_events,
             f"no error event broadcast for the failed reject: {events}",
         )
 
-        # The hunk must stay unresolved — nothing was written to disk.
         with self.server._merge_states_lock:
             state = self.server._merge_states.get(tab_id)
         self.assertIsNotNone(state, "merge state must survive the failure")
         assert state is not None
         self.assertEqual(state.remaining, 1)
         self.assertEqual(state.resolutions(), [])
-        # The directory the agent created is untouched.
         self.assertTrue((work / "cfg").is_dir())
         self.assertEqual((work / "cfg" / "inner.txt").read_text(), "x\n")
 
@@ -293,7 +287,6 @@ class TestRejectWriteFailure(IsolatedAsyncioTestCase):
                 f"WebSocket connection ({type(exc).__name__}: {exc})",
             )
 
-        # The good file must be restored to its base content.
         self.assertEqual(
             (work / "good.txt").read_text(),
             "".join(f"line{i}\n" for i in range(8)),
@@ -304,8 +297,6 @@ class TestRejectWriteFailure(IsolatedAsyncioTestCase):
             error_events,
             f"no error event broadcast for the failed reject-all: {events}",
         )
-        # The failed file's hunk stays unresolved; the review survives
-        # (NOT zombified with remaining == 0 and no all-done dispatched).
         with self.server._merge_states_lock:
             state = self.server._merge_states.get(tab_id)
         self.assertIsNotNone(state, "merge state must survive the failure")

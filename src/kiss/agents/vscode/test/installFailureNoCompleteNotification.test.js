@@ -2,36 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Integration test: a FAILED slow-path dependency install must never be
-// followed by a "KISS Sorcar: Installation complete ..." notification.
-//
-// Bug locked in: ``ensureDependenciesImpl`` consumed the
-// ``~/.kiss/.extension-updated`` marker up front (arming
-// ``showRestartNotification``), and after the slow path it computed
-//
-//     showRestartNotification = showRestartNotification || !!result.success;
-//
-// so when the install FAILED (e.g. uv missing and ``curl`` unavailable)
-// while the marker existed, the user saw the specific error
-// notification immediately followed by "Installation complete, but ...
-// API key required" — contradictory and hiding the failure.
-//
-// This test drives the REAL compiled ``out/DependencyInstaller.js``
-// (only ``vscode`` and the notification sink are stubbed) in a sandbox:
-// fresh HOME, a PATH with no uv/curl/tar, a fake kiss project, and the
-// update marker present.  ``findUvPath`` in ``kissPaths.ts`` also
-// probes fixed absolute locations (/usr/local/bin/uv,
-// /opt/homebrew/bin/uv) that an empty PATH cannot hide, so
-// ``fs.existsSync`` is shimmed to report any ``uv`` binary outside the
-// sandbox HOME as missing — otherwise a host with Homebrew uv skips
-// the "uv missing" branch entirely and runs ``uv sync`` against the
-// fake project.  The test asserts the curl error IS shown and no
-// "Installation complete" notification follows.
-//
-// Run directly with ``node`` (after ``npm run compile``):
-//
-//     node src/kiss/agents/vscode/test/installFailureNoCompleteNotification.test.js
 
 'use strict';
 
@@ -44,12 +14,10 @@ const Module = require('module');
 const EXT_ROOT = path.join(__dirname, '..');
 const OUT_DIR = path.join(EXT_ROOT, 'out');
 
-// --- Sandbox: fresh HOME, empty PATH dir, fake kiss project -------------
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-instfail-'));
 const emptyBin = path.join(tmpHome, 'bin');
 fs.mkdirSync(emptyBin, {recursive: true});
 fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
-// The update marker that armed the completion notification.
 fs.writeFileSync(path.join(tmpHome, '.kiss', '.extension-updated'), 'x\n');
 
 const fakeProject = path.join(tmpHome, 'kiss_project');
@@ -62,18 +30,8 @@ fs.writeFileSync(
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 process.env.KISS_PROJECT_PATH = fakeProject;
-// No uv, no curl, no tar anywhere on PATH (the shell for `which` lookups
-// is spawned via an absolute path, so an empty PATH dir suffices).
 process.env.PATH = emptyBin;
 
-// --- Hide system-wide uv installs from findUvPath -----------------------
-// ``findUvPath`` probes absolute candidate paths (/usr/local/bin/uv,
-// /opt/homebrew/bin/uv, $HOME/.local/bin/uv, $HOME/.cargo/bin/uv) with
-// ``fs.existsSync`` before falling back to ``which uv``.  HOME already
-// points inside the sandbox and PATH is empty, but the two system-wide
-// candidates would leak a host uv install into the test.  Shim
-// ``existsSync`` to report any uv binary outside the sandbox as absent;
-// every other path is answered truthfully.
 const realExistsSync = fs.existsSync;
 fs.existsSync = function (p) {
   const base = path.basename(String(p));
@@ -83,7 +41,6 @@ fs.existsSync = function (p) {
   return realExistsSync.apply(fs, arguments);
 };
 
-// --- vscode stub ---------------------------------------------------------
 const vscodeStub = {
   workspace: {
     isTrusted: true,
@@ -120,7 +77,6 @@ Module._load = function (request, parent, isMain) {
   return origLoad.call(this, request, parent, isMain);
 };
 
-// --- Notification sink (replaces the real WebviewNotifications) ---------
 const notifications = [];
 
 function stubModule(filePath, exports) {

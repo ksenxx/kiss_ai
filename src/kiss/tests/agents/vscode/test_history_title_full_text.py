@@ -77,7 +77,6 @@ class TestHistoryTitleFullText(unittest.TestCase):
         s = sessions[0]
         self.assertEqual(s["title"], _LONG_TASK)
         self.assertEqual(s["preview"], _LONG_TASK)
-        # Ensure the previous 50-char + ellipsis truncation is gone.
         self.assertNotIn("...", s["title"])
         self.assertGreater(len(s["title"]), 50)
 
@@ -109,13 +108,6 @@ class TestRunningItemLineClampCSS(unittest.TestCase):
             / "main.css"
         )
         css = css_path.read_text(encoding="utf-8")
-        # Block:
-        #   .running-item > .sidebar-item-text {
-        #     ...
-        #     -webkit-line-clamp: 4;
-        #     line-clamp: 4;
-        #     ...
-        #   }
         start = css.index(".running-item > .sidebar-item-text")
         block = css[start : start + 400]
         self.assertIn("-webkit-line-clamp: 4;", block)

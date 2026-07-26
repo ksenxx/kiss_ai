@@ -325,8 +325,6 @@ def _history_event_from_real_backend(
                 target=stop.wait, name="kiss-test-fake-worker", daemon=True,
             )
             worker.start()
-            # Give the OS scheduler a moment so ``is_alive()`` is true
-            # by the time ``_get_running_task_ids`` polls.
             for _ in range(50):
                 if worker.is_alive():
                     break
@@ -358,8 +356,6 @@ def _history_event_from_real_backend(
         th._DB_PATH = orig_db_path  # type: ignore[attr-defined]
         shutil.rmtree(tmp, ignore_errors=True)
 
-
-# --- Backend tests -------------------------------------------------
 
 
 def test_backend_marks_alive_thread_as_running() -> None:
@@ -395,8 +391,6 @@ def test_backend_marks_alive_thread_as_running() -> None:
             f"got: {running}"
         )
 
-        # The dead-thread case: stop the worker, ``is_alive()`` flips
-        # to False, ``_get_running_task_ids`` must drop the id.
         stop.set()
         worker.join(timeout=2.0)
         assert not worker.is_alive(), "test worker must have stopped"
@@ -425,15 +419,9 @@ def test_backend_overrides_failed_sentinel_for_running_task() -> None:
     been reattached and is now actively running.  The History row
     must show the green pulsing dot, NOT the red failed dot.
     """
-    # The helper persists exactly one task per call; when
-    # ``fake_running_task_id`` is the same DB's auto-assigned id, the
-    # alive-thread fixture overlaps the persisted "failed" sentinel
-    # and exercises the override path.  We don't know the id ahead of
-    # time, so use a sentinel that the helper resolves to the just-
-    # persisted id (see _history_event_from_real_backend).
     event = _history_event_from_real_backend(
         result="Agent Failed Abruptly",
-        fake_running_task_id="-1",  # sentinel: use the persisted id
+        fake_running_task_id="-1",
     )
     sessions = event["sessions"]
     row = next(
@@ -475,8 +463,6 @@ def test_backend_marks_cli_launched_task_as_running() -> None:
         th._DB_PATH = orig_db_path  # type: ignore[attr-defined]
         shutil.rmtree(tmp, ignore_errors=True)
 
-
-# --- Frontend tests ------------------------------------------------
 
 
 def test_running_session_renders_green_circle(_browser) -> None:
@@ -531,7 +517,6 @@ def test_running_session_renders_green_circle(_browser) -> None:
         )
         by_text = {r["text"]: r for r in info}
 
-        # Running task — must have a green pulsing dot.
         run = by_text["running task"]
         assert run["category"] == "running", (
             f"running row miscategorised: {run['category']!r}"
@@ -587,7 +572,6 @@ def test_running_session_renders_green_circle(_browser) -> None:
             f"running dot has wrong aria-label: {dot['ariaLabel']!r}"
         )
 
-        # Failed task — red dot, NOT green.
         fail = by_text["failing task"]
         assert not fail["hasRunningDot"], (
             "failed task should not render a .sidebar-item-running element"
@@ -596,7 +580,6 @@ def test_running_session_renders_green_circle(_browser) -> None:
             "failed task should render a .sidebar-item-failed element"
         )
 
-        # Completed task — no dot at all.
         ok = by_text["successful task"]
         assert not ok["hasRunningDot"], (
             "completed task should not render a .sidebar-item-running element"
@@ -696,7 +679,6 @@ def test_status_running_true_event_triggers_history_refresh(_browser) -> None:
     """
     context, page = _open_history_page(_browser)
     try:
-        # Seed the panel with one finished row.
         finished_sample = dict(_sample_sessions()[2])
         finished_sample["task_id"] = 4001
         finished_sample["id"] = "chat-live"
@@ -709,8 +691,6 @@ def test_status_running_true_event_triggers_history_refresh(_browser) -> None:
             ")"
         ), "no green dot expected before the task starts running"
 
-        # Dispatch the backend status: running=true and assert the
-        # frontend posts getHistory back to the host.
         page.evaluate(
             "() => { window.__postedMessages.length = 0; }"
         )
@@ -735,9 +715,6 @@ def test_status_running_true_event_triggers_history_refresh(_browser) -> None:
             " }"
         )
 
-        # Deliver the host's response with is_running=true.  Use the
-        # generation the frontend just asked for so renderHistory
-        # accepts it.
         live = dict(finished_sample)
         live["is_running"] = True
         live["endTs"] = 0
@@ -750,7 +727,6 @@ def test_status_running_true_event_triggers_history_refresh(_browser) -> None:
             ")"
         ), "green dot must appear after status running=true refresh"
 
-        # Then drive status: running=false and verify the dot drops.
         page.evaluate("() => { window.__postedMessages.length = 0; }")
         page.evaluate(
             "() => window.__post({ type: 'status', running: false })"
@@ -923,12 +899,6 @@ def test_backend_history_event_renders_green_circle_end_to_end(
     green pulsing dot is visible on the row backed by the real DB."""
     context, page = _open_history_page(_browser)
     try:
-        # Persist a fresh task and overlay it with a synthetic alive
-        # thread so the broadcast is driven by the real persistence
-        # layer plus the real ``_get_running_task_ids`` plumbing.  The
-        # ``-1`` sentinel asks the helper to re-use the just-persisted
-        # task id for the alive-thread fixture so we don't have to
-        # predict the auto-assigned id.
         event = _history_event_from_real_backend(fake_running_task_id="-1")
         row = next(
             s for s in event["sessions"]

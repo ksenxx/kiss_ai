@@ -2,22 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test for the agent ``talk`` tool playback: a backend
-// ``{type: 'talk', ...}`` event plays ONLY the GPT-synthesized clip
-// (``audioB64``) through an Audio element on EVERY client with a tab
-// open for the running task — even when that tab is not the active
-// tab.  The robotic Web Speech (speechSynthesis) fallback is gone
-// for good: an event without audio, a device without the Audio API,
-// or a failing clip degrades to SILENCE while the serialized talk
-// queue still advances so later talks keep playing.  A copy stamped
-// for a tab this webview does not own belongs to another window and
-// must stay silent here (see talkSpeaksOnce.test.js for the full
-// per-device dedupe contract).
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/talkTool.test.js
 
 'use strict';
 
@@ -28,12 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom window running the production chat webview: the real
- * ``chat.html`` body (placeholders blanked), ``panelCopy.js`` and
- * ``main.js`` evaluated in the window, and a recording
- * ``acquireVsCodeApi`` stub (the only host API the webview has).
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -68,9 +46,6 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  // Evaluate api.js separately so V8 coverage offsets for the
-
-  // sourceURL-labelled main.js eval below start at character 0.
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(
@@ -79,12 +54,6 @@ fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   return {win, posted};
 }
 
-/**
- * Install a TRIPWIRE Web Speech API on *win* (jsdom has none).  The
- * production code must NEVER call it any more — the returned array
- * records any (forbidden) utterance so tests can assert it stays
- * empty.
- */
 function installSpeech(win) {
   const spoken = [];
   win.SpeechSynthesisUtterance = function SpeechSynthesisUtterance(text) {
@@ -97,12 +66,6 @@ function installSpeech(win) {
   return spoken;
 }
 
-/**
- * Install a recording Audio constructor on *win* (jsdom's own media
- * elements cannot play).  Returns the array of created sources;
- * ``play()`` resolves and each element's ``onended`` can be fired by
- * the test to complete the serialized talk queue.
- */
 function installAudio(win) {
   const created = [];
   win.Audio = function Audio(src) {
@@ -113,12 +76,11 @@ function installAudio(win) {
   return created;
 }
 
-/** Dispatch a backend→webview event exactly like the extension does. */
 function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-const B64 = 'SUQzBAAAAAAAAA=='; // decodes to "ID3..." — an MP3 tag header
+const B64 = 'SUQzBAAAAAAAAA==';
 
 function testAudiolessTalkIsSilentAndQueueAdvances() {
   const {win} = makeWebview();
@@ -126,17 +88,12 @@ function testAudiolessTalkIsSilentAndQueueAdvances() {
   const created = installAudio(win);
   const activeTab = win._demoApi.getActiveTabId();
 
-  // No audioB64: the old code spoke this through the robotic Web
-  // Speech engine; the new code stays silent and completes the talk
-  // immediately.
   send(win, {type: 'talk', language: 'es', text: 'hola usuario',
              talkId: 'tt-noaudio', tabId: activeTab});
 
   assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
   assert.strictEqual(created.length, 0, 'no clip to play — stays silent');
 
-  // The silent talk must have RELEASED the serialized talk queue: a
-  // later talk carrying a good clip plays right away.
   send(win, {type: 'talk', language: 'es', text: 'con audio',
              talkId: 'tt-audio', tabId: activeTab,
              audioB64: B64, audioMime: 'audio/mpeg'});
@@ -152,11 +109,6 @@ function testTalkForOtherWindowsTabStaysSilent() {
   const spoken = installSpeech(win);
   const created = installAudio(win);
 
-  // The backend stamps one copy per subscribed viewer tab and sends
-  // every copy to every connected webview.  A copy stamped for a tab
-  // this webview does NOT own belongs to another window / device —
-  // that window plays it.  Playing it here too made every utterance
-  // play twice on the same speakers.
   send(win, {type: 'talk', language: 'de', text: 'hallo',
              tabId: 'some-other-windows-tab', audioB64: B64});
 
@@ -170,8 +122,6 @@ function testTalkWithoutLanguagePlaysClip() {
   const spoken = installSpeech(win);
   const created = installAudio(win);
 
-  // ``language`` only steers server-side synthesis; playback of the
-  // clip must not depend on it.
   send(win, {type: 'talk', text: 'plain default', talkId: 'tt-nolang',
              audioB64: B64});
 
@@ -198,10 +148,8 @@ function testTalkEmptyTextIsIgnored() {
 function testTalkWithoutAudioApiDoesNotCrashAndQueueAdvances() {
   const {win} = makeWebview();
   const spoken = installSpeech(win);
-  win.Audio = undefined; // device without the Audio API
+  win.Audio = undefined;
 
-  // Must be a silent no-op (never crash, never go robotic) AND must
-  // not wedge the serialized talk queue.
   send(win, {type: 'talk', language: 'en', text: 'hello',
              talkId: 'tt-noapi', audioB64: B64});
   assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
@@ -224,7 +172,6 @@ function testThrowingAudioConstructorIsSwallowedAndQueueAdvances() {
              talkId: 'tt-throw', audioB64: B64});
   assert.strictEqual(spoken.length, 0, 'Web Speech must never speak');
 
-  // The failure degraded to silence and released the queue.
   const created = installAudio(win);
   send(win, {type: 'talk', language: 'en', text: 'next one',
              talkId: 'tt-next', audioB64: B64});

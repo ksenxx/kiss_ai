@@ -2,26 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test for the host-side VoiceWakeService speech events.
-//
-// After the "Sorcar" wake word, the Python listener captures the
-// following speech, translates it to English with a GPT audio model
-// and prints ``SPEECH <json>`` (or ``NO_SPEECH`` when only silence
-// follows).  VoiceWakeService must parse those lines and invoke the
-// ``onSpeech`` callback.
-//
-// This test spawns the REAL compiled service (out/voiceWake.js), which
-// spawns the REAL Python listener via ``uv run`` — no mocks.  The
-// listener is fed a WAV file (spoken "Sorcar" followed by silence,
-// synthesized with the macOS TTS engine) through the
-// ``KISS_VOICE_WAKE_ARGS`` extra-arguments hook, so the test is fully
-// deterministic and needs no OpenAI call: silence after the wake word
-// must surface as ``onSpeech('')``.
-//
-// Run directly with ``node test/voiceWakeSpeechLines.test.js`` after
-// ``npm run compile`` (skips politely when macOS TTS, uv, or the
-// compiled output is unavailable).
 
 'use strict';
 
@@ -57,8 +37,6 @@ if (!fs.existsSync(OUT_VOICEWAKE)) {
   process.exit(0);
 }
 
-// The compiled service imports 'vscode' (through kissPaths); provide
-// the shared stub used by the other extension-host tests.
 global.__kissVscodeStub = {
   workspace: {
     isTrusted: true,
@@ -71,7 +49,6 @@ Module._resolveFilename = function (request, ...rest) {
   return realResolve.call(this, request, ...rest);
 };
 
-// Synthesize "Sorcar" followed by ~8s of silence at 16kHz mono 16-bit.
 const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-voice-'));
 const aiff = path.join(tmpdir, 'wake.aiff');
 const wav = path.join(tmpdir, 'wake.wav');

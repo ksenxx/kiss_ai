@@ -174,9 +174,7 @@ class TestAutoCommitEnabledGate:
             assert agent._auto_commit_worktree() is False
             after = _head_count(wt_dir)
 
-            # No new commit on the worktree branch.
             assert after == before
-            # Dirty file is preserved (not committed away).
             assert GitWorktreeOps.has_uncommitted_changes(wt_dir)
 
     def test_auto_commit_on_creates_commit(self) -> None:
@@ -186,9 +184,6 @@ class TestAutoCommitEnabledGate:
 
             before = _head_count(wt_dir)
             agent.auto_commit_enabled = True
-            # Force the message-generation LLM call through its
-            # exception fallback so the test does not need a real
-            # model — same pattern as ``test_autocommit_user_prompt``.
             import kiss.core.kiss_agent as kiss_agent_mod
 
             saved = kiss_agent_mod.KISSAgent
@@ -208,5 +203,4 @@ class TestAutoCommitEnabledGate:
             after = _head_count(wt_dir)
 
             assert after == before + 1
-            # Working tree is clean after the auto-commit.
             assert not GitWorktreeOps.has_uncommitted_changes(wt_dir)

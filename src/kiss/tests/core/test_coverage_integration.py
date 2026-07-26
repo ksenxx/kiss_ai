@@ -219,8 +219,6 @@ class TestExtractTokenCounts:
 
         m = OpenAICompatibleModel("gpt-4", base_url="http://localhost", api_key="k")
         counts = m.extract_input_output_token_counts_from_response(FakeResponse())
-        # Text-only traffic keeps the legacy 4-tuple shape (the 7-tuple
-        # is reserved for audio-chat responses with audio-token subsets).
         assert counts == (100, 50, 0, 0)
 
     def test_no_usage_attr(self) -> None:

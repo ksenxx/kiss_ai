@@ -56,10 +56,6 @@ def _provider_model_name(model_name: str) -> str:
         if model_name.startswith("openrouter/")
         else model_name
     )
-    # Lazy import: avoid a circular import between this module and
-    # ``model_info`` (which imports ``OpenAICompatibleModel`` from this
-    # package via ``_openai_compatible``).  ``model_info`` owns the
-    # canonical ``-xhigh`` alias-stripping rule.
     from kiss.core.models.model_info import _strip_xhigh_alias
 
     return _strip_xhigh_alias(provider_name)
@@ -84,9 +80,6 @@ def _model_thinking_level(model_name: str) -> str | None:
         The thinking level string (e.g. ``"xhigh"``) if the matching
         ``MODEL_INFO`` entry sets one, otherwise ``None``.
     """
-    # Lazy import: avoid a circular import between this module and
-    # ``model_info`` (which imports ``OpenAICompatibleModel`` from this
-    # package via ``_openai_compatible``).
     from kiss.core.models.model_info import MODEL_INFO
     info = MODEL_INFO.get(model_name)
     return info.thinking if info is not None else None
@@ -112,14 +105,6 @@ DEEPSEEK_REASONING_MODELS = {
     "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
 }
 
-# Per-process cache of live verdicts on whether an endpoint accepts
-# ``tools`` + ``reasoning_effort`` on the same Chat Completions request,
-# keyed by ``base_url``.  Only consulted for endpoints whose capability is
-# not declared in ``model_info.OPENAI_COMPATIBLE_PROVIDERS`` (custom
-# gateways, or registered vendors declared ``None`` = unverified): the
-# first tool-bearing request keeps the effort optimistically and the
-# vendor's actual response records the verdict here (adaptive probe), so
-# future vendors work correctly without a manual host allowlist patch.
 _ADAPTIVE_TOOL_EFFORT_VERDICTS: dict[str, bool] = {}
 
 
@@ -329,7 +314,6 @@ class OpenAICompatibleBase(Model):
     prompt-cache request marker live here once.
     """
 
-    #: Bare model id sent to the API (``openrouter/`` routing prefix stripped).
     _api_model_name: str
 
     def _is_deepseek_reasoning_model(self) -> bool:
@@ -362,10 +346,6 @@ class OpenAICompatibleBase(Model):
             return
         if not self.model_config.get("enable_cache", True):
             return
-        # Shallow-copy the caller-supplied ``extra_body`` dict (when present)
-        # before adding ``cache_control``.  Without this copy the nested dict
-        # in ``self.model_config["extra_body"]`` would be mutated in place —
-        # leaking the auto-injected cache marker into the caller's config.
         existing = kwargs.get("extra_body")
         extra_body = dict(existing) if isinstance(existing, dict) else {}
         extra_body["cache_control"] = {"type": "ephemeral"}
@@ -409,20 +389,8 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         self.base_url = base_url
         self.api_key = api_key
         self._api_model_name = _provider_model_name(model_name)
-        # Lazily-created ``OpenAICompatibleModel2`` used to send tool-bearing
-        # requests through ``/v1/responses`` so ``reasoning_effort`` (incl.
-        # ``"xhigh"``) survives instead of being stripped (see
-        # ``_generate_with_tools_via_responses``).
         self._responses_delegate: OpenAICompatibleModel2 | None = None
-        # call_id -> raw Responses-API output items (reasoning / message /
-        # function_call) captured for the assistant turn that produced the
-        # call.  Replayed verbatim on later turns so OpenAI's "function_call
-        # provided without its required reasoning item" constraint is
-        # satisfied for reasoning models.
         self._delegate_raw_items: dict[str, list[dict[str, Any]]] = {}
-        # Default ``reasoning_effort`` to the level declared on the model's
-        # MODEL_INFO entry (e.g. ``"xhigh"`` for gpt-5.5).  Copy first so we
-        # never mutate the caller's dict.  Caller-supplied values always win.
         thinking_level = _model_thinking_level(self.model_name)
         reasoning_cfg = self.model_config.get("reasoning")
         has_native_effort = (
@@ -435,13 +403,6 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         ):
             self.model_config = dict(self.model_config)
             self.model_config["reasoning_effort"] = thinking_level
-        # Base64-encoded audio payload of the most recent ``generate()``
-        # response, populated when the request asked for audio output
-        # (``model_config={"modalities": ["text", "audio"], "audio":
-        # {...}}`` with a GPT audio-chat model).  ``None`` otherwise.
-        # Lets callers (e.g. the ``talk`` tool's speech synthesis via
-        # ``KISSAgent``) retrieve model-generated audio through the core
-        # model layer instead of calling the OpenAI SDK directly.
         self.last_audio_data: str | None = None
 
     def __str__(self) -> str:
@@ -611,7 +572,6 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 block_type = block.get("type")
                 if block_type in ("thinking", "redacted_thinking"):
                     continue
-                # Drop pre-existing whitespace-only text dicts too.
                 if block_type == "text" and not block.get("text", "").strip():
                     continue
                 if block_type in ("image", "document"):
@@ -696,12 +656,9 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         """
         msg_copy = msg.copy()
         if msg_copy.get("tool_calls"):
-            # Gemini hand-off: arguments may be dicts; OpenAI wants JSON strings.
             msg_copy["tool_calls"] = _stringify_tool_call_arguments(msg_copy["tool_calls"])
         attachments = msg_copy.pop("attachments", None)
         if attachments:
-            # Gemini hand-off: lift the Attachment objects into OpenAI
-            # content parts (the API rejects unknown message fields).
             parts = cls._attachments_to_content_parts(attachments)
             prior = msg_copy.get("content")
             if isinstance(prior, str) and prior.strip():
@@ -713,8 +670,6 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         has_tool_calls = bool(msg_copy.get("tool_calls"))
 
         if isinstance(content, str):
-            # Keep whitespace-only content when tool_calls are attached
-            # (OpenAI allows empty assistant content alongside tool_calls).
             if content.strip() or has_tool_calls:
                 return [msg_copy]
             return []
@@ -727,7 +682,6 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         rest = [b for b in blocks if b.get("type") not in ("tool_result", "tool_use")]
 
         if tool_uses:
-            # Anthropic assistant message: text blocks + tool_use blocks.
             text = "".join(b.get("text", "") for b in rest if b.get("type") == "text")
             tool_calls = list(msg_copy.get("tool_calls") or [])
             for b in tool_uses:
@@ -749,8 +703,6 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 }
             ]
         if tool_results:
-            # Anthropic user message carrying tool results: one OpenAI
-            # ``role="tool"`` message per tool_result block.
             converted = [
                 {
                     "role": "tool",
@@ -936,9 +888,6 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         kwargs = self.model_config.copy()
         kwargs.pop("system_instruction", None)
         kwargs.pop("use_responses_api", None)
-        # Anthropic-only client knob; arrives here when a live conversation
-        # (and its config) is handed over from an AnthropicModel via the
-        # Sorcar ``set_model`` tool.  Not a Chat Completions parameter.
         kwargs.pop("stream_stall_timeout", None)
         kwargs.update({"model": self._api_model_name, "messages": messages})
         self._apply_cache_control_for_openrouter_anthropic(kwargs)
@@ -977,8 +926,6 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         if audio is not None:
             self.last_audio_data = getattr(audio, "data", None)
             if not content:
-                # Audio-output models leave ``message.content`` empty and
-                # put the spoken text in ``message.audio.transcript``.
                 content = getattr(audio, "transcript", None) or ""
 
         if self._is_deepseek_reasoning_model():
@@ -1008,14 +955,6 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
 
         tools = self._resolve_openai_tools_schema(function_map, tools_schema)
 
-        # OpenAI's /v1/chat/completions endpoint rejects the combination of
-        # ``tools`` + ``reasoning_effort`` for GPT-5.x / o-series reasoning
-        # models with: "Function tools with reasoning_effort are not supported
-        # ... in /v1/chat/completions. Please use /v1/responses instead."
-        # Tool-bearing requests to endpoints that implement ``/v1/responses``
-        # are therefore delegated to the Responses-API transport
-        # (:class:`OpenAICompatibleModel2`), which supports the combination
-        # natively — including ``"xhigh"``.
         if (
             tools
             and "reasoning_effort" in self.model_config
@@ -1028,17 +967,6 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         )
         kwargs["tools"] = tools or None
 
-        # Whether ``tools`` + ``reasoning_effort`` survive on the same Chat
-        # Completions request is a per-vendor capability declared in
-        # ``model_info.OPENAI_COMPATIBLE_PROVIDERS`` (e.g. OpenRouter and
-        # Together accept the combination — verified live; api.openai.com
-        # rejects it, hence the Responses delegation above).  Endpoints
-        # with an unknown capability (custom gateways, or vendors declared
-        # ``None``) keep the effort optimistically —
-        # ``_create_chat_completion_adaptive`` learns the verdict from the
-        # vendor's actual response and caches it per endpoint, so no
-        # manual allowlist patch is needed for future vendors.  The
-        # no-tools ``generate()`` path always keeps the effort.
         if (
             tools
             and "reasoning_effort" in kwargs
@@ -1150,7 +1078,6 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         flag = self.model_config.get("use_responses_api")
         if flag is not None:
             return bool(flag)
-        # Imported lazily: ``model_info`` imports this module at load time.
         from kiss.core.models.model_info import openai_compatible_provider_for_base_url
 
         provider = openai_compatible_provider_for_base_url(self.base_url)
@@ -1170,7 +1097,6 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             known to be rejected, None when unknown (send optimistically
             and let ``_create_chat_completion_adaptive`` learn the verdict).
         """
-        # Imported lazily: ``model_info`` imports this module at load time.
         from kiss.core.models.model_info import openai_compatible_provider_for_base_url
 
         provider = openai_compatible_provider_for_base_url(self.base_url)
@@ -1509,8 +1435,6 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             instead; those are routed to the delegate's extractor.
         """
         if self._responses_delegate is not None:
-            # Alias so isinstance narrowing does not affect ``response``,
-            # which the Chat-Completions path below still treats as ``Any``.
             response_alias: Any = response
             usage_obj: Any = (
                 response_alias.get("usage")
@@ -1548,11 +1472,6 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             )
             text_output_tokens = max(0, completion_tokens - audio_output_tokens)
             if audio_input_tokens or audio_output_tokens:
-                # Audio-chat traffic (gpt-audio family): audio tokens are
-                # SUBSETS of prompt/completion totals and bill at the
-                # model's separate audio rates ($32/$64 per 1M for
-                # gpt-audio-1.5 vs $2.50/$10 text), so they are split out
-                # and reported as the 7-tuple's last two elements.
                 return (
                     text_input_tokens,
                     text_output_tokens,

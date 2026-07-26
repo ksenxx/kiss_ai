@@ -66,7 +66,6 @@ class TestMultiViewerFanout:
         be persisted — only the canonical event keyed by ``taskId`` is.
         """
         printer = MemoryPrinter()
-        # Enable recording for the running task.
         printer._recordings["TASK1"] = []
         printer.subscribe_tab("TASK1", "T1")
         printer.subscribe_tab("TASK1", "T2")

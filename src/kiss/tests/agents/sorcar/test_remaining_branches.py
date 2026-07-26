@@ -84,8 +84,6 @@ class TestPersistenceBranches:
 
     def test_chat_context_text_cache_hits_and_invalidates(self) -> None:
         """_load_chat_context_text caches and is invalidated by writes."""
-        # Start from a clean cache so a chat_id reused across tests
-        # doesn't carry over stale text.
         th._invalidate_chat_context_cache()
         task_id, chat_id = th._add_task("alpha_one")
         th._save_task_result("result_one_text", task_id=task_id)
@@ -93,9 +91,6 @@ class TestPersistenceBranches:
         assert "alpha_one" in first
         assert "result_one_text" in first
 
-        # Mutate the underlying row directly via SQL — this path does
-        # not invalidate the cache, so the next call must still return
-        # the cached pre-mutation text.
         db = th._get_db()
         db.execute(
             "UPDATE task_history SET result = ? WHERE id = ?",
@@ -106,19 +101,15 @@ class TestPersistenceBranches:
         assert cached == first
         assert "SECRET_NEW_RESULT" not in cached
 
-        # After explicit invalidation the next call observes the
-        # updated row.
         th._invalidate_chat_context_cache(chat_id)
         refreshed = th._load_chat_context_text(chat_id)
         assert "SECRET_NEW_RESULT" in refreshed
         assert "result_one_text" not in refreshed
 
-        # _save_task_result invalidates automatically.
         th._save_task_result("AUTO_INVALIDATED", task_id=task_id)
         after_save = th._load_chat_context_text(chat_id)
         assert "AUTO_INVALIDATED" in after_save
 
-        # _add_task on the same chat_id also invalidates automatically.
         th._add_task("brand_new_task_added", chat_id=chat_id)
         after_add = th._load_chat_context_text(chat_id)
         assert "brand_new_task_added" in after_add
@@ -129,12 +120,10 @@ class TestPersistenceBranches:
         th._invalidate_chat_context_cache()
         _, chat_a = th._add_task("aa_one")
         _, chat_b = th._add_task("bb_one")
-        # Populate cache for both.
         text_a = th._load_chat_context_text(chat_a)
         text_b = th._load_chat_context_text(chat_b)
         assert "aa_one" in text_a
         assert "bb_one" in text_b
-        # Out-of-band SQL update neither chat sees through the cache.
         db = th._get_db()
         db.execute(
             "UPDATE task_history SET task = 'mut_aa' WHERE chat_id = ?",
@@ -315,15 +304,12 @@ class TestVSCodeServerBranches:
             "the result mentions parse_xml_payload again", task_id=task_id,
         )
         server = VSCodeServer()
-        # No file content at all — must still find a candidate from chat history.
         assert _file_suffix(server,
             "calc", "", "", chat_id,
         ) == "ulate_total_amount"
         assert _file_suffix(server,
             "parse_xml", "", "", chat_id,
         ) == "_payload"
-        # Without chat_id, the same call returns nothing because there is
-        # no active-file content to harvest identifiers from.
         assert _file_suffix(server, "calc", "", "") == ""
 
     def test_file_suffix_combines_file_and_chat(self) -> None:
@@ -331,11 +317,9 @@ class TestVSCodeServerBranches:
         _task_id, chat_id = th._add_task("chat had wonderful_widget_factory in it")
         server = VSCodeServer()
         file_content = "class HelperUtil:\n    pass\n"
-        # Match from file content.
         assert _file_suffix(server,
             "Help", "", file_content, chat_id,
         ) == "erUtil"
-        # Match from chat history when the partial doesn't appear in file.
         assert _file_suffix(server,
             "wonderful", "", file_content, chat_id,
         ) == "_widget_factory"
@@ -346,14 +330,10 @@ class TestVSCodeServerBranches:
         th._save_task_result("nothing useful", task_id=task_id)
         server = VSCodeServer()
 
-        # First call populates the cache; suggestion comes from chat text.
         assert _file_suffix(server,
             "wonderful_a", "", "", chat_id,
         ) == "lpha_token"
 
-        # Mutate the row out-of-band so the DB no longer contains the
-        # original token.  The cache must still serve the stale text,
-        # proving the second keystroke didn't re-run SQL/joins.
         db = th._get_db()
         db.execute(
             "UPDATE task_history SET task = ? WHERE id = ?",
@@ -364,8 +344,6 @@ class TestVSCodeServerBranches:
             "wonderful_a", "", "", chat_id,
         ) == "lpha_token"
 
-        # An explicit invalidation forces a reload; now beta_zero_marker
-        # is visible and the old token is not.
         th._invalidate_chat_context_cache(chat_id)
         assert _file_suffix(server,
             "beta_zero", "", "", chat_id,
@@ -374,8 +352,6 @@ class TestVSCodeServerBranches:
             "wonderful_a", "", "", chat_id,
         ) == ""
 
-        # _save_task_result auto-invalidates: write a result containing a
-        # brand-new identifier and confirm the next keystroke sees it.
         th._save_task_result(
             "gamma_three_signal appears now", task_id=task_id,
         )
@@ -383,7 +359,6 @@ class TestVSCodeServerBranches:
             "gamma_three", "", "", chat_id,
         ) == "_signal"
 
-        # _add_task also auto-invalidates.
         th._add_task("delta_four_indicator was added", chat_id=chat_id)
         assert _file_suffix(server,
             "delta_four", "", "", chat_id,

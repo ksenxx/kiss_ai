@@ -25,15 +25,6 @@ logger = logging.getLogger(__name__)
 _repo_locks: dict[str, threading.RLock] = {}
 _repo_locks_guard = threading.Lock()
 
-# Repo-scoped git environment variables that OVERRIDE ``git -C``-based
-# repository discovery.  When KISS is launched from a context that
-# exports them — e.g. a git hook (``post-commit`` starting an agent),
-# ``git rebase --exec``, or a user shell export — every git call would
-# silently target the WRONG repository (the hook's repo) instead of the
-# ``cwd`` passed to :func:`_git`.  This mirrors the list git itself
-# clears before crossing repo boundaries (``local_repo_env`` — see
-# ``git submodule``).  Author/committer/SSH/config-file variables are
-# intentionally kept.
 _REPO_SCOPED_GIT_ENV = (
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -49,12 +40,6 @@ _REPO_SCOPED_GIT_ENV = (
 )
 
 
-# Canonical commit-message metadata block headings.  Single-sourced
-# here because :func:`_ensure_task_metadata`'s dedup detection depends
-# on byte-exact agreement with what the writers append — both this
-# module's stamping below and ``vscode/helpers._append_user_prompt`` /
-# ``_append_task_result`` (which import these constants) build blocks
-# as ``f"{HEADING}{text}"`` appended to an ``rstrip()``-ed message.
 USER_PROMPT_HEADING = "\n\nUser prompt:\n"
 TASK_RESULT_HEADING = "\n\nResult:\n"
 
@@ -139,10 +124,6 @@ def repo_lock(repo: Path) -> threading.RLock:
         return _repo_locks[key]
 
 
-# Local git operations can legitimately be slow in very large repositories
-# (``add -A``, stash, merge/cherry-pick, and user pre-commit hooks).  Five
-# minutes matches the Bash tool's normal execution budget while still putting
-# a hard ceiling on a wedged hook or git process.
 _GIT_TIMEOUT_SECONDS: float = 300.0
 
 
@@ -171,10 +152,6 @@ def _git(
     Returns:
         The completed process with stdout/stderr captured as text.
     """
-    # ``-c core.quotepath=false`` forces git to emit non-ASCII filenames
-    # verbatim (UTF-8) rather than as C-style ``\NNN`` octal escapes,
-    # regardless of the repo's local ``core.quotePath`` config.  All
-    # callers parse these outputs as plain UTF-8 paths.
     cmd = [
         "git",
         "-c",
@@ -183,22 +160,7 @@ def _git(
         str(cwd),
         *args,
     ]
-    # Scrub repo-scoped GIT_* variables so an inherited GIT_DIR /
-    # GIT_WORK_TREE / GIT_INDEX_FILE (e.g. from a git hook that
-    # launched this process) cannot redirect the command away from
-    # ``cwd`` (see :data:`_REPO_SCOPED_GIT_ENV`).
     env = {k: v for k, v in os.environ.items() if k not in _REPO_SCOPED_GIT_ENV}
-    # ``errors="surrogateescape"``: git paths are byte strings and may
-    # be invalid UTF-8 (e.g. Latin-1 filenames committed on Linux);
-    # with ``core.quotepath=false`` such bytes are emitted verbatim and
-    # a strict decode would raise UnicodeDecodeError out of EVERY git
-    # call.  Surrogate escapes round-trip through ``os.fsencode`` for
-    # filesystem operations, matching :func:`_unquote_git_path`.
-    # Use a fresh POSIX process group rather than ``subprocess.run``.
-    # Killing only the top-level git process on timeout is insufficient:
-    # a hung hook can keep the captured stdout/stderr pipes open, making
-    # ``run``'s post-timeout ``communicate()`` wait indefinitely even
-    # after git itself has died.
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -220,8 +182,6 @@ def _git(
             except ProcessLookupError:
                 pass
         else:  # pragma: no cover - Windows CI is not available here
-            # ``Popen.kill`` does not terminate hook descendants on
-            # Windows; taskkill's /T switch closes the whole tree.
             subprocess.run(  # noqa: S603, S607
                 ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
                 capture_output=True,
@@ -242,14 +202,13 @@ def _git(
                 exc.stderr.decode("utf-8", "surrogateescape")
                 if isinstance(exc.stderr, bytes) else (exc.stderr or "")
             )
-        # TimeoutExpired may expose bytes even for a text-mode process.
         if isinstance(stdout, bytes):
             stdout = stdout.decode("utf-8", "surrogateescape")
         if isinstance(stderr, bytes):
             stderr = stderr.decode("utf-8", "surrogateescape")
         return subprocess.CompletedProcess(
             args=cmd,
-            returncode=124,  # convention: timeout
+            returncode=124,
             stdout=stdout or "",
             stderr=stderr
             or f"git {args[0] if args else ''} timed out"
@@ -290,8 +249,6 @@ class MergeResult(enum.Enum):
     STASH_FAILED = "stash_failed"
 
 
-# Sentinel directory under which the framework creates per-task worktrees.
-# Layout: ``<repo>/.kiss-worktrees/kiss_wt-<slug>/...``.
 _WORKTREE_SUBDIR = ".kiss-worktrees"
 _WORKTREE_SLUG_PREFIX = "kiss_wt-"
 
@@ -319,10 +276,6 @@ def strip_worktree_suffix(path: str) -> str:
     """
     if not path:
         return path
-    # Split on os-agnostic separators so the helper works on POSIX paths
-    # carried across platforms (tests, payloads from remote daemons).
-    # ``str.replace`` first folds Windows separators to ``/`` so the
-    # logic is uniform.
     norm = path.replace("\\", "/")
     parts = norm.split("/")
     for i, segment in enumerate(parts):
@@ -333,13 +286,7 @@ def strip_worktree_suffix(path: str) -> str:
         ):
             parent = "/".join(parts[:i])
             if parent:
-                # Normal case: ``/Users/x/proj/.kiss-worktrees/kiss_wt-…``
-                # → ``/Users/x/proj``.
                 return parent
-            # No parent segments before ``.kiss-worktrees``.  For an
-            # absolute path (``/.kiss-worktrees/kiss_wt-…``) the parent
-            # is the filesystem root; for a relative path
-            # (``.kiss-worktrees/kiss_wt-…``) it is the current dir.
             return "/" if norm.startswith("/") else "."
     return path
 
@@ -553,11 +500,6 @@ class GitWorktreeOps:
             wt_dir: Worktree directory to remove.
         """
         if not wt_dir.exists():
-            # The directory may have been deleted manually or by crash
-            # cleanup while git still holds a ``.git/worktrees/<name>``
-            # registration; without a prune the branch stays "checked
-            # out in a worktree" and ``git branch -d/-D`` refuses to
-            # delete it.
             GitWorktreeOps.prune(repo)
             return
         result = _git("worktree", "remove", str(wt_dir), "--force", cwd=repo)
@@ -724,14 +666,6 @@ class GitWorktreeOps:
         """
         if not GitWorktreeOps.has_uncommitted_changes(repo):
             return False
-        # ``git stash push`` exits 0 WITHOUT creating a stash ("No
-        # local changes to save") for dirtiness it cannot capture —
-        # e.g. a submodule with modified/untracked content, or a tree
-        # cleaned by a concurrent writer.  Returning True then makes
-        # the caller's later ``stash_pop`` consume an unrelated,
-        # pre-existing user stash.  Compare ``refs/stash`` before and
-        # after so the return value honors the "a stash entry was
-        # created" contract.
         before = _git("rev-parse", "-q", "--verify", "refs/stash", cwd=repo)
         result = _git(
             "stash",
@@ -776,9 +710,6 @@ class GitWorktreeOps:
             return True
         after = _git("status", "--porcelain", cwd=repo).stdout
         if after != before:
-            # The failed ``--index`` attempt already modified the tree
-            # (partial application; the stash entry is retained by
-            # git).  Do not re-apply the same stash on top.
             return False
         result = _git("stash", "pop", cwd=repo)
         return result.returncode == 0
@@ -834,12 +765,6 @@ class GitWorktreeOps:
         Returns:
             A non-empty commit message string.
         """
-        # bughunt8: terminate the revision list with ``--`` — without
-        # it, git refuses the command with "ambiguous argument
-        # '<branch>': both revision and filename" whenever the user's
-        # repo contains a file whose path equals the branch name,
-        # silently degrading every merge commit message to the
-        # synthetic fallback.
         result = _git("log", "-1", "--format=%B", branch, "--", cwd=repo)
         msg = result.stdout.rstrip()
         if result.returncode != 0 or not msg:
@@ -1011,9 +936,6 @@ class GitWorktreeOps:
             filename: File under ``info/`` (e.g. ``"exclude"``).
             entry: The exact line to ensure is present.
         """
-        # The read-check-append sequence below is not atomic; hold the
-        # per-repo lock so concurrent tabs setting up worktrees for the
-        # same repo cannot interleave and append duplicate entries.
         with repo_lock(repo):
             result = _git("rev-parse", "--git-common-dir", cwd=repo)
             git_common = Path(result.stdout.strip())
@@ -1023,20 +945,11 @@ class GitWorktreeOps:
             info_file.parent.mkdir(parents=True, exist_ok=True)
             content = ""
             if info_file.exists():
-                # Git treats these files as raw bytes — non-UTF-8
-                # patterns/comments are legal, so a strict decode would
-                # raise UnicodeDecodeError and silently skip the entry
-                # (the caller swallows exceptions), e.g. leaving
-                # ``?? .kiss-worktrees/`` polluting the user's git status
-                # forever.  Mirror :func:`_git`'s surrogateescape policy.
                 content = info_file.read_bytes().decode(
                     "utf-8", errors="surrogateescape"
                 )
                 if entry in content.splitlines():
                     return
-            # Prefix a newline only when the existing content lacks a
-            # trailing one; unconditionally writing ``"\n{entry}\n"``
-            # accumulated a blank line per append.
             prefix = "" if not content or content.endswith("\n") else "\n"
             with open(info_file, "a", encoding="utf-8") as f:
                 f.write(f"{prefix}{entry}\n")
@@ -1089,8 +1002,6 @@ class GitWorktreeOps:
             "KISS scratch file: keep the incoming task branch version",
             cwd=repo,
         )
-        # %A = temp file that must receive the merge result (starts as
-        # "ours"), %B = the other branch's version; exit 0 = resolved.
         _git("config", "merge.kiss-scratch.driver", "cp -f %B %A", cwd=repo)
 
     @staticmethod
@@ -1197,61 +1108,34 @@ class GitWorktreeOps:
             return False
 
         copied = False
-        # Parse via the shared :func:`_porcelain_entries` helper (the
-        # same parser backing merge_flow's ``_porcelain_paths``) so the
-        # baseline-seeding and merge-flow porcelain parsers cannot
-        # drift apart (split on ``\n`` only, no strip, quote-aware
-        # rename splitting).
         for _code, old_name, fname in _porcelain_entries(status.stdout):
             src = repo / fname
             dst = wt_dir / fname
 
             if old_name is not None:
-                # The rename's old path is gone from the main worktree
-                # regardless of what happened to the new path, so it
-                # must be removed from the task worktree even when the
-                # new file was subsequently deleted (e.g. status "RD").
                 old_dst = wt_dir / old_name
-                # is_symlink() is checked (by _remove_path) FIRST:
-                # is_dir()/exists() follow symlinks, so a symlink to a
-                # directory must be unlinked (not rmtree'd) and a
-                # broken symlink reports exists() == False.
                 if old_dst.is_symlink() or old_dst.exists():
                     GitWorktreeOps._remove_path(old_dst)
                     copied = True
 
             if src.is_symlink():
-                # Mirror the symlink itself (possibly broken); is_file()
-                # and copy2 would follow the link instead.
                 GitWorktreeOps._remove_path(dst)
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 os.symlink(os.readlink(src), dst)
                 copied = True
             elif src.is_file():
                 if dst.is_symlink():
-                    # A symlink was replaced by a regular file; copy2
-                    # onto the link would write THROUGH it into the
-                    # link's target inside the worktree.
                     dst.unlink()
                 elif dst.is_dir():
-                    # A tracked directory was replaced by a same-named
-                    # file; copy2 into the directory would create
-                    # dst/<basename> instead of replacing dst.
                     shutil.rmtree(str(dst))
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(str(src), str(dst))
                 copied = True
             elif dst.is_symlink():
-                # The path is gone in the main worktree but the fresh
-                # checkout has a (possibly broken) symlink there;
-                # exists() follows the link and would miss it.
                 dst.unlink()
                 copied = True
             elif dst.is_dir():
                 if not src.exists():
-                    # The path was deleted in the main worktree but the
-                    # fresh checkout has a directory there (file/dir
-                    # type change); unlink() would raise on a dir.
                     shutil.rmtree(str(dst))
                     copied = True
             elif dst.exists():
@@ -1377,10 +1261,6 @@ class GitWorktreeOps:
 
         cherry_pick_args = ["cherry-pick", "--no-commit"]
         if GitWorktreeOps._head_matches_baseline_parent(repo, baseline):
-            # Resolve hunk-level conflicts caused by the user's dirty
-            # edits living in ``baseline`` but not in ``HEAD`` in favor
-            # of the branch tip — see method docstring for the full
-            # 3-way-merge analysis.  Only safe when HEAD == baseline^.
             cherry_pick_args.extend(["-X", "theirs"])
         cherry_pick_args.append(f"{baseline}..{branch}")
         result = _git(*cherry_pick_args, cwd=repo)

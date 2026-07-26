@@ -229,10 +229,6 @@ class TestTalkPlaybackArbitration(IsolatedAsyncioTestCase):
         remote_web_tab = "remote-webtab-" + uuid.uuid4().hex[:8]
         cli_tab = "clitab-" + uuid.uuid4().hex[:8]
         cli_reader, cli_writer = await self._connect(cli_tab, cli=True)
-        # Deliberately subscribe the web tab WITHOUT a UDS connection:
-        # this models a remote WSS browser tab.  It should receive a
-        # playable copy on that remote device, but it must not suppress
-        # the local terminal player's copy.
         self.server._printer.subscribe_tab(self.task_id, remote_web_tab)
         self.server._printer.subscribe_tab(self.task_id, cli_tab)
         await asyncio.sleep(0.05)
@@ -375,8 +371,6 @@ class TestTalkPlayerHonoursMuted(IsolatedAsyncioTestCase):
                     [],
                     "a muted talk copy must never reach the player/TTS",
                 )
-                # The muted copy must not poison the dedupe set: a
-                # later playable copy of the same talkId still plays.
                 player.play(
                     {
                         "type": "talk",

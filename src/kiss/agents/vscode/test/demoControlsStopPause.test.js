@@ -2,25 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end tests for the demo-replay input controls (real chat.html
-// + main.js + demo.js in jsdom, a recording acquireVsCodeApi stub
-// standing in for the extension host / daemon).  While a demo replay
-// is playing:
-//
-//   * the input textbox, burger menu, model picker, attach,
-//     inject-promptlet, mic, and send buttons must be HIDDEN;
-//
-//   * a STOP button is shown in place of the send button — pressing
-//     it stops the demo animations and speech;
-//
-//   * a pause/play button is shown to the LEFT of the stop button —
-//     pressing pause freezes the demo animations AND speech and flips
-//     the icon to play; pressing play resumes.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/demoControlsStopPause.test.js
 
 'use strict';
 
@@ -31,13 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom window running the production chat webview: the real
- * ``chat.html`` body, ``panelCopy.js``, ``main.js`` AND ``demo.js``
- * evaluated in the window, plus a recording ``acquireVsCodeApi`` stub.
- * ``win._onPosted`` (settable per test) observes every posted message
- * so tests can answer like the extension host / daemon would.
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -75,9 +49,6 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  // Evaluate api.js separately so V8 coverage offsets for the
-
-  // sourceURL-labelled main.js eval below start at character 0.
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(
@@ -87,13 +58,6 @@ fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   return {win, posted};
 }
 
-/**
- * Install a recording Audio implementation whose clips play for
- * *durationMs* and then fire ``onended``.  ``pause()`` records the
- * call and suppresses the pending ``onended`` (a paused clip never
- * ends on its own); a later ``play()`` re-arms it.  Returns the
- * created players.
- */
 function installAudio(win, durationMs) {
   const players = [];
   win.Audio = function Audio(src) {
@@ -119,7 +83,6 @@ function installAudio(win, durationMs) {
   return players;
 }
 
-/** Install a no-op Web Speech API so fallbacks never hang. */
 function installSpeech(win) {
   const spoken = [];
   win.SpeechSynthesisUtterance = function (text) {
@@ -140,7 +103,6 @@ function installSpeech(win) {
   return spoken;
 }
 
-/** Deliver a daemon/extension-host message to the webview. */
 function dispatch(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
@@ -160,8 +122,6 @@ async function waitUntil(pred, timeoutMs, label) {
   throw new Error('timed out waiting for ' + label);
 }
 
-// A long recorded result so the result panel streams for several
-// seconds — the window in which pause/resume is exercised.
 const LONG_RESULT = (
   'The agent audited every module and confirmed the invariants hold ' +
   'across restarts, replays, cancellations, and reconnects. '
@@ -178,12 +138,6 @@ const SESSIONS = [
   },
 ];
 
-/**
- * Replayed event stream: a ``talk`` tool call carrying its RECORDED
- * audio clip (the speech clip the pause/stop tests exercise — demo
- * mode only plays recorded audio, never synthesizes), a thought
- * panel, then a long result.
- */
 function eventsFor(label) {
   return [
     {
@@ -203,14 +157,6 @@ function eventsFor(label) {
   ];
 }
 
-/**
- * Enable demo mode, deliver SESSIONS, auto-answer resumeSession with
- * per-task events, click the (single) history row.  Returns a promise
- * resolving when the replay ends.  When *noResponder* is true the
- * built-in 10ms resumeSession responder is NOT installed — the caller
- * has installed its own ``win._onPosted`` responder (e.g. one that
- * delays task_events) and a second answer would double-deliver.
- */
 function startDemoFlow(win, noResponder) {
   dispatch(win, {type: 'configData', config: {demo_mode: true}, apiKeys: {}});
   dispatch(win, {type: 'history', offset: 0, generation: 0, sessions: SESSIONS});
@@ -250,7 +196,6 @@ function startDemoFlow(win, noResponder) {
   })();
 }
 
-/** The 7 controls that must be hidden while a demo replay plays. */
 const HIDDEN_SELECTORS = [
   '#input-text-wrap',
   '#menu-btn',
@@ -261,7 +206,6 @@ const HIDDEN_SELECTORS = [
   '#send-btn',
 ];
 
-/** Read the pause/play icon visibility of #demo-pause-btn. */
 function iconState(btn) {
   const pauseIcon = btn.querySelector('.icon-pause');
   const playIcon = btn.querySelector('.icon-play');
@@ -282,9 +226,6 @@ async function testControlsHiddenWhileDemoPlays() {
   await sleep(300);
   assert.ok(win._demoApi.active, 'demo replay is running');
 
-  // The demo-playing body class drives the hiding (jsdom does not
-  // load <link> stylesheets, so the CSS rules are asserted on the
-  // real stylesheet text below).
   assert.ok(
     win.document.body.classList.contains('demo-playing'),
     'body carries the demo-playing class while a demo replay plays',
@@ -314,8 +255,6 @@ async function testControlsHiddenWhileDemoPlays() {
     'main.css shows #demo-pause-btn under body.demo-playing',
   );
 
-  // The pause/play button exists to the LEFT of the stop button and
-  // starts in the "pause" state.
   const btn = win.document.getElementById('demo-pause-btn');
   assert.ok(btn, '#demo-pause-btn exists');
   const stopBtn = win.document.getElementById('stop-btn');
@@ -343,9 +282,6 @@ async function testControlsHiddenWhileDemoPlays() {
     !win.document.body.classList.contains('demo-playing'),
     'demo-playing class removed after the replay finishes naturally',
   );
-  // After the replay finishes, the ENDED state keeps the controls
-  // hidden and leaves ONLY the play button up (it restarts the demo
-  // — see demoEndedRestart.test.js for the full ended-state suite).
   assert.ok(
     win.document.body.classList.contains('demo-ended'),
     'body carries demo-ended after the replay finishes naturally',
@@ -366,13 +302,6 @@ async function testPauseBeforeClipStartsDefersSpeechUntilResume() {
   const {win} = makeWebview();
   const players = installAudio(win, 40);
   installSpeech(win);
-  // Delay the recorded events long enough to pause BEFORE the talk
-  // clip's queue job starts: a recorded Audio clip whose turn comes
-  // while the demo is paused must not start playing —
-  // waitForDemoPlaybackResume must gate recorded-clip playback too.
-  // This 300ms responder REPLACES startDemoFlow's built-in 10ms one
-  // (noResponder below) — with both installed, the instant answer
-  // would start the clip before the pause click.
   win._onPosted = msg => {
     if (msg.type !== 'resumeSession') return;
     setTimeout(() => {
@@ -405,9 +334,6 @@ async function testPauseBeforeClipStartsDefersSpeechUntilResume() {
       'must not start playing until the demo is resumed',
   );
 
-  // Rapid pause/resume/pause must not leak a resolved waiter that starts
-  // the clip in the microtask after the demo has already been paused
-  // again.
   btn.click();
   assert.strictEqual(win._isDemoPaused(), false, 'demo briefly resumed');
   btn.click();
@@ -439,7 +365,6 @@ async function testPauseFreezesSpeechAndStreamingThenResumes() {
   const btn = win.document.getElementById('demo-pause-btn');
   assert.ok(btn, '#demo-pause-btn exists');
 
-  // Pause while the talk clip is playing.
   await sleep(150);
   assert.ok(players.length > 0, 'talk clip started');
   btn.click();
@@ -457,14 +382,12 @@ async function testPauseFreezesSpeechAndStreamingThenResumes() {
   assert.ok(icons.playVisible, 'icon flips to play while paused');
   assert.ok(!icons.pauseVisible, 'pause icon hidden while paused');
 
-  // Resume — the clip plays out and the replay proceeds to streaming.
   btn.click();
   assert.strictEqual(win._isDemoPaused(), false, 'demo resumed');
   icons = iconState(btn);
   assert.ok(icons.pauseVisible, 'icon back to pause after resume');
   assert.ok(!icons.playVisible, 'play icon hidden after resume');
 
-  // Wait for the result panel to start streaming.
   const body = await (async () => {
     const t0 = Date.now();
     while (Date.now() - t0 < 15000) {
@@ -475,10 +398,9 @@ async function testPauseFreezesSpeechAndStreamingThenResumes() {
     throw new Error('result panel never started streaming');
   })();
 
-  // Pause: word streaming must stop growing across ~300ms.
   btn.click();
   assert.strictEqual(win._isDemoPaused(), true, 'demo paused mid-stream');
-  await sleep(120); // let an already-scheduled tick settle
+  await sleep(120);
   const frozenLen = body.textContent.length;
   await sleep(300);
   assert.strictEqual(
@@ -489,7 +411,6 @@ async function testPauseFreezesSpeechAndStreamingThenResumes() {
   icons = iconState(btn);
   assert.ok(icons.playVisible, 'play icon shown while paused mid-stream');
 
-  // Resume: streaming grows again.
   btn.click();
   assert.strictEqual(win._isDemoPaused(), false, 'demo resumed mid-stream');
   await sleep(400);
@@ -562,9 +483,6 @@ async function testStopWhilePausedRestoresUiAndNextDemoResetsPause() {
   );
   await done;
 
-  // Start another demo in the SAME webview.  Reset the posted-message
-  // hook so the first startDemoFlow resumeSession responder is not
-  // chained and cannot answer the second run twice.
   win._onPosted = null;
   const done2 = startDemoFlow(win);
   await sleep(150);
@@ -589,7 +507,7 @@ async function testStopButtonCancelsDemoAndRestoresControls() {
   installSpeech(win);
 
   const done = startDemoFlow(win);
-  await sleep(150); // talk clip is playing now
+  await sleep(150);
   assert.ok(win._demoApi.active, 'demo replay is running');
   assert.ok(players.length > 0, 'talk clip started');
 
@@ -607,8 +525,6 @@ async function testStopButtonCancelsDemoAndRestoresControls() {
     !win.document.body.classList.contains('demo-playing'),
     'demo-playing class removed on stop',
   );
-  // A stop leaves the ENDED play-button-only UI up: the play button
-  // restarts the stopped demo (see demoEndedRestart.test.js).
   assert.ok(
     win.document.body.classList.contains('demo-ended'),
     'body carries demo-ended after stop — only the play button shows',
@@ -635,8 +551,6 @@ async function testStopButtonCancelsDemoAndRestoresControls() {
   await testDemoToggleOffCancelsPausedReplayAndRestoresUi();
   await testStopWhilePausedRestoresUiAndNextDemoResetsPause();
   console.log('demoControlsStopPause.test.js: all tests passed');
-  // Demo/webview timers can keep the node event loop alive; match the
-  // other jsdom e2e demo tests and exit explicitly once assertions pass.
   process.exit(0);
 })().catch(err => {
   console.error(err);

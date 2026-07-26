@@ -77,7 +77,6 @@ class TestConvergenceSimulation(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        # Skip if node is not available.
         try:
             subprocess.run(
                 ["node", "--version"],
@@ -131,7 +130,6 @@ class TestConvergenceSimulation(unittest.TestCase):
         )
 
     def test_converges_on_typical_laptop_1440(self) -> None:
-        # 1440-px window, sidebar starts at default 300 px.
         r = self._run_sim(screen_width=1440, initial=300)
         self.assertTrue(
             r.within_tol,
@@ -142,7 +140,6 @@ class TestConvergenceSimulation(unittest.TestCase):
     def test_converges_on_wide_monitor_2560(self) -> None:
         r = self._run_sim(screen_width=2560, initial=300)
         self.assertTrue(r.within_tol, f"did not converge on 2560px screen: {r}")
-        # Target = 853, start = 300, +50/iter ⇒ ≤ 12 iterations.
         self.assertLess(r.iters, 30, f"too many iterations: {r}")
 
     def test_converges_on_4k_3840(self) -> None:
@@ -151,7 +148,6 @@ class TestConvergenceSimulation(unittest.TestCase):
         self.assertLess(r.iters, 30, f"too many iterations: {r}")
 
     def test_converges_when_starting_too_wide(self) -> None:
-        # Sidebar already wider than 1/3 — must shrink, not grow.
         r = self._run_sim(screen_width=1440, initial=900)
         self.assertTrue(
             r.within_tol,
@@ -164,7 +160,6 @@ class TestConvergenceSimulation(unittest.TestCase):
         )
 
     def test_within_tol_means_within_six_percent(self) -> None:
-        # Sanity: the algorithm's tolerance gate works as advertised.
         r = self._run_sim(screen_width=1500, initial=300)
         self.assertTrue(r.within_tol)
         rel = abs(r.final - r.target) / r.target
@@ -176,6 +171,5 @@ class TestConvergenceSimulation(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    # Ensure cwd doesn't matter for the static reads.
     os.chdir(Path(__file__).resolve().parent)
     unittest.main()

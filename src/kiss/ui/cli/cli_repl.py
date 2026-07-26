@@ -126,14 +126,7 @@ from kiss.ui.cli.cli_prompt import _AT_RE, _MODEL_CMD_RE, PtkLineReader
 
 logger = logging.getLogger(__name__)
 
-try:  # POSIX line editing; ``readline`` is absent on stock Windows.
-    # Prefer GNU readline (the ``gnureadline`` wheel) when it is
-    # installed: stock macOS Python links ``readline`` against libedit,
-    # which has no ``menu-complete`` and therefore cannot *cycle* through
-    # completion candidates one at a time.  ``gnureadline`` ships real
-    # GNU readline, enabling the Tab/Shift-Tab menu cycling configured in
-    # :func:`_setup_readline`.  Fall back to the stdlib ``readline`` (and
-    # its degraded list-on-double-Tab behaviour) when it is unavailable.
+try:
     try:
         import gnureadline as readline  # type: ignore[import-not-found]
     except ImportError:
@@ -144,8 +137,6 @@ except ImportError:  # pragma: no cover - exercised only on Windows
     readline = None  # type: ignore[assignment]
     _HAVE_READLINE = False
 
-# Slash commands handled locally by the REPL (never sent to the model),
-# mirroring Claude Code's built-in quick commands.  Maps command -> help.
 SLASH_COMMANDS: dict[str, str] = {
     "/help": "Show available commands",
     "/clear": "Start a new chat (clear conversation context)",
@@ -178,45 +169,24 @@ SLASH_COMMANDS: dict[str, str] = {
     "/quit": "Alias for /exit",
 }
 
-# Argument options offered after a slash command followed by a space
-# (e.g. typing ``/resume `` pops ``--task`` / ``--limit``).  Maps
-# command -> {option: help}.  Commands absent here take no completable
-# arguments; ``/skills`` additionally completes the discovered skill
-# names (added dynamically in :meth:`CliCompleter._slash_arg_options`)
-# and ``/model`` completes model names through its dedicated
-# ``_MODEL_CMD_RE`` path (which also offers ``list``).
 SLASH_ARG_OPTIONS: dict[str, dict[str, str]] = {
     "/resume": {
         "--task": "Open the chat containing this task id",
         "--limit": "How many recent chats to list (default 20)",
     },
     "/model": {"list": "List all generation models"},
-    "/skills": {},  # dynamic: discovered skill names
+    "/skills": {},
 }
 
-# ``/<cmd> `` — a slash command followed by whitespace, whose argument
-# options are completed by :meth:`CliCompleter._slash_arg_matches`.
 _SLASH_ARG_RE = re.compile(r"^\s*(/\S+)\s")
 
-# ``--task <partial>`` / ``--model <partial>`` at the end of a slash-
-# command line: the flag's *value* is completed by
-# :meth:`CliCompleter._flag_value_matches` — recent task ids for
-# ``--task``, model names (in model-picker order) for ``--model``.
-# The flag must be a whole whitespace-delimited token: without the
-# ``(?:^|\s)`` anchor a token merely *ending* in the flag name
-# (``x--task``, ``----task``) would hijack the completer into the
-# terminal flag-value branch, suppressing the option / predictive
-# menus that should have been offered instead.
 _FLAG_VALUE_RE = re.compile(r"(?:^|\s)(--task|--model)\s+(\S*)$")
 
-# Longest one-line task description shown next to a task-id candidate.
 _TASK_DESC_WIDTH = 48
 
-# Bare words (no leading slash) that also exit, matching Claude Code.
 _EXIT_WORDS = {"exit", "quit"}
 
 _PROMPT = f"{CYAN}{PROMPT_MARKER}{RESET}"
-# ANSI SGR (colour) sequences embedded in the input prompt.
 _ANSI_SGR_RE = re.compile(r"(\x1b\[[0-9;]*m)")
 
 
@@ -309,9 +279,6 @@ def picker_ordered_models(query: str) -> list[tuple[str, str]]:
 
     names = ranked_function_calling_models()
     if not names:
-        # No provider credential configured (e.g. a fresh checkout):
-        # offer every candidate model so the menu is never empty,
-        # mirroring ``get_completion_model_names``' fallback.
         names = sorted(
             (
                 name for name, info in MODEL_INFO.items()
@@ -325,8 +292,6 @@ def picker_ordered_models(query: str) -> list[tuple[str, str]]:
         names = [name for name in names if q in name.lower()]
     usage = _load_model_usage()
     used = [name for name in names if usage.get(name, 0) > 0]
-    # Stable sort: usage ties keep the vendor/price base order, exactly
-    # like the webview's ``used.sort((a, b) => b.uses - a.uses)``.
     used.sort(key=lambda name: -usage[name])
     rest = [name for name in names if usage.get(name, 0) <= 0]
     return [(name, "recently used") for name in used] + [
@@ -402,8 +367,6 @@ class CliCompleter:
         from kiss.core.models.model_info import rank_model_suggestions
 
         matches = [f"/model {name}" for name in rank_model_suggestions(query)]
-        # ``/model list`` is a subcommand, not a model name; offer it
-        # alongside the model names whenever the partial matches.
         if "list".startswith(query):
             matches.insert(0, "/model list")
         return matches
@@ -483,7 +446,7 @@ class CliCompleter:
         if not options:
             return []
         tail = re.search(r"(\S*)$", line)
-        assert tail is not None  # ``\S*`` always matches (possibly empty)
+        assert tail is not None
         partial = tail.group(1)
         head = line[: len(line) - len(partial)]
         used = set(line[m.end(1): len(line) - len(partial)].split())
@@ -553,25 +516,11 @@ class CliCompleter:
         accept in the VS Code webview's ``acceptCompletion`` and keeps
         the text the user already typed from being erased on accept.
         """
-        # ``_prefix_match_tasks`` already guarantees (via SQL) that
-        # every match starts with *line* and is strictly longer than it.
         tasks = _prefix_match_tasks(line)
         if tasks:
             return tasks
-        # INJECTIONS.md "Inject instruction" tricks are also surfaced
-        # as fast-complete suggestions, but ONLY at the beginning of a
-        # sentence (start of *line* or after ``[.!?]`` + whitespace).
-        # ``prefix_match_tricks`` returns EVERY trick whose body
-        # begins with the current sentence's leading partial — so when
-        # multiple tricks share a prefix (e.g. the bundled
-        # INJECTIONS.md ships two ``Reproduce the issue by writing …``
-        # tricks) the dropdown menu shows them all, mirroring
-        # ``_prefix_match_tasks``' multi-alternative contract.
         tricks = prefix_match_tricks(line)
         if tricks:
-            # ``current_sentence_partial`` is always a suffix of *line*
-            # (leading whitespace only when no interior boundary), so
-            # the head before it is everything the trick must keep.
             head = line[: len(line) - len(current_sentence_partial(line))]
             return [head + trick for trick in tricks]
         suffix = self._active_file_suffix(line)
@@ -659,17 +608,10 @@ class CliCompleter:
         model_cmd = _MODEL_CMD_RE.match(line)
         if model_cmd:
             return ("model", model_cmd.group(1))
-        # Left-strip only: a trailing space after a slash command
-        # (``/resume ``) switches from command-name completion to the
-        # command's argument options.
         lstripped = line.lstrip()
         if lstripped.startswith("/") and " " not in lstripped:
             return ("slash", None)
         if lstripped.startswith("/"):
-            # A trailing value-taking flag (``--task `` / ``--model ``)
-            # completes the flag's VALUE; the branch is terminal (an
-            # empty candidate list must not fall back to the option
-            # menu, which would wrongly re-offer flags as the value).
             value_matches = self._flag_value_matches(line)
             if value_matches is not None:
                 return ("flag-value", value_matches)
@@ -715,9 +657,6 @@ class CliCompleter:
         if kind == "slash":
             return [(m, m) for m in self._slash_matches(line)]
         if kind == "flag-value":
-            # ``--task`` rows already embed the description; the
-            # ``task`` note would be noise.  Model rows append the
-            # picker group (vendor / recently used).
             return [
                 (full, disp if help_ == "task" else f"{disp} — {help_}")
                 for full, disp, help_ in payload
@@ -781,17 +720,11 @@ def _setup_readline(completer: CliCompleter, history_path: Path) -> None:
     backend = getattr(readline, "backend", "") or ""
     doc = getattr(readline, "__doc__", "") or ""
     if backend == "editline" or "libedit" in doc:
-        # libedit has no menu-complete; cycling is unavailable here.
         readline.parse_and_bind("bind ^I rl_complete")
     else:
-        # GNU readline: Tab cycles forward, Shift-Tab cycles backward.
         readline.parse_and_bind("set show-all-if-ambiguous on")
         readline.parse_and_bind("tab: menu-complete")
         readline.parse_and_bind('"\\e[Z": menu-complete-backward')
-        # Shift+Enter (kitty CSI-u "\e[13;2u" / xterm modifyOtherKeys
-        # "\e[27;2;13~") types a backslash and accepts the line, which
-        # triggers _read_line's trailing-backslash continuation so the
-        # final message contains a real newline at that point.
         readline.parse_and_bind('"\\e[13;2u": "\\\\\\n"')
         readline.parse_and_bind('"\\e[27;2;13~": "\\\\\\n"')
     try:
@@ -1095,11 +1028,6 @@ def _read_line(prompt: str, reader: PtkLineReader | None = None) -> str | None:
         print(bottom)
         return line
 
-    # Interactive: pre-draw the closed box, then edit on the body line.
-    # ``input`` hands the prompt to readline only when stdin is also a
-    # TTY; readline needs its colour codes bracketed with the
-    # \x01/\x02 ignore markers to compute the prompt width correctly
-    # (raw markers would be echoed verbatim in the non-readline path).
     try:
         stdin_tty = bool(sys.stdin.isatty())
     except Exception:  # pragma: no cover - defensive isatty guard
@@ -1107,10 +1035,6 @@ def _read_line(prompt: str, reader: PtkLineReader | None = None) -> str | None:
     if _HAVE_READLINE and stdin_tty:
         framed_prompt = _readline_prompt(framed_prompt)
     print(top)
-    # Draw the body line's right border at the far column so the box is
-    # fully framed (left ``│`` comes from ``framed_prompt`` below), then
-    # draw the bottom rule one line down, then move the cursor back up
-    # onto the (now framed) body line at column 1 for readline.
     sys.stdout.write(
         f"{_ESC}[{cols}G{CYAN}│{RESET}\r\n{bottom}{_ESC}[1A\r"
     )
@@ -1118,28 +1042,13 @@ def _read_line(prompt: str, reader: PtkLineReader | None = None) -> str | None:
     try:
         line = input(framed_prompt)
     except EOFError:
-        # Cursor is still on the body line; drop below the bottom rule.
         sys.stdout.write("\n\n")
         sys.stdout.flush()
         return None
     except KeyboardInterrupt:
-        # Ctrl+C leaves the cursor on the body line; step onto the
-        # bottom rule and erase it so the caller's interrupt message is
-        # not printed over the border (which would leave a garbled
-        # "…quit)────╯" row on screen).
         sys.stdout.write(f"\n{_ESC}[2K")
         sys.stdout.flush()
         raise
-    # An unescaped trailing backslash (typed directly, or injected by
-    # the Shift+Enter readline macro bound in :func:`_setup_readline`)
-    # continues the message on the next line, following the shared
-    # POSIX-shell rule in :func:`~kiss.agents.sorcar
-    # .cli_line_continuation.ends_with_line_continuation` (an even,
-    # escaped-literal number of backslashes submits); the joined parts
-    # are separated by real newlines.  The cursor currently sits on the
-    # old bottom-rule row: clear it, frame it as the next body row,
-    # redraw the bottom rule one line down, and read the continuation
-    # there.
     def _reframe_body_row() -> None:
         sys.stdout.write(
             f"\r{_ESC}[2K{_ESC}[{cols}G{CYAN}│{RESET}\r\n{bottom}{_ESC}[1A\r"
@@ -1154,7 +1063,6 @@ def _read_line(prompt: str, reader: PtkLineReader | None = None) -> str | None:
         sys.stdout.flush()
 
     def _erase_bottom_rule() -> None:
-        # Same bottom-rule cleanup as the first input() above.
         sys.stdout.write(f"\n{_ESC}[2K")
         sys.stdout.flush()
 
@@ -1165,21 +1073,11 @@ def _read_line(prompt: str, reader: PtkLineReader | None = None) -> str | None:
         on_eof=_step_past_frame,
         on_interrupt=_erase_bottom_rule,
     )
-    # Enter already moved the cursor onto the bottom rule line; step past
-    # it so following output never overwrites the closed box.
     sys.stdout.write("\n")
     sys.stdout.flush()
     return line
 
 
-# First line of anchored-history files written by
-# :func:`_save_history_lines`.  Entries under this header are stored
-# one per physical line with ``\\`` and newlines escaped (``\\\\`` /
-# ``\\n``), so a multi-line entry (Shift+Enter in the anchored box)
-# survives the save/load round trip as ONE history entry instead of
-# fragmenting into one bogus entry per physical line.  Files without
-# the header are legacy plain-lines files and are loaded verbatim
-# (no unescaping — a legacy ``C:\\new`` must never be mangled).
 _ANCHORED_HISTORY_HEADER = "#sorcar-history-v2"
 
 
@@ -1253,9 +1151,6 @@ def _load_history_lines(path: Path) -> list[str]:
     return [
         ln
         for ln in raw
-        # Skip libedit's ``_HiStOrY_V2_`` header: before w2 F13
-        # the readline backend wrote its own format to this same
-        # file, so a legacy file may still open with the header.
         if ln and ln != "_HiStOrY_V2_"
     ]
 

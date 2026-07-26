@@ -35,8 +35,6 @@ APOS_COLON_PAGE = """<!DOCTYPE html>
 def test_single_quoted_yaml_name_unescapes_doubled_apostrophe() -> None:
     """Parse-level: the doubled ``''`` inside a single-quoted YAML key
     must be collapsed back to a single apostrophe."""
-    # Exact serialization produced by Playwright's aria_snapshot() for
-    # an accessible name containing both an apostrophe and ": ".
     snap = "- 'link \"Bob''s: list\"':\n  - /url: \"#\""
 
     _, elements = _number_interactive_elements(snap)
@@ -63,7 +61,6 @@ def test_click_element_with_apostrophe_and_colon_in_name(tmp_path: Path) -> None
         tree = tool.go_to_url(page.as_uri())
         assert "Bob" in tree, tree
 
-        # Find the [N] id assigned to the button.
         element_id = None
         for entry in tool._elements:
             if entry["role"] == "button":

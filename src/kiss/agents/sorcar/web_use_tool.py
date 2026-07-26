@@ -95,16 +95,8 @@ INTERACTIVE_ROLES = {
     "treeitem",
 }
 
-# Role lines look like ``- button "Name"`` — but when the accessible
-# name contains ``": "`` Playwright single-quote-wraps the whole YAML
-# key (``- 'link "colon: \"q\""':``), so an optional leading ``'`` must
-# be accepted or the element is silently never numbered.
 _ROLE_LINE_RE = re.compile(r"^(\s*)-\s+('?)([\w]+)\s*(.*)")
 
-# Accessible names are double-quoted with YAML escaping: ``\"`` for an
-# embedded quote and ``\\`` for a backslash.  A naive ``"([^"]*)"``
-# stops at the first embedded quote and records a corrupted name that
-# get_by_role(name=..., exact=True) can never match.
 _NAME_RE = re.compile(r'"((?:\\.|[^"\\])*)"')
 _NAME_UNESCAPE_RE = re.compile(r'\\(["\\])')
 
@@ -130,19 +122,10 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-# Seconds a graceful Playwright close may take before the watchdog kills
-# the Chromium process directly (a wedged driver connection can otherwise
-# hang the close call forever, leaking the browser).
 _CLOSE_WATCHDOG_SECS = 15.0
 
-# Serializes stale-dir cleanup + profile resolution + launch within this
-# process so two concurrently-launching tools can never clean/select the
-# same profile directory out from under each other.
 _LAUNCH_LOCK = threading.RLock()
 
-# Substrings identifying a Chromium/Playwright browser process command
-# line; the SingletonLock PID fallback only trusts PIDs whose process
-# matches (the lock could be corrupt or its PID recycled).
 _BROWSER_CMD_MARKERS = ("chrom", "playwright", "headless")
 
 
@@ -210,8 +193,6 @@ def _terminate_pid_escalating(pid: int, identity: str | None) -> None:
             return
         current = _process_identity(pid)
         if current is None:
-            # Process vanished between the checks (or ps failed): there
-            # is nothing that can be safely signalled.
             return
         if identity is None or current != identity:
             logger.warning(
@@ -315,18 +296,9 @@ def _is_profile_in_use(profile_dir: str) -> bool:
     Returns:
         True if the profile is currently locked by a live process.
     """
-    # Composition of the two shared helpers: ``_read_lock_pid``
-    # already rejects absent/unparsable/corrupt locks (including the
-    # ``pid <= 0`` case — ``os.kill(0, 0)`` signals the caller's own
-    # process group and always succeeds, which would mark the profile
-    # permanently in use), and ``_pid_alive`` implements the
-    # EPERM-means-alive liveness probe.
     try:
         pid = _read_lock_pid(profile_dir, propagate_permission_error=True)
     except PermissionError:
-        # Preserve the old inline check's conservative behaviour: a
-        # lock symlink we cannot inspect may belong to another user's
-        # live Chromium, so never launch a second browser into it.
         return True
     return pid is not None and _pid_alive(pid)
 
@@ -348,10 +320,6 @@ def _number_interactive_elements(snapshot: str) -> tuple[str, list[dict[str, str
         name_match = _NAME_RE.match(rest)
         name = _NAME_UNESCAPE_RE.sub(r"\1", name_match.group(1)) if name_match else ""
         if quote:
-            # The whole key is a YAML *single-quoted* scalar, in which
-            # an embedded apostrophe is escaped by doubling it
-            # (``- 'link "Bob''s: list"':``).  Collapse the doubling or
-            # get_by_role(name=..., exact=True) can never match.
             name = name.replace("''", "'")
         elements.append({"role": role, "name": name})
         result_lines.append(f"{indent}- [{counter}] {quote}{role} {rest}".rstrip())
@@ -366,10 +334,6 @@ class WebUseTool:
     happens in this single Chromium instance.
     """
 
-    # Sentinel meaning "use the default profile dir under the KISS home".
-    # The actual path is resolved lazily at construction time via
-    # ``_default_kiss_dir()`` so it respects the ``KISS_HOME`` env var even
-    # when KISS_HOME is set after package import (as the test conftest does).
     _DEFAULT_USER_DATA_DIR = "__kiss_default_browser_profile__"
 
     def __init__(
@@ -381,10 +345,6 @@ class WebUseTool:
         ephemeral: bool = False,
         **_kwargs: Any,
     ) -> None:
-        # Ephemeral mode (parallel sub-agents): a throwaway profile in a
-        # fresh temp directory, deleted by close().  This keeps sub-agents
-        # off the user's persistent profile so they never escalate to
-        # ``browser_profile_N`` dirs (one leaked visible window each).
         self._ephemeral_dir: str | None = None
         if ephemeral:
             self._ephemeral_dir = tempfile.mkdtemp(prefix="kiss_web_profile_")
@@ -394,17 +354,12 @@ class WebUseTool:
         self.viewport = viewport
         self.user_data_dir = user_data_dir
         self._headless = headless
-        # Agent working directory: relative screenshot paths are
-        # anchored here, consistent with the Read/Write/Edit/Bash tools.
         self.work_dir = work_dir
         self._playwright: Any = None
         self._browser: Any = None
         self._context: Any = None
         self._page: Any = None
         self._elements: list[dict[str, str]] = []
-        # OS PID + identity fingerprint of the Chromium main process,
-        # recorded at launch so a failed graceful close can escalate to
-        # killing the process (identity guards against PID reuse).
         self._browser_pid: int | None = None
         self._browser_identity: str | None = None
         atexit.register(self.close)
@@ -535,7 +490,6 @@ class WebUseTool:
         self._browser_identity = None
         if pid is None or pid <= 0 or pid == os.getpid():
             return
-        # A graceful close that succeeded needs only a moment to finish.
         if _wait_pid_exit(pid, 2.0):
             return
         logger.warning("Chromium (pid %d) survived graceful close", pid)
@@ -583,8 +537,6 @@ class WebUseTool:
             pid = _read_lock_pid(profile_dir)
             if pid is None:
                 return
-            # The lock could be corrupt or its PID recycled: only trust
-            # it when the process actually looks like a browser.
             identity = _process_identity(pid)
             if identity and any(
                 marker in identity.lower() for marker in _BROWSER_CMD_MARKERS
@@ -622,12 +574,6 @@ class WebUseTool:
         """
         if self._is_alive():
             return
-        # Active tab closed (user hit the tab's ✕ / window.close()) but
-        # the context survives with other tabs: adopt the most recent
-        # surviving tab instead of tearing down the whole session and
-        # discarding every open tab.  ``self._page is None`` means a
-        # renderer *crash* (see _on_page_crash) — that path must still
-        # fall through to a full teardown + relaunch.
         if self._page is not None and self._context is not None:
             try:
                 pages = [p for p in self._context.pages if not p.is_closed()]
@@ -638,9 +584,6 @@ class WebUseTool:
                 self._adopt_page(pages[-1])
                 self._elements = []
                 return
-        # Re-arm the atexit safety net (close() unregisters it).  The
-        # unregister-then-register pattern keeps exactly one entry even
-        # when the browser is relaunched many times.
         atexit.unregister(self.close)
         atexit.register(self.close)
         self._close_browser_only()
@@ -669,9 +612,6 @@ class WebUseTool:
                 self._launch_browser(launcher, kwargs)
             except Exception:  # pragma: no cover – Chromium always pre-installed in CI
                 logger.info("Playwright Chromium not found, installing...")
-                # A partially-launched browser (launch succeeded, later
-                # setup raised) must be torn down before retrying or it
-                # would leak alongside the retry's browser.
                 self._close_browser_only()
                 subprocess.run(
                     [sys.executable, "-m", "playwright", "install", "chromium"],
@@ -731,10 +671,6 @@ class WebUseTool:
         return None  # pragma: no cover — 100 concurrent instances is unlikely
 
     def _launch_browser(self, launcher: Any, kwargs: dict[str, Any]) -> None:
-        # The launch lock serializes cleanup + profile resolution + launch
-        # so two concurrently-launching tools in this process can never
-        # clean/select the same profile directory out from under each
-        # other.
         with _LAUNCH_LOCK:
             self._cleanup_stale_escalation_dirs()
             effective_dir = self._resolve_user_data_dir()
@@ -744,13 +680,6 @@ class WebUseTool:
                 self._context = launcher.launch_persistent_context(
                     effective_dir, **kwargs, **self._context_args()
                 )
-                # Record the Chromium OS PID immediately — before any
-                # post-launch setup that could raise — so close() can
-                # guarantee the process dies even when setup fails or a
-                # later graceful close fails.  NOTE: _on_browser_lost
-                # deliberately does NOT clear the PID — after the driver
-                # drops its references the PID is the only remaining
-                # handle to a possibly-still-running process.
                 self._capture_browser_pid(effective_dir)
                 page = (
                     self._context.pages[0] if self._context.pages
@@ -761,8 +690,6 @@ class WebUseTool:
                 self._capture_browser_pid(None)
                 self._context = self._browser.new_context(**self._context_args())
                 page = self._context.new_page()
-        # The accounts.google.com block applies to the tool as a whole,
-        # not just persistent profiles: install it on every context.
         self._context.route(_ACCOUNTS_GOOGLE_URL_RE, _abort_route)
         self._context.on("close", self._on_browser_lost)
         self._adopt_page(page)
@@ -976,18 +903,7 @@ class WebUseTool:
             "Error taking screenshot: <message>" on error."""
         self._ensure_browser()
         try:
-            # Anchor the path the same way the file tools do: expand
-            # ``~`` to the user's home (never a literal ``./~/`` dir),
-            # then resolve relative paths against the agent work_dir
-            # (NOT the daemon process cwd — in worktree mode that
-            # would silently escape the worktree).  Reuses the exact
-            # helper the Read/Write/Edit tools use so the two path
-            # policies can never drift.
             path = Path(_absolutize(file_path, self.work_dir)).resolve()
-            # Active-worktree remap, mirroring Write/Edit: an absolute
-            # parent-repo path (model ignored the ``Work dir:`` hint)
-            # must land inside the live ``.kiss-worktrees/kiss_wt-*``
-            # worktree — never dirty the user's main checkout.
             remapped = _active_worktree_remap(path, self.work_dir)
             if remapped is not None:
                 path = remapped
@@ -1032,15 +948,8 @@ class WebUseTool:
             except Exception:  # pragma: no cover — Playwright stop rarely fails
                 logger.debug("Exception caught", exc_info=True)
         self._playwright = None
-        # Drop the atexit registration so closed tools are not retained
-        # for the process lifetime (one leaked entry per agent run).
-        # ``_ensure_browser`` re-registers if this tool is revived.
         atexit.unregister(self.close)
         if self._ephemeral_dir:
-            # Keep _ephemeral_dir set: a closed tool can be revived by
-            # the next web tool call (_ensure_browser relaunches and
-            # mkdir-recreates the dir), and the revived browser's profile
-            # must be deleted again by the next close().
             _rmtree_logged(self._ephemeral_dir)
         return "Browser closed."
 

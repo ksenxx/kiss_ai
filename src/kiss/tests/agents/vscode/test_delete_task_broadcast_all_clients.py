@@ -75,8 +75,6 @@ class TestDeleteTaskBroadcastReachesAllClients(IsolatedAsyncioTestCase):
     client showing the task's chat removes the task and its chat."""
 
     async def asyncSetUp(self) -> None:
-        # Pin persistence to a fresh test-owned directory so these
-        # tests remain independent regardless of run order.
         self._saved_persistence = (
             th._DB_PATH,
             th._db_conn,
@@ -130,8 +128,6 @@ class TestDeleteTaskBroadcastReachesAllClients(IsolatedAsyncioTestCase):
         """THE regression: a completed (unsubscribed) task is deleted
         by client 1; client 2 — a different device whose open tab shows
         the same chat — MUST also receive the ``taskDeleted`` event."""
-        # Two completed tasks in the same chat, inserted directly into
-        # the real DB (the same rows the History panel lists).
         id1, chat_id = await asyncio.to_thread(th._add_task, "first task")
         await asyncio.sleep(0.01)
         id2, _ = await asyncio.to_thread(
@@ -149,7 +145,6 @@ class TestDeleteTaskBroadcastReachesAllClients(IsolatedAsyncioTestCase):
             await self._auth(ws_deleter)
             await self._auth(ws_viewer)
 
-            # Client 1 deletes task id1 from its History panel.
             await ws_deleter.send(
                 json.dumps({"type": "deleteTask", "taskId": id1}),
             )
@@ -224,10 +219,6 @@ class TestDeleteTaskBroadcastReachesAllClients(IsolatedAsyncioTestCase):
                 "taskDeleted", [e.get("type") for e in events],
             )
 
-        # Give the async persistence queue a moment to flush, then
-        # verify no events were written for the deleted task id.  The
-        # task_history row is gone, so _load_chat_events_by_task_id
-        # must return None (no orphan event rows resurrect the task).
         await asyncio.to_thread(th._flush_chat_events)
         loaded = await asyncio.to_thread(
             th._load_chat_events_by_task_id, id1,

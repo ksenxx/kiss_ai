@@ -138,7 +138,6 @@ class TestSetFavoriteCommandDispatch:
         """Missing taskId is silently dropped (no exception)."""
         server, events = _make_server()
         server._handle_command({"type": "setFavorite", "isFavorite": True})
-        # No error event fired.
         assert [e for e in events if e.get("type") == "error"] == []
 
 
@@ -162,8 +161,6 @@ class TestMainJsFavoriteButton:
 
     def test_favorite_click_posts_set_favorite_message(self) -> None:
         src = self._js()
-        # The click handler goes through the Sorcar API facade, which
-        # posts the {type: 'setFavorite', ...} wire message.
         assert re.search(
             r"api\.setFavorite\(\s*\{",
             src,

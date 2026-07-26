@@ -281,7 +281,6 @@ class TestSummarizerPromptDoesNotLeakIntoEvents:
             f"event stream as a type='prompt' event: {leaked[0][:200]!r}"
         )
 
-        # Every remaining prompt event must be the actual task prompt.
         non_task = [p for p in prompt_events if _TASK not in p]
         assert not non_task, (
             "unexpected non-task prompt event(s) leaked into the "

@@ -2,14 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression test: when a running task in a background chat
-// tab asks the user a question, the real webview must switch to that
-// tab immediately so the modal is visible and answerable.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/ask_user_switches_to_tab.test.js
 
 'use strict';
 
@@ -20,12 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom window running the production chat webview: the real
- * ``chat.html`` body (placeholders blanked), ``panelCopy.js`` and
- * ``main.js`` evaluated in the window, and a recording
- * ``acquireVsCodeApi`` stub (the only host API the webview has).
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -60,9 +46,6 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  // Evaluate api.js separately so V8 coverage offsets for the
-
-  // sourceURL-labelled main.js eval below start at character 0.
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(
@@ -71,7 +54,6 @@ fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   return {win, posted};
 }
 
-/** Dispatch a backend→webview event exactly like the extension does. */
 function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
@@ -84,15 +66,10 @@ function testAskUserSwitchesToQuestionTab() {
   const questionTab = api.getActiveTabId();
   assert.ok(questionTab, 'initial tab id must exist');
 
-  // Open a second tab.  The initial tab is now a background tab whose
-  // running task is about to ask the user a question.
   api.createNewTab();
   const otherTab = api.getActiveTabId();
   assert.ok(otherTab && otherTab !== questionTab, 'second tab must be active');
 
-  // The background task asks a question.  This must switch the active
-  // webview tab to the task's tab, otherwise the modal remains hidden
-  // behind the wrong tab and the user does not see the question.
   send(win, {
     type: 'askUser',
     question: 'Please provide the deployment token.',

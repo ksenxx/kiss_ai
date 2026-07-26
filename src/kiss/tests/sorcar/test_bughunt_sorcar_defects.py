@@ -52,10 +52,6 @@ from kiss.agents.sorcar.code_graph import (  # noqa: E402
     grep_hint,
 )
 
-# ---------------------------------------------------------------------------
-# D1 — chained-call callee misattribution
-# ---------------------------------------------------------------------------
-
 
 def _call_edges(graph) -> set[tuple[str, str]]:
     """Return the graph's ``calls`` edges as (caller_label, callee_label)."""
@@ -80,9 +76,7 @@ class TestChainedCallCallee:
         )
         graph = build_graph(str(tmp_path), incremental=False)
         edges = _call_edges(graph)
-        # The constructor call is still recorded ...
         assert ("main", "Application") in edges
-        # ... and the chained method call resolves to the METHOD.
         assert ("main", "start") in edges
 
     def test_javascript_chained_call(self, tmp_path: Path) -> None:
@@ -108,23 +102,14 @@ class TestChainedCallCallee:
         assert ("main", "draw") in _call_edges(graph)
 
 
-# ---------------------------------------------------------------------------
-# D2 — _grep_pattern: `--` marker and `-f` pattern-file
-# ---------------------------------------------------------------------------
-
 
 class TestGrepPatternParsing:
     def test_double_dash_marks_next_token_as_pattern(self) -> None:
-        # POSIX: everything after ``--`` is an operand; the first one
-        # is the pattern.  The old parser skipped ``-literal`` as a
-        # flag and returned ``file``.
         assert _grep_pattern("grep -- -literal file") == "-literal"
         assert _grep_pattern("grep -rn -- TODO src/") == "TODO"
         assert _grep_pattern("grep --") is None
 
     def test_pattern_file_flag_means_no_inline_pattern(self) -> None:
-        # With ``-f``/``--file`` the patterns come from a file; the
-        # remaining operands are search TARGETS, never the pattern.
         assert _grep_pattern("grep -f pats.txt src/") is None
         assert _grep_pattern("rg --file pats.txt src/") is None
         assert _grep_pattern("rg --file=pats.txt src/") is None
@@ -153,17 +138,9 @@ class TestGrepPatternParsing:
         assert grep_hint("grep -f pats.txt util_fn", str(tmp_path)) is None
 
 
-# ---------------------------------------------------------------------------
-# D3 — "Task interrupted" must classify as a failed result
-# ---------------------------------------------------------------------------
-
 
 class TestInterruptedResultClassification:
     def test_task_interrupted_is_failed(self) -> None:
-        # Exact string persisted by ``ChatSorcarAgent.run``'s
-        # ``except BaseException`` handler (user Stop / daemon
-        # shutdown reaching a CLI, sub-agent, or channel-agent run)
-        # and by the channel agents' KeyboardInterrupt paths.
         assert _is_failed_result("Task interrupted")
 
     def test_shutdown_variant_still_failed(self) -> None:
@@ -178,10 +155,6 @@ class TestInterruptedResultClassification:
         assert not _is_failed_result("All done; wrote the report.")
         assert not _is_failed_result("")
 
-
-# ---------------------------------------------------------------------------
-# D4 — empty frontmatter block must be stripped
-# ---------------------------------------------------------------------------
 
 
 def _parse(path: Path) -> tuple[dict[str, object], str]:
@@ -220,8 +193,6 @@ class TestEmptyFrontmatter:
         p.write_bytes(b"---\r\na: b\r\n---\r\nBody\r\n")
         meta, body = _parse(p)
         assert meta == {"a": "b"}
-        # ``read_text`` applies universal-newline translation, so the
-        # body comes back with ``\n`` endings.
         assert body == "Body\n"
 
     def test_value_ending_in_dashes_is_not_a_closing_marker(

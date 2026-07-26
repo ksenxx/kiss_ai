@@ -248,10 +248,6 @@ window._startDemoReplay(sessions).then(function() {
             f"createNewTab was called during replay: {calls}"
         )
 
-        # The task header must be rendered for EVERY replayed task
-        # before that task's events are processed — the header is what
-        # replaces the welcome page (main.js hides it on setTaskText /
-        # task_events; demo.js no longer calls hideWelcome).
         text_indices = [
             i for i, c in enumerate(calls) if c.startswith("setTaskText:")
         ]

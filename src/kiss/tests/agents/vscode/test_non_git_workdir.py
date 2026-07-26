@@ -98,9 +98,6 @@ class TestNonGitCommandsDoNotCrash(_NonGitHarness):
         Path(self.tmpdir, "alpha.txt").write_text("a\n")
         Path(self.tmpdir, "beta.py").write_text("b\n")
         self.server._handle_command({"type": "getFiles", "prefix": ""})
-        # H9: the first call schedules a background scan and emits an
-        # empty ``loading`` event; the populated event is broadcast once
-        # the scan completes.  Wait briefly for the second event.
         for _ in range(50):
             evt = self._events_of("files")
             if evt and evt[-1].get("files"):
@@ -355,10 +352,6 @@ class TestNonGitRunTask(_NonGitHarness):
             errors = self._events_of("error")
             assert not errors, f"unexpected error events: {errors}"
             assert "merge_started" not in self._types()
-            # The per-task agent is disposed in ``_run_task``'s outer
-            # ``finally``; a fresh agent is auto-allocated by
-            # ``_get_tab`` and (since this is a non-git work_dir) has
-            # no pending worktree state.
             assert tab.agent is None or tab.agent._wt_branch is None
             assert tab.agent is None or tab.agent._wt_pending is False
         finally:

@@ -2,17 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression test: when the same backend chat/task is open
-// in multiple local webview tabs, answering an ask-user prompt in any
-// one of those tabs must close the ask-user modal for every local tab
-// that has the same backend chat id.  Otherwise switching to a sibling
-// tab after answering exposes a stale ask window whose answer would be
-// submitted to an already-resolved question.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/ask_user_same_chat_tabs_clear.test.js
 
 'use strict';
 
@@ -23,12 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom window running the production chat webview: the real
- * ``chat.html`` body (placeholders blanked), ``panelCopy.js`` and
- * ``main.js`` evaluated in the window, and a recording
- * ``acquireVsCodeApi`` stub (the only host API the webview has).
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -63,9 +46,6 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  // Evaluate api.js separately so V8 coverage offsets for the
-
-  // sourceURL-labelled main.js eval below start at character 0.
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(
@@ -74,12 +54,10 @@ fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   return {win, posted};
 }
 
-/** Dispatch a backend→webview event exactly like the extension does. */
 function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** Click a real tab-bar element to drive the production switchToTab flow. */
 function clickTab(win, tabId) {
   const tabEl = win.document.querySelector(
     `.chat-tab[data-tab-id="${tabId}"]`,

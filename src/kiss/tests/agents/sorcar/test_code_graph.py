@@ -139,10 +139,6 @@ def built(project: Path) -> CodeGraph:
     return build_graph(str(project))
 
 
-# ---------------------------------------------------------------------------
-# Build: nodes, edges, confidence
-# ---------------------------------------------------------------------------
-
 
 class TestBuild:
     def test_nodes_extracted(self, built: CodeGraph) -> None:
@@ -153,7 +149,6 @@ class TestBuild:
         assert "shared_calc" in labels
         assert "Widget" in labels
         assert "startWidget" in labels
-        # file nodes exist for every parsed source file
         assert "main.py" in labels
         assert "helpers.py" in labels
         assert "app.js" in labels
@@ -196,9 +191,6 @@ class TestBuild:
         assert edge["confidence"] == "EXTRACTED"
 
     def test_call_edge_cross_file_inferred(self, built: CodeGraph) -> None:
-        # util_fn is defined in helpers.py; the call from
-        # Application.run in main.py is resolved in the second
-        # (call-graph) pass and therefore tagged INFERRED.
         run = built.find_node("run")
         util = built.find_node("util_fn")
         assert run is not None and util is not None
@@ -265,10 +257,6 @@ class TestBuild:
         assert graph.edges == []
 
 
-# ---------------------------------------------------------------------------
-# Incremental (feature #5): SHA256 cache
-# ---------------------------------------------------------------------------
-
 
 class TestIncremental:
     def test_unchanged_files_not_reextracted(self, project: Path) -> None:
@@ -287,7 +275,6 @@ class TestIncremental:
         graph = build_graph(str(project), incremental=True)
         assert graph.stats["reextracted"] == 1
         assert graph.find_node("brand_new_fn") is not None
-        # untouched files keep their nodes
         assert graph.find_node("Application") is not None
 
     def test_deleted_file_pruned(self, project: Path) -> None:
@@ -317,13 +304,8 @@ class TestIncremental:
         (project / "helpers.py").write_text(PY_HELPERS + "\ndef also():\n    pass\n")
         graph = build_graph(str(project), only_files=["main.py"])
         assert graph.find_node("added") is not None
-        # helpers.py was not in only_files, so its change is not seen
         assert graph.find_node("also") is None
 
-
-# ---------------------------------------------------------------------------
-# Query / path / explain (feature #1)
-# ---------------------------------------------------------------------------
 
 
 class TestQuery:
@@ -369,7 +351,7 @@ class TestQuery:
 
     def test_query_token_budget(self, built: CodeGraph) -> None:
         out = built.query("Application", max_chars=200)
-        assert len(out) <= 260  # budget + truncation notice
+        assert len(out) <= 260
 
     def test_query_budget_prioritizes_seed_and_nearest_neighbors(self) -> None:
         nodes = {
@@ -392,9 +374,6 @@ class TestQuery:
             {"source": "hub", "target": "target", "relation": "defines",
              "confidence": "EXTRACTED"},
         ]
-        # A file hub can connect the seed to hundreds of alphabetically earlier
-        # nodes.  Under a tight hint budget, those distant nodes must never
-        # displace the exact seed or its direct caller.
         for index in range(30):
             node_id = f"other-{index}"
             nodes[node_id] = {
@@ -420,7 +399,6 @@ class TestQuery:
         assert "entry_point" in out
         assert "shared_calc" in out
         assert "-->" in out
-        # every hop shows relation + confidence
         assert "calls" in out
         assert "EXTRACTED" in out or "INFERRED" in out
 
@@ -448,10 +426,6 @@ class TestQuery:
         out = built.explain("application")
         assert "Application" in out
 
-
-# ---------------------------------------------------------------------------
-# grep interception (feature #3)
-# ---------------------------------------------------------------------------
 
 
 class TestGrepHint:
@@ -506,8 +480,6 @@ class TestGrepHint:
         out = bash("grep -rn 'Application' .", "search")
         assert "[code_graph]" in out
         assert "NODE Application" in out
-        # The expensive grep is denied: the interception response is the
-        # answer, matching graphify's one-model-call hook pattern.
         assert "class Application" not in out
 
     def test_repeated_identifier_grep_falls_through_for_verification(
@@ -537,9 +509,6 @@ class TestGrepHint:
     def test_bash_wrapper_intercepts_before_streaming(
         self, project: Path, built: CodeGraph
     ) -> None:
-        # The wrapper answers from the graph BEFORE UsefulTools.Bash (and
-        # thus before its subprocess-spawning streaming path) is entered:
-        # an intercepted command streams nothing to the printer.
         from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
         chunks: list[str] = []
@@ -556,10 +525,6 @@ class TestGrepHint:
         assert "class Application" not in out
         assert chunks == []
 
-
-# ---------------------------------------------------------------------------
-# Git post-commit hook (feature #5)
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
@@ -651,10 +616,6 @@ class TestGitHook:
             time.sleep(0.5)
         assert found, "post-commit hook did not update the graph in time"
 
-
-# ---------------------------------------------------------------------------
-# CLI (used by the git hook)
-# ---------------------------------------------------------------------------
 
 
 class TestCli:
@@ -762,10 +723,6 @@ class TestCli:
         assert not lock.exists()
 
 
-# ---------------------------------------------------------------------------
-# Agent tool (feature #1 exposure)
-# ---------------------------------------------------------------------------
-
 
 class TestAgentTool:
     def test_tool_created(self, project: Path) -> None:
@@ -820,8 +777,6 @@ class TestAgentTool:
         assert "removed" in tool(action="uninstall_hook").lower()
 
     def test_tool_registered_in_sorcar_agent(self, project: Path) -> None:
-        # Minimal-coupling check: the agent wires the tool through
-        # make_code_graph_tool without further dependencies.
         from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
         agent = SorcarAgent("t")
@@ -852,10 +807,6 @@ class TestAgentTool:
         verification = bash("rg Application .", "verify")
         assert "[code_graph]" not in verification
         assert "docker-result:rg Application .:verify" == verification
-
-# ---------------------------------------------------------------------------
-# Independent review regressions (gpt-5.6-sol)
-# ---------------------------------------------------------------------------
 
 
 class TestReviewedCorrectness:
@@ -1092,8 +1043,6 @@ class TestDefensiveAndCoveragePaths:
             "defs": [], "imports": [],
             "calls": [{"caller": 99, "callee": "none"}],
         }
-        # The record is intentionally malformed to exercise stale/corrupt
-        # cache defense, not normal extraction.
         graph = cg._assemble({"bad.py": record}, {})
         assert graph.find_node("bad.py") is not None
         assert not any(edge["relation"] == "calls" for edge in graph.edges)
@@ -1165,7 +1114,7 @@ class TestDefensiveAndCoveragePaths:
     ) -> None:
         result = grep_hint(command, str(project))
         if command == "grep -eCompact .":
-            assert result is None  # valid syntax, but no matching graph node
+            assert result is None
         else:
             assert result is None
 
@@ -1175,7 +1124,6 @@ class TestDefensiveAndCoveragePaths:
         install_post_commit_hook(str(repo))
         assert "existing\n# >>>" in hook.read_text()
         hook.write_text("#!/bin/sh\n# >>> kiss code_graph hook >>>\n")
-        # Corrupt markers must produce a diagnostic, never ValueError.
         assert "corrupt" in uninstall_post_commit_hook(str(repo)).lower()
 
     def test_uninstall_outside_repository(self, tmp_path: Path) -> None:
@@ -1282,7 +1230,7 @@ class TestDirectCliAndLockCoverage:
         cg._release_update_lock(lock)
         assert lock.exists()
         lock.unlink()
-        cg._release_update_lock(lock)  # missing is harmless
+        cg._release_update_lock(lock)
 
 
 def test_last_defensive_branches(
@@ -1290,11 +1238,9 @@ def test_last_defensive_branches(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # grep option whose value is metadata, not the search pattern.
     build_graph(str(repo))
     assert grep_hint("grep -A 2 Application .", str(repo)) is not None
 
-    # Shell-hook recognizer rejects malformed/empty/non-shebang scripts.
     assert not cg._is_shell_hook("echo no-shebang\n")
     assert not cg._is_shell_hook("#!'unterminated\n")
     assert not cg._is_shell_hook("#!\n")
@@ -1310,7 +1256,6 @@ def test_last_defensive_branches(
     hook.write_text("#!/bin/sh\necho no-marker\n")
     assert "not installed" in uninstall_post_commit_hook(str(repo)).lower()
 
-    # Existing git exclude without a newline and a second idempotent call.
     exclude_text = _git(repo, "rev-parse", "--git-path", "info/exclude").strip()
     exclude = Path(exclude_text)
     if not exclude.is_absolute():
@@ -1321,7 +1266,6 @@ def test_last_defensive_branches(
     cg._ensure_graph_git_excluded(str(repo))
     assert exclude.read_text().count(".kiss/code_graph/") == 1
 
-    # Force the absolute-path result without replacing real filesystem logic.
     absolute = tmp_path / "absolute-exclude"
     real_run = cg.subprocess.run
 

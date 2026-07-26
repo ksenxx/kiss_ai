@@ -70,9 +70,6 @@ def _find_rule(css: str, selector: str) -> str:
     return "\n".join(bodies)
 
 
-# Every chat-panel BODY-TEXT selector.  main.css sizes them
-# inconsistently (--fs-base vs --fs-md vs hard-coded px); the remote
-# stylesheet must pin every one of them to the SAME var(--fs-base).
 PANEL_BODY_TEXT_SELECTORS = [
     ".txt",
     ".llm-panel .txt",
@@ -171,10 +168,6 @@ def test_main_css_styles_rc_status_like_old_inline_style() -> None:
     assert "color: var(--red)" in fail.group(1)
 
 
-# ── Live end-to-end: computed font sizes are EQUAL ──────────────────
-
-# Injects a transcript covering every chat-panel body-text surface
-# rendered by media/main.js.
 _INJECT_THREAD_JS = r"""
 (() => {
   const out = document.getElementById('output');
@@ -254,7 +247,6 @@ _INJECT_THREAD_JS = r"""
 })()
 """
 
-# Selector → element whose computed font-size is the panel's body text.
 _FONT_SIZE_PROBES = {
     "txt": ".ev.txt",
     "txtCode": ".ev.txt code",
@@ -406,8 +398,6 @@ def test_live_chat_panel_font_sizes_are_uniform(tmp_path: Path) -> None:
     missing = [k for k, v in sizes.items() if v == "MISSING"]
     assert not missing, f"probe elements missing from the page: {missing}"
 
-    # THE uniformity assertion: every panel's body text is the same
-    # size — the remote page's base body size (16px).
     assert sizes["txt"] == "16px", sizes
     distinct = {v for v in sizes.values()}
     assert distinct == {"16px"}, (

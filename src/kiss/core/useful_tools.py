@@ -27,14 +27,6 @@ from kiss.core.models.model import (
 
 logger = logging.getLogger(__name__)
 
-# Largest supported binary the Read tool will embed inline as a base64
-# attachment.  The text path is bounded by ``max_lines``; without this
-# cap the binary path would ``read_bytes()`` an arbitrarily large file
-# (e.g. a multi-GB video) and base64-encode it (+33%) into the
-# tool-result string — blowing up process memory and producing a
-# payload no model provider accepts anyway (inline-attachment limits
-# are ~20MB across OpenAI / Anthropic / Gemini).  Checked via ``stat``
-# BEFORE the content is read.
 _MAX_BINARY_READ_BYTES = 20 * 1024 * 1024
 
 
@@ -117,25 +109,15 @@ def _active_worktree_remap(resolved: Path, work_dir: str | None) -> Path | None:
         ):
             main_repo_parts = work_parts[:i]
             wt_root_parts = work_parts[: i + 2]
-            # Vanished worktree: no remap (see docstring).  The caller
-            # falls through to plain resolution against the parent
-            # repo, consistent with ``_spawn``'s cwd fallback.
             if not Path(*wt_root_parts).is_dir():
                 return None
             res_parts = resolved.parts
-            # *resolved* must be STRICTLY under the parent repo
-            # (equal-length is no-op, shorter or different prefix is
-            # outside the repo entirely).
             if (
                 len(res_parts) <= len(main_repo_parts)
                 or res_parts[: len(main_repo_parts)] != main_repo_parts
             ):
                 return None
             tail = res_parts[len(main_repo_parts):]
-            # Leave any path that is already inside ANY worktree
-            # untouched: don't redirect a sibling-worktree path
-            # (a different concurrent tab's working tree) into the
-            # active worktree.
             if tail and tail[0] == ".kiss-worktrees":
                 return None
             return Path(*wt_root_parts, *tail)
@@ -166,7 +148,6 @@ def _absolutize(file_path: str, work_dir: str | None) -> str:
     try:
         p = Path(file_path).expanduser()
     except RuntimeError:
-        # ``~unknownuser/...`` — fall through to the literal path.
         p = Path(file_path)
     if p.is_absolute():
         return str(p)
@@ -208,12 +189,6 @@ def _bash_parent_repo_guard(command: str, work_dir: str | None) -> str | None:
     """
     if not work_dir:
         return None
-    # Check BOTH the given and the resolved spelling of work_dir: when
-    # work_dir contains a symlinked component (e.g. /tmp → /private/tmp
-    # on macOS — the spelling the model sees in its "Work dir:" hint),
-    # a command using the unresolved spelling would never match the
-    # resolved prefix and bypass the guard entirely.  Read/Write/Edit
-    # resolve both sides and are immune; the guard must be too.
     checked: set[tuple[str, ...]] = set()
     for wd_parts in (Path(work_dir).parts, Path(work_dir).resolve().parts):
         if wd_parts in checked:
@@ -245,30 +220,17 @@ def _parent_repo_guard_for_parts(
         ):
             main_repo = str(Path(*wd_parts[:i]))
             wt_root = str(Path(*wd_parts[: i + 2]))
-            # Vanished worktree: ``_spawn`` falls back to running the
-            # command with cwd = parent repo root, so refusing a
-            # parent-repo path here (and pointing the model at a
-            # worktree path that no longer exists) would be a dead
-            # end.  Let the command through.
             if not os.path.isdir(wt_root):
                 return None
-            # Match the parent-repo prefix followed by either end-of-
-            # token or a path separator.  This avoids false positives
-            # on unrelated paths that merely share a prefix substring
-            # (e.g. ``/repo`` vs ``/repository``).
             pattern = re.escape(main_repo) + r"(?=/|[\s'\";|&<>()`]|$)"
             for m in re.finditer(pattern, command):
-                # Pull the rest of the path token after the match start.
                 tail_start = m.start()
-                # Scan forward over path characters to find the full
-                # path token the prefix is part of.
                 end = tail_start + len(main_repo)
                 while end < len(command) and command[end] not in " \t\n'\";|&<>()`":
                     end += 1
                 hit = command[tail_start:end]
                 if hit == wt_root or hit.startswith(wt_root + os.sep):
                     continue
-                # Otherwise it's a parent-repo path outside the worktree.
                 return (
                     f"Error: command references the parent-repo path "
                     f"{hit!r}, which is outside the active worktree "
@@ -599,26 +561,10 @@ class UsefulTools:
             expanded = _absolutize(file_path, self.work_dir)
             resolved = Path(expanded).resolve()
 
-            # Active-worktree remap: if work_dir is inside a live
-            # ``.kiss-worktrees/kiss_wt-*`` worktree and the caller
-            # passed a parent-repo path (LLM ignored the work_dir
-            # hint), reroute to the equivalent worktree-internal
-            # path so the read sees the worktree's content (which
-            # may have already diverged from main via earlier
-            # remapped edits).  Remap is *unconditional* — even when
-            # the worktree branch has *deleted* the file, we must
-            # still report not-found rather than silently leaking
-            # the main repo's copy.  The stale-worktree fallback is
-            # therefore mutually exclusive with the active remap.
             remapped = _active_worktree_remap(resolved, self.work_dir)
             if remapped is not None:
                 resolved = remapped
             elif not resolved.exists():
-                # Stale-worktree fallback: if the caller passed a
-                # path inside a .kiss-worktrees/kiss_wt-* directory
-                # that has since been torn down (autocommit / task
-                # finish), try the equivalent path under the parent
-                # repo before giving up.
                 fallback = _stale_worktree_fallback(resolved)
                 if fallback is not None and fallback.exists():
                     resolved = fallback.resolve()
@@ -626,10 +572,6 @@ class UsefulTools:
             if resolved.is_dir():
                 return self._read_directory_listing(file_path, resolved)
 
-            # Non-regular files (FIFOs, devices, sockets): opening a FIFO
-            # with no writer blocks FOREVER, and /dev/zero-style devices
-            # stream endlessly — either would hang the agent with no
-            # timeout.  Refuse them up front.
             if resolved.exists() and not resolved.is_file():
                 return (
                     f"Error: {file_path} is not a regular file "
@@ -729,35 +671,19 @@ class UsefulTools:
         try:
             expanded = _absolutize(file_path, self.work_dir)
             resolved = Path(expanded).resolve()
-            # Active-worktree remap: redirect parent-repo absolute paths
-            # into the active worktree so writes never leak out of the
-            # task's isolated working tree (see ``_active_worktree_remap``).
             remapped = _active_worktree_remap(resolved, self.work_dir)
             if remapped is not None:
                 resolved = remapped
             else:
-                # Stale-worktree fallback: writing to a path inside a
-                # now-deleted ``.kiss-worktrees/kiss_wt-*`` directory
-                # would silently resurrect a zombie worktree whose
-                # contents are never merged.  Redirect to the parent
-                # repo instead, mirroring Read's fallback and _spawn's
-                # cwd fallback.
                 fallback = _stale_worktree_fallback(resolved)
                 if fallback is not None:
                     resolved = fallback
-            # Refuse existing non-regular targets: opening a FIFO for
-            # writing blocks forever when it has no reader, hanging the
-            # agent with no timeout (directories/devices are also wrong).
             if resolved.exists() and not resolved.is_file():
                 return (
                     f"Error: {file_path} exists and is not a regular file "
                     f"(directory/FIFO/device/socket); refusing to write to it."
                 )
             resolved.parent.mkdir(parents=True, exist_ok=True)
-            # newline="" prevents os.linesep translation on write
-            # (matching Edit) so the file's bytes equal *content*
-            # exactly — LF content is not CRLF-ified on Windows and a
-            # Write-then-Read round trip is byte-identical.
             resolved.write_text(content, encoding="utf-8", newline="")
             return f"Successfully wrote {len(content)} characters to {file_path}"
         except Exception as e:
@@ -785,21 +711,10 @@ class UsefulTools:
         try:
             expanded = _absolutize(file_path, self.work_dir)
             resolved = Path(expanded).resolve()
-            # Active-worktree remap: redirect parent-repo absolute paths
-            # into the active worktree so edits never leak out of the
-            # task's isolated working tree (see ``_active_worktree_remap``).
-            # Remap *unconditionally* — when the worktree branch deleted
-            # the file the subsequent ``is_file()`` check produces the
-            # correct "File not found" error against the worktree path
-            # rather than silently mutating the main repo's copy.
             remapped = _active_worktree_remap(resolved, self.work_dir)
             if remapped is not None:
                 resolved = remapped
             elif not resolved.is_file():
-                # Stale-worktree fallback, mirroring Read: a path under
-                # a now-deleted ``.kiss-worktrees/kiss_wt-*`` directory
-                # edits the equivalent parent-repo file so a Read/Edit
-                # pair on the same remembered path stays consistent.
                 fallback = _stale_worktree_fallback(resolved)
                 if fallback is not None and fallback.is_file():
                     resolved = fallback.resolve()
@@ -808,29 +723,14 @@ class UsefulTools:
             if old_string == new_string:
                 return "Error: new_string must be different from old_string"
             if old_string == "":
-                # str.count("") == len(content) + 1, so an empty
-                # old_string would interleave new_string between every
-                # character (replace_all) or silently overwrite an empty
-                # file.  Reject it explicitly instead.
                 return (
                     "Error: old_string must not be empty. "
                     "Use the Write tool to create or overwrite a file."
                 )
-            # Read WITHOUT universal-newline translation: reading the
-            # translated text and writing it back would silently rewrite
-            # EVERY line ending in a CRLF file as LF (huge spurious
-            # diffs) even for a one-character edit.
             content = resolved.read_text(encoding="utf-8", newline="")
             count = content.count(old_string)
             if count == 0 and "\r\n" in content and "\r\n" not in old_string:
-                # Models see files through Read(), which translates CRLF
-                # to LF — so old_string/new_string carry LF even when the
-                # file on disk uses CRLF.  Retry with CRLF-normalised
-                # strings so the edit applies and the replacement keeps
-                # the file's CRLF convention.
                 old_string = old_string.replace("\n", "\r\n")
-                # Collapse-then-expand so a new_string that already
-                # carries some CRLFs is not corrupted into "\r\r\n".
                 new_string = new_string.replace("\r\n", "\n").replace("\n", "\r\n")
                 count = content.count(old_string)
             if count == 0:
@@ -844,8 +744,6 @@ class UsefulTools:
                 new_content = content.replace(old_string, new_string)
             else:
                 new_content = content.replace(old_string, new_string, 1)
-            # newline="" prevents os.linesep translation on write so the
-            # preserved (untranslated) line endings round-trip verbatim.
             resolved.write_text(new_content, encoding="utf-8", newline="")
             replaced = count if replace_all else 1
             return f"Successfully replaced {replaced} occurrence(s) in {file_path}"
@@ -887,23 +785,12 @@ class UsefulTools:
             try:
                 stdout, _ = process.communicate(timeout=timeout_seconds)
             except subprocess.TimeoutExpired as timeout_exc:
-                # Deadline hit: either the shell is still running
-                # (genuine timeout) or it already exited and background
-                # children inherited the output pipe, keeping
-                # ``communicate()`` blocked past the deadline.  Kill
-                # the group in both cases; only the former is a
-                # timeout — the latter returns the command's real
-                # output, matching the streaming path.
                 shell_running = process.poll() is None
                 _kill_process_group(process)
                 stdout = ""
                 try:
                     stdout, _ = process.communicate(timeout=5)
                 except Exception:
-                    # Descendants outside the process group still hold
-                    # the pipe; fall back to the output captured before
-                    # the deadline (bytes on some platforms even in
-                    # text mode).
                     raw = timeout_exc.output
                     if isinstance(raw, bytes):  # pragma: no cover — platform-dependent
                         raw = raw.decode("utf-8", errors="replace")
@@ -967,24 +854,6 @@ class UsefulTools:
             self.stream_callback(line)
 
     def _bash_streaming(self, command: str, timeout_seconds: float, max_output_chars: int) -> str:
-        # Output is drained by a daemon reader thread that feeds a
-        # queue, while THIS thread consumes the queue with a deadline
-        # and invokes ``stream_callback`` itself.  Two constraints meet
-        # here:
-        #
-        # * A blocking ``readline()`` loop in this thread would have no
-        #   deadline: when the shell exits but backgrounded children
-        #   inherit the stdout pipe (``(cmd) & echo done``), the pipe
-        #   only reaches EOF once *every* inheritor exits, which once
-        #   froze an agent for 94 minutes.  Hence the reader thread.
-        # * ``stream_callback`` must run on the thread that called
-        #   ``Bash``: printers key task attribution, bash buffers,
-        #   recordings, and stop events on thread-local ``task_id``.
-        #   Invoking the callback from the reader thread stripped the
-        #   ``taskId`` from every ``system_output`` event — the bash
-        #   sub panel of the tool panel stayed empty and the
-        #   unattributed events were broadcast to every client as
-        #   garbage in the chat webview.  Hence the queue hand-off.
         assert self.stream_callback is not None
         process = self._spawn(command)
         done = threading.Event()
@@ -996,8 +865,6 @@ class UsefulTools:
                 for line in iter(process.stdout.readline, ""):
                     out_queue.put(line)
             finally:
-                # EOF sentinel — also emitted when readline raises so
-                # the consumer can never wait for a dead reader.
                 out_queue.put(None)
 
         reader = threading.Thread(target=_drain_stdout, daemon=True)
@@ -1011,25 +878,12 @@ class UsefulTools:
                 out_queue, chunks, time.monotonic() + timeout_seconds,
             )
             if not eof:
-                # Deadline hit.  Either the command is still running
-                # (genuine timeout) or its shell already exited and
-                # background children are keeping the pipe open.  Kill
-                # the whole process group in both cases; only the
-                # former is reported as a timeout.  Checking ``poll()``
-                # here — after the wait, not in a racing timer — means
-                # a command that finished naturally an instant ago is
-                # never misreported as timed out.
                 timed_out = process.poll() is None
                 _kill_process_group(process)
                 eof = self._consume_stream(
                     out_queue, chunks, time.monotonic() + 5,
                 )
                 if not eof:
-                    # Descendants outside the process group (e.g.
-                    # ``setsid``) survived the kill and still hold the
-                    # pipe.  Abandon the daemon reader rather than
-                    # blocking the agent; the output collected so far
-                    # is returned.
                     try:
                         process.wait(timeout=5)
                     except subprocess.TimeoutExpired:  # pragma: no cover
@@ -1040,16 +894,11 @@ class UsefulTools:
                 except subprocess.TimeoutExpired:  # pragma: no cover
                     _kill_process_group(process)
         except BaseException:
-            # A raising stream callback (or KeyboardInterrupt) aborts
-            # the command: kill the group and propagate.
             _kill_process_group(process)
             raise
         finally:
             done.set()
             if eof:
-                # Only close once the reader is done with the pipe;
-                # closing under a blocked ``readline()`` is unsafe.
-                # An abandoned daemon reader keeps the fd until EOF.
                 process.stdout.close()  # type: ignore[union-attr]
 
         if timed_out:

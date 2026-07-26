@@ -58,8 +58,6 @@ def _resolve_relative(module_name: str, is_package: bool, node: ast.ImportFrom) 
         The absolute dotted module path being imported from.
     """
     parts = module_name.split(".")
-    # For a plain module, level 1 refers to its parent package; for a
-    # package __init__, level 1 refers to the package itself.
     base = parts[: len(parts) - node.level + (1 if is_package else 0)]
     if node.module:
         base = [*base, *node.module.split(".")]

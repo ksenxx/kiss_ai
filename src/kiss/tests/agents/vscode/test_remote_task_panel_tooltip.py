@@ -69,9 +69,6 @@ def _start_live_server(
             certfile=str(certfile),
             keyfile=str(keyfile),
             url_file=tmp_path / "remote-url.json",
-            # AF_UNIX socket paths are limited to ~104 bytes on macOS;
-            # pytest tmp_path can exceed that, so bind in a short dir
-            # (removed in the finally below).
             uds_path=Path(uds_dir) / "sorcar.sock",
         )
         started = False
@@ -135,8 +132,6 @@ def test_live_remote_task_panel_hover_tooltip(tmp_path: Path) -> None:
                 )
                 page.wait_for_selector("#task-panel", state="attached")
 
-                # Pin the task through the PRODUCTION event path — the
-                # same window 'message' handler the backend drives.
                 page.evaluate(
                     "task => window.postMessage("
                     "{type: 'setTaskText', text: task}, '*')",
@@ -144,7 +139,6 @@ def test_live_remote_task_panel_hover_tooltip(tmp_path: Path) -> None:
                 )
                 page.wait_for_selector("#task-panel.visible")
 
-                # The full text must ride on the hover tooltip source.
                 tooltip_attr = page.get_attribute(
                     "#task-panel-text", "data-tooltip"
                 )
@@ -153,8 +147,6 @@ def test_live_remote_task_panel_hover_tooltip(tmp_path: Path) -> None:
                     f"in data-tooltip; got: {tooltip_attr!r}"
                 )
 
-                # Real hover: move the mouse onto the task text and
-                # wait out the 400 ms show delay + fade-in.
                 page.hover("#task-panel-text")
                 page.wait_for_selector("#custom-tooltip.visible")
                 page.wait_for_function(
@@ -178,7 +170,6 @@ def test_live_remote_task_panel_hover_tooltip(tmp_path: Path) -> None:
                     }"""
                 )
 
-                # Moving the mouse away must hide the tooltip again.
                 page.mouse.move(5, 5)
                 page.wait_for_function(
                     "() => !document.getElementById('custom-tooltip')"

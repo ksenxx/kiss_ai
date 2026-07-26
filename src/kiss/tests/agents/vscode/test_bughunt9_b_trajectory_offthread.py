@@ -91,7 +91,6 @@ class TestTrajectoryEndpointsOffThread(IsolatedAsyncioTestCase):
         self._orig_get_jobs_root = web_server.get_jobs_root
         web_server.get_jobs_root = lambda *a, **k: self._jobs_root
 
-        # Wrap the real helpers with thin recorders (identical behavior).
         self._list_threads: list[int] = []
         self._load_threads: list[int] = []
         self._orig_list_jobs = web_server.list_jobs
@@ -122,7 +121,6 @@ class TestTrajectoryEndpointsOffThread(IsolatedAsyncioTestCase):
             work_dir=tempfile.mkdtemp(),
         )
         await self.server.start_async()
-        # IsolatedAsyncioTestCase runs the server on this very loop/thread.
         self._loop_thread = threading.get_ident()
 
     async def asyncTearDown(self) -> None:

@@ -281,8 +281,6 @@ class TestWorkDirConfigRoundTrip(IsolatedAsyncioTestCase):
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect_persistence(self.tmpdir)
 
-        # Isolate config.json so this test never sees (or pollutes)
-        # values saved by other tests in the same process.
         self._orig_cfg_dir = vc.CONFIG_DIR
         self._orig_cfg_path = vc.CONFIG_PATH
         vc.CONFIG_DIR = Path(self.tmpdir) / "config"

@@ -69,10 +69,6 @@ class TestGitCommitAfterWorktreeCleanup(unittest.TestCase):
         Path(self.repo).mkdir(parents=True, exist_ok=True)
         _init_repo(self.repo)
 
-        # Simulate a removed worktree directory.  The stale path lives
-        # under ``<repo>/.kiss-worktrees/kiss_wt-…`` and does NOT exist
-        # on disk — exactly what the frontend captures during a task
-        # whose worktree was cleaned up after the task ended.
         self.stale_wt_dir = str(
             Path(self.repo) / ".kiss-worktrees" / "kiss_wt-1781574606-49147541",
         )
@@ -86,7 +82,6 @@ class TestGitCommitAfterWorktreeCleanup(unittest.TestCase):
 
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
-        # Dirty the main working tree so a real commit is possible.
         Path(self.repo, "edited.txt").write_text("dirty content\n")
 
     def tearDown(self) -> None:
@@ -117,13 +112,11 @@ class TestGitCommitAfterWorktreeCleanup(unittest.TestCase):
         assert done.get("success") is True, f"commit should succeed: {done}"
         assert done.get("committed") is True, f"should have committed: {done}"
 
-        # HEAD must have advanced in the parent repo.
         after_head = _run_git(self.repo, "rev-parse", "HEAD").stdout.strip()
         assert after_head != before_head, (
             f"HEAD did not advance: before={before_head} after={after_head}"
         )
 
-        # Working tree must now be clean.
         status = _run_git(self.repo, "status", "--porcelain")
         assert status.stdout.strip() == "", (
             f"working tree still dirty: {status.stdout!r}"

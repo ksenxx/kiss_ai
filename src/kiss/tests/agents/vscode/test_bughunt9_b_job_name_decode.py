@@ -72,7 +72,6 @@ class TestJobNameSingleDecode(IsolatedAsyncioTestCase):
 
         self._jobs_root = Path(tempfile.mkdtemp(prefix="kiss_traj_pct_")) / "jobs"
         self._jobs_root.mkdir(parents=True)
-        # A job directory whose on-disk name contains a literal ``%20``.
         _write_trajectory(self._jobs_root, "job%20a", "Agent Pct")
         _write_trajectory(self._jobs_root, "job_plain", "Agent Plain")
         self._orig_get_jobs_root = web_server.get_jobs_root

@@ -54,8 +54,6 @@ SUPPORTED_MIME_TYPES = {
     "video/quicktime",
 }
 
-# Content-part types produced by the OpenAI Responses API
-# (:class:`OpenAICompatibleModel2` stores its conversation in this shape).
 _RESPONSES_PART_TYPES = {
     "input_text",
     "output_text",
@@ -107,9 +105,6 @@ def _responses_parts_to_chat_parts(parts: list[Any]) -> list[dict[str, Any]]:
                 }
             )
         else:
-            # ``input_audio`` has the same shape in both APIs; anything
-            # else is already Chat-Completions-shaped (text / image_url /
-            # file / tool_use / ...) and passes through unchanged.
             out.append(part)
     return out
 
@@ -186,9 +181,6 @@ def responses_items_to_chat_messages(conversation: list[Any]) -> list[Any]:
             )
             continue
         if role is None:
-            # Standalone non-message items (``reasoning``, the internal
-            # ``_kiss_pending_tool_result_attachment`` sentinel, ...) are
-            # hidden provider state with no Chat-Completions equivalent.
             continue
         content = item.get("content")
         if isinstance(content, list) and any(
@@ -203,9 +195,6 @@ def responses_items_to_chat_messages(conversation: list[Any]) -> list[Any]:
             out.append(converted)
             continue
         if itype == "message":
-            # Responses ``message`` item whose content is already
-            # chat-compatible: keep only the Chat-Completions keys
-            # (``type`` / ``id`` / ``status`` are Responses-only).
             out.append({"role": role, "content": content})
             continue
         out.append(item)
@@ -278,22 +267,11 @@ class Attachment:
         return f"data:{self.mime_type};base64,{self.to_base64()}"
 
 
-# Tool results that include binary file contents (e.g. ``Read`` on a PNG)
-# embed each file inside these sentinel markers so that model implementations
-# can lift the payload into a real image/document content block instead of
-# shipping kilobytes of base64 as plain text.
 BINARY_ATTACHMENT_OPEN_RE = re.compile(
     r"<<KISS_BINARY_ATTACHMENT mime_type=([^>\s]+)>>"
 )
 BINARY_ATTACHMENT_CLOSE = "<</KISS_BINARY_ATTACHMENT>>"
 
-# MIME types the ``Read`` tool is willing to embed inline in its return
-# value.  Set equal to :data:`SUPPORTED_MIME_TYPES` so audio/video are
-# also encoded as sentinel-wrapped base64; each model backend then decides
-# whether it can actually ingest the bytes (e.g. OpenAI Chat Completions
-# accepts ``input_audio``; Gemini accepts any ``inline_data`` MIME;
-# Anthropic transcribes audio to text and drops video; text-CLI backends
-# drop the bytes after lifting the placeholder text).
 READ_TOOL_BINARY_MIME_TYPES = set(SUPPORTED_MIME_TYPES)
 
 
@@ -658,8 +636,6 @@ class Model(ABC):
             if itype == "reasoning":
                 continue
             if native and msg.get("role") is not None:
-                # The trailing Responses-API ``function_call`` run ended
-                # at this role-bearing message.
                 break
             if msg.get("role") == "assistant":
                 if msg.get("tool_calls"):
@@ -692,10 +668,6 @@ class Model(ABC):
 
         for i, (func_name, result_dict) in enumerate(function_results):
             result_content = _tool_result_to_string(result_dict)
-            # Strip binary attachment payloads — the default OpenAI-style
-            # ``role: tool`` message does not accept image content blocks,
-            # so we drop the base64 bytes and keep only the placeholder
-            # text so the conversation does not balloon to megabytes.
             result_content, _ = parse_binary_attachments(result_content)
             if self.usage_info_for_messages:
                 result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
@@ -786,10 +758,6 @@ class Model(ABC):
         return tools_schema if tools_schema is not None else self._build_openai_tools_schema(
             function_map
         )
-
-    # =========================================================================
-    # Helper methods for building tool schemas (shared across implementations)
-    # ========================================================================
 
     def _build_openai_tools_schema(
         self, function_map: dict[str, Callable[..., Any]]
@@ -939,11 +907,6 @@ class CLITextModel(Model):
     parsing.
     """
 
-    # Concrete transports override both attributes so inherited methods
-    # preserve the exact class label and provider-module logger used before
-    # this plumbing moved into the shared base.  In particular, subclasses
-    # of ClaudeCodeModel/CodexModel must retain the concrete transport name
-    # rather than exposing their own subclass name in warnings/errors.
     _cli_model_name = "CLITextModel"
     _cli_logger = logger
 
@@ -1123,19 +1086,12 @@ def _iter_balanced_json_objects(
                     break
             j += 1
         if end == -1:
-            # Unbalanced — this "{" (e.g. a stray brace in prose) never
-            # closes, but a later "{" may still start a valid object.
-            # Resume the scan at the next "{" instead of aborting.
             nxt = content.find("{", i + 1)
             if nxt == -1:
                 break
             i = nxt
             continue
         try:
-            # ``strict=False`` permits raw control characters (e.g. literal
-            # newlines, tabs) inside JSON string values.  Reasoning models
-            # such as ``cc/opus`` routinely emit unescaped newlines inside
-            # ``summary`` arguments, which strict JSON would reject.
             parsed = json.loads(content[i:end], strict=False)
         except json.JSONDecodeError:
             i += 1
@@ -1208,7 +1164,6 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
                 try:
                     key = (tc["name"], json.dumps(arguments, sort_keys=True))
                 except TypeError:
-                    # Non-JSON-serializable args — fall back to repr for keying.
                     key = (tc["name"], repr(arguments))
                 if key in seen:
                     continue
@@ -1224,8 +1179,6 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
     return function_calls
 
 
-# Matches an empty fenced code block left behind after the JSON inside it
-# has been stripped — e.g. ``"```json\n\n```"`` or ``"```\n\n```"``.
 _EMPTY_FENCE_PATTERN = re.compile(r"```(?:json)?\s*```", re.DOTALL)
 
 

@@ -54,10 +54,8 @@ class TestShutdownSignalRegistryRace(unittest.TestCase):
     def setUp(self) -> None:
         self.server = RemoteAccessServer(
             host="127.0.0.1",
-            port=0,  # Never bound — we only test the signal handler.
+            port=0,
         )
-        # Quarantine: snapshot whatever entries already exist (test
-        # isolation) so we restore them on tearDown.
         with _RunningAgentState._registry_lock:
             self._preserved = dict(_RunningAgentState.running_agent_states)
             _RunningAgentState.running_agent_states.clear()
@@ -79,23 +77,13 @@ class TestShutdownSignalRegistryRace(unittest.TestCase):
         stop = threading.Event()
         errors: list[BaseException] = []
 
-        # Pre-load a set of stable entries that yield the GIL on
-        # every ``is_task_active`` access.  Without a GIL yield, the
-        # C-level ``dict.items()`` iterator runs to completion in a
-        # single GIL slice on small dicts, masking the race.
-        # ``_GilYieldingTab`` mimics the public surface of
-        # :class:`_RunningAgentState` that the signal handler reads —
-        # ``is_task_active``, ``task_history_id``, ``last_task_id`` —
-        # and calls :func:`time.sleep` ``(0)`` on every attribute read
-        # to give the worker thread a chance to mutate the dict
-        # mid-iteration, reliably exposing the race within ~2 s.
         class _GilYieldingTab:
             is_task_active = False
             task_history_id = None
             last_task_id = None
 
             def __getattribute__(self, name: str) -> object:
-                time.sleep(0)  # yield the GIL on every access
+                time.sleep(0)
                 return object.__getattribute__(self, name)
 
         template = cast(_RunningAgentState, _GilYieldingTab())
@@ -122,9 +110,6 @@ class TestShutdownSignalRegistryRace(unittest.TestCase):
             i = 0
             try:
                 while not stop.is_set():
-                    # Burst many mutations so a GIL switch landing
-                    # mid-iteration in the handler is overwhelmingly
-                    # likely to observe a different dict size.
                     for j in range(50):
                         key = f"churn-{i}-{j}"
                         _RunningAgentState.running_agent_states[key] = (
@@ -147,8 +132,6 @@ class TestShutdownSignalRegistryRace(unittest.TestCase):
         try:
             while time.monotonic() < deadline:
                 try:
-                    # SIGHUP path: logs and returns without raising,
-                    # so we can call it in a tight loop.
                     self.server._handle_shutdown_signal(signal.SIGHUP)
                 except BaseException as exc:  # noqa: BLE001
                     handler_errors.append(exc)
@@ -157,18 +140,10 @@ class TestShutdownSignalRegistryRace(unittest.TestCase):
             stop.set()
             churn_thread.join(timeout=2.0)
 
-        # The churn thread itself must never have crashed (only
-        # surfaces non-race bugs in registry mutation).
         self.assertFalse(
             errors,
             f"Churn thread raised: {errors!r}",
         )
-        # With the fix in place, the handler's per-attribute GIL
-        # yield on a 200-entry registry makes each invocation
-        # comparatively slow — five invocations in ~2 s is enough
-        # to assert that we exercised the iteration code path
-        # multiple times.  The race-exposure variant (no fix)
-        # produced ~50 failed RuntimeErrors at this threshold.
         self.assertGreater(
             invocations,
             3,

@@ -54,19 +54,16 @@ def _find_project_root() -> Path:
     copy of the project would write to the extension directory instead of
     the actual source repository.
     """
-    # 1. KISS_WORKDIR env var — set by the agent runtime
     workdir = os.environ.get("KISS_WORKDIR", "")
     if workdir:
         p = Path(workdir)
         if (p / _EXPECTED_SUBPATH).exists():
             return p
 
-    # 2. CWD with .git marker (a real git checkout, not a bundled copy)
     cwd = Path.cwd()
     if (cwd / ".git").exists() and (cwd / _EXPECTED_SUBPATH).exists():
         return cwd
 
-    # 3. Fallback: derive from script location
     return Path(__file__).resolve().parent.parent.parent.parent
 
 
@@ -76,12 +73,6 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 MODEL_INFO_PATH = PROJECT_ROOT / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json"
 README_PATH = PROJECT_ROOT / "README.md"
 
-# Provider prefixes we intentionally exclude from the bundled catalog.
-# These are removed on every run regardless of whether they still appear
-# in upstream APIs.  Currently used to keep MiniMax models out: we replaced
-# MiniMax API-key support with Z.AI and Moonshot AI, and several tests
-# (``test_zai_moonshot_keys.test_model_info_json_has_no_minimax_entries``)
-# assert that no minimax entries leak back into ``MODEL_INFO.json``.
 _EXCLUDED_PREFIXES: tuple[str, ...] = (
     "minimax-",
     "MiniMaxAI/",
@@ -90,9 +81,6 @@ _EXCLUDED_PREFIXES: tuple[str, ...] = (
 
 _SSL_CTX = ssl.create_default_context()
 
-# Context lengths at or above this threshold are capped at _CAPPED_CONTEXT_LENGTH
-# in the bundled catalog (both for freshly fetched vendor data and for entries
-# already present in MODEL_INFO.json).
 _CONTEXT_CAP_THRESHOLD = 1_000_000
 _CAPPED_CONTEXT_LENGTH = 500_000
 
@@ -369,7 +357,7 @@ def _tiny_wav_bytes() -> bytes:
     import struct
 
     sample_rate = 8000
-    data = b"\x00\x00" * (sample_rate // 10)  # 0.1 s of silence
+    data = b"\x00\x00" * (sample_rate // 10)
     fmt_chunk = b"fmt " + struct.pack(
         "<IHHIIHH", 16, 1, 1, sample_rate, sample_rate * 2, 2, 16
     )
@@ -1192,8 +1180,6 @@ def apply_updates_to_file(
     for name in deprecated_names:
         if data.pop(name, None) is not None:
             removed += 1
-        # Also drop any auto-generated xhigh sibling so deprecation is
-        # complete (the sibling is meaningless without its base).
         if data.pop(name + _XHIGH_SUFFIX, None) is not None:
             removed += 1
 
@@ -1246,10 +1232,6 @@ def apply_updates_to_file(
         return
     _write_model_info_json(MODEL_INFO_PATH, data)
     print(f"  Written to {MODEL_INFO_PATH}")
-    # ``~/.kiss/MODEL_INFO.json`` is no longer maintained — the bundled
-    # MODEL_INFO.json is the runtime source of truth and is read directly
-    # from the installed package by ``kiss.core.models.model_info``.  User
-    # overrides live in ``~/.kiss/MY_MODELS.json`` instead.
 
 
 def _readme_provider_category(model_name: str) -> str:

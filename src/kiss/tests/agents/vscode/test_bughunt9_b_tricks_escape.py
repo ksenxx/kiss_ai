@@ -57,8 +57,6 @@ class TestTricksJsonEscaped(IsolatedAsyncioTestCase):
             self._orig_config = CONFIG_PATH.read_text()
         save_config({"remote_password": ""})
 
-        # Pin the tricks sources to a private temp dir BEFORE the server
-        # builds its HTML page (RemoteAccessServer caches the page at init).
         kiss_dir = Path(tempfile.mkdtemp(prefix="kiss_tricks_test_")) / ".kiss"
         kiss_dir.mkdir(parents=True)
         fake_path = kiss_dir / "fake_INJECTIONS.md"
@@ -117,9 +115,6 @@ class TestTricksJsonEscaped(IsolatedAsyncioTestCase):
         blob = line.split(marker, 1)[1]
         end = blob.rindex(";</script>")
         payload = blob[:end]
-        # The raw sequence ``</`` inside the inline script terminates it
-        # in a browser — it must be escaped as ``<\/``.
         self.assertNotIn("</", payload)
-        # Round-trip: unescaping yields valid JSON containing the trick.
         tricks = json.loads(payload.replace("<\\/", "</"))
         self.assertIn(_TRICK_WITH_SCRIPT, tricks)

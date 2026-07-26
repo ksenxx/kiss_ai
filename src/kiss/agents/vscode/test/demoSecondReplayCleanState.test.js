@@ -2,33 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end tests (real chat.html + main.js + demo.js in jsdom, a
-// recording acquireVsCodeApi stub standing in for the extension host)
-// for the demo-mode invariant that a finished OR stopped demo replay
-// MUST NOT leave any state behind that interferes with the next demo:
-//
-//   * ZOMBIE REPLAY: stopping demo A while its replay coroutine is
-//     suspended at an ``await`` (panel-show sleep) and then starting
-//     demo B must NOT let A's coroutine resume when B resets the
-//     shared cancel flag — pre-fix, A's remaining panels rendered
-//     interleaved into B's output and A's epilogue then tore down the
-//     running-demo UI (spinner, demo-playing class, _demoActive)
-//     while B was still playing, so B's own task_events fell into the
-//     instant replayTaskEvents path and B hung forever.
-//
-//   * STALE EVENT RESOLVER: stopping demo A while its task_events
-//     request is still in flight must clear ``_demoApi.resolveEvents``
-//     (and wake the suspended fetch) so A's LATE reply can never be
-//     mistaken for demo B's events.
-//
-//   * CLEAN COMPLETION: a demo that finishes naturally leaves no
-//     active/paused/resolver state and the next demo replays its own
-//     events only.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/demoSecondReplayCleanState.test.js
 
 'use strict';
 
@@ -39,13 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom window running the production chat webview: the real
- * ``chat.html`` body, ``panelCopy.js``, ``main.js`` AND ``demo.js``
- * evaluated in the window, plus a recording ``acquireVsCodeApi`` stub.
- * ``win._onPosted`` (settable per test) observes every posted message
- * so tests can answer like the extension host / daemon would.
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -83,9 +49,6 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  // Evaluate api.js separately so V8 coverage offsets for the
-
-  // sourceURL-labelled main.js eval below start at character 0.
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(
@@ -95,7 +58,6 @@ fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   return {win, posted};
 }
 
-/** Install a no-op recording Audio implementation (clips end in 5ms). */
 function installAudio(win) {
   const players = [];
   win.Audio = function Audio(src) {
@@ -112,7 +74,6 @@ function installAudio(win) {
   return players;
 }
 
-/** Install a no-op Web Speech API so nothing can hang on speech. */
 function installSpeech(win) {
   win.SpeechSynthesisUtterance = function (text) {
     this.text = text;
@@ -130,7 +91,6 @@ function installSpeech(win) {
   };
 }
 
-/** Deliver a daemon/extension-host message to the webview. */
 function dispatch(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
@@ -150,7 +110,6 @@ async function waitUntil(pred, timeoutMs, label) {
   throw new Error('timed out waiting for ' + label);
 }
 
-// Two independent history tasks, each in its OWN chat.
 const SESSIONS = [
   {
     id: 'chat-B',
@@ -170,12 +129,6 @@ const SESSIONS = [
   },
 ];
 
-/**
- * Task A's recorded events: FOUR panel groups (thought, tool call,
- * thought, result) so that stopping the replay during the first
- * group's post-render pause leaves three distinctly-markered groups
- * that a zombie coroutine would go on to render.
- */
 function eventsA() {
   return [
     {type: 'thinking_start'},
@@ -193,12 +146,6 @@ function eventsA() {
   ];
 }
 
-/**
- * Task B's recorded events: a markered thought and a LONG result so B
- * keeps streaming for several seconds — the window in which a zombie
- * replay of task A would (pre-fix) interleave its panels and tear
- * down the running-demo UI.
- */
 function eventsB() {
   return [
     {type: 'thinking_start'},
@@ -214,13 +161,6 @@ function eventsB() {
 
 const EVENTS_BY_TASK = {a1: eventsA, b1: eventsB};
 
-/**
- * Enable demo mode, deliver SESSIONS and install a resumeSession
- * responder that answers each request with that task's own events
- * after 10ms.  Tasks listed in *skipTaskIds* are NOT answered — their
- * requests are recorded in the returned ``pending`` array so a test
- * can deliver a LATE reply by hand.
- */
 function setupDemo(win, skipTaskIds) {
   const skip = skipTaskIds || [];
   dispatch(win, {type: 'configData', config: {demo_mode: true}, apiKeys: {}});
@@ -252,7 +192,6 @@ function setupDemo(win, skipTaskIds) {
   return pending;
 }
 
-/** Click the history row whose text contains *label*. */
 function clickHistoryRow(win, label) {
   const rows = Array.from(
     win.document.querySelectorAll('#history-list > div'),
@@ -262,7 +201,6 @@ function clickHistoryRow(win, label) {
   row.click();
 }
 
-/** Text content of the live (active-tab) output area. */
 function outputText(win) {
   const O = win.document.getElementById('output');
   return O ? O.textContent : '';
@@ -282,8 +220,6 @@ async function testStoppedDemoDoesNotZombieIntoNextDemo() {
   installSpeech(win);
   setupDemo(win);
 
-  // Start demo A and let its first panel render; the replay coroutine
-  // is now suspended in the post-render show pause.
   clickHistoryRow(win, 'Demo task A');
   await waitUntil(
     () => outputText(win).indexOf('A-THOUGHT-ONE') !== -1,
@@ -291,7 +227,6 @@ async function testStoppedDemoDoesNotZombieIntoNextDemo() {
     "demo A's first panel",
   );
 
-  // Stop demo A mid-pause, then immediately start demo B.
   win.document.getElementById('stop-btn').click();
   assert.strictEqual(win._demoApi.active, false, 'stop cancels demo A');
   clickHistoryRow(win, 'Demo task B');
@@ -301,10 +236,6 @@ async function testStoppedDemoDoesNotZombieIntoNextDemo() {
     "demo B's first panel",
   );
 
-  // Demo A's coroutine wakes from its ~500ms pause while B plays.  It
-  // must observe the cancel and exit: none of A's remaining panels may
-  // render into B's output, and A's epilogue must NOT tear down the
-  // running-demo state under B.
   await sleep(1800);
   const text = outputText(win);
   assert.strictEqual(
@@ -333,7 +264,6 @@ async function testStoppedDemoDoesNotZombieIntoNextDemo() {
     "demo B's demo-playing UI must survive stopped demo A's epilogue",
   );
 
-  // Demo B runs to its natural end with only its own content.
   await waitForDemoEnd(win, 30000);
   const finalText = outputText(win);
   assert.ok(
@@ -356,8 +286,6 @@ async function testStopDuringEventFetchLeavesNoStaleResolver() {
   const {win} = makeWebview();
   installAudio(win);
   installSpeech(win);
-  // Never answer task A's resumeSession — the stop happens while the
-  // event fetch is still in flight.
   const pendingA = setupDemo(win, ['a1']);
 
   clickHistoryRow(win, 'Demo task A');
@@ -376,7 +304,6 @@ async function testStopDuringEventFetchLeavesNoStaleResolver() {
       "demo's (or a live task's) task_events",
   );
 
-  // Start demo B; it must replay normally.
   clickHistoryRow(win, 'Demo task B');
   await waitUntil(
     () => outputText(win).indexOf('B-THOUGHT-ONE') !== -1,
@@ -384,8 +311,6 @@ async function testStopDuringEventFetchLeavesNoStaleResolver() {
     "demo B's first panel",
   );
 
-  // Task A's LATE reply arrives now (addressed to A's old tab).  It
-  // must not corrupt demo B's output.
   dispatch(win, {
     type: 'task_events',
     tabId: pendingA[0].tabId,
@@ -414,7 +339,6 @@ async function testMismatchedActiveTabReplyDoesNotSettleDemoFetch() {
   const {win} = makeWebview();
   installAudio(win);
   installSpeech(win);
-  // Never auto-answer task B — its reply is delivered by hand.
   const pendingB = setupDemo(win, ['b1']);
 
   clickHistoryRow(win, 'Demo task B');
@@ -424,9 +348,6 @@ async function testMismatchedActiveTabReplyDoesNotSettleDemoFetch() {
     "demo B's resumeSession request",
   );
 
-  // A DIFFERENT task's late reply arrives addressed to B's own
-  // (active) tab — e.g. a stopped demo's reply after a legacy
-  // same-tab restart.  It must NOT settle B's fetch or render.
   dispatch(win, {
     type: 'task_events',
     tabId: pendingB[0].tabId,
@@ -447,7 +368,6 @@ async function testMismatchedActiveTabReplyDoesNotSettleDemoFetch() {
     "demo B's fetch must still be pending after the mismatched reply",
   );
 
-  // The RIGHT reply settles the fetch and B replays to completion.
   dispatch(win, {
     type: 'task_events',
     tabId: pendingB[0].tabId,
@@ -482,7 +402,6 @@ async function testCompletedDemoLeavesCleanStateForNextDemo() {
   installSpeech(win);
   setupDemo(win);
 
-  // Demo A runs to its natural end.
   clickHistoryRow(win, 'Demo task A');
   await waitUntil(
     () => outputText(win).indexOf('A-RESULT-FINAL') !== -1,
@@ -491,7 +410,6 @@ async function testCompletedDemoLeavesCleanStateForNextDemo() {
   );
   await waitForDemoEnd(win, 30000);
 
-  // Every piece of demo state must be back to idle.
   assert.strictEqual(win._demoApi.active, false, 'demo A inactive');
   assert.strictEqual(
     win._demoApi.resolveEvents,
@@ -504,7 +422,6 @@ async function testCompletedDemoLeavesCleanStateForNextDemo() {
     'demo UI restored after A',
   );
 
-  // Demo B replays cleanly: only its own events, and ends idle.
   clickHistoryRow(win, 'Demo task B');
   await waitUntil(
     () => outputText(win).indexOf('B-THOUGHT-ONE') !== -1,
@@ -531,14 +448,6 @@ async function testCompletedDemoLeavesCleanStateForNextDemo() {
   console.log('PASS: completed demo leaves clean state for the next demo');
 }
 
-/**
- * Build a jsdom window with ONLY demo.js and a stub host api (like
- * demoPauseOnTalk.test.js) so tests can inject faults — the
- * full-webview harness cannot make main.js hooks throw.  The stub
- * answers each resumeSession with ``api.eventsToDeliver`` after 10ms
- * unless ``api.autoRespond`` is false; ``api.throwOnProcess`` makes
- * ``processEvent`` throw.  ``calls`` records processed events.
- */
 function makeStubDemoWindow() {
   const dom = new JSDOM(
     '<!DOCTYPE html><html><body><div id="output"></div></body></html>',
@@ -598,9 +507,6 @@ async function testThrowingHostHookStillRestoresIdleState() {
     {type: 'result', summary: 'STUB-RESULT-OK', total_tokens: 1, cost: '$0'},
   ];
 
-  // Demo #1: the host's processEvent THROWS.  The replay must still
-  // end with every piece of demo state back to idle — a stuck
-  // api.active would block every later demo forever.
   api.throwOnProcess = true;
   await win._startDemoReplay([
     {id: 7, task_id: 't7', has_events: true, preview: 'faulty', ts: 1},
@@ -617,7 +523,6 @@ async function testThrowingHostHookStillRestoresIdleState() {
   );
   assert.strictEqual(win._isDemoPaused(), false, 'not paused after fault');
 
-  // Demo #2 (fault cleared) must replay to completion.
   api.throwOnProcess = false;
   await win._startDemoReplay([
     {id: 7, task_id: 't7', has_events: true, preview: 'healthy', ts: 1},
@@ -637,8 +542,6 @@ async function testStaleCapturedResolverCannotClobberNextFetch() {
   const {win, api, calls} = makeStubDemoWindow();
   api.autoRespond = false;
 
-  // Demo A suspends on its event fetch; capture its deliver hook the
-  // way a late caller would.
   const replayA = win._startDemoReplay([
     {id: 1, task_id: 'a1', has_events: true, preview: 'task A', ts: 1},
   ]);
@@ -649,7 +552,6 @@ async function testStaleCapturedResolverCannotClobberNextFetch() {
   );
   const staleDeliver = api.resolveEvents;
 
-  // Stop A (clears the hook), then start demo B up to ITS fetch.
   win._cancelDemoReplay();
   assert.strictEqual(api.resolveEvents, null, 'cancel cleared the hook');
   await replayA;
@@ -663,9 +565,6 @@ async function testStaleCapturedResolverCannotClobberNextFetch() {
   );
   const bDeliver = api.resolveEvents;
 
-  // A's LATE captured deliver fires now.  It must settle only its own
-  // abandoned promise — clobbering B's hook would hang B forever, and
-  // rendering A's events would corrupt B's output.
   staleDeliver([
     {type: 'thinking_start'},
     {type: 'thinking_delta', text: 'A-STALE'},
@@ -681,7 +580,6 @@ async function testStaleCapturedResolverCannotClobberNextFetch() {
     "the cancelled demo's late events must not be rendered",
   );
 
-  // B's own events arrive and B completes normally.
   bDeliver([
     {type: 'thinking_start'},
     {type: 'thinking_delta', text: 'B-LIVE'},
@@ -705,8 +603,6 @@ async function testStaleCapturedResolverCannotClobberNextFetch() {
   await testThrowingHostHookStillRestoresIdleState();
   await testStaleCapturedResolverCannotClobberNextFetch();
   console.log('demoSecondReplayCleanState.test.js: all tests passed');
-  // Webview timers keep the node event loop alive; match the other
-  // jsdom e2e demo tests and exit explicitly once assertions pass.
   process.exit(0);
 })().catch(err => {
   console.error(err);

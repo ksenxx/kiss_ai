@@ -183,7 +183,6 @@ class ReadyFanoutWorkDirTest(_ServerTestBase):
         dir_other = Path(self.tmpdir) / "inst_other"
         dir_mine.mkdir()
         dir_other.mkdir()
-        # Another instance persisted its folder globally.
         vc.save_config({"work_dir": str(dir_other)})
 
         ws = await self._connect_ok()
@@ -229,22 +228,15 @@ class AuthFailureRegistryGrowthTest(_ServerTestBase):
     async def test_failed_auth_still_recorded_and_lockout_works(self) -> None:
         """Real failures are still tracked and still trigger lockout."""
         vc.save_config({"remote_password": "s3cret"})
-        # 5 failures (each connection allows 2 attempts; drive 3
-        # connections of 2 bad attempts each = 6 recorded failures).
         for _ in range(3):
             ws = await self._connect("wrong")
-            # First failure elicits an auth_required retry prompt.
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_required")
             await ws.send(json.dumps({"type": "auth", "password": "wrong"}))
-            # Second failure closes the connection (error event first).
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "error")
             await ws.close()
         self.assertTrue(self.server._is_auth_locked("127.0.0.1"))
-        # A locked IP is refused outright: the server closes the
-        # socket without ever sending auth_ok (the send or the recv
-        # observes the close, depending on timing).
         with self.assertRaises(Exception):
             ws = await self._connect("s3cret")
             json.loads(await asyncio.wait_for(ws.recv(), timeout=5))

@@ -46,12 +46,6 @@ class RecordingPrinter(Printer):
     def __init__(self) -> None:
         super().__init__()
         self.events: list[tuple[str, Any, dict[str, Any]]] = []
-        # ``KISSAgent._reset`` reads ``printer.token_callback`` and — when
-        # truthy — routes the model call through the streaming code path.
-        # Our fake OpenAI server returns plain JSON (not SSE), so force the
-        # non-streaming path by overriding the abstract method with a
-        # ``None`` instance attribute (see ``openai_compatible_model.py``:
-        # ``if self.token_callback is None: fallback to non-streaming``).
         self.token_callback = None  # type: ignore[method-assign,assignment]
 
     def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:  # noqa: A002
@@ -59,8 +53,6 @@ class RecordingPrinter(Printer):
         return str(content)
 
     def token_callback(self, token: str) -> None:  # type: ignore[no-redef]
-        # Concrete implementation to satisfy the ABC; the instance attribute
-        # assigned in ``__init__`` shadows it at runtime.
         return None
 
     def reset(self) -> None:
@@ -188,10 +180,6 @@ class TestFailureAfterContinueEmitsMergedFinalResult:
         assert parsed["success"] is False
         assert parsed["is_continue"] is False
 
-        # The LAST Result event on the wire is what the front-end renders
-        # into the Result panel — assert it carries the merged failure.
-        # Exactly 3 events: 2 inner per-session Results (one per finish
-        # tool call) + 1 outer merged Result from RelentlessAgent.
         result_events = printer.result_events()
         assert len(result_events) == 3, (
             "expected 2 inner + 1 outer merged Result; "
@@ -225,9 +213,6 @@ class TestExhaustionEmitsMergedFinalResult:
             _run_agent([resp_continue], max_sub_sessions=2, printer=printer)
 
         result_events = printer.result_events()
-        # Exactly 3 events: 2 inner per-session Results (both
-        # is_continue=True) + 1 outer merged exhaustion Result
-        # (is_continue=False).
         assert len(result_events) == 3, (
             f"expected 2 inner + 1 outer exhaustion Result; got {len(result_events)}"
         )
@@ -240,11 +225,8 @@ class TestExhaustionEmitsMergedFinalResult:
         assert "### Previous Session 1" in summary
         assert "### Previous Session 2" in summary
         assert "step done" in summary
-        # Exhaustion layout uses trailing separator + banner (no "Final
-        # Session" header), matching the front-end's fallback split rule.
         assert "### Final Session" not in summary
         assert summary.rstrip().endswith("Task failed after 2 sub-sessions")
-        # Merged event uses accumulated totals from the outer agent.
         assert "step_count" in kwargs
         assert "total_tokens" in kwargs
         assert "cost" in kwargs
@@ -266,7 +248,6 @@ class TestSingleSessionDoesNotEmitExtraFinalResult:
 
         parsed = yaml.safe_load(result)
         assert parsed["success"] is True
-        # Exactly one Result event: the inner per-session emit.
         result_events = printer.result_events()
         assert len(result_events) == 1, (
             f"expected exactly one Result event for single-session success; "
@@ -357,16 +338,8 @@ class TestMergedResultMetricsAreNotDoubleCounted:
 
         result_events = printer.result_events()
         assert len(result_events) == 3
-        # Inner Result of session 2 has: raw total_tokens = session-2
-        # tokens; resolved = raw + tokens_offset (= session-1 tokens),
-        # which is the correct cumulative aggregate after session 2.
         _, inner_session2_kw = result_events[1]
         inner_session2_tokens = int(inner_session2_kw["total_tokens"])
-        # Merged Result: resolved value MUST equal the cumulative
-        # aggregate — same as the inner session-2 resolved value (both
-        # reflect state at end of the terminal session).  If offsets
-        # weren't zeroed during the merged emit, this would be
-        # ``inner_session2_tokens + (session-1 tokens) = double-counted``.
         _, merged_kw = result_events[2]
         merged_tokens = int(merged_kw["total_tokens"])
         assert merged_tokens == inner_session2_tokens, (
@@ -375,7 +348,6 @@ class TestMergedResultMetricsAreNotDoubleCounted:
             f"({inner_session2_tokens}); a larger value indicates the "
             f"printer's tokens_offset was double-counted."
         )
-        # Same invariant for steps.
         inner_session2_steps = int(inner_session2_kw["step_count"])
         merged_steps = int(merged_kw["step_count"])
         assert merged_steps == inner_session2_steps, (
@@ -383,7 +355,6 @@ class TestMergedResultMetricsAreNotDoubleCounted:
             f"the inner terminal-session resolved step_count "
             f"({inner_session2_steps})."
         )
-        # Cost invariant.
         inner_session2_cost = str(inner_session2_kw["cost"])
         merged_cost = str(merged_kw["cost"])
         assert merged_cost == inner_session2_cost, (
@@ -396,15 +367,10 @@ class TestMergedResultMetricsAreNotDoubleCounted:
         restored to whatever they were before — the emit is a temporary
         adjustment, not a permanent reset."""
         printer = OffsetAwarePrinter()
-        # Pre-set non-zero offsets to prove they survive the emit.
-        # RelentlessAgent's per-session offset assignments happen inside
-        # ``perform_task`` and will overwrite these; here we just verify
-        # the SAVE/RESTORE contract on the helper directly.
         printer.tokens_offset = 999
         printer.budget_offset = 9.99
         printer.steps_offset = 7
         agent = RelentlessAgent("OffsetRestoreTest")
-        # Minimal manual reset to attach a printer without running a task.
         agent.printer = printer
         agent.total_steps = 3
         agent.total_tokens_used = 42
@@ -442,9 +408,7 @@ class TestEmptyTerminalSummaryStillSplittable:
         summary = parsed["summary"]
         assert "### Previous Session 1" in summary
         assert "\n\n---\n\n" in summary
-        # Placeholder ensures the separator + a non-empty final segment.
         assert "### Final Session" in summary
-        # Splittable by the front-end rule.
         head, sep, tail = summary.rpartition("\n\n---\n\n")
         assert sep == "\n\n---\n\n"
         assert head.strip()
@@ -470,9 +434,6 @@ class TestExhaustionSummaryHelper:
         assert summary == (
             f"{_prior_sessions_section(['did A', 'did B'])}\n\n---\n\n{banner}"
         )
-        # The trailing "\n\n---\n\n<banner>" layout is what the front-end
-        # `splitMultiSessionSummary` fallback rule detects (no "### Final
-        # Session" header).
         assert summary.endswith(f"\n\n---\n\n{banner}")
         assert "### Previous Session 1" in summary
         assert "### Previous Session 2" in summary

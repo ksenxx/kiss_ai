@@ -75,12 +75,6 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
-# ``get_jobs_root`` and the ``kiss.viz_trajectory.server`` helpers are
-# re-exported: the server API's HTTP data methods
-# (``kiss.server.sorcar.ServerApi.trajectory_jobs`` /
-# ``job_trajectories``) resolve them through THIS module's namespace,
-# which is the established seam tests use to redirect the jobs root
-# to a fixture directory.
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
 from kiss.core.vscode_config import load_config, source_shell_env
@@ -120,14 +114,8 @@ __all__ = ["RemoteAccessServer", "WebPrinter"]
 
 logger = logging.getLogger(__name__)
 
-# Static web assets shared with the VS Code extension webview; they
-# stay under ``kiss/agents/vscode/media`` because the extension loads
-# them from there too.
 MEDIA_DIR = Path(__file__).resolve().parent.parent / "agents" / "vscode" / "media"
 
-# Lightweight Vosk speech model used by the in-browser "Sorcar" wake-word
-# listener (voice.js).  The ~40MB archive is not bundled; it is downloaded
-# once on first use and cached under ~/.kiss/models/.
 VOICE_MODEL_URL = (
     "https://ccoreilly.github.io/vosk-browser/models/"
     "vosk-model-small-en-us-0.15.tar.gz"
@@ -219,7 +207,6 @@ def _ensure_voice_model() -> Path | None:
             return None
 _MEDIA_VERSION_CACHE: dict[str, str] = {}
 
-# HTML page for the agent-trajectory visualizer, served at ``/trajectories/``.
 TRAJECTORY_TEMPLATE = (
     Path(__file__).resolve().parents[1]
     / "viz_trajectory"
@@ -229,107 +216,28 @@ TRAJECTORY_TEMPLATE = (
 
 TUNNEL_CHECK_INTERVAL = 15
 
-# Number of consecutive watchdog ticks that must observe the *same*
-# new non-empty set of local IPs before the watchdog will treat it as
-# a genuine network change and restart the server.  Without this
-# debounce a single transient flake from :func:`_get_local_ips`
-# (briefly empty result, DHCP renewal, VPN flap, post-sleep DNS hiccup)
-# would force a spurious daemon restart on LAN-only deployments.  Four
-# ticks at :data:`TUNNEL_CHECK_INTERVAL` = 60 s of sustained change.
-# Earlier code used 2 ticks (30 s) which still let a real-but-brief
-# VPN-connect / Ethernet↔WiFi handover that holds a new consistent
-# IP set for ≥60 s trigger a daemon restart even if the address
-# reverted seconds later.  Tests override both knobs to drive the
-# loop faster.
 _IP_CHANGE_DEBOUNCE_TICKS = 4
 
-# Maximum number of attempts :meth:`RemoteAccessServer._setup_server`
-# will make to bind the WSS listener before giving up.  Each transient
-# ``OSError`` (most often ``EADDRINUSE`` lingering from a previous
-# instance still in ``TIME_WAIT``, or ``EADDRNOTAVAIL`` while an
-# interface is still coming up at boot / post-resume) is backed off
-# via :data:`_BIND_RETRY_BACKOFF` between attempts.  After exhausting
-# all retries the server exits with a structured ``SystemExit`` and a
-# single-line error message — *no* traceback — so that a supervisor
-# (launchd, systemd, the VS Code extension's respawn loop) sees a
-# clean non-zero exit and backs off naturally, rather than respawning
-# straight into the same OSError traceback in a tight flap loop.
 _BIND_RETRY_ATTEMPTS = 5
-# Per-attempt backoff in seconds; the value at index ``attempt`` is
-# slept *before* attempt ``attempt + 2`` (i.e. between attempts).  The
-# tuple is indexed by ``min(attempt, len(_BIND_RETRY_BACKOFF) - 1)``
-# so a shorter override (in tests) still terminates the loop.
 _BIND_RETRY_BACKOFF: tuple[float, ...] = (0.5, 1.0, 2.0, 4.0, 8.0)
-# ``OSError.errno`` values worth retrying.  ``EADDRINUSE`` covers the
-# common "previous kiss-web instance just SIGTERM'd, its port is in
-# TIME_WAIT" case; ``EADDRNOTAVAIL`` covers a slow interface coming up
-# at boot or after a network state change.  Other errnos (``EACCES``
-# = privileged port without permission, ``ENOENT`` = bad UDS path,
-# TLS load errors which surface as :class:`ssl.SSLError`, ...) are
-# *not* retried — they will not be fixed by waiting and would only
-# delay the inevitable failure exit.
 _BIND_RETRYABLE_ERRNOS: frozenset[int] = frozenset({
     errno.EADDRINUSE, errno.EADDRNOTAVAIL,
 })
 
-# How often the server polls PyPI to learn whether a newer
-# ``kiss-agent-framework`` release is available.  3600 s = once per
-# hour, matching the "every hour" requirement.  Tests override this
-# to a sub-second value to exercise the periodic loop quickly.
 _VERSION_CHECK_INTERVAL: float = 3600
 
-# PyPI JSON endpoint that reports the latest release of the project.
-# Tests override this to point at a local stub HTTP server so no
-# real network access is required.
 _PYPI_LATEST_URL = "https://pypi.org/pypi/kiss-agent-framework/json"
 
-# Root directory scanned by :func:`_read_version` to discover the
-# NEWEST installed KISS Sorcar extension.  ``None`` means "use the real
-# ``~/.vscode/extensions`` directory"; tests override this to a
-# tempdir so they can seed multiple ``ksenxx.kiss-sorcar-<VERSION>``
-# subdirs without touching the developer's real VS Code install.
-#
-# Why this exists — regression fix for the sticky "update available"
-# toast that kept re-appearing after the user clicked "Update".  The
-# root cause is that ``install.sh`` only ``launchctl kickstart -k``\ s
-# the pre-existing kiss-web launch agent / systemd unit; the unit's
-# ``ProgramArguments`` / ``ExecStart`` still point at the OLD
-# extension's binary (``~/.vscode/extensions/ksenxx.kiss-sorcar-<OLD>/
-# kiss_project/.venv/bin/kiss-web``) until the fresh extension's next
-# activation gets a chance to rewrite it.  Meanwhile the OLD daemon
-# has already re-broadcast ``update_available`` with its own bundled
-# ``_version.py`` — the stale OLD version — so the client sees
-# ``{available: True, latest: NEW, current: OLD}`` and re-shows the
-# same "update available (NEW)" toast the user just clicked.
-#
-# The fix: :func:`_read_version` now returns the *highest* ``__version__``
-# it can find under ``<extensions_root>/ksenxx.kiss-sorcar-*/kiss_project/
-# src/kiss/core/_version.py``.  Once the install unpacks the new extension
-# dir the answer flips to the fresh version even if the daemon binary
-# is still the stale one, so the daemon broadcasts ``available: False``
-# and ``renderUpdateAvailableNotification`` (media/main.js) dismisses
-# the toast.
 _INSTALLED_EXTENSIONS_ROOT: Path | None = None
 
-# Publisher.name prefix of the KISS Sorcar VS Code extension.  Kept
-# in one place so ``_read_version`` and any future scanner stay in
-# lock-step with ``install.sh`` and the extension's ``package.json``.
 _EXTENSION_DIR_PREFIX = "ksenxx.kiss-sorcar-"
 
-# Timeout for the PyPI HTTP request — kept small so a slow PyPI
-# response cannot stall the periodic loop for long.
 _PYPI_FETCH_TIMEOUT = 5.0
 
 _WS_PING_TIMEOUT = 10
 
 _TUNNEL_UNHEALTHY_LIMIT_NAMED = 3
 
-# Quick tunnels get a new random URL on every restart, so be much more
-# conservative before force-restarting.  40 ticks × :data:`TUNNEL_CHECK_INTERVAL`
-# (15s) = 10 minutes of readyConnections=0 before the watchdog kills
-# cloudflared.  This gives cloudflared ample time to re-register a
-# temporarily-dropped tunnel without burning through dozens of distinct
-# *.trycloudflare.com URLs.
 _TUNNEL_UNHEALTHY_LIMIT_QUICK = 40
 
 _TUNNEL_STARTUP_GRACE = 120
@@ -338,54 +246,18 @@ _TUNNEL_BACKOFF_INITIAL = 60
 
 _TUNNEL_BACKOFF_MAX = 1800
 
-# When cloudflared's stderr reports HTTP 429 / Cloudflare error code
-# 1015 ("rate-limited") on the trycloudflare.com quick-tunnel API, the
-# normal exponential backoff (60s → 120s → ...) is far too aggressive:
-# every retry within the cooldown window resets Cloudflare's per-IP
-# clock, so the tunnel can stay unreachable for *hours* while burning
-# through dozens of distinct *.trycloudflare.com URLs.  When a
-# rate-limit signal is detected we use a much longer baseline plus a
-# random jitter so a fleet of restarts (e.g. across machines on the
-# same egress IP) does not synchronise into another rate-limit burst.
-_TUNNEL_RATE_LIMIT_BACKOFF = 900  # 15 minutes
+_TUNNEL_RATE_LIMIT_BACKOFF = 900
 
-_TUNNEL_RATE_LIMIT_JITTER = 300  # 0..5 minutes additional jitter
+_TUNNEL_RATE_LIMIT_JITTER = 300
 
-# After the watchdog force-restarts cloudflared because it observed
-# ``readyConnections == 0`` for the unhealthy-tick limit, wait at
-# least this many seconds before allowing another force-restart even
-# if the new cloudflared instance is *also* immediately unhealthy.
-# Without this cool-down a chronically-flaky cloudflared metrics
-# endpoint (or a Cloudflare edge that briefly drops every fresh
-# quick-tunnel registration) rotates the public ``*.trycloudflare.com``
-# URL every ~10 minutes (= quick-tunnel limit × tick interval) forever,
-# breaking long-lived browser sessions and pushing a steady stream of
-# stale URLs to the message board.  Each consecutive force-restart
-# without a sustained healthy period in between doubles the wait, up
-# to :data:`_TUNNEL_FORCE_RESTART_COOLDOWN_MAX`.
 _TUNNEL_FORCE_RESTART_COOLDOWN_INITIAL = 60
 
 _TUNNEL_FORCE_RESTART_COOLDOWN_MAX = 3600
 
-# Once a freshly-restarted cloudflared has been continuously healthy
-# for this many seconds since its ``_tunnel_started_at`` we consider
-# the chronic-flake episode over and reset the consecutive
-# force-restart counter so a future, *unrelated* event starts at the
-# minimum cool-down.
 _TUNNEL_FORCE_RESTART_RESET_AFTER_HEALTHY = 600
 
-# Fail-fast window (seconds) used by ``_spawn_cloudflared``: after
-# spawning, wait up to this long for the child to exit so a bind
-# collision (TOCTOU on the pre-picked metrics port) is detected and
-# retried with a fresh port.  Healthy cloudflared takes seconds to
-# start, so it never exits within this window.  Module-level so tests
-# can widen the window on heavily loaded machines where even a
-# fail-fast child may take longer than 1s to exec and exit.
 _SPAWN_FAILFAST_WINDOW = 1.0
 
-# Substrings (case-insensitive) in cloudflared's stderr that indicate
-# trycloudflare.com is rate-limiting the local egress IP.  Matching is
-# done line-by-line via :func:`_is_rate_limit_line`.
 _RATE_LIMIT_INDICATORS = (
     "error code: 1015",
     "error code 1015",
@@ -396,65 +268,24 @@ _RATE_LIMIT_INDICATORS = (
     "rate limited",
 )
 
-# Auth rate-limiting (per source IP).  After _AUTH_FAIL_MAX failures
-# within _AUTH_FAIL_WINDOW seconds, new connections from that IP are
-# refused for _AUTH_LOCKOUT seconds.
 _AUTH_FAIL_MAX = 5
 
 _AUTH_FAIL_WINDOW = 60.0
 
 _AUTH_LOCKOUT = 60.0
 
-# M7: client-supplied lists are clamped to these sizes to bound the
-# work the server does per command.  An authenticated-but-malicious or
-# buggy client cannot make the server resume thousands of sessions or
-# attach thousands of files in a single submit.
 _MAX_RESTORED_TABS = 32
 
 _MAX_ATTACHMENTS = 32
 
-# Seconds to wait after acknowledging a "Server reset" request before
-# SIGTERMing this daemon, so the ``notification`` event flushes to the
-# clicking window before its socket drops on shutdown.
 _SERVER_RESET_DELAY = 0.4
 
-# Seconds after the freshly-restarted daemon binds its listeners
-# before it broadcasts the "Server restart complete" notification.
-# Long enough for the VS Code extension's ``AgentClient`` and any
-# reconnecting browser webview to reattach to the UDS / WSS so the
-# toast is delivered into a live socket instead of being dropped on
-# the floor.  Tests monkey-patch this constant to a tiny value so
-# they do not have to wait the full window.
 _SERVER_RESET_COMPLETE_DELAY = 3.0
 
-# File name of the pending-reset flag dropped by
-# :meth:`RemoteAccessServer._handle_server_reset` in the same
-# directory as ``remote-url.json`` (``~/.kiss`` in production, a
-# tmpdir in tests via ``url_file=``).  Its presence at daemon
-# startup means the previous instance SIGTERMed itself in response
-# to a user-initiated "Server reset" — the freshly-restarted daemon
-# deletes the flag and schedules a "Server restart complete"
-# notification to reconnecting clients.  Absent flag ⇒ this is a
-# regular launch / crash restart / install respawn and the
-# completion toast is intentionally suppressed.
 _SERVER_RESET_FLAG_NAME = "server-reset-pending.json"
 
-# Hard upper bound (seconds) a SIGTERM-initiated graceful shutdown may
-# take AFTER the in-flight agent tasks have been stopped and persisted
-# (see :meth:`RemoteAccessServer._shutdown_on_sigterm`).  If the event
-# loop still has not unwound by then — e.g. ``asyncio.run``'s
-# task-cancellation phase is wedged on a task that swallows
-# ``CancelledError``, or the default executor refuses to drain — the
-# process force-exits so the supervising LaunchAgent / systemd unit can
-# respawn a fresh daemon.  Without this failsafe a wedged loop leaves
-# the old daemon (and anything it still runs) alive forever and the
-# user's "Reset Server" click appears to do nothing.
 _SHUTDOWN_EXIT_FAILSAFE = 30.0
 
-# M7: cap the prompt size (in UTF-8 BYTES) echoed back via
-# ``setTaskText`` so a giant JSON payload cannot push tens of MB
-# through the broadcast pipeline.  Enforced with byte-based truncation
-# in ``_handle_submit`` that never splits inside a character.
 _MAX_PROMPT_BYTES = 1_000_000
 
 
@@ -487,45 +318,16 @@ def _truncate_utf8_bytes(text: str, max_bytes: int) -> tuple[str, int]:
         try:
             return prefix.decode("utf-8", errors="surrogatepass"), original_size
         except UnicodeDecodeError as exc:
-            # ``encoded`` itself is valid under surrogatepass, so the
-            # only possible error is a final sequence cut by the cap.
             prefix = prefix[:exc.start]
     return "", original_size
 
 
-# Maximum length of a single newline-delimited JSON command line read
-# from a UDS or WSS client.  The default ``asyncio.StreamReader`` limit
-# is 64 KiB which is smaller than even a modest base64-encoded image
-# attachment — a single ``submit`` with an attached PNG/PDF would
-# overflow the reader, raise ``LimitOverrunError`` and silently drop
-# the user's task.  Bumped to 64 MiB so attachments up to a few MB
-# each (capped by ``_MAX_ATTACHMENTS``) can be delivered as one line.
 _MAX_LINE_BYTES = 64 * 1024 * 1024
 
-# Upper bound on a ``voiceTranscribe`` base64 audio payload.  The
-# browser captures at most 30s of 16kHz mono s16le PCM (960KB, ~1.3MB
-# base64); anything much larger is malformed or abusive and is
-# dropped instead of being shipped to the gpt-audio API.
 _MAX_VOICE_AUDIO_B64 = 4 * 1024 * 1024
 
-# Grace period (seconds) between a WebSocket connection dropping and
-# the deferred ``closeTab`` actually firing for every tab seen on
-# that connection.  Browsers do not reliably send a "closeTab" before
-# the WSS shuts down (and ``beforeunload``/``pagehide`` WebSocket
-# writes are routinely dropped), so a brief grace window is the
-# canonical way to distinguish a transient reconnect/reload from an
-# intentional browser close.  A fresh ``ready`` message that
-# re-claims a tab id (current ``tabId`` or any entry in
-# ``restoredTabs``) cancels the pending close before it fires.  10s
-# is long enough to cover typical reloads on a slow link without
-# letting an orphaned ``_RunningAgentState`` linger meaningfully.
 _TAB_CLOSE_GRACE = 10.0
 
-# Test-override slots: tests monkeypatch these module attributes to
-# redirect state into a temporary directory.  When left as ``None``
-# (production), the location is resolved lazily on every access via
-# :func:`kiss.core.config.kiss_home`, so ``KISS_HOME`` set after
-# import (as the test conftest does) is honored.
 _KISS_HOME: Path | None = None
 _TLS_DIR: Path | None = None
 
@@ -555,9 +357,6 @@ def _url_file_path() -> Path:
 
 
 if TYPE_CHECKING:
-    # Static declaration of the PEP 562 lazy attribute below so type
-    # checkers (pyright) know it exists; at runtime the name is served
-    # by ``__getattr__`` and never lives in the module dict.
     _URL_FILE: Path
 
 
@@ -761,18 +560,8 @@ class _HeadAwareServerConnection(ServerConnection):
         super().data_received(buffered)
 
 
-# Maximum file size (bytes) the remote webapp's ``openFile`` handler
-# will read and ship to the browser as a ``fileContent`` reply.  Keeps
-# a stray click on a huge artifact from stalling the WebSocket with a
-# multi-hundred-megabyte JSON frame.
 _OPEN_FILE_MAX_BYTES = 2_000_000
 
-# Canonical KISS Sorcar source-checkout root.  The curl-piped
-# bootstrapper (``scripts/install.sh``) clones the GitHub repo to this
-# fixed location and ``install.sh`` — which the Update button re-runs —
-# lives at its root.  Mirrors ``kissAiRoot()`` in the VS Code
-# extension's ``installerPath.js`` so the extension and the remote
-# webapp resolve the updater identically.
 _KISS_AI_ROOT = Path.home() / "kiss_ai"
 
 
@@ -884,7 +673,6 @@ def _pick_free_local_port() -> int:
     return port
 
 
-# Test-override slot; ``None`` means lazy $KISS_HOME resolution.
 _CLOUDFLARED_PIDFILE: Path | None = None
 
 
@@ -1079,10 +867,6 @@ def _try_adopt_existing_cloudflared() -> tuple[int, int, str] | None:
         return None
     ready = _probe_tunnel_ready(metrics_port)
     if ready is None:
-        # "No information" (endpoint unreachable / malformed reply)
-        # is not the same as confirmed-unhealthy: briefly re-probe
-        # before declining so a just-woken or slow-to-bind cloudflared
-        # is not needlessly replaced (rotating the public URL).
         for _ in range(4):
             time.sleep(0.5)
             ready = _probe_tunnel_ready(metrics_port)
@@ -1096,8 +880,6 @@ def _try_adopt_existing_cloudflared() -> tuple[int, int, str] | None:
         )
         _terminate_declined_cloudflared(pid)
         return None
-    # Prefer a freshly-probed URL so we recover from URL rotation
-    # between adoption attempts; fall back to the saved one.
     url = _query_quicktunnel_hostname(metrics_port)
     if url is None:
         saved = data.get("url")
@@ -1233,7 +1015,6 @@ def _stderr_reader_loop(
                 found = True
                 if url_found_event is not None:
                     url_found_event.set()
-                # Keep draining stderr — do NOT return.
                 continue
         if stop_event is not None and stop_event.is_set():
             return
@@ -1281,29 +1062,9 @@ def _read_url_from_stderr(
         daemon=True,
     )
     reader.start()
-    # Wait until the reader finds a URL *or* the timeout elapses.
-    # Unlike the previous reader.join(timeout), this unblocks as soon
-    # as the URL is discovered (the reader thread keeps running in the
-    # background to drain stderr so the pipe buffer never fills).
     url_found_event.wait(timeout=timeout)
     if result[0] is not None:
-        # URL found.  The reader daemon thread continues draining
-        # stderr in the background until cloudflared exits.  This is
-        # essential: if nobody reads stderr, the ~64 KiB OS pipe
-        # buffer fills, cloudflared blocks on write(), and in Go the
-        # logging mutex deadlocks the whole process — making the
-        # tunnel unresponsive and triggering a watchdog restart (with
-        # a new URL) every few minutes.
         return result[0]
-    # H6: No URL found within *timeout*.  Signal the reader to exit on
-    # its next iteration.  The reader may still be blocked inside
-    # readline() (closing stderr from another thread does not unblock
-    # the in-flight read on every platform), but the moment the next
-    # log line arrives — or the subprocess dies and readline() returns
-    # "" — the loop will observe stop_event and exit, instead of
-    # running forever.  This bounds the leak to "one extra line
-    # consumed after timeout" rather than "thread leaks on every
-    # timed-out restart".
     stop_event.set()
     return None
 
@@ -1574,12 +1335,6 @@ def _post_url_to_message_board(
             headers={
                 "Title": "KISS Sorcar Remote URL",
                 "Tags": "link,kiss-sorcar",
-                # Make the notification itself clickable: tapping the
-                # notification (mobile) or the message card (web UI)
-                # opens the URL in a browser.  Without this header
-                # ntfy renders the body as plain text that is not
-                # auto-linked, so users cannot navigate to the site
-                # by clicking it.
                 "Click": url,
                 "User-Agent": "kiss-web",
             },
@@ -1675,11 +1430,6 @@ def _snapshot_active_tabs() -> list[str]:
         with _RunningAgentState._registry_lock:
             items = list(_RunningAgentState.running_agent_states.items())
     except Exception:
-        # Unlocked fallback: a concurrent mutation can still raise
-        # ``RuntimeError: dictionary changed size during iteration``
-        # mid-copy — the very failure mode this function exists to
-        # prevent — so guard it and degrade to an empty snapshot
-        # rather than propagate.
         try:
             items = list(_RunningAgentState.running_agent_states.items())
         except Exception:
@@ -1881,8 +1631,6 @@ def _generate_self_signed_cert(
         serialization.PrivateFormat.TraditionalOpenSSL,
         serialization.NoEncryption(),
     )
-    # Create the key file with mode 0600 *before* writing, so the
-    # private key bytes are never on disk world-readable even briefly.
     if key_path.exists():
         key_path.unlink()
     fd = os.open(str(key_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -1890,7 +1638,6 @@ def _generate_self_signed_cert(
         os.write(fd, key_bytes)
     finally:
         os.close(fd)
-    # Defensive: also chmod afterwards in case umask interfered.
     os.chmod(key_path, 0o600)
     cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
 
@@ -1922,12 +1669,6 @@ def _create_ssl_context(
         if not cert_path.is_file() or not key_path.is_file():
             logger.info("Generating self-signed TLS certificate in %s", tls_dir)
             _generate_self_signed_cert(cert_path, key_path)
-        # M4: regenerate a self-signed cert that is already expired or
-        # within 30 days of expiry.  Without this the server would
-        # silently start serving an expired cert after ~1 year (with
-        # the historical 365-day validity) and every browser would
-        # refuse to connect.  Only the auto-generated path is
-        # regenerated; user-supplied cert/key paths are never touched.
         elif _self_signed_cert_needs_renewal(cert_path):
             logger.info(
                 "Self-signed TLS certificate %s is expired or "
@@ -1937,9 +1678,6 @@ def _create_ssl_context(
             _generate_self_signed_cert(cert_path, key_path)
 
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    # M3: pin a minimum TLS version so this hardened context cannot be
-    # downgraded to SSLv3 / TLS 1.0 / 1.1 by a hostile client even on
-    # Python builds that allow older protocols by default.
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.load_cert_chain(str(cert_path), str(key_path))
     return ctx
@@ -1979,64 +1717,17 @@ class WebPrinter(JsonPrinter):
     def __init__(self) -> None:
         super().__init__()
         self._ws_clients: set[ServerConnection] = set()
-        # Unix-domain socket writers (local extension clients).  Same
-        # newline-delimited JSON protocol as WSS clients; broadcasts
-        # fan out to both sets in lockstep so a browser viewer and a
-        # VS Code extension viewer of the same chat tab observe an
-        # identical event stream.
         self._uds_writers: set[asyncio.StreamWriter] = set()
-        # Tab ids currently connected over the local UDS transport.
-        # UDS peers (VS Code extension webviews and CLI REPL clients)
-        # share the daemon machine's speakers; WSS peers are treated as
-        # remote devices.  Counts (rather than sets) make reconnects
-        # safe: if a tab reclaims the same id before the old connection
-        # fully unwinds, the old connection's unregister only decrements
-        # its own registration instead of erasing the fresh one.
-        # Guarded by ``_ws_lock``.
         self._local_uds_tab_counts: dict[str, int] = {}
-        # CLI terminal-player tab ids announced via ``cliTabHello``
-        # (also connection-counted, for the same reconnect safety).
-        # Talk-playback arbitration (:meth:`_fanout_talk`) needs to
-        # tell CLI REPL tabs apart from local webview tabs: both send
-        # ``ready``, but a CLI tab plays on THIS machine's speakers and
-        # must stay silent whenever a local webview tab is also
-        # subscribed to the task.  Guarded by ``_ws_lock``.
         self._cli_tab_counts: dict[str, int] = {}
-        # Per-connection endpoint registry, keyed by the ``conn_id``
-        # that the handlers stamp (as ``connId``) on every client
-        # command.  Request/reply events (``models``, ``history``,
-        # ``files``, ``ghost``, ``configData``, ...) carry the
-        # requesting connection's id back on the event so
-        # :meth:`broadcast` can deliver them ONLY to the window that
-        # asked — one VS Code window's webview activity must never
-        # change the UI of another window's webview.
         self._conn_endpoints: dict[str, Any] = {}
         self._ws_lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._merge_state_callback: (
             Callable[[str, dict[str, Any]], None] | None
         ) = None
-        # M2: per-instance work_dir avoids mutating ``os.environ``
-        # ("KISS_WORKDIR") across instances.  Set by
-        # :class:`RemoteAccessServer.__init__`.  Empty string falls
-        # back to the env var or cwd.
         self.work_dir: str = ""
-        # M8: Pending ``run_coroutine_threadsafe`` futures per client.
-        # Tracked so :meth:`remove_client` can cancel pending sends to
-        # a slow / dead peer instead of leaking them.
         self._pending_sends: dict[Any, set[ConcurrentFuture[None]]] = {}
-        # Per-endpoint FIFO send locks.  ``websockets``'
-        # ``Connection.send`` applies write backpressure BEFORE the
-        # frame is queued, so two concurrent ``send()`` coroutines on
-        # the same endpoint can reach the wire out of start order when
-        # the transport buffer is full: the suspended earlier sender
-        # is overtaken by a later one that finds the buffer drained.
-        # Serialising every outbound payload per endpoint — broadcast
-        # fan-out AND direct replies alike — makes wire order equal
-        # send-start order (``asyncio.Lock`` wakes waiters FIFO).
-        # ``RemoteAccessServer._handle_ready`` relies on this to
-        # replay ``task_events`` before the in-flight ``merge_data``
-        # on reconnect.
         self._send_locks: dict[Any, asyncio.Lock] = {}
 
     def broadcast(self, event: dict[str, Any]) -> None:
@@ -2082,18 +1773,12 @@ class WebPrinter(JsonPrinter):
         Args:
             event: The event dictionary to emit.
         """
-        # Stamp the wall-clock emission time (ms since epoch) before
-        # any transport / recording / persistence path so the chat
-        # webview's per-panel timestamp badge agrees everywhere (live,
-        # replay, extension, remote web app).  Pre-stamped events
-        # (e.g. replayed copies) keep their original ``ts``.
         stamp_event_ts(event)
         conn_id = event.pop("connId", "")
         record_only = bool(event.pop("recordOnly", False))
         if event.get("type") == "configData":
             cfg = event.get("config")
             if isinstance(cfg, dict) and not cfg.get("work_dir"):
-                # M2: prefer per-instance work_dir over the global env var.
                 cfg["work_dir"] = (
                     self.work_dir
                     or os.environ.get("KISS_WORKDIR", "")
@@ -2101,11 +1786,6 @@ class WebPrinter(JsonPrinter):
                 )
 
         if conn_id:
-            # Targeted request/reply event — deliver only to the
-            # requesting connection.  Never recorded or persisted
-            # (these are transient UI replies, not task events).  A
-            # vanished endpoint (client disconnected before the reply
-            # was ready) silently drops the event.
             self._send_to_conn(conn_id, json.dumps(event))
             return
 
@@ -2116,58 +1796,17 @@ class WebPrinter(JsonPrinter):
                 self._merge_state_callback(evt_tab, event.get("data", {}))
 
         if "tabId" in event:
-            # Targeted "system" event — forward verbatim.  Recording /
-            # persistence is per-task and normally owned by the agent
-            # thread, so tab-stamped events are not recorded — EXCEPT
-            # the injected-prompt echo (``_cmd_append_user_message`` /
-            # ``_cmd_run``'s busy-tab conversion) which the emitter
-            # explicitly stamped with the owning ``taskId``: record +
-            # persist a tabId-stripped copy under that task so the
-            # injected prompt survives ``task_events`` replay
-            # (sub-agent tabs rebuild their transcript from the
-            # recording on every reopen) and page reloads.  The
-            # stamped ``tabId`` is stripped from the recorded copy
-            # because replay re-stamps events with the subscribing
-            # viewer's own tab id.  The exception is gated on
-            # ``type in ("prompt", "result")`` — other tab-stamped
-            # events (e.g. ``status``) may carry a ``taskId`` that is a
-            # client-supplied CORRELATION id, not a task-stream key,
-            # and must stay transient.
-            #
-            # ``result`` joined the exception because task_runner's
-            # failure / user-stop paths used to broadcast their
-            # terminal ``{"type": "result"}`` panel stamped with
-            # ``tabId`` only — shown live but never recorded or
-            # persisted, so reloading the webview / loading the task
-            # from history / adjacent-task scrolling showed NO Result
-            # panel for a stopped or failed task.  task_runner now
-            # broadcasts ``taskId``-only (standard record → persist →
-            # fan-out path) whenever the task row id is known, so this
-            # branch is a DEFENSIVE NET: any emitter that still
-            # broadcasts a tab-stamped result carrying a task-stream
-            # ``taskId`` gets a durable tabId-stripped copy instead of
-            # silently losing the panel on replay.
             if event.get("type") in ("prompt", "result") and event.get("taskId"):
                 record = {k: v for k, v in event.items() if k != "tabId"}
                 with self._lock:
                     self._record_event(record)
                 self._persist_event(record)
             if record_only:
-                # Defensive: no emitter currently produces a
-                # ``tabId`` + ``recordOnly`` event (the drain hook's
-                # durable copies are tab-less), but the marker's
-                # contract is "never re-send live" — honour it here
-                # too rather than leak a duplicate panel.
                 return
             self._send_to_ws_clients(json.dumps(event))
             return
 
         if event.get("type") in GLOBAL_EVENT_TYPES:
-            # Global system broadcast that carries a ``taskId`` PAYLOAD
-            # field (e.g. ``taskDeleted``) — it is NOT a task-stream
-            # event.  Send verbatim to every connected client; never
-            # record, persist, or fan out per subscribed tab (the named
-            # task no longer exists / has no subscribers).
             self._send_to_ws_clients(json.dumps(event))
             return
 
@@ -2175,14 +1814,7 @@ class WebPrinter(JsonPrinter):
 
         if not event.get("taskId"):
             if record_only:
-                # A ``recordOnly`` durable copy with no resolvable task
-                # id has nowhere to be recorded — and it was already
-                # rendered live at queueing time, so sending it verbatim
-                # would duplicate the prompt panel.  Drop it.
                 return
-            # Global system event with no task context (configData,
-            # models, history, error, etc.) — broadcast verbatim to
-            # every connected client.  Not recorded, not persisted.
             self._send_to_ws_clients(json.dumps(event))
             return
 
@@ -2192,16 +1824,8 @@ class WebPrinter(JsonPrinter):
         self._persist_event(event)
 
         if record_only:
-            # Durable copy of a prompt echo that was already rendered
-            # live at queueing time (``recordOnly`` — see
-            # ``SorcarAgent._drain_pending_user_messages``): recorded
-            # and persisted above so it survives ``task_events``
-            # replay, but never re-sent to clients (a live re-send
-            # would render a duplicate prompt panel).
             return
 
-        # Fan out one stamped copy per subscribed tab (see
-        # :meth:`_fanout_stamped`).
         self._fanout_stamped(event)
 
     def _fanout_stamped(self, event: dict[str, Any]) -> None:
@@ -2230,8 +1854,6 @@ class WebPrinter(JsonPrinter):
         if "tabId" in event:
             event = {k: v for k, v in event.items() if k != "tabId"}
         if event.get("type") == "talk":
-            # Talk events need per-tab playback arbitration so one
-            # utterance is heard exactly once per device.
             self._fanout_talk(event, targets)
             return
         base = json.dumps(event)[:-1]
@@ -2411,10 +2033,6 @@ class WebPrinter(JsonPrinter):
         if not targets:
             return
         if "tabId" in event:
-            # Same duplicate-member guard as :meth:`_fanout_stamped`:
-            # the CLI forwards its events verbatim, so a stale
-            # ``tabId`` stamp must not survive next to the spliced
-            # per-subscriber one.
             event = {k: v for k, v in event.items() if k != "tabId"}
         base = json.dumps(event)[:-1]
         muted_base = json.dumps({**event, "muted": True})[:-1]
@@ -2507,15 +2125,6 @@ class WebPrinter(JsonPrinter):
             lock = self._send_locks.get(endpoint)
             if lock is None:
                 lock = asyncio.Lock()
-                # Only store the lock for endpoints that are still
-                # registered (``_add_endpoint`` seeds ``_pending_sends``;
-                # ``_remove_endpoint`` pops both maps together).  A send
-                # coroutine that lost the race with removal would
-                # otherwise RE-INSERT a lock for the gone endpoint that
-                # nothing ever removes again, leaking one entry per
-                # lost race for the daemon's lifetime.  The unstored
-                # fresh lock is fine: the endpoint is gone, so FIFO
-                # ordering across senders no longer matters.
                 if endpoint in self._pending_sends:
                     self._send_locks[endpoint] = lock
             return lock
@@ -2551,9 +2160,6 @@ class WebPrinter(JsonPrinter):
             try:
                 await asyncio.wrap_future(fut)
             except Exception:
-                # A cancelled/failed send (dead peer) must not abort the
-                # merge replay for a still-live connection; the send
-                # lock and per-endpoint teardown handle those paths.
                 logger.debug("flush_pending_sends await failed", exc_info=True)
 
     async def _locked_send(self, endpoint: Any, data: str) -> None:
@@ -2598,12 +2204,6 @@ class WebPrinter(JsonPrinter):
             if pending is not None:
                 pending.add(fut)
         if pending is None:
-            # The endpoint was removed between the caller's snapshot
-            # and here (``_remove_endpoint`` won the race): the future
-            # can no longer be tracked — and therefore never cancelled
-            # by ``_remove_endpoint`` — so cancel it now instead of
-            # letting an orphaned send attempt a write on a closed
-            # connection.
             fut.cancel()
             return
         fut.add_done_callback(
@@ -2760,22 +2360,10 @@ def _build_html() -> str:
         The complete HTML string.
     """
     version = _read_version()
-    # ``</`` must never appear raw inside the inline <script> block —
-    # a trick or tip body containing ``</script>`` would otherwise
-    # terminate it (tricks come from the user-editable INJECTIONS.md).
     tricks_json = json.dumps(read_tricks()).replace("</", "<\\/")
-    # ``show`` is always false here: the tips window only auto-opens in
-    # the VS Code webview after a fresh installation (SorcarTab.ts).
     tips_json = json.dumps(
         {"tips": read_tips(), "show": False},
     ).replace("</", "<\\/")
-    # Codex-mobile restyle for the remote page ONLY: the stylesheet is
-    # linked via the remote-only HEAD_STYLE substitution (SorcarTab
-    # passes HEAD_STYLE: '' for the VS Code webview) and every rule in
-    # it is additionally scoped under ``body.remote-chat``, so the
-    # extension webview can never pick it up.  It comes AFTER main.css
-    # (linked via STYLE_HREF above HEAD_STYLE in chat.html) so its
-    # overrides win by normal cascade order.
     head_style = (
         f'<link href="{_media_url("remote-codex.css")}" rel="stylesheet">\n'
         "  <style>\n"
@@ -2861,18 +2449,10 @@ def _build_html() -> str:
             "mode": "browser",
             "voskSrc": _media_url("vosk.js"),
             "modelUrl": "/voice-model.tar.gz",
-            # GPT-synthesized "Working on it." clip voice.js plays
-            # after submitting a voice-dictated task.
             "ackAudioUrl": _media_url("working-on-it.mp3"),
         }),
     }
     tpl = (MEDIA_DIR / "chat.html").read_text(encoding="utf-8")
-    # Single-pass substitution: injected values (e.g. the JS shim's
-    # documentation comment that mentions ``{{AUTH_MODAL}}`` by name)
-    # must NOT be re-scanned, otherwise stray placeholder-shaped tokens
-    # inside substituted JS/HTML would either be wrongly replaced or
-    # (when their key happens to be processed earlier in the dict)
-    # survive into the served page as unsubstituted placeholders.
     return re.sub(
         r"\{\{([A-Z_]+)\}\}",
         lambda m: subs.get(m.group(1), m.group(0)),
@@ -2968,8 +2548,6 @@ def _read_version() -> str:
             best_str = v
     if best_str:
         return best_str
-    # Fallback: developer / Docker / test-without-extdir install.  The
-    # version literal is single-sourced in ``kiss/core/_version.py``.
     return _parse_version_py(
         Path(__file__).parent.parent / "core" / "_version.py",
     )
@@ -3603,24 +3181,11 @@ def _augment_merge_data(event: dict[str, Any]) -> dict[str, Any]:
     files = []
     for f in data.get("files", []):
         f = {**f}
-        # Binary files (PDFs, images, etc.) have no meaningful text
-        # representation; the MergeManager / web client open them via
-        # the native viewer.  Attempting ``read_text()`` on them would
-        # raise ``UnicodeDecodeError`` (a ``ValueError``, not
-        # ``OSError``), which previously aborted the entire
-        # ``merge_data`` broadcast and prevented the diff/merge UI
-        # from appearing for binary-only changes.
         if f.get("binary"):
             f["base_text"] = ""
             f["current_text"] = ""
             files.append(f)
             continue
-        # Read WITHOUT newline translation: hunk coordinates are
-        # computed by splitting the on-disk bytes on "\n" only (see
-        # ``diff_merge._read_lines_preserved``), so a universal-newline
-        # read would hand the browser text whose CRLF endings are
-        # silently rewritten — and whose line COUNT differs for
-        # lone-"\r" content — misaligning hunk highlighting.
         try:
             with open(f["base"], encoding="utf-8", newline="") as bfh:
                 f["base_text"] = bfh.read()
@@ -3637,9 +3202,6 @@ def _augment_merge_data(event: dict[str, Any]) -> dict[str, Any]:
     return event
 
 
-# The wire→backend command translation now lives in the server API
-# module (applied by ``sorcar.ServerApi.resume_session``); this alias
-# keeps the established local name for callers and tests.
 _translate_webview_command = sorcar_api.translate_webview_command
 
 
@@ -3716,41 +3278,15 @@ class RemoteAccessServer:
         self.use_tunnel = use_tunnel
         self.tunnel_token = tunnel_token
         self.tunnel_url = tunnel_url
-        # SSL context is deliberately NOT built in ``__init__`` — it
-        # costs ~0.5-2 s (cert load / RSA keygen on first boot or on
-        # near-expiry renewal) and would delay every listener bind by
-        # that much on the startup critical path.  Instead the cert /
-        # key paths are stashed here and the context is built inside
-        # :meth:`_setup_server` on a worker thread while the UDS
-        # listener (which does not need TLS) binds in parallel.  This
-        # is what makes ``install.sh`` see ``~/.kiss/sorcar.sock``
-        # within ~100 ms after ``launchctl kickstart`` even when the
-        # WSS listener is still waiting on ``load_cert_chain``.
         self._ssl_certfile: str | None = certfile
         self._ssl_keyfile: str | None = keyfile
         self._ssl_context: ssl.SSLContext | None = None
-        # Path to the JSON file used to publish the active URL.  Tests
-        # override this to a per-test temporary path to avoid racing
-        # the live ``~/.kiss/remote-url.json`` watched by the VS Code
-        # extension and the ``kiss-web`` daemon.
         self._url_file: Path = Path(url_file) if url_file else _url_file_path()
 
         if not work_dir:
             work_dir = load_config().get("work_dir", "") or None
-        # M2: store work_dir on the instance instead of mutating the
-        # global ``os.environ["KISS_WORKDIR"]`` (which would stomp on
-        # other concurrent ``RemoteAccessServer`` instances and leak
-        # process-wide state into tests).  ``self.work_dir`` is the
-        # canonical resolved value, ``""`` when neither argument nor
-        # config provides one.
         self.work_dir: str = work_dir or ""
 
-        # Remote-web voice dictation: lazily-built speaker identifier
-        # shared by every voiceTranscribe request so each distinct
-        # voice keeps one stable speaker number across utterances.
-        # Guarded by a lock (requests come from executor threads) and
-        # latched off after a construction/recognition failure —
-        # translation must keep working without speaker numbers.
         self._voice_speaker_identifier: SpeakerIdentifier | None = None
         self._voice_speaker_broken = False
         self._voice_speaker_lock = threading.Lock()
@@ -3760,9 +3296,6 @@ class RemoteAccessServer:
         self._vscode_server = VSCodeServer(printer=self._printer)
         if self.work_dir:
             self._vscode_server.work_dir = self.work_dir
-        # The server's code API (see ``kiss.server.sorcar.ServerApi``):
-        # every client command received on either transport is routed
-        # through it, with this server acting as the API's backend.
         self._server_api = sorcar_api.ServerApi(self)
 
         self._html_bytes = _build_html().encode("utf-8")
@@ -3772,158 +3305,40 @@ class RemoteAccessServer:
         self._tunnel_started_at: float | None = None
         self._tunnel_failure_count = 0
         self._tunnel_next_retry = 0.0
-        # Pid of a cloudflared spawned by a *previous* ``kiss-web``
-        # process that this instance adopted on startup (see
-        # :func:`_try_adopt_existing_cloudflared`).  When non-None,
-        # ``self._tunnel_proc`` is None (we don't own the process) but
-        # ``self._tunnel_metrics_port`` and the URL file are populated
-        # as if we had spawned it ourselves.  The watchdog treats an
-        # adopted pid as equivalent to a self-spawned proc for
-        # health-check purposes.
         self._tunnel_adopted_pid: int | None = None
-        # Set by ``_start_quick_tunnel`` when cloudflared's stderr
-        # reports a Cloudflare quick-tunnel rate-limit (HTTP 429 /
-        # error 1015).  ``_restart_tunnel_url`` reads (and clears) it
-        # to apply a much longer backoff than the regular exponential
-        # one so the per-IP cooldown actually has time to clear.
         self._tunnel_rate_limited = False
-        # Counts consecutive force-restarts of cloudflared driven by
-        # the unhealthy-tick watchdog without a sustained healthy
-        # period in between.  Used together with
-        # ``_tunnel_force_restart_next_allowed`` to apply an
-        # exponentially-growing cool-down so a chronically-flaky
-        # metrics endpoint (or an edge that keeps dropping fresh
-        # quick-tunnel registrations) cannot rotate
-        # ``*.trycloudflare.com`` URLs every ~10 minutes forever.
-        # The counter is reset to 0 by the next ``healthy`` probe
-        # observed after ``_TUNNEL_FORCE_RESTART_RESET_AFTER_HEALTHY``
-        # seconds of post-restart uptime.
         self._tunnel_force_restart_count = 0
         self._tunnel_force_restart_next_allowed = 0.0
-        # Last Cloudflare tunnel URL posted to the ntfy.sh message
-        # board.  Tracked so a watchdog restart that yields the *same*
-        # public hostname (e.g. an adopted cloudflared, or a named
-        # tunnel re-registering) does not re-publish the unchanged URL
-        # to subscribers.
         self._last_posted_url: str | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws_server: Any = None
-        # Unix-domain socket listener for local clients (the VS Code
-        # extension).  Bound in :meth:`_setup_server` and torn down
-        # in :meth:`stop_async`.  Tests pass an explicit
-        # ``uds_path`` so concurrent instances do not race on the
-        # shared default ``~/.kiss/sorcar.sock``.
         self._uds_path: Path = (
             Path(uds_path) if uds_path else _default_uds_path()
         )
         self._uds_server: asyncio.Server | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
-        # Cached PyPI version learned by :meth:`_check_for_update`.
-        # ``None`` until the first poll completes; ``""`` if PyPI is
-        # unreachable.  ``_send_welcome_info`` replays the cached
-        # ``update_available`` event so a client that connects between
-        # polls still learns the current state without waiting for
-        # the next hour's tick.
         self._latest_version: str | None = None
         self._version_check_task: asyncio.Task[None] | None = None
-        # Set True by :meth:`_handle_shutdown_signal` the first time a
-        # SIGTERM is caught.  Guards against a *second* SIGTERM (e.g.
-        # an impatient ``pkill`` loop) re-raising ``KeyboardInterrupt``
-        # while :meth:`start` is already in its ``finally`` cleanup —
-        # which would escape the cleanup uncaught, abort
-        # ``subprocess.wait`` mid-sleep, and crash the process with an
-        # unhandled traceback (killing any running agent task).
         self._shutdown_initiated = False
-        # Resolved by :meth:`_request_loop_shutdown` (scheduled from the
-        # SIGTERM handler via ``call_soon_threadsafe``) to make
-        # :meth:`_serve_async` return deterministically.  Raising
-        # ``KeyboardInterrupt`` from the signal handler instead proved
-        # unreliable: with many agents active the main thread is busy
-        # inside coroutine/callback frames whose broad ``except`` /
-        # ``finally`` clauses can swallow the injected exception — the
-        # shutdown then never begins while ``_shutdown_initiated`` stays
-        # latched, so every later SIGTERM (every further "Reset Server"
-        # click) is ignored and the daemon keeps running its agents
-        # until it is SIGKILLed.
         self._shutdown_future: asyncio.Future[None] | None = None
         self._local_url = f"https://localhost:{self.port}"
         self._merge_states: dict[str, _WebMergeState] = {}
-        # M6: a small lock guards _merge_states so the agent
-        # task-runner thread (via WebPrinter.broadcast →
-        # _register_merge_state) and the asyncio thread (via
-        # _handle_web_merge_action / _ws_handler cleanup) cannot lose
-        # each other's mutations.  CPython's GIL makes individual
-        # dict ops atomic, but a sequence like ``del[k]`` racing a
-        # concurrent ``[k] = v`` can still drop a registration.
         self._merge_states_lock = threading.Lock()
-        # Per-tab asyncio lock serialising :meth:`_handle_web_merge_action`.
-        # Both the local UDS handler (VS Code extension) and the remote
-        # WebSocket handler dispatch ``mergeAction`` commands on the SAME
-        # event loop.  When two clients act on the *same* tab's merge
-        # review concurrently, the two coroutines would otherwise
-        # interleave at the ``run_in_executor`` await inside the reject
-        # branches — both reading the same ``current()`` hunk, both
-        # rejecting it, and leaving a later hunk permanently unresolved
-        # (a lost update).  Holding this per-tab lock for the whole
-        # action body makes the read-modify-write atomic per tab.
-        # Lazily created in :meth:`_merge_action_lock`; the dict itself
-        # is guarded by ``self._merge_states_lock`` above.
         self._merge_action_locks: dict[str, asyncio.Lock] = {}
-        # Deferred-disposal state for tabs whose WebSocket connection
-        # has dropped but whose backend ``_RunningAgentState`` should survive a
-        # short grace window so a reload / transient reconnect can
-        # re-claim it.  See :meth:`_schedule_tab_close`.
         self._pending_tab_closes: dict[str, asyncio.TimerHandle] = {}
         self._pending_tab_closes_lock = threading.Lock()
-        # Strong references for in-flight ``closeTab`` tasks dispatched
-        # by :meth:`_fire_pending_tab_close`.  Without this set the
-        # asyncio runtime can GC the task while it is still pending.
         self._pending_close_tasks: set[asyncio.Task[None]] = set()
         self._printer._merge_state_callback = self._register_merge_state
         self._active_url: str | None = None
         self._last_ips: frozenset[str] = frozenset()
-        # Debounce state for the IP-change watchdog.  ``_pending_ip_change``
-        # holds the most recent *candidate* new IP set observed by the
-        # watchdog (``None`` when no change is pending), and
-        # ``_pending_ip_change_count`` counts how many consecutive ticks
-        # have observed that same candidate.  Only when the count reaches
-        # :data:`_IP_CHANGE_DEBOUNCE_TICKS` does the watchdog accept the
-        # candidate as the new baseline and (in LAN mode) restart the
-        # server.  See :meth:`_watchdog` for the full state machine.
         self._pending_ip_change: frozenset[str] | None = None
         self._pending_ip_change_count: int = 0
-        # Per-IP auth failure timestamps, used by _is_auth_locked.
         self._auth_failures: dict[str, list[float]] = {}
-        # Where the ``runUpdate`` command looks for ``install.sh`` and
-        # where it appends the updater's output.  Mirrors the VS Code
-        # extension's ``installerPath.js`` lookup; tests override both
-        # to temp paths.
         self._install_root: Path = _KISS_AI_ROOT
         self._update_log_path: Path = _kiss_home_dir() / "update.log"
-        # Task ids the local ``sorcar`` CLI has announced as running
-        # via ``cliTaskStart`` envelopes (see
-        # :meth:`_handle_cli_task_start`).  Consulted by
-        # :meth:`VSCodeServer._replay_session` (read through the
-        # ``_is_cli_task_running`` hook) so a chat webview tab that
-        # later resumes a CLI-launched task from the history sidebar
-        # can be subscribed to the live event stream and shown the
-        # blinking-green-circle "running" indicator in its tab title.
-        # Guarded by ``_cli_running_lock`` because the UDS handler
-        # mutates it from the asyncio thread and ``_replay_session``
-        # reads it from agent / handler threads.
         self._cli_running_tasks: set[str] = set()
         self._cli_running_lock = threading.Lock()
-        # Expose the running-set lookup to ``VSCodeServer`` so its
-        # ``_replay_session`` can subscribe a freshly opened webview
-        # tab to a CLI-launched task that is still running.  The
-        # closure captures both the set and its lock so the read is
-        # atomic with respect to mutations from the UDS handler.
         self._vscode_server.set_cli_running_lookup(self._is_cli_task_running)
-        # Companion snapshot hook used by
-        # :meth:`VSCodeServer._get_running_task_ids` to UNION CLI-
-        # launched running task ids into the per-row ``is_running``
-        # flag the History panel uses to render the pulsing-green-dot
-        # indicator.
         self._vscode_server.set_cli_running_task_ids_lookup(
             self._snapshot_cli_running_task_ids,
         )
@@ -4062,10 +3477,6 @@ class RemoteAccessServer:
         if path == "/ws":
             return None
         if path in ("/trajectories", "/trajectories/"):
-            # Disk reads and trajectory-JSON parsing run off-thread so a
-            # large jobs root (or a slow disk) does not stall the event
-            # loop for every other client — same rationale as the
-            # /voice-model.tar.gz and /media/ branches below.
             return _http_response(
                 200,
                 "text/html; charset=utf-8",
@@ -4076,10 +3487,6 @@ class RemoteAccessServer:
         if path.startswith("/api/jobs/") and path.endswith("/trajectories"):
             return await asyncio.to_thread(_trajectory_job_response, path)
         if path == "/voice-model.tar.gz":
-            # Wake-word model for the in-browser voice listener.  Both
-            # the download AND the ~40 MB archive read are served
-            # off-thread so a cold cache (or a slow disk) does not
-            # stall the event loop for every other client.
             model_file = await asyncio.to_thread(_ensure_voice_model)
             if model_file is None:
                 return _http_response(
@@ -4089,9 +3496,6 @@ class RemoteAccessServer:
             return _http_response(200, "application/gzip", body)
         if path.startswith("/media/"):
             filepath = MEDIA_DIR / path[7:]
-            # Containment check, stat and read all run off-thread; a
-            # filesystem error (e.g. ELOOP from a symlink cycle) is a
-            # 404, not an unhandled 500.
             media_body = await asyncio.to_thread(_read_media_file, filepath)
             if media_body is not None:
                 ctype = mimetypes.guess_type(str(filepath))[0] or "application/octet-stream"
@@ -4156,13 +3560,6 @@ class RemoteAccessServer:
         """
         now = time.monotonic()
         fails = self._auth_failures.get(ip, [])
-        # Drop entries outside the window.  Write the pruned list back
-        # only when it is non-empty; an IP whose failures all expired
-        # is DELETED from the dict — writing back an empty list used
-        # to keep one stale entry per failed IP forever, growing
-        # ``_auth_failures`` without bound over the daemon's lifetime
-        # (IPs that always authenticated successfully never get an
-        # entry at all).
         fails = [t for t in fails if now - t <= _AUTH_FAIL_WINDOW]
         if fails:
             self._auth_failures[ip] = fails
@@ -4322,11 +3719,6 @@ class RemoteAccessServer:
         """
         with self._pending_tab_closes_lock:
             self._pending_tab_closes.pop(tab_id, None)
-        # Check the loop BEFORE popping the merge state: bailing out on
-        # a torn-down loop must be side-effect free.  Popping first
-        # discarded the _WebMergeState — the only handle that could
-        # still drive the review to ``all-done`` — leaving the backend
-        # tab ``is_merging`` forever.
         if self._loop is None or not self._loop.is_running():
             return
         merge_state = self._pop_merge_state(tab_id)
@@ -4383,11 +3775,7 @@ class RemoteAccessServer:
             return
 
         self._printer.add_client(websocket)
-        # M6: track tab_ids seen on this connection so we can clean
-        # up associated merge state when the connection drops.
         tabs_seen: set[str] = set()
-        # Per-connection work_dir + unique connection id (see
-        # _dispatch_client_command).
         conn_state: dict[str, Any] = {
             "work_dir": "", "conn_id": uuid.uuid4().hex,
         }
@@ -4407,13 +3795,6 @@ class RemoteAccessServer:
                 except websockets.exceptions.ConnectionClosed:
                     raise
                 except Exception:
-                    # Contain per-command failures (malformed fields,
-                    # unexpected I/O errors in handlers): one bad
-                    # message must not tear down the authenticated
-                    # connection — the ``finally`` below would arm
-                    # deferred closeTab timers for EVERY tab this
-                    # client touched, force-finishing in-flight merge
-                    # reviews as "accept remaining".
                     logger.warning(
                         "Error handling client command %r; "
                         "connection kept",
@@ -4424,21 +3805,8 @@ class RemoteAccessServer:
         except Exception:
             logger.debug("WS handler error", exc_info=True)
         finally:
-            # Deferred disposal: schedule a ``closeTab`` for every
-            # tab id this connection touched, with a short grace
-            # window so a reload / transient reconnect can re-claim
-            # the same tab ids and cancel the pending close.  Merge
-            # state is also popped lazily inside
-            # :meth:`_fire_pending_tab_close` so a reconnect within
-            # the grace window keeps the merge review intact.
             for tab in tabs_seen:
                 self._schedule_tab_close(tab)
-            # Sweep any CLI task ids announced on this connection but
-            # never closed — ``_dispatch_client_command`` accepts
-            # ``cliTaskStart`` from BOTH transports, so a WSS peer
-            # that drops without ``cliTaskEnd`` must get the same
-            # stale-task cleanup as a UDS peer or the daemon keeps
-            # reporting the task as running forever.
             self._sweep_stale_cli_tasks(conn_state)
             self._vscode_server.drop_connection_state(conn_state["conn_id"])
             self._printer.unbind_conn(conn_state["conn_id"])
@@ -4468,14 +3836,6 @@ class RemoteAccessServer:
         """
         self._printer.add_uds_writer(writer)
         tabs_seen: set[str] = set()
-        # Per-connection work_dir: each VS Code window owns exactly one
-        # UDS connection, so recording the window's ``setWorkDir`` here
-        # (instead of only on the daemon-global fallback) is what keeps
-        # every window's work_dir == its own workspace folder even when
-        # several windows share this one daemon process.  The unique
-        # ``conn_id`` is stamped (as ``connId``) on every command so
-        # ``VSCodeServer`` can key its per-connection autocomplete
-        # state (active-file snapshot, request staleness) by window.
         conn_state: dict[str, Any] = {
             "work_dir": "", "conn_id": uuid.uuid4().hex,
         }
@@ -4498,10 +3858,6 @@ class RemoteAccessServer:
                 except (ConnectionError, asyncio.IncompleteReadError):
                     raise
                 except Exception:
-                    # Same per-command containment as ``_ws_handler``:
-                    # one bad message (malformed field, handler I/O
-                    # error) must not drop the VS Code extension's
-                    # UDS connection and force-close its tabs.
                     logger.warning(
                         "Error handling UDS command %r; connection kept",
                         cmd.get("type", ""), exc_info=True,
@@ -4517,13 +3873,6 @@ class RemoteAccessServer:
             cli_tabs = conn_state.get("cli_tabs")
             if isinstance(cli_tabs, set):
                 self._printer.unregister_cli_tabs(cli_tabs)
-            # Clean up any CLI task ids announced on this connection
-            # but never closed (CLI crash, Ctrl+C, abrupt SIGKILL):
-            # without this the daemon would keep them in
-            # ``_cli_running_tasks`` forever and a webview later
-            # resuming the task would mis-display the
-            # blinking-green-circle "running" indicator for a task
-            # that is no longer actually running anywhere.
             self._sweep_stale_cli_tasks(conn_state)
             self._vscode_server.drop_connection_state(conn_state["conn_id"])
             self._printer.unbind_conn(conn_state["conn_id"])
@@ -4559,9 +3908,6 @@ class RemoteAccessServer:
                 carry at least ``type`` and ``taskId``.
         """
         if ev.get("type") == "talk":
-            # The CLI process already played this utterance on the
-            # daemon machine's speakers; mute the copies delivered to
-            # same-machine (UDS) peers so it is heard once per device.
             self._printer._fanout_talk_cli_origin(ev)
             return
         self._printer._fanout_stamped(ev)
@@ -4650,14 +3996,6 @@ class RemoteAccessServer:
             "severity": "info",
             "message": "Restarting the KISS Sorcar web server…",
         }, conn_id)
-        # Drop a pending-reset flag so the freshly-respawned daemon
-        # knows to broadcast a paired "Server restart complete"
-        # notification once it is listening again — see
-        # :meth:`_setup_server`.  Written atomically (tmp + replace)
-        # so a crash mid-write never leaves a half-baked file the
-        # next daemon would read.  Best-effort: a filesystem error
-        # here only suppresses the post-restart toast, never blocks
-        # the actual restart.
         self._write_server_reset_flag(conn_id)
         loop.call_later(_SERVER_RESET_DELAY, self._trigger_server_reset)
 
@@ -5152,19 +4490,10 @@ class RemoteAccessServer:
                 )
                 self._active_url = discovered
                 url = discovered
-        # ``tunnelActive`` is True only when a real Cloudflare tunnel
-        # URL is in effect (not the local fallback).  The frontend hides
-        # the welcome-page remote-password panel when this is False so
-        # users are not shown a password field for a tunnel that does
-        # not exist.
         tunnel_active = bool(
             self.use_tunnel and url and url != self._local_url
         )
         self._broadcast_remote_url(url or "", tunnel_active)
-        # Replay the cached PyPI update-available state so a client
-        # that just (re)connected sees the green download badge on
-        # the Update button without having to wait for the next
-        # hourly poll.
         await self._broadcast_update_available()
 
     async def _endpoint_send(self, endpoint: Any, data: str) -> None:
@@ -5288,47 +4617,15 @@ class RemoteAccessServer:
         """
         tab_id = cmd.get("tabId", "")
         if not isinstance(tab_id, str):
-            # M7: an unhashable JSON value (list/dict) would raise
-            # ``TypeError`` inside ``_cancel_pending_tab_close``'s
-            # dict lookup and abort the whole ready handling.
             tab_id = ""
         conn_id = cmd.get("connId", "")
-        # A fresh ``ready`` is the unambiguous signal that the
-        # frontend has reconnected and is re-claiming whatever tab
-        # ids it carries.  Cancel the deferred ``closeTab`` for the
-        # current tab id (and every restored tab below) so a reload
-        # within :data:`_TAB_CLOSE_GRACE` keeps the backend state.
         self._cancel_pending_tab_close(tab_id)
-        # Propagate the connection's stamped ``workDir`` (if any) onto
-        # the fanned-out init commands.  ``_cmd_get_config`` reports
-        # the command's ``workDir`` as ``config.work_dir`` so the
-        # settings panel shows the folder THIS instance actually uses;
-        # dropping the stamp here made every page-load ``configData``
-        # fall back to the daemon-global work_dir instead of the
-        # connection's pinned folder.
         work_dir = cmd.get("workDir", "")
         for init_cmd in ("getModels", "getInputHistory", "getConfig"):
             init: dict[str, Any] = {"type": init_cmd, "connId": conn_id}
             if work_dir:
                 init["workDir"] = work_dir
             await self._run_cmd(init)
-        # Belt-and-braces history resync: the start-time
-        # ``tasks_updated`` broadcast by ``ChatSorcarAgent.run`` is a
-        # one-shot global system event ("Not recorded, not persisted"
-        # — see :meth:`WebPrinter.broadcast`), so a client whose
-        # WebSocket was down at that instant (mobile Safari kills the
-        # socket whenever the phone backgrounds) misses it forever.
-        # Nudging the WSS client that just sent ``ready`` — i.e. a
-        # fresh or reloaded remote page, including the shim's
-        # ``location.reload()`` recovery after an authenticated close
-        # — with a targeted ``tasks_updated`` makes its open History
-        # sidebar refetch and converge on the current task list.
-        # (UDS/VS Code-extension reconnects don't resend ``ready``;
-        # they converge via the webview's ``daemonStatus
-        # connected:true`` → ``refreshHistory()`` path instead.)  The
-        # webview treats ``tasks_updated`` as a hint (refetch via
-        # ``getHistory``), never as data, so a redundant nudge after
-        # a clean page load is harmless.
         try:
             await self._endpoint_send(
                 websocket, json.dumps({"type": "tasks_updated"}),
@@ -5343,23 +4640,6 @@ class RemoteAccessServer:
             )
         except Exception:
             pass
-        # Replay in-flight merge reviews after restored-tab session
-        # replays below.  ``merge_data`` events are tab-stamped and
-        # never persisted, so without this a page reload mid-review
-        # loses the merge UI forever while the server-side
-        # ``_WebMergeState`` (and the backend tab's ``is_merging``
-        # flag) stay stuck.  However, when a refreshed tab has a
-        # backend ``chatId``, ``resumeSession`` emits ``task_events``;
-        # the frontend handles that by clearing ``#output`` before it
-        # renders the replayed history.  Sending ``merge_data`` before
-        # that history replay therefore reconstructs the diff panel
-        # and then immediately erases it.  Collect unique merge tabs
-        # during ready handling and replay them only after all
-        # ``resumeSession`` calls have completed.  The set also avoids
-        # duplicate active/restored replays; duplicate ``merge_data``
-        # panels leave the first diff panel stale in the remote webapp
-        # because later ``merge_nav`` updates only the most recent
-        # panel.
         merge_tabs_to_replay: list[str] = []
         seen_merge_tabs: set[str] = set()
         if tab_id:
@@ -5379,29 +4659,9 @@ class RemoteAccessServer:
                 merge_tabs_to_replay.append(rt_id)
                 seen_merge_tabs.add(rt_id)
         if merge_tabs_to_replay:
-            # Drain every send already scheduled to this endpoint —
-            # crucially the ``task_events`` that the ``resumeSession``
-            # calls above fanned out from their executor threads — so
-            # the ``merge_data`` replay below reaches the wire strictly
-            # AFTER them.  Without this the merge send can overtake a
-            # not-yet-started ``task_events`` send under load, and the
-            # frontend's history replay then erases the recovered merge
-            # panel (see :meth:`WebPrinter.flush_pending_sends`).
             await self._printer.flush_pending_sends(websocket)
         for merge_tab_id in merge_tabs_to_replay:
             await self._replay_merge_review(merge_tab_id, websocket)
-        # Finally, tell a freshly-opened REMOTE page about every task
-        # that is currently running in the backend so it can open one
-        # chat tab per running task and focus the tab running the
-        # LATEST one.  A brand-new browser session has no persisted
-        # ``restoredTabs`` (the shim's state lives in per-tab
-        # sessionStorage), so without this push running tasks are
-        # invisible until the user digs them out of the History
-        # sidebar.  The send is targeted at the connecting endpoint
-        # only, and the client dedupes by backend chat id, so a reload
-        # that DID restore the chat's tab never shows it twice.  UDS
-        # (VS Code / CLI) clients are exempt: the extension host owns
-        # their tab restoration.
         if not is_uds:
             try:
                 running_rows = await asyncio.to_thread(
@@ -5448,28 +4708,15 @@ class RemoteAccessServer:
         """
         if not tab_id:
             return
-        # Serialise with in-flight merge actions: the reject branches
-        # of ``_apply_web_merge_action`` rewrite the reviewed files on
-        # disk (truncate + write) and mutate the shared hunk ``cs``
-        # offsets while holding this per-tab lock.  Reading the files
-        # (``_augment_merge_data``) and hunk dicts without it could
-        # hand the reconnecting client a torn ``current_text`` and
-        # mid-mutation offsets that no later ``merge_nav`` broadcast
-        # can repair (``merge_nav`` carries no file text).
         lock = await self._acquire_merge_action_lock(tab_id)
         if lock is None:
             return
         try:
-            # Re-check under the lock: the action we waited for may
-            # have resolved the final hunk and finished the review.
             with self._merge_states_lock:
                 state = self._merge_states.get(tab_id)
             if state is None or not state.remaining:
                 return
             assert self._loop is not None
-            # ``_augment_merge_data`` reads every reviewed file
-            # from disk; do it off the event loop like the
-            # broadcast path's callers.
             event = await self._loop.run_in_executor(
                 None,
                 _augment_merge_data,
@@ -5517,14 +4764,6 @@ class RemoteAccessServer:
         """
         tab_id = cmd.get("tabId", "")
         prompt = cmd.get("prompt", "")
-        # M7: clamp the prompt size so a giant payload cannot push
-        # tens of MB through the broadcast pipeline (every connected
-        # client receives a ``setTaskText`` echo of this string).
-        # Measured and truncated in UTF-8 BYTES (matching the
-        # ``_MAX_PROMPT_BYTES`` name — a 1M-char multibyte prompt is
-        # up to ~4 MB on the wire); ``_truncate_utf8_bytes`` removes a
-        # trailing partial sequence so the cut never splits inside a
-        # character, and safely handles JSON lone-surrogate escapes.
         if isinstance(prompt, str):
             prompt, prompt_size = _truncate_utf8_bytes(
                 prompt, _MAX_PROMPT_BYTES,
@@ -5534,7 +4773,6 @@ class RemoteAccessServer:
                     "prompt size %d bytes exceeds cap %d bytes; truncating",
                     prompt_size, _MAX_PROMPT_BYTES,
                 )
-        # M7: clamp the attachments list size symmetrically.
         attachments = cmd.get("attachments")
         if isinstance(attachments, list) and len(attachments) > _MAX_ATTACHMENTS:
             logger.warning(
@@ -5548,18 +4786,11 @@ class RemoteAccessServer:
             "type": "run",
             "prompt": prompt,
             "model": cmd.get("model", ""),
-            # ``or`` (not ``dict.get`` default) so an explicit empty
-            # ``workDir`` also falls back to the daemon-wide default.
-            # Commands from VS Code windows arrive pre-stamped with the
-            # window's own work_dir by ``sorcar.ServerApi.dispatch``.
             "workDir": cmd.get("workDir") or self._vscode_server.work_dir,
             "tabId": tab_id,
             "attachments": attachments,
             "useWorktree": cmd.get("useWorktree", False),
             "useParallel": cmd.get("useParallel", False),
-            # Mirror the extension's ``_startTask``: the webview's
-            # "Auto commit" toggle must survive the submit → run
-            # translation or remote submits silently lose the mode.
             "autoCommit": cmd.get("autoCommit", False),
         }
         await self._run_cmd(run_cmd)
@@ -5735,13 +4966,6 @@ class RemoteAccessServer:
         with self._merge_states_lock:
             state = self._merge_states.get(tab_id)
         if state is None:
-            # The review vanished between the caller's membership
-            # check and our lookup (resolved / closed concurrently).
-            # Drop the per-tab lock entry too — but only while no NEW
-            # review exists for the tab (checked atomically under
-            # ``_merge_states_lock``, which ``_register_merge_state``
-            # also holds) — so the entry cannot leak for the daemon's
-            # lifetime.
             with self._merge_states_lock:
                 if tab_id not in self._merge_states:
                     self._merge_action_locks.pop(tab_id, None)
@@ -5773,13 +4997,6 @@ class RemoteAccessServer:
                         ),
                     )
                 except OSError as exc:
-                    # The restore write failed (e.g. the agent replaced
-                    # the deleted file with a DIRECTORY of the same
-                    # name → IsADirectoryError, or the target is not
-                    # writable).  Nothing landed on disk, so the hunk
-                    # must stay UNRESOLVED — and the failure must not
-                    # propagate, or the transport loop would tear down
-                    # the whole client connection over one bad hunk.
                     self._broadcast_reject_failure(tab_id, fd, exc)
                 else:
                     _record_hunk_rejected(
@@ -5803,9 +5020,6 @@ class RemoteAccessServer:
                             state.unresolved_in_file(fi),
                         )
                     except OSError as exc:
-                        # See the per-hunk ``reject`` branch: the
-                        # restore write failed, so the file's hunks
-                        # stay unresolved and the review survives.
                         self._broadcast_reject_failure(tab_id, fd, exc)
                         resolve_file = False
                 if resolve_file:
@@ -5824,12 +5038,6 @@ class RemoteAccessServer:
                 unresolved_by_file.setdefault(fi, []).append(hi)
             for fi, his in unresolved_by_file.items():
                 fd = state.files[fi]
-                # Mark hunks resolved only AFTER their file's restore
-                # write succeeded: marking up-front would zombify the
-                # review on failure (remaining == 0 with the state
-                # never popped and all-done never dispatched), while a
-                # propagating exception killed the client connection
-                # AND left sibling files unrestored.
                 try:
                     await self._loop.run_in_executor(
                         None, _reject_all_hunks_in_file, fd, his,
@@ -5855,14 +5063,6 @@ class RemoteAccessServer:
         })
 
         if not state.remaining:
-            # A waiter already queued on the popped lock object is
-            # harmless: when it finally acquires, it either re-fetches
-            # a ``None`` state and takes the early return above, or —
-            # when a NEW review for this tab was registered in the
-            # meantime — detects that the lock ROTATED (the entry it
-            # holds is no longer ``_merge_action_locks[tab_id]``) and
-            # retries with the current lock (see
-            # ``_handle_web_merge_action`` / ``_replay_merge_review``).
             self._pop_merge_state(tab_id)
             await self._run_cmd(
                 {
@@ -5899,10 +5099,6 @@ class RemoteAccessServer:
         last_proc: subprocess.Popen[str] | None = None
         for attempt in range(max(1, retries)):
             self._tunnel_metrics_port = _pick_free_local_port()
-            # stdout is DEVNULL (not PIPE) because nothing reads it.
-            # An un-drained PIPE buffer fills after ~64 KiB of
-            # cloudflared log output and causes the subprocess to
-            # block on write().
             proc = subprocess.Popen(
                 [
                     "cloudflared", "tunnel",
@@ -5914,25 +5110,8 @@ class RemoteAccessServer:
                 stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
-                # Detach cloudflared into its own process group / session
-                # so it survives ``kiss-web``'s SIGTERM / SIGINT.  Combined
-                # with the pidfile written below and adoption logic in
-                # :func:`_try_adopt_existing_cloudflared`, this keeps the
-                # public quick-tunnel URL stable across ``kiss-web``
-                # restarts that would otherwise mint a brand-new
-                # ``*.trycloudflare.com`` hostname every time.
                 start_new_session=True,
             )
-            # Give cloudflared a brief moment to fail-fast on a bind
-            # collision.  Healthy cloudflared takes seconds to start
-            # so it will not have exited within the window.  ``wait``
-            # (rather than a fixed ``sleep`` + ``poll``) returns as
-            # soon as a fail-fast child exits — typically a few ms —
-            # and also reaps it, while tolerating scheduling delay up
-            # to :data:`_SPAWN_FAILFAST_WINDOW` under heavy machine
-            # load (a loaded box can take >250ms just to exec and
-            # exit the child, which used to misclassify a doomed
-            # spawn as healthy).
             try:
                 proc.wait(timeout=_SPAWN_FAILFAST_WINDOW)
             except subprocess.TimeoutExpired:
@@ -5941,18 +5120,10 @@ class RemoteAccessServer:
                 self._tunnel_proc = proc
                 self._tunnel_started_at = time.monotonic()
                 self._tunnel_adopted_pid = None
-                # Best-effort pidfile (URL added later once known).
                 _save_cloudflared_pidfile(
                     proc.pid, self._tunnel_metrics_port, None,
                 )
                 return
-            # Reap the previous failed attempt before dropping our
-            # only reference to it: close its stderr pipe FD
-            # deterministically (instead of leaving it to GC) and
-            # wait() the already-exited process so it never lingers
-            # unreaped.  Only the LAST dead process is kept — its
-            # stderr stays open because the caller's URL-parsing
-            # path still reads it.
             if last_proc is not None:
                 if last_proc.stderr is not None:
                     last_proc.stderr.close()
@@ -5964,9 +5135,6 @@ class RemoteAccessServer:
                 self._tunnel_metrics_port, attempt + 1, retries,
                 proc.returncode,
             )
-        # All retries exhausted — keep the most recent (already-dead)
-        # process so the caller's stderr-parsing path can still run
-        # (it will time out and return None as before).
         self._tunnel_proc = last_proc
         self._tunnel_started_at = time.monotonic()
 
@@ -6019,10 +5187,6 @@ class RemoteAccessServer:
             for _ in range(20):
                 if self._tunnel_proc.poll() is not None:
                     break
-                # Prefer OUR just-spawned cloudflared's metrics port.
-                # ``_discover_tunnel_url_from_metrics`` scans ALL
-                # cloudflared processes plus hardcoded ports and could
-                # adopt a FOREIGN tunnel's URL.
                 if self._tunnel_metrics_port is not None:
                     url = _query_quicktunnel_hostname(
                         self._tunnel_metrics_port,
@@ -6038,11 +5202,6 @@ class RemoteAccessServer:
                 self._tunnel_proc.pid, self._tunnel_metrics_port, url,
             )
             return url
-        # Rate-limit detection: if cloudflared's stderr named HTTP
-        # 429 / error 1015 (and we never got a URL out), tell the
-        # restart machinery to use a longer cooldown.  Setting this
-        # only when ``url is None`` prevents a stray mid-line match
-        # in healthy logs from poisoning the next backoff.
         if rate_limit_flag[0]:
             self._tunnel_rate_limited = True
             logger.warning(
@@ -6114,15 +5273,9 @@ class RemoteAccessServer:
                 "cloudflared tunnel process died (rc=%s), restarting…",
                 proc.returncode,
             )
-            # ``proc.wait`` inside can block up to ~5s — keep it off
-            # the event loop (M10).
             await asyncio.to_thread(self._terminate_tunnel_proc)
             proc = None
 
-        # When we adopted an externally-owned cloudflared, treat a
-        # vanished pid the same as a self-spawned proc that exited:
-        # clear the adopted-pid bookkeeping so the no-process branch
-        # below kicks in and a fresh cloudflared is spawned.
         if adopted_pid is not None and not _is_pid_alive(adopted_pid):
             logger.info(
                 "Adopted cloudflared (pid=%d) is gone; restarting…",
@@ -6135,14 +5288,6 @@ class RemoteAccessServer:
             adopted_pid = None
 
         if proc is None and adopted_pid is None:
-            # Don't (re)start the tunnel when the auth password is
-            # unset — see H1 in the security review.  The watchdog
-            # mirrors the guard in _setup_server so a runtime config
-            # change doesn't accidentally bring up an open tunnel.
-            # ``load_config`` reads ``~/.kiss/config.json`` from disk;
-            # run it off-thread (M10 convention) so a slow/hung
-            # (e.g. NFS-homed) read cannot stall the event loop for
-            # every connected client.
             cfg = await asyncio.to_thread(load_config)
             if not cfg.get("remote_password", ""):
                 return
@@ -6163,17 +5308,9 @@ class RemoteAccessServer:
             None, _probe_tunnel_ready, self._tunnel_metrics_port,
         )
         if healthy is None:
-            # Metrics endpoint unreachable, response malformed, or
-            # schema changed.  This is "no information" — do NOT
-            # increment ``_tunnel_unhealthy_ticks`` (which would
-            # eventually force a brand-new ``*.trycloudflare.com``
-            # URL on every flake of the loopback metrics socket).
             return
         if healthy:
             self._tunnel_unhealthy_ticks = 0
-            # After enough sustained healthy uptime, treat the prior
-            # chronic-flake episode as resolved and let a future,
-            # unrelated event start the cool-down ladder from rung 1.
             if (
                 self._tunnel_force_restart_count > 0
                 and self._tunnel_started_at is not None
@@ -6201,13 +5338,6 @@ class RemoteAccessServer:
             return
 
         if now < self._tunnel_force_restart_next_allowed:
-            # The watchdog already force-restarted cloudflared recently
-            # and the replacement is *still* unhealthy.  Skip the
-            # force-restart this tick: rotating the public URL every
-            # ~10 minutes for a problem that has not gone away just
-            # breaks every existing browser session without recovering
-            # the tunnel.  The cool-down grows exponentially so a
-            # genuinely-dead edge will eventually be force-restarted.
             remaining = int(self._tunnel_force_restart_next_allowed - now)
             logger.info(
                 "cloudflared tunnel still reports zero ready edge "
@@ -6224,10 +5354,6 @@ class RemoteAccessServer:
             "edge (readyConnections=0 for %d ticks); force-restarting",
             self._tunnel_unhealthy_ticks,
         )
-        # Kill the adopted cloudflared too — it is the unhealthy one
-        # we are replacing; leaving it running would leak metrics
-        # ports and confuse the next adoption attempt.  Runs
-        # off-thread (M10): it can block ~5s in ``proc.wait``.
         await asyncio.to_thread(self._terminate_tunnel_proc, True)
         self._tunnel_force_restart_count += 1
         cooldown = min(
@@ -6258,12 +5384,6 @@ class RemoteAccessServer:
             self._tunnel_rate_limited = False
         else:
             self._tunnel_failure_count += 1
-            # When cloudflared reported a rate-limit on this attempt,
-            # ignore the regular exponential schedule (60s, 120s, ...)
-            # and wait at least _TUNNEL_RATE_LIMIT_BACKOFF + jitter
-            # seconds: shorter waits keep resetting Cloudflare's per-IP
-            # cooldown clock and burn through dozens of distinct
-            # *.trycloudflare.com URLs without ever recovering.
             if self._tunnel_rate_limited:
                 delay = _rate_limit_backoff_seconds()
                 self._tunnel_rate_limited = False
@@ -6319,7 +5439,6 @@ class RemoteAccessServer:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
-            # Pidfile is stale now that we killed our own cloudflared.
             _unlink_cloudflared_pidfile()
         elif kill_adopted and self._tunnel_adopted_pid is not None:
             adopted_pid = self._tunnel_adopted_pid
@@ -6368,9 +5487,6 @@ class RemoteAccessServer:
         assert loop is not None
         latest = await loop.run_in_executor(None, _fetch_latest_version)
         if not latest:
-            # Network error or malformed payload — keep the previous
-            # cached state (if any) and do nothing.  Re-broadcasting
-            # a stale ``False`` would mask a genuine update.
             return
         self._latest_version = latest
         await self._broadcast_update_available()
@@ -6424,18 +5540,12 @@ class RemoteAccessServer:
                 except Exception:
                     logger.debug("Watchdog tunnel check error", exc_info=True)
             try:
-                # Pure file I/O (stat + potential re-write) — run it
-                # off-thread so a slow disk cannot stall the loop
-                # (M10 convention).
                 await asyncio.to_thread(self._watchdog_check_url_file)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.debug("Watchdog URL-file check error", exc_info=True)
             try:
-                # ``_get_local_ips`` hits the network stack — fetch it
-                # off-thread (M10) so only the pure comparison runs on
-                # the event loop.
                 ips = await asyncio.to_thread(_get_local_ips)
                 if self._watchdog_check_ip_change(ips):
                     return
@@ -6494,42 +5604,16 @@ class RemoteAccessServer:
         if current_ips is None:
             current_ips = _get_local_ips()
         if not current_ips:
-            # IP discovery failed (transient WiFi roam, DHCP
-            # renewal, VPN flap, slow resolver, post-sleep DNS
-            # hiccup).  Bare ``try/except: pass`` inside
-            # :func:`_get_local_ips` swallows any error and
-            # returns ``frozenset()``.  Treat this as "no
-            # information" — do NOT compare it against
-            # ``_last_ips`` (which would falsely look like a
-            # network change and trigger a spurious restart),
-            # and drop any in-flight debounce candidate so a
-            # later real change starts its count from scratch.
             self._pending_ip_change = None
             self._pending_ip_change_count = 0
         elif current_ips == self._last_ips:
-            # IPs match the established baseline — clear any
-            # in-flight candidate (the host's network briefly
-            # diverged and recovered before reaching the
-            # debounce threshold).
             self._pending_ip_change = None
             self._pending_ip_change_count = 0
         elif not self._last_ips:
-            # Initial discovery (or recovery after a sustained
-            # failure) — adopt the first non-empty result as
-            # the baseline without restarting.  Without this
-            # branch a server that started before the network
-            # came up would always trigger one spurious restart
-            # on the first successful poll.
             self._last_ips = current_ips
             self._pending_ip_change = None
             self._pending_ip_change_count = 0
         else:
-            # Real divergence from the established baseline.
-            # Require :data:`_IP_CHANGE_DEBOUNCE_TICKS`
-            # consecutive ticks observing the *same* candidate
-            # set before acting.  A single divergent tick (the
-            # most common spurious-restart trigger) is no
-            # longer enough.
             if current_ips == self._pending_ip_change:
                 self._pending_ip_change_count += 1
             else:
@@ -6541,16 +5625,6 @@ class RemoteAccessServer:
                 self._pending_ip_change = None
                 self._pending_ip_change_count = 0
                 if self.use_tunnel:
-                    # In tunnel mode, cloudflared handles edge
-                    # reconnection automatically.  Restarting
-                    # the entire daemon would assign a new
-                    # random *.trycloudflare.com URL — avoid
-                    # that.  Just log and let cloudflared
-                    # recover on its own.
-                    # N.B. Check use_tunnel only — NOT
-                    # _tunnel_proc, which can be None during
-                    # startup, when remote_password is empty,
-                    # or between a force-restart.
                     logger.info(
                         "IP address changed: %s → %s; tunnel "
                         "mode — cloudflared will re-register "
@@ -6711,9 +5785,6 @@ class RemoteAccessServer:
                 stdin=stderr.fileno(),
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                # New session so the shim survives this kiss-web's
-                # exit *and* is not killed by a process-group signal
-                # sent to kiss-web (e.g. ``pkill -g``).
                 start_new_session=True,
                 close_fds=True,
             )
@@ -6732,24 +5803,9 @@ class RemoteAccessServer:
         Binds the WebSocket server, starts the tunnel (if enabled),
         saves the URL file, and starts watchdog tasks.
         """
-        # M1: ``asyncio.get_event_loop()`` is deprecated when there is a
-        # running loop on Python 3.12+.  ``_setup_server`` only ever
-        # runs from inside a coroutine driven by ``asyncio.run`` (or
-        # an externally-managed loop), so the running loop is always
-        # available here — use it directly.
         self._loop = asyncio.get_running_loop()
         self._printer._loop = self._loop
 
-        # Bind the local Unix-domain socket FIRST — before the WSS
-        # listener, before the SSL context, before anything that could
-        # take non-trivial time.  ``install.sh`` /
-        # ``build-extension.sh`` poll for ``~/.kiss/sorcar.sock`` to
-        # decide whether the freshly-launched daemon is back; giving
-        # them a bound UDS within ~100 ms of ``launchctl kickstart``
-        # is what makes the "KISS Sorcar Server is starting …"
-        # overlay disappear promptly.  UDS bind does not depend on
-        # ``self._ssl_context`` (local peers authenticate via
-        # filesystem permissions), so it can run on the fast path.
         try:
             self._uds_path.parent.mkdir(parents=True, exist_ok=True)
             if self._uds_path.exists() or self._uds_path.is_symlink():
@@ -6773,11 +5829,6 @@ class RemoteAccessServer:
             )
             self._uds_server = None
 
-        # Build the SSL context on a worker thread while the WSS
-        # bind retry loop below awaits it.  ``load_cert_chain`` (and
-        # RSA keygen on a near-expiry auto-generated cert) is CPU-
-        # heavy synchronous work that would otherwise block the
-        # event loop and the UDS accept-path we just bound.
         if self._ssl_context is None:
             self._ssl_context = await asyncio.to_thread(
                 _create_ssl_context,
@@ -6785,17 +5836,6 @@ class RemoteAccessServer:
                 self._ssl_keyfile,
             )
 
-        # Bind the WSS listener with bounded retry on transient
-        # ``OSError`` (most often ``EADDRINUSE`` lingering from a
-        # previous instance still in ``TIME_WAIT`` during a fast
-        # launchd / extension respawn, or ``EADDRNOTAVAIL`` while the
-        # network interface is still coming up post-boot / post-
-        # resume).  Without retry, the first crash propagates an
-        # OSError traceback out of ``asyncio.run`` and the supervisor
-        # immediately respawns kiss-web into the same OSError, visible
-        # to the user as a flap loop.  After ``_BIND_RETRY_ATTEMPTS``
-        # we raise :class:`SystemExit` with a clean error message and
-        # no traceback so the supervisor backs off naturally.
         last_err: OSError | None = None
         for attempt in range(_BIND_RETRY_ATTEMPTS):
             try:
@@ -6812,9 +5852,6 @@ class RemoteAccessServer:
                 )
                 break
             except OSError as exc:
-                # Permission errors (EACCES on a privileged port) and
-                # other non-transient errnos are not worth retrying —
-                # fail fast so the supervisor sees the error promptly.
                 if exc.errno not in _BIND_RETRYABLE_ERRNOS:
                     logger.error(
                         "WSS bind to %s:%d failed with non-retryable "
@@ -6828,8 +5865,6 @@ class RemoteAccessServer:
                     )
                     raise SystemExit(2) from exc
                 last_err = exc
-                # Was this the final attempt?  Skip the sleep and
-                # fall through to the SystemExit below.
                 if attempt + 1 >= _BIND_RETRY_ATTEMPTS:
                     break
                 delay = _BIND_RETRY_BACKOFF[
@@ -6843,9 +5878,6 @@ class RemoteAccessServer:
                 )
                 await asyncio.sleep(delay)
         if self._ws_server is None:
-            # All retryable attempts exhausted.  Exit cleanly so the
-            # supervisor backs off naturally instead of respawning
-            # into the same OSError traceback in a flap loop.
             logger.error(
                 "WSS bind to %s:%d failed after %d attempts: %s — exiting",
                 self.host, self.port, _BIND_RETRY_ATTEMPTS, last_err,
@@ -6859,25 +5891,10 @@ class RemoteAccessServer:
 
         tunnel_url: str | None = None
         if self.use_tunnel:
-            # Refuse to expose the server to the public internet
-            # (cloudflared tunnel) when no authentication password is
-            # configured.  Without a password every WS client is
-            # admitted, which would let anyone on the internet drive
-            # the local agent.  Local connections still work.
-            #
-            # Wait up to 30 s for the password to be written.  When the
-            # VS Code extension restarts ``kiss-web``, its
-            # ``ensureRemotePassword`` prompt may not finish until a
-            # few seconds after the daemon starts; polling here avoids
-            # a launchd respawn that would mint a new tunnel URL.
             password = await self._loop.run_in_executor(  # type: ignore[union-attr]
                 None, _wait_for_remote_password, 30.0,
             )
             if password:
-                # Before spawning a fresh cloudflared, try to adopt one
-                # left running by a previous ``kiss-web`` (detached via
-                # ``start_new_session=True``).  Adoption keeps the
-                # same public URL across kiss-web restarts.
                 adopted = await self._loop.run_in_executor(  # type: ignore[union-attr]
                     None, _try_adopt_existing_cloudflared,
                 )
@@ -6887,9 +5904,6 @@ class RemoteAccessServer:
                     self._tunnel_metrics_port = adopted_port
                     self._tunnel_started_at = time.monotonic()
                     tunnel_url = adopted_url
-                    # Refresh pidfile with the freshly-probed URL so
-                    # subsequent adoption attempts see the current
-                    # hostname even when cloudflared has rotated it.
                     _save_cloudflared_pidfile(
                         adopted_pid, adopted_port, adopted_url,
                     )
@@ -6907,10 +5921,6 @@ class RemoteAccessServer:
                     file=sys.stderr,
                 )
             elif tunnel_url is None:
-                # No existing cloudflared was adopted — spawn a fresh
-                # one.  When ``tunnel_url`` was already set by the
-                # adoption branch above we deliberately skip this
-                # call to avoid starting a duplicate cloudflared.
                 tunnel_url = await self._loop.run_in_executor(  # type: ignore[union-attr]
                     None, self._start_tunnel,
                 )
@@ -6927,18 +5937,6 @@ class RemoteAccessServer:
             self._version_check_loop(),
         )
 
-        # If the previous instance of this daemon SIGTERMed itself in
-        # response to a user-initiated "Server reset", drop a delayed
-        # broadcast announcing the restart completed so reconnecting
-        # clients see a confirmation toast (paired with the
-        # "Restarting the KISS Sorcar web server…" toast emitted by
-        # the previous instance).  The flag file is removed eagerly
-        # so a *crash* respawn or a routine launchd kick — neither
-        # of which writes the flag — never replays an obsolete
-        # notification on the next launch.  The delay gives the VS
-        # Code extension's ``AgentClient`` and any reconnecting
-        # browser webview time to reattach to the freshly-bound UDS
-        # / WSS before the broadcast goes out.
         self._maybe_schedule_server_reset_complete()
 
     async def _serve_async(self) -> None:
@@ -7022,9 +6020,6 @@ class RemoteAccessServer:
             ", ".join(active_tabs) if active_tabs else "none",
             _rss_mb(),
         )
-        # For SIGTERM: begin a deterministic graceful shutdown — but
-        # only on the first signal.  Re-triggering during the cleanup
-        # phase would crash the process (see docstring).
         if signum == signal.SIGTERM:
             if self._shutdown_initiated:
                 logger.info(
@@ -7036,28 +6031,12 @@ class RemoteAccessServer:
             self._shutdown_initiated = True
             loop = self._loop
             if loop is not None and loop.is_running():
-                # Do NOT raise KeyboardInterrupt here.  The signal
-                # handler fires at an arbitrary bytecode of whatever
-                # the main thread is executing; with agents active the
-                # loop is usually inside coroutine/callback frames
-                # whose broad ``except``/``finally`` clauses can
-                # swallow the injected exception (observed in
-                # production: SIGTERM logged, agents kept stepping, no
-                # shutdown, all later SIGTERMs ignored).  A dedicated
-                # shutdown thread stops the in-flight agents first and
-                # then unwinds the loop via a plain callback, which no
-                # foreign frame can intercept.
                 threading.Thread(
                     target=self._shutdown_on_sigterm,
                     name="kiss-sigterm-shutdown",
                     daemon=True,
                 ).start()
                 return
-            # Loop not running yet (SIGTERM landed between
-            # ``_install_signal_handlers`` and ``asyncio.run``): the
-            # main thread is still in plain ``start()`` code where a
-            # raised KeyboardInterrupt reliably reaches the existing
-            # ``except KeyboardInterrupt`` handler.
             raise KeyboardInterrupt(f"Received {sig_name}")
 
     def _request_loop_shutdown(self) -> None:
@@ -7114,12 +6093,12 @@ class RemoteAccessServer:
             try:
                 loop.call_soon_threadsafe(self._request_loop_shutdown)
             except RuntimeError:
-                pass  # loop closed concurrently — start() is unwinding
+                pass
         deadline = time.monotonic() + _SHUTDOWN_EXIT_FAILSAFE
         while time.monotonic() < deadline:
             loop = self._loop
             if loop is None or not loop.is_running():
-                return  # asyncio.run unwound; start()'s finally takes over
+                return
             time.sleep(0.25)
         logger.error(
             "Shutdown failsafe: event loop did not unwind within %.0fs "
@@ -7163,8 +6142,6 @@ class RemoteAccessServer:
         """
         import ctypes
 
-        # Declare the C signature once so the ``PyThreadState_SetAsyncExc``
-        # calls below marshal arguments correctly.
         ctypes.pythonapi.PyThreadState_SetAsyncExc.argtypes = [
             ctypes.c_ulong,
             ctypes.py_object,
@@ -7178,29 +6155,8 @@ class RemoteAccessServer:
             for tab_id, tab in _RunningAgentState.running_agent_states.items():
                 thread = tab.task_thread
                 if tab.is_task_active and thread is not None and thread.is_alive():
-                    # Mark BEFORE the cooperative stop / injected
-                    # KeyboardInterrupt so the worker's
-                    # ``except KeyboardInterrupt`` handler reliably
-                    # observes that this cancellation is a graceful
-                    # server shutdown (SIGTERM / daemon restart), not a
-                    # user "Stop" click.  This is the sole signal that
-                    # lets the task-runner persist
-                    # "Task interrupted by server restart/shutdown"
-                    # (event ``task_interrupted``) instead of
-                    # "Task stopped by user" (event ``task_stopped``).
                     tab.interrupted_by_shutdown = True
                     active.append((tab_id, tab.stop_event, thread))
-                    # Capture the in-flight task row id so the helper
-                    # below can pre-emptively rewrite its sentinel
-                    # ``"Agent Failed Abruptly"`` ``result`` column to
-                    # ``"Task interrupted by server restart/shutdown"``.
-                    # ``tab.task_history_id`` is only set in the
-                    # task_runner's inner finally *after* the agent's
-                    # ``run()`` returns — but the agent itself sets
-                    # ``self._last_task_id`` early in ``run()`` (see
-                    # ``ChatSorcarAgent.run``) so a worker wedged
-                    # mid-``run()`` is still recoverable via the
-                    # agent's own attribute.
                     th_id = tab.task_history_id
                     if th_id is None and tab.agent is not None:
                         th_id = getattr(tab.agent, "_last_task_id", None)
@@ -7210,18 +6166,6 @@ class RemoteAccessServer:
         if not active:
             return
 
-        # Pre-emptive persistence safety net.  Done BEFORE we start
-        # signalling workers so that — even if a worker is wedged in
-        # uninterruptible C code (a blocking LLM API call) and never
-        # reaches its cleanup ``finally`` within *timeout* — the
-        # task_history row already carries a meaningful result rather
-        # than the sentinel.  Without this net, the next startup's
-        # orphan sweep would rewrite the surviving sentinel to
-        # ``"Task terminated unexpectedly (process killed)"`` — the
-        # intermittent "agent was killed" symptom users observe.
-        # Workers that *do* finish unwinding will overwrite this
-        # placeholder with a more detailed result via
-        # ``_save_task_result``.
         if active_task_history_ids:
             try:
                 from kiss.agents.sorcar.persistence import (
@@ -7241,14 +6185,10 @@ class RemoteAccessServer:
             ", ".join(tab_id for tab_id, _, _ in active),
         )
 
-        # Phase 1: cooperative stop signal for every worker first.
         for _tab_id, stop_event, _thread in active:
             if stop_event is not None:
                 stop_event.set()
 
-        # Phase 2: force a KeyboardInterrupt in any worker that did not
-        # exit on its own, then join (bounded by the shared deadline) so
-        # the worker's cleanup finally runs before we return.
         deadline = time.monotonic() + timeout
         for tab_id, _stop_event, thread in active:
             remaining = max(0.0, deadline - time.monotonic())
@@ -7282,7 +6222,7 @@ class RemoteAccessServer:
             try:
                 signal.signal(sig, self._handle_shutdown_signal)
             except (OSError, ValueError):
-                pass  # e.g. not main thread, or unsupported on this OS
+                pass
 
     def start(self) -> None:
         """Start the server (blocks until interrupted).
@@ -7312,34 +6252,13 @@ class RemoteAccessServer:
         try:
             asyncio.run(self._serve_async())
             if self._shutdown_initiated:
-                # Deterministic SIGTERM path: _shutdown_on_sigterm
-                # resolved _shutdown_future, _serve_async returned and
-                # asyncio.run unwound without an exception.
                 logger.info("Server shutting down: pid=%d (SIGTERM)", pid)
         except KeyboardInterrupt:
             logger.info("Server shutting down: pid=%d (KeyboardInterrupt)", pid)
         finally:
-            # A shutdown that began via SIGINT/KeyboardInterrupt or
-            # ``stop()`` never set ``_shutdown_initiated`` — so a first
-            # SIGTERM arriving DURING this cleanup (which can block for
-            # ~12s in ``_stop_active_agent_tasks``) would raise
-            # ``KeyboardInterrupt`` here, skipping ``_detach_tunnel``.
-            # Mark shutdown as in progress so later signals only log.
             self._shutdown_initiated = True
-            # Gracefully stop any in-flight agent worker thread BEFORE
-            # the process exits.  Without this the daemon worker thread
-            # is killed abruptly when ``start()`` returns, its cleanup
-            # ``finally`` (which persists a real result + broadcasts the
-            # outcome) never runs, and the task_history row is left at
-            # the ``"Agent Failed Abruptly"`` sentinel — later rewritten
-            # by the orphan sweep to "Task terminated unexpectedly
-            # (process killed)".  That is the silent-failure mode this
-            # fix eliminates (see tasks 2968 in the bundled sorcar.db).
             self._stop_active_agent_tasks()
             logger.info("Server stopped: pid=%d", pid)
-            # Leave the spawned ``cloudflared`` running so the next
-            # ``kiss-web`` adopts it (preserving the public tunnel
-            # URL across restarts) — see :meth:`_detach_tunnel`.
             self._detach_tunnel()
 
     async def start_async(self) -> None:
@@ -7372,8 +6291,6 @@ class RemoteAccessServer:
         self._watchdog_task = None
         await _cancel_task(self._version_check_task)
         self._version_check_task = None
-        # Cancel any armed deferred-close timers so a server shutdown
-        # does not leave dangling ``call_later`` handles in the loop.
         with self._pending_tab_closes_lock:
             handles = list(self._pending_tab_closes.values())
             self._pending_tab_closes.clear()

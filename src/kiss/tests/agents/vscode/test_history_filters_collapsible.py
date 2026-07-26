@@ -57,7 +57,6 @@ _HTML = _MEDIA_DIR / "chat.html"
 _TEST_JS = _VSCODE_DIR / "test" / "historyFiltersCollapsible.test.js"
 _JSDOM_PKG = _VSCODE_DIR / "node_modules" / "jsdom" / "package.json"
 
-#: Every filter control that must hide/show with the panel.
 FILTER_CONTROL_IDS = [
     "hf-running",
     "hf-errors",
@@ -93,15 +92,11 @@ class TestRemoteWebViewFiltersPanel(unittest.TestCase):
         self.assertIn('id="history-filters-panel"', panel)
         self.assertIn('id="history-filters-toggle"', panel)
         self.assertIn('id="history-filters-body"', panel)
-        # Disclosure semantics: the toggle is a button titled
-        # "Filters" that controls the body and starts collapsed
-        # (default flipped by "collapse Filters panel by default").
         toggle = panel.split('id="history-filters-toggle"', 1)[1]
         toggle = toggle.split("</button>", 1)[0]
         self.assertIn('aria-expanded="false"', toggle)
         self.assertIn('aria-controls="history-filters-body"', toggle)
         self.assertIn(">Filters<", toggle)
-        # Every filter control lives inside the collapsible body.
         body = panel.split('id="history-filters-body"', 1)[1]
         self.assertIn('class="history-filter-bar"', body)
         for cid in FILTER_CONTROL_IDS:
@@ -291,8 +286,6 @@ class TestFiltersPanelRealBrowser:
                     f"#{cid} must be visible while the Filters panel "
                     "is uncollapsed"
                 )
-            # The header itself must stay visible so the panel can be
-            # collapsed again.
             assert _visible(page, "history-filters-toggle")
 
             page.click("#history-filters-toggle")

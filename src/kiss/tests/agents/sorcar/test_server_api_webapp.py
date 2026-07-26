@@ -208,31 +208,21 @@ class TestRemoteWebappThroughApi(IsolatedAsyncioTestCase):
     async def test_handshake_then_commands_run_on_the_api(self) -> None:
         """Wrong→right password, then commands, exactly like the shim."""
         async with await self._ws_connect() as ws:
-            # 1. First attempt with the (empty) stored password — the
-            #    API answers auth_required, the webapp's prompt cue.
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await self._recv_type(ws, "auth_required")
-            # 2. Retry with the user's typed password — auth_ok.
             await ws.send(
                 json.dumps({"type": "auth", "password": _PASSWORD})
             )
             await self._recv_type(ws, "auth_ok")
-            # 3. A catalog command is dispatched to its API handler
-            #    and answered on this same connection.
             await ws.send(json.dumps({"type": "activeTasksQuery"}))
             reply = await self._recv_type(ws, "activeTasksResponse")
             self.assertIn("count", reply)
             self.assertIn("tabs", reply)
-            # 4. An off-catalog command is rejected by the API's
-            #    validation with a direct error reply.
             await ws.send(
                 json.dumps({"type": "definitelyNotACommand"})
             )
             err = await self._recv_type(ws, "error")
             self.assertIn("Unknown command", err.get("text", ""))
-            # 5. An ``auth`` frame leaking into the authenticated
-            #    dispatch loop is silently dropped — the connection
-            #    stays alive and keeps answering.
             await ws.send(
                 json.dumps({"type": "auth", "password": "again"})
             )

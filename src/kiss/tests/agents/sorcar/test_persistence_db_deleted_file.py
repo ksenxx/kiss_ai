@@ -60,23 +60,15 @@ class TestDbFileDeletedUnderCachedConnection:
             path.unlink(missing_ok=True)
 
     def test_write_after_delete_recreates_schema_and_is_visible(self) -> None:
-        # 1. Normal write: creates the file and its schema, and caches
-        #    a per-thread connection inside the persistence layer.
         _add_task("dbdel first", chat_id="")
         assert th._DB_PATH.exists()
 
-        # 2. External deletion WITHOUT closing the cached connection.
         self._delete_db_files()
         assert not th._DB_PATH.exists()
 
-        # 3. Next write must detect the deletion, reconnect, recreate
-        #    the schema, and land in the NEW file — not the orphaned
-        #    inode of the deleted one.
         _add_task("dbdel second", chat_id="")
         assert th._DB_PATH.exists()
 
-        # 4. An independent reader of ``_DB_PATH`` (exactly what the
-        #    wave-2/wave-3 runner tests do) must see the row.
         conn = sqlite3.connect(str(th._DB_PATH))
         try:
             rows = conn.execute(
@@ -89,18 +81,10 @@ class TestDbFileDeletedUnderCachedConnection:
     def test_reads_also_heal_after_delete(self) -> None:
         _add_task("dbdel read-heal", chat_id="")
         self._delete_db_files()
-        # A read through the persistence layer must not crash with
-        # "no such table" — it reconnects and sees an empty history.
         entries = th._load_history()
         assert entries == []
 
     def test_same_path_recreated_file_is_detected(self) -> None:
-        # The harder variant: after the deletion, an INDEPENDENT
-        # connection recreates a schema-less zero-byte file at the
-        # SAME pathname (exactly what a raw ``sqlite3.connect``
-        # reader does).  A bare existence check passes here, so the
-        # persistence layer must compare the file's (st_dev, st_ino)
-        # identity to notice its cached connection is orphaned.
         _add_task("dbdel recreate first", chat_id="")
         self._delete_db_files()
         sqlite3.connect(str(th._DB_PATH)).close()

@@ -67,16 +67,10 @@ from kiss.agents.sorcar.skills import load_permission_rules, skill_permission
 
 logger = logging.getLogger(__name__)
 
-# Seconds to wait for a server to connect / a tool call to return.
 CONNECT_TIMEOUT = 60.0
-# After a connect() timeout, how long a straggler task stuck
-# mid-handshake is given to unwind gracefully (via its ``stop`` event)
-# before it is cancelled outright so the transport child is reaped.
 _CONNECT_STRAGGLER_GRACE_S = 5.0
 CALL_TIMEOUT = 300.0
 
-# JSON-schema type → Python annotation used when synthesizing wrapper
-# signatures (so kiss's schema builder round-trips the MCP inputSchema).
 _JSON_TO_PY: dict[str, type] = {
     "string": str,
     "integer": int,
@@ -169,7 +163,6 @@ def _parse_server_entry(name: str, raw: Any, source: str) -> MCPServerConfig | N
     url = str(raw.get("url", "") or "")
     transport = str(raw.get("type", "") or raw.get("transport", "") or "").lower()
     if transport not in ("stdio", "http", "sse"):
-        # Claude Code's leniency: infer from the fields present.
         transport = "stdio" if command else "http"
     if transport == "stdio" and not command:
         logger.debug("mcp server %s: stdio without command; skipping", name)
@@ -470,21 +463,11 @@ class _Connection:
 
     config: MCPServerConfig
     ready: threading.Event = field(default_factory=threading.Event)
-    # Created eagerly (asyncio.Event is loop-agnostic until awaited) so
-    # a stop request arriving before the connection task's first line
-    # runs is never lost — it is only ever set on the manager loop via
-    # call_soon_threadsafe, and the task sees it when it parks.
     stop: asyncio.Event = field(default_factory=asyncio.Event)
     session: Any = None
     tools: list[Any] = field(default_factory=list)
     error: str = ""
     task: Any = None
-    # Set as the LAST act of ``_maintain_connection`` — i.e. only after
-    # the transport contexts have fully unwound (child process reaped).
-    # ``task`` (a ``concurrent.futures.Future``) is marked done the
-    # instant it is *cancelled*, while the wrapped asyncio task is
-    # still unwinding on the loop, so waiting on ``task`` alone lets
-    # ``shutdown`` stop the loop mid-unwind and leak the child.
     finished: threading.Event = field(default_factory=threading.Event)
 
 
@@ -558,9 +541,6 @@ async def _maintain_connection(conn: _Connection, auth: Any) -> None:
     finally:
         conn.session = None
         conn.ready.set()
-        # Signal full unwind (transports closed, child reaped) LAST —
-        # ``disconnect_all`` waits on this after a cancel so it never
-        # stops the loop while this task is still tearing down.
         conn.finished.set()
 
 
@@ -583,11 +563,6 @@ class MCPManager:
         )
         self._thread.start()
         self._connections: dict[str, _Connection] = {}
-        # Connections evicted from ``_connections`` by a connect()
-        # timeout whose task has not finished yet.  ``disconnect_all``
-        # tears these down too — without this list a task stuck
-        # mid-handshake (which ``stop.set()`` cannot unwind) would keep
-        # its transport child alive forever, invisible to shutdown.
         self._orphans: list[_Connection] = []
         self._lock = threading.Lock()
         self._shut_down = False
@@ -617,9 +592,6 @@ class MCPManager:
         """
         with self._lock:
             if self._shut_down:
-                # Fail fast: the manager loop is stopped, so a scheduled
-                # coroutine would never run and ready.wait() would burn
-                # the full CONNECT_TIMEOUT on a stale manager reference.
                 conn = _Connection(config=config)
                 conn.error = "manager shut down"
                 conn.ready.set()
@@ -633,8 +605,6 @@ class MCPManager:
                 conn = existing
             else:
                 if existing is not None:
-                    # Stop the stale connection's task so its server
-                    # subprocess/stream is closed, not leaked.
                     self._loop.call_soon_threadsafe(existing.stop.set)
                 if config.transport in ("http", "sse") and auth is None:
                     auth = build_oauth_provider(config)
@@ -644,27 +614,9 @@ class MCPManager:
                     _maintain_connection(conn, auth), self._loop,
                 )
         if not conn.ready.wait(CONNECT_TIMEOUT):
-            # Tear the straggler down instead of leaving a poisoned
-            # record: if the server finished connecting just after the
-            # deadline, the record would be live (session set) yet
-            # marked failed — contradictory state that a later
-            # connect() would needlessly tear down and that
-            # format_mcp_listing would report inconsistently.
-            #
-            # Setting ``stop`` only unwinds a task that reached its
-            # ``stop.wait()`` park; one still stuck mid-handshake (a
-            # stdio child that never speaks MCP) ignores it and holds
-            # the transport child alive forever.  So the straggler is
-            # (a) kept visible to ``disconnect_all`` via ``_orphans``
-            # and (b) cancelled after a grace period even without an
-            # explicit shutdown.
             with self._lock:
                 if self._connections.get(config.name) is conn:
                     del self._connections[config.name]
-                # Stamp the error under the lock: the connection task may
-                # be finishing concurrently (setting conn.error in its
-                # except clause) and other threads read conn.error through
-                # lock-guarded paths.
                 conn.error = conn.error or "connection timed out"
                 if conn.task is not None and not conn.task.done():
                     self._orphans.append(conn)
@@ -697,8 +649,6 @@ class MCPManager:
                 task,
             )
         except RuntimeError:
-            # Loop already closed (shutdown raced us) — disconnect_all
-            # has taken (or will take) care of the orphan list.
             pass
 
     def _forget_orphan(self, conn: _Connection, _future: Any) -> None:
@@ -722,18 +672,11 @@ class MCPManager:
         """
         with self._lock:
             if self._shut_down:
-                # The manager loop is stopped: no connection can be live
-                # and a scheduled coroutine would never run.
                 return (
                     f"Error: MCP server {server!r} is not connected "
                     f"(manager shut down)"
                 )
             conn = self._connections.get(server)
-        # Snapshot the session exactly once: the manager-loop thread
-        # nulls conn.session whenever the connection dies or is stopped
-        # (_maintain_connection's finally), so re-reading the attribute
-        # after the check would race an AttributeError out of the tool
-        # wrapper instead of returning the friendly error string.
         session = conn.session if conn is not None else None
         if conn is None or session is None:
             why = conn.error if conn else "never connected"
@@ -768,9 +711,6 @@ class MCPManager:
         with self._lock:
             conns = list(self._connections.values())
             self._connections.clear()
-            # Include stragglers evicted by connect() timeouts: their
-            # tasks may still be stuck mid-handshake holding a live
-            # transport child that only a cancel can reap.
             conns.extend(self._orphans)
             self._orphans.clear()
         for conn in conns:
@@ -780,19 +720,8 @@ class MCPManager:
                 try:
                     conn.task.result(timeout=10)
                 except BaseException:  # noqa: BLE001 — CancelledError is BaseException
-                    # ``CancelledError`` (raised when the straggler
-                    # grace timer cancelled the future) does NOT
-                    # inherit ``Exception`` — a plain ``except
-                    # Exception`` would let it blow up the whole
-                    # teardown loop.
                     conn.task.cancel()
                     logger.debug("MCP disconnect error", exc_info=True)
-                    # The future is marked done the moment it is
-                    # cancelled, but the wrapped asyncio task is still
-                    # unwinding on the loop.  Wait for the unwind to
-                    # actually finish (transport closed, child reaped)
-                    # so ``shutdown`` cannot stop the loop mid-teardown
-                    # and orphan the server subprocess.
                     conn.finished.wait(timeout=10)
             conn.session = None
             conn.error = conn.error or "disconnected"
@@ -910,18 +839,12 @@ def make_mcp_tool_wrapper(
     tool_name = str(tool.name)
     full_name = f"{_sanitize(server)}_{_sanitize(tool_name)}"
     schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
-    # Nothing in MCP constrains the schema's inner values; be lenient
-    # with malformed shapes (e.g. a list ``properties`` or a string
-    # ``required``) so one bad tool never breaks agent startup.
     props = schema.get("properties")
     if not isinstance(props, dict):
         props = {}
     required_raw = schema.get("required")
     required = set(required_raw) if isinstance(required_raw, list) else set()
 
-    # (is_required, Parameter, doc line) per property; the Python
-    # parameter name may differ from the JSON property name (which can
-    # be hyphenated or a keyword), so param_map maps it back.
     entries: list[tuple[bool, inspect.Parameter, str]] = []
     param_map: dict[str, tuple[str, bool]] = {}
     used_names: set[str] = set()
@@ -943,8 +866,6 @@ def make_mcp_tool_wrapper(
         suffix = "" if is_required else " (optional)"
         doc_line = f"    {py_name}: {desc or 'See tool description.'}{suffix}"
         entries.append((is_required, param, doc_line))
-    # Required parameters must precede optional ones in a Python
-    # signature; JSON object properties carry no such ordering.
     entries.sort(key=lambda e: not e[0])
     params = [e[1] for e in entries]
     doc_args = [e[2] for e in entries]

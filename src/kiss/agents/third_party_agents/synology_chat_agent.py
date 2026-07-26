@@ -89,12 +89,8 @@ class SynologyChatChannelBackend(ToolMethodBackend):
                 try:
                     params = parse_qs(body.decode("utf-8"))
                     if "payload" in params:
-                        # Fallback: Slack-style JSON blob in a 'payload' field.
                         payload: dict[str, Any] = json.loads(params["payload"][0])
                     else:
-                        # Synology Chat outgoing webhooks POST the fields
-                        # directly as form data (token, user_id, username,
-                        # post_id, timestamp, text).
                         payload = {k: v[0] for k, v in params.items()}
                     token = str(payload.get("token", ""))
                     if not backend._token or token == backend._token:  # pragma: no branch

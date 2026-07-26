@@ -87,8 +87,6 @@ class TestDeleteParentCascadesToSubagents(_TempDbTestBase):
         assert _load_subagent_rows_by_parent_task_id(parent_id) == []
         assert _load_chat_events_by_task_id(sub1) is None
         assert _load_chat_events_by_task_id(sub2) is None
-        # The chat is now genuinely empty — the frontend's
-        # ``chatHasMoreTasks`` flag must agree so the tab gets closed.
         assert _chat_has_tasks(chat_id) is False
 
     def test_other_parents_subagents_survive(self) -> None:
@@ -107,9 +105,6 @@ class TestDeleteParentCascadesToSubagents(_TempDbTestBase):
 
     def test_lookalike_non_subagent_row_not_deleted(self) -> None:
         parent_id, chat_id = _add_task("parent with lookalike")
-        # A regular row whose free-form extra merely EMBEDS the marker
-        # substring must NOT be cascade-deleted (same false-positive
-        # defense as _load_subagent_rows_by_parent_task_id).
         lookalike_id, _ = _add_task(
             "regular task",
             chat_id=chat_id,

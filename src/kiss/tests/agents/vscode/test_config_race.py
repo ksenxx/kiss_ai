@@ -30,9 +30,6 @@ from typing import Any
 
 import kiss.core.vscode_config as vc
 
-# Distinct (key, value) pairs drawn from ``DEFAULTS`` so each writer
-# touches a different key with a non-default value.  ``save_config``
-# only persists keys present in ``DEFAULTS``.
 _DISTINCT_WRITES: dict[str, Any] = {
     "max_budget": 222,
     "custom_endpoint": "http://endpoint.example",
@@ -84,7 +81,6 @@ class TestSaveConfigConcurrencyNoLostUpdate(unittest.TestCase):
         vc.tempfile.mkstemp = slow_mkstemp
 
     def test_concurrent_writes_all_survive(self) -> None:
-        # Seed an initial file so every writer reads a real baseline.
         vc.save_config({"max_budget": 100})
         self._install_slow_mkstemp()
 

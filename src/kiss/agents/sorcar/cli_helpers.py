@@ -413,12 +413,6 @@ def _build_run_kwargs(
     if args.endpoint:
         model_config["base_url"] = args.endpoint
     if args.header:
-        # Reject malformed headers loudly instead of silently dropping
-        # them (w3 C-3): a ``--header`` without a colon (or with an
-        # empty key) used to vanish without a message, surfacing later
-        # only as an opaque downstream auth/HTTP error.  The same
-        # strict :func:`_parse_kv` backs the sibling ``sorcar mcp``
-        # CLI's ``--env`` / ``--header`` options.
         headers = dict(_parse_kv(
             args.header, ":",
             error_fmt="Invalid --header {pair!r}: expected 'Key:Value'",
@@ -437,13 +431,6 @@ def _build_run_kwargs(
         "verbose": args.verbose,
         "ask_user_question_callback": cli_ask_user_question,
     }
-    # When the CLI runs verbosely (the default), install a recording
-    # console printer.  The plain ``ConsolePrinter`` renders Rich
-    # panels but does NOT persist events, so the chat webview shows a
-    # blank session for CLI-launched tasks.  ``RecordingConsolePrinter``
-    # both records every display event to the chat DB AND renders the
-    # Rich panels to the terminal, so the same run is visible live in
-    # the terminal and replayable later in the chat webview.
     if args.verbose and printer_factory is not None:
         run_kwargs["printer"] = printer_factory()
     return run_kwargs
@@ -466,8 +453,6 @@ def _print_result(result: str) -> None:
     except Exception:
         parsed = None
     if isinstance(parsed, dict) and "summary" in parsed:
-        # ``summary:`` with no value parses to ``None`` — print an
-        # empty summary rather than the literal string ``"None"``.
         summary = parsed.get("summary")
         print("" if summary is None else str(summary))
     else:

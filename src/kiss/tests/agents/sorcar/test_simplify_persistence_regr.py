@@ -130,7 +130,6 @@ class TestLegacySchemaMigration(_TempDbTestBase):
             "INSERT INTO events (task_id, seq, event_json, timestamp) "
             "VALUES (1, 0, '{}', ?)", (now,),
         )
-        # Orphan event: task_id 99 has no task row -> must be dropped.
         conn.execute(
             "INSERT INTO events (task_id, seq, event_json, timestamp) "
             "VALUES (99, 0, '{}', ?)", (now,),
@@ -145,14 +144,12 @@ class TestLegacySchemaMigration(_TempDbTestBase):
         assert parent["model"] == "m1"
         assert parent["cost"] == 1.5
         assert parent["tokens"] == 12
-        # r6-persistence-H3: string "false"/"0" flags coerce to 0.
         assert parent["is_parallel"] == 0
         assert parent["is_worktree"] == 0
         assert child["parent_task_id"] == parent["id"]
         evs = conn.execute("SELECT task_id FROM events").fetchall()
         assert len(evs) == 1
         assert evs[0]["task_id"] == parent["id"]
-        # All five indexes must exist after migration.
         idx = {
             r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='index'"
@@ -163,7 +160,6 @@ class TestLegacySchemaMigration(_TempDbTestBase):
             "idx_th_parent_task_id", "idx_ev_task_id",
         ):
             assert name in idx
-        # Second call is a no-op on the new schema.
         assert th._migrate_old_schema_if_needed(conn) is False
         conn.close()
 
@@ -217,7 +213,6 @@ class TestAddTaskAndExtra(_TempDbTestBase):
                 {"parent_task_id": parent_id, "subagent": parent_id},
                 task_id=task_id,
             )
-        # Garbage parent id must not re-parent the row.
         th._save_task_extra({"parent_task_id": "nope"}, task_id=task_id)
         assert th._load_subagent_rows_by_parent_task_id(parent_id) == []
         th._save_task_extra({"parent_task_id": parent_id}, task_id=task_id)
@@ -301,7 +296,6 @@ class TestChatContextCache(_TempDbTestBase):
         task_id, chat_id = th._add_task("taskA")
         th._save_task_result("resA", task_id=task_id)
         assert th._load_chat_context_text(chat_id) == "taskA\nresA"
-        # Cached second call.
         assert th._load_chat_context_text(chat_id) == "taskA\nresA"
         t2, _ = th._add_task("taskB", chat_id)
         th._save_task_result("resB", task_id=t2)
@@ -327,7 +321,7 @@ class TestBoxGeometry:
     def test_box_top_row(self) -> None:
         assert _box_top_row(40) == 36
         assert _box_top_row(40, 10) == 31
-        assert _box_top_row(3, 10) == 2  # clamped
+        assert _box_top_row(3, 10) == 2
 
     def test_partial_suffix_len(self) -> None:
         assert _partial_suffix_len("abc\x1b[20", "\x1b[201~") == 4
@@ -382,7 +376,7 @@ class TestAnchoredReplLoops:
         from kiss.ui.cli.cli_steering import AnchoredRepl
         with _PipeStdin() as stdin:
             repl = AnchoredRepl()
-            stdin.write(b"\x04")  # Ctrl+D on empty buffer
+            stdin.write(b"\x04")
             line = repl.read_idle_line()
         assert line is None
 

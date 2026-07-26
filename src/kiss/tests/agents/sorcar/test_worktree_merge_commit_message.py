@@ -55,7 +55,6 @@ def _create_worktree(repo: Path, branch: str) -> Path:
     slug = branch.replace("/", "_")
     wt_dir = repo / ".kiss-worktrees" / slug
     assert GitWorktreeOps.create(repo, branch, wt_dir)
-    # Inherit user config in the worktree.
     subprocess.run(
         ["git", "-C", str(wt_dir), "config", "user.email", "t@t.com"],
         check=True,

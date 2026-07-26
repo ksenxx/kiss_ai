@@ -244,8 +244,6 @@ def _row_states(page) -> list[dict]:
     return result
 
 
-# --- The invariant on a fresh load --------------------------------
-
 
 def test_fresh_history_load_with_completed_row_renders_no_solid_green(
     _browser,
@@ -303,8 +301,6 @@ def test_fresh_history_load_with_many_completed_rows_renders_no_dots(
             )
             assert row["hasRunning"] is False, row
             assert row["hasFailed"] is False, row
-            # And the first child must NOT be one of the status-dot
-            # classes — the title span is the first child.
             assert row["firstChildClass"] not in (
                 "sidebar-item-running",
                 "sidebar-item-completed",
@@ -330,8 +326,6 @@ def test_failed_row_still_renders_red_circle(_browser) -> None:
         context.close()
 
 
-# --- The live transition --------------------------------------------
-
 
 def test_live_running_to_completed_transition_shows_solid_green(
     _browser,
@@ -344,7 +338,6 @@ def test_live_running_to_completed_transition_shows_solid_green(
     """
     context, page = _open_history_page(_browser)
     try:
-        # Initial render: row is running → pulsing green dot.
         _post_history(page, [
             _make_session(task_id=801, title="live task", is_running=True)
         ])
@@ -352,8 +345,6 @@ def test_live_running_to_completed_transition_shows_solid_green(
         assert rows[0]["hasRunning"] is True, rows
         assert rows[0]["hasCompleted"] is False, rows
 
-        # The follow-up event delivers the same task_id as finished.
-        # The dot MUST swap from pulsing green to SOLID green.
         _post_history(page, [
             _make_session(task_id=801, title="live task", is_running=False)
         ])
@@ -363,7 +354,6 @@ def test_live_running_to_completed_transition_shows_solid_green(
             "after a live running→completed transition the row MUST "
             f"render the solid green circle; rows: {rows}"
         )
-        # Verify the dot is genuinely solid (no pulse animation).
         anim = page.evaluate(
             "() => getComputedStyle("
             "document.querySelector('#history-list .sidebar-item-completed')"
@@ -374,8 +364,6 @@ def test_live_running_to_completed_transition_shows_solid_green(
             f"got animation-name={anim!r}"
         )
 
-        # A subsequent ``refreshHistory()`` reload — same task still
-        # completed — MUST keep the solid green dot.
         _post_history(page, [
             _make_session(task_id=801, title="live task", is_running=False)
         ])
@@ -397,7 +385,6 @@ def test_unrelated_completed_row_after_a_transition_still_has_no_dot(
     task_ids the user actually saw running."""
     context, page = _open_history_page(_browser)
     try:
-        # Witness a running→completed transition for task 901.
         _post_history(page, [
             _make_session(task_id=901, title="witnessed task", is_running=True)
         ])
@@ -408,8 +395,6 @@ def test_unrelated_completed_row_after_a_transition_still_has_no_dot(
         rows = _row_states(page)
         assert rows[0]["hasCompleted"] is True, rows
 
-        # Now reload history with an additional, unrelated, completed
-        # row that was never running in this session.
         _post_history(page, [
             _make_session(task_id=901, title="witnessed task",
                           is_running=False, timestamp=1700000100),

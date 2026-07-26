@@ -95,7 +95,6 @@ class TestUnreadableDirtyFile:
                     f"work dir: {result}"
                 )
                 assert agent._wt is None
-                # No half-created state may be left behind.
                 assert _kiss_branches(repo) == [], (
                     "partial worktree branch left behind after the "
                     "dirty-state copy failed"

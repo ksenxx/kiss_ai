@@ -2,31 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Bug-hunt integration test for demo-mode result rendering in
-// ``media/demo.js``.
-//
-// Bug locked in:
-//
-//   ``streamResultEvent`` renders the status banner for a replayed
-//   ``result`` event with ONLY a ``success === false`` branch
-//   ("Status: FAILED").  The canonical renderer in ``media/main.js``
-//   (``handleOutputEvent``, case 'result') checks ``is_continue``
-//   FIRST and renders "Status: Continue" for results of agents that
-//   paused to continue in a new session — ``types.ts`` documents
-//   ``is_continue`` as exactly that ("main.js renders a 'Status:
-//   Continue' banner for it").  Continue-results are emitted with
-//   ``success: false`` by the backend, so demo replay mislabels every
-//   paused-to-continue task as FAILED.
-//
-// This test drives the real ``media/demo.js`` inside jsdom (no mocks
-// of project code; the ``window._demoApi`` host shim that main.js
-// normally provides is stubbed, exactly like the ``vscode`` host stub
-// in bughunt_isNewFile.test.js).
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/bughunt2_demo_continue.test.js
 
 'use strict';
 
@@ -41,11 +16,6 @@ function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
-/**
- * Build a jsdom window with ``demo.js`` evaluated and a minimal
- * ``window._demoApi`` host shim that hands the supplied *events* back
- * when the replay requests them via ``resumeSession``.
- */
 function makeDemoWindow(events) {
   const dom = new JSDOM(
     '<!DOCTYPE html><html><body><div id="output"></div></body></html>',
@@ -75,7 +45,6 @@ function makeDemoWindow(events) {
     },
     sendMessage(msg) {
       if (msg && msg.type === 'resumeSession') {
-        // Deliver the stored events asynchronously, like the backend.
         setTimeout(() => {
           if (api.resolveEvents) api.resolveEvents(events);
         }, 10);
@@ -95,8 +64,6 @@ async function runReplay(win, api) {
   const replay = win._startDemoReplay([
     {id: 1, has_events: true, preview: 'continue this big task', timestamp: 1},
   ]);
-  // The replay pauses 2 s showing the task text, then streams the
-  // result panel word-by-word; wait for it to finish.
   await replay;
   assert.strictEqual(api.active, false, 'replay must clear active flag');
 }

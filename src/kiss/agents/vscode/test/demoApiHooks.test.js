@@ -2,32 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test for the demo-mode host hooks in ``media/main.js``
-// (``window._demoApi``): demo replay must be able to
-//
-//   * narrate a user prompt (``speakText``) silently — demo mode
-//     never synthesizes speech and prompt events carry no recorded
-//     audio, so the narration resolves without any sound (the
-//     robotic Web Speech voice is never used),
-//   * actually play a replayed ``talk`` tool call (``playTalkEvent``),
-//     using the recorded GPT audio when the event carries it, and
-//     skip it silently otherwise,
-//   * actually materialise sub-agent tabs for a replayed
-//     ``run_parallel`` fan-out (``openSubagentTab``),
-//   * cancel queued speech (``stopSpeech``) when the demo is
-//     stopped, and
-//   * PAUSE the replay while talking: ``speakText`` / ``playTalkEvent``
-//     return promises that resolve when the playback ends, and
-//     ``stopSpeech`` resolves the promises of both queued and
-//     in-flight jobs so a paused replay can never hang after cancel.
-//
-// Drives the real ``chat.html`` + ``main.js`` inside jsdom, exactly
-// like talkTool.test.js (no mocks of project code).
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/demoApiHooks.test.js
 
 'use strict';
 
@@ -38,12 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom window running the production chat webview: the real
- * ``chat.html`` body (placeholders blanked), ``panelCopy.js`` and
- * ``main.js`` evaluated in the window, and a recording
- * ``acquireVsCodeApi`` stub (the only host API the webview has).
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -81,9 +49,6 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  // Evaluate api.js separately so V8 coverage offsets for the
-
-  // sourceURL-labelled main.js eval below start at character 0.
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(
@@ -92,12 +57,6 @@ fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   return {win, posted};
 }
 
-/**
- * Install a recording Audio implementation on *win*.  With
- * ``opts.manual`` clips do NOT auto-complete — tests fire
- * ``player.onended()`` by hand; otherwise clips end after 5ms.
- * Returns the created players.
- */
 function installAudio(win, opts) {
   const manual = !!(opts && opts.manual);
   const players = [];
@@ -116,11 +75,6 @@ function installAudio(win, opts) {
   return players;
 }
 
-/**
- * Install a recording Web Speech API on *win* (jsdom has none) whose
- * utterances end after 5ms.  Demo speech must NOT reach it in the
- * webview — tests assert the recording stays empty.
- */
 function installSpeech(win) {
   const spoken = [];
   win.SpeechSynthesisUtterance = function SpeechSynthesisUtterance(text) {
@@ -141,7 +95,6 @@ function installSpeech(win) {
   return spoken;
 }
 
-/** Deliver a daemon message to the webview. */
 function dispatch(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
@@ -152,8 +105,6 @@ function sleep(ms) {
   });
 }
 
-/** Await *promise* but fail fast after *ms* — a hung promise means the
- * paused demo replay would hang too. */
 function withTimeout(promise, ms, what) {
   return Promise.race([
     promise,
@@ -277,14 +228,8 @@ function testOpenSubagentTabMaterialisesTab() {
   installSpeech(win);
   const parentId = win._demoApi.getActiveTabId();
 
-  // Demo replay always sets the running state before processing
-  // events (see _startDemoReplay) — a non-running task renders its
-  // panels collapsed, and a collapsed fan-out panel keeps its
-  // sub-agent tabs closed by design.
   win._demoApi.setRunningState(true);
 
-  // Render the fan-out's tool-call panel first (like demo replay does),
-  // then materialise the sub-agent tabs through the real handler.
   win._demoApi.processEvent({
     type: 'tool_call',
     name: 'run_parallel',
@@ -319,7 +264,6 @@ function testOpenSubagentTabMaterialisesTab() {
     'second sub-agent tab titled with its 1-based task index',
   );
 
-  // The fan-out panel exists and owns the run_parallel accent class.
   const panel = win.document.querySelector('.tc-run-parallel');
   assert.ok(panel, 'run_parallel tool-call panel rendered');
   console.log('PASS: openSubagentTab materialises sub-agent tabs');
@@ -384,8 +328,6 @@ async function testStopSpeechResolvesQueuedAndInFlightPromises() {
   const players = installAudio(win, {manual: true});
   const spoken = installSpeech(win);
 
-  // Manual clips: the in-flight job's clip never ends on its own —
-  // the worst case for a cancelled paused replay.
   const inFlight = win._demoApi.playTalkEvent({
     text: 'In-flight talk.',
     audioB64: 'QUJD',
@@ -401,8 +343,6 @@ async function testStopSpeechResolvesQueuedAndInFlightPromises() {
 
   win._demoApi.stopSpeech();
 
-  // Both promises must resolve — the paused demo replay awaits them,
-  // and a dangling promise would hang the cancelled replay forever.
   await withTimeout(inFlight, 1000, 'in-flight promise after stopSpeech');
   await withTimeout(queued, 1000, 'queued promise after stopSpeech');
 
@@ -440,8 +380,6 @@ async function testLateClipEndAfterStopSpeechDoesNotBreakQueue() {
   await sleep(30);
   assert.strictEqual(players.length, 2, 'job B starts after the cancel');
 
-  // The cancelled clip completes LATE — its stale finish must be a
-  // no-op: it must NOT release the queue under job B.
   players[0].onended();
 
   const c = win._demoApi.playTalkEvent({
@@ -457,9 +395,6 @@ async function testLateClipEndAfterStopSpeechDoesNotBreakQueue() {
       'cancelled job must not pump the queue (overlapping speech)',
   );
 
-  // The late finish must not clobber B's discard hook either: a
-  // second stopSpeech must still resolve BOTH the in-flight B and
-  // the queued C, or a cancelled paused replay would hang forever.
   win._demoApi.stopSpeech();
   await withTimeout(b, 1000, 'in-flight job B promise after 2nd stopSpeech');
   await withTimeout(c, 1000, 'queued job C promise after 2nd stopSpeech');
@@ -477,8 +412,6 @@ async function runTests() {
   await testStopSpeechResolvesQueuedAndInFlightPromises();
   await testLateClipEndAfterStopSpeechDoesNotBreakQueue();
   console.log('All demoApiHooks tests passed.');
-  // setRunningState(true) starts webview timers that keep the node
-  // event loop alive — exit explicitly once every assertion passed.
   process.exit(0);
 }
 

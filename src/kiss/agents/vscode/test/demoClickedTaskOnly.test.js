@@ -2,25 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression tests for demo mode replaying the WHOLE chat
-// chain instead of just the clicked task (real chat.html + main.js +
-// demo.js in jsdom, a recording acquireVsCodeApi stub standing in for
-// the extension host / daemon).  Reproduces the report "when I click
-// a task in the task history in demo mode, it replays the entire
-// chain of tasks of that chat from oldest to newest — it must demo
-// ONLY the task that was clicked":
-//
-//   * Clicking a history row of a multi-task chat replayed EVERY
-//     top-level task of that chat, oldest first, instead of only the
-//     clicked task.
-//
-//   * Clicking a sub-agent row must (still) replay just that
-//     sub-agent task.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/demoClickedTaskOnly.test.js
 
 'use strict';
 
@@ -31,13 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom window running the production chat webview: the real
- * ``chat.html`` body, ``panelCopy.js``, ``main.js`` AND ``demo.js``
- * evaluated in the window, plus a recording ``acquireVsCodeApi`` stub.
- * ``win._onPosted`` (settable per test) observes every posted message
- * so tests can answer like the extension host / daemon would.
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -75,9 +49,6 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  // Evaluate api.js separately so V8 coverage offsets for the
-
-  // sourceURL-labelled main.js eval below start at character 0.
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(
@@ -87,10 +58,6 @@ fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   return {win, posted};
 }
 
-/**
- * Install a recording Audio implementation whose clips play and fire
- * ``onended`` after 15ms.  Returns the created players.
- */
 function installAudio(win) {
   const players = [];
   win.Audio = function Audio(src) {
@@ -106,7 +73,6 @@ function installAudio(win) {
   return players;
 }
 
-/** Install a no-op Web Speech API so fallbacks never hang. */
 function installSpeech(win) {
   const spoken = [];
   win.SpeechSynthesisUtterance = function (text) {
@@ -126,7 +92,6 @@ function installSpeech(win) {
   return spoken;
 }
 
-/** Deliver a daemon/extension-host message to the webview. */
 function dispatch(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
@@ -137,9 +102,6 @@ function sleep(ms) {
   });
 }
 
-// Server sends history newest-first.  chat-A has THREE top-level
-// tasks (a1 oldest, a2, a3 newest); chat-B has a top-level task with
-// a sub-agent row.
 const SESSIONS = [
   {
     id: 'chat-A',
@@ -184,7 +146,6 @@ const SESSIONS = [
   },
 ];
 
-/** Small replayed event stream ending in a result. */
 function eventsFor(label) {
   return [
     {type: 'thinking_start'},
@@ -193,12 +154,6 @@ function eventsFor(label) {
   ];
 }
 
-/**
- * Enable demo mode, deliver SESSIONS, auto-answer resumeSession with
- * per-task events, click the history row whose title is *rowTitle*.
- * Returns {resumes, done} — the recorded resumeSession posts and a
- * promise resolving when the replay ends.
- */
 function startDemoFlow(win, rowTitle) {
   dispatch(win, {type: 'configData', config: {demo_mode: true}, apiKeys: {}});
   dispatch(win, {type: 'history', offset: 0, generation: 0, sessions: SESSIONS});
@@ -302,8 +257,6 @@ async function testClickingSubagentRowReplaysOnlyThatSubagentTask() {
   await testClickingNewestTaskReplaysOnlyThatTask();
   await testClickingSubagentRowReplaysOnlyThatSubagentTask();
   console.log('demoClickedTaskOnly.test.js: all tests passed');
-  // Demo/webview timers can keep the node event loop alive; match the
-  // other jsdom e2e demo tests and exit explicitly once assertions pass.
   process.exit(0);
 })().catch(err => {
   console.error(err);

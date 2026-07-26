@@ -111,7 +111,6 @@ class TestCloseDbReconnect(_PersistenceTestBase):
         rows = th._load_history()
         tasks = {r["task"] for r in rows}
         assert tasks == {"before close", "after close"}
-        # Most-recent-first ordering preserved across the reconnect.
         assert rows[0]["task"] == "after close"
 
     def test_seq_cache_does_not_leak_across_close_db(self) -> None:
@@ -119,8 +118,6 @@ class TestCloseDbReconnect(_PersistenceTestBase):
         th._queue_chat_event({"type": "agent_text", "text": "e0"}, task_id)
         th._flush_chat_events()
         th._close_db()
-        # Synchronous append after the close must re-seed the seq counter
-        # from the database, not restart at 0 (which would collide).
         th._append_chat_event(
             {"type": "agent_text", "text": "e1"}, task_id=task_id
         )
@@ -156,7 +153,6 @@ class TestInterleavedQueueAndAppend(_PersistenceTestBase):
         events = _session_events(th._load_chat_events_by_task_id(task_id))
         texts = [e["text"] for e in events]
         assert texts == [f"ev{i}" for i in range(total)]
-        # Replay injects a ``_timestamp`` on every event.
         assert all("_timestamp" in e for e in events)
 
     def test_append_persists_previously_queued_events(self) -> None:
@@ -165,8 +161,6 @@ class TestInterleavedQueueAndAppend(_PersistenceTestBase):
             th._queue_chat_event(
                 {"type": "agent_text", "text": f"queued{i}"}, task_id
             )
-        # No explicit flush: _append_chat_event itself must drain the
-        # queue so the sync event lands AFTER all queued ones.
         th._append_chat_event(
             {"type": "agent_text", "text": "sync"}, task_id=task_id
         )
@@ -198,7 +192,6 @@ class TestSaveResultAndExtra(_PersistenceTestBase):
             )
         th._save_task_result("result after queue", task_id=task_id)
 
-        # The queued events must already be persisted (no explicit flush).
         seqs = _event_seqs(task_id)
         assert len(seqs) == 4
         _assert_strictly_increasing_unique(seqs)
@@ -207,18 +200,12 @@ class TestSaveResultAndExtra(_PersistenceTestBase):
     def test_save_task_extra_round_trips_json(self) -> None:
         task_id, _ = th._add_task("extra task")
         th._queue_chat_event({"type": "agent_text", "text": "q"}, task_id)
-        # Only known flat-column keys round-trip in the new schema; an
-        # arbitrary "nested" key is silently dropped by ``_save_task_extra``.
         extra = {"model": "m1", "tokens": 123, "cost": 0.5}
         th._save_task_extra(extra, task_id=task_id)
 
-        # Queued event persisted before the extra write.
         assert len(_event_seqs(task_id)) == 1
         session = th._load_chat_events_by_task_id(task_id)
         assert session is not None
-        # r3-H3: ``_row_to_extra_json`` emits every typed column
-        # consistently.  Pop the defaulted ones; the assertion is
-        # that the explicitly-written keys round-trip.
         loaded = json.loads(str(session["extra"]))
         for k in (
             "auto_commit_mode", "is_parallel", "is_worktree",
@@ -227,8 +214,6 @@ class TestSaveResultAndExtra(_PersistenceTestBase):
         ):
             loaded.pop(k, None)
         assert loaded == extra
-        # Row in history table mirrors the same flat-column shape.
-        # r3-H3: pop every defaulted key consistently.
         row_extra = json.loads(str(_history_row(task_id)["extra"]))
         for k in (
             "auto_commit_mode", "is_parallel", "is_worktree",
@@ -244,7 +229,7 @@ class TestChatIdLookups(_PersistenceTestBase):
 
     def test_get_task_chat_id_returns_row_chat(self) -> None:
         old_id, old_chat = th._add_task("repeated task")
-        time.sleep(0.02)  # distinct timestamps for ORDER BY timestamp DESC
+        time.sleep(0.02)
         new_id, new_chat = th._add_task("repeated task")
         assert old_chat != new_chat
 
@@ -282,11 +267,9 @@ class TestChatContextCacheFreshness(_PersistenceTestBase):
         task_id, chat_id = th._add_task("ctx task one")
         first = th._load_chat_context_text(chat_id)
         assert "ctx task one" in first
-        # Result written AFTER the cached read must appear on re-read.
         th._save_task_result("ctx result one", task_id=task_id)
         second = th._load_chat_context_text(chat_id)
         assert "ctx result one" in second
-        # A new task in the same chat must also invalidate the cache.
         time.sleep(0.02)
         th._add_task("ctx task two", chat_id=chat_id)
         third = th._load_chat_context_text(chat_id)
@@ -298,13 +281,10 @@ class TestChatContextCacheFreshness(_PersistenceTestBase):
         task_id, chat_id = th._add_task("ctx global task")
         assert "ctx global task" in th._load_chat_context_text(chat_id)
         th._invalidate_chat_context_cache("")
-        # Cache cleared globally: next read recomputes from the DB.
         assert "ctx global task" in th._load_chat_context_text(chat_id)
-        # Read (re-caches) → global invalidate → write → read: fresh.
         th._invalidate_chat_context_cache("")
         th._save_task_result("ctx global result", task_id=task_id)
         assert "ctx global result" in th._load_chat_context_text(chat_id)
-        # Empty chat_id always short-circuits to "".
         assert th._load_chat_context_text("") == ""
 
 

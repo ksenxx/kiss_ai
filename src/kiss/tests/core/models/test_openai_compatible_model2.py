@@ -55,12 +55,6 @@ from kiss.core.models.model_info import MODEL_INFO, model
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
 
-# ---------------------------------------------------------------------------
-# Fake server: captures every POST body and returns a stock response for
-# /v1/responses (and /v1/embeddings).  Streaming and non-streaming are
-# differentiated by the captured request body's ``"stream"`` key.
-# ---------------------------------------------------------------------------
-
 
 def _text_response_json(text: str = "ok") -> str:
     """Return a minimal /v1/responses non-streaming JSON body."""
@@ -218,7 +212,6 @@ def _tool_call_stream_sse_body(
             },
         )
     ]
-    # Stream arguments one chunk at a time.
     for ch in args_text:
         frames.append(
             _stream_sse_event(
@@ -348,7 +341,6 @@ class _CapturingHandler(BaseHTTPRequestHandler):
     """Captures every POST body and returns a configurable stock response."""
 
     captured_requests: list[dict[str, Any]] = []
-    # Each entry is (status, headers, body_bytes) — caller can override.
     next_response_body: bytes = b""
     next_response_headers: dict[str, str] = {}
 
@@ -373,7 +365,6 @@ class _CapturingHandler(BaseHTTPRequestHandler):
             self.wfile.write(payload)
             return
 
-        # /v1/responses
         streaming = bool(body.get("stream"))
         payload = self.__class__.next_response_body
         if not payload:
@@ -420,10 +411,6 @@ def _last_path() -> str:
     return path
 
 
-# ---------------------------------------------------------------------------
-# Tool stubs used in tests
-# ---------------------------------------------------------------------------
-
 
 def _echo(text: str) -> str:
     """Echo back ``text`` (test-only tool stub).
@@ -452,10 +439,6 @@ _ECHO_TOOL_CHAT_SCHEMA: list[dict[str, object]] = [
     }
 ]
 
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 
 class TestEndpointAndDefaults:
@@ -558,8 +541,6 @@ class TestEndpointAndDefaults:
         m.generate()
         body = _last_body()
         assert body.get("reasoning", {}).get("effort") == "high"
-        # The model name sent on the wire must be the bare alias (no
-        # ``openrouter/`` prefix), matching v1's behaviour.
         assert body.get("model") == "openai/gpt-5.5"
 
     def test_openrouter_gpt_5_5_xhigh_alias_routes_to_base(
@@ -697,7 +678,6 @@ class TestConversationShape:
         m.generate()
         body = _last_body()
         assert body.get("instructions") == "you are a helper"
-        # The system message must NOT be duplicated inside ``input``.
         input_items = body.get("input", [])
         for item in input_items:
             if isinstance(item, dict):
@@ -797,7 +777,6 @@ class TestToolCallParsing:
         assert fcs == [
             {"id": "call_abc", "name": "echo", "arguments": {"text": "hello"}}
         ]
-        # The function_call item is appended to the conversation.
         fc_items = [
             x for x in m.conversation
             if isinstance(x, dict) and x.get("type") == "function_call"
@@ -805,7 +784,6 @@ class TestToolCallParsing:
         assert fc_items
         assert fc_items[-1]["call_id"] == "call_abc"
         assert fc_items[-1]["name"] == "echo"
-        # content is the text portion (empty here).
         assert content == ""
 
     def test_function_results_become_function_call_output(
@@ -853,24 +831,20 @@ class TestToolCallParsing:
             function_map={"echo": _echo},
             tools_schema=_ECHO_TOOL_CHAT_SCHEMA,
         )
-        # Make a "tool result" string carrying a fake PNG.
         payload = encode_binary_attachment("image/png", b"\x89PNG\r\n\x1a\n")
         m.add_function_results_to_conversation_and_return(
             [("echo", {"result": f"see image: {payload}"})]
         )
-        # function_call_output stripped of binary bytes:
         outputs = [
             x for x in m.conversation
             if isinstance(x, dict) and x.get("type") == "function_call_output"
         ]
         assert outputs
         assert "KISS_BINARY" not in outputs[-1]["output"]
-        # Follow-up user message with input_image part:
         user_msgs = [
             x for x in m.conversation
             if isinstance(x, dict) and x.get("role") == "user"
         ]
-        # The last user message must carry an input_image part.
         last_user_parts = user_msgs[-1]["content"]
         assert any(
             isinstance(p, dict) and p.get("type") == "input_image"
@@ -897,7 +871,6 @@ class TestStreaming:
         text, _resp = m.generate()
         assert "hello" in tokens
         assert text == "hello"
-        # The request must have actually streamed.
         body = _last_body()
         assert body.get("stream") is True
 
@@ -920,10 +893,8 @@ class TestStreaming:
         )
         text, _resp = m.generate()
         assert text == "answer"
-        # Thinking block start, then end:
         assert thinking_events[:1] == [True]
         assert thinking_events[-1] is False
-        # Reasoning text was streamed via token_callback as well:
         assert "thinking..." in tokens
         assert "answer" in tokens
 
@@ -966,10 +937,7 @@ class TestUsageExtraction:
         m.initialize("hi")
         _, resp = m.generate()
         ip, op, cr, cw = m.extract_input_output_token_counts_from_response(resp)
-        # default _text_response_json: input=5, cached=2, output=4, reasoning=1
-        assert ip == 3  # 5 - 2 (cached)
-        # The output count must include the reasoning tokens already
-        # reported by the Responses API (output_tokens already counts them).
+        assert ip == 3
         assert op == 4
         assert cr == 2
         assert cw == 0
@@ -1033,7 +1001,6 @@ class TestOpenRouterAnthropicCacheControl:
         m.initialize("hi")
         m.generate()
         body = _last_body()
-        # extra_body is merged into the top-level request by the SDK.
         assert body.get("cache_control") == {"type": "ephemeral"}
 
     def test_cache_control_disabled_when_enable_cache_false(
@@ -1070,8 +1037,6 @@ class TestDeepSeekTextBasedFallback:
         assert len(fcs) == 1
         assert fcs[0]["name"] == "echo"
         assert fcs[0]["arguments"] == {"text": "hi"}
-        # And the request body must NOT contain a native ``tools`` array,
-        # because DeepSeek R1's native tool calling is unreliable.
         body = _last_body()
         assert "tools" not in body or not body.get("tools")
 
@@ -1168,7 +1133,6 @@ class TestExtraCoverage:
             x.get("role") for x in m.conversation if isinstance(x, dict)
         ]
         assert "assistant" in roles
-        # The function_call item is also present.
         assert any(
             isinstance(x, dict) and x.get("type") == "function_call"
             for x in m.conversation
@@ -1209,9 +1173,6 @@ class TestExtraCoverage:
         )
         m.initialize("hi")
         m.set_usage_info_for_messages("[USAGE]")
-        # Seed a prior function_call so the Responses-API conversation
-        # contract is honored (every function_call_output must reference
-        # a prior function_call.call_id).
         m.conversation.append(
             {
                 "type": "function_call",
@@ -1241,7 +1202,6 @@ class TestExtraCoverage:
             "text-embedding-3-small", base_url=capture_server, api_key="k"
         )
         m.initialize("ignored")
-        # An obviously broken URL forces an exception in client.embeddings.create.
         m.base_url = "http://127.0.0.1:1/never/v1"
         from openai import OpenAI
 
@@ -1305,8 +1265,6 @@ class TestExtraCoverage:
             thinking_callback=thinking_events.append,
         )
         m.initialize("hi")
-        # SSE order: reasoning_summary_text.delta → output_item.added
-        # (function_call) → args.delta → completed.
         frames = [
             _stream_sse_event(
                 "response.reasoning_summary_text.delta",
@@ -1377,7 +1335,6 @@ class TestExtraCoverage:
         assert fcs == [
             {"id": "call_R", "name": "echo", "arguments": {"text": "y"}}
         ]
-        # Reasoning callback opened and then closed before tool call begin.
         assert thinking_events[0] is True
         assert False in thinking_events
         assert "planning" in tokens
@@ -1418,7 +1375,6 @@ class TestReviewBugReproductions:
             if isinstance(x, dict) and x.get("type") == "function_call"
         ]
         assert fc_items, "DeepSeek fallback must store Responses function_call items"
-        # The assistant message must NOT carry the v1 ``tool_calls`` key.
         for msg in m.conversation:
             if isinstance(msg, dict) and msg.get("role") == "assistant":
                 assert "tool_calls" not in msg
@@ -1432,7 +1388,6 @@ class TestReviewBugReproductions:
         ]
         assert out_items
         assert out_items[-1]["call_id"] == fc_items[-1]["call_id"]
-        # And the returned function_calls reflect the same id.
         assert fcs[-1]["id"] == fc_items[-1]["call_id"]
 
     def test_usage_extracts_cache_write_tokens(
@@ -1463,7 +1418,7 @@ class TestReviewBugReproductions:
             api_key="k",
         )
         assert m.extract_input_output_token_counts_from_response(_Resp()) == (
-            83,  # 100 - 10 - 7
+            83,
             5,
             10,
             7,
@@ -1498,7 +1453,6 @@ class TestReviewBugReproductions:
         body = _last_body()
         for item in body["input"]:
             if isinstance(item, dict) and item.get("role") == "assistant":
-                # Either dropped or contains non-empty text only.
                 content = item.get("content")
                 if isinstance(content, str):
                     assert content.strip(), (
@@ -2830,9 +2784,6 @@ class TestFactoryRouting:
         import kiss.core.models as models_pkg
 
         assert models_pkg.OpenAICompatibleModel2 is OpenAICompatibleModel2
-        # ``model()`` is still importable and is the factory entry point;
-        # whether it routes to v2 by default is intentionally unspecified
-        # by this feature — direct instantiation is the supported path.
         assert callable(model)
 
 
@@ -3004,11 +2955,7 @@ class TestReviewBugReproductions8:
             "sanity: pending call should be seeded after generate_and_process"
         )
 
-        # Start a brand-new conversation without consuming the prior call.
         m.initialize("second")
-        # Pending state must be empty — otherwise the orphan would raise
-        # "No pending function_call named 'orphan'" rather than the
-        # "No prior function_call" message we expect below.
         assert m._pending_function_calls == []
         with pytest.raises(KISSError, match="No prior function_call"):
             m.add_function_results_to_conversation_and_return(
@@ -3047,8 +2994,6 @@ class TestReviewBugReproductions8:
         for item in assistant_items:
             if item.get("type") == "message":
                 continue
-            # Easy-input assistant messages must use plain string content
-            # (not the hybrid ``output_text`` content-part shape).
             assert isinstance(item.get("content"), str), item
 
     def test_streaming_completed_with_failed_status_raises(
@@ -3155,7 +3100,6 @@ class TestReviewBugReproductions9:
                         "parallel_tool_calls": True,
                         "tool_choice": "auto",
                         "tools": [],
-                        # Non-empty output, but no function_call item.
                         "output": [
                             {
                                 "type": "message",
@@ -3196,7 +3140,7 @@ class TestReviewBugReproductions9:
             [("echo", {"result": "ok"})]
         )
 
-        m.token_callback = None  # second generate() uses non-streaming JSON body
+        m.token_callback = None
         _CapturingHandler.next_response_body = _text_response_json("done").encode()
         m.generate()
 
@@ -3571,7 +3515,6 @@ class TestReviewBugReproductions12:
 
         img = encode_binary_attachment("image/png", b"\x89PNG\r\n\x1a\n")
 
-        # Incremental result submission with attachment on first call.
         m.add_function_results_to_conversation_and_return(
             [("echo", {"result": f"first result {img}"})]
         )
@@ -4031,8 +3974,6 @@ class TestReviewBugReproductions14:
             if isinstance(item, dict) and item.get("type") == "function_call"
         ]
         assert fc_items
-        # Authoritative empty arguments must overwrite the partial
-        # streamed ``{"text":`` prefix.
         assert fc_items[-1]["arguments"] == ""
 
     def test_function_call_missing_call_id_is_rejected(
@@ -4138,15 +4079,12 @@ class TestReviewBugReproductions15:
             function_map={"echo": _echo},
             tools_schema=_ECHO_TOOL_CHAT_SCHEMA,
         )
-        # Only satisfy one of the two pending calls.
         m.add_function_results_to_conversation_and_return(
             [("echo", {"result": "A"})]
         )
-        # Snapshot the request count from the capture server.
         before = len(_CapturingHandler.captured_requests)
         with pytest.raises(KISSError, match="pending"):
             m.generate()
-        # No new request was sent — the guard fired locally.
         assert len(_CapturingHandler.captured_requests) == before
 
     def test_generate_succeeds_after_all_pending_resolved(
@@ -4189,7 +4127,6 @@ class TestReviewBugReproductions15:
         m.add_function_results_to_conversation_and_return(
             [("echo", {"result": "A"})]
         )
-        # All pending resolved — next generate must succeed.
         _CapturingHandler.next_response_body = _text_response_json(
             "done"
         ).encode()
@@ -4374,8 +4311,6 @@ class TestReviewBugReproductions17:
             function_map={"echo": _echo},
             tools_schema=_ECHO_TOOL_CHAT_SCHEMA,
         )
-        # Simulate conversation restore / process restart: the public
-        # conversation survives, the private pending queue does not.
         assert any(
             isinstance(item, dict)
             and item.get("type") == "function_call"
@@ -4867,8 +4802,6 @@ class TestReviewBugReproductions19:
             and item.get("type") == "function_call"
             and item.get("call_id") == "call_1"
         )
-        # Original gateway order was message at index 0, function_call at
-        # index 1.  Replay must preserve that order.
         assert msg_idx < fc_idx
 
     def test_done_text_fallback_does_not_drop_delta_only_parts(
@@ -5088,8 +5021,6 @@ class TestReviewBugReproductions19:
         )
         assert fcs == [{"id": "call_1", "name": "echo", "arguments": {"text": "x"}}]
 
-        # Simulate restore / process restart: public conversation
-        # survives, private pending queue is lost.
         m._pending_function_calls = []
 
         m.add_function_results_to_conversation_and_return(
@@ -5303,7 +5234,6 @@ class TestReviewBugReproductions21:
             tools_schema=_ECHO_TOOL_CHAT_SCHEMA,
         )
 
-        # Simulate process restart / restore.
         m._pending_function_calls = []
 
         img = encode_binary_attachment("image/png", b"\x89PNG\r\n\x1a\n")
@@ -5848,7 +5778,6 @@ class TestReviewBugReproductions23:
             [("echo", {"result": "ok"})]
         )
 
-        # Final generate uses non-streaming JSON body for inspection.
         m.token_callback = None
         _CapturingHandler.next_response_body = _text_response_json("done").encode()
         text, _resp = m.generate()
@@ -8124,7 +8053,6 @@ class TestReviewBugReproductions36:
 
         assert text == "answer"
         assert tokens == ["pla", "answer", "n"]
-        # Late reasoning suffix "n" must be re-bracketed.
         assert thinking_events == [True, False, True, False]
 
 
@@ -8174,7 +8102,6 @@ class TestReviewBugReproductions37:
             tools_schema=_ECHO_TOOL_CHAT_SCHEMA,
         )
 
-        # Bad caller behavior / restored bad conversation: user message before tool output.
         m.conversation.append(
             {"role": "user", "content": [{"type": "input_text", "text": "new user turn"}]}
         )
@@ -8374,8 +8301,6 @@ class TestReviewBugReproductions38:
         )
         assert content == ""
         assert fcs == [{"id": "call_1", "name": "echo", "arguments": {"text": "hi"}}]
-        # Follow-up function_call_output must not raise; conversation has the
-        # prior dict-shaped function_call item.
         m.add_function_results_to_conversation_and_return(
             [("echo", {"result": "hi"})]
         )
@@ -8429,12 +8354,6 @@ class TestReviewBugReproductions39:
             m.generate()
 
 
-# ---------------------------------------------------------------------------
-# Model-switching (conversation hand-off) tests
-# ---------------------------------------------------------------------------
-
-# A conversation exactly as OpenAICompatibleModel2 stores it after one
-# tool-using turn (Responses-API input items, raw output replayed).
 _V2_NATIVE_CONVERSATION: list[dict[str, Any]] = [
     {
         "role": "user",
@@ -8466,7 +8385,6 @@ _V2_NATIVE_CONVERSATION: list[dict[str, Any]] = [
     {"type": "function_call_output", "call_id": "call_01", "output": "5"},
 ]
 
-# The same conversation as OpenAICompatibleModel (Chat Completions) stores it.
 _CHAT_HANDOFF_CONVERSATION: list[dict[str, Any]] = [
     {"role": "system", "content": "You are a concise assistant."},
     {"role": "user", "content": "Use the add tool to compute 2 + 3."},
@@ -8557,9 +8475,7 @@ class TestModelSwitchingIntoV2:
         assert outs == [
             {"type": "function_call_output", "call_id": "call_01", "output": "5"}
         ]
-        # The function_call must precede its function_call_output.
         assert input_items.index(fcs[0]) < input_items.index(outs[0])
-        # No Chat-Completions constructs may leak onto the wire.
         assert all(item.get("role") != "tool" for item in input_items)
         assert all("tool_calls" not in item for item in input_items)
 
@@ -8637,7 +8553,6 @@ class TestModelSwitchingIntoV2:
         assert _wire_items_by_type(body, "function_call_output") == [
             {"type": "function_call_output", "call_id": "toolu_01", "output": "5"}
         ]
-        # Hidden Anthropic thinking blocks must never reach the wire.
         assert "thinking" not in json.dumps(input_items)
 
     def test_gemini_handoff_dict_args_and_attachments(
@@ -8655,7 +8570,6 @@ class TestModelSwitchingIntoV2:
                     {
                         "id": "call_g1",
                         "type": "function",
-                        # Gemini stores arguments as a dict, not a JSON string.
                         "function": {"name": "add", "arguments": {"a": 2, "b": 3}},
                     }
                 ],
@@ -8678,7 +8592,6 @@ class TestModelSwitchingIntoV2:
         assert _wire_items_by_type(body, "function_call_output") == [
             {"type": "function_call_output", "call_id": "call_g1", "output": "5"}
         ]
-        # The Attachment must surface as an input_image data URL part.
         user_parts = [
             part
             for item in body["input"]
@@ -8730,7 +8643,6 @@ class TestModelSwitchingIntoV2:
         m.conversation = native
         m.generate()
         body = _last_body()
-        # The raw reasoning / message / function_call items are replayed.
         assert _wire_items_by_type(body, "reasoning") == [
             {"type": "reasoning", "id": "rs_1", "summary": []}
         ]
@@ -8760,7 +8672,6 @@ class TestModelSwitchingOutOfV2:
             }
         ]
         assert chat[2] == {"role": "tool", "tool_call_id": "call_01", "content": "5"}
-        # Responses-only constructs must be gone.
         dumped = json.dumps(chat)
         assert "reasoning" not in dumped
         assert "output_text" not in dumped
@@ -8925,7 +8836,6 @@ class TestModelSwitchingRoundTrip:
         assert {"role": "assistant", "content": "Let me add those numbers."} in (
             native_again
         )
-        # And the round-tripped conversation is actually sendable.
         m2.conversation = native_again
         m2.generate()
         assert [

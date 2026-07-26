@@ -198,9 +198,7 @@ class TestRepair(_Base):
         self.assertEqual(
             by_text["Silent narration."]["audioMime"], "audio/mpeg",
         )
-        # The already-audible row keeps its original clip untouched.
         self.assertEqual(by_text["Audible narration."]["audioB64"], "REVG")
-        # A second scan reports everything audible now.
         self.assertTrue(all(c.has_audio for c in scan_talk_calls()))
 
     def test_repair_skips_empty_text(self) -> None:
@@ -272,14 +270,11 @@ class TestMainCli(_Base):
     def test_db_override_reports_other_database(self) -> None:
         """--db redirects the scan to a copied database file."""
         self._seed_standard_rows()
-        # Copy the isolated DB elsewhere, then point --db at the copy.
         copy_dir = Path(self.tmpdir) / "copy"
         copy_dir.mkdir()
         db_copy = copy_dir / "sorcar.db"
         _flush_chat_events()
         with _persistence._rw_lock.read_lock():
-            # The database is in WAL mode; checkpoint so the main file
-            # alone (the copy target) contains every committed row.
             db = _persistence._get_db()
             db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         shutil.copy(_persistence._DB_PATH, db_copy)

@@ -53,9 +53,6 @@ DEEPSCHOLAR_REPO_URL = "https://github.com/guestrin-lab/deepscholar.git"
 # DeepScholar-Bench evolves and re-verify metrics.
 DEEPSCHOLAR_PIN = "c95413b3b2f3255b461b90d0ce650f685ae2d1ff"
 
-# Query template borrowed verbatim from
-# ``deepscholar/deepscholar_base/main.py::load_queries`` so we produce
-# the same queries.csv the upstream reference pipeline would.
 QUERY_TEMPLATE = (
     "Your task is to write a Related Works section for an academic paper "
     "given the paper's abstract. Your response should provide the Related "
@@ -70,15 +67,8 @@ QUERY_TEMPLATE = (
     "section. Here is the paper abstract: {abstract}"
 )
 
-# We ask the DeepScholar-Bench evaluator to use the
-# ``openai_deepresearch`` parser because it needs only a single
-# markdown file per task with inline ``[number](https://arxiv.org/abs/ID)``
-# citations — the exact shape we prompt Sorcar for.  See
-# ``deepscholar/eval/parsers/openai_deepresearch.py``.
 EVAL_PARSER_MODE = "openai_deepresearch"
 
-# Evaluations that do NOT require the pkl ``metadata.pickle`` file used
-# only by the deepscholar_base pipeline.
 DEFAULT_EVALS = (
     "organization",
     "nugget_coverage",
@@ -166,7 +156,7 @@ def ensure_openai_parser_wired(repo: Path) -> None:
         text=True,
     )
     if reverse_check.returncode == 0:
-        return  # Already applied by a previous/resumed invocation.
+        return
 
     apply_check = subprocess.run(
         ["git", "apply", "--check", str(patch)],
@@ -200,8 +190,6 @@ def ensure_eval_venv(repo: Path) -> Path:
     python = venv / "bin" / "python"
     if not python.exists():
         _run(["uv", "venv", "--python", "3.10", str(venv)], cwd=repo)
-    # Always re-run pip install (idempotent) to catch any missing
-    # transitive deps after a partial previous install.
     _run(
         [
             "uv",
@@ -212,15 +200,8 @@ def ensure_eval_venv(repo: Path) -> Path:
             "-r",
             str(repo / "requirements.txt"),
         ],
-        # requirements.txt contains ``-e ./eval/nuggetizer``; resolve that
-        # local path against the pinned benchmark checkout, not the caller's
-        # working directory.
         cwd=repo,
     )
-    # NLTK does not ship tokenizer data with the Python package.  Both
-    # citation-level evaluators call ``sent_tokenize`` and NLTK 3.9.1 needs
-    # ``punkt`` plus ``punkt_tab``; install them before an expensive eval run
-    # rather than failing after generation has completed.
     _run(
         [
             str(python),
@@ -322,8 +303,6 @@ def run_sorcar_one(
             "elapsed": 0.0,
             "output_md": str(output_md),
         }
-    # Regeneration must never accidentally score yesterday's artefact if the
-    # subprocess fails before writing a replacement.
     if output_md.exists():
         output_md.unlink()
 
@@ -333,9 +312,6 @@ def run_sorcar_one(
         cutoff_date=query["cutoff_date"],
     )
 
-    # Note: DO NOT pass ``--no-web``.  DeepScholar-Bench requires Sorcar
-    # to search arXiv for real paper IDs, and ``--no-web`` disables the
-    # web tools entirely (see ``cli_helpers.py::web_tools``).
     cmd = [
         "sorcar",
         "-t",
@@ -360,9 +336,6 @@ def run_sorcar_one(
         stderr_log = task_dir / "sorcar_stderr.log"
         stdout_log.write_text(proc.stdout or "", encoding="utf-8")
         stderr_log.write_text(proc.stderr or "", encoding="utf-8")
-        # Prefer the produced file regardless of sorcar's exit code —
-        # a non-zero return code often reflects a cosmetic issue
-        # (e.g., budget warning) rather than a missing artefact.
         if output_md.exists() and output_md.stat().st_size > 0:
             return {
                 "idx": idx,
@@ -372,8 +345,6 @@ def run_sorcar_one(
                 "elapsed": elapsed,
                 "output_md": str(output_md),
             }
-        # Fall back: dump stdout so the parser still has something to
-        # score rather than skipping the task entirely.
         output_md.write_text(proc.stdout or "", encoding="utf-8")
         return {
             "idx": idx,
@@ -485,9 +456,6 @@ def run_eval(
         Path to the aggregated ``results.csv`` produced by the evaluator.
     """
     eval_dir.mkdir(parents=True, exist_ok=True)
-    # Restrict evaluation to numeric task directories containing an artifact.
-    # ``results_dir`` also contains summary.json, which the upstream evaluator
-    # otherwise attempts (and fails) to interpret as a paper ID.
     file_ids = sorted(
         (
             child.name
@@ -562,7 +530,6 @@ def print_summary(results_csv: Path, sorcar_summary: Path) -> None:
     print("\nEvaluator results (raw):")
     print(df.to_string(index=False))
 
-    # Extract per-metric mean for the openai_deepresearch mode row.
     row = df[df["baseline_name"] == EVAL_PARSER_MODE]
     if not row.empty:
         row = row.iloc[0]
@@ -681,7 +648,6 @@ def main() -> None:
             f"n_concurrent={args.n_concurrent})",
             flush=True,
         )
-        # Ensure sorcar CLI is on PATH before we spend budget on the venv.
         if shutil.which("sorcar") is None:
             print(
                 "ERROR: `sorcar` CLI not found on PATH. Install kiss-agent-framework "

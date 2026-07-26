@@ -23,11 +23,6 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.core.models.model_info import MODEL_INFO, get_available_models
 from kiss.server.helpers import (
-    # ``SUGGESTION_LIMIT`` caps the fast-complete dropdown items
-    # emitted to the webview per ``complete`` request.  Single-sourced
-    # in helpers.py and shared with the @-mention file picker so the
-    # dropdown stays scrollable without UI tuning differences between
-    # the two pickers.
     SUGGESTION_LIMIT as _COMPLETIONS_LIMIT,
 )
 from kiss.server.helpers import (
@@ -45,16 +40,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Trailing word / dot-chain token of a query (e.g. ``self.met`` at the
-# end of ``call self.met``) — the piece identifier completion extends.
-# ``\Z`` (not ``$``): Python's ``$`` also matches immediately before a
-# final newline.  Completion must inspect the text at the actual cursor
-# position; a query ending in ``"name\n"`` is on a fresh line and has no
-# trailing identifier to extend.
 _TRAILING_IDENT_RE = re.compile(r"([\w][\w.]*)\Z")
 
-# Identifier completion reads at most this many characters of the
-# active file so huge buffers cannot stall a per-keystroke request.
 _ACTIVE_FILE_READ_CAP = 50000
 
 
@@ -188,8 +175,6 @@ def _ghost_suffix(query: str, completions: list[dict[str, str]]) -> str:
     elif kind == "trick":
         prefix = current_sentence_partial(query)
     else:
-        # ``identifier`` — the only other kind ``_complete_many``
-        # produces.
         m = _TRAILING_IDENT_RE.search(query)
         prefix = m.group(1) if m else ""
     if not prefix or not text.startswith(prefix):
@@ -246,9 +231,6 @@ class _AutocompleteMixin:
             return []
         combined = content + ("\n" + chat_text if chat_text else "")
         matches = identifier_prefix_matches(combined, partial)
-        # Longest-first so the dropdown's auto-selected first item is
-        # the most informative completion.  Tie-breaker is
-        # alphabetical for stable ordering across runs.
         matches.sort(key=lambda c: (-len(c), c))
         return matches
 
@@ -276,11 +258,6 @@ class _AutocompleteMixin:
                     conn_id,
                 )
             except Exception:
-                # This worker is a lazily-started singleton with no
-                # restart path (``_ensure_complete_worker`` sees the
-                # dead thread object as "already started"), so one
-                # poisoned request must never kill ghost-text
-                # autocomplete for the daemon's remaining lifetime.
                 logger.debug("autocomplete request failed", exc_info=True)
 
     def _complete(
@@ -322,14 +299,6 @@ class _AutocompleteMixin:
         completions = self._complete_many(
             query, snapshot_file, snapshot_content, chat_id,
         )
-        # Inline ghost text: derive the suffix from the top completion
-        # so the legacy overlay keeps working for users who prefer to
-        # accept with Tab without opening the dropdown.  Completions
-        # are raw suggestions — a history task starts with ``query``
-        # in full, a trick starts with the current sentence partial,
-        # and an identifier starts with the trailing token — so the
-        # ghost suffix is derived per source.  ``clip_autocomplete_
-        # suggestion`` then normalises the cursor-to-ghost gap.
         fast = _ghost_suffix(query, completions)
         fast = clip_autocomplete_suggestion(query, fast)
         self._emit_ghost(fast, query, conn_id)
@@ -522,8 +491,6 @@ class _AutocompleteMixin:
             with self._state_lock:
                 existing = self._file_cache.get(wd)
                 if only_if_empty and existing is not None:
-                    # A concurrent writer published a fresher value
-                    # while we were scanning — emit theirs, not ours.
                     result = existing
                 else:
                     self._file_cache[wd] = result
@@ -577,18 +544,9 @@ class _AutocompleteMixin:
         def _do_refresh() -> None:
             result = _scan_files(wd)
             if set(result) == cached_set:
-                # Only modifications (or no change at all) — nothing
-                # to publish.  The cached list is still accurate so
-                # no overwrite is needed either.
                 return
             with self._state_lock:
                 if self._file_cache.get(wd) is not cached:
-                    # A concurrent writer (explicit refresh or
-                    # ``setWorkDir``) published a fresher scan while
-                    # ours was running — keep theirs (already
-                    # broadcast) instead of clobbering it with our
-                    # potentially staler result.  Mirrors the
-                    # double-check in ``_refresh_file_cache``.
                     return
                 self._file_cache[wd] = result
             usage = _load_file_usage()

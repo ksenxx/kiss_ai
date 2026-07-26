@@ -2,25 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end tests for the demo-replay ENDED state (real chat.html +
-// main.js + demo.js in jsdom, a recording acquireVsCodeApi stub
-// standing in for the extension host / daemon).  When a demo replay
-// ends naturally OR is stopped with the stop button:
-//
-//   * ONLY the play button is shown — the input textbox, burger menu,
-//     model picker, attach, inject-promptlet, mic, send AND stop
-//     buttons all stay hidden;
-//
-//   * pressing the play button RESTARTS the demo from the beginning
-//     (the events are re-fetched and replayed in the same tab);
-//
-//   * turning demo mode off, or switching to another tab, dismisses
-//     the play button and restores the normal input controls.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/demoEndedRestart.test.js
 
 'use strict';
 
@@ -31,13 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom window running the production chat webview: the real
- * ``chat.html`` body, ``panelCopy.js``, ``main.js`` AND ``demo.js``
- * evaluated in the window, plus a recording ``acquireVsCodeApi`` stub.
- * ``win._onPosted`` (settable per test) observes every posted message
- * so tests can answer like the extension host / daemon would.
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -75,9 +49,6 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  // Evaluate api.js separately so V8 coverage offsets for the
-
-  // sourceURL-labelled main.js eval below start at character 0.
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(
@@ -87,10 +58,6 @@ fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   return {win, posted};
 }
 
-/**
- * Install a recording Audio implementation whose clips play for
- * *durationMs* and then fire ``onended``.
- */
 function installAudio(win, durationMs) {
   const players = [];
   win.Audio = function Audio(src) {
@@ -116,7 +83,6 @@ function installAudio(win, durationMs) {
   return players;
 }
 
-/** Install a no-op Web Speech API so fallbacks never hang. */
 function installSpeech(win) {
   win.SpeechSynthesisUtterance = function (text) {
     this.text = text;
@@ -134,7 +100,6 @@ function installSpeech(win) {
   };
 }
 
-/** Deliver a daemon/extension-host message to the webview. */
 function dispatch(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
@@ -165,7 +130,6 @@ const SESSIONS = [
   },
 ];
 
-/** A short replayed event stream so replays end quickly. */
 function eventsFor(label) {
   return [
     {type: 'thinking_start'},
@@ -174,11 +138,6 @@ function eventsFor(label) {
   ];
 }
 
-/**
- * Enable demo mode, deliver SESSIONS, auto-answer resumeSession with
- * events, click the (single) history row.  Returns a promise resolving
- * when the replay ends.
- */
 function startDemoFlow(win) {
   dispatch(win, {type: 'configData', config: {demo_mode: true}, apiKeys: {}});
   dispatch(win, {
@@ -202,7 +161,6 @@ function startDemoFlow(win) {
   return waitForDemoEnd(win);
 }
 
-/** Answer every posted resumeSession with the recorded events. */
 function installResumeResponder(win) {
   const prev = win._onPosted;
   win._onPosted = msg => {
@@ -221,7 +179,6 @@ function installResumeResponder(win) {
   };
 }
 
-/** Wait until the running demo replay finishes. */
 async function waitForDemoEnd(win) {
   const t0 = Date.now();
   while (Date.now() - t0 < 30000) {
@@ -231,7 +188,6 @@ async function waitForDemoEnd(win) {
   throw new Error('demo replay did not finish within 30s');
 }
 
-/** The 7 input controls that must stay hidden in the ended state. */
 const HIDDEN_SELECTORS = [
   '#input-text-wrap',
   '#menu-btn',
@@ -242,7 +198,6 @@ const HIDDEN_SELECTORS = [
   '#send-btn',
 ];
 
-/** Read the pause/play icon visibility of #demo-pause-btn. */
 function iconState(btn) {
   const pauseIcon = btn.querySelector('.icon-pause');
   const playIcon = btn.querySelector('.icon-play');
@@ -254,13 +209,6 @@ function iconState(btn) {
   };
 }
 
-/**
- * Assert the ended-state UI: ONLY the play button is visible — the
- * demo-ended body class hides the input controls AND the stop button
- * (CSS rules asserted on the real stylesheet text since jsdom does
- * not load <link> stylesheets) while #demo-pause-btn shows the PLAY
- * icon.
- */
 function assertEndedUi(win, label) {
   assert.ok(
     !win.document.body.classList.contains('demo-playing'),
@@ -348,7 +296,6 @@ async function testPlayButtonRestartsDemo() {
     '#tab-list .chat-tab',
   ).length;
 
-  // Press play: the demo restarts from the beginning.
   win.document.getElementById('demo-pause-btn').click();
   await waitUntil(
     () => win._demoApi.active,
@@ -396,7 +343,6 @@ async function testPlayButtonRestartsDemo() {
   );
   assertEndedUi(win, 'after restart finishes');
 
-  // A second restart works too (the ended state is re-armed).
   win.document.getElementById('demo-pause-btn').click();
   await waitUntil(
     () => win._demoApi.active,
@@ -434,7 +380,6 @@ async function testToggleOffFromEndedRestoresFullUi() {
     'play button hidden after demo mode is turned off',
   );
 
-  // The play button no longer restarts anything.
   const resumesBefore = posted.filter(m => m.type === 'resumeSession').length;
   win.document.getElementById('demo-pause-btn').click();
   await sleep(200);
@@ -455,8 +400,6 @@ async function testSwitchingTabClearsEndedUi() {
   await startDemoFlow(win);
   assertEndedUi(win, 'before tab switch');
 
-  // The history click opened a NEW tab for the demo, so the original
-  // tab is still there — switch back to it.
   const tabEls = Array.from(
     win.document.querySelectorAll('#tab-list .chat-tab'),
   );
@@ -485,9 +428,6 @@ async function testClosingDemoTabClearsEndedUi() {
   await startDemoFlow(win);
   assertEndedUi(win, 'before closing the demo tab');
 
-  // Close the demo's own (active) tab with the tab-bar × — the
-  // adjacent tab becomes active and the ended play-button UI must be
-  // dismissed: a restart there would wipe THAT tab's chat.
   const activeTab = win.document.querySelector('#tab-list .chat-tab.active');
   assert.ok(activeTab, 'demo tab is the active tab');
   activeTab.querySelector('.chat-tab-close').click();
@@ -502,8 +442,6 @@ async function testClosingDemoTabClearsEndedUi() {
     'play button hidden after closing the demo tab',
   );
 
-  // The forgotten replay can no longer be restarted into the
-  // surviving tab.
   const resumesBefore = posted.filter(m => m.type === 'resumeSession').length;
   win.document.getElementById('demo-pause-btn').click();
   await sleep(200);
@@ -524,8 +462,6 @@ async function testNewHistoryClickFromEndedStartsFreshDemo() {
   await startDemoFlow(win);
   assertEndedUi(win, 'before second history click');
 
-  // Clicking a history row while the ended UI shows starts a fresh
-  // demo (a new tab, playing UI) — the ended state must not block it.
   const rows = Array.from(
     win.document.querySelectorAll('#history-list > div'),
   );
@@ -561,8 +497,6 @@ async function testNewHistoryClickFromEndedStartsFreshDemo() {
   await testClosingDemoTabClearsEndedUi();
   await testNewHistoryClickFromEndedStartsFreshDemo();
   console.log('demoEndedRestart.test.js: all tests passed');
-  // Demo/webview timers can keep the node event loop alive; match the
-  // other jsdom e2e demo tests and exit explicitly once assertions pass.
   process.exit(0);
 })().catch(err => {
   console.error(err);

@@ -56,30 +56,20 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Storage lives under the worktree so each worktree has its own graph
-# (build once per worktree) and teardown removes it automatically.
 _STORAGE_SUBDIR = Path(".kiss") / "code_graph"
 
-# Bump whenever extraction-record semantics change.  Reusing records made by
-# older code can silently corrupt relationship identity, so incompatible
-# caches are discarded and rebuilt.
 _CACHE_VERSION = 1
 
-# Query neighborhoods match graphify's three-hop scoped-subgraph behavior.
 _QUERY_DEPTH = 3
 
-# Non-blocking update-lock filename used by detached git-hook processes.
 _UPDATE_LOCK = ".update.lock"
 
-# A lock older than this is presumed left by a process killed before cleanup.
 _STALE_LOCK_SECONDS = 60 * 60
 
 
-# Marker identifying our section inside a (possibly shared) git hook.
 _HOOK_BEGIN = "# >>> kiss code_graph hook >>>"
 _HOOK_END = "# <<< kiss code_graph hook <<<"
 
-# Directories never scanned for source files.
 _SKIP_DIRS = {
     ".git",
     "node_modules",
@@ -92,8 +82,6 @@ _SKIP_DIRS = {
     ".kiss-worktrees",
 }
 
-# Extension → tree-sitter language name (languages with extraction
-# tables below; other files are skipped).
 _EXT_TO_LANG = {
     ".py": "python",
     ".js": "javascript",
@@ -112,10 +100,6 @@ _EXT_TO_LANG = {
     ".hpp": "cpp",
 }
 
-# Per-language node-type tables (empirically verified against
-# tree-sitter grammars):  definition node type → (kind, name strategy).
-# Name strategy "field:name" reads child_by_field_name("name");
-# "c_declarator" walks C/C++ declarator chains.
 _DEF_TYPES: dict[str, dict[str, tuple[str, str]]] = {
     "python": {
         "class_definition": ("class", "field:name"),
@@ -170,7 +154,6 @@ _DEF_TYPES: dict[str, dict[str, tuple[str, str]]] = {
     },
 }
 
-# Call-expression node type and the field holding the callee, per language.
 _CALL_TYPES: dict[str, dict[str, str]] = {
     "python": {"call": "function"},
     "javascript": {"call_expression": "function"},
@@ -184,8 +167,6 @@ _CALL_TYPES: dict[str, dict[str, str]] = {
     "cpp": {"call_expression": "function"},
 }
 
-# Import-ish node types per language (module name extraction is
-# best-effort: the whole node text minus keywords).
 _IMPORT_TYPES: dict[str, set[str]] = {
     "python": {"import_statement", "import_from_statement"},
     "javascript": {"import_statement"},
@@ -257,7 +238,6 @@ def _def_name(node: Any, strategy: str) -> str | None:
         return _node_text(name) if name is not None else None
     if strategy == "c_declarator":
         return _c_declarator_name(node)
-    # go type_declaration → type_spec child carries the name field
     for child in node.named_children:
         if child.type == "type_spec":
             name = child.child_by_field_name("name")
@@ -272,8 +252,6 @@ def _import_label(node: Any) -> str | None:
     text = _IMPORT_NAME_RE.sub("", text)
     if not text:
         return None
-    # "from helpers import util_fn" → helpers; "os" → os;
-    # "{ render } from './view.js'" → ./view.js; "<stdio.h>" → stdio.h
     if "from" in text.split():
         after = text.split("from", 1)[1].strip()
         if after:
@@ -338,13 +316,6 @@ def _extract_file(rel_path: str, source: bytes, lang: str) -> dict[str, Any] | N
                 callee_field = call_types[child.type]
                 callee = child.child_by_field_name(callee_field)
                 if callee is not None:
-                    # Keep only the last identifier segment
-                    # (self.g → g, pkg.mod.fn → fn, w.draw → draw).
-                    # Split on the separators FIRST, then strip a
-                    # trailing call-argument tail: a CHAINED call like
-                    # ``Application().start`` must resolve to ``start``
-                    # — truncating at the first ``(`` before taking the
-                    # last segment misattributed it to ``Application``.
                     name = re.split(r"[.:>]", _node_text(callee))[-1]
                     name = name.split("(")[0].strip()
                     if name and re.fullmatch(r"\w+", name):
@@ -491,10 +462,6 @@ class CodeGraph:
                     seen.add(neighbor)
                     distance[neighbor] = depth + 1
                     frontier.append((neighbor, depth + 1))
-        # Relevance must outrank alphabetical determinism.  Large file/class
-        # hubs can pull thousands of third-hop nodes into ``seen``; sorting
-        # those globally by label used to truncate the exact seed and its
-        # direct callers out of the 1,500-character grep hint entirely.
         ordered_nodes = sorted(
             seen,
             key=lambda nid: (
@@ -516,11 +483,6 @@ class CodeGraph:
                 self.nodes[edge["target"]]["label"].lower(),
             ),
         )
-        # Interleave each discovered node with the relationships that connect
-        # it to the preceding BFS rings.  Emitting every node before every
-        # edge made tight grep hints contain no relationships at all on
-        # hub-heavy real repositories (a high-degree target can have dozens of
-        # direct neighbours by itself).
         nodes_by_depth: dict[int, list[str]] = {}
         for nid in ordered_nodes:
             nodes_by_depth.setdefault(distance[nid], []).append(nid)
@@ -552,8 +514,6 @@ class CodeGraph:
                 lines.extend(
                     self._edge_line(edge) for edge in parent_edges.get(nid, [])
                 )
-            # Same-ring relationships are less useful than every node's path
-            # back toward the seed, so render them only after the whole ring.
             lines.extend(self._edge_line(edge) for edge in same_ring_edges)
         out: list[str] = []
         used = 0
@@ -680,8 +640,6 @@ def _record_to_graph_parts(
     key_to_id: dict[int, str] = {}
     defs_by_key: dict[int, dict[str, Any]] = {}
     name_to_keys: dict[str, list[int]] = {}
-    # Create every node before edges so identity never depends on labels or
-    # traversal-order lookup.  Duplicate method names are normal source code.
     for d in record["defs"]:
         key = int(d["key"])
         nid = f"def:{rel}:{d['name']}:{d['line']}"
@@ -729,9 +687,6 @@ def _record_to_graph_parts(
         )
         candidates = name_to_keys.get(call["callee"], [])
         local_callee_id: str | None = None
-        # Resolve lexical scope from nearest to farthest: nested definition,
-        # containing class/function, then module.  If a scope has multiple
-        # candidates, resolution is genuinely ambiguous and no edge is made.
         scopes: list[int | None] = []
         requested_caller = int(caller_key) if caller_key is not None else None
         cursor = requested_caller if requested_caller in defs_by_key else None
@@ -774,7 +729,6 @@ def _assemble(records: dict[str, dict[str, Any]], stats: dict[str, int]) -> Code
         nodes.update(file_nodes)
         edges.extend(file_edges)
         pending.extend(file_pending)
-    # global label → node-id index for cross-file call resolution
     label_index: dict[str, list[str]] = {}
     for nid, node in nodes.items():
         if node["kind"] not in ("file", "module"):
@@ -790,7 +744,7 @@ def _assemble(records: dict[str, dict[str, Any]], stats: dict[str, int]) -> Code
         else:
             candidates = label_index.get(call["callee"], [])
             if len(candidates) != 1:
-                continue  # unknown or ambiguous — never invent an edge
+                continue
             callee_id = candidates[0]
             confidence = "INFERRED"
         key = (caller_id, callee_id)
@@ -839,12 +793,6 @@ def _ensure_graph_git_excluded(work_dir: str) -> None:
         exclude = Path(result.stdout.strip())
         if not exclude.is_absolute():
             exclude = Path(work_dir).resolve() / exclude
-        # Git treats info/exclude as raw bytes — non-UTF-8 patterns or
-        # comments are legal, so a strict ``read_text()`` would raise
-        # UnicodeDecodeError (a ValueError, NOT caught below) out of
-        # ``_save`` -> ``build_graph`` and crash the code_graph tool on
-        # such repos.  Decode/encode with surrogateescape so arbitrary
-        # bytes round-trip unchanged.
         existing = ""
         if exclude.is_file():
             existing = exclude.read_bytes().decode("utf-8", errors="surrogateescape")
@@ -870,8 +818,6 @@ def _save(
     storage = graph_dir(work_dir)
     storage.mkdir(parents=True, exist_ok=True)
     _ensure_graph_git_excluded(work_dir)
-    # Cache first: interruption leaves readers with the previous valid graph;
-    # the next update can always reassemble that graph from the newer cache.
     _atomic_write_json(
         storage / "cache.json",
         {"version": _CACHE_VERSION, "hashes": hashes, "records": records},
@@ -970,7 +916,6 @@ def build_graph(
         reextracted += 1
         hashes[rel] = digest
         records[rel] = record
-    # prune deleted files (anything cached but no longer on disk)
     records = {rel: rec for rel, rec in records.items() if rel in on_disk}
     hashes = {rel: h for rel, h in hashes.items() if rel in on_disk}
     graph = _assemble(records, {"files": len(records), "reextracted": reextracted})
@@ -978,22 +923,14 @@ def build_graph(
     return graph
 
 
-# ---------------------------------------------------------------------------
-# Feature #3: query-before-grep interception
-# ---------------------------------------------------------------------------
-
 _GREP_COMMANDS = {"grep", "rg", "egrep", "fgrep"}
 
-# grep/rg flags that consume the next argv token.
 _FLAGS_WITH_VALUE = {
     "-e", "-f", "-m", "-A", "-B", "-C", "-d", "-D",
     "--include", "--exclude", "--exclude-dir", "--regexp",
     "-g", "-t", "-T", "--type", "--glob", "--max-count",
 }
 _PATTERN_FLAGS = {"-e", "--regexp"}
-# Flags naming a FILE the patterns are read from: the remaining
-# operands are search targets, so the command line carries no inline
-# pattern for the graph to answer.
 _PATTERN_FILE_FLAGS = {"-f", "--file"}
 
 
@@ -1017,25 +954,16 @@ def _grep_pattern(command: str) -> str | None:
         arg = argv[i]
         if arg.startswith("-"):
             if arg == "--":
-                # POSIX end-of-options marker: the next token is an
-                # operand — the pattern (unless -e/-f already supplied
-                # it).  The old parser skipped it like a flag, so
-                # ``grep -- -pat file`` misparsed ``file`` as pattern.
                 return argv[i + 1] if i + 1 < len(argv) else None
             flag, separator, value = arg.partition("=")
             if flag in _PATTERN_FILE_FLAGS or (
                 arg.startswith("-f") and not arg.startswith("--")
             ):
-                # ``-f pats.txt`` / ``-fpats.txt`` / ``--file[=]...``:
-                # no inline pattern exists; returning a later operand
-                # would let grep_hint suppress a real grep based on
-                # its TARGET path.
                 return None
             if flag in _PATTERN_FLAGS:
                 if separator:
                     return value or None
                 return argv[i + 1] if i + 1 < len(argv) else None
-            # GNU grep also accepts the compact spelling ``-ePATTERN``.
             if arg.startswith("-e") and len(arg) > 2:
                 return arg[2:]
             if flag in _FLAGS_WITH_VALUE and not separator:
@@ -1071,10 +999,6 @@ def grep_hint(command: str, work_dir: str | None) -> str | None:
     graph = load_graph(work_dir)
     if graph is None:
         return None
-    # Intercept identifier lookups only.  Feeding an arbitrary literal/regex
-    # into ``query`` can produce a substring match on an unrelated label
-    # (for example, the word "app" in prose matching ``Application``) and
-    # would incorrectly suppress a grep that the graph cannot answer.
     if graph.find_node(pattern) is None:
         return None
     answer = graph.query(pattern, max_chars=1500)
@@ -1124,10 +1048,6 @@ def intercept_grep_hint(
         return hint
     return None
 
-
-# ---------------------------------------------------------------------------
-# Feature #5: git post-commit hook
-# ---------------------------------------------------------------------------
 
 
 def _hooks_dir(work_dir: str) -> Path | None:
@@ -1259,10 +1179,6 @@ def uninstall_post_commit_hook(work_dir: str) -> str:
     return "code_graph post-commit hook removed."
 
 
-# ---------------------------------------------------------------------------
-# Feature #1 exposure: the agent tool
-# ---------------------------------------------------------------------------
-
 
 def make_code_graph_tool(work_dir: str) -> Any | None:
     """Build the ``code_graph`` agent tool for *work_dir*.
@@ -1338,10 +1254,6 @@ def make_code_graph_tool(work_dir: str) -> Any | None:
     return code_graph
 
 
-# ---------------------------------------------------------------------------
-# CLI (used by the git hook and for manual builds)
-# ---------------------------------------------------------------------------
-
 
 def _pid_is_running(pid: int) -> bool:
     """Return whether *pid* still exists (permission denied means yes)."""
@@ -1379,8 +1291,6 @@ def _acquire_update_lock(work_dir: str) -> Path | None:
                     continue
             if _pid_is_running(pid):
                 return None
-            # A malformed lock gets a grace period in case its owner is in the
-            # tiny create-before-write window; dead numeric PIDs are safe now.
             if pid == -1 and age < _STALE_LOCK_SECONDS:
                 return None
             try:

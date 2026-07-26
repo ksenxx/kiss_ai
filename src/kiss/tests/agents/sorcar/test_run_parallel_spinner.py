@@ -146,8 +146,6 @@ def test_set_running_state_true_shows_spinner() -> None:
     assert "showSpinner" in calls, (
         f"setRunningState(true) must call showSpinner; got {calls}"
     )
-    # And the spinner must be (re)shown AFTER startTimer so it's the
-    # most-recent spinner signal on the running branch.
     assert calls.index("showSpinner") > calls.index("startTimer"), (
         f"showSpinner must follow startTimer on the running branch; "
         f"got {calls}"

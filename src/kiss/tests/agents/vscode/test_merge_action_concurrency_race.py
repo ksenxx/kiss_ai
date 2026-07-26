@@ -127,17 +127,11 @@ class TestConcurrentMergeActionRace(unittest.IsolatedAsyncioTestCase):
         state = server._merge_states[tab_id]
 
         cmd = {"type": "mergeAction", "action": "reject", "tabId": tab_id}
-        # Two independent coroutines on the same loop — the multi-viewer
-        # (UDS + WSS) scenario.  gather lets each reach its
-        # run_in_executor await before the other resumes.
         await asyncio.gather(
             server._handle_web_merge_action(dict(cmd)),
             server._handle_web_merge_action(dict(cmd)),
         )
 
-        # Both reject actions must each have resolved a *distinct* hunk.
-        # The race re-resolves hunk (0, 0) twice and leaves (0, 1)
-        # permanently unresolved.
         self.assertTrue(state.is_resolved(0, 0))
         self.assertTrue(
             state.is_resolved(0, 1),

@@ -2,45 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test: transcript text must never instantiate a Tips panel.
-//
-// Bug locked in:
-//
-//   After ``./scripts/build-extension.sh`` the reloaded chat webview
-//   showed TWO Tips windows — one blank, one with the real tips.  The
-//   blank one came from the transcript: a chat message (e.g. a task
-//   result summary describing the tips feature) contained the literal
-//   text ``<kiss-tips-panel>``.  ``kissSanitize`` in ``media/main.js``
-//   only stripped a blocklist of dangerous tags (script, iframe, ...),
-//   so the tag survived ``marked.parse`` → ``innerHTML``, and because
-//   ``media/tips.js`` registers ``<kiss-tips-panel>`` as a custom
-//   element the browser upgraded it into a REAL panel: its constructor
-//   builds the header/footer chrome but no tips were ever assigned, so
-//   a blank full-viewport overlay appeared on top of (or under) the
-//   legitimate auto-shown Tips window.
-//
-// Contract locked in here:
-//
-//   * Rendering a chat event whose markdown contains a raw
-//     ``<kiss-tips-panel>`` tag must NOT mount a second panel — the
-//     sanitizer strips every custom element (any hyphenated tag).
-//   * A ``<kiss-tips-panel>`` mentioned inside a code span stays
-//     visible as literal text in the transcript.
-//   * Defense in depth: a ``<kiss-tips-panel>`` element upgraded from
-//     parsed HTML (bypassing the sanitizer) self-removes on connect —
-//     only ``showTipsPanel()``, which assigns ``.tips`` before
-//     mounting, may show a panel.  An empty-tips panel keeps
-//     working because ``showTipsPanel([])`` still assigns ``.tips``.
-//
-// This test drives the real ``media/main.js``, ``media/tips.js`` and
-// ``media/marked.min.js`` (plus the real ``media/chat.html`` markup
-// and ``media/panelCopy.js``) inside jsdom, exactly like
-// ``bughunt3_warning_event.test.js``.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/tipsNoBlankPanelFromTranscript.test.js
 
 'use strict';
 
@@ -53,14 +14,6 @@ const MEDIA = path.join(__dirname, '..', 'media');
 
 const TIPS = ['## First tip\n\nUse **KISS Sorcar** like a pro.'];
 
-/**
- * Build a jsdom window running the production chat webview: the real
- * ``chat.html`` body (placeholders blanked), ``marked.min.js``,
- * ``tips.js`` (with ``window.__TIPS__`` injected first, exactly like
- * the inline script emitted by ``buildChatHtml``), ``panelCopy.js``
- * and ``main.js`` evaluated in the window, and a recording
- * ``acquireVsCodeApi`` stub (the only host API the webview has).
- */
 function makeWebview({show}) {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -94,9 +47,6 @@ function makeWebview({show}) {
   win.eval(`window.__TIPS__ = ${JSON.stringify({tips: TIPS, show})};`);
   win.eval(fs.readFileSync(path.join(MEDIA, 'tips.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  // Evaluate api.js separately so V8 coverage offsets for the
-
-  // sourceURL-labelled main.js eval below start at character 0.
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(
@@ -105,17 +55,14 @@ fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   return {win, posted};
 }
 
-/** Dispatch a backend→webview event exactly like the extension does. */
 function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** All mounted ``<kiss-tips-panel>`` elements anywhere in the page. */
 function panels(win) {
   return Array.from(win.document.querySelectorAll('kiss-tips-panel'));
 }
 
-/** The rendered tip body text of a mounted panel (shadow DOM). */
 function panelBodyText(panel) {
   const body = panel.shadowRoot && panel.shadowRoot.querySelector('.tips-body');
   return body ? body.textContent.trim() : '';
@@ -134,9 +81,6 @@ function testResultSummaryCannotSpawnBlankPanel() {
     'the auto-shown panel renders the tip contents',
   );
 
-  // A task result whose summary mentions the tag raw (not in a code
-  // span) — exactly what a session summary describing the tips
-  // feature looks like in the transcript.
   send(win, {
     type: 'result',
     summary: 'Read media/tips.js fully: <kiss-tips-panel>; auto-show wired.',
@@ -200,8 +144,6 @@ function testCodeSpanMentionStaysVisibleText() {
 function testParsedPanelSelfRemovesButProgrammaticPanelSurvives() {
   const {win} = makeWebview({show: false});
 
-  // Defense in depth: HTML injected through any path that bypasses the
-  // sanitizer must still not produce a live panel.
   const div = win.document.createElement('div');
   div.innerHTML = '<kiss-tips-panel></kiss-tips-panel>';
   win.document.body.appendChild(div);
@@ -213,8 +155,6 @@ function testParsedPanelSelfRemovesButProgrammaticPanelSurvives() {
       'blank overlay',
   );
 
-  // The legit programmatic path still works — including an
-  // empty-tips panel (``showTipsPanel([])`` assigns ``.tips``).
   const empty = win.__kissShowTipsPanel([]);
   assert.strictEqual(panels(win).length, 1, 'empty panel still mounts');
   empty.shadowRoot.querySelector('.tips-close').click();

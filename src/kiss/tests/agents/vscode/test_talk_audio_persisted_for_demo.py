@@ -119,7 +119,6 @@ class TestAttachTalkAudio(_Base):
         extras = talk_calls[0].get("extras") or {}
         self.assertEqual(extras.get("audioB64"), "QUJD")
         self.assertEqual(extras.get("audioMime"), "audio/mpeg")
-        # The spoken text stays intact next to the clip.
         self.assertEqual(extras.get("text"), "Hello there!")
 
     def test_persisted_row_gains_audio(self) -> None:
@@ -201,8 +200,6 @@ class TestAmendPersistenceHelper(_Base):
         )
 
     def test_non_talk_tool_calls_untouched(self) -> None:
-        # A Bash command whose *content* merely mentions "talk" must not
-        # be amended (the LIKE prefilter alone would match it).
         self.printer.print(
             "Bash",
             type="tool_call",

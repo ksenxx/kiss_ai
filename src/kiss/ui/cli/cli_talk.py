@@ -55,21 +55,14 @@ logger = logging.getLogger(__name__)
 
 _PLAY_CMD_ENV = "KISS_SORCAR_PLAY_CMD"
 _SAY_CMD_ENV = "KISS_SORCAR_SAY_CMD"
-# webview parity: media/main.js caps ``spokenTalkIds`` at 500 and
-# drops the oldest half when the cap is hit.
 _MAX_TALK_IDS = 500
-# Safety valve so one hung player can never wedge the talk queue.
 _PLAYBACK_TIMEOUT = 600.0
 
-# Linux/BSD MP3-capable players, most common first; each entry is the
-# full argv prefix (the audio path is appended as the last argument).
 _FALLBACK_PLAYERS: tuple[tuple[str, ...], ...] = (
     ("mpg123", "-q"),
     ("ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"),
     ("mpv", "--no-video", "--really-quiet"),
 )
-# Non-macOS TTS commands (the text is appended as the last argument);
-# macOS always uses ``say`` directly.
 _FALLBACK_SAY: tuple[tuple[str, ...], ...] = (
     ("espeak-ng",),
     ("espeak",),
@@ -212,8 +205,6 @@ class TalkPlayer:
                     return
                 self._spoken_ids[talk_id] = None
                 if len(self._spoken_ids) > _MAX_TALK_IDS:
-                    # Bounded memory: drop the oldest half (dicts
-                    # iterate in insertion order).
                     for stale in list(self._spoken_ids)[: _MAX_TALK_IDS // 2]:
                         del self._spoken_ids[stale]
             if self._worker is None or not self._worker.is_alive():
@@ -230,8 +221,6 @@ class TalkPlayer:
             try:
                 self._play_one(event)
             except Exception:
-                # Playback is best-effort; a broken clip/player must
-                # never take down the worker (later talks still play).
                 logger.exception("talk playback failed")
 
     def _play_one(self, event: dict[str, Any]) -> None:

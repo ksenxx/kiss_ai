@@ -2,29 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Integration test for demo-mode speech + tool-call execution in
-// ``media/demo.js``:
-//
-//   1. Replayed user prompts are NOT narrated (no "User said ..."
-//      ``speakText`` call — the prompt display step was removed).
-//   2. A replayed ``talk`` tool call is ACTUALLY played (routed to the
-//      host's ``playTalkEvent`` with the recorded text/language/emotion).
-//   3. A replayed ``run_parallel`` tool call ACTUALLY materialises one
-//      sub-agent tab per task via the host's ``openSubagentTab`` — and
-//      only after the tool-call panel was rendered (``processEvent``),
-//      because the tab machinery locates the fan-out's panel in the DOM.
-//   4. Unparseable ``tasks`` JSON degrades gracefully (no tabs, no throw).
-//   5. A host api without the new hooks (older main.js) still replays
-//      without throwing.
-//
-// This test drives the real ``media/demo.js`` inside jsdom (no mocks of
-// project code; the ``window._demoApi`` host shim that main.js normally
-// provides is stubbed, exactly like in bughunt2_demo_continue.test.js).
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/demoTalkRunParallel.test.js
 
 'use strict';
 
@@ -35,12 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const DEMO_PATH = path.join(__dirname, '..', 'media', 'demo.js');
 
-/**
- * Build a jsdom window with ``demo.js`` evaluated and a minimal
- * ``window._demoApi`` host shim that hands the supplied *events* back
- * when the replay requests them via ``resumeSession``.  ``calls``
- * records every interesting host-api invocation in order.
- */
 function makeDemoWindow(events, opts) {
   const withHooks = !opts || opts.withHooks !== false;
   const dom = new JSDOM(
@@ -111,7 +82,6 @@ async function runReplay(win, api, preview) {
   assert.strictEqual(api.active, false, 'replay must clear active flag');
 }
 
-/** Events for a session with one talk and one run_parallel call. */
 function sampleEvents() {
   return [
     {type: 'text_delta', text: 'Working on it.'},
@@ -148,18 +118,15 @@ async function testNoPromptNarrationAndExecutesToolCalls() {
   const {win, api, calls} = makeDemoWindow(sampleEvents());
   await runReplay(win, api, 'plan my trip');
 
-  // 1. The user prompt must NOT be narrated (prompt display removed).
   const speaks = calls.filter(c => c.fn === 'speakText');
   assert.strictEqual(speaks.length, 0, 'no prompt narration');
 
-  // 2. The recorded talk tool call is actually played.
   const talks = calls.filter(c => c.fn === 'playTalkEvent');
   assert.strictEqual(talks.length, 1, 'exactly one talk playback');
   assert.strictEqual(talks[0].ev.text, 'Hello there, I am on it.');
   assert.strictEqual(talks[0].ev.language, 'en-US');
   assert.strictEqual(talks[0].ev.emotion, 'cheerful');
 
-  // 3. The run_parallel fan-out materialises one sub-agent tab per task.
   const tabs = calls.filter(c => c.fn === 'openSubagentTab');
   assert.strictEqual(tabs.length, 2, 'one sub-agent tab per task');
   tabs.forEach((c, i) => {
@@ -177,8 +144,6 @@ async function testNoPromptNarrationAndExecutesToolCalls() {
     'sub-agent tab ids must be unique',
   );
 
-  // Ordering: each tool execution happens AFTER its panel was rendered
-  // by processEvent (the tab machinery needs the panel in the DOM).
   const idxOf = pred => calls.findIndex(pred);
   const talkPanelIdx = idxOf(
     c =>
@@ -248,7 +213,6 @@ async function testCancelStopsSpeech() {
   const replay = win._startDemoReplay([
     {id: 1, has_events: true, preview: 'cancel me', timestamp: 1},
   ]);
-  // Cancel while the replay is showing the first panel.
   await new Promise(r => setTimeout(r, 50));
   win._cancelDemoReplay();
   await replay;
@@ -268,8 +232,6 @@ function testParseDemoTasks() {
   const win = dom.window;
   win._demoApi = null;
   win.eval(fs.readFileSync(DEMO_PATH, 'utf8'));
-  // Compare via JSON — the parsed arrays come from the jsdom window's
-  // realm, so their prototype differs from this realm's Array.
   const parse = raw => JSON.stringify(win._parseDemoTasks(raw));
   assert.strictEqual(parse('["a","b"]'), '["a","b"]');
   assert.strictEqual(parse(['x', 2]), '["x","2"]');

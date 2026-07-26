@@ -52,9 +52,6 @@ MEDIA_DIR = (
 CODEX_CSS = MEDIA_DIR / "remote-codex.css"
 CHAT_HTML = MEDIA_DIR / "chat.html"
 
-# Every interactive-control id in media/chat.html.  If ANY id ever
-# disappears from the built remote page, a control was lost and this
-# parity guard must fail.
 CONTROL_IDS = [
     "kiss-server-loading",
     "app",
@@ -178,8 +175,6 @@ def _read_codex_css() -> str:
     return CODEX_CSS.read_text(encoding="utf-8")
 
 
-# ── Stylesheet wiring ────────────────────────────────────────────────
-
 
 def test_built_html_links_codex_stylesheet_cache_busted() -> None:
     """The built remote page links remote-codex.css with ?v=<sha16>."""
@@ -209,8 +204,6 @@ def test_no_unsubstituted_placeholders_remain() -> None:
     assert not re.search(r"\{\{[A-Z_]+\}\}", html)
 
 
-# ── Control parity ───────────────────────────────────────────────────
-
 
 def test_all_control_ids_still_present() -> None:
     """Every existing control/template id survives unchanged.
@@ -233,8 +226,6 @@ def test_body_keeps_remote_chat_class() -> None:
     html = _build_html()
     assert '<body class="remote-chat">' in html
 
-
-# ── VS Code webview isolation ────────────────────────────────────────
 
 
 def test_chat_html_template_does_not_hardcode_codex_css() -> None:
@@ -266,7 +257,6 @@ def _iter_top_level_selectors(css: str) -> list[str]:
             if brace == -1:
                 break
             header = text[i:brace].strip()
-            # find matching close brace
             depth = 1
             j = brace + 1
             while j < n and depth:
@@ -283,8 +273,6 @@ def _iter_top_level_selectors(css: str) -> list[str]:
                     "@container",
                 ):
                     scan(body)
-                # @keyframes / @font-face bodies contain no selectors
-                # that could leak into the extension webview.
             else:
                 selectors.extend(
                     s.strip() for s in header.split(",") if s.strip()
@@ -311,8 +299,6 @@ def test_every_codex_rule_scoped_under_remote_chat() -> None:
     ]
     assert not bad, f"unscoped selectors leak into VS Code webview: {bad}"
 
-
-# ── Codex design language ────────────────────────────────────────────
 
 
 def test_codex_page_palette() -> None:
@@ -376,8 +362,6 @@ def test_codex_rounded_panels() -> None:
     assert "body.remote-chat #settings-panel" in css
     assert "#171717" in css, "drawer surface #171717 missing"
 
-
-# ── Desktop docked sidebar + colorless chat panels ──────────────────
 
 
 def _find_rule(css: str, selector: str) -> str:
@@ -493,19 +477,9 @@ def test_chat_panels_left_aligned() -> None:
     assert "margin-left: 0" in rule
     assert "margin-right: auto" in rule
     assert "max-width" in rule
-    # The pinned user bubble stays right-aligned (outside #output).
     task = re.search(r"body\.remote-chat #task-panel\s*\{([^}]*)\}", css)
     assert task and "margin-left: auto" in task.group(1)
 
-
-# ── Codex flat-thread panels (indistinguishable from Codex) ─────────
-#
-# The real Codex desktop/app thread is FLATTER than a card layout:
-# assistant/tool content sits directly on the page background, tool
-# and thinking labels are quiet sentence-case muted-gray rows with a
-# chevron, and only monospace output blocks (bash/tool results) get a
-# subtle inset #171717 surface.  These tests pin that language so the
-# remote webapp thread is visually indistinguishable from Codex.
 
 FLAT_PAGE_BG_SELECTORS = [
     ".tc",
@@ -646,8 +620,6 @@ def test_main_js_remote_desktop_wiring() -> None:
     )
 
 
-# ── Resizable docked sidebar ─────────────────────────────────────────
-
 
 def test_sidebar_resizer_in_chat_html() -> None:
     """chat.html ships an accessible resize handle inside #sidebar."""
@@ -704,8 +676,6 @@ def test_main_js_sidebar_resize_wiring() -> None:
     assert "setPointerCapture" in js
     assert "pointercancel" in js
 
-
-# ── Desktop width defaults (1/4-screen sidebar, 90% chat column) ────
 
 
 def test_sidebar_defaults_to_quarter_screen() -> None:
@@ -775,8 +745,6 @@ def test_main_js_quarter_screen_default() -> None:
         "the resize default must be computed as 1/4 of the window width"
     )
 
-
-# ── Live HTTP serving ────────────────────────────────────────────────
 
 
 @pytest.mark.timeout(120)
@@ -900,5 +868,4 @@ def test_media_url_cache_busts_codex_css() -> None:
     url = _media_url("remote-codex.css")
     expected = hashlib.sha256(CODEX_CSS.read_bytes()).hexdigest()[:16]
     assert url == f"/media/remote-codex.css?v={expected}"
-    # And cached on second call.
     assert _media_url("remote-codex.css") == url

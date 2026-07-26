@@ -37,7 +37,7 @@ DOWN = b"\x1b[B"
 LEFT = b"\x1b[D"
 SS3_UP = b"\x1bOA"
 SS3_DOWN = b"\x1bOB"
-ALT_ENTER = b"\x1b\r"  # inserts a real newline into the buffer
+ALT_ENTER = b"\x1b\r"
 
 
 @pytest.fixture
@@ -52,8 +52,6 @@ def _feed(box: _InputBox, data: bytes) -> list[str]:
     return submitted
 
 
-# --- In-buffer line navigation (webview textarea caret behaviour) ---
-
 
 def test_up_moves_cursor_to_previous_line(box: _InputBox) -> None:
     """Up in a multi-line buffer moves the caret up, not into history."""
@@ -66,8 +64,6 @@ def test_up_moves_cursor_to_previous_line(box: _InputBox) -> None:
 def test_down_moves_cursor_to_next_line(box: _InputBox) -> None:
     box.history = ["old task"]
     _feed(box, b"ab" + ALT_ENTER + b"cd" + UP + UP + DOWN + b"X")
-    # Up, Up puts the caret at the start of line 1; Down returns to
-    # column 0 of line 2.
     assert box.buf == "ab\nXcd"
     assert box.cursor == 4
 
@@ -94,17 +90,14 @@ def test_down_on_last_line_moves_caret_to_end(box: _InputBox) -> None:
 def test_up_down_clamp_column_to_shorter_line(box: _InputBox) -> None:
     """Moving onto a shorter line clamps the caret to that line's end."""
     _feed(box, b"ab" + ALT_ENTER + b"cdef" + UP)
-    # From column 4 of "cdef" up onto "ab": clamp to column 2.
     assert box.buf == "ab\ncdef"
     assert box.cursor == 2
     _feed(box, DOWN)
-    # Back down keeps column 2 within "cdef".
     assert box.cursor == 5
 
 
 def test_up_down_preserve_column_across_lines(box: _InputBox) -> None:
     _feed(box, b"abcd" + ALT_ENTER + b"wxyz" + LEFT + LEFT + UP)
-    # Caret at column 2 of "wxyz" moves to column 2 of "abcd".
     assert box.cursor == 2
     _feed(box, DOWN)
     assert box.cursor == 7
@@ -112,8 +105,6 @@ def test_up_down_preserve_column_across_lines(box: _InputBox) -> None:
 
 def test_up_down_navigate_three_line_buffer(box: _InputBox) -> None:
     _feed(box, b"one" + ALT_ENTER + b"two" + ALT_ENTER + b"three")
-    # From the end of "three" (column 5) Up lands at the end of "two"
-    # (column clamped to 3); a second Up reaches the end of "one".
     _feed(box, UP + b"X")
     assert box.buf == "one\ntwoX\nthree"
     _feed(box, UP + b"W")
@@ -140,11 +131,9 @@ def test_split_up_arrow_across_feed_chunks(box: _InputBox) -> None:
     assert box.buf == "abX\ncd"
 
 
-# --- History cycling (webview cycleHistoryUp/Down behaviour) ---
-
 
 def test_up_on_empty_buffer_recalls_newest_history(box: _InputBox) -> None:
-    box.history = ["one", "two"]  # oldest -> newest
+    box.history = ["one", "two"]
     _feed(box, UP)
     assert box.buf == "two"
     assert box.cursor == len("two")
@@ -155,7 +144,6 @@ def test_up_keeps_browsing_older_entries(box: _InputBox) -> None:
     box.history = ["one", "two"]
     _feed(box, UP + UP)
     assert box.buf == "one"
-    # At the oldest entry Up stays put (webview clamps at the end).
     _feed(box, UP)
     assert box.buf == "one"
 
@@ -167,7 +155,6 @@ def test_down_returns_to_newer_then_empty_draft(box: _InputBox) -> None:
     _feed(box, DOWN)
     assert box.buf == ""
     assert box.cursor == 0
-    # A further Down is a no-op (not browsing, empty single line).
     _feed(box, DOWN)
     assert box.buf == ""
 
@@ -185,8 +172,6 @@ def test_up_browses_history_across_multiline_entry(box: _InputBox) -> None:
     box.history = ["first", "a\nb\nc"]
     _feed(box, UP)
     assert box.buf == "a\nb\nc"
-    # Still browsing: Up cycles to the older entry instead of moving
-    # the caret up inside the recalled multi-line text.
     _feed(box, UP)
     assert box.buf == "first"
 
@@ -197,7 +182,6 @@ def test_typing_stops_history_browse(box: _InputBox) -> None:
     _feed(box, UP + b"x")
     assert box.buf == "twox"
     _feed(box, UP)
-    # Not browsing any more and single-line text: caret jumps to start.
     assert box.buf == "twox"
     assert box.cursor == 0
 
@@ -224,6 +208,5 @@ def test_draft_restored_after_browse_started_from_empty(
     assert box.buf == "one"
     _feed(box, DOWN)
     assert box.buf == ""
-    # And Up starts a fresh browse again.
     _feed(box, UP)
     assert box.buf == "one"

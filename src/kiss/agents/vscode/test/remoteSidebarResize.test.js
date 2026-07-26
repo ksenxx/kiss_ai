@@ -2,36 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end tests: horizontally RESIZABLE docked history sidebar in
-// the REMOTE webapp desktop layout.
-//
-// Feature under test: on desktop-wide remote windows (body.remote-chat
-// + body.remote-desktop, matchMedia '(min-width: 900px)') the docked
-// agent-history sidebar (#sidebar) must be horizontally resizable via
-// a drag handle (#sidebar-resizer) on its right edge:
-//
-//   * the handle exists in chat.html and is an accessible ARIA window
-//     splitter (role=separator, aria-orientation=vertical, focusable,
-//     aria-valuenow/min/max reflecting the width);
-//   * dragging with pointer events resizes the sidebar by setting the
-//     --sidebar-w custom property (which drives BOTH the sidebar width
-//     and #app's margin-left in remote-codex.css, so they never
-//     desync);
-//   * the width is clamped to [220px, 600px];
-//   * the width persists across reloads (localStorage) and garbage or
-//     out-of-range persisted values are sanitized;
-//   * ArrowLeft/ArrowRight on the focused handle resize by 16px steps
-//     (W3C window-splitter keyboard pattern);
-//   * double-click resets to the 1/4-window default and clears
-//     persistence;
-//   * NONE of this activates on mobile-width windows nor inside the
-//     VS Code extension webview (no remote-chat class), and jsdom-less
-//     pointer-capture APIs must never crash main.js.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/remoteSidebarResize.test.js
 
 'use strict';
 
@@ -42,20 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom webview running the real chat.html + panelCopy.js +
- * main.js, with a controllable matchMedia stub and recorded
- * pointer-capture calls (jsdom implements neither natively).
- *
- * @param {object} [opts]
- * @param {boolean} [opts.remote=true] add class="remote-chat" to body
- * @param {boolean} [opts.desktopMatches=true] initial
- *     matchMedia('(min-width: 900px)').matches
- * @param {string|null} [opts.storedWidth=null] pre-seed
- *     localStorage['kiss-sidebar-w'] BEFORE main.js runs
- * @returns {{win: object, posted: Array, fireChange: function(boolean),
- *     captured: Array, released: Array}}
- */
 function makeWebview(opts) {
   const {remote = true, desktopMatches = true, storedWidth = null} =
     opts || {};
@@ -74,7 +30,6 @@ function makeWebview(opts) {
   const win = dom.window;
   win.Element.prototype.scrollIntoView = function () {};
   win.Element.prototype.scrollTo = function () {};
-  // jsdom has no pointer-capture: record the calls main.js makes.
   const captured = [];
   const released = [];
   win.Element.prototype.setPointerCapture = function (id) {
@@ -120,9 +75,6 @@ function makeWebview(opts) {
     };
   };
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  // Evaluate api.js separately so V8 coverage offsets for the
-
-  // sourceURL-labelled main.js eval below start at character 0.
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(
@@ -134,12 +86,10 @@ fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   return {win, posted, fireChange, captured, released};
 }
 
-/** Current --sidebar-w custom property value ('' when unset). */
 function sidebarW(win) {
   return win.document.documentElement.style.getPropertyValue('--sidebar-w');
 }
 
-/** Dispatch a pointer-type event on *el* (jsdom: MouseEvent carrier). */
 function pointer(win, el, type, props) {
   const ev = new win.MouseEvent(type, {
     bubbles: true,
@@ -154,17 +104,12 @@ function pointer(win, el, type, props) {
   return ev;
 }
 
-/** Perform a full drag of the resizer: down at x0, move to x1, up. */
 function drag(win, resizer, x0, x1) {
   pointer(win, resizer, 'pointerdown', {clientX: x0, pointerId: 1});
   pointer(win, resizer, 'pointermove', {clientX: x1, pointerId: 1});
   pointer(win, resizer, 'pointerup', {clientX: x1, pointerId: 1});
 }
 
-// ---------------------------------------------------------------------------
-// 1. The resize handle exists and is an accessible ARIA window
-//    splitter on the docked desktop sidebar.
-// ---------------------------------------------------------------------------
 function testResizerExistsAndIsAccessible() {
   const {win} = makeWebview({remote: true, desktopMatches: true});
   const resizer = win.document.getElementById('sidebar-resizer');
@@ -186,7 +131,6 @@ function testResizerExistsAndIsAccessible() {
   );
   assert.strictEqual(resizer.getAttribute('aria-valuemin'), '220');
   assert.strictEqual(resizer.getAttribute('aria-valuemax'), '600');
-  // Default width is 1/4 of the window (jsdom innerWidth 1024 → 256).
   assert.strictEqual(
     resizer.getAttribute('aria-valuenow'),
     '256',
@@ -201,9 +145,6 @@ function testResizerExistsAndIsAccessible() {
   console.log('PASS resizer exists and is an accessible ARIA separator');
 }
 
-// ---------------------------------------------------------------------------
-// 2. Dragging the handle resizes the sidebar via --sidebar-w.
-// ---------------------------------------------------------------------------
 function testDragResizesSidebar() {
   const {win, captured, released} = makeWebview({
     remote: true,
@@ -230,9 +171,6 @@ function testDragResizesSidebar() {
   console.log('PASS dragging the handle resizes the docked sidebar');
 }
 
-// ---------------------------------------------------------------------------
-// 3. The width is clamped to [220, 600].
-// ---------------------------------------------------------------------------
 function testDragClampsWidth() {
   const {win} = makeWebview({remote: true, desktopMatches: true});
   const resizer = win.document.getElementById('sidebar-resizer');
@@ -246,9 +184,6 @@ function testDragClampsWidth() {
   console.log('PASS drag width is clamped to [220px, 600px]');
 }
 
-// ---------------------------------------------------------------------------
-// 4. The chosen width persists (localStorage) and is restored on load.
-// ---------------------------------------------------------------------------
 function testWidthPersistsAndRestores() {
   const {win} = makeWebview({remote: true, desktopMatches: true});
   const resizer = win.document.getElementById('sidebar-resizer');
@@ -259,7 +194,6 @@ function testWidthPersistsAndRestores() {
     'pointerup must persist the width to localStorage',
   );
   win.close();
-  // A fresh page with a persisted width restores it on load.
   const second = makeWebview({
     remote: true,
     desktopMatches: true,
@@ -280,9 +214,6 @@ function testWidthPersistsAndRestores() {
   console.log('PASS width persists to localStorage and restores on load');
 }
 
-// ---------------------------------------------------------------------------
-// 5. Garbage / out-of-range persisted values are sanitized.
-// ---------------------------------------------------------------------------
 function testPersistedGarbageSanitized() {
   const garbage = makeWebview({
     remote: true,
@@ -309,11 +240,7 @@ function testPersistedGarbageSanitized() {
   console.log('PASS garbage / out-of-range persisted widths are sanitized');
 }
 
-// ---------------------------------------------------------------------------
-// 6. Keyboard: ArrowRight/ArrowLeft resize by 16px and persist.
-// ---------------------------------------------------------------------------
 function testKeyboardResize() {
-  // Baseline is the 1/4-window default (jsdom 1024 → 256px).
   const {win} = makeWebview({remote: true, desktopMatches: true});
   const resizer = win.document.getElementById('sidebar-resizer');
   resizer.dispatchEvent(
@@ -337,10 +264,6 @@ function testKeyboardResize() {
   console.log('PASS ArrowLeft/ArrowRight resize the sidebar by 16px steps');
 }
 
-// ---------------------------------------------------------------------------
-// 7. Double-click resets to the 1/4-window default and clears
-//    persistence (jsdom innerWidth 1024 → 256px).
-// ---------------------------------------------------------------------------
 function testDoubleClickResets() {
   const {win} = makeWebview({remote: true, desktopMatches: true});
   const resizer = win.document.getElementById('sidebar-resizer');
@@ -362,11 +285,6 @@ function testDoubleClickResets() {
   console.log('PASS double-click resets the width and clears persistence');
 }
 
-// ---------------------------------------------------------------------------
-// 8. Mobile (narrow) remote windows: dragging must do nothing (the
-//    drawer is full-flow there; the handle is display:none via CSS and
-//    inert via the remote-desktop guard in JS).
-// ---------------------------------------------------------------------------
 function testMobileDragInert() {
   const {win} = makeWebview({remote: true, desktopMatches: false});
   const resizer = win.document.getElementById('sidebar-resizer');
@@ -390,10 +308,6 @@ function testMobileDragInert() {
   console.log('PASS resize is inert on narrow (mobile) remote windows');
 }
 
-// ---------------------------------------------------------------------------
-// 9. VS Code extension webview isolation: no remote-chat class → the
-//    resizer never activates and main.js must not crash.
-// ---------------------------------------------------------------------------
 function testVsCodeWebviewIsolation() {
   const {win, posted} = makeWebview({remote: false, desktopMatches: true});
   assert.ok(
@@ -415,11 +329,6 @@ function testVsCodeWebviewIsolation() {
   console.log('PASS VS Code webview (no remote-chat) is unaffected');
 }
 
-// ---------------------------------------------------------------------------
-// 10. pointercancel ends the drag exactly like pointerup (touch
-//     interruptions, e.g. an incoming call, must not leave a stuck
-//     drag that keeps resizing on later moves).
-// ---------------------------------------------------------------------------
 function testPointerCancelEndsDrag() {
   const {win} = makeWebview({remote: true, desktopMatches: true});
   const resizer = win.document.getElementById('sidebar-resizer');
@@ -427,7 +336,6 @@ function testPointerCancelEndsDrag() {
   pointer(win, resizer, 'pointermove', {clientX: 400, pointerId: 1});
   assert.strictEqual(sidebarW(win), '400px');
   pointer(win, resizer, 'pointercancel', {clientX: 400, pointerId: 1});
-  // A stray move AFTER the cancel must not resize any further.
   pointer(win, resizer, 'pointermove', {clientX: 550, pointerId: 1});
   assert.strictEqual(
     sidebarW(win),
@@ -442,10 +350,6 @@ function testPointerCancelEndsDrag() {
   console.log('PASS pointercancel ends the drag like pointerup');
 }
 
-// ---------------------------------------------------------------------------
-// 11. During a drag the body carries sidebar-resizing (disables text
-//     selection via CSS) and the sidebar stays docked open.
-// ---------------------------------------------------------------------------
 function testDragKeepsDockAndMarksBody() {
   const {win} = makeWebview({remote: true, desktopMatches: true});
   const sidebar = win.document.getElementById('sidebar');

@@ -150,20 +150,15 @@ class TestEnsureGraphGitExcludedNonUtf8:
         )
         exclude = repo / ".git" / "info" / "exclude"
         exclude.parent.mkdir(parents=True, exist_ok=True)
-        # Latin-1 comment + raw high bytes: legal for git (raw bytes),
-        # invalid UTF-8 for a strict Python decode.
         exclude.write_bytes(b"# caf\xe9 latin-1 comment\n\x80\x81pattern\n")
         return repo, exclude
 
     def test_non_utf8_exclude_does_not_raise_and_appends(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo, exclude = self._make_repo_with_binary_exclude(Path(tmp))
-            # Before the fix this raised UnicodeDecodeError (a
-            # ValueError, uncaught by the OSError handler).
             _ensure_graph_git_excluded(str(repo))
             data = exclude.read_bytes()
             assert data.count(b".kiss/code_graph/\n") == 1
-            # The original non-UTF-8 bytes round-trip unchanged.
             assert b"# caf\xe9 latin-1 comment" in data
             assert b"\x80\x81pattern" in data
 

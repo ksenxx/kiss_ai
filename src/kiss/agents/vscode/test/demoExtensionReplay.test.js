@@ -2,32 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression tests for demo mode running inside the VS Code
-// EXTENSION webview (real chat.html + main.js + demo.js in jsdom, a
-// recording acquireVsCodeApi stub standing in for the extension host /
-// daemon).  Reproduces two field-reported bugs:
-//
-//   * "I do not see any tab": processOutputEvent's automatic
-//     collapseOlderPanels() pass fired on the very next replayed event
-//     — milliseconds later in a demo — collapsing every demo panel
-//     instantly and closing a replayed run_parallel fan-out's
-//     sub-agent tabs right after they opened, so no tab was ever
-//     visible.  collapseOlderPanels must be a no-op while the demo is
-//     active (demo.js owns collapsing), and fan-out groups pause
-//     longer so the tabs are actually watchable.
-//
-//   * replayed ``talk`` calls play their RECORDED audio clip in-page
-//     (demo mode never synthesizes speech).  Events without recorded
-//     audio — and prompt narration — are skipped SILENTLY and the
-//     replay advances; if Audio.play() fails, both VS Code and remote
-//     webviews degrade to SILENCE too.  The robotic Web-Speech
-//     fallback is gone for good, so the speech stub below is a CANARY
-//     that must never record an utterance.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/demoExtensionReplay.test.js
 
 'use strict';
 
@@ -38,13 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom window running the production chat webview: the real
- * ``chat.html`` body, ``panelCopy.js``, ``main.js`` AND ``demo.js``
- * evaluated in the window, plus a recording ``acquireVsCodeApi`` stub.
- * ``win._onPosted`` (settable per test) observes every posted message
- * so tests can answer like the extension host / daemon would.
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -82,9 +49,6 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  // Evaluate api.js separately so V8 coverage offsets for the
-
-  // sourceURL-labelled main.js eval below start at character 0.
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(
@@ -94,11 +58,6 @@ fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   return {win, posted};
 }
 
-/**
- * Install a recording Audio implementation.  ``opts.reject`` makes
- * play() reject like a Chromium autoplay block; otherwise clips play
- * and fire ``onended`` after 30ms.  Returns the created players.
- */
 function installAudio(win, opts) {
   const reject = !!(opts && opts.reject);
   const rejectDelay = (opts && opts.rejectDelay) || 0;
@@ -122,10 +81,6 @@ function installAudio(win, opts) {
   return players;
 }
 
-/**
- * Install a recording Web Speech API whose utterances complete
- * asynchronously.  Returns the spoken utterances.
- */
 function installSpeech(win) {
   const spoken = [];
   win.SpeechSynthesisUtterance = function (text) {
@@ -146,7 +101,6 @@ function installSpeech(win) {
   return spoken;
 }
 
-/** Deliver a daemon/extension-host message to the webview. */
 function dispatch(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
@@ -157,8 +111,6 @@ function sleep(ms) {
   });
 }
 
-/** Utterances actually SPOKEN via the Web Speech API — the webview
- * never uses Web Speech anymore, so this must always be empty. */
 function realSpoken(spoken) {
   return spoken.filter(u => (u.text || '').trim() !== '');
 }
@@ -186,11 +138,6 @@ const REPLAY_EVENTS = [
   {type: 'result', summary: 'All done.', total_tokens: 10, cost: '$0.01'},
 ];
 
-/**
- * Drive the full extension demo flow: enable demo mode, deliver one
- * history session, answer resumeSession with REPLAY_EVENTS, click the
- * history row.  Returns a promise resolving when the replay ends.
- */
 function startDemoFlow(win) {
   dispatch(win, {type: 'configData', config: {demo_mode: true}, apiKeys: {}});
   dispatch(win, {
@@ -320,7 +267,6 @@ async function testDemoSpeechUsesRecordedClip() {
     'Web Speech must not be used when the recorded clip is available',
   );
 
-  // Prompt narration never carries audio — it resolves silently.
   await win._demoApi.speakText('User said hello world', 'en-US');
   assert.strictEqual(players.length, 1, 'narration plays no clip');
   assert.strictEqual(realSpoken(spoken).length, 0, 'still no robotic voice');
@@ -350,7 +296,7 @@ async function testWebviewNoRecordedAudioIsSkippedSilently() {
 
 async function testWebviewBlockedPlaybackDegradesSilently() {
   const {win} = makeWebview();
-  const players = installAudio(win, {reject: true}); // autoplay block
+  const players = installAudio(win, {reject: true});
   const spoken = installSpeech(win);
 
   await Promise.race([
@@ -373,8 +319,6 @@ async function testWebviewBlockedPlaybackDegradesSilently() {
 }
 
 async function testPausedDemoDefersClipPlayback() {
-  // A recorded clip whose queue turn comes while the demo pause
-  // button is engaged must not start sounding until the user resumes.
   const {win} = makeWebview();
   const players = installAudio(win);
   const spoken = installSpeech(win);
@@ -400,8 +344,6 @@ async function testPausedDemoDefersClipPlayback() {
 }
 
 async function testStopBeforePlayRejectionLeavesQueueUsable() {
-  // A play() rejection that lands AFTER stopSpeech must neither make
-  // any sound nor wedge the serialized talk queue.
   const {win} = makeWebview();
   installAudio(win, {reject: true, rejectDelay: 50});
   const spoken = installSpeech(win);
@@ -411,16 +353,15 @@ async function testStopBeforePlayRejectionLeavesQueueUsable() {
     audioB64: 'QUJD',
     audioMime: 'audio/mpeg',
   });
-  await sleep(30); // the clip started; Audio.play() is still pending
+  await sleep(30);
   win._demoApi.stopSpeech();
   await speech;
-  await sleep(60); // the delayed rejection settles after the stop
+  await sleep(60);
   assert.strictEqual(
     realSpoken(spoken).length,
     0,
     'a late play() rejection after stop must not create zombie speech',
   );
-  // The queue must be free for the next demo run.
   await Promise.race([
     win._demoApi.speakText('User said next run'),
     sleep(2000).then(() => {
@@ -431,8 +372,6 @@ async function testStopBeforePlayRejectionLeavesQueueUsable() {
 }
 
 async function testRemotePageAlsoDegradesSilently() {
-  // The remote browser page shares the exact same silent-degradation
-  // path — no Web Speech fallback anywhere.
   const {win} = makeWebview();
   const players = installAudio(win);
   const spoken = installSpeech(win);
@@ -454,13 +393,11 @@ async function testRemotePageAlsoDegradesSilently() {
 }
 
 async function testStopSpeechCancelsQueuedClips() {
-  // Stopping the demo must resolve every queued clip promise without
-  // sound and leave the talk queue usable for the next run.
   const {win} = makeWebview();
   const players = installAudio(win);
   const spoken = installSpeech(win);
 
-  win._setDemoPaused(true); // park the clip before it starts
+  win._setDemoPaused(true);
   const p = win._demoApi.playTalkEvent({
     text: 'User said cancel me',
     audioB64: 'QUJD',
@@ -481,7 +418,6 @@ async function testStopSpeechCancelsQueuedClips() {
   assert.strictEqual(players.length, 0, 'a stopped clip must not play');
   assert.strictEqual(realSpoken(spoken).length, 0, 'and must not speak');
 
-  // The queue must be free for the next demo run.
   await win._demoApi.playTalkEvent({
     text: 'User said next run',
     audioB64: 'REVG',
@@ -501,8 +437,6 @@ async function runTests() {
   await testRemotePageAlsoDegradesSilently();
   await testStopSpeechCancelsQueuedClips();
   console.log('All demoExtensionReplay tests passed.');
-  // The demo replay's running state starts webview timers that keep
-  // the node event loop alive — exit explicitly.
   process.exit(0);
 }
 

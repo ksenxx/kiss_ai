@@ -2,13 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end chat-webview regression test for multi-session Result
-// ordering.  Drives the real chat.html + panelCopy.js + main.js in
-// jsdom and dispatches the same task_events payload the backend sends.
-//
-// Requirement: for a multi-session agent result, the "Previous
-// Sessions" panel must render before the terminal "Result" panel.
 
 'use strict';
 
@@ -48,9 +41,6 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  // Evaluate api.js separately so V8 coverage offsets for the
-
-  // sourceURL-labelled main.js eval below start at character 0.
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(

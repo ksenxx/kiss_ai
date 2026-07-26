@@ -77,15 +77,9 @@ class TestValidateCommand(unittest.TestCase):
         )
 
     def test_empty_string_satisfies_required_field(self) -> None:
-        # ``auth`` with an empty password must still reach the daemon's
-        # password check (which is what rejects it) — only an absent
-        # field is a protocol error.
         self.assertIsNone(validate_command({"type": "auth", "password": ""}))
 
     def test_catalog_covers_every_backend_handler(self) -> None:
-        # Every command VSCodeServer dispatches must be reachable
-        # through the API — otherwise the validation hook would cut
-        # off a live feature.
         from kiss.server.server import VSCodeServer
 
         missing = set(VSCodeServer._HANDLERS) - set(API)
@@ -183,9 +177,6 @@ class TestServerApiOverUds(unittest.TestCase):
         self.assertNotIn("tabId", event)
 
     def test_non_object_command_is_dropped_connection_survives(self) -> None:
-        # The transport silently drops non-object lines before the API
-        # dispatcher (long-standing behaviour); the connection must
-        # stay alive and keep serving valid API commands afterwards.
         async def _talk() -> dict[str, Any]:
             reader, writer = await asyncio.open_unix_connection(
                 self.sock_path
@@ -217,10 +208,6 @@ class TestServerApiOverUds(unittest.TestCase):
         self.assertEqual(event["count"], 0)
 
     def test_vscode_only_command_is_dropped_silently(self) -> None:
-        # Host-consumed commands (voice bridge, auth) are in the API
-        # catalog but carry no meaning for the daemon: they must be
-        # dropped, not answered with an error, and the connection must
-        # keep serving subsequent commands.
         async def _talk() -> dict[str, Any]:
             reader, writer = await asyncio.open_unix_connection(
                 self.sock_path
@@ -242,14 +229,9 @@ class TestServerApiOverUds(unittest.TestCase):
         event = asyncio.run_coroutine_threadsafe(_talk(), self.loop).result(
             timeout=15
         )
-        # The FIRST reply is the activeTasksQuery response — no error
-        # event was interleaved for the dropped voiceAck.
         self.assertEqual(event.get("type"), "activeTasksResponse")
 
     def test_error_reply_goes_only_to_the_sender(self) -> None:
-        # Two concurrent clients: the invalid command from client A
-        # must produce an error on A's connection ONLY — client B (who
-        # then round-trips a valid query) must never see A's error.
         async def _talk() -> tuple[dict[str, Any], dict[str, Any]]:
             reader_a, writer_a = await asyncio.open_unix_connection(
                 self.sock_path
@@ -265,8 +247,6 @@ class TestServerApiOverUds(unittest.TestCase):
                 line_a = await asyncio.wait_for(
                     reader_a.readline(), timeout=10
                 )
-                # B's first-ever reply must be its own query response,
-                # proving A's error was not broadcast to B.
                 writer_b.write(
                     json.dumps({"type": "activeTasksQuery"}).encode() + b"\n"
                 )
@@ -293,8 +273,6 @@ class TestCatalogSync(unittest.TestCase):
     """The handwritten client catalogs must not drift from the API."""
 
     def test_browser_catalog_is_a_subset_of_the_server_api(self) -> None:
-        # media/api.js hand-mirrors the Python catalog; every command a
-        # browser client can emit must validate server-side.
         import re
         from pathlib import Path
 
@@ -323,9 +301,6 @@ class TestServerApiCodeBindings(unittest.TestCase):
     """The catalog's handler bindings define the server's code API."""
 
     def test_every_handler_is_a_server_api_coroutine(self) -> None:
-        # Each non-drop catalog entry must name an async ServerApi
-        # method with the uniform ``handler(cmd, ctx)`` signature —
-        # the actual code API a client command invokes.
         import inspect
 
         from kiss.server.sorcar import ServerApi
@@ -356,8 +331,6 @@ class TestServerApiCodeBindings(unittest.TestCase):
             DROPPED_COMMANDS,
             frozenset(c.name for c in API.values() if c.handler == "drop"),
         )
-        # The host-consumed messages historically dropped by the
-        # daemon transport must all stay in the derived set.
         self.assertEqual(
             DROPPED_COMMANDS,
             frozenset({
@@ -368,8 +341,6 @@ class TestServerApiCodeBindings(unittest.TestCase):
         )
 
     def test_unknown_handler_name_fails_at_construction(self) -> None:
-        # A routing typo in the catalog must abort daemon startup, not
-        # explode on first use of the command.
         from kiss.server import sorcar
         from kiss.server.sorcar import ApiCommand, ServerApi
 
@@ -382,12 +353,6 @@ class TestServerApiCodeBindings(unittest.TestCase):
             del sorcar.API["bogusCmd"]
 
     def test_cli_commands_bypass_work_dir_stamping(self) -> None:
-        # The CLI-bridge commands relay tasks the sorcar CLI runs
-        # itself: they never read the per-connection work_dir and must
-        # reach their handlers unmutated — even on a context whose
-        # conn_state carries no ``work_dir`` at all (the pre-refactor
-        # inline dispatcher returned before its stamping code, so this
-        # must not raise ``KeyError('work_dir')`` either).
         from kiss.server.sorcar import ApiContext
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -415,7 +380,6 @@ class TestServerApiCodeBindings(unittest.TestCase):
         self.assertEqual(
             out, {"type": "resumeSession", "chatId": "c1", "tabId": "t"}
         )
-        # Explicit chatId wins; other commands pass through unchanged.
         keep = {"type": "resumeSession", "id": "x", "chatId": "c2"}
         self.assertEqual(translate_webview_command(dict(keep)), keep)
         other = {"type": "stop", "tabId": "t"}

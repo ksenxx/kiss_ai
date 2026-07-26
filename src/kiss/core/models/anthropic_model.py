@@ -29,27 +29,8 @@ from kiss.core.models.model import (
 
 logger = logging.getLogger(__name__)
 
-#: Maximum seconds the Anthropic streaming connection may go without
-#: delivering ANY bytes (response headers, SSE events, or the periodic
-#: ``ping`` keep-alive events the API sends during long turns) before the
-#: request is aborted with a retryable error.
-#:
-#: Without this bound the SDK default applies — ``httpx.Timeout(read=600)``
-#: with 2 silent retries — so a request that the API accepts but never
-#: answers hangs the agent for 10–30 minutes with zero output.  This was
-#: the production "task stuck in thinking" failure (task
-#: ``f554c68446fa42af89c2fd3c7cc14f63`` in ``~/.kiss/sorcar.db``,
-#: 2026-07-21 10:08): step 2's stream produced no events for 5.5 minutes,
-#: no error was ever raised, and the user had to stop the task by hand.
-#: Overridable per model via ``model_config["stream_stall_timeout"]``.
 DEFAULT_STREAM_STALL_TIMEOUT = 180.0
-#: Seconds allowed for establishing the TCP/TLS connection.
 _CONNECT_TIMEOUT = 10.0
-#: SDK-level retries for connect/timeout failures BEFORE the response
-#: starts.  The SDK default of 2 made the worst pre-header case
-#: ``3 x stall`` of silent waiting; one retry keeps resilience to
-#: transient connection failures while bounding silence at ``2 x stall``.
-#: KISSAgent adds its own, user-visible retries on top.
 _MAX_RETRIES = 1
 
 
@@ -138,8 +119,6 @@ def _uses_adaptive_thinking(model_name: str) -> bool:
        use ``enabled``. Sonnet/Haiku 4 models continue to use
        ``enabled`` as before.
     """
-    # Deferred import to avoid a cycle between ``model_info`` (which
-    # imports the model classes lazily) and this module.
     from kiss.core.models.model_info import MODEL_INFO
 
     info = MODEL_INFO.get(model_name)
@@ -152,9 +131,6 @@ def _uses_adaptive_thinking(model_name: str) -> bool:
     suffix = model_name[len(prefix):]
     minor_str = suffix.split("-", 1)[0]
     if len(minor_str) == 8 and minor_str.isdigit():
-        # Date-stamped official id (e.g. ``claude-opus-4-20250514``): the
-        # token is a release date, not a minor version — this is Opus 4.0,
-        # which only supports ``thinking.type=enabled``.
         return False
     try:
         minor = int(minor_str)
@@ -422,13 +398,6 @@ class AnthropicModel(Model):
                 is available; otherwise they are skipped with a warning.  Video
                 attachments are always skipped.
         """
-        # Bound the time the connection may sit with NO bytes flowing
-        # (httpx read/write/pool timeouts apply between bytes, so a healthy
-        # long generation — which streams deltas and periodic ``ping``
-        # events continuously — is unaffected).  Without this, the SDK
-        # default (read=600s, 2 silent retries) let an accepted-but-dead
-        # request hang the agent for 10–30 minutes with no output: the
-        # "task stuck in thinking" production failure.
         self.client = Anthropic(
             api_key=self.api_key,
             timeout=httpx.Timeout(self._stream_stall_timeout, connect=_CONNECT_TIMEOUT),
@@ -460,7 +429,6 @@ class AnthropicModel(Model):
         for block in content:
             if isinstance(block, dict):
                 dict_block_type = block.get("type")
-                # Drop pre-existing whitespace-only text dicts too.
                 if dict_block_type == "text" and not block.get("text", "").strip():
                     continue
                 if dict_block_type in ("image_url", "file", "input_audio"):
@@ -626,8 +594,6 @@ class AnthropicModel(Model):
         msg_copy = msg.copy()
         attachments = msg_copy.pop("attachments", None)
         if attachments:
-            # Gemini hand-off: lift the Attachment objects into Anthropic
-            # content blocks (the API rejects unknown message fields).
             att_blocks = _attachments_to_blocks(attachments)
             prior = msg_copy.get("content")
             if isinstance(prior, str):
@@ -648,19 +614,15 @@ class AnthropicModel(Model):
             blocks.extend(_tool_calls_to_tool_use_blocks(tool_calls))
             return [{"role": msg_copy.get("role", "assistant"), "content": blocks}]
 
-        # If content is a string, ensure it's non-whitespace
         if isinstance(content, str):
             if content.strip():
                 return [msg_copy]
-            # Skip messages with whitespace-only string content
             return []
-        # If content is a list of blocks, normalize them
         if isinstance(content, list):
             normalized_blocks = self._normalize_content_blocks(content)
             if normalized_blocks:
                 msg_copy["content"] = normalized_blocks
                 return [msg_copy]
-            # Skip messages where all blocks were dropped
             return []
         return []
 
@@ -676,23 +638,10 @@ class AnthropicModel(Model):
         kwargs = self.model_config.copy()
         enable_cache = kwargs.pop("enable_cache", True)
         system_instruction = kwargs.pop("system_instruction", None)
-        # ``reasoning_effort`` and ``use_responses_api`` are OpenAI-specific
-        # knobs (the factory auto-defaults the former into ``model_config``
-        # for gpt-5.x reasoning models; the latter forces/disables the
-        # /v1/responses delegation); they arrive here verbatim when a live
-        # conversation (and its config) is handed over by the Sorcar
-        # ``set_model`` tool.  The Anthropic API rejects unknown kwargs, so
-        # drop them — the extended-thinking default below already enables
-        # native reasoning for Claude 4+ models.
         kwargs.pop("reasoning_effort", None)
         kwargs.pop("use_responses_api", None)
-        # Consumed by ``initialize`` (client construction); not an API param.
         kwargs.pop("stream_stall_timeout", None)
 
-        # Hoist OpenAI-style ``role="system"`` messages (present when the
-        # conversation was handed off from an OpenAI-schema model, e.g. via
-        # the Sorcar ``set_model`` tool) into the top-level ``system``
-        # parameter; the Anthropic Messages API rejects the "system" role.
         system_texts: list[str] = [system_instruction] if system_instruction else []
         for msg in self.conversation:
             if msg.get("role") != "system":
@@ -727,19 +676,8 @@ class AnthropicModel(Model):
             if not user_set_max_tokens:
                 max_tokens = 65536 if self.model_name.startswith("claude-opus-4") else 64000
             if _uses_adaptive_thinking(self.model_name):
-                # ``display`` defaults to "omitted" on adaptive-thinking
-                # models (fable-5, mythos-5, sonnet-5, opus-4-7/4-8): the
-                # API then returns thinking blocks with an EMPTY ``thinking``
-                # field (encrypted signature only) and emits no
-                # ``thinking_delta`` stream events, so no thinking tokens
-                # are ever revealed to the user.  Request the readable
-                # summary explicitly.
                 kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
             else:
-                # The API requires ``max_tokens > budget_tokens`` and
-                # ``budget_tokens >= 1024``.  Cap the budget below the
-                # user's max_tokens and skip thinking entirely when there
-                # is no room for the minimum budget.
                 budget = min(10000, max_tokens - 1)
                 if budget >= 1024:
                     kwargs["thinking"] = {
@@ -747,11 +685,6 @@ class AnthropicModel(Model):
                         "budget_tokens": budget,
                     }
 
-        # When extended thinking is enabled, request interleaved thinking via
-        # the anthropic-beta header so the model emits between-tool-call
-        # reasoning as ``thinking`` content blocks (routed to the Thoughts
-        # panel) instead of as plain ``text`` blocks (which would render in
-        # the main response area).
         if "thinking" in kwargs:
             existing_headers = kwargs.get("extra_headers") or {}
             beta_header = existing_headers.get("anthropic-beta", "")
@@ -783,16 +716,6 @@ class AnthropicModel(Model):
         if tools:
             kwargs["tools"] = tools
             if "tool_choice" not in kwargs and "thinking" not in kwargs:
-                # KISSAgent's ReAct loop requires every agentic turn to
-                # produce a tool call (``finish`` is always present), so
-                # non-thinking models force ``tool_choice=any`` to prevent
-                # tool-less turns.  When thinking is active (``enabled`` or
-                # ``adaptive``) tool use only supports ``tool_choice``
-                # ``auto``/``none``: ``enabled`` rejects forced tool use with
-                # a 400, and adaptive models (fable-5, sonnet-5, opus-4-7/4-8)
-                # silently DISABLE thinking for the request ("graceful
-                # thinking degradation") — the response then contains only
-                # ``tool_use`` blocks and no thinking is ever revealed.
                 kwargs["tool_choice"] = {"type": "any"}
 
         if enable_cache:
@@ -886,10 +809,6 @@ class AnthropicModel(Model):
         except (httpx.TimeoutException, APITimeoutError) as exc:
             raise self._stall_error(thinking_started) from exc
         except Exception as exc:
-            # The watchdog closes the response out from under the blocked
-            # iterator, which surfaces as a provider/transport error
-            # (e.g. ``httpx.StreamClosed`` or a peer-closed read error) —
-            # attribute it to the stall.
             if watchdog is not None and watchdog.stalled:
                 raise self._stall_error(thinking_started) from exc
             raise

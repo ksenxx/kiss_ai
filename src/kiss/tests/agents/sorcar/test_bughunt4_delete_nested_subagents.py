@@ -93,8 +93,6 @@ class TestDeleteCascadesThroughNestedSubagents(_TempDbTestBase):
         assert _load_chat_events_by_task_id(child) is None
         assert _load_chat_events_by_task_id(grandchild) is None
         assert _load_chat_events_by_task_id(great) is None
-        # The chat is now genuinely empty — the frontend's
-        # ``chatHasMoreTasks`` flag must agree so the tab gets closed.
         assert _chat_has_tasks(chat_id) is False
 
     def test_other_trees_nested_subagents_survive(self) -> None:
@@ -114,18 +112,12 @@ class TestDeleteCascadesThroughNestedSubagents(_TempDbTestBase):
         assert _chat_has_tasks(chat_a) is False
 
     def test_self_referencing_subagent_row_terminates(self) -> None:
-        # Defensive: a corrupt row whose subagent.parent_task_id points
-        # at itself must not send the cascade into an infinite loop.
         parent_id, chat_id = _add_task("parent of weird row")
         weird, _ = _add_task(
             "self-referencing sub row",
             chat_id=chat_id,
             extra={"subagent": {"parent_task_id": parent_id}},
         )
-        # Corrupt it to point at itself: in the new flat-column schema
-        # sub-agent parenthood lives in the ``parent_task_id`` column,
-        # so the self-cycle is induced by pointing that column at the
-        # row's own id.
         db = th._get_db()
         with th._rw_lock.write_lock():
             db.execute(
@@ -133,7 +125,6 @@ class TestDeleteCascadesThroughNestedSubagents(_TempDbTestBase):
                 (weird, weird),
             )
             db.commit()
-        # Deleting the weird row itself must terminate and succeed.
         assert _delete_task(weird) is True
         assert _load_chat_events_by_task_id(weird) is None
         assert _load_chat_events_by_task_id(parent_id) is not None

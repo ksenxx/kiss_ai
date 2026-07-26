@@ -277,9 +277,6 @@ window._startDemoReplay(sessions).then(function() {
             f"setRunningState(true) was not called: {calls}"
         )
         rs_true_idx = calls.index("setRunningState:true")
-        # The first visible replay mutation is the task header
-        # (welcome hiding is delegated to main.js's setTaskText /
-        # task_events path — demo.js no longer calls hideWelcome).
         first_visible_idx = calls.index("setTaskText:Task A")
         assert rs_true_idx < first_visible_idx, (
             f"setRunningState(true) (idx {rs_true_idx}) must come "

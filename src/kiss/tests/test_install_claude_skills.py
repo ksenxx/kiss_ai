@@ -127,9 +127,6 @@ class TestReleaseShClaudeSkillsStep(unittest.TestCase):
     def test_release_sh_claude_skills_dir_is_absolute(self) -> None:
         """CLAUDE_SKILLS_DIR must be an absolute path so cp works after cd."""
         text = RELEASE_SH.read_text()
-        # The assignment must use $(pwd) or similar to make the path absolute;
-        # a bare relative path like CLAUDE_SKILLS_DIR="src/..." would break
-        # after cd into the sparse-checkout temp directory.
         import re
 
         match = re.search(r'CLAUDE_SKILLS_DIR="([^"]*)"', text)

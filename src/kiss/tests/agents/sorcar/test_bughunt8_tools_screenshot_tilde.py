@@ -32,9 +32,7 @@ def test_screenshot_tilde_path_targets_home_not_literal_dir(
         out = tool.screenshot("~/shot.png")
 
         assert out.startswith("Screenshot saved to "), out
-        # Must land in the (fake) home directory...
         assert (home / "shot.png").is_file()
-        # ...and must NOT create a literal '~' directory in the work dir.
         assert not (work_dir / "~").exists()
     finally:
         tool.close()

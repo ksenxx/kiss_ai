@@ -74,12 +74,6 @@ Read relevant portions of the file using your tools:
 - Call finish(result="detailed summary of work done so far").
 """
 
-#: Maximum size (in characters, ~15K tokens) of the accumulated
-#: prior-attempt summaries embedded in ``CONTINUATION_PROMPT``.  Without a
-#: cap, every continuation session starts with ALL previous summaries and
-#: the prompt grows unboundedly — each successive session begins with less
-#: context headroom, making repeated context exhaustion progressively
-#: worse.
 MAX_PROGRESS_CHARS = 60_000
 
 
@@ -99,18 +93,12 @@ def _capped_progress_text(summaries: list[str]) -> str:
         summary content, possibly preceded by an omission note.
     """
     separator = "\n\n---\n\n"
-    # Reserve room for the truncation note, the omission note, and the
-    # separators around them so the RETURNED text never exceeds
-    # ``MAX_PROGRESS_CHARS`` (a true hard cap).
     budget = MAX_PROGRESS_CHARS - 200
     sections = [f"### Attempt {i + 1}\n{s}" for i, s in enumerate(summaries)]
     kept: list[str] = []
     total = 0
     for section in reversed(sections):
         if len(section) > budget:
-            # Even the newest summary alone must not blow the
-            # continuation prompt (the whole point of the cap is that a
-            # fresh session starts with context headroom).
             section = section[:budget] + "\n(...summary truncated.)"
         cost = len(section) + len(separator)
         if kept and total + cost > budget:
@@ -161,9 +149,6 @@ def _build_exhaustion_summary(summaries: list[str], banner: str) -> str:
 class RelentlessAgent(Base):
     """Base agent with auto-continuation for long tasks."""
 
-    # ``_reset`` assigns the resolved absolute path on every ``run()``;
-    # this default makes ``self.work_dir`` safe to read on a freshly
-    # constructed agent (mirroring ``Base.model_name``).
     work_dir: str = ""
 
     def _reset(
@@ -196,16 +181,7 @@ class RelentlessAgent(Base):
         self.task_description: str = ""
         self.system_prompt: str = ""
         self.model_config: dict[str, Any] | None = None
-        # See :attr:`kiss.core.kiss_agent.KISSAgent.pre_step_hook`.
-        # Propagated to every inner per-session executor created in
-        # :meth:`perform_task`, so subclasses (e.g. ``SorcarAgent``)
-        # can hook into model calls without re-implementing the
-        # per-session executor.
         self.pre_step_hook: Callable[..., None] | None = None
-        # See :attr:`kiss.core.kiss_agent.KISSAgent.tool_call_guard`.
-        # Propagated to every inner per-session executor alongside
-        # ``pre_step_hook`` so subclasses can veto individual tool
-        # calls (e.g. ``ChatSorcarAgent``'s every-5-steps summary gate).
         self.tool_call_guard: Callable[[str, dict[str, Any]], str | None] | None = None
         self.set_printer(printer, verbose=verbose)
 
@@ -276,9 +252,6 @@ class RelentlessAgent(Base):
         summary = ""
         summaries: list[str] = []
         current_pid = str(os.getpid())
-        # Report ``self.work_dir`` verbatim — in worktree mode this is the
-        # real on-disk ``<repo>/.kiss-worktrees/<slug>/...`` path, matching
-        # what ``pwd`` / ``os.getcwd()`` return inside the agent's tools.
         important_instructions = IMPORTANT_INSTRUCTIONS.format(
             step_threshold=str(self.max_steps - 2),
             work_dir=self.work_dir,
@@ -306,21 +279,8 @@ class RelentlessAgent(Base):
                 self.total_steps,
             )
             executor = KISSAgent(f"{self.name} Session-{session}")
-            # Propagate any pre-step hook installed on the relentless
-            # parent (e.g. ``SorcarAgent.run``'s pending-user-messages
-            # drain) to the per-session inner executor — that's the
-            # layer that actually calls the model.
             executor.pre_step_hook = getattr(self, "pre_step_hook", None)
-            # Propagate the per-tool-call guard (e.g. ``ChatSorcarAgent``'s
-            # every-5-steps summary gate) so the executor consults it
-            # before dispatching EVERY tool call, including ``finish``.
             executor.tool_call_guard = getattr(self, "tool_call_guard", None)
-            # Enforce the parent task's TOTAL budget from inside the
-            # executor's step loop — the executor's own ``budget_used``
-            # never sees spend attributed to the parent mid-session by
-            # parallel sub-agents (``_attribute_sub_usage``), so without
-            # this hook the session would keep running long after the
-            # task's budget was exhausted.
             executor.budget_check_hook = self._check_total_budget
             self._current_executor = executor
             try:
@@ -341,23 +301,11 @@ class RelentlessAgent(Base):
                     attachments=attachments if session == 0 else None,
                 )
             except BudgetExceededError:
-                # A budget limit is a hard stop.  Never launch the LLM
-                # trajectory summarizer here: doing so would make more
-                # paid model calls after the configured limit.  Account
-                # for the live executor exactly once, clear the pointer,
-                # and preserve the typed error for task-runner/UI handling.
                 self._current_executor = None
                 self._accumulate_usage(executor)
                 raise
             except Exception as exc:
                 logger.debug("Exception caught", exc_info=True)
-                # A context-window overflow is always recoverable via the
-                # trajectory-summarizer/continuation path, even when it
-                # carries a ``__cause__`` (the provider's rejection is
-                # chained by ``KISSAgent._run_agentic_loop``).  Other
-                # chained or non-KISS errors stay terminal.  A first-step
-                # overflow still hard-fails: continuing would replay the
-                # same oversized prompt forever.
                 is_context_overflow = isinstance(exc, ContextWindowExceededError)
                 if (
                     (
@@ -398,49 +346,16 @@ class RelentlessAgent(Base):
                             prompt_template=SUMMARIZER_PROMPT,
                             tools=[shell_tools.Read, shell_tools.Bash],
                             arguments={
-                                # ``SUMMARIZER_PROMPT`` uses
-                                # ``{trajectory_path}`` as the
-                                # placeholder; the argument key MUST
-                                # match or the literal placeholder
-                                # leaks into the LLM prompt.
                                 "trajectory_path": str(trajectory_path),
                             },
                             max_steps=self.max_steps,
                             max_budget=summarizer_budget,
-                            # Inherit the parent's model routing
-                            # (e.g. custom ``base_url``/``api_key``)
-                            # so the summarizer talks to the same
-                            # provider as the executor — otherwise it
-                            # silently falls back to the default
-                            # OpenAI client and its cost vanishes
-                            # from this agent's accounting.
                             model_config=self.model_config,
-                            # Inherit verbose/printer so the
-                            # summarizer's streaming behaviour
-                            # matches the parent's (no surprise
-                            # ``ConsolePrinter`` when the parent
-                            # asked for ``verbose=False``).
                             printer=self.printer,
                             verbose=self.verbose,
-                            # The summarizer is an INTERNAL helper: its
-                            # "# Summarizer" prompt must never surface
-                            # as a user-visible ``type="prompt"`` event
-                            # in the shared printer's event stream
-                            # (users reported it as an unexpected
-                            # prompt message in the task events).
                             print_prompts=False,
                         )
                     finally:
-                        # The summarizer's spend MUST be folded into
-                        # the parent's running totals BEFORE we leave
-                        # this block — otherwise every model call the
-                        # summarizer made (which costs real money on
-                        # paid providers) silently disappears from
-                        # ``self.budget_used`` and the user is told
-                        # they spent less than they actually did.
-                        # This must run even when ``summarizer_agent.run``
-                        # raises (e.g. budget exceeded mid-summary) so
-                        # the partial spend is still attributed.
                         self._accumulate_usage(summarizer_agent)
                     try:
                         parsed = yaml.safe_load(summarizer_result)
@@ -477,10 +392,6 @@ class RelentlessAgent(Base):
             if not is_continue or success:
                 if summaries:
                     final_summary = payload.get("summary", "")
-                    # ``summaries`` holds every PRIOR session's summary
-                    # (collected from ``is_continue=True`` returns).  Prepend
-                    # them as historical context BEFORE the terminal session's
-                    # summary, which stays the primary payload summary.
                     prior_section = _prior_sessions_section(summaries)
                     if final_summary:
                         payload["summary"] = (
@@ -488,26 +399,11 @@ class RelentlessAgent(Base):
                             f"{final_summary}"
                         )
                     else:
-                        # An empty terminal summary must still be
-                        # split-able by the front-end
-                        # (``splitMultiSessionSummary`` requires the
-                        # ``\n\n---\n\n`` separator).  Use a placeholder
-                        # so the merged Result panel isn't collapsed
-                        # into a single "Previous Sessions" block.
                         payload["summary"] = (
                             f"{prior_section}\n\n---\n\n### Final Session\n"
                             "(no summary)"
                         )
                     result = yaml.dump(payload, sort_keys=False)
-                    # The inner ``KISSAgent`` already emitted a per-session
-                    # ``type="result"`` event carrying ONLY the last session's
-                    # summary and status. When prior sessions exist, the
-                    # front-end Result panel would otherwise miss the merged
-                    # context (and, for a terminal failure, still show a stale
-                    # "Continue" banner from an earlier session).  Broadcast
-                    # the merged payload so the front-end can supersede the
-                    # per-session panel with a "Previous Sessions" + "Result"
-                    # pair via ``splitMultiSessionSummary`` in ``main.js``.
                     self._emit_merged_result_event(payload)
                 return result
 
@@ -519,11 +415,6 @@ class RelentlessAgent(Base):
                     progress_text=_capped_progress_text(summaries),
                     continuation_number=session + 1,
                 )
-        # Sub-session budget exhausted without a terminal ``is_continue=False``
-        # (or successful) return.  The last inner session's ``type="result"``
-        # event carries ``is_continue=True``, so without this broadcast the
-        # front-end Result panel would render a stale "Status: Continue" for
-        # what is actually a terminal failure.
         banner = f"Task failed after {self.max_sub_sessions} sub-sessions"
         self._emit_merged_result_event(
             {
@@ -532,12 +423,6 @@ class RelentlessAgent(Base):
                 "summary": _build_exhaustion_summary(summaries, banner),
             }
         )
-        # Tag the exception so downstream error handlers
-        # (e.g. ``TaskRunner``'s ``except Exception`` block) know a
-        # terminal ``type="result"`` event has ALREADY been broadcast
-        # for this failure and skip their own generic broadcast —
-        # otherwise the front-end would render a duplicate FAILED
-        # Result panel with no summary.
         err = KISSError(banner)
         err.terminal_result_broadcast = True  # type: ignore[attr-defined]
         raise err
@@ -563,15 +448,6 @@ class RelentlessAgent(Base):
         """
         if self.printer is None:
             return
-        # ``self.total_steps`` / ``total_tokens_used`` / ``budget_used``
-        # are the CUMULATIVE aggregates across every sub-session.  The
-        # printer's per-task offset attributes (set at the start of
-        # each sub-session in :meth:`perform_task` to the aggregate
-        # BEFORE that session) would be added on top of these totals
-        # by ``JsonPrinter._broadcast_result`` — double-counting the
-        # prior sessions.  Zero them for the duration of the print and
-        # restore afterwards so subsequent inner-session emits (if any)
-        # still get the correct offset applied.
         offset_attrs = (
             ("tokens_offset", 0),
             ("budget_offset", 0.0),

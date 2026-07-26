@@ -32,10 +32,6 @@ def temp_db(
     persistence._close_db()
 
 
-# ---------------------------------------------------------------------------
-# r5-persistence-C2 — ``_save_task_extra({"is_favorite": ...})`` must raise.
-# ---------------------------------------------------------------------------
-
 def test_save_task_extra_raises_on_is_favorite_payload(temp_db: Path) -> None:  # noqa: ARG001
     """Caller must not be allowed to flip ``is_favorite`` via
     ``_save_task_extra`` — that flag is owned by
@@ -48,11 +44,6 @@ def test_save_task_extra_raises_on_is_favorite_payload(temp_db: Path) -> None:  
             {"is_favorite": True, "tokens": 5}, task_id=tid,
         )
 
-
-# ---------------------------------------------------------------------------
-# r5-sorcar-H7 — ``cli_printer.broadcast`` only forwards specific global
-#   event types to the daemon when ``taskId`` is empty.
-# ---------------------------------------------------------------------------
 
 def test_cli_printer_forwards_only_listed_global_types(
     monkeypatch: pytest.MonkeyPatch,
@@ -77,7 +68,6 @@ def test_cli_printer_forwards_only_listed_global_types(
     )
 
     printer = cli_printer.RecordingConsolePrinter()
-    # Forwarded
     printer.broadcast({
         "type": "new_tab",
         "task_id": "a" * 32,
@@ -85,7 +75,6 @@ def test_cli_printer_forwards_only_listed_global_types(
         "taskId": "",
     })
     printer.broadcast({"type": "tasks_updated", "taskId": ""})
-    # NOT forwarded (diagnostic without taskId)
     printer.broadcast({"type": "debug_diagnostic", "taskId": ""})
     printer.broadcast({"type": "random_internal_event"})
 
@@ -95,11 +84,6 @@ def test_cli_printer_forwards_only_listed_global_types(
     assert "debug_diagnostic" not in types_forwarded
     assert "random_internal_event" not in types_forwarded
 
-
-# ---------------------------------------------------------------------------
-# r5-sorcar-H3 — ``_register_running_state`` ``state.agent is None``
-#   branch must bind ``state.agent`` so downstream scans find it.
-# ---------------------------------------------------------------------------
 
 def test_register_running_state_does_not_clobber_preexisting(temp_db: Path) -> None:  # noqa: ARG001
     """Documented contract: a pre-allocated ``_RunningAgentState``
@@ -140,11 +124,6 @@ def test_register_running_state_does_not_clobber_preexisting(temp_db: Path) -> N
             )
 
 
-# ---------------------------------------------------------------------------
-# r6-persistence-H3 — ``_bx`` must NOT treat string literals
-#   "false" / "0" / "no" as truthy.
-# ---------------------------------------------------------------------------
-
 def test_bx_handles_falsy_string_literals_during_migration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -157,7 +136,6 @@ def test_bx_handles_falsy_string_literals_during_migration(
     import json
     import sqlite3
 
-    # Build a legacy-shape DB with stringified bool flags in extra.
     legacy_db = tmp_path / "legacy.db"
     with sqlite3.connect(legacy_db) as conn:
         conn.execute(
@@ -187,7 +165,6 @@ def test_bx_handles_falsy_string_literals_during_migration(
                 (1.0, label, 0, "", "x" * 32, json.dumps(flags)),
             )
 
-    # Open via _get_db() to trigger migration.
     import kiss.agents.sorcar.persistence as P
 
     P._close_db()
@@ -211,11 +188,6 @@ def test_bx_handles_falsy_string_literals_during_migration(
         P._close_db()
 
 
-# ---------------------------------------------------------------------------
-# r6-persistence-H7 — migration must temporarily disable foreign_keys
-#   so the ``ALTER TABLE ... RENAME`` is safe under older SQLite.
-# ---------------------------------------------------------------------------
-
 def test_migration_toggles_foreign_keys_off_during_rename() -> None:
     """Inspect source to verify the migration encloses its body with
     ``PRAGMA foreign_keys=OFF`` / ``PRAGMA foreign_keys=ON`` so the
@@ -223,16 +195,9 @@ def test_migration_toggles_foreign_keys_off_during_rename() -> None:
     stale FK target on SQLite < 3.26.
     """
     src = Path("src/kiss/agents/sorcar/persistence.py").read_text()
-    # Must turn FK off before BEGIN IMMEDIATE in the migration.
     assert "PRAGMA foreign_keys=OFF" in src
-    # And restore on every exit path (success + rollback).
     assert src.count("PRAGMA foreign_keys=ON") >= 2
 
-
-# ---------------------------------------------------------------------------
-# r6-vscode-H4 — server.py ``_live_task_id`` must return ``str | None``
-#   coercing int values from legacy DBs.
-# ---------------------------------------------------------------------------
 
 def test_live_task_id_returns_str_or_none() -> None:
     """Source-level assertion: the ``_live_task_id`` helper must be
@@ -241,9 +206,7 @@ def test_live_task_id_returns_str_or_none() -> None:
     ``set[str]`` membership comparisons downstream.
     """
     src = Path("src/kiss/server/server.py").read_text()
-    # Function signature
     assert "_live_task_id" in src
-    # Strict-typed return contract.
     assert "-> str | None" in src or "-> str|None" in src, (
         "_live_task_id should return str | None"
     )

@@ -2,42 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression test: the Tips window must re-open after
-// ``./scripts/build-extension.sh`` rebuilds/reinstalls the extension
-// and kiss-web restarts.
-//
-// The bug
-// -------
-// ``consumeTipsFirstRun()`` persists ``~/.kiss/TIPS_SHOWN`` forever, so
-// the Tips window auto-opened only once per machine — ever.  After
-// ``./scripts/build-extension.sh`` reinstalled the extension, killed
-// the kiss-web daemon and wrote ``~/.kiss/.extension-updated`` (which
-// makes every VS Code window reload), the reloaded extension rendered
-// the chat webview with ``show:false`` because ``TIPS_SHOWN`` still
-// existed.  The Tips window therefore never opened after a rebuild.
-//
-// The fix
-// -------
-// ``activate()`` calls ``resetTipsOnExtensionUpdate()``: when the
-// ``.extension-updated`` marker is present at activation (i.e. the
-// window just reloaded because of a rebuild/reinstall), the
-// ``TIPS_SHOWN`` marker is removed so the next chat webview render
-// auto-opens the Tips window exactly once again.
-//
-// What this test exercises
-// ------------------------
-// The REAL compiled ``out/extension.js`` ``activate()`` and the REAL
-// ``out/SorcarTab.js`` ``buildChatHtml()`` against a real on-disk
-// filesystem, with ``$HOME``/``$KISS_HOME`` redirected to a tmpdir.
-// The rebuild is simulated by executing the actual marker-writing
-// command extracted from ``scripts/build-extension.sh`` plus the
-// daemon-restart side effect (socket removal), i.e. exactly what the
-// script does as its final steps.
-//
-// Run directly with ``node`` (after ``npm run compile``):
-//
-//     node src/kiss/agents/vscode/test/tipsReopenAfterRebuild.test.js
 
 'use strict';
 
@@ -62,11 +26,6 @@ assert.ok(
   `build script missing: ${BUILD_SCRIPT}`,
 );
 
-// ---- 1. Redirect HOME / KISS_HOME so all markers live in a tmpdir ----
-// ``extension.ts`` derives the ``.extension-updated`` path from
-// ``os.homedir()`` and ``SorcarTab.ts`` derives ``TIPS_SHOWN`` from
-// ``kissHomeDir()`` (KISS_HOME || ~/.kiss), so both env vars are set
-// before the compiled modules are required.
 const TMP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-tips-rebuild-'));
 const KISS_HOME = path.join(TMP_HOME, '.kiss');
 const ORIG_ENV = {
@@ -88,7 +47,6 @@ const markerPath = path.join(KISS_HOME, '.extension-updated');
 const tipsShownPath = path.join(KISS_HOME, 'TIPS_SHOWN');
 const sockPath = path.join(KISS_HOME, 'sorcar.sock');
 
-// ---- 2. vscode module stub ------------------------------------------
 function makeDisposable() {
   return {dispose: () => {}};
 }
@@ -157,8 +115,6 @@ Module._resolveFilename = function (request, parent, ...rest) {
   return origResolve.call(this, request, parent, ...rest);
 };
 
-// ---- 3. Stub the heavy dependency modules ----------------------------
-// SorcarTab.js is NOT stubbed: the tips logic under test lives there.
 class FakeSidebarView {
   syncWorkDir() {}
   focusChatInput() {
@@ -218,7 +174,6 @@ stubModule(path.join(OUT_DIR, 'UpdateChecker.js'), {
 const extension = require(path.join(OUT_DIR, 'extension.js'));
 const {buildChatHtml} = require(path.join(OUT_DIR, 'SorcarTab.js'));
 
-// ---- 4. Helpers -------------------------------------------------------
 function makeMemento() {
   const store = new Map();
   return {
@@ -252,16 +207,11 @@ function disposeContext(ctx) {
     try {
       d.dispose && d.dispose();
     } catch {
-      // ignore
     }
   }
   fs.rmSync(ctx._tmpExtPath, {recursive: true, force: true});
 }
 
-/**
- * Render the chat webview HTML exactly like SorcarTab does when the
- * chat view resolves, and return the injected ``window.__TIPS__``.
- */
 function renderTipsConfig() {
   const webview = {
     cspSource: 'vscode-webview://stub',
@@ -275,13 +225,6 @@ function renderTipsConfig() {
   return JSON.parse(m[1].replace(/<\\\//g, '</'));
 }
 
-/**
- * Simulate the final steps of ``./scripts/build-extension.sh`` by
- * executing the ACTUAL marker-write command extracted from the script
- * (so the test tracks the script's real behaviour), plus the kiss-web
- * daemon restart side effect it performs (``rm -f ~/.kiss/sorcar.sock``
- * before the LaunchAgent respawns the daemon).
- */
 function runBuildExtensionFinalSteps() {
   const script = fs.readFileSync(BUILD_SCRIPT, 'utf-8');
   const lines = script
@@ -315,10 +258,7 @@ function check(name, fn) {
   }
 }
 
-// ---- 5. Scenario ------------------------------------------------------
 async function run() {
-  // (a) Fresh install: first window activation, chat opens, tips show
-  //     exactly once, then never again on ordinary reopens.
   const ctx1 = makeContext();
   extension.activate(ctx1);
   check('fresh install: tips auto-open on first chat render', () => {
@@ -334,7 +274,6 @@ async function run() {
   extension.deactivate();
   disposeContext(ctx1);
 
-  // (b) A plain window reload WITHOUT a rebuild must not re-open tips.
   const ctx2 = makeContext();
   extension.activate(ctx2);
   check('plain reload without rebuild: tips stay closed', () => {
@@ -343,15 +282,9 @@ async function run() {
   extension.deactivate();
   disposeContext(ctx2);
 
-  // (c) User runs ./scripts/build-extension.sh: the VSIX is
-  //     reinstalled, the kiss-web daemon is killed (LaunchAgent
-  //     restarts it) and the .extension-updated marker is written,
-  //     which makes every VS Code window reload.
   runBuildExtensionFinalSteps();
-  fs.writeFileSync(sockPath, ''); // daemon respawned by LaunchAgent
+  fs.writeFileSync(sockPath, '');
 
-  // (d) The reloaded window activates with the marker present.  The
-  //     Tips window MUST auto-open again — this is the reported bug.
   const ctx3 = makeContext();
   extension.activate(ctx3);
   check('after build-extension.sh + kiss-web restart: tips re-open', () => {
@@ -366,8 +299,6 @@ async function run() {
   extension.deactivate();
   disposeContext(ctx3);
 
-  // (e) The next plain reload (marker already consumed by the
-  //     dependency installer in real life) must not re-open tips.
   fs.rmSync(markerPath, {force: true});
   const ctx4 = makeContext();
   extension.activate(ctx4);
@@ -383,7 +314,6 @@ run().then(
     try {
       fs.unlinkSync(stubPath);
     } catch {
-      // ignore
     }
     fs.rmSync(TMP_HOME, {recursive: true, force: true});
     for (const [k, v] of Object.entries(ORIG_ENV)) {
@@ -401,7 +331,6 @@ run().then(
     try {
       fs.unlinkSync(stubPath);
     } catch {
-      // ignore
     }
     fs.rmSync(TMP_HOME, {recursive: true, force: true});
     console.error('FAIL:', err && err.stack ? err.stack : err);

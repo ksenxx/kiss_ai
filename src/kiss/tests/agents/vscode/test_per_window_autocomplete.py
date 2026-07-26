@@ -164,7 +164,6 @@ class TestPerWindowAutocomplete(IsolatedAsyncioTestCase):
             "window A must complete from its own active file",
         )
 
-        # Window B: same identifier prefix, no active editor.
         await self._send(writer_b, {
             "type": "complete",
             "query": "zebraq_mark",
@@ -177,7 +176,6 @@ class TestPerWindowAutocomplete(IsolatedAsyncioTestCase):
             "window B must NOT see completions from window A's file",
         )
 
-        # Window B reports its own editor and gets its own completion.
         await self._send(writer_b, {
             "type": "complete",
             "query": "yonder_token",
@@ -189,8 +187,6 @@ class TestPerWindowAutocomplete(IsolatedAsyncioTestCase):
         )
         self.assertEqual(ghost_b2.get("suggestion"), "_only_in_window_b")
 
-        # And window A keeps ITS snapshot: a follow-up complete from A
-        # without activeFile still completes from A's file, not B's.
         await self._send(writer_a, {
             "type": "complete",
             "query": "zebraq_marker_on",
@@ -275,19 +271,16 @@ class TestPerWindowAutocomplete(IsolatedAsyncioTestCase):
         })
         await self._drain_until(reader_b, self._ghost_for("deltaq_token"))
 
-        # Window A opens a different folder.
         await self._send(
             writer_a, {"type": "setWorkDir", "workDir": str(dir_a2)},
         )
 
-        # Window B's snapshot must survive window A's folder change.
         await self._send(writer_b, {"type": "complete", "query": "deltaq_tok"})
         ghost_b = await self._drain_until(
             reader_b, self._ghost_for("deltaq_tok"),
         )
         self.assertEqual(ghost_b.get("suggestion"), "en_from_b")
 
-        # Window A's own snapshot was cleared (previous workspace).
         await self._send(writer_a, {"type": "complete", "query": "gammaq_tok"})
         ghost_a = await self._drain_until(
             reader_a, self._ghost_for("gammaq_tok"),

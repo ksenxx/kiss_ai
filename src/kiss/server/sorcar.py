@@ -66,9 +66,6 @@ from kiss.server.tools_file import resolve_tools_file
 
 logger = logging.getLogger(__name__)
 
-# Read buffer limit for a single daemon event line.  The daemon emits
-# large single-line JSON events (e.g. ``system_prompt`` carrying the
-# full SYSTEM.md), so mirror the CLI client's generous 16 MiB cap.
 _MAX_LINE_BYTES = 16 * 1024 * 1024
 
 
@@ -176,30 +173,6 @@ def _to_task_result(
     )
 
 
-# ---------------------------------------------------------------------------
-# The Sorcar server API.
-#
-# The single source of truth for every command a user interface (the
-# VS Code extension, the remote webapp, or a CLI/Python client) may
-# send to the daemon.  Both transports speak the same JSON commands,
-# dispatched on the ``"type"`` field — framed as newline-delimited
-# lines on the UDS and as one object per WebSocket frame on WSS.  The
-# daemon routes every command through :meth:`ServerApi.dispatch` — the
-# server's code API defined below — which validates it with
-# :func:`validate_command` (answering an invalid one with an
-# ``{"type": "error", "text": ...}`` event instead of processing it)
-# and invokes the :class:`ServerApi` method the command's catalog
-# entry names.  The only exception is a WSS connection's pre-dispatch
-# ``auth`` handshake, serviced by :meth:`ServerApi.authenticate`.
-#
-# The user interfaces consume this catalog through thin client
-# facades — ``media/api.js`` (chat webview and remote webapp) and
-# ``src/SorcarApi.ts`` (VS Code extension host) — whose methods map
-# 1:1 onto the command names below; the remote webapp's bootstrap
-# shim (``_WS_SHIM_JS``) additionally sends the ``auth`` handshake
-# and the reconnect ``setWorkDir`` re-pin, both catalog commands.
-# ---------------------------------------------------------------------------
-
 
 @dataclass(frozen=True)
 class ApiCommand:
@@ -235,12 +208,7 @@ def _catalog(*commands: ApiCommand) -> dict[str, ApiCommand]:
     return {c.name: c for c in commands}
 
 
-#: Every command the daemon accepts, keyed by wire name.  Each entry
-#: binds the wire name to the :class:`ServerApi` method (``handler``)
-#: that services it, making the catalog the single routing table for
-#: the server's code API.
 API: dict[str, ApiCommand] = _catalog(
-    # -- session / task lifecycle ------------------------------------
     ApiCommand("run", required=("prompt",)),
     ApiCommand("submit", required=("prompt",), handler="submit"),
     ApiCommand("appendUserMessage", required=("prompt",)),
@@ -250,7 +218,6 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("closeTab", required=("tabId",), handler="close_tab"),
     ApiCommand("resumeSession", handler="resume_session"),
     ApiCommand("ready", handler="ready"),
-    # -- history / metadata ------------------------------------------
     ApiCommand("getHistory"),
     ApiCommand("getAdjacentTask", required=("direction",)),
     ApiCommand("getFrequentTasks"),
@@ -262,46 +229,33 @@ API: dict[str, ApiCommand] = _catalog(
         "getWelcomeSuggestions", handler="get_welcome_suggestions"
     ),
     ApiCommand("activeTasksQuery", handler="active_tasks_query"),
-    # -- models / configuration --------------------------------------
     ApiCommand("getModels"),
     ApiCommand("selectModel", required=("model",)),
     ApiCommand("getConfig"),
     ApiCommand("saveConfig", required=("config",)),
     ApiCommand("setWorkDir", required=("workDir",)),
-    # -- files / autocomplete ----------------------------------------
     ApiCommand("getFiles", required=("prefix",)),
     ApiCommand("recordFileUsage", required=("path",)),
     ApiCommand("openFile", required=("path",), handler="open_file"),
     ApiCommand("complete", required=("query",)),
-    # -- worktree / merge / commit flows -----------------------------
     ApiCommand("mergeAction", required=("action",), handler="merge_action"),
     ApiCommand("worktreeAction", required=("action",)),
     ApiCommand("autocommitAction", required=("action",)),
     ApiCommand("generateCommitMessage"),
-    # -- daemon administration ---------------------------------------
-    # ``auth`` is serviced by :meth:`ServerApi.authenticate` during the
-    # WSS handshake, BEFORE the per-connection dispatch loop starts; an
-    # ``auth`` frame that leaks into an already-authenticated
-    # connection's dispatch is accepted and discarded.
     ApiCommand("auth", required=("password",), handler="drop"),
     ApiCommand("runUpdate", handler="run_update"),
     ApiCommand("serverReset", handler="server_reset"),
-    # -- voice ---------------------------------------------------------
     ApiCommand(
         "voiceTranscribe", required=("audio",), handler="voice_transcribe"
     ),
     ApiCommand("voiceToggle", required=("enabled",), handler="drop"),
     ApiCommand("voiceSensitivity", required=("value",), handler="drop"),
     ApiCommand("voiceAck", handler="drop"),
-    # -- CLI bridge ----------------------------------------------------
     ApiCommand("cliEvent", required=("event",), handler="cli_event"),
     ApiCommand("cliTabHello", required=("tabId",), handler="cli_tab_hello"),
     ApiCommand("cliTaskStart", required=("taskId",), handler="cli_task_start"),
     ApiCommand("cliTaskEnd", required=("taskId",), handler="cli_task_end"),
     ApiCommand("cliInfo"),
-    # -- VS Code-only webview messages (accepted and dropped by the
-    #    daemon so a remote webapp sharing the webview code never
-    #    triggers spurious errors) --------------------------------------
     ApiCommand("focusEditor", handler="drop"),
     ApiCommand("webviewFocusChanged", handler="drop"),
     ApiCommand("notificationAction", required=("id",), handler="drop"),
@@ -309,24 +263,10 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("resolveDroppedPaths", required=("uris",), handler="drop"),
 )
 
-#: Client messages the daemon accepts and silently discards, derived
-#: from the catalog (``handler == "drop"``).  They are consumed by the
-#: VS Code extension host (webview bridge, voice bridge) or by the WSS
-#: handshake (``auth``, serviced pre-dispatch by
-#: :meth:`ServerApi.authenticate`), so when one leaks to the daemon
-#: transport it
-#: must be dropped BEFORE catalog validation — validating it (e.g. a
-#: ``notificationAction`` missing its ``id``) would surface a spurious
-#: error banner for a message the daemon was never meant to handle.
 DROPPED_COMMANDS: frozenset[str] = frozenset(
     c.name for c in API.values() if c.handler == "drop"
 )
 
-#: Handlers of the CLI-bridge commands (``cliEvent`` / ``cliTabHello``
-#: / ``cliTaskStart`` / ``cliTaskEnd``).  :meth:`ServerApi.dispatch`
-#: exempts them from per-connection ``workDir`` stamping: they relay
-#: tasks the sorcar CLI runs itself, never read ``workDir``, and must
-#: reach their handlers unmutated.
 _CLI_HANDLERS: frozenset[str] = frozenset(
     {"cli_event", "cli_tab_hello", "cli_task_start", "cli_task_end"}
 )
@@ -690,9 +630,6 @@ class ServerApi:
             return False
         password = load_config().get("remote_password", "")
         try:
-            # Two attempts: the first wrong password elicits an
-            # ``auth_required`` retry prompt; the second failure (or a
-            # non-auth message on the retry) closes the connection.
             for is_retry, timeout in ((False, 30), (True, 60)):
                 raw = await asyncio.wait_for(websocket.recv(), timeout=timeout)
                 msg = json.loads(raw)
@@ -705,8 +642,6 @@ class ServerApi:
                     await websocket.send(json.dumps({"type": "auth_ok"}))
                     return True
                 if not is_retry and msg.get("type") != "auth":
-                    # First message was not an auth attempt at all:
-                    # close without counting it as a failed login.
                     await websocket.close()
                     return False
                 if client_pw:
@@ -1007,16 +942,6 @@ class ServerApi:
         if task_id:
             self._backend._handle_cli_task_end(task_id, ctx.conn_state)
 
-    # -- HTTP data API (remote webapp) --------------------------------
-    #
-    # Besides the WSS catalog commands above, the remote webapp's
-    # trajectory-viewer page fetches its data over two plain HTTP GET
-    # endpoints.  Their payload logic is part of the server API too;
-    # the transport (``RemoteAccessServer._process_request``) only
-    # wraps the ``(status, content_type, body)`` replies returned here
-    # into HTTP responses.  The methods are static: they read the jobs
-    # directory on disk and need no daemon backend.
-
     @staticmethod
     def trajectory_jobs() -> tuple[int, str, bytes]:
         """List all trajectory jobs (the ``/api/jobs`` endpoint).
@@ -1029,11 +954,6 @@ class ServerApi:
             ``(200, "application/json", body)`` with the JSON job
             list.
         """
-        # The jobs-root and trajectory helpers are resolved through
-        # the ``web_server`` module namespace, lazily: it keeps this
-        # client-importable module light and import-cycle-free, and
-        # that namespace is the established seam tests use to
-        # redirect the jobs root to a fixture directory.
         from kiss.server import web_server as _ws
 
         body = json.dumps(_ws.list_jobs(_ws.get_jobs_root())).encode("utf-8")
@@ -1058,8 +978,6 @@ class ServerApi:
             list, a 400 reply for an invalid job name, or a 404 reply
             when the job directory does not exist.
         """
-        # See :meth:`trajectory_jobs` for why the helpers are resolved
-        # through the ``web_server`` module namespace.
         from kiss.server import web_server as _ws
 
         job_name = path[len("/api/jobs/") : -len("/trajectories")]
@@ -1188,11 +1106,6 @@ def run(
         sock.sendall(json.dumps(cmd).encode("utf-8") + b"\n")
         reader = sock.makefile("rb", buffering=_MAX_LINE_BYTES)
         result_event: dict[str, Any] | None = None
-        # ``chat_id`` (the parameter) doubles as the accumulator: when
-        # the caller passed an existing chat id the daemon continues
-        # that chat, so it is already the correct fallback; the run's
-        # ``clear`` event then confirms (or, for a new chat, supplies)
-        # the daemon-assigned id.
         task_id = ""
         started = False
         while True:
@@ -1221,16 +1134,8 @@ def run(
                 continue
             etype = event.get("type")
             if etype == "clear":
-                # ``_cmd_run`` stamps the launcher tab's ``clear``
-                # broadcast with the chat session id it minted (or
-                # reused) for this run.
                 chat_id = str(event.get("chat_id", "") or "") or chat_id
             elif etype != "status" and event.get("taskId"):
-                # Task-stream events are fanned out with the persisted
-                # ``task_history`` row id injected as ``taskId``.
-                # ``status`` events are excluded: they echo the
-                # client-supplied correlation id from the ``run``
-                # command, not the daemon's row id.
                 task_id = str(event["taskId"])
             if etype == "result":
                 result_event = event

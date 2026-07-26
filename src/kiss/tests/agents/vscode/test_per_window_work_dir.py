@@ -71,7 +71,6 @@ class TestPerWindowWorkDir(IsolatedAsyncioTestCase):
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect_persistence(self.tmpdir)
 
-        # Two workspace folders, one per simulated VS Code window.
         self.dir_a = Path(self.tmpdir) / "ws_a"
         self.dir_b = Path(self.tmpdir) / "ws_b"
         self.dir_a.mkdir()
@@ -181,22 +180,18 @@ class TestPerWindowWorkDir(IsolatedAsyncioTestCase):
             writer_b, {"type": "setWorkDir", "workDir": str(self.dir_b)},
         )
 
-        # Window A: autocomplete without explicit workDir → folder A.
         await self._send(writer_a, {"type": "getFiles", "prefix": ""})
         ev_a = await self._drain_until(
             reader_a, self._files_event_with("alpha.txt"),
         )
         self.assertNotIn("beta.txt", _file_names(ev_a))
 
-        # Window B: same command → folder B, not the other window's.
         await self._send(writer_b, {"type": "getFiles", "prefix": ""})
         ev_b = await self._drain_until(
             reader_b, self._files_event_with("beta.txt"),
         )
         self.assertNotIn("alpha.txt", _file_names(ev_b))
 
-        # Window A again, AFTER window B synced last (the daemon-global
-        # fallback now points at folder B): still folder A.
         await self._send(writer_a, {"type": "getFiles", "prefix": ""})
         ev_a2 = await self._drain_until(
             reader_a, self._files_event_with("alpha.txt"),

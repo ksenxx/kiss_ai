@@ -127,7 +127,6 @@ def test_file_cache_refreshes_after_task_completion(
     """
     server, events = _make_server(workspace)
 
-    # 1) Warm cache.
     server._handle_command(
         {"type": "getFiles", "prefix": "", "workDir": workspace},
     )
@@ -136,18 +135,12 @@ def test_file_cache_refreshes_after_task_completion(
     assert "old_file.py" in warm_names
     assert "new_file.py" not in warm_names
 
-    # 2) Simulate agent: create + delete files in work_dir.
     (Path(workspace) / "new_file.py").write_text("# new\n")
     (Path(workspace) / "old_file.py").unlink()
 
-    # 3) Fire the task-completion hook directly.  In production this
-    #    is called from the ``_run_task_inner`` cleanup finally; the
-    #    hook is what the bug fix introduces, so a missing or no-op
-    #    implementation here is exactly the failure mode under test.
     events.clear()
     server._refresh_files_after_task(workspace)
 
-    # 4) Wait for the post-task broadcast that reflects the new state.
     refreshed = _wait_for_files_event(
         events,
         must_contain="new_file.py",
@@ -157,8 +150,6 @@ def test_file_cache_refreshes_after_task_completion(
     assert "new_file.py" in refreshed_names
     assert "old_file.py" not in refreshed_names
 
-    # 5) The cache itself must be updated so the *next* ``getFiles``
-    #    sees the post-task file list synchronously (no rescan).
     events.clear()
     server._handle_command(
         {"type": "getFiles", "prefix": "", "workDir": workspace},
@@ -185,13 +176,11 @@ def test_refresh_skipped_when_no_files_added_or_removed(
     )
     _wait_for_files_event(events, must_contain="old_file.py")
 
-    # Only modify content (no add/delete).
     (Path(workspace) / "old_file.py").write_text("# modified\n")
 
     events.clear()
     server._refresh_files_after_task(workspace)
 
-    # Give the background thread time to scan and decide not to emit.
     time.sleep(0.5)
     files_events = [e for e in events if e.get("type") == "files"]
     assert files_events == [], (
@@ -209,13 +198,11 @@ def test_refresh_no_op_when_cache_never_warmed(
     """
     server, events = _make_server(workspace)
 
-    # Cache is empty for workspace — no prior getFiles.
     assert workspace not in server._file_cache
 
     (Path(workspace) / "new_file.py").write_text("# new\n")
     server._refresh_files_after_task(workspace)
 
     time.sleep(0.3)
-    # No files event should be broadcast and no cache entry created.
     assert workspace not in server._file_cache
     assert [e for e in events if e.get("type") == "files"] == []

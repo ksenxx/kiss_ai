@@ -2,32 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression tests for demo mode replaying the WRONG tasks
-// (real chat.html + main.js + demo.js in jsdom, a recording
-// acquireVsCodeApi stub standing in for the extension host / daemon).
-// Reproduces the field report "demo mode keeps opening and replaying
-// tabs of random tasks; I cannot hear any voice":
-//
-//   * Clicking a history row in demo mode replayed EVERY session in
-//     the history (other chats, other workspaces, sub-agent rows)
-//     instead of ONLY the CLICKED task — the demo-mode spec is "when
-//     I click a task in the task history, it will replay only that
-//     task" (see demoClickedTaskOnly.test.js for the follow-up spec
-//     tightening from "the clicked chat's tasks" to "only the
-//     clicked task").
-//
-//   * The replayed task issued ``resumeSession`` WITHOUT a
-//     ``taskId``, so clicking an older task of a multi-task chat
-//     replayed the latest task's events instead of its own events.
-//
-//   * Clicking another history row while a demo replay was already
-//     active opened ANOTHER chat tab on every click ("keeps opening
-//     tabs").
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/demoClickedChatOnly.test.js
 
 'use strict';
 
@@ -38,13 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom window running the production chat webview: the real
- * ``chat.html`` body, ``panelCopy.js``, ``main.js`` AND ``demo.js``
- * evaluated in the window, plus a recording ``acquireVsCodeApi`` stub.
- * ``win._onPosted`` (settable per test) observes every posted message
- * so tests can answer like the extension host / daemon would.
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -82,9 +49,6 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  // Evaluate api.js separately so V8 coverage offsets for the
-
-  // sourceURL-labelled main.js eval below start at character 0.
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(
@@ -94,10 +58,6 @@ fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   return {win, posted};
 }
 
-/**
- * Install a recording Audio implementation whose clips play and fire
- * ``onended`` after 15ms.  Returns the created players.
- */
 function installAudio(win) {
   const players = [];
   win.Audio = function Audio(src) {
@@ -113,7 +73,6 @@ function installAudio(win) {
   return players;
 }
 
-/** Install a no-op Web Speech API so fallbacks never hang. */
 function installSpeech(win) {
   const spoken = [];
   win.SpeechSynthesisUtterance = function (text) {
@@ -133,7 +92,6 @@ function installSpeech(win) {
   return spoken;
 }
 
-/** Deliver a daemon/extension-host message to the webview. */
 function dispatch(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
@@ -144,17 +102,12 @@ function sleep(ms) {
   });
 }
 
-// A huge recorded prompt (like the multi-KB bug-hunt prompts that fill
-// a real history) — the replay must handle such rows without choking.
 const HUGE_PROMPT =
   'You are a bug-hunting agent working in a giant repository. ' +
   'Audit every file and reproduce every inconsistency you find. '.repeat(
     120,
   );
 
-// Server sends history newest-first.  chat-A (the clicked chat) has
-// two tasks; chat-B is a DIFFERENT chat (the "random tasks") with a
-// top-level task and a sub-agent row.
 const SESSIONS = [
   {
     id: 'chat-A',
@@ -191,7 +144,6 @@ const SESSIONS = [
   },
 ];
 
-/** Small replayed event stream ending in a result. */
 function eventsFor(label) {
   return [
     {type: 'thinking_start'},
@@ -200,12 +152,6 @@ function eventsFor(label) {
   ];
 }
 
-/**
- * Enable demo mode, deliver SESSIONS, auto-answer resumeSession with
- * per-task events, click the history row whose title is *rowTitle*.
- * Returns {resumes, done} — the recorded resumeSession posts and a
- * promise resolving when the replay ends.
- */
 function startDemoFlow(win, rowTitle) {
   dispatch(win, {type: 'configData', config: {demo_mode: true}, apiKeys: {}});
   dispatch(win, {type: 'history', offset: 0, generation: 0, sessions: SESSIONS});
@@ -277,10 +223,6 @@ async function testNoPromptNarrationRequested() {
   const {done} = startDemoFlow(win, 'Task A1 original');
   await done;
 
-  // The prompt display + "User said ..." narration step was removed
-  // and demo mode never synthesizes speech: a replay with no ``talk``
-  // tool calls must play NO audio at all — even for a huge recorded
-  // prompt.
   assert.strictEqual(
     players.length,
     0,
@@ -302,13 +244,12 @@ async function testClickWhileActiveOpensNoNewTab() {
   installSpeech(win);
 
   const {done} = startDemoFlow(win, 'Task A1 original');
-  await sleep(300); // replay is now active, showing the first panel
+  await sleep(300);
   assert.ok(win._demoApi.active, 'demo replay is running');
   const tabsBefore = win.document.querySelectorAll(
     '#tab-list .chat-tab',
   ).length;
 
-  // Re-open the sidebar and click other history rows mid-replay.
   const rows = Array.from(
     win.document.querySelectorAll('#history-list > div'),
   );
@@ -338,8 +279,6 @@ async function testClickWhileActiveOpensNoNewTab() {
   await testNoPromptNarrationRequested();
   await testClickWhileActiveOpensNoNewTab();
   console.log('demoClickedChatOnly.test.js: all tests passed');
-  // Demo/webview timers can keep the node event loop alive; match the
-  // other jsdom e2e demo tests and exit explicitly once assertions pass.
   process.exit(0);
 })().catch(err => {
   console.error(err);

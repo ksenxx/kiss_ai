@@ -19,8 +19,6 @@ import sys
 from pathlib import Path
 
 NON_ASCII = "café ☕ — ünïcode"
-# Escape the non-ASCII text into pure-ASCII JSON so the script source
-# itself never depends on the child interpreter's locale decoding.
 NON_ASCII_JSON = json.dumps(NON_ASCII)
 
 

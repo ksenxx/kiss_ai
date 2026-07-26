@@ -9,11 +9,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-# The commit-message helpers moved to
-# ``kiss.agents.sorcar.commit_message`` (sorcar's auto-commit path is
-# their primary consumer and sorcar must not depend on the server
-# layer); they are re-exported here for this module's historical
-# importers.
 from kiss.agents.sorcar.commit_message import (  # noqa: F401 — re-exported
     _append_task_result,
     _append_user_prompt,
@@ -168,11 +163,6 @@ def generate_followup_text(task: str, result: str, model: str) -> str:
     )
 
 
-# Maximum number of dropdown suggestion items emitted to the webview
-# per request.  Single-sourced here and shared by the @-mention file
-# picker (:func:`rank_file_suggestions`) and the fast-complete
-# dropdown (``autocomplete``) so the two pickers stay scrollable
-# without UI tuning differences between them.
 SUGGESTION_LIMIT = 20
 
 

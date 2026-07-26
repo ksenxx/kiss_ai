@@ -84,10 +84,6 @@ def _make_task_printer(task_id: str, tab_id: str = "TAB1") -> MemoryPrinter:
     return printer
 
 
-# ---------------------------------------------------------------------------
-# B3 — offset arithmetic parity between the result and usage_info paths
-# ---------------------------------------------------------------------------
-
 
 class TestBudgetOffsetParity(unittest.TestCase):
     """`result` and `usage_info` must apply identical offset arithmetic."""
@@ -108,11 +104,9 @@ class TestBudgetOffsetParity(unittest.TestCase):
         assert len(result_events) == 1, printer.emitted
         usage, result = usage_events[0], result_events[0]
 
-        # Pinned absolute values: $1.25 + 0.5 budget offset, 4-decimal format.
         assert usage["cost"] == "$1.7500", usage
         assert usage["total_tokens"] == 1100, usage
         assert usage["total_steps"] == 7, usage
-        # Parity: the result panel reports identically adjusted numbers.
         assert result["cost"] == usage["cost"], (result, usage)
         assert result["total_tokens"] == usage["total_tokens"], (result, usage)
         assert result["step_count"] == usage["total_steps"], (result, usage)
@@ -138,10 +132,6 @@ class TestBudgetOffsetParity(unittest.TestCase):
         assert _events_of(printer, "result")[0]["cost"] == "$abc"
 
 
-# ---------------------------------------------------------------------------
-# C2 — per-task offset isolation
-# ---------------------------------------------------------------------------
-
 
 class TestPerTaskOffsetIsolation(unittest.TestCase):
     """Offsets are keyed by task id and never leak across tasks."""
@@ -158,7 +148,6 @@ class TestPerTaskOffsetIsolation(unittest.TestCase):
         assert printer.budget_offset == 0.0
         assert printer.steps_offset == 0
 
-        # Switching back to A restores A's offsets untouched.
         printer._thread_local.task_id = "A"
         assert printer.tokens_offset == 100
         assert printer.budget_offset == 0.5
@@ -195,10 +184,6 @@ class TestPerTaskOffsetIsolation(unittest.TestCase):
         assert printer.steps_offset == 0
 
 
-# ---------------------------------------------------------------------------
-# C1 / A3 — bash stream flush, timer attribution, reset, and flush race
-# ---------------------------------------------------------------------------
-
 
 class TestBashStreamFlush(unittest.TestCase):
     """Bash buffering broadcasts every chunk exactly once."""
@@ -210,13 +195,11 @@ class TestBashStreamFlush(unittest.TestCase):
         printer.print("one", type="bash_stream")
         printer.print("two", type="bash_stream")
         printer.print("three", type="bash_stream")
-        # tool_call forces a flush of any pending buffer first.
         printer.print("Bash", type="tool_call", tool_input={})
-        time.sleep(0.3)  # let any straggler timer fire (it must find an empty buffer)
+        time.sleep(0.3)
 
         texts = [e["text"] for e in _events_of(printer, "system_output")]
         assert "".join(texts) == "onetwothree", texts
-        # tool_call itself was still emitted after the flush.
         assert len(_events_of(printer, "tool_call")) == 1, printer.emitted
 
     def test_timer_flush_attributes_task_id(self) -> None:
@@ -224,8 +207,8 @@ class TestBashStreamFlush(unittest.TestCase):
         it runs on a worker thread with no task id of its own."""
         printer = _make_task_printer("BASH-TIMER")
 
-        printer.print("first", type="bash_stream")  # immediate flush (last_flush==0)
-        printer.print("later", type="bash_stream")  # buffered; timer scheduled
+        printer.print("first", type="bash_stream")
+        printer.print("later", type="bash_stream")
         time.sleep(0.35)
 
         texts = [e["text"] for e in _events_of(printer, "system_output")]
@@ -238,10 +221,10 @@ class TestBashStreamFlush(unittest.TestCase):
         broadcast afterwards (guards the generation-counter logic)."""
         printer = _make_task_printer("BASH-RESET")
 
-        printer.print("flushed", type="bash_stream")  # immediate flush
-        printer.print("pending", type="bash_stream")  # buffered; timer scheduled
+        printer.print("flushed", type="bash_stream")
+        printer.print("pending", type="bash_stream")
         printer.reset()
-        time.sleep(0.3)  # timer window elapses; nothing may surface
+        time.sleep(0.3)
 
         texts = [e["text"] for e in _events_of(printer, "system_output")]
         assert texts == ["flushed"], texts
@@ -276,33 +259,23 @@ class TestBashStreamFlush(unittest.TestCase):
         for t in threads:
             t.join(timeout=30)
             assert not t.is_alive(), "bash race worker hung"
-        printer._flush_bash()  # drain any remainder (main thread has task id set)
-        time.sleep(0.3)  # let any in-flight timer flush land
+        printer._flush_bash()
+        time.sleep(0.3)
 
         payloads = [e["text"] for e in _events_of(printer, "system_output")]
         seen: list[str] = []
         for payload in payloads:
             tokens = _TOKEN_RE.findall(payload)
-            # Each payload is made of whole chunks only (chunks are appended
-            # atomically and flushed wholesale — never split).
             assert "".join(tokens) == payload, payload
-            # Within one flushed payload the chunks appear in print order.
             assert tokens == sorted(tokens), payload
             seen.extend(tokens)
-        # No loss, no duplication.
         assert sorted(seen) == chunks, (
             f"missing={set(chunks) - set(seen)} dup_or_extra="
             f"{[t for t in seen if seen.count(t) > 1 or t not in chunks]}"
         )
-        # Each payload is a contiguous slice of the stream, so reassembling
-        # payloads by their first chunk reproduces the exact concatenation.
         reassembled = "".join(sorted(payloads))
         assert reassembled == "".join(chunks), reassembled
 
-
-# ---------------------------------------------------------------------------
-# B1 — custom-header parsing parity (vscode_config)
-# ---------------------------------------------------------------------------
 
 
 class _ConfigDirTestCase(unittest.TestCase):
@@ -375,10 +348,6 @@ class TestCustomHeaderParsingParity(_ConfigDirTestCase):
         assert model_config["extra_headers"] == expected, model_config
 
 
-# ---------------------------------------------------------------------------
-# B2 — load/save round-trip with DEFAULTS overlay
-# ---------------------------------------------------------------------------
-
 
 class TestConfigRoundTrip(_ConfigDirTestCase):
     """`save_config`/`load_config` semantics that any refactor must keep."""
@@ -421,7 +390,6 @@ class TestConfigRoundTrip(_ConfigDirTestCase):
         assert stored["email"] == "a@b.c", stored
         assert stored["max_budget"] == 7, stored
         assert "bogus_key" not in stored, stored
-        # load_config surfaces the preserved unknown key too.
         cfg = load_config()
         assert cfg["email"] == "a@b.c"
         assert cfg["max_budget"] == 7

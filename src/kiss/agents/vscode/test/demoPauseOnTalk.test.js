@@ -2,27 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test for the "pause the demo while talking" behavior in
-// ``media/demo.js`` (fix for the demo-mode infinite loop where queued
-// speech lagged ever further behind the visual replay):
-//
-//   1. The replay must NOT advance past a ``talk`` tool-call panel
-//      (no collapse, no result streaming) until the speech promise
-//      returned by ``playTalkEvent`` resolves.
-//   2. Cancelling the demo during an in-flight talk resolves the
-//      pending speech promise via ``stopSpeech`` so the paused replay
-//      coroutine exits immediately instead of hanging forever.
-//   3. A legacy host api whose speech hooks return undefined (older
-//      main.js) still replays to completion without hanging.
-//
-// Drives the real ``media/demo.js`` inside jsdom (no mocks of project
-// code; the ``window._demoApi`` host shim that main.js normally
-// provides is stubbed, exactly like demoTalkRunParallel.test.js).
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/demoPauseOnTalk.test.js
 
 'use strict';
 
@@ -39,7 +18,6 @@ function sleep(ms) {
   });
 }
 
-/** Poll until *pred* returns true or *timeoutMs* elapses. */
 async function waitFor(pred, timeoutMs, what) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -49,19 +27,6 @@ async function waitFor(pred, timeoutMs, what) {
   throw new Error('timed out waiting for ' + what);
 }
 
-/**
- * Build a jsdom window with the real ``demo.js`` evaluated and a
- * ``window._demoApi`` host shim whose speech hooks return promises
- * the test resolves by hand:
- *
- *   - ``speakText`` / ``playTalkEvent`` return pending promises and
- *     stash their resolvers in ``pending`` (unless ``opts.legacy``,
- *     in which case they return undefined like an old main.js);
- *   - ``stopSpeech`` resolves every pending promise, mirroring the
- *     real discard behavior in main.js.
- *
- * ``calls`` records every interesting host-api invocation in order.
- */
 function makeDemoWindow(events, opts) {
   const legacy = !!(opts && opts.legacy);
   const dom = new JSDOM(
@@ -127,8 +92,6 @@ function makeDemoWindow(events, opts) {
     },
     stopSpeech() {
       calls.push({fn: 'stopSpeech'});
-      // Mirror main.js: discarding queued + in-flight jobs resolves
-      // the promises the paused replay is awaiting.
       while (pending.length) pending.shift().resolve();
     },
   };
@@ -137,7 +100,6 @@ function makeDemoWindow(events, opts) {
   return {win, api, calls, pending};
 }
 
-/** One session: a talk tool call followed by a result. */
 function talkEvents() {
   return [
     {
@@ -172,15 +134,11 @@ async function testReplayPausesUntilTalkEnds() {
   const {win, api, calls, pending} = makeDemoWindow(talkEvents());
   const replay = startReplay(win, 'pause on talk');
 
-  // The talk starts playing...
   await waitFor(
     () => calls.some(c => c.fn === 'playTalkEvent'),
     5000,
     'talk playback to start',
   );
-  // ...and while its promise is unresolved the replay must stay
-  // paused: no panel collapse, no result streaming — even long after
-  // the usual 500ms panel pause would have elapsed.
   await sleep(1200);
   assert.strictEqual(
     calls.filter(c => c.fn === 'collapsePanels').length,
@@ -192,7 +150,6 @@ async function testReplayPausesUntilTalkEnds() {
     'replay must not stream the result while speech is playing',
   );
 
-  // End the speech — the replay resumes and runs to completion.
   await waitFor(() => pending.length >= 1, 1000, 'talk promise registration');
   assert.strictEqual(pending[0].kind, 'playTalkEvent');
   pending.shift().resolve();
@@ -217,9 +174,6 @@ async function testCancelDuringTalkExitsImmediately() {
     'talk playback to start',
   );
 
-  // Cancel while the replay is paused awaiting the in-flight talk:
-  // _cancelDemoReplay -> stopSpeech resolves the pending promise, so
-  // the paused coroutine wakes up, sees cancelRequested and exits.
   win._cancelDemoReplay();
   await replay;
   assert.ok(
@@ -233,7 +187,6 @@ async function testCancelDuringTalkExitsImmediately() {
   assert.strictEqual(api.active, false, 'cancelled replay clears active');
   assert.strictEqual(pending.length, 0, 'no speech promise left dangling');
 
-  // The demo can be restarted after a cancel (nothing deadlocked).
   const again = startReplay(win, 'restart after cancel');
   await waitFor(() => pending.length >= 1, 5000, 'restart talk');
   assert.strictEqual(pending[0].kind, 'playTalkEvent');

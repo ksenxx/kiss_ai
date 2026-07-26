@@ -2,18 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end tests for the Sorcar client API facades:
-//
-// 1. media/api.js (createSorcarApi) — every generated method must post
-//    exactly its catalog command; the generic send() must accept only
-//    catalog commands.
-// 2. The REAL chat webview (media/chat.html + api.js + main.js booted
-//    in jsdom, no project code mocked) must talk to the server
-//    exclusively through API commands — every message it posts has a
-//    type from the catalog.
-// 3. out/SorcarApi.js — every extension-host facade method must emit
-//    the correct wire command through AgentClient.sendCommand.
 'use strict';
 
 const assert = require('assert');
@@ -54,8 +42,6 @@ test('catalog contains the core task-lifecycle commands', () => {
 
 test('the real chat webview only sends API commands', async () => {
   const {win, posted} = makeWebview();
-  // Boot traffic (ready, getConfig, ...) plus a user interaction:
-  // type a prompt and submit it through the real input pipeline.
   const inp = win.document.getElementById('task-input');
   inp.value = 'do something';
   win.document.getElementById('send-btn').click();

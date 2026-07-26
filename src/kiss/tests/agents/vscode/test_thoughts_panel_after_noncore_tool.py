@@ -66,8 +66,6 @@ def _extract_function_body(src: str, name: str) -> str:
     raise AssertionError(f"unmatched braces in function {name}")
 
 
-# ── Frontend code-analysis tests ──────────────────────────────────────────
-
 
 def test_process_output_event_tool_call_sets_pending_panel_true() -> None:
     """processOutputEvent must set pendingPanel = true on tool_call.
@@ -79,8 +77,6 @@ def test_process_output_event_tool_call_sets_pending_panel_true() -> None:
     src = _read_main_js()
     body = _extract_function_body(src, "processOutputEvent")
 
-    # Find the tool_call handler block:
-    #   if (t === 'tool_call') { ... pendingPanel = true; ... }
     m = re.search(
         r"t\s*===\s*'tool_call'[^}]*?pendingPanel\s*=\s*(\w+)",
         body,
@@ -132,8 +128,6 @@ def test_replay_events_into_tool_call_sets_pending_true() -> None:
     )
 
 
-# ── Backend test: tool_result is broadcast for every non-finish tool ──────
-
 
 def test_noncore_tool_result_is_broadcast() -> None:
     """Verify that tool_result for non-core tools IS broadcast.
@@ -183,8 +177,6 @@ def test_core_tool_result_is_broadcast() -> None:
     )
 
 
-# ── End-to-end event sequence test ────────────────────────────────────────
-
 
 def test_thinking_after_noncore_tool_gets_panel_events() -> None:
     """Simulate a non-core tool turn and verify the post-a8d394a7 event order.
@@ -202,7 +194,6 @@ def test_thinking_after_noncore_tool_gets_panel_events() -> None:
     printer._thread_local.task_id = "t1"
     printer.start_recording()
 
-    # Turn 1: thinking → tool_call(Read) → tool_result → tool_call(screenshot)
     printer.thinking_callback(True)
     printer.token_callback("Let me read the file")
     printer.thinking_callback(False)
@@ -211,7 +202,6 @@ def test_thinking_after_noncore_tool_gets_panel_events() -> None:
     printer.print("screenshot", type="tool_call", tool_input={})
     printer.print("screenshot taken", type="tool_result", tool_name="screenshot")
 
-    # Turn 2: thinking → text → tool_call(Write)
     printer.thinking_callback(True)
     printer.token_callback("I see the issue, need to add SVG")
     printer.thinking_callback(False)
@@ -229,8 +219,6 @@ def test_thinking_after_noncore_tool_gets_panel_events() -> None:
             break
     assert screenshot_idx is not None
 
-    # tool_result(screenshot) is now broadcast and appears between the
-    # screenshot tool_call and the next thinking_start.
     post_screenshot = types[screenshot_idx + 1 :]
     thinking_start_offset = post_screenshot.index("thinking_start")
     between = post_screenshot[:thinking_start_offset]
@@ -240,8 +228,6 @@ def test_thinking_after_noncore_tool_gets_panel_events() -> None:
     )
 
 
-# ── Step-counting consistency tests ───────────────────────────────────────
-
 
 def test_step_count_code_uses_tool_call_pending_true() -> None:
     """Step-counting code in task_events and replayTaskEvents must use
@@ -250,21 +236,17 @@ def test_step_count_code_uses_tool_call_pending_true() -> None:
     """
     src = _read_main_js()
 
-    # Check the bg tab task_events step counting loop
-    # Pattern: if (t === 'tool_call') { ... bgPending = true/false; }
     bg_step_match = re.search(
         r"bgSteps\s*===\s*0.*?tool_call.*?bgPending\s*=\s*(\w+)",
         src,
         re.DOTALL,
     )
-    # If it exists, verify it sets bgPending = true
     if bg_step_match:
         assert bg_step_match.group(1) == "true", (
             f"Step counting sets bgPending = {bg_step_match.group(1)} on "
             "tool_call; must be true for consistency."
         )
 
-    # Check the replayTaskEvents step counting loop
     replay_step_match = re.search(
         r"rSteps\s*===\s*0.*?tool_call.*?rPending\s*=\s*(\w+)",
         src,

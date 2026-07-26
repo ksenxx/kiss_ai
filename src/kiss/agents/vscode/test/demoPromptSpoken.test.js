@@ -2,34 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test that the demo replay handles ``prompt`` events
-// specially: whenever a replayed session contains a ``prompt`` event
-// (a follow-up message the user sent while the task ran), the demo
-// must READ THE PROMPT ALOUD — exactly like a replayed ``talk`` tool
-// call — prefixed with the words "User says ":
-//
-//   1. A ``prompt`` event must be narrated via ``playTalkEvent`` with
-//      text ``"User says " + prompt text`` (and still rendered in the
-//      output via ``processEvent`` like any other event).
-//   2. The replay must PAUSE at the prompt panel until the narration
-//      promise resolves — no panel collapse, no result streaming
-//      while the speech is playing (same contract as ``talk``).
-//   3. Cancelling the demo during an in-flight prompt narration
-//      resolves the pending speech promise via ``stopSpeech`` so the
-//      paused replay exits immediately.
-//   4. A ``prompt`` event with empty text is not spoken (and does not
-//      hang the replay).
-//   5. ``groupEventsIntoPanels`` gives a ``prompt`` its own panel and
-//      the following thinking/text still starts a fresh LLM panel.
-//
-// Drives the real ``media/demo.js`` inside jsdom (no mocks of project
-// code; the ``window._demoApi`` host shim that main.js normally
-// provides is stubbed, exactly like demoPauseOnTalk.test.js).
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/demoPromptSpoken.test.js
 
 'use strict';
 
@@ -46,7 +18,6 @@ function sleep(ms) {
   });
 }
 
-/** Poll until *pred* returns true or *timeoutMs* elapses. */
 async function waitFor(pred, timeoutMs, what) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -56,19 +27,6 @@ async function waitFor(pred, timeoutMs, what) {
   throw new Error('timed out waiting for ' + what);
 }
 
-/**
- * Build a jsdom window with the real ``demo.js`` evaluated and a
- * ``window._demoApi`` host shim whose speech hooks return promises
- * the test resolves by hand:
- *
- *   - ``playTalkEvent`` returns a pending promise and stashes its
- *     resolver in ``pending`` (unless ``opts.instantSpeech``, in
- *     which case it resolves immediately);
- *   - ``stopSpeech`` resolves every pending promise, mirroring the
- *     real discard behavior in main.js.
- *
- * ``calls`` records every interesting host-api invocation in order.
- */
 function makeDemoWindow(events, opts) {
   const instantSpeech = !!(opts && opts.instantSpeech);
   const dom = new JSDOM(
@@ -131,8 +89,6 @@ function makeDemoWindow(events, opts) {
     },
     stopSpeech() {
       calls.push({fn: 'stopSpeech'});
-      // Mirror main.js: discarding queued + in-flight jobs resolves
-      // the promises the paused replay is awaiting.
       while (pending.length) pending.shift().resolve();
     },
   };
@@ -143,10 +99,6 @@ function makeDemoWindow(events, opts) {
 
 const PROMPT_TEXT = 'please also add documentation';
 
-/**
- * One session: an LLM text panel, a user follow-up prompt, another
- * LLM text panel, then a result.
- */
 function promptEvents() {
   return [
     {type: 'text_delta', text: 'Working on the parser...'},
@@ -193,7 +145,6 @@ async function testPromptSpokenWithUserSaysPrefix() {
     'User says ' + PROMPT_TEXT,
     'prompt narration must be prefixed with "User says "',
   );
-  // The prompt event is still rendered in the output like any other.
   assert.ok(
     calls.some(c => c.fn === 'processEvent' && c.ev.type === 'prompt'),
     'prompt event must still be rendered via processEvent',
@@ -208,22 +159,17 @@ async function testReplayPausesUntilPromptNarrationEnds() {
   const {win, api, calls, pending} = makeDemoWindow(promptEvents());
   const replay = startReplay(win, 'pause on prompt');
 
-  // The prompt narration starts playing...
   await waitFor(
     () => calls.some(c => c.fn === 'playTalkEvent'),
     5000,
     'prompt narration to start',
   );
-  // ...and while its promise is unresolved the replay must stay
-  // paused: no result streaming — even long after the usual 500ms
-  // panel pause would have elapsed.
   await sleep(1200);
   assert.ok(
     !resultRendered(win),
     'replay must not stream the result while the prompt narration plays',
   );
 
-  // End the narration — the replay resumes and runs to completion.
   await waitFor(() => pending.length >= 1, 1000, 'narration registration');
   assert.strictEqual(pending[0].ev.text, 'User says ' + PROMPT_TEXT);
   pending.shift().resolve();
@@ -244,9 +190,6 @@ async function testCancelDuringPromptNarrationExitsImmediately() {
     'prompt narration to start',
   );
 
-  // Cancel while the replay is paused awaiting the narration:
-  // _cancelDemoReplay -> stopSpeech resolves the pending promise, so
-  // the paused coroutine wakes up, sees cancelRequested and exits.
   win._cancelDemoReplay();
   await replay;
   assert.ok(

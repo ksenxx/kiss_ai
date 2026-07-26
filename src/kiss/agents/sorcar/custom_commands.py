@@ -51,10 +51,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kiss.agents.sorcar.persistence import _default_kiss_dir
-
-# Frontmatter parsing, whitespace normalization, and the
-# ``CLAUDE_CONFIG_DIR`` resolution are shared with skills.py so the
-# two Markdown-definition discovery paths can never drift.
 from kiss.agents.sorcar.skills import (
     claude_config_dir,
     collapse_whitespace,
@@ -63,34 +59,14 @@ from kiss.agents.sorcar.skills import (
 )
 
 logger = logging.getLogger(__name__)
-# ``$ARGUMENTS`` placeholder (all arguments, verbatim).
 _ARGUMENTS_RE = re.compile(r"\$ARGUMENTS\b")
-# ``$1`` … ``$9`` positional-argument placeholders.
 _POSITIONAL_RE = re.compile(r"\$([1-9])\b")
-# Combined pattern for the single-pass substitution in
-# :func:`expand_command`, matching every injection construct the
-# template supports: ``@{path}`` (group ``file``), ``!`command```
-# (group ``shell``), ``$ARGUMENTS``, and ``$1`` … ``$9`` (group
-# ``pos``).  One pass over the ORIGINAL template is essential:
-# replacement text — a user-supplied argument value, an injected
-# file's contents, or a shell command's output — must never be
-# re-scanned by a later substitution.  Otherwise a data file merely
-# referenced with ``@{path}`` could get an embedded ``!`cmd```
-# EXECUTED, and literal ``$1`` / ``$ARGUMENTS`` text inside file
-# contents or shell output would be rewritten with the user's
-# arguments.
 _INJECT_RE = re.compile(
     r"@\{(?P<file>[^{}]+)\}"
     r"|!`(?P<shell>[^`]+)`"
     r"|\$ARGUMENTS\b"
     r"|\$(?P<pos>[1-9])\b"
 )
-# The non-argument injection constructs alone (``@{path}`` and
-# ``!`command```).  Used to blank them out of the template before
-# deciding whether it contains a *real* argument placeholder: a ``$1``
-# or ``$ARGUMENTS`` inside a file path or shell command is consumed by
-# the earlier alternatives of ``_INJECT_RE`` and never substituted, so
-# it must not suppress the append-args fallback either.
 _NON_ARG_INJECT_RE = re.compile(r"@\{[^{}]+\}|!`[^`]+`")
 
 _SHELL_TIMEOUT_SECONDS = 60
@@ -168,9 +144,6 @@ def _parse_command_file(path: Path, root: Path, source: str) -> CustomCommand | 
         return None
     rel = path.relative_to(root)
     name = ":".join((*rel.parts[:-1], rel.stem))
-    # Collapse all whitespace (a YAML block scalar may span lines) so
-    # the one-line ``/commands`` and ``/help`` listings never break —
-    # same normalization as skills.py applies to skill descriptions.
     return CustomCommand(
         name=name,
         description=collapse_whitespace(meta.get("description", "")),
@@ -296,12 +269,6 @@ def expand_command(command: CustomCommand, args_text: str, work_dir: str) -> str
         The fully expanded prompt text.
     """
     args_text = args_text.strip()
-    # Computed on the ORIGINAL template (so placeholder-looking text
-    # inside injected file contents / shell output cannot suppress the
-    # append-args fallback below) with the ``@{path}`` / ``!`command```
-    # constructs blanked out first: a ``$1`` or ``$ARGUMENTS`` inside
-    # them is consumed by those alternatives of ``_INJECT_RE`` and never
-    # substituted, so it is not a real placeholder either.
     scannable = _NON_ARG_INJECT_RE.sub("", command.template)
     has_placeholder = bool(
         _ARGUMENTS_RE.search(scannable) or _POSITIONAL_RE.search(scannable)
@@ -322,7 +289,7 @@ def expand_command(command: CustomCommand, args_text: str, work_dir: str) -> str
         if pos is not None:
             index = int(pos) - 1
             return positional[index] if index < len(positional) else ""
-        return args_text  # bare $ARGUMENTS
+        return args_text
 
     text = _INJECT_RE.sub(inject_repl, command.template)
     if args_text and not has_placeholder:

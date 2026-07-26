@@ -175,10 +175,6 @@ class _AutocommitFlagPrinter(_RecordingPrinter):
         super().broadcast(event)
 
 
-# ---------------------------------------------------------------------------
-# F1 — empty-worktree auto-discard must claim the main tree atomically
-# ---------------------------------------------------------------------------
-
 
 class TestEmptyWorktreeDiscardClaimsMainTree:
     def test_discard_runs_with_is_merging_claimed(self, tmp_path: Path) -> None:
@@ -197,17 +193,14 @@ class TestEmptyWorktreeDiscardClaimsMainTree:
 
             host._present_pending_worktree(tab_id, try_merge_review=True)
 
-            # The empty worktree was really discarded.
             assert agent.observed_merging_during_discard is not None, (
                 "empty worktree was not auto-discarded"
             )
             assert not agent._wt_pending
-            # The main tree was claimed for the duration of the discard.
             assert agent.observed_merging_during_discard is True, (
                 "discard() ran without claiming tab.is_merging — a "
                 "non-wt task could start and race the main-repo checkout"
             )
-            # The claim is released afterwards.
             assert tab.is_merging is False
         finally:
             _RunningAgentState.running_agent_states.pop(tab_id, None)
@@ -242,10 +235,6 @@ class TestEmptyWorktreeDiscardClaimsMainTree:
                 _RunningAgentState.running_agent_states.pop(tid, None)
 
 
-# ---------------------------------------------------------------------------
-# F3 — _finish_merge keeps is_merging until the autocommit scan is done
-# ---------------------------------------------------------------------------
-
 
 class TestFinishMergeHoldsClaimThroughCleanup:
     def test_autocommit_prompt_scanned_while_still_merging(
@@ -261,7 +250,7 @@ class TestFinishMergeHoldsClaimThroughCleanup:
         try:
             tab = host._get_tab(tab_id)
             tab.use_worktree = False
-            tab.is_merging = True  # a merge review session is live
+            tab.is_merging = True
             printer.tab = tab
 
             host._finish_merge(tab_id, work_dir=str(repo))
@@ -278,7 +267,6 @@ class TestFinishMergeHoldsClaimThroughCleanup:
                 "is_merging was cleared before the autocommit dirty scan "
                 "— a task starting in that window races the scan"
             )
-            # The claim is released once _finish_merge returns.
             assert tab.is_merging is False
         finally:
             _RunningAgentState.running_agent_states.pop(tab_id, None)
@@ -310,10 +298,6 @@ class TestFinishMergeHoldsClaimThroughCleanup:
         assert host.printer.events == []
 
 
-# ---------------------------------------------------------------------------
-# F13 — _scan_files 5000-entry cap applies to directory entries too
-# ---------------------------------------------------------------------------
-
 
 class TestScanFilesCapCoversDirectories:
     def test_directory_heavy_tree_respects_cap(self, tmp_path: Path) -> None:
@@ -341,10 +325,6 @@ class TestScanFilesCapCoversDirectories:
         assert "sub/g.txt" in paths
 
 
-# ---------------------------------------------------------------------------
-# F18 — newly created empty files are visible in the merge review
-# ---------------------------------------------------------------------------
-
 
 class TestEmptyNewFileVisibleInMergeReview:
     def test_empty_new_file_gets_whole_file_entry(self, tmp_path: Path) -> None:
@@ -365,7 +345,6 @@ class TestEmptyNewFileVisibleInMergeReview:
         for fname in ("pkg/__init__.py", ".gitkeep"):
             assert fname in by_name, f"{fname} missing from merge review"
             entry = by_name[fname]
-            # Whole-file (binary-style) single decision entry.
             assert entry.get("binary") is True
             assert entry["hunks"] == [{"bs": 0, "bc": 0, "cs": 0, "cc": 0}]
 
@@ -403,10 +382,6 @@ class TestEmptyNewFileVisibleInMergeReview:
         assert not by_name["new.py"].get("binary")
 
 
-# ---------------------------------------------------------------------------
-# F20 — source_shell_env must not import forged keys from multi-line values
-# ---------------------------------------------------------------------------
-
 
 @pytest.mark.skipif(
     not Path("/bin/bash").exists(), reason="requires /bin/bash",
@@ -431,9 +406,7 @@ class TestSourceShellEnvMultilineValues:
 
         source_shell_env()
 
-        # Real single-line key from the RC is imported…
         assert os.environ.get("TOGETHER_API_KEY") == "real-together-key"
-        # …but the forged key embedded in another variable's value is not.
         assert os.environ.get("OPENAI_API_KEY") != "forged-by-multiline-value"
 
     def test_multiline_api_key_value_preserved_fully(

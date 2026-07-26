@@ -47,14 +47,6 @@ anthropic = pytest.importorskip("anthropic")
 
 _MODELS_UNDER_TEST = ("claude-fable-5", "claude-sonnet-5")
 
-# KISS deliberately pins ``claude-fable-5.context_length`` below
-# Anthropic's advertised ``max_input_tokens=1_000_000`` to bound
-# worst-case prompt-cost and truncate before the tail of the window
-# where quality is known to degrade.  ``claude-sonnet-5`` is pinned to
-# ``500_000`` by the catalog-wide cap in ``update_models.py``
-# (``_cap_context_length``: any context length >= 1_000_000 is written
-# as 500_000).  Models absent from this map still track the live API
-# value.
 _CONTEXT_LENGTH_OVERRIDES: dict[str, int] = {
     "claude-fable-5": 400_000,
     "claude-sonnet-5": 500_000,

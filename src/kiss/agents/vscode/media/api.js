@@ -2,44 +2,11 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-/**
- * SorcarApi — the client facade of the Sorcar server API.
- *
- * The ONLY channel through which the chat UI (media/main.js, in both
- * the VS Code webview and the remote webapp) talks to the KISS Sorcar
- * server.  Each method maps 1:1 onto a command of the server API
- * catalog defined in ``src/kiss/server/sorcar.py`` (the single source
- * of truth).  Every command is a remote call into the server's code
- * API: the daemon routes it through
- * ``kiss.server.sorcar.ServerApi.dispatch``, which validates it
- * against the catalog (answering invalid ones with an ``error``
- * event) and invokes the ``ServerApi`` method the command's catalog
- * entry names.
- *
- * The remote webapp reaches the same API for everything else too: its
- * WebSocket shim's pre-app ``auth`` handshake is serviced by
- * ``kiss.server.sorcar.ServerApi.authenticate``, and the
- * trajectory-viewer HTTP endpoints by
- * ``ServerApi.trajectory_jobs`` / ``ServerApi.job_trajectories``.
- *
- * Usage (main.js owns the single ``acquireVsCodeApi()`` handle):
- *
- *   const api = createSorcarApi(msg => vscode.postMessage(msg));
- *   api.stop({tabId: activeTabId});
- *   api.getConfig();
- *   api.send(prebuiltMessage);   // validated generic escape hatch
- */
 /* global module */
 (function (global) {
   'use strict';
 
-  /**
-   * Command names of the Sorcar server API (mirrors the ``API``
-   * catalog in ``src/kiss/server/sorcar.py``) plus the VS Code
-   * host-only webview messages that never reach the daemon.
-   */
   const SORCAR_API_COMMANDS = [
-    // session / task lifecycle
     'run',
     'submit',
     'appendUserMessage',
@@ -49,7 +16,6 @@
     'closeTab',
     'resumeSession',
     'ready',
-    // history / metadata
     'getHistory',
     'getAdjacentTask',
     'getFrequentTasks',
@@ -59,32 +25,26 @@
     'getInputHistory',
     'getWelcomeSuggestions',
     'activeTasksQuery',
-    // models / configuration
     'getModels',
     'selectModel',
     'getConfig',
     'saveConfig',
     'setWorkDir',
-    // files / autocomplete
     'getFiles',
     'recordFileUsage',
     'openFile',
     'complete',
-    // worktree / merge / commit flows
     'mergeAction',
     'worktreeAction',
     'autocommitAction',
     'generateCommitMessage',
-    // daemon administration
     'auth',
     'runUpdate',
     'serverReset',
-    // voice
     'voiceTranscribe',
     'voiceToggle',
     'voiceSensitivity',
     'voiceAck',
-    // VS Code host-only webview messages
     'focusEditor',
     'webviewFocusChanged',
     'notificationAction',
@@ -92,17 +52,6 @@
     'resolveDroppedPaths',
   ];
 
-  /**
-   * Build the API client.
-   *
-   * @param {function(Object)} post Transport function delivering one
-   *     command object to the server (``vscode.postMessage`` in the
-   *     webview, the WebSocket shim in the remote webapp).
-   * @returns {Object} An object with one method per API command —
-   *     ``api.stop({tabId})`` posts ``{type: 'stop', tabId}`` — plus
-   *     ``api.send(msg)``, which posts a prebuilt command after
-   *     checking its ``type`` is part of the API.
-   */
   function createSorcarApi(post) {
     const api = {
       send: function (msg) {
@@ -120,9 +69,6 @@
             msg[k] = fields[k];
           });
         }
-        // Set ``type`` last: the method's identity always wins, so a
-        // stray ``type`` field in ``fields`` can never rebrand the
-        // command into a different (or out-of-catalog) one.
         msg.type = name;
         post(msg);
       };

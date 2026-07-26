@@ -130,8 +130,6 @@ class TestAgenticCost:
         assert input_t == 10000
         assert output_t == 500
 
-        # calculate_cost must not raise KISSError — cc/opus pricing is
-        # $0/$0 (billed via subscription), so cost == 0 is expected.
         calculate_cost(
             m.model_name,
             input_t,
@@ -188,8 +186,6 @@ class TestAgenticCost:
         assert cache_write_5m == 5000
         assert cache_write_1h == 2000
 
-        # calculate_cost must not raise KISSError — cc/opus pricing is
-        # $0/$0 (billed via subscription), so cost == 0 is expected.
         calculate_cost(
             m.model_name,
             input_t,

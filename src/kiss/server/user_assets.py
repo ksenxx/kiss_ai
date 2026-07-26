@@ -73,10 +73,6 @@ def ensure_user_asset_from_default(
                 os.write(fd, default_content.encode("utf-8"))
             finally:
                 os.close(fd)
-            # ``link`` (not ``replace``) is atomic AND refuses to
-            # clobber: it fails with FileExistsError when a concurrent
-            # seeder or user edit created the file after the existence
-            # check above, preserving the never-overwrite contract.
             os.link(tmp, user_path)
         except FileExistsError:
             return user_path

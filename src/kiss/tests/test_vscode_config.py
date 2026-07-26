@@ -48,13 +48,6 @@ def _isolate_config(
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     monkeypatch.setenv("HOME", str(fake_home))
-    # ``CONFIG_DIR``/``CONFIG_PATH`` are PEP 562 *lazy* attributes of
-    # ``vscode_config`` — ``monkeypatch.setattr`` would record the
-    # lazily-computed Path as the "old value" and restore it at
-    # teardown as a permanent module-dict pin pointing into this
-    # test's (soon stale) tmp home, polluting every later test in the
-    # process.  ``setitem`` on the module dict instead *deletes* the
-    # pin at teardown, restoring lazy resolution.
     import kiss.core.vscode_config as _vc
 
     monkeypatch.setitem(vars(_vc), "CONFIG_DIR", fake_home / ".kiss")
@@ -70,9 +63,6 @@ def _isolate_config(
     from kiss.core import config as config_module
 
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG", config_module.DEFAULT_CONFIG)
-    # ``apply_config_to_env`` mutates DEFAULT_CONFIG *in place*
-    # (e.g. ``max_budget``), so restoring the binding alone is not
-    # enough — restore the field values too.
     saved = config_module.DEFAULT_CONFIG
     snapshot = saved.model_copy(deep=True).__dict__
     yield
@@ -166,7 +156,6 @@ class TestApiKeyShell:
         save_api_key_to_shell("GEMINI_API_KEY", "test-key-123")
         rc = Path.home() / ".zshrc"
         content = rc.read_text()
-        # H3 fix uses shlex.quote which omits quotes for shell-safe values.
         assert (
             f"export GEMINI_API_KEY={shlex.quote('test-key-123')}" in content
         )
@@ -350,7 +339,6 @@ class TestResolveShellPath:
 
     def test_resolve_via_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """When ``PATH`` is populated, returns the ``shutil.which`` result."""
-        # sh exists on every POSIX system that runs the test suite.
         monkeypatch.setenv("PATH", "/usr/bin:/bin")
         resolved = _resolve_shell_path("sh") or _resolve_shell_path("bash")
         assert resolved is not None
@@ -361,11 +349,7 @@ class TestResolveShellPath:
     ) -> None:
         """With empty ``PATH``, falls back to known absolute locations."""
         monkeypatch.setenv("PATH", "")
-        # bash is in /bin on both macOS and Linux runners; zsh on macOS.
         resolved = _resolve_shell_path("bash")
-        # Either bash is present in a fallback path or the system truly
-        # has no bash (very unlikely); accept None to keep the test
-        # portable but verify the absolute-path invariant when found.
         if resolved is not None:
             assert os.path.isabs(resolved)
             assert Path(resolved).is_file()
@@ -441,8 +425,6 @@ class TestSourceShellEnv:
         monkeypatch.setenv("SHELL", "/bin/zsh")
         monkeypatch.setenv("PATH", "")
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        # Skip when the system has no zsh in any standard location
-        # (very unusual; macOS and modern Linux distros ship it).
         if _resolve_shell_path("zsh") is None:
             pytest.skip("zsh binary not available on this system")
         source_shell_env()
@@ -457,10 +439,8 @@ class TestSourceShellEnv:
         rc = Path.home() / ".zshrc"
         rc.write_text('export GEMINI_API_KEY="never-set"\n')
         monkeypatch.setenv("SHELL", "/bin/zsh")
-        monkeypatch.setenv("PATH", str(tmp_path))  # empty dir
+        monkeypatch.setenv("PATH", str(tmp_path))
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        # Force ``_resolve_shell_path`` to return None by stubbing the
-        # fallback list to a path that does not exist.
         from kiss.core import vscode_config as vc
         monkeypatch.setattr(
             vc, "_SHELL_FALLBACK_PATHS",
@@ -799,8 +779,6 @@ class TestSaveConfigAtomicity:
 
         from kiss.core import vscode_config as vc
 
-        # Seed config.json with a valid value (the autouse fixture
-        # already redirected CONFIG_PATH to a tmp dir).
         save_config({"remote_password": "secret-1", "max_budget": 1})
         assert vc.CONFIG_PATH.exists()
 
@@ -832,7 +810,6 @@ class TestSaveConfigAtomicity:
         t = threading.Thread(target=reader, daemon=True)
         t.start()
 
-        # Flip the file between two valid states many times.
         try:
             for i in range(200):
                 save_config({
@@ -857,7 +834,6 @@ class TestSaveConfigAtomicity:
         the install flow).
         """
         save_config({"remote_password": "sensca95", "max_budget": 10})
-        # Simulate a later partial save (e.g. only max_budget changed).
         save_config({"max_budget": 25})
         cfg = load_config()
         assert cfg["remote_password"] == "sensca95"

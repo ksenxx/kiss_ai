@@ -2,12 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Integration test: the VS Code webview HTML must use content-versioned
-// media URLs.  Without a cache-busting query string, VS Code can reuse
-// an older cached main.js/main.css after an extension update, causing
-// the History sidebar to run stale code that never renders running-task
-// rows/dots even though the source tree is fixed.
 
 'use strict';
 

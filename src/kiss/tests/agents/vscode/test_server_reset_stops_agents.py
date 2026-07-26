@@ -251,8 +251,6 @@ class TestServerResetStopsRunningAgents(TestCase):
         heartbeat = self.tmpdir / "heartbeat.txt"
         task_id_file = self.tmpdir / "task_id.txt"
 
-        # The daemon is up (UDS bound) and the agent worker is running
-        # (heartbeat file being rewritten, task row registered).
         self._wait_for(uds_path.exists, 30.0, "UDS socket to appear")
         self._wait_for(heartbeat.exists, 30.0, "agent heartbeat to start")
         self._wait_for(task_id_file.exists, 30.0, "task row to be registered")
@@ -269,8 +267,6 @@ class TestServerResetStopsRunningAgents(TestCase):
         client.connect(str(uds_path))
         try:
             client.sendall(json.dumps({"type": "serverReset"}).encode() + b"\n")
-            # Read until the acknowledgement notification arrives so we
-            # know the command was dispatched (not just buffered).
             buf = b""
             deadline = time.monotonic() + 10.0
             acked = False
@@ -302,7 +298,6 @@ class TestServerResetStopsRunningAgents(TestCase):
         heartbeat = self.tmpdir / "heartbeat.txt"
         task_id_file = self.tmpdir / "task_id.txt"
 
-        # 1. The daemon process must exit (the restart half of a reset).
         assert self.proc is not None
         try:
             self.proc.wait(timeout=30.0)
@@ -314,9 +309,6 @@ class TestServerResetStopsRunningAgents(TestCase):
                 f"child log:\n{log}"
             )
 
-        # 2. The agent worker must have STOPPED: once the daemon is dead
-        # the heartbeat file must go quiet.  (If agent threads survived
-        # as another process, or the daemon lingered, this keeps ticking.)
         mtime_after_exit = heartbeat.stat().st_mtime
         time.sleep(1.0)
         self.assertEqual(
@@ -326,10 +318,6 @@ class TestServerResetStopsRunningAgents(TestCase):
             "the running agent was not stopped",
         )
 
-        # 3. The task must be persisted as gracefully interrupted by the
-        # restart — NOT left at the abrupt-kill sentinel and NOT still
-        # marked running.  This is what distinguishes "the reset stopped
-        # the agent" from "the process death happened to kill it".
         task_id = task_id_file.read_text(encoding="utf-8").strip()
         db = sqlite3.connect(str(self.tmpdir / ".kiss" / "sorcar.db"))
         db.row_factory = sqlite3.Row

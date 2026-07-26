@@ -48,7 +48,6 @@ def _extract_render_tab_bar(src: str) -> str:
     balanced braces to find its closing ``}``.
     """
     start = src.index("function renderTabBar(")
-    # Find the opening ``{`` of the function body.
     open_brace = src.index("{", start)
     depth = 0
     i = open_brace
@@ -303,10 +302,6 @@ class TestSubagentTabDoneSolidIndicator(unittest.TestCase):
             f"Done rule must include ``animation: none`` to stop the "
             f"pulse.  Got: {block!r}",
         )
-        # No ``color:`` declaration that overrides the default purple.
-        # (The base ``.subagent-indicator`` rule sets
-        # ``color: var(--purple);`` — overriding it here would change
-        # the done state's colour.)
         color_decl = re.search(r"\bcolor\s*:\s*([^;]+);", block)
         self.assertIsNone(
             color_decl,

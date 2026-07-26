@@ -143,9 +143,6 @@ class TestAdoptDecline(unittest.TestCase):
 
     def test_none_probe_reprobes_then_adopts(self) -> None:
         """Transient no-information probes re-probe; adoption succeeds."""
-        # First two /ready replies are garbage (probe -> None), then the
-        # endpoint reports a healthy tunnel.  Pre-fix the first None
-        # probe declined adoption outright.
         httpd, port = _start_metrics_server([
             (503, "not json"),
             (503, "not json"),

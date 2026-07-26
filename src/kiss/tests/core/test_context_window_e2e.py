@@ -44,16 +44,11 @@ class TestOverflowPhraseDetection(unittest.TestCase):
     def test_detects_all_known_provider_phrasings(self) -> None:
         """Every known provider overflow phrasing is detected."""
         provider_errors = [
-            # Anthropic (exact production error from task 9c0bcb00...)
             "Your input exceeds the context window of this model. "
             "Please adjust your input and try again.",
-            # Anthropic alternative
             "prompt is too long: 213462 tokens > 200000 maximum",
-            # OpenAI error code
             "Error code: 400 - context_length_exceeded",
-            # OpenAI message
             "This model's maximum context length is 128000 tokens.",
-            # Gemini
             "The input token count (1200000) exceeds the maximum number "
             "of tokens allowed (1048576).",
         ]
@@ -67,8 +62,6 @@ class TestOverflowPhraseDetection(unittest.TestCase):
             "rate limit exceeded",
             "invalid api key",
             "connection reset",
-            # Merely mentioning the words must not be misrouted to the
-            # context-overflow recovery path.
             "the context window feature is unavailable",
         ]:
             with self.subTest(msg=msg):
@@ -166,9 +159,6 @@ class TestProactiveContextStop(ShrunkContextMixin):
             """
             return f"noted: {text}"
 
-        # ~8000 words ≈ 10K tokens of prompt >> 0.9 * 6000 threshold, but
-        # far below the provider's real 128K limit, so the first call
-        # SUCCEEDS and only KISS's proactive check fires at the next step.
         filler = _big_text(8000)
         with pytest.raises(ContextWindowExceededError) as exc_info:
             agent.run(
@@ -184,13 +174,9 @@ class TestProactiveContextStop(ShrunkContextMixin):
                 max_budget=1.0,
                 verbose=False,
             )
-        # Proactive stop: raised by _check_limits, not chained from a
-        # provider rejection.
         self.assertIsNone(exc_info.value.__cause__)
         threshold = CONTEXT_LIMIT_FRACTION * self.small_context
         self.assertGreaterEqual(agent.context_tokens_used, threshold)
-        # D1 regression: the usage string must show the TRUE context size
-        # (which exceeds the registered max) — never wrapped modulo max.
         usage = agent._get_usage_info_string()
         self.assertIn(f"Context: {agent.context_tokens_used:,}/6,000", usage)
         self.assertIn(f"Total tokens: {agent.total_tokens_used:,}", usage)
@@ -208,7 +194,6 @@ class TestProviderOverflowConversion(unittest.TestCase):
         the real provider; the agent must raise ContextWindowExceededError on the
         FIRST failure instead of retrying 3 times while growing the conversation."""
         agent = KISSAgent("Provider-Overflow-Test")
-        # ~200K words ≈ 250K tokens — genuinely above the 128K window.
         filler = _big_text(200_000)
         with pytest.raises(ContextWindowExceededError) as exc_info:
             agent.run(
@@ -220,10 +205,7 @@ class TestProviderOverflowConversion(unittest.TestCase):
                 max_budget=1.0,
                 verbose=False,
             )
-        # Reactive path: the provider error is chained as the cause.
         self.assertIsNotNone(exc_info.value.__cause__)
-        # Fast failure: no "Please try again" retry messages were appended
-        # (the old code retried 3 times, growing the conversation each time).
         retry_messages = [
             m for m in agent.messages if "Please try again" in str(m.get("content", ""))
         ]
@@ -275,12 +257,8 @@ class TestRelentlessRecovery(ShrunkContextMixin):
                 verbose=False,
             )
         parsed = yaml.safe_load(result)
-        # The old code hard-failed here with "failed with 3 consecutive
-        # errors ... exceeds the context window" and success=False.
         self.assertNotIn("consecutive errors", parsed.get("summary", ""))
         self.assertTrue(parsed["success"], f"expected recovery, got: {parsed}")
-        # Recovery really went through the continuation path: the merged
-        # summary contains the prior (overflowed) session's summary section.
         self.assertIn("### Previous Session", parsed.get("summary", ""))
 
     @pytest.mark.slow

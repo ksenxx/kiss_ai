@@ -75,8 +75,6 @@ def _extract_case_body(src: str, case_name: str) -> str:
     return src[start:i]
 
 
-# ---------- Backend order test ----------
-
 
 class _StubPrinter:
     """Capture broadcast events in order."""
@@ -139,8 +137,6 @@ class TestReplaySessionStatusBeforeTaskEvents:
         conn.close()
 
         printer = _StubPrinter()
-        # ``VSCodeServer.__init__`` requires several args; build a
-        # minimal instance via object.__new__ and inject what we need.
         srv = object.__new__(VSCodeServer)
         srv.printer = printer  # type: ignore[assignment]
         _RunningAgentState.running_agent_states.clear()
@@ -158,7 +154,6 @@ class TestReplaySessionStatusBeforeTaskEvents:
             temp_history_db, chat_id, tab_id,
         )
 
-        # Stub the loaders to return a fixed running session.
         fake_result = {
             "events": [{"type": "text_delta", "text": "hi"}],
             "task": "test task",
@@ -167,8 +162,6 @@ class TestReplaySessionStatusBeforeTaskEvents:
             "extra": "{}",
         }
 
-        # Stub ``_reattach_running_chat`` to report "still running"
-        # so the status broadcast path fires.
         with patch.object(
             VSCodeServer, "_reattach_running_chat", return_value=True,
         ), patch.object(
@@ -207,8 +200,6 @@ class TestReplaySessionStatusBeforeTaskEvents:
         assert status_ev.get("tabId") == tab_id
 
 
-# ---------- Frontend: openSubagentTab + subagentDone ----------
-
 
 class TestOpenSubagentTabSyncsRunningState:
     """When ``openSubagentTab`` lands on the currently active tab
@@ -218,9 +209,6 @@ class TestOpenSubagentTabSyncsRunningState:
 
     def test_handler_calls_set_running_state_when_active(self) -> None:
         body = _extract_case_body(_read_main_js(), "openSubagentTab")
-        # The block guarded by ``subTab.id === activeTabId`` must
-        # contain a setRunningState call so the global running state
-        # tracks the sub-agent's per-tab isRunning.
         m = re.search(
             r"if\s*\(\s*subTab\.id\s*===\s*activeTabId\b", body,
         )
@@ -229,9 +217,6 @@ class TestOpenSubagentTabSyncsRunningState:
             "`if (subTab.id === activeTabId ...)` so it only fires "
             "when the sub-agent tab is the one being viewed"
         )
-        # Slice from the guard to the end of the case (the if block
-        # extends to roughly the end; using the full tail is safe
-        # because nothing useful follows the guard inside this case).
         region = body[m.end():]
         assert "setRunningState(" in region, (
             "openSubagentTab's `subTab.id === activeTabId` branch "

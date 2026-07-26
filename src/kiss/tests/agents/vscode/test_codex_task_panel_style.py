@@ -69,12 +69,6 @@ def _find_rule(css: str, selector: str) -> str:
     return "\n".join(bodies)
 
 
-# ── 1. Task-panel-matched typography (static) ───────────────────────
-
-# Every chat-panel content surface that main.css (or the browser's UA
-# stylesheet, for pre/code) puts in a monospace editor font.  The
-# remote stylesheet must repin each one to the task panel's sans
-# --vscode-font-family stack.
 MONO_CONTENT_SELECTORS = [
     ".tp",
     ".tc-b",
@@ -117,8 +111,6 @@ def test_remote_page_font_size_vars_match_task_panel() -> None:
     assert "--vscode-font-size: 16px" in src
     assert "--vscode-editor-font-size: 16px" in src
 
-
-# ── 2. History-row colors (static) ──────────────────────────────────
 
 
 def test_main_js_history_rows_use_task_color_var_not_inline() -> None:
@@ -199,8 +191,6 @@ def test_remote_history_metadata_readable_on_dark(
     assert decl in rule, f"{selector} must set {decl}; got: {rule!r}"
 
 
-# ── 3. Single-line wrapping metadata (static) ───────────────────────
-
 
 def test_remote_metadata_container_flows_as_one_line() -> None:
     """.running-item-info must stop stacking the three spans as flex
@@ -244,8 +234,6 @@ def test_remote_metadata_separator_between_groups(selector: str) -> None:
         f"{selector} must insert a ' \u2022 ' separator; got: {rule!r}"
     )
 
-
-# ── Live end-to-end ─────────────────────────────────────────────────
 
 _INJECT_PAGE_JS = r"""
 (() => {
@@ -327,12 +315,6 @@ _INJECT_PAGE_JS = r"""
 })()
 """
 
-# History row with EVERY metadata field, rendered through the
-# production renderHistory (window message -> handleEvent).  On the
-# desktop remote page the docked sidebar issues its own getHistory on
-# boot, bumping the private ``historyGeneration`` counter, so the
-# event is posted once per plausible generation — renderHistory
-# ignores every stale generation and renders exactly the matching one.
 _INJECT_HISTORY_JS = r"""
 (() => {
   // Lay the sidebar out (the desktop remote page auto-docks it, but
@@ -387,8 +369,6 @@ _INJECT_HISTORY_JS = r"""
 })()
 """
 
-# Chat-panel CONTENT probes whose computed font family/size must equal
-# the task panel's.
 _TYPOGRAPHY_PROBES = {
     "txt": ".ev.txt",
     "txtCode": ".ev.txt code",
@@ -599,25 +579,12 @@ def test_live_task_panel_typography_and_history_rows(
                 page.wait_for_selector("#output", state="attached")
                 count = page.evaluate(_INJECT_PAGE_JS)
                 assert count >= 9, "transcript injection failed"
-                # Let the page's own boot-time getHistory round-trip
-                # settle BEFORE injecting: the server serves the real
-                # task database, so the boot response renders either
-                # real history rows or the empty placeholder — wait
-                # for either deterministically.  (The old swallowed
-                # 5s ``.sidebar-empty`` wait always timed out on a
-                # machine with a non-empty DB, and under
-                # parallel-suite load a late offset-0 boot render
-                # could wipe the injected row.)
                 page.wait_for_selector(
                     "#history-list .sidebar-empty, "
                     "#history-list .sidebar-item",
                     state="attached",
                     timeout=60000,
                 )
-                # Inject the fixed history session.  Retry in case a
-                # straggling backend history response (the boot flow
-                # can issue more than one getHistory) re-renders the
-                # list over the injected row.
                 for attempt in range(3):
                     page.evaluate(_INJECT_HISTORY_JS)
                     try:
@@ -630,11 +597,6 @@ def test_live_task_panel_typography_and_history_rows(
                     except PlaywrightTimeoutError:
                         if attempt == 2:
                             raise
-                # Wait for the metadata layout to settle: the info
-                # container must have real text rects (i.e. its inline
-                # children have been laid out) before probing.  Under
-                # heavy parallel load a fixed sleep was not enough and
-                # ``getClientRects`` occasionally returned 0.
                 page.wait_for_function(
                     """() => {
                         const info = document.querySelector(
@@ -660,7 +622,6 @@ def test_live_task_panel_typography_and_history_rows(
             "RemoteAccessServer thread failed"
         ) from thread_error
 
-    # 1. Typography: every content probe == task panel font + size.
     task_panel_font = probes["taskPanelFont"]
     assert " | 16px" in task_panel_font, probes
     fonts = probes["fonts"]
@@ -677,9 +638,6 @@ def test_live_task_panel_typography_and_history_rows(
         "thinking content font style must match the task panel: "
         + repr(probes)
     )
-    # The pinned task panel is a dark right-aligned bubble that
-    # blends with the thread: light #ececec text on the composer's
-    # #212121 surface (not the old light #ececec card).
     assert probes["taskPanelColor"] == "rgb(236, 236, 236)", probes
     assert probes["taskPanelBg"] == "rgb(33, 33, 33)", (
         "the task panel background must be the dark #212121 surface: "
@@ -694,7 +652,6 @@ def test_live_task_panel_typography_and_history_rows(
         + repr(probes)
     )
 
-    # 2. History-row colors: accent on the left border, neutral bg.
     row = probes["row"]
     assert row != "MISSING", "history row was not rendered"
     accent = probes["expectedAccent"]
@@ -710,7 +667,6 @@ def test_live_task_panel_typography_and_history_rows(
         f"row text must be light (not the old #1a1a1a); row: {row}"
     )
 
-    # 3. Metadata: one wrapping inline flow with all fields present.
     assert probes["infoDisplay"] == "block", probes
     for key in ("metrics", "workspace", "ids"):
         assert probes[key] == "inline | normal | visible", (
@@ -718,8 +674,6 @@ def test_live_task_panel_typography_and_history_rows(
         )
     assert "\u2022" in probes["workspaceSep"], probes
     assert "\u2022" in probes["idsSep"], probes
-    # The combined metadata is far wider than the sidebar: the single
-    # inline flow must WRAP over multiple line boxes, never clip.
     assert probes["infoLineRects"] >= 2, (
         "the single metadata line must wrap over multiple line boxes: "
         + repr(probes)
@@ -732,8 +686,6 @@ def test_live_task_panel_typography_and_history_rows(
     assert "1,234 tok" in probes["metricsText"], probes
     assert "$0.5000" in probes["metricsText"], probes
     assert "00:01:01" in probes["metricsText"], probes
-    # Full date AND wall-clock time (timestamp 1700000000 → Nov 14/15,
-    # 2023 depending on the machine's timezone).
     assert re.search(
         r"Nov 1[45], 2023, \d{1,2}:\d{2}\s?[AP]M", probes["metricsText"]
     ), probes

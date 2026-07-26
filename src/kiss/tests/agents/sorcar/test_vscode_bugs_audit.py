@@ -71,9 +71,7 @@ class TestCmdRunDuplicateSilentDrop(unittest.TestCase):
         self.server._handle_command({"type": "run", "tabId": "t1", "prompt": "x"})
 
         assert thread.is_alive()
-        # The duplicate run must produce zero broadcasts.
         assert len(self.events) == events_before
-        # And task_thread is still the original blocker thread (no new run).
         assert tab.task_thread is thread
 
         blocker.set()

@@ -58,16 +58,8 @@ TALK_TEXT = (
     "probability."
 )
 
-# Virtual-time ceiling of one driver run.
 VIRTUAL_CAP_MS = 600_000
 
-# Node driver: loads chat.html (script tags stripped), installs a
-# deterministic virtual clock, runs the real main.js (+ demo.js for
-# demo scenarios), triggers one historical Web-Speech-fallback
-# scenario (argv mode), and reports every speechSynthesis.speak call
-# and every Audio clip play.  Prints JSON:
-# {"spoken": [...], "clips": [...], "vnow": N, "replayDone": bool,
-#  "timerErrors": [...]}.
 NODE_DRIVER = r"""
 'use strict';
 const fs = require('fs');

@@ -440,7 +440,6 @@ class RelentlessRegression(unittest.TestCase):
             self.assertFalse(_str_to_bool(v))
 
     def test_finish_yaml_shape(self) -> None:
-        # ``finish`` tolerates string booleans at runtime; type them away.
         data = yaml.safe_load(
             relentless_finish(cast(Any, "true"), cast(Any, "false"), "sum"),
         )

@@ -2,20 +2,15 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-/**
- * Type definitions for VS Code extension messaging.
- */
 
 import {MergeData} from './MergeManager';
 
-/** Attachment for file uploads */
 export interface Attachment {
   name: string;
   mimeType: string;
-  data: string; // Base64 encoded
+  data: string;
 }
 
-/** Session/conversation info */
 export interface SessionInfo {
   id: number;
   task_id?: number;
@@ -25,7 +20,6 @@ export interface SessionInfo {
   has_events?: boolean;
 }
 
-/** Messages from webview to extension */
 export type FromWebviewMessage =
   | {
       type: 'submit';
@@ -55,8 +49,6 @@ export type FromWebviewMessage =
       tabId?: string;
       restoredTabs?: Array<{tabId: string; chatId: string}>;
     }
-  // The webview resumes either a whole chat (``chatId``, legacy ``id``)
-  // or a single task row (``taskId`` only, string or number).
   | {
       type: 'resumeSession';
       chatId?: string;
@@ -83,8 +75,6 @@ export type FromWebviewMessage =
   | {
       type: 'getAdjacentTask';
       tabId?: string;
-      // DB row id of the reference task (UUID string; legacy rows may
-      // carry ints), or null when the tab has no known task row yet.
       taskId: string | number | null;
       direction: 'prev' | 'next';
     }
@@ -102,16 +92,13 @@ export type FromWebviewMessage =
   | {type: 'voiceSensitivity'; value: number}
   | {type: 'voiceAck'};
 
-/** Messages from extension to webview (matches browser event protocol) */
 export type ToWebviewMessage = ToWebviewMessageBody & {tabId?: string};
 
 type ToWebviewMessageBody =
-  // Voice wake-word events (host-side listener → voice.js)
   | {type: 'voiceWake'}
   | {type: 'voiceTranscribing'}
   | {type: 'voiceSpeech'; text: string; speaker?: number; language?: string}
   | {type: 'voiceState'; listening: boolean; error?: string}
-  // Streaming events (same as browser JsonPrinter)
   | {type: 'thinking_start'}
   | {type: 'thinking_delta'; text: string}
   | {type: 'thinking_end'}
@@ -136,9 +123,6 @@ type ToWebviewMessageBody =
       text?: string;
       summary?: string;
       success?: boolean;
-      /** True when the agent paused to continue in a new session
-       *  (``json_printer`` copies ``is_continue`` onto result events;
-       *  main.js renders a "Status: Continue" banner for it). */
       is_continue?: boolean;
       total_tokens?: number;
       cost?: string;
@@ -153,10 +137,6 @@ type ToWebviewMessageBody =
     }
   | {type: 'system_prompt'; text: string}
   | {type: 'prompt'; text: string}
-  // Agent-initiated text-to-speech (the ``talk`` tool): the webview
-  // plays the GPT-synthesized clip (audioB64), staying silent when no
-  // clip can play; talkId dedupes fan-out copies, muted marks copies
-  // already played on this machine by another local player.
   | {
       type: 'talk';
       text: string;
@@ -167,7 +147,6 @@ type ToWebviewMessageBody =
       audioMime?: string;
       muted?: boolean;
     }
-  // Lifecycle events
   | {type: 'clear'; chat_id?: number}
   | {type: 'showWelcome'}
   | {type: 'clearChat'}
@@ -175,13 +154,9 @@ type ToWebviewMessageBody =
   | {type: 'task_error'; text: string}
   | {type: 'task_stopped'}
   | {type: 'task_interrupted'}
-  // UI events
   | {
       type: 'status';
       running: boolean;
-      /** Agent's true start timestamp (ms since epoch) supplied by the
-       *  backend (``task_runner`` / ``server._replay_session``) so the
-       *  webview's "Running …" timer is anchored to agent wall-clock. */
       startTs?: number;
     }
   | {
@@ -263,8 +238,6 @@ type ToWebviewMessageBody =
       type: 'adjacent_task_events';
       direction: 'prev' | 'next';
       task: string;
-      // DB row id (UUID string; legacy rows may carry ints) of the
-      // adjacent task, or null when no adjacent row exists.
       task_id: string | number | null;
       events: unknown[];
     }
@@ -288,19 +261,12 @@ type ToWebviewMessageBody =
     }
   | {type: 'subagentDone'; tab_id?: string; success?: boolean}
   | {
-      // Sub-agent tab announcement: ``task_id`` is the sub-agent's
-      // persisted ``task_history.id`` (a UUID hex string) and
-      // ``parent_tab_id`` is the frontend tab id of the parent
-      // run_parallel tab (empty when the parent has no tab).  The
-      // broadcast is stamped ``taskId: ''`` so it stays a global
-      // system event (see ``ChatSorcarAgent.run``).
       type: 'new_tab';
       task_id: string | number;
       parent_tab_id?: string;
       taskId?: string;
     };
 
-/** Command sent to Python backend */
 export interface AgentCommand {
   type:
     | 'run'

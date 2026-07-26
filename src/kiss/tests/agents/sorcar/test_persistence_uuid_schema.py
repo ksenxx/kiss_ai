@@ -205,7 +205,6 @@ def test_recover_orphaned_tasks_string_ids(fresh_kiss_db):
     P = fresh_kiss_db
     t1, _ = P._add_task("t1")
     t2, _ = P._add_task("t2")
-    # t1 active, t2 should be recovered
     n = P._recover_orphaned_tasks({t1})
     assert n == 1
     db = P._get_db()
@@ -300,7 +299,7 @@ def test_migration_from_old_schema(tmp_path, monkeypatch):
     conn.close()
     monkeypatch.setenv("KISS_HOME", str(tmp_path))
     with _fresh_persistence_module(tmp_path, db_path) as P:
-        db = P._get_db()  # triggers migration
+        db = P._get_db()
         cols = {
             r[1]: r[2].upper()
             for r in db.execute("PRAGMA table_info(task_history)").fetchall()
@@ -389,5 +388,4 @@ def test_resume_after_migration_uses_new_uuid_ids(tmp_path, monkeypatch):
         new_id = entries[0]["id"]
         assert isinstance(new_id, str)
         assert len(new_id) == 32
-        # _get_task_chat_id should accept the new string id
         assert P._get_task_chat_id(new_id) == "chatX"

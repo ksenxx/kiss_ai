@@ -2,27 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test that the demo replay no longer performs "Step A"
-// (prompt display + narration) before replaying a task's events:
-//
-//   1. The recorded task text must NOT be typed into the input box
-//      (no ``setInput`` call with the task text) and must NOT be
-//      cleared afterwards (no ``clearInput`` call).
-//   2. No "User said ..." narration must be spoken (no ``speakText``
-//      call at all).
-//   3. The replay must request the session events promptly — without
-//      the old 2-second prompt display pause.
-//   4. The replay still runs to completion: the result panel streams
-//      and the demo deactivates.
-//
-// Drives the real ``media/demo.js`` inside jsdom (no mocks of project
-// code; the ``window._demoApi`` host shim that main.js normally
-// provides is stubbed, exactly like demoPauseOnTalk.test.js).
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/demoNoPromptDisplay.test.js
 
 'use strict';
 
@@ -39,7 +18,6 @@ function sleep(ms) {
   });
 }
 
-/** Poll until *pred* returns true or *timeoutMs* elapses. */
 async function waitFor(pred, timeoutMs, what) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -49,13 +27,6 @@ async function waitFor(pred, timeoutMs, what) {
   throw new Error('timed out waiting for ' + what);
 }
 
-/**
- * Build a jsdom window with the real ``demo.js`` evaluated and a
- * ``window._demoApi`` host shim. ``calls`` records every interesting
- * host-api invocation in order (with a timestamp for pacing checks).
- * Speech hooks resolve immediately so the replay never blocks on
- * audio in this test.
- */
 function makeDemoWindow(events) {
   const dom = new JSDOM(
     '<!DOCTYPE html><html><body><div id="output"></div></body></html>',
@@ -124,7 +95,6 @@ function makeDemoWindow(events) {
   return {win, api, calls};
 }
 
-/** One session: an LLM text panel followed by a result. */
 function sessionEvents() {
   return [
     {type: 'text_delta', text: 'Working on it...'},
@@ -157,9 +127,6 @@ async function testNoPromptDisplayOrNarration() {
   const start = Date.now();
   const replay = startReplay(win);
 
-  // The session events must be requested promptly — the old Step A
-  // held the replay for a 2-second prompt display (plus narration)
-  // before sending ``resumeSession``.
   await waitFor(
     () =>
       calls.some(c => c.fn === 'sendMessage' && c.msg.type === 'resumeSession'),
@@ -179,7 +146,6 @@ async function testNoPromptDisplayOrNarration() {
 
   await replay;
 
-  // The task text must never be typed into the input box or cleared.
   assert.strictEqual(
     calls.filter(c => c.fn === 'setInput').length,
     0,
@@ -191,14 +157,12 @@ async function testNoPromptDisplayOrNarration() {
     'replay must not clear the input box',
   );
 
-  // No "User said ..." narration (nor any other speakText call).
   assert.strictEqual(
     calls.filter(c => c.fn === 'speakText').length,
     0,
     'replay must not narrate the prompt',
   );
 
-  // The replay still completes normally.
   assert.ok(resultRendered(win), 'replay streams the result to completion');
   assert.strictEqual(api.active, false, 'demo deactivates after the replay');
   win.close();

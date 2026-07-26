@@ -45,8 +45,6 @@ def _host_bash(command: str, _description: str) -> str:
     )
     out = proc.stdout
     if proc.returncode != 0:
-        # Match DockerManager.Bash's error-tagging convention so the test
-        # can assert on it; full stderr is appended for diagnosability.
         out += f"\n[exit code: {proc.returncode}]\n{proc.stderr}"
     return out
 

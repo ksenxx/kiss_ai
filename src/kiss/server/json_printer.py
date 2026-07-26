@@ -36,14 +36,6 @@ from kiss.core.printer import (
     truncate_result,
 )
 
-# Event types that carry a ``taskId`` PAYLOAD field but are NOT
-# task-stream events.  ``taskDeleted`` announces that a History-panel
-# row was deleted; its ``taskId`` names the just-removed DB row.  Such
-# events are global system broadcasts: they must never be recorded
-# under (or persisted for) the named task, and transport subclasses
-# (see :meth:`WebPrinter.broadcast` in ``web_server.py``) must send
-# them verbatim to EVERY connected client instead of fanning them out
-# to the task's subscribers.
 GLOBAL_EVENT_TYPES = frozenset({"taskDeleted"})
 
 _DISPLAY_EVENT_TYPES = frozenset({
@@ -53,10 +45,6 @@ _DISPLAY_EVENT_TYPES = frozenset({
     "task_done", "task_error", "task_stopped", "task_interrupted",
     "followup_suggestion",
     "autocommit_done",
-    # Backend warnings the user must see (e.g. the worktree agent's
-    # stash-pop failure / merge-conflict warnings).  They are rendered
-    # live by the frontend, so they must also be recorded/persisted or
-    # they silently vanish when the task is reopened or replayed.
     "warning",
 })
 
@@ -127,16 +115,6 @@ class _BashState:
         self.generation: int = 0
         self.last_flush: float = 0.0
         self.streamed: bool = False
-        # W2-F5: per-task lock held across the generation re-check +
-        # ``broadcast`` of a flush, and across ``reset()``'s
-        # generation bump.  It closes the reset-vs-flush TOCTOU
-        # WITHOUT holding the printer-global ``_bash_lock`` during
-        # ``broadcast`` (network I/O in transport subclasses) — which
-        # used to block every concurrent ``print(type="bash_stream")``
-        # from ANY task behind one slow client socket, and would
-        # deadlock any future subclass whose broadcast path touches
-        # ``_bash_lock``.  Lock order: ``flush_lock`` is always
-        # acquired BEFORE ``_bash_lock``, never while holding it.
         self.flush_lock = threading.Lock()
 
 
@@ -185,23 +163,12 @@ class JsonPrinter(Printer):
         self._thread_local = threading.local()
         self._lock = threading.Lock()
         self._bash_lock = threading.Lock()
-        # All per-task maps are keyed by ``str(task_id)``.  The empty
-        # string ``""`` is used as a fallback key for events that
-        # happen on a thread with no thread-local ``task_id`` set
-        # (e.g. very early task lifecycle, or unit tests).
         self._bash_states: dict[str, _BashState] = {}
         self._tokens_offsets: dict[str, int] = {}
         self._budget_offsets: dict[str, float] = {}
         self._steps_offsets: dict[str, int] = {}
         self._recordings: dict[str, list[dict[str, Any]]] = {}
         self._persist_agents: dict[str, Any] = {}
-        # ``_subscribers`` maps a task_id (str) to the set of frontend
-        # tab ids that should receive every broadcast for that task.
-        # The agent thread emits events tagged with ``taskId`` only;
-        # the transport layer (e.g. ``WebPrinter.broadcast``) fans
-        # each event out to every subscriber tab, stamping the
-        # tab-specific ``tabId`` on each fan-out copy.  The single
-        # recording per task is shared by all subscribed tabs.
         self._subscribers: dict[str, set[str]] = {}
 
     @staticmethod
@@ -304,12 +271,6 @@ class JsonPrinter(Printer):
         key = self._coerce_task_id(event.get("taskId"))
         if not key:
             return
-        # Look up the registered agent under ``_lock`` so a concurrent
-        # ``cleanup_task`` (which pops from ``_persist_agents`` under
-        # the same lock) cannot remove the entry between our ``get``
-        # and our use of the returned agent.  Holding the lock also
-        # serialises us against ``ChatSorcarAgent.run`` registering
-        # a fresh agent under the same key.
         with self._lock:
             agent = self._persist_agents.get(key)
         if agent is None:
@@ -594,9 +555,6 @@ class JsonPrinter(Printer):
                     extras = {}
                     event["extras"] = extras
                 if extras.get("audioB64"):
-                    # Already carries a clip (an earlier talk in the
-                    # same task); the most recent audio-less call is
-                    # the one being spoken now.
                     continue
                 extras["audioB64"] = audio_b64
                 extras["audioMime"] = audio_mime
@@ -633,20 +591,6 @@ class JsonPrinter(Printer):
         stamp_event_ts(event)
         event.pop("recordOnly", None)
         if "tabId" in event:
-            # Mirror :meth:`WebPrinter.broadcast`'s explicit-tabId
-            # semantics so the base class (production-reachable via
-            # ``VSCodeServer()``'s default printer and the CLI's
-            # ``RecordingConsolePrinter``) cannot drift: events that
-            # carry an explicit ``tabId`` are transient targeted
-            # system events — never recorded or persisted — EXCEPT
-            # task-scoped ``prompt`` / ``result`` events, whose
-            # durable copy is recorded + persisted with the ``tabId``
-            # STRIPPED (replay re-stamps events with the subscribing
-            # viewer's own tab id, so a stale frontend tab id must
-            # never survive in the recording or the DB).  Without
-            # this branch a viewer-targeted transient ``clear`` (a
-            # display type) leaked into the recording/DB and durable
-            # prompt/result copies kept the stale tab id.
             if event.get("type") in ("prompt", "result") and event.get("taskId"):
                 record = {k: v for k, v in event.items() if k != "tabId"}
                 with self._lock:
@@ -654,11 +598,6 @@ class JsonPrinter(Printer):
                 self._persist_event(record)
             return
         if event.get("type") in GLOBAL_EVENT_TYPES:
-            # Global system broadcast (e.g. ``taskDeleted``): its
-            # ``taskId`` is a payload field naming a just-deleted task,
-            # not a stream tag.  Never record or persist it — that
-            # would append it to an active recording / re-insert event
-            # rows for the deleted task.
             return
         event = self._inject_task_id(event)
         with self._lock:
@@ -692,12 +631,6 @@ class JsonPrinter(Printer):
         cost: str = "N/A",
         step_count: int = 0,
     ) -> None:
-        # Apply per-task offsets so sub-agent cost / tokens / steps that
-        # were accumulated into the printer (e.g. by ``run_parallel``)
-        # are included in the final result panel.  Otherwise the parent
-        # agent's displayed cost would be smaller than the sum of its
-        # sub-agents' costs.  Matches the offset arithmetic in the
-        # ``usage_info`` branch of :meth:`JsonPrinter.print`.
         cost = self._cost_with_offset(cost)
         total_tokens = total_tokens + self.tokens_offset
         step_count = step_count + self.steps_offset
@@ -773,18 +706,6 @@ class JsonPrinter(Printer):
                     bs.timer.daemon = True
                     bs.timer.start()
             if text:
-                # Mirror ``_flush_bash``'s two-phase protocol: re-check
-                # the generation under ``_bash_lock`` and broadcast
-                # under the per-task ``flush_lock`` (W2-F5), so a
-                # concurrent ``reset()`` (start of a new turn, which
-                # bumps the generation to invalidate stale output)
-                # cannot slip in between the drain above and this
-                # broadcast — otherwise stale bash output from the
-                # previous turn would be broadcast (and recorded/
-                # persisted) into the new turn.  Holding ``flush_lock``
-                # instead of ``_bash_lock`` across the (potentially
-                # slow, socket-bound) broadcast keeps other tasks'
-                # bash streaming unblocked.
                 with bs.flush_lock:
                     stale = False
                     with self._bash_lock:
@@ -863,25 +784,12 @@ class JsonPrinter(Printer):
                 results).
         """
         self._flush_bash()
-        # Show every tool's return value (so the user sees the output
-        # of run_parallel, ask_user_question, update_settings, the
-        # WebUseTool methods, etc.) EXCEPT ``finish`` -- the agentic
-        # loop renders that one as a dedicated "result" panel right
-        # after, so a tool_result here would just be a duplicate.
         show_result = tool_name != "finish"
         with self._bash_lock:
             streamed = self._bash_state.streamed
             self._bash_state.streamed = False
         result_content = "" if streamed else truncate_result(str(content))
         if show_result:
-            # Carry ``tool_name`` and (for Read calls) the
-            # originating ``path`` / ``start_line`` over the wire
-            # so a daemon-attached sorcar CLI client can
-            # reconstruct the ``tool_input`` slice its local
-            # ``ConsolePrinter`` needs to syntax-highlight a Read
-            # result body.  Without this the daemon→CLI replay
-            # would always plain-write the file contents, even
-            # though the in-process CLI does highlight them.
             event: dict[str, Any] = {
                 "type": "tool_result",
                 "content": result_content,
@@ -964,22 +872,11 @@ class JsonPrinter(Printer):
                 f"${budget_used:.4f}" if budget_used else "N/A",
             )
         elif hasattr(message, "content"):
-            # W3-D4: route message-object tool results (third-party /
-            # claude-style agents whose messages carry ``.content``
-            # blocks) through the SAME emission helper as the primary
-            # ``print(type="tool_result")`` path, so the event carries
-            # ``tool_name`` and gets the identical finish-suppression /
-            # streamed-dedup treatment.
             blocks = [
                 block
                 for block in message.content
                 if hasattr(block, "is_error") and hasattr(block, "content")
             ]
-            # The kwargs-level ``tool_input`` describes the whole
-            # message; stamping it onto every block of a multi-block
-            # message would mislabel unrelated results (e.g. a Read
-            # ``path``/``start_line`` on a Bash block), so it is only
-            # trusted when it unambiguously maps to a single block.
             shared_input = (
                 kwargs.get("tool_input") if len(blocks) == 1 else None
             )

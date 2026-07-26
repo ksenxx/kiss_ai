@@ -70,8 +70,6 @@ class TestMediaSymlinkLoop(IsolatedAsyncioTestCase):
         await self.server.start_async()
         self._loop_thread = threading.get_ident()
 
-        # Swap MEDIA_DIR only AFTER start (the cached HTML page was
-        # already built from the real media dir at server init).
         self._media_dir = Path(tempfile.mkdtemp(prefix="kiss_media_loop_"))
         (self._media_dir / "ok.txt").write_text("hello media")
         (self._media_dir / "loop").symlink_to(self._media_dir / "loop")

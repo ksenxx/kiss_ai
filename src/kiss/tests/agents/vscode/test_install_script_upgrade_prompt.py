@@ -42,8 +42,6 @@ import pytest
 REPO = Path(__file__).resolve().parents[5]
 INSTALL_SCRIPT = REPO / "install.sh"
 
-# Stub ``npm run package`` prints this and exits 7, deterministically
-# ending the run *after* all the version checks under test.
 NPM_MARKER = "NPM-PACKAGE-MARKER"
 NPM_EXIT = 7
 

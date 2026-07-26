@@ -125,7 +125,6 @@ class TestF4MachineTopicDeleteRace(unittest.TestCase):
         finally:
             stop.set()
             t.join(timeout=5)
-        # No stray temp files may accumulate next to the topic file.
         leftovers = [
             p.name
             for p in Path(self.tmpdir).iterdir()
@@ -202,11 +201,9 @@ class TestF3VoiceModelCrossProcessRace(unittest.TestCase):
             [expected, expected],
             f"each process must return an intact archive, got {outs}",
         )
-        # The published cache file itself must be intact too.
         self.assertEqual(
             hashlib.sha256(cache.read_bytes()).hexdigest(), expected
         )
-        # No stray per-process temp files may remain.
         leftovers = [
             p.name for p in cache.parent.iterdir() if p.name != cache.name
         ]
@@ -242,21 +239,14 @@ class TestF13SecondServerInitPreservesLiveTasks(unittest.TestCase):
         _RunningAgentState.register("tab-live", state)
         try:
             server = VSCodeServer()
-            # The orphan sweep runs on a background thread so daemon
-            # startup is never blocked by SQLite lock contention; join
-            # it so the assertions below observe the post-sweep state.
             sweep = server._orphan_sweep_thread
             assert sweep is not None
             sweep.join(timeout=30)
             self.assertFalse(sweep.is_alive(), "orphan sweep did not finish")
-            # The dead row has no live owner thread → swept.
             self.assertEqual(
                 _task_result(dead_id),
                 "Task terminated unexpectedly (process killed)",
             )
-            # The live row's worker thread is still running in THIS
-            # process → its sentinel must be left for the worker's
-            # own cleanup ``finally`` to overwrite.
             self.assertEqual(_task_result(live_id), "Agent Failed Abruptly")
         finally:
             stop.set()
@@ -332,9 +322,6 @@ class TestF8SpawnCloudflaredRetries(unittest.TestCase):
         proc = server._tunnel_proc
         assert proc is not None
         self.addCleanup(proc.stderr.close if proc.stderr else lambda: None)
-        # All three attempts exited immediately; the LAST one is kept
-        # (already reaped) with its stderr still open for the caller's
-        # URL-parsing path.
         self.assertIsNotNone(proc.returncode)
         self.assertEqual(proc.returncode, 1)
         assert proc.stderr is not None
@@ -383,7 +370,6 @@ class TestF5AndF10LiveServer(unittest.IsolatedAsyncioTestCase):
         assert resp is not None
         self.assertEqual(resp.status_code, 404)
 
-        # Pre-seeded cache → served without any network access.
         payload = os.urandom(256 * 1024)
         cache = Path(self.tmpdir) / "models" / "model.tar.gz"
         cache.parent.mkdir(parents=True, exist_ok=True)
@@ -403,7 +389,6 @@ class TestF5AndF10LiveServer(unittest.IsolatedAsyncioTestCase):
         saved_cache = ws_mod.VOICE_MODEL_CACHE
         saved_url = ws_mod.VOICE_MODEL_URL
         ws_mod.VOICE_MODEL_CACHE = Path(self.tmpdir) / "none" / "m.tar.gz"
-        # Closed port → the real download fails fast, no external network.
         ws_mod.VOICE_MODEL_URL = "http://127.0.0.1:1/model.tar.gz"
         try:
             req = Request("/voice-model.tar.gz", Headers())

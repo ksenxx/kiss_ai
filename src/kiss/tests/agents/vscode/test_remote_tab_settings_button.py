@@ -57,20 +57,16 @@ def _find_rule(css: str, selector: str) -> str:
     return "\n".join(bodies)
 
 
-# ── Static: remote-codex.css restores gear geometry ─────────────────
-
 
 def test_remote_codex_defines_chat_tab_settings_pill() -> None:
     """remote-codex.css must define an explicit .chat-tab-settings
     override so the .chat-tab pill padding cannot collapse the gear."""
     css = CODEX_CSS.read_text(encoding="utf-8")
     rule = _find_rule(css, ".chat-tab-settings")
-    # Pill styling to visually match the .chat-tab-add pill.
     assert "border-radius: 999px" in rule, (
         ".chat-tab-settings must be a pill on the remote webapp; "
         f"got: {rule!r}"
     )
-    # Restore enough content width for the 18x18 SVG.
     m_min = re.search(r"min-width:\s*(\d+)px", rule)
     m_max = re.search(r"max-width:\s*(\d+)px", rule)
     assert m_min and m_max, (
@@ -109,8 +105,6 @@ def test_remote_codex_settings_rule_comes_after_generic_chat_tab() -> None:
         "generic .chat-tab rule in remote-codex.css"
     )
 
-
-# ── Live: RemoteAccessServer + real Chromium ────────────────────────
 
 
 def _start_live_server(
@@ -235,15 +229,12 @@ def test_live_remote_tab_settings_button_renders_gear(
                     wait_until="domcontentloaded",
                 )
                 page.wait_for_selector("#tab-bar", state="attached")
-                # init() runs renderTabBar() at boot, which appends
-                # .chat-tab-add and .chat-tab-settings to #tab-bar.
                 page.wait_for_selector(
                     ".chat-tab-settings", state="attached"
                 )
                 page.wait_for_selector(
                     ".chat-tab-settings svg", state="attached"
                 )
-                # Let layout settle after the injected tab render.
                 page.wait_for_timeout(200)
                 measured = page.evaluate(_MEASURE_JS)
             finally:
@@ -266,8 +257,6 @@ def test_live_remote_tab_settings_button_renders_gear(
         ".chat-tab-settings must contain a gear SVG child; "
         + repr(measured)
     )
-    # The gear SVG must render at its intrinsic 18x18 size — not
-    # collapsed to a dot by the outer flex container.
     assert measured["svgWidth"] >= 16 and measured["svgHeight"] >= 16, (
         "settings gear SVG must render at ~18x18; got: "
         + repr(measured)
@@ -278,7 +267,6 @@ def test_live_remote_tab_settings_button_renders_gear(
         "the gear SVG must be flex-shrink:0 so it cannot be squeezed "
         + repr(measured)
     )
-    # The clickable pill must be roomy enough to hit reliably.
     assert measured["tabWidth"] >= 32, (
         "settings pill must be a clickable size; got: " + repr(measured)
     )

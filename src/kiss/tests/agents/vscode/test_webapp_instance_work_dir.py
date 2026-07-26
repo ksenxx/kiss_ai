@@ -137,8 +137,6 @@ out.sent = ws0.sent.map(s => JSON.parse(s));
         self.assertEqual(out["sessionWorkDir"], "/inst/a")
         sent = out["sent"]
         self.assertEqual(sent[0]["type"], "auth")
-        # The replay must come first; the queued getFiles arrives only
-        # after the connection's work_dir is established.
         self.assertEqual(sent[1]["type"], "setWorkDir")
         self.assertEqual(sent[1]["workDir"], "/inst/a")
         types_after = [m["type"] for m in sent[2:]]
@@ -178,18 +176,9 @@ ws1.onopen();
 ws1.onmessage({data: JSON.stringify({type: 'auth_ok'})});
 out.sent1 = ws1.sent.map(s => JSON.parse(s));
 """)
-        # Reload must have been triggered exactly once: this is what
-        # refreshes the page so the new server's restored state is
-        # visible to the user.
         self.assertEqual(out.get("reloaded"), 1, out)
-        # The second connection sent ONLY ``auth`` — no in-place
-        # setWorkDir replay, because the shim short-circuits to a
-        # reload on the post-disconnect ``auth_ok``.  The replay
-        # happens on the fresh post-reload shim from sessionStorage.
         sent1 = out["sent1"]
         self.assertEqual([m["type"] for m in sent1], ["auth"])
-        # And the sessionStorage pin survives the simulated reload
-        # (real ``location.reload()`` preserves sessionStorage).
         self.assertEqual(out["sessionWorkDir"], "/inst/a")
 
     def test_fresh_shim_with_pinned_work_dir_replays_on_auth_ok(self) -> None:
@@ -271,14 +260,11 @@ class TestWebappInstanceWorkDirOverWss(IsolatedAsyncioTestCase):
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect_persistence(self.tmpdir)
 
-        # Isolate config.json so auth uses an empty remote_password and
-        # this test never sees (or pollutes) the user's real config.
         self._orig_cfg_dir = vc.CONFIG_DIR
         self._orig_cfg_path = vc.CONFIG_PATH
         vc.CONFIG_DIR = Path(self.tmpdir) / "config"
         vc.CONFIG_PATH = vc.CONFIG_DIR / "config.json"
 
-        # Two folders, one per simulated webapp instance.
         self.dir_a = Path(self.tmpdir) / "inst_a"
         self.dir_b = Path(self.tmpdir) / "inst_b"
         self.dir_a.mkdir()
@@ -398,7 +384,6 @@ class TestWebappInstanceWorkDirOverWss(IsolatedAsyncioTestCase):
             ws_b, {"type": "setWorkDir", "workDir": str(self.dir_b)},
         )
 
-        # Instance A's WebSocket drops (page reload / network blip).
         await ws_a.close()
         ws_a2 = await self._connect_instance()
         await self._send(

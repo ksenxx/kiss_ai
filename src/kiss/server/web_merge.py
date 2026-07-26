@@ -42,19 +42,8 @@ class _WebMergeState:
     """
 
     def __init__(self, merge_data: dict[str, Any]) -> None:
-        # Full ``data`` payload of the opening ``merge_data`` event,
-        # kept so an in-flight review can be replayed verbatim to a
-        # client that reconnects mid-review (browser reload).  The
-        # ``hunks`` dicts inside are shared (not copied): reject
-        # actions adjust their ``cs`` offsets in place, so a replay
-        # always reflects the current on-disk line numbers.
         self.data: dict[str, Any] = merge_data
         self.files: list[dict[str, Any]] = merge_data.get("files", [])
-        # The tab's repository (or worktree) directory, stamped by the
-        # backend ``_start_merge_session``.  Echoed back on the
-        # ``all-done`` ``mergeAction`` so the post-merge autocommit scan
-        # runs against the tab's own repo rather than the daemon-wide
-        # ``self.work_dir`` (which may be a different, non-git folder).
         self.work_dir: str = merge_data.get("work_dir", "")
         self._all_hunks: list[tuple[int, int]] = [
             (fi, hi)
@@ -62,9 +51,6 @@ class _WebMergeState:
             for hi in range(len(f.get("hunks", [])))
         ]
         self._pos = 0
-        # Maps (file_idx, hunk_idx) -> resolution status ("accepted" or
-        # "rejected"); used so the browser can render accepted hunks
-        # dimmed and rejected hunks struck-through.
         self._resolved: dict[tuple[int, int], str] = {}
 
     @property
@@ -90,14 +76,6 @@ class _WebMergeState:
         if self._pos >= len(self._all_hunks):
             self._pos = len(self._all_hunks) - 1
         if self.is_resolved(*self._all_hunks[self._pos]):
-            # A partial ``reject-all``/``reject-file`` failure resolves
-            # whole files without ever calling ``advance()``, so
-            # ``_pos`` can be left on a RESOLVED hunk.  Returning it
-            # would highlight a resolved hunk as current and let a
-            # follow-up accept/reject re-act on it (flipping its
-            # recorded status while the disk content disagrees).  Seek
-            # to the next unresolved hunk instead — one is guaranteed
-            # to exist because ``remaining > 0`` here.
             self._seek(1)
         return self._all_hunks[self._pos]
 
@@ -260,9 +238,6 @@ def _restore_base_bytes(
         data = Path(base_path).read_bytes()
     except OSError:
         data = b""
-    # Never write THROUGH a symlink: git tracks the link itself, not
-    # its target, and the target may be a precious file (possibly
-    # outside the repo) whose truncation would be silent data loss.
     if dest.is_symlink():
         dest.unlink()
     dest.write_bytes(data)
@@ -326,9 +301,6 @@ def _reject_hunk_in_file(
             make_executable=make_executable,
         )
         return
-    # Read from *write_to* (the real workspace target) when it exists
-    # so that successive partial rejections accumulate against the
-    # restored content rather than the (now-stale) placeholder.
     cur_lines: list[str] = []
     try:
         try:
@@ -340,10 +312,6 @@ def _reject_hunk_in_file(
                 cur_lines = []
         base_lines = _read_lines_preserved(base_path)
     except UnicodeDecodeError:
-        # Undecodable content that slipped past the binary sniff
-        # (e.g. UTF-16 / latin-1 without NUL bytes in the first 8 KiB).
-        # Restoring the base bytes wholesale beats crashing the merge
-        # action with an exception.
         _restore_base_bytes(
             base_path, write_to, make_executable=make_executable,
         )
@@ -358,9 +326,6 @@ def _reject_hunk_in_file(
     )
     dest = Path(write_to)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    # Replace a symlink instead of writing THROUGH it — writing through
-    # would clobber the pointed-to file (which may live outside the
-    # repo) while leaving the rejected link itself untouched.
     if dest.is_symlink():
         dest.unlink()
     with open(write_to, "w", encoding="utf-8", newline="") as f:
@@ -442,10 +407,6 @@ def _reject_all_hunks_in_file(
     if hunk_indices is None:
         hunk_indices = list(range(len(hunks)))
     if file_data.get("binary"):
-        # Binary entries carry a single whole-file pseudo-hunk; restore
-        # the base bytes wholesale (line splicing does not apply).
-        # ``link_target`` marks a symlink-base entry whose reject must
-        # recreate the link itself.
         if hunk_indices:
             _restore_base_bytes(
                 file_data["base"],

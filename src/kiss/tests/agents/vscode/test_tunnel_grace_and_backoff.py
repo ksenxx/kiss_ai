@@ -123,12 +123,6 @@ class TestStartupGracePeriod(unittest.IsolatedAsyncioTestCase):
         self.server._loop = self._loop
         self.server._tunnel_proc = self._proc
         self.server._tunnel_metrics_port = 1
-        # ``_probe_tunnel_ready`` now distinguishes "unreachable" (None
-        # — no information, do not count as unhealthy) from "confirmed
-        # zero ready connections" (False — count toward unhealthy
-        # streak).  These tests verify the *grace window* logic, not
-        # the probe itself, so inject a deterministic False so a tick
-        # past the grace window is guaranteed to count as unhealthy.
         self._orig_probe = ws_mod._probe_tunnel_ready
         ws_mod._probe_tunnel_ready = lambda _port: False  # type: ignore[assignment]
 
@@ -172,8 +166,6 @@ class TestRestartBackoff(unittest.IsolatedAsyncioTestCase):
         self._tmpdir = Path(self._tmp.name)
         self._old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = f"{self._tmpdir}{os.pathsep}{self._old_path}"
-        # The H1 watchdog guard skips tunnel restarts when no password is
-        # configured.  Set one so the restart path under test actually runs.
         self._orig_config = (
             CONFIG_PATH.read_text() if CONFIG_PATH.exists() else None
         )
@@ -256,7 +248,6 @@ class TestSuccessfulRestartResetsBackoff(unittest.IsolatedAsyncioTestCase):
         self._tmpdir = Path(self._tmp.name)
         self._old_path = os.environ.get("PATH", "")
         os.environ["PATH"] = f"{self._tmpdir}{os.pathsep}{self._old_path}"
-        # H1 watchdog guard requires a password before the restart runs.
         self._orig_config = (
             CONFIG_PATH.read_text() if CONFIG_PATH.exists() else None
         )

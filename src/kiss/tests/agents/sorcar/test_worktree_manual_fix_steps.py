@@ -137,8 +137,6 @@ class TestManualFixStepsExecutable:
         assert wt.baseline_commit is None
         branch = wt.branch
 
-        # Agent commits a change in the worktree; main independently
-        # commits a conflicting change to the same file.
         (wt.wt_dir / "f.txt").write_text("agent edit\n")
         assert GitWorktreeOps.commit_all(wt.wt_dir, "agent work")
         (self.repo / "f.txt").write_text("main edit\n")
@@ -150,8 +148,6 @@ class TestManualFixStepsExecutable:
 
         _run_fix_block(block, "echo resolved > f.txt")
 
-        # Following the instructions must leave the merge committed
-        # and the task branch deleted.
         assert (self.repo / "f.txt").read_text() == "resolved\n"
         assert GitWorktreeOps.head_sha(self.repo) is not None
         assert not GitWorktreeOps.has_uncommitted_changes(self.repo)
@@ -165,7 +161,6 @@ class TestManualFixStepsExecutable:
     ) -> None:
         """Baseline (cherry-pick) conflict: following the printed steps
         verbatim must apply the work AND delete the task branch."""
-        # Dirty main state at setup so a baseline commit is created.
         (self.repo / "f.txt").write_text("user dirty edit\n")
         agent = WorktreeSorcarAgent("test")
         wt_work = agent._try_setup_worktree(self.repo, None)
@@ -175,9 +170,6 @@ class TestManualFixStepsExecutable:
         assert wt.baseline_commit is not None
         branch = wt.branch
 
-        # Agent commits a change in the worktree; main COMMITS an
-        # independent conflicting change (HEAD advances past
-        # baseline^, so no -X theirs and the conflict is real).
         (wt.wt_dir / "f.txt").write_text("agent edit\n")
         assert GitWorktreeOps.commit_all(wt.wt_dir, "agent work")
         (self.repo / "f.txt").write_text("main committed edit\n")
@@ -211,13 +203,12 @@ class TestPendingReviewClearedByExplicitAction:
     def test_discard_clears_pending_review(self) -> None:
         agent = WorktreeSorcarAgent("test")
         assert agent._try_setup_worktree(self.repo, None) is not None
-        agent._pending_review = True  # as task_runner sets on user-Stop
+        agent._pending_review = True
 
         result = agent.discard()
 
         assert "Discarded branch" in result
         assert agent._pending_review is False
-        # Teardown's preserve-for-review path must now be a no-op.
         assert agent._preserve_pending_worktree_for_review() is False
 
     def test_merge_clears_pending_review(self) -> None:
@@ -227,7 +218,7 @@ class TestPendingReviewClearedByExplicitAction:
         assert wt is not None
         (wt.wt_dir / "g.txt").write_text("new file\n")
         assert GitWorktreeOps.commit_all(wt.wt_dir, "agent work")
-        agent._pending_review = True  # as task_runner sets on user-Stop
+        agent._pending_review = True
 
         result = agent.merge()
 

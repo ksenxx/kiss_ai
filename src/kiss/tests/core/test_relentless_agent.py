@@ -22,8 +22,6 @@ from kiss.core.relentless_agent import (
 )
 from kiss.tests.conftest import requires_gemini_api_key
 
-# gemini-2.0-flash was retired by Google (404 "no longer available");
-# use the current cheap flash model for real-call tests.
 TEST_MODEL = "gemini-2.5-flash"
 
 
@@ -218,17 +216,14 @@ class TestMultiSessionSummaryMerge(unittest.TestCase):
 
     def test_merged_summary_on_completion(self) -> None:
         """After 2 continue sessions + final success, summary merges all sessions."""
-        # Session 1: continue with summary "did A"
         resp1 = self._make_tool_call_response(
             "finish",
             {"success": False, "is_continue": True, "summary": "did A"},
         )
-        # Session 2: continue with summary "did B"
         resp2 = self._make_tool_call_response(
             "finish",
             {"success": False, "is_continue": True, "summary": "did B"},
         )
-        # Session 3: success with summary "did C"
         resp3 = self._make_tool_call_response(
             "finish",
             {"success": True, "is_continue": False, "summary": "did C"},
@@ -253,16 +248,12 @@ class TestMultiSessionSummaryMerge(unittest.TestCase):
             parsed = yaml.safe_load(result)
             assert parsed["success"] is True
             summary = parsed["summary"]
-            # Prior (continued) sessions are PREPENDED as "Previous Session N"
-            # blocks; the terminal (success) session is appended last under
-            # "### Final Session".
             assert "### Previous Session 1" in summary
             assert "did A" in summary
             assert "### Previous Session 2" in summary
             assert "did B" in summary
             assert "### Final Session" in summary
             assert "did C" in summary
-            # Order: previous sessions come first, final session last.
             assert summary.index("did A") < summary.index("did B") < summary.index(
                 "did C"
             )

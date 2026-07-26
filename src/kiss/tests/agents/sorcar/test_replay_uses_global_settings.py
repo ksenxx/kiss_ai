@@ -99,8 +99,6 @@ def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]], threading.Lock]:
     printer = server.printer
 
     def capture(event: dict[str, Any]) -> None:
-        # Mirror the real ``JsonPrinter.broadcast`` side effects so
-        # persistence and per-task recording see the event.
         ev = printer._inject_task_id(event)
         with printer._lock:
             printer._record_event(ev)
@@ -215,7 +213,6 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         return None
 
     def test_replay_strips_global_setting_keys_from_extra(self) -> None:
-        # Step 1: run a first task with the old global settings.
         first_tab = "tab-first"
         _run_and_wait(
             self.server,
@@ -232,19 +229,15 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         first_task_id = cast(str, first_row["id"])
         assert chat_id, "first task should have a chat id"
 
-        # Sanity-check the persisted snapshot — the bug is only
-        # interesting BECAUSE these keys live in ``extra``.
         persisted = self._persisted_extra_for(first_task_id)
         assert persisted.get("is_worktree") is True, persisted
         assert persisted.get("is_parallel") is True, persisted
         assert persisted.get("auto_commit_mode") is True, persisted
         assert persisted.get("model") == "claude-opus-4-6", persisted
 
-        # Clear captured events so the replay broadcast is unambiguous.
         with self.lock:
             self.events.clear()
 
-        # Step 2: user clicks the history row for T1 into a fresh tab.
         history_tab = "tab-history"
         self.server._handle_command(
             {"type": "newChat", "tabId": history_tab},
@@ -256,10 +249,6 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
             "tabId": history_tab,
         })
 
-        # Step 3: inspect the broadcast ``task_events``.  Its ``extra``
-        # must NOT carry the four global-setting keys, so the
-        # frontend's ``task_events`` handler cannot stamp the live
-        # toggles / model with the loaded task's stale snapshot.
         replay = self._broadcasted_task_events()
         assert replay is not None, "expected a task_events broadcast on resume"
         extra_str = cast(str, replay.get("extra", ""))
@@ -273,14 +262,11 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
                 f"replay broadcast leaked stripped key {stripped!r}: "
                 f"{extra_json!r}"
             )
-        # Keys we DO want to keep for the chat header / timer / tab
-        # work-dir routing must survive the strip.
         assert extra_json.get("work_dir") == self.tmpdir, extra_json
         assert int(cast(int, extra_json.get("startTs", 0))) > 0, extra_json
         assert int(cast(int, extra_json.get("endTs", 0))) > 0, extra_json
 
     def test_followup_task_uses_new_global_settings(self) -> None:
-        # Step 1: run a first task under the OLD global settings.
         first_tab = "tab-first"
         _run_and_wait(
             self.server,
@@ -296,7 +282,6 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         chat_id = str(first_row["chat_id"])
         first_task_id = cast(str, first_row["id"])
 
-        # Step 2: user clicks the history row for T1 → fresh tab.
         history_tab = "tab-history"
         self.server._handle_command(
             {"type": "newChat", "tabId": history_tab},
@@ -308,19 +293,12 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
             "tabId": history_tab,
         })
 
-        # The replay must NOT have seeded ``tab.use_worktree`` with
-        # the loaded task's snapshot — otherwise a follow-up run that
-        # forgot to pass ``useWorktree`` would silently inherit the
-        # stale True from the loaded T1.  The new global setting is
-        # ``False`` (the user toggled it off after T1 finished).
         loaded_tab = self.server._get_tab(history_tab)
         assert not loaded_tab.use_worktree, (
             "loading a chat must not stamp tab.use_worktree from the "
             "loaded task's historical snapshot"
         )
 
-        # Step 3: the user submits a follow-up under the NEW global
-        # settings (toggles all flipped off, model swapped).
         _run_and_wait(
             self.server,
             tab_id=history_tab,
@@ -332,9 +310,6 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
             auto_commit=False,
         )
 
-        # The second persisted task's extras must reflect the NEW
-        # global settings.  ``_load_history`` returns rows in
-        # most-recent-first order so the follow-up is row 0.
         rows = th._load_history(limit=10)
         assert len(rows) >= 2, rows
         second_task_id = cast(str, rows[0]["id"])
@@ -406,12 +381,6 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         chat_id = str(first_row["chat_id"])
         first_task_id = cast(str, first_row["id"])
 
-        # Now load that chat into a brand-new tab.  We seed
-        # ``selected_model`` on the tab to a non-default value
-        # AFTER ``newChat`` (which itself resets it), to simulate
-        # a tab that had run a task with a non-default model in
-        # the past.  ``_replay_session`` (with the fix) must reset
-        # it back to the server default.
         history_tab = "tab-history-model"
         self.server._handle_command(
             {"type": "newChat", "tabId": history_tab},
@@ -429,7 +398,6 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         assert (
             loaded_tab.selected_model == self.server._default_model
         ), loaded_tab.selected_model
-        # Defensive: must not be the stale value we seeded.
         assert loaded_tab.selected_model != stale_model
 
     def test_history_load_preserves_state_during_merge_review(self) -> None:
@@ -457,7 +425,6 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         task_id = cast(str, row["id"])
 
         tab = self.server._get_tab(tab_id)
-        # Simulate mid-merge: task finished, merge review still open.
         tab.is_task_active = False
         tab.is_merging = True
         tab.use_worktree = True
@@ -530,8 +497,6 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         ``is_task_active = True``) on the tab BEFORE calling
         ``_replay_session``, then assert the fields are unchanged."""
         tab_id = "tab-live"
-        # Spin up a chat by running a task to completion so a
-        # task_history row exists for the replay.
         _run_and_wait(
             self.server,
             tab_id=tab_id,
@@ -547,10 +512,6 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         task_id = cast(str, row["id"])
 
         tab = self.server._get_tab(tab_id)
-        # Simulate an in-flight run by flipping the "alive" flag.
-        # ``_replay_session``'s ``tab_alive`` guard reads both
-        # ``is_task_active`` and ``task_thread.is_alive``; setting
-        # the flag is the minimum repro.
         tab.is_task_active = True
         tab.use_worktree = True
         tab.use_parallel = True
@@ -561,8 +522,6 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
             self.server._replay_session(
                 chat_id=chat_id, tab_id=tab_id, task_id=task_id,
             )
-            # The guard prevents the reset, so the live values
-            # survive.
             assert tab.use_worktree is True, tab.use_worktree
             assert tab.use_parallel is True, tab.use_parallel
             assert tab.auto_commit_mode is True, tab.auto_commit_mode
@@ -607,8 +566,6 @@ class TestExtraForReplayUnit(unittest.TestCase):
     def test_dict_without_stripped_keys_passes_through(self) -> None:
         from kiss.server.server import _extra_for_replay
         payload = json.dumps({"work_dir": "/tmp/x", "startTs": 1})
-        # The implementation returns the ORIGINAL string when no
-        # stripped key was present (skips re-serialization).
         out = _extra_for_replay(payload)
         assert json.loads(out) == json.loads(payload)
 
@@ -636,7 +593,6 @@ class TestSubagentReplayStripsGlobalSettings(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect_db(self.tmpdir)
-        # No git repo needed: we seed task_history directly.
 
     def tearDown(self) -> None:
         _restore_db(self.saved)
@@ -644,8 +600,6 @@ class TestSubagentReplayStripsGlobalSettings(unittest.TestCase):
 
     def test_persisted_subagent_extras_are_stripped(self) -> None:
         chat_id = "chat-subs"
-        # Seed a parent row with a persisted extra that contains the
-        # stripped keys.
         parent_id, _ = th._add_task("parent", chat_id=chat_id)
         th._append_chat_event(
             {"type": "text_delta", "text": "parent-stream"},
@@ -666,8 +620,6 @@ class TestSubagentReplayStripsGlobalSettings(unittest.TestCase):
             },
             task_id=parent_id,
         )
-        # Seed two sub-agent rows whose extras also carry stripped
-        # keys + the subagent metadata.
         sub_ids: list[str] = []
         for i in range(2):
             sub_id, _ = th._add_task(f"sub {i}", chat_id=chat_id)
@@ -699,7 +651,6 @@ class TestSubagentReplayStripsGlobalSettings(unittest.TestCase):
             chat_id=chat_id, tab_id=parent_tab, task_id=parent_id,
         )
 
-        # Filter task_events for sub-agent tabs.
         sub_tab_ids = {f"{parent_tab}__sub_{sid}" for sid in sub_ids}
         with lock:
             sub_task_events = [
@@ -721,9 +672,6 @@ class TestSubagentReplayStripsGlobalSettings(unittest.TestCase):
                     f"sub-agent replay broadcast leaked stripped key "
                     f"{stripped!r}: {extra_json!r}"
                 )
-            # Preserved keys: startTs / endTs / work_dir survive so
-            # the sub-tab's "Running …" / "Done" header keeps working,
-            # and the subagent metadata is still present.
             assert extra_json.get("startTs", 0) > 0, extra_json
             assert extra_json.get("endTs", 0) > 0, extra_json
             assert extra_json.get("work_dir") == self.tmpdir, extra_json

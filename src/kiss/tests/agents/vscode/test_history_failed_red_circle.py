@@ -81,17 +81,10 @@ def _build_test_page() -> str:
     api_js = _API_JS.read_text(encoding="utf-8")
     js = _JS.read_text(encoding="utf-8")
     html = _HTML.read_text(encoding="utf-8")
-    # Strip the template placeholders that the extension fills in at
-    # webview load time — we don't need any of them for this test, and
-    # leaving them in would inject invalid markup (e.g. ``<link
-    # href="{{STYLE_HREF}}">`` resolves to a 404 link).
     body_start = html.find("<body")
     body_open_end = html.find(">", body_start) + 1
     body_end = html.find("</body>")
     body = html[body_open_end:body_end]
-    # Drop the script tags — we inline ``main.js`` ourselves below and
-    # the others (hljs / marked / panelCopy / demo / shim / nonce) are
-    # either stubbed or irrelevant for history rendering.
     body = "\n".join(
         line for line in body.splitlines()
         if "<script" not in line and "</script>" not in line
@@ -195,18 +188,6 @@ def _open_history_page(_browser, width: int = 480, height: int = 900):
         "document.getElementById('history-list') !== null",
         timeout=5000,
     )
-    # The sidebar ships hidden behind ``transform: translateX(-100%)``
-    # and is revealed by adding ``.open``; in production the user
-    # clicks the history button to add that class.  Add it here so
-    # the rendered DOM has real layout boxes (otherwise the row /
-    # dot inherit zero geometry from the slid-off container).
-    #
-    # ``#app`` ships with an inline ``style="display:none;"`` and is
-    # only revealed by ``setServerLoading(false)`` once the kiss-web
-    # daemon socket connects.  In this harness no daemon is ever
-    # connected, so we flip it manually — otherwise every descendant
-    # (including the failed dot) inherits a 0×0 layout box and the
-    # test cannot verify that the red circle is actually painted.
     page.evaluate(
         "() => {"
         " document.getElementById('app').style.display = '';"
@@ -457,7 +438,6 @@ def test_failed_session_renders_red_circle(_browser) -> None:
         )
         by_text = {r["text"]: r for r in info}
 
-        # Failed task — must have a red dot.
         fail = by_text["failing task"]
         assert fail["category"] == "errors", (
             f"failed row miscategorised: {fail['category']!r}"
@@ -470,7 +450,6 @@ def test_failed_session_renders_red_circle(_browser) -> None:
         assert dot["width"] == "8px" and dot["height"] == "8px", (
             f"failed dot is not 8x8: {dot['width']} x {dot['height']}"
         )
-        # ``border-radius: 50%`` resolves to half the width in pixels.
         assert dot["borderRadius"] in ("4px", "50%"), (
             f"failed dot is not rounded: border-radius={dot['borderRadius']}"
         )
@@ -498,7 +477,6 @@ def test_failed_session_renders_red_circle(_browser) -> None:
             f"failed dot has wrong aria-label: {dot['ariaLabel']!r}"
         )
 
-        # Running task — green dot, NOT red.
         run = by_text["running task"]
         assert run["category"] == "running", (
             f"running row miscategorised: {run['category']!r}"
@@ -510,7 +488,6 @@ def test_failed_session_renders_red_circle(_browser) -> None:
             "running task should render a .sidebar-item-running element"
         )
 
-        # Completed task — no dot at all.
         ok = by_text["successful task"]
         assert ok["category"] == "completed", (
             f"completed row miscategorised: {ok['category']!r}"
@@ -534,7 +511,6 @@ def test_errored_filter_toggle_hides_and_shows_failed_row(_browser) -> None:
     context, page = _open_history_page(_browser)
     try:
         _post_history(page, _sample_sessions())
-        # Baseline — failed row visible.
         visible0 = page.evaluate(
             "() => document.querySelector("
             "'#history-list .sidebar-item[data-category=\"errors\"]'"
@@ -542,7 +518,6 @@ def test_errored_filter_toggle_hides_and_shows_failed_row(_browser) -> None:
         )
         assert visible0, "failed row should be visible before any filter change"
 
-        # Uncheck "Errored" — failed row must hide.
         page.evaluate(
             "() => { const c = document.getElementById('hf-errors');"
             " c.checked = false; c.dispatchEvent(new Event('change')); }"
@@ -554,7 +529,6 @@ def test_errored_filter_toggle_hides_and_shows_failed_row(_browser) -> None:
         )
         assert hidden, "failed row should hide when Errored filter is unchecked"
 
-        # Re-check "Errored" — failed row must re-appear.
         page.evaluate(
             "() => { const c = document.getElementById('hf-errors');"
             " c.checked = true; c.dispatchEvent(new Event('change')); }"
@@ -662,11 +636,6 @@ def test_search_results_can_render_failed_red_circle(_browser) -> None:
             ")",
             timeout=5000,
         )
-        # Typing into the search box calls ``resetHistoryPagination``
-        # which bumps ``historyGeneration``; ``renderHistory`` drops
-        # any incoming ``history`` event whose ``generation`` does not
-        # match the current value, so reuse the generation the
-        # frontend just asked for instead of the default ``0``.
         search_generation = page.evaluate(
             "() => {"
             " const m = window.__postedMessages.slice().reverse().find("
