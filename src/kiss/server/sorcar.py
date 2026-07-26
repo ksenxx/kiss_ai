@@ -47,8 +47,12 @@ socket restrict access to the owning user.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import math
 import os
+import secrets
 import socket
 import time
 import uuid
@@ -57,7 +61,10 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from kiss.agents.sorcar.persistence import _default_kiss_dir
+from kiss.core.vscode_config import load_config
 from kiss.server.tools_file import resolve_tools_file
+
+logger = logging.getLogger(__name__)
 
 # Read buffer limit for a single daemon event line.  The daemon emits
 # large single-line JSON events (e.g. ``system_prompt`` carrying the
@@ -174,20 +181,23 @@ def _to_task_result(
 #
 # The single source of truth for every command a user interface (the
 # VS Code extension, the remote webapp, or a CLI/Python client) may
-# send to the daemon.  Both transports (UDS and WSS) speak the same
-# newline-delimited JSON: one object per line, dispatched on its
-# ``"type"`` field.  The daemon routes every incoming command through
-# :meth:`ServerApi.dispatch` — the server's code API defined below —
-# which validates it with :func:`validate_command` (answering an
-# invalid one with an ``{"type": "error", "text": ...}`` event
-# instead of processing it) and invokes the :class:`ServerApi` method
-# the command's catalog entry names.
+# send to the daemon.  Both transports speak the same JSON commands,
+# dispatched on the ``"type"`` field — framed as newline-delimited
+# lines on the UDS and as one object per WebSocket frame on WSS.  The
+# daemon routes every command through :meth:`ServerApi.dispatch` — the
+# server's code API defined below — which validates it with
+# :func:`validate_command` (answering an invalid one with an
+# ``{"type": "error", "text": ...}`` event instead of processing it)
+# and invokes the :class:`ServerApi` method the command's catalog
+# entry names.  The only exception is a WSS connection's pre-dispatch
+# ``auth`` handshake, serviced by :meth:`ServerApi.authenticate`.
 #
 # The user interfaces consume this catalog through thin client
 # facades — ``media/api.js`` (chat webview and remote webapp) and
 # ``src/SorcarApi.ts`` (VS Code extension host) — whose methods map
-# 1:1 onto the command names below, so no UI code ever hand-builds a
-# protocol message.
+# 1:1 onto the command names below; the remote webapp's bootstrap
+# shim (``_WS_SHIM_JS``) additionally sends the ``auth`` handshake
+# and the reconnect ``setWorkDir`` re-pin, both catalog commands.
 # ---------------------------------------------------------------------------
 
 
@@ -269,6 +279,10 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("autocommitAction", required=("action",)),
     ApiCommand("generateCommitMessage"),
     # -- daemon administration ---------------------------------------
+    # ``auth`` is serviced by :meth:`ServerApi.authenticate` during the
+    # WSS handshake, BEFORE the per-connection dispatch loop starts; an
+    # ``auth`` frame that leaks into an already-authenticated
+    # connection's dispatch is accepted and discarded.
     ApiCommand("auth", required=("password",), handler="drop"),
     ApiCommand("runUpdate", handler="run_update"),
     ApiCommand("serverReset", handler="server_reset"),
@@ -298,7 +312,9 @@ API: dict[str, ApiCommand] = _catalog(
 #: Client messages the daemon accepts and silently discards, derived
 #: from the catalog (``handler == "drop"``).  They are consumed by the
 #: VS Code extension host (webview bridge, voice bridge) or by the WSS
-#: handshake (``auth``), so when one leaks to the daemon transport it
+#: handshake (``auth``, serviced pre-dispatch by
+#: :meth:`ServerApi.authenticate`), so when one leaks to the daemon
+#: transport it
 #: must be dropped BEFORE catalog validation — validating it (e.g. a
 #: ``notificationAction`` missing its ``id``) would surface a spurious
 #: error banner for a message the daemon was never meant to handle.
@@ -366,6 +382,22 @@ def translate_webview_command(cmd: dict[str, Any]) -> dict[str, Any]:
         out["chatId"] = out.pop("id")
         return out
     return cmd
+
+
+def passwords_equal(a: str, b: str) -> bool:
+    """Compare two passwords in constant time to defeat timing attacks.
+
+    Encodes both strings to UTF-8 bytes and delegates to
+    :func:`secrets.compare_digest`.
+
+    Args:
+        a: First password string.
+        b: Second password string.
+
+    Returns:
+        ``True`` when the two strings are equal.
+    """
+    return secrets.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
 
 @dataclass(frozen=True)
@@ -463,6 +495,12 @@ class ServerBackend(Protocol):
         self, tab_id: str, merge_state: Any,
     ) -> None: ...
 
+    def _client_ip(self, websocket: Any) -> str: ...
+
+    def _auth_lock_remaining(self, ip: str) -> float: ...
+
+    def _record_auth_failure(self, ip: str) -> None: ...
+
 
 class ServerApi:
     """The Sorcar server's code-level API.
@@ -484,6 +522,13 @@ class ServerApi:
     concerns: pre-validation drops, catalog validation, per-connection
     stamping (``connId`` / ``workDir`` / tab registration), wire→
     backend field translation, and per-command routing.
+
+    The remote webapp's non-command interactions are part of this API
+    as well: a remote WSS connection must first complete the password
+    handshake serviced by :meth:`authenticate` before its commands are
+    dispatched, and the webapp's trajectory-viewer HTTP data endpoints
+    are serviced by :meth:`trajectory_jobs` /
+    :meth:`job_trajectories`.
     """
 
     def __init__(self, backend: ServerBackend) -> None:
@@ -589,6 +634,97 @@ class ServerApi:
             if tab_id not in local_tabs:
                 local_tabs.add(tab_id)
                 self._backend._printer.register_local_uds_tab(tab_id)
+
+    async def authenticate(self, websocket: Any) -> bool:
+        """Authenticate a remote WSS client with the ``auth`` handshake.
+
+        The remote webapp's entry point into the API: before a browser
+        connection may issue any catalog command, its very first
+        frames must complete this handshake (the ``_WS_SHIM_JS`` shim
+        served with the webapp sends ``{"type": "auth", "password":
+        ...}`` as soon as the socket opens).  Local UDS clients (the
+        VS Code extension, the CLI) skip it — POSIX file permissions
+        on the socket already gate access to the owning user.
+
+        Protocol serviced here, in order:
+
+        1. A source IP that is still rate-limited after too many
+           failed logins is answered with ``auth_locked`` (carrying
+           ``retry_after`` seconds) and closed — telling the client
+           WHY instead of leaving its loading overlay spinning.
+        2. Otherwise up to two ``auth`` attempts are read: a correct
+           password (constant-time compare against the configured
+           ``remote_password``, which may be empty) is answered with
+           ``auth_ok``; the first wrong password elicits an
+           ``auth_required`` retry prompt; the second failure is
+           answered with an ``error`` event and the socket is closed.
+           A first message that is not an ``auth`` at all closes the
+           socket without counting a failed login.
+        3. Only NON-EMPTY wrong guesses count toward the brute-force
+           lockout: every fresh page load probes with the (possibly
+           empty) password stored in ``localStorage``, and behind the
+           shared cloudflared tunnel penalising that benign empty
+           probe would let a handful of normal page loads lock the
+           password prompt away from every visitor.
+
+        Args:
+            websocket: The remote client's WebSocket connection.
+
+        Returns:
+            ``True`` when the client authenticated; ``False`` when it
+            failed (the socket is then already closed).
+        """
+        backend = self._backend
+        ip = backend._client_ip(websocket)
+        lock_remaining = backend._auth_lock_remaining(ip)
+        if lock_remaining > 0.0:
+            logger.warning("Auth rate-limit hit for %s; closing socket", ip)
+            try:
+                await websocket.send(json.dumps({
+                    "type": "auth_locked",
+                    "retry_after": math.ceil(lock_remaining),
+                }))
+                await websocket.close()
+            except Exception:
+                pass
+            return False
+        password = load_config().get("remote_password", "")
+        try:
+            # Two attempts: the first wrong password elicits an
+            # ``auth_required`` retry prompt; the second failure (or a
+            # non-auth message on the retry) closes the connection.
+            for is_retry, timeout in ((False, 30), (True, 60)):
+                raw = await asyncio.wait_for(websocket.recv(), timeout=timeout)
+                msg = json.loads(raw)
+                client_pw = msg.get("password", "")
+                if not isinstance(client_pw, str):
+                    client_pw = ""
+                if msg.get("type") == "auth" and passwords_equal(
+                    password, client_pw,
+                ):
+                    await websocket.send(json.dumps({"type": "auth_ok"}))
+                    return True
+                if not is_retry and msg.get("type") != "auth":
+                    # First message was not an auth attempt at all:
+                    # close without counting it as a failed login.
+                    await websocket.close()
+                    return False
+                if client_pw:
+                    backend._record_auth_failure(ip)
+                if not is_retry:
+                    await websocket.send(json.dumps({"type": "auth_required"}))
+            await websocket.send(
+                json.dumps({"type": "error", "text": "Authentication failed"})
+            )
+            await websocket.close()
+            return False
+        except Exception:
+            logger.debug("WS auth failed", exc_info=True)
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+            return False
 
     async def forward(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Run *cmd* on the backend agent server.
@@ -870,6 +1006,75 @@ class ServerApi:
         task_id = self._backend._validated_cli_task_id(cmd)
         if task_id:
             self._backend._handle_cli_task_end(task_id, ctx.conn_state)
+
+    # -- HTTP data API (remote webapp) --------------------------------
+    #
+    # Besides the WSS catalog commands above, the remote webapp's
+    # trajectory-viewer page fetches its data over two plain HTTP GET
+    # endpoints.  Their payload logic is part of the server API too;
+    # the transport (``RemoteAccessServer._process_request``) only
+    # wraps the ``(status, content_type, body)`` replies returned here
+    # into HTTP responses.  The methods are static: they read the jobs
+    # directory on disk and need no daemon backend.
+
+    @staticmethod
+    def trajectory_jobs() -> tuple[int, str, bytes]:
+        """List all trajectory jobs (the ``/api/jobs`` endpoint).
+
+        Mirrors the ``/api/jobs`` endpoint of the standalone
+        trajectory visualizer (:mod:`kiss.viz_trajectory.server`,
+        imported lazily so this client-importable module stays light).
+
+        Returns:
+            ``(200, "application/json", body)`` with the JSON job
+            list.
+        """
+        # The jobs-root and trajectory helpers are resolved through
+        # the ``web_server`` module namespace, lazily: it keeps this
+        # client-importable module light and import-cycle-free, and
+        # that namespace is the established seam tests use to
+        # redirect the jobs root to a fixture directory.
+        from kiss.server import web_server as _ws
+
+        body = json.dumps(_ws.list_jobs(_ws.get_jobs_root())).encode("utf-8")
+        return (200, "application/json", body)
+
+    @staticmethod
+    def job_trajectories(path: str) -> tuple[int, str, bytes]:
+        """Serve one job's trajectory list (``/api/jobs/<job>/trajectories``).
+
+        Mirrors the ``/api/jobs/<job_name>/trajectories`` endpoint of
+        the standalone trajectory visualizer.
+
+        Args:
+            path: Request path of the form
+                ``/api/jobs/<job_name>/trajectories``.  The transport
+                has already URL-decoded it exactly once; the job
+                segment must NOT be unquoted again or names containing
+                literal percent-escapes would spuriously 404.
+
+        Returns:
+            ``(200, "application/json", body)`` with the trajectory
+            list, a 400 reply for an invalid job name, or a 404 reply
+            when the job directory does not exist.
+        """
+        # See :meth:`trajectory_jobs` for why the helpers are resolved
+        # through the ``web_server`` module namespace.
+        from kiss.server import web_server as _ws
+
+        job_name = path[len("/api/jobs/") : -len("/trajectories")]
+        if "/" in job_name or "\\" in job_name or ".." in job_name:
+            return (400, "application/json", b'{"error": "Invalid job name"}')
+        jobs_root = _ws.get_jobs_root()
+        if _ws.find_job_dir(jobs_root, job_name) is None:
+            body = json.dumps(
+                {"error": f"Job '{job_name}' not found"}
+            ).encode("utf-8")
+            return (404, "application/json", body)
+        body = json.dumps(
+            _ws.load_job_trajectories(jobs_root, job_name)
+        ).encode("utf-8")
+        return (200, "application/json", body)
 
 
 def run(

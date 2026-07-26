@@ -16,6 +16,12 @@
  * event) and invokes the ``ServerApi`` method the command's catalog
  * entry names.
  *
+ * The remote webapp reaches the same API for everything else too: its
+ * WebSocket shim's pre-app ``auth`` handshake is serviced by
+ * ``kiss.server.sorcar.ServerApi.authenticate``, and the
+ * trajectory-viewer HTTP endpoints by
+ * ``ServerApi.trajectory_jobs`` / ``ServerApi.job_trajectories``.
+ *
  * Usage (main.js owns the single ``acquireVsCodeApi()`` handle):
  *
  *   const api = createSorcarApi(msg => vscode.postMessage(msg));

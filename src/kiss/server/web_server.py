@@ -48,7 +48,6 @@ import hashlib
 import ipaddress
 import json
 import logging
-import math
 import mimetypes
 import os
 import platform
@@ -76,7 +75,14 @@ from websockets.asyncio.server import ServerConnection, serve
 from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
-from kiss.core.config import get_jobs_root, kiss_home
+# ``get_jobs_root`` and the ``kiss.viz_trajectory.server`` helpers are
+# re-exported: the server API's HTTP data methods
+# (``kiss.server.sorcar.ServerApi.trajectory_jobs`` /
+# ``job_trajectories``) resolve them through THIS module's namespace,
+# which is the established seam tests use to redirect the jobs root
+# to a fixture directory.
+from kiss.core.config import get_jobs_root as get_jobs_root
+from kiss.core.config import kiss_home
 from kiss.core.vscode_config import load_config, source_shell_env
 from kiss.server import sorcar as sorcar_api
 from kiss.server.diff_merge import _read_lines_preserved as _read_lines_preserved
@@ -104,7 +110,11 @@ from kiss.server.web_merge import (
     _restore_base_bytes,  # noqa: F401  (re-exported for external tests)
     _WebMergeState,
 )
-from kiss.viz_trajectory.server import find_job_dir, list_jobs, load_job_trajectories
+from kiss.viz_trajectory.server import find_job_dir as find_job_dir
+from kiss.viz_trajectory.server import list_jobs as list_jobs
+from kiss.viz_trajectory.server import (
+    load_job_trajectories as load_job_trajectories,
+)
 
 __all__ = ["RemoteAccessServer", "WebPrinter"]
 
@@ -3044,6 +3054,14 @@ def _fetch_latest_version() -> str | None:
 
 
 _WS_SHIM_JS = r"""
+// WebSocket shim for the remote webapp: provides acquireVsCodeApi()
+// so the extension's media/main.js + media/api.js run unmodified in a
+// plain browser.  Every frame sent through it is a command of the
+// server API catalog defined in src/kiss/server/sorcar.py (dispatched
+// by kiss.server.sorcar.ServerApi.dispatch); the pre-app ``auth``
+// handshake frames sent below are serviced by
+// kiss.server.sorcar.ServerApi.authenticate before the daemon starts
+// dispatching this connection's commands.
 (function() {
   var _state = null;
   try { _state = JSON.parse(sessionStorage.getItem('sorcar-state')); } catch(e) {}
@@ -3509,21 +3527,25 @@ def _http_response(status: int, content_type: str, body: bytes) -> Response:
 def _trajectory_jobs_response() -> Response:
     """Return a JSON HTTP response listing all trajectory jobs.
 
-    Mirrors the ``/api/jobs`` endpoint of the standalone trajectory
-    visualizer (:mod:`kiss.viz_trajectory.server`).
+    Transport wrapper for the ``/api/jobs`` endpoint: the payload is
+    produced by the server API
+    (:meth:`kiss.server.sorcar.ServerApi.trajectory_jobs`); this
+    function only wraps it into an HTTP response.
 
     Returns:
         A 200 ``application/json`` response with the job list.
     """
-    body = json.dumps(list_jobs(get_jobs_root())).encode("utf-8")
-    return _http_response(200, "application/json", body)
+    return _http_response(*sorcar_api.ServerApi.trajectory_jobs())
 
 
 def _trajectory_job_response(path: str) -> Response:
     """Return a JSON HTTP response with the trajectories for one job.
 
-    Mirrors the ``/api/jobs/<job_name>/trajectories`` endpoint of the
-    standalone trajectory visualizer.
+    Transport wrapper for the ``/api/jobs/<job_name>/trajectories``
+    endpoint: the payload (including the job-name containment check
+    and the no-double-unquote contract) is produced by the server API
+    (:meth:`kiss.server.sorcar.ServerApi.job_trajectories`); this
+    function only wraps it into an HTTP response.
 
     Args:
         path: Request path of the form ``/api/jobs/<job_name>/trajectories``.
@@ -3533,20 +3555,7 @@ def _trajectory_job_response(path: str) -> Response:
         response for an invalid job name, or a 404 response when the job
         directory does not exist.
     """
-    # ``_process_request`` already URL-decoded the whole path once; do
-    # NOT unquote again or job names containing literal percent-escapes
-    # (e.g. ``job%20a``) would be double-decoded and spuriously 404.
-    job_name = path[len("/api/jobs/") : -len("/trajectories")]
-    if "/" in job_name or "\\" in job_name or ".." in job_name:
-        return _http_response(
-            400, "application/json", b'{"error": "Invalid job name"}'
-        )
-    jobs_root = get_jobs_root()
-    if find_job_dir(jobs_root, job_name) is None:
-        body = json.dumps({"error": f"Job '{job_name}' not found"}).encode("utf-8")
-        return _http_response(404, "application/json", body)
-    body = json.dumps(load_job_trajectories(jobs_root, job_name)).encode("utf-8")
-    return _http_response(200, "application/json", body)
+    return _http_response(*sorcar_api.ServerApi.job_trajectories(path))
 
 
 def _read_media_file(filepath: Path) -> bytes | None:
@@ -4094,9 +4103,11 @@ class RemoteAccessServer:
     def _passwords_equal(a: str, b: str) -> bool:
         """Constant-time string compare to defeat timing attacks.
 
-        Encodes to bytes and delegates to :func:`secrets.compare_digest`.
+        Alias of :func:`kiss.server.sorcar.passwords_equal` (the
+        server API owns the auth handshake; this staticmethod is kept
+        for existing callers and tests).
         """
-        return secrets.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+        return sorcar_api.passwords_equal(a, b)
 
     def _client_ip(self, websocket: ServerConnection) -> str:
         """Return the rate-limit bucket key (source IP) of *websocket*.
@@ -4201,87 +4212,18 @@ class RemoteAccessServer:
         (using a constant-time compare).  See also
         :meth:`_setup_server` which refuses to advertise the public
         cloudflared tunnel when no password is configured.
+
+        Transport wrapper: the handshake protocol itself (the
+        ``auth`` / ``auth_ok`` / ``auth_required`` / ``auth_locked``
+        exchange, the rate-limit refusal, and the
+        only-non-empty-guesses-count lockout rule) is part of the
+        server API and lives in
+        :meth:`kiss.server.sorcar.ServerApi.authenticate`, which
+        calls back into this server's :meth:`_client_ip` /
+        :meth:`_auth_lock_remaining` / :meth:`_record_auth_failure`
+        primitives.
         """
-        ip = self._client_ip(websocket)
-        lock_remaining = self._auth_lock_remaining(ip)
-        if lock_remaining > 0.0:
-            # Tell the client WHY it is being refused before closing.
-            # Closing silently used to leave the webapp's shim staring
-            # at its loading overlay forever — the password modal only
-            # appears on ``auth_required``, so a locked-out visitor was
-            # never asked for a password at all.  Every visitor on the
-            # public cloudflared tunnel shares one loopback source IP,
-            # so one user's wrong guesses locked everyone into that
-            # promptless spinner.  The ``auth_locked`` frame lets the
-            # shim show "Too many failed login attempts" and retry
-            # (and re-prompt) once ``retry_after`` seconds elapse.  No
-            # password sent on this socket is ever examined, so the
-            # brute-force protection is fully preserved.
-            logger.warning("Auth rate-limit hit for %s; closing socket", ip)
-            try:
-                await websocket.send(json.dumps({
-                    "type": "auth_locked",
-                    "retry_after": math.ceil(lock_remaining),
-                }))
-                await websocket.close()
-            except Exception:
-                pass
-            return False
-        password = load_config().get("remote_password", "")
-        try:
-            # Two attempts: the first wrong password elicits an
-            # ``auth_required`` retry prompt; the second failure (or a
-            # non-auth message on the retry) closes the connection.
-            for is_retry, timeout in ((False, 30), (True, 60)):
-                raw = await asyncio.wait_for(websocket.recv(), timeout=timeout)
-                msg = json.loads(raw)
-                client_pw = msg.get("password", "")
-                if not isinstance(client_pw, str):
-                    client_pw = ""
-                if msg.get("type") == "auth" and self._passwords_equal(
-                    password, client_pw,
-                ):
-                    await websocket.send(json.dumps({"type": "auth_ok"}))
-                    return True
-                if not is_retry and msg.get("type") != "auth":
-                    # First message was not an auth attempt at all:
-                    # close without counting it as a failed login.
-                    await websocket.close()
-                    return False
-                # Only a NON-EMPTY wrong password guess counts toward the
-                # brute-force lockout.  The ``_WS_SHIM_JS`` shim run by
-                # every fresh page-load unconditionally sends an ``auth``
-                # frame carrying the password from ``localStorage`` —
-                # which is the empty string on any device that has never
-                # logged in (a new phone, an incognito window, cleared
-                # storage).  That benign empty-password probe MUST NOT be
-                # penalised: because :meth:`_client_ip` collapses every
-                # visitor arriving through the public cloudflared tunnel
-                # to the single shared loopback IP, counting the probe let
-                # only ``_AUTH_FAIL_MAX`` normal page loads rate-limit
-                # *everyone* — after which this method closes new sockets
-                # silently (never sending ``auth_required``), so the
-                # webapp's password modal never appears and, from the
-                # user's view, "the remote webapp doesn't ask for a
-                # password".  Skipping the empty probe keeps the prompt
-                # flowing to legitimate visitors while genuine brute-force
-                # attempts (non-empty guesses) are still locked out.
-                if client_pw:
-                    self._record_auth_failure(ip)
-                if not is_retry:
-                    await websocket.send(json.dumps({"type": "auth_required"}))
-            await websocket.send(
-                json.dumps({"type": "error", "text": "Authentication failed"})
-            )
-            await websocket.close()
-            return False
-        except Exception:
-            logger.debug("WS auth failed", exc_info=True)
-            try:
-                await websocket.close()
-            except Exception:
-                pass
-            return False
+        return await self._server_api.authenticate(websocket)
 
     async def _run_cmd(self, cmd: dict[str, Any]) -> None:
         """Run a backend command in the thread-pool executor."""
