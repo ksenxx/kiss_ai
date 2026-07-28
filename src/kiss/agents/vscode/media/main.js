@@ -1562,7 +1562,7 @@
         ? 'Expand input panel'
         : 'Collapse input panel';
       inputDrawerBtn.setAttribute('aria-label', inputLabel);
-      inputDrawerBtn.setAttribute('data-tooltip', inputLabel);
+      inputDrawerBtn.removeAttribute('data-tooltip');
     }
   }
 
