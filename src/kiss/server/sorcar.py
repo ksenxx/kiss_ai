@@ -2,10 +2,34 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Minimal synchronous client API for the local ``sorcar web`` daemon.
+"""The Sorcar server API and a minimal synchronous client for it.
 
-Any process can launch a task on an already-running daemon and block
-until it finishes::
+This module is the single source of truth for the wire API of the
+``sorcar web`` daemon and hosts both of its Python ends:
+
+**The server API** — :data:`API`, :func:`validate_command`, and
+:class:`ServerApi` define every command a user interface (a VS Code
+window, the remote webapp, or a CLI/Python client) may send to the
+daemon.  Both transports speak the same JSON commands, dispatched on
+the ``"type"`` field — framed as newline-delimited lines on the
+Unix-domain socket (UDS) and as one object per WebSocket frame on
+WSS.  The daemon routes every command through
+:meth:`ServerApi.dispatch`, which validates it against the catalog
+(answering an invalid one with an ``{"type": "error", "text": ...}``
+event instead of processing it) and invokes the :class:`ServerApi`
+method the command's catalog entry names.  The only exception is a
+WSS connection's pre-dispatch ``auth`` handshake, serviced by
+:meth:`ServerApi.authenticate`.  The user interfaces consume the
+catalog through thin client facades — ``media/api.js`` (chat webview
+and remote webapp) and ``src/SorcarApi.ts`` (VS Code extension host)
+— whose methods map 1:1 onto the catalog's command names; the remote
+webapp's bootstrap shim (``_WS_SHIM_JS`` in
+:mod:`kiss.server.web_server`) additionally sends the ``auth``
+handshake and the reconnect ``setWorkDir`` re-pin, both catalog
+commands.
+
+**The client API** — :func:`run` lets any process launch a task on an
+already-running daemon and block until it finishes::
 
     from kiss.server import sorcar
 
@@ -67,6 +91,12 @@ from kiss.server.tools_file import resolve_tools_file
 logger = logging.getLogger(__name__)
 
 _MAX_LINE_BYTES = 16 * 1024 * 1024
+"""Read buffer limit for a single daemon event line.
+
+The daemon emits large single-line JSON events (e.g.
+``system_prompt`` carrying the full SYSTEM.md), so this mirrors the
+CLI client's generous 16 MiB cap.
+"""
 
 
 @dataclass(frozen=True)
@@ -262,14 +292,42 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("sizeReport", handler="drop"),
     ApiCommand("resolveDroppedPaths", required=("uris",), handler="drop"),
 )
+"""Every command the daemon accepts, keyed by wire name.
+
+Each entry binds the wire name to the :class:`ServerApi` method
+(``handler``) that services it, making the catalog the single routing
+table for the server's code API.  ``auth`` is serviced by
+:meth:`ServerApi.authenticate` during the WSS handshake, BEFORE the
+per-connection dispatch loop starts; an ``auth`` frame that leaks
+into an already-authenticated connection's dispatch is accepted and
+discarded.
+"""
 
 DROPPED_COMMANDS: frozenset[str] = frozenset(
     c.name for c in API.values() if c.handler == "drop"
 )
+"""Client messages the daemon accepts and silently discards.
+
+Derived from the catalog (``handler == "drop"``).  These messages are
+consumed by the VS Code extension host (webview bridge, voice bridge)
+or by the WSS handshake (``auth``, serviced pre-dispatch by
+:meth:`ServerApi.authenticate`), so when one leaks to the daemon
+transport it must be dropped BEFORE catalog validation — validating
+it (e.g. a ``notificationAction`` missing its ``id``) would surface a
+spurious error banner for a message the daemon was never meant to
+handle.
+"""
 
 _CLI_HANDLERS: frozenset[str] = frozenset(
     {"cli_event", "cli_tab_hello", "cli_task_start", "cli_task_end"}
 )
+"""Handlers of the CLI → daemon bridge commands.
+
+Commands routed to these handlers describe tasks the sorcar CLI runs
+itself; :meth:`ServerApi.dispatch` exempts them from the per-window
+``workDir`` stamping because they never read ``workDir`` and must not
+be mutated on their way to the relay.
+"""
 
 
 def validate_command(cmd: Any) -> str | None:

@@ -34,6 +34,13 @@ def _restore(saved):
     (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
 
 
+def _event_types(session: dict[str, object]) -> list[str]:
+    """Return the ``type`` field of each event in a loaded session dict."""
+    events = session["events"]
+    assert isinstance(events, list)
+    return [e["type"] for e in events]
+
+
 class TestChatEventsLoaderParity:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
@@ -62,7 +69,7 @@ class TestChatEventsLoaderParity:
         assert by_chat["task"] == "parent task"
         assert by_chat["task_id"] == task_id
         assert by_chat["chat_id"] == chat_id
-        assert [e["type"] for e in by_chat["events"]] == ["text", "result"]
+        assert _event_types(by_chat) == ["text", "result"]
 
     def test_chat_id_loader_skips_subagent_rows(self):
         parent_id, chat_id = th._add_task("parent task")
@@ -81,7 +88,7 @@ class TestChatEventsLoaderParity:
         assert by_task is not None
         assert by_task["task_id"] == sub_id
         assert by_task["chat_id"] == chat_id
-        assert [e["type"] for e in by_task["events"]] == ["text"]
+        assert _event_types(by_task) == ["text"]
 
     def test_loaders_return_none_for_missing_rows(self):
         assert th._load_latest_chat_events_by_chat_id("") is None
@@ -103,4 +110,4 @@ class TestChatEventsLoaderParity:
         assert by_task is not None
         assert by_task["chat_id"] == ""
         assert by_task["task_id"] == task_id
-        assert [e["type"] for e in by_task["events"]] == ["text"]
+        assert _event_types(by_task) == ["text"]
