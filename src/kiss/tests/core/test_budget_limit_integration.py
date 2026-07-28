@@ -222,7 +222,7 @@ class TestBudgetLimitViaRealHTTP:
 def _continue_response(tokens: int = 200_000) -> dict:
     """Response that calls finish(success=False, is_continue=True, summary='...')."""
     args = json.dumps(
-        {"success": False, "is_continue": True, "summary": "did some work"}
+        {"success": False, "is_continue": True, "summary_in_html": "did some work"}
     )
     return {
         "id": "chatcmpl-cont",

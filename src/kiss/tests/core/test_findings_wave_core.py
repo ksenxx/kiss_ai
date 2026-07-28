@@ -102,7 +102,7 @@ class UtilsFinishContract(unittest.TestCase):
         assert parsed is not None
         self.assertEqual(
             parsed,
-            {"success": True, "is_continue": False, "summary": "the final code"},
+            {"success": True, "is_continue": False, "summary": "<p>the final code</p>"},
         )
 
 

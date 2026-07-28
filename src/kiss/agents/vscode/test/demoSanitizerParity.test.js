@@ -74,7 +74,8 @@ function sleep(ms) {
 
 const MALICIOUS_SUMMARY =
   'done <x-evil onclick="window.__pwned=1">boom</x-evil> ' +
-  '<a href="javascript:window.__pwned=1">link</a> end';
+  '<a href="javascript:window.__pwned=1">link</a> ' +
+  '<h2>HtmlHeading</h2> keep **stars** literal end';
 
 async function runDemoReplay(win) {
   dispatch(win, {type: 'configData', config: {demo_mode: true}, apiKeys: {}});
@@ -147,6 +148,16 @@ async function main() {
   assert.ok(
     /done/.test(body.textContent) && /end/.test(body.textContent),
     'result text rendered',
+  );
+  // The summary wire format is HTML: demo replay must render HTML tags as
+  // elements and must NOT run the summary through a Markdown parser.
+  assert.ok(
+    body.querySelector('h2'),
+    'BUG: <h2> in the HTML summary must render as a heading in demo replay',
+  );
+  assert.ok(
+    body.textContent.includes('**stars**') && !body.querySelector('strong'),
+    'BUG: demo replay must not parse the HTML summary as Markdown',
   );
   assert.strictEqual(
     body.querySelector('x-evil'),

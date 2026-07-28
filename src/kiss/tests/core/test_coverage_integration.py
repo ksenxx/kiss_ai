@@ -653,11 +653,11 @@ class TestOpenAICompatibleModelEmbedding:
 
 class TestUtilsFunctionsExtra:
     def test_utils_finish(self) -> None:
-        result = utils_finish(success=True, summary="42")
+        result = utils_finish(success=True, summary_in_html="42")
         payload = yaml.safe_load(result)
         assert payload["success"] is True
         assert payload["is_continue"] is False
-        assert payload["summary"] == "42"
+        assert payload["summary"] == "<p>42</p>"
 
 
 if __name__ == "__main__":

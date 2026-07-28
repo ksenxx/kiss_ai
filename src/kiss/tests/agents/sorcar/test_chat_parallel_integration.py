@@ -82,7 +82,7 @@ def _finish_response(model: str = "gpt-4o-mini") -> dict:
                             "function": {
                                 "name": "finish",
                                 "arguments": json.dumps(
-                                    {"success": "true", "summary": "done"}
+                                    {"success": "true", "summary_in_html": "done"}
                                 ),
                             },
                         }
@@ -196,7 +196,7 @@ class TestSequentialSharedChatId:
         assert tasks == ["task alpha", "task bravo", "task charlie"]
 
         for entry in context:
-            assert entry["result"] == "done"
+            assert entry["result"] == "<p>done</p>"
 
     def test_results_are_persisted_for_each_agent(self) -> None:
         """Each agent's result is individually persisted under the shared chat."""
@@ -222,7 +222,7 @@ class TestSequentialSharedChatId:
 
         context = _load_chat_context(chat_id)
         assert len(context) == 2
-        assert all(e["result"] == "done" for e in context)
+        assert all(e["result"] == "<p>done</p>" for e in context)
 
 
 class TestParallelFlowSimulation:
@@ -447,7 +447,7 @@ class TestConcurrentThreadPoolExecutor:
         for st in sub_tasks:
             assert st in recorded_tasks
         for entry in context:
-            assert entry["result"] == "done"
+            assert entry["result"] == "<p>done</p>"
 
     def test_concurrent_db_writes_no_errors(self) -> None:
         """Direct concurrent writes to the DB don't raise errors.

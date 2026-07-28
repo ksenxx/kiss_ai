@@ -242,7 +242,8 @@ class TestRelentlessRecovery(ShrunkContextMixin):
                 prompt_template=(
                     "If the section '# Task Progress' appears below, a previous "
                     "attempt already loaded the dataset: IMMEDIATELY call "
-                    "finish(success=True, is_continue=False, summary='recovered') "
+                    "finish(success=True, is_continue=False, "
+                    "summary_in_html='recovered') "
                     "and nothing else.\n"
                     "Otherwise: call load_dataset(1), then load_dataset(2), then "
                     "load_dataset(3), then load_dataset(4), then load_dataset(5), "
@@ -259,7 +260,7 @@ class TestRelentlessRecovery(ShrunkContextMixin):
         parsed = yaml.safe_load(result)
         self.assertNotIn("consecutive errors", parsed.get("summary", ""))
         self.assertTrue(parsed["success"], f"expected recovery, got: {parsed}")
-        self.assertIn("### Previous Session", parsed.get("summary", ""))
+        self.assertIn("<h3>Previous Session", parsed.get("summary", ""))
 
     @pytest.mark.slow
     def test_first_step_overflow_hard_fails(self) -> None:

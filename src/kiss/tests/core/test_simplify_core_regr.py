@@ -95,7 +95,7 @@ class UtilsRegression(unittest.TestCase):
         raw = utils_finish(False, True, "my summary")
         data = yaml.safe_load(raw)
         self.assertEqual(
-            data, {"success": False, "is_continue": True, "summary": "my summary"}
+            data, {"success": False, "is_continue": True, "summary": "<p>my summary</p>"}
         )
 
     def test_finish_defaults(self) -> None:
@@ -108,14 +108,14 @@ class UtilsRegression(unittest.TestCase):
         data = yaml.safe_load(
             utils_finish(cast(Any, "true"), cast(Any, "no"), "s")
         )
-        self.assertEqual(data, {"success": True, "is_continue": False, "summary": "s"})
+        self.assertEqual(data, {"success": True, "is_continue": False, "summary": "<p>s</p>"})
 
     def test_finish_output_recognized_by_parse_result_yaml(self) -> None:
         raw = utils_finish(True, False, "structured summary")
         parsed = parse_result_yaml(raw)
         self.assertIsNotNone(parsed)
         assert parsed is not None
-        self.assertEqual(parsed["summary"], "structured summary")
+        self.assertEqual(parsed["summary"], "<p>structured summary</p>")
         self.assertTrue(parsed["success"])
 
     def test_escape_keeps_valid_and_escapes_invalid(self) -> None:
@@ -443,7 +443,7 @@ class RelentlessRegression(unittest.TestCase):
         data = yaml.safe_load(
             relentless_finish(cast(Any, "true"), cast(Any, "false"), "sum"),
         )
-        self.assertEqual(data, {"success": True, "is_continue": False, "summary": "sum"})
+        self.assertEqual(data, {"success": True, "is_continue": False, "summary": "<p>sum</p>"})
         data2 = yaml.safe_load(relentless_finish(False))
         self.assertEqual(data2, {"success": False, "is_continue": False, "summary": ""})
 

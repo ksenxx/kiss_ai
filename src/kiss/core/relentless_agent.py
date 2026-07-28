@@ -38,9 +38,11 @@ TASK_PROMPT = """
 IMPORTANT_INSTRUCTIONS = """
 # MOST IMPORTANT INSTRUCTIONS
 - **At step {step_threshold}: you MUST call finish(success=False, is_continue=True, \
-summary="precise chronologically-ordered list of things the agent did \
-with the reason for doing that along with relevant code snippets")** or \
+summary_in_html="precise chronologically-ordered list of things the agent did \
+with the reason for doing that along with relevant code snippets, formatted \
+as HTML (e.g. <ol>, <p>, <pre><code>), never Markdown")** or \
 if the task is not complete and you are at risk of running out of steps or context length.
+- The summary_in_html argument of finish MUST always be formatted as HTML.
 - Work dir: {work_dir}
 - Current process PID: {current_pid} — NEVER kill this process.
 """
@@ -71,7 +73,8 @@ Read relevant portions of the file using your tools:
 - Analyze the trajectory file.
 - Return a precise chronologically-ordered list of things the agent did
   with the reason for doing that along with relevant code snippets.
-- Call finish(result="detailed summary of work done so far").
+- Format the summary as HTML (e.g. <ol>, <p>, <pre><code>), never Markdown.
+- Call finish(result="detailed summary of work done so far, in HTML").
 """
 
 MAX_PROGRESS_CHARS = 60_000
@@ -113,9 +116,9 @@ def _capped_progress_text(summaries: list[str]) -> str:
 
 
 def _prior_sessions_section(summaries: list[str]) -> str:
-    """Join prior session summaries into "### Previous Session N" markdown sections."""
+    """Join prior session summaries into "<h3>Previous Session N</h3>" HTML sections."""
     return "\n\n---\n\n".join(
-        f"### Previous Session {i + 1}\n{s}" for i, s in enumerate(summaries)
+        f"<h3>Previous Session {i + 1}</h3>\n{s}" for i, s in enumerate(summaries)
     )
 
 
@@ -123,7 +126,7 @@ def _build_exhaustion_summary(summaries: list[str], banner: str) -> str:
     """Compose the merged failure summary emitted on sub-session exhaustion.
 
     The exhaustion banner (``"Task failed after N sub-sessions"``) is
-    appended AFTER a "### Previous Session N" section when any prior
+    appended AFTER a "<h3>Previous Session N</h3>" section when any prior
     session summaries exist. This layout matches the front-end
     (``splitMultiSessionSummary`` in ``main.js``): it splits on the
     trailing ``\\n\\n---\\n\\n`` separator so the banner renders as the
@@ -395,12 +398,12 @@ class RelentlessAgent(Base):
                     prior_section = _prior_sessions_section(summaries)
                     if final_summary:
                         payload["summary"] = (
-                            f"{prior_section}\n\n---\n\n### Final Session\n"
+                            f"{prior_section}\n\n---\n\n<h3>Final Session</h3>\n"
                             f"{final_summary}"
                         )
                     else:
                         payload["summary"] = (
-                            f"{prior_section}\n\n---\n\n### Final Session\n"
+                            f"{prior_section}\n\n---\n\n<h3>Final Session</h3>\n"
                             "(no summary)"
                         )
                     result = yaml.dump(payload, sort_keys=False)

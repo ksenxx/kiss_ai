@@ -22,6 +22,7 @@ import yaml
 from kiss.agents.sorcar.persistence import _list_recent_chats
 from kiss.core import config as config_module
 from kiss.core._version import __version__
+from kiss.core.html_render import html_to_text
 from kiss.core.models.model_info import get_default_model
 
 if TYPE_CHECKING:
@@ -440,10 +441,11 @@ def _print_result(result: str) -> None:
     """Print the agent's run result without the raw YAML envelope.
 
     The agent returns a YAML document with ``success`` and ``summary``
-    keys.  Printing that document verbatim exposes the raw YAML to the
-    user; instead show only the human-readable ``summary`` text.  When
-    the result is not the expected YAML mapping, fall back to printing
-    it as-is so no output is ever silently dropped.
+    keys, where the summary is always HTML.  Printing that document
+    verbatim exposes raw YAML and HTML tags to the user; instead render
+    the ``summary`` HTML as plain terminal text.  When the result is not
+    the expected YAML mapping, fall back to printing it as-is so no
+    output is ever silently dropped.
 
     Args:
         result: The YAML string returned by the running agent.
@@ -454,7 +456,7 @@ def _print_result(result: str) -> None:
         parsed = None
     if isinstance(parsed, dict) and "summary" in parsed:
         summary = parsed.get("summary")
-        print("" if summary is None else str(summary))
+        print("" if summary is None else html_to_text(str(summary)))
     else:
         print(result)
 

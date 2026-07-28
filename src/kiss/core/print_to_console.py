@@ -13,6 +13,7 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.text import Text
 
+from kiss.core.html_render import html_to_rich
 from kiss.core.printer import (
     Printer,
     extract_extras,
@@ -89,7 +90,7 @@ class ConsolePrinter(Printer):
         elif data.get("success") is False:
             parts.append(Text("Status: FAILED", style="bold red"))
             parts.append(Text(""))
-        parts.append(Markdown(str(data["summary"])))
+        parts.append(html_to_rich(str(data["summary"])))
         return Group(*parts)
 
     def _flush_newline(self) -> None:

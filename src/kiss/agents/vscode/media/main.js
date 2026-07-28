@@ -2379,9 +2379,21 @@
 
   function splitMultiSessionSummary(summary) {
     const text = typeof summary === 'string' ? summary : '';
-    const finalMarker = '\n\n---\n\n### Final Session\n';
-    let markerIdx = text.indexOf(finalMarker);
-    let markerLen = finalMarker.length;
+    // The summary wire format is HTML (<h3> session markers); old
+    // persisted events may still carry Markdown '###' markers.
+    const finalMarkers = [
+      '\n\n---\n\n<h3>Final Session</h3>\n',
+      '\n\n---\n\n### Final Session\n',
+    ];
+    let markerIdx = -1;
+    let markerLen = 0;
+    for (const finalMarker of finalMarkers) {
+      markerIdx = text.indexOf(finalMarker);
+      if (markerIdx > 0) {
+        markerLen = finalMarker.length;
+        break;
+      }
+    }
     if (markerIdx <= 0) {
       const separator = '\n\n---\n\n';
       markerIdx = text.lastIndexOf(separator);
@@ -2391,7 +2403,11 @@
     const previous = text.substring(0, markerIdx).trim();
     const final = text.substring(markerIdx + markerLen).trim();
     if (!previous || !final) return null;
-    if (!previous.includes('### Previous Session')) return null;
+    if (
+      !previous.includes('<h3>Previous Session') &&
+      !previous.includes('### Previous Session')
+    )
+      return null;
     return {previous: previous, final: final};
   }
 
@@ -2421,12 +2437,10 @@
       const sum = String(summaryText)
         .replace(/\n{3,}/g, '\n\n')
         .trim();
-      if (typeof marked !== 'undefined') {
-        rb += kissSanitize(marked.parse(sum));
-        usePre = false;
-      } else {
-        rb += esc(sum);
-      }
+      // The summary wire format is always HTML (see finish() in
+      // kiss/core/utils.py); render it sanitized, never via Markdown.
+      rb += kissSanitize(sum);
+      usePre = false;
       rawBody += sum;
     } else {
       const txt = (ev.text || '(no result)').replace(/\n{3,}/g, '\n\n').trim();

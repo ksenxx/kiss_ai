@@ -165,11 +165,11 @@ class TestFailureAfterContinueEmitsMergedFinalResult:
     def test_final_result_event_carries_merged_failure(self) -> None:
         resp_continue = _make_tool_call_response(
             "finish",
-            {"success": False, "is_continue": True, "summary": "did A"},
+            {"success": False, "is_continue": True, "summary_in_html": "did A"},
         )
         resp_fail = _make_tool_call_response(
             "finish",
-            {"success": False, "is_continue": False, "summary": "gave up: reason X"},
+            {"success": False, "is_continue": False, "summary_in_html": "gave up: reason X"},
         )
         printer = RecordingPrinter()
         result = _run_agent(
@@ -190,9 +190,9 @@ class TestFailureAfterContinueEmitsMergedFinalResult:
         assert final_payload["success"] is False
         assert final_payload["is_continue"] is False
         summary = final_payload["summary"]
-        assert "### Previous Session 1" in summary
+        assert "<h3>Previous Session 1</h3>" in summary
         assert "did A" in summary
-        assert "### Final Session" in summary
+        assert "<h3>Final Session</h3>" in summary
         assert "gave up: reason X" in summary
 
 
@@ -206,7 +206,7 @@ class TestExhaustionEmitsMergedFinalResult:
     def test_exhaustion_emits_terminal_failed_result(self) -> None:
         resp_continue = _make_tool_call_response(
             "finish",
-            {"success": False, "is_continue": True, "summary": "step done"},
+            {"success": False, "is_continue": True, "summary_in_html": "step done"},
         )
         printer = RecordingPrinter()
         with pytest.raises(KISSError, match=r"Task failed after 2 sub-sessions"):
@@ -222,10 +222,10 @@ class TestExhaustionEmitsMergedFinalResult:
         assert final_payload["is_continue"] is False
         summary = final_payload["summary"]
         assert "Task failed after 2 sub-sessions" in summary
-        assert "### Previous Session 1" in summary
-        assert "### Previous Session 2" in summary
+        assert "<h3>Previous Session 1</h3>" in summary
+        assert "<h3>Previous Session 2</h3>" in summary
         assert "step done" in summary
-        assert "### Final Session" not in summary
+        assert "<h3>Final Session</h3>" not in summary
         assert summary.rstrip().endswith("Task failed after 2 sub-sessions")
         assert "step_count" in kwargs
         assert "total_tokens" in kwargs
@@ -241,7 +241,7 @@ class TestSingleSessionDoesNotEmitExtraFinalResult:
     def test_single_session_success_no_extra_final_result(self) -> None:
         resp_done = _make_tool_call_response(
             "finish",
-            {"success": True, "is_continue": False, "summary": "all done"},
+            {"success": True, "is_continue": False, "summary_in_html": "all done"},
         )
         printer = RecordingPrinter()
         result = _run_agent([resp_done], max_sub_sessions=5, printer=printer)
@@ -255,12 +255,12 @@ class TestSingleSessionDoesNotEmitExtraFinalResult:
         )
         inner_payload = _parse_result_payload(result_events[0][0])
         assert inner_payload["success"] is True
-        assert inner_payload["summary"] == "all done"
+        assert inner_payload["summary"] == "<p>all done</p>"
 
     def test_single_session_failure_no_extra_final_result(self) -> None:
         resp_fail = _make_tool_call_response(
             "finish",
-            {"success": False, "is_continue": False, "summary": "nope"},
+            {"success": False, "is_continue": False, "summary_in_html": "nope"},
         )
         printer = RecordingPrinter()
         result = _run_agent([resp_fail], max_sub_sessions=5, printer=printer)
@@ -326,11 +326,11 @@ class TestMergedResultMetricsAreNotDoubleCounted:
         printer = OffsetAwarePrinter()
         resp_continue = _make_tool_call_response(
             "finish",
-            {"success": False, "is_continue": True, "summary": "did A"},
+            {"success": False, "is_continue": True, "summary_in_html": "did A"},
         )
         resp_fail = _make_tool_call_response(
             "finish",
-            {"success": False, "is_continue": False, "summary": "gave up"},
+            {"success": False, "is_continue": False, "summary_in_html": "gave up"},
         )
         _run_agent(
             [resp_continue, resp_fail], max_sub_sessions=5, printer=printer
@@ -376,7 +376,7 @@ class TestMergedResultMetricsAreNotDoubleCounted:
         agent.total_tokens_used = 42
         agent.budget_used = 0.5
         agent._emit_merged_result_event(
-            {"success": True, "is_continue": False, "summary": "ok"}
+            {"success": True, "is_continue": False, "summary_in_html": "ok"}
         )
         assert printer.tokens_offset == 999
         assert printer.budget_offset == 9.99
@@ -386,18 +386,18 @@ class TestMergedResultMetricsAreNotDoubleCounted:
 class TestEmptyTerminalSummaryStillSplittable:
     """When the terminal session returns an empty summary AFTER prior
     continuations, the merged payload MUST still contain the
-    ``\\n\\n---\\n\\n`` separator (a "### Final Session\\n(no summary)"
+    ``\\n\\n---\\n\\n`` separator (a "<h3>Final Session</h3>\\n(no summary)"
     placeholder) so the front-end ``splitMultiSessionSummary`` can split
     into "Previous Sessions" + "Result" panels."""
 
     def test_empty_final_summary_uses_placeholder(self) -> None:
         resp_continue = _make_tool_call_response(
             "finish",
-            {"success": False, "is_continue": True, "summary": "did A"},
+            {"success": False, "is_continue": True, "summary_in_html": "did A"},
         )
         resp_terminal = _make_tool_call_response(
             "finish",
-            {"success": False, "is_continue": False, "summary": ""},
+            {"success": False, "is_continue": False, "summary_in_html": ""},
         )
         printer = RecordingPrinter()
         result = _run_agent(
@@ -406,9 +406,9 @@ class TestEmptyTerminalSummaryStillSplittable:
 
         parsed = yaml.safe_load(result)
         summary = parsed["summary"]
-        assert "### Previous Session 1" in summary
+        assert "<h3>Previous Session 1</h3>" in summary
         assert "\n\n---\n\n" in summary
-        assert "### Final Session" in summary
+        assert "<h3>Final Session</h3>" in summary
         head, sep, tail = summary.rpartition("\n\n---\n\n")
         assert sep == "\n\n---\n\n"
         assert head.strip()
@@ -417,7 +417,7 @@ class TestEmptyTerminalSummaryStillSplittable:
         result_events = printer.result_events()
         assert len(result_events) == 3
         final_payload = _parse_result_payload(result_events[-1][0])
-        assert "### Final Session" in final_payload["summary"]
+        assert "<h3>Final Session</h3>" in final_payload["summary"]
 
 
 class TestExhaustionSummaryHelper:
@@ -435,5 +435,5 @@ class TestExhaustionSummaryHelper:
             f"{_prior_sessions_section(['did A', 'did B'])}\n\n---\n\n{banner}"
         )
         assert summary.endswith(f"\n\n---\n\n{banner}")
-        assert "### Previous Session 1" in summary
-        assert "### Previous Session 2" in summary
+        assert "<h3>Previous Session 1</h3>" in summary
+        assert "<h3>Previous Session 2</h3>" in summary

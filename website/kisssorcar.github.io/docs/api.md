@@ -33,7 +33,7 @@ Base agent with auto-continuation across multiple sub-sessions for long-horizon 
 
 - **perform_task** — `perform_task(tools, attachments=None) -> str`. Executes the task with auto-continuation across sub-sessions; returns a YAML string with `success` and `summary` keys.
 - **run** — Full signature adds: `model_name`, `prompt_template`, `arguments`, `system_prompt`, `max_steps` (per sub-session), `max_budget` (USD), `model_config`, `work_dir`, `printer`, `max_sub_sessions`, `docker_image` (run tools inside a container), `verbose`, `tools`, `attachments`. Returns YAML with `success` and `summary`.
-- **finish** — `finish(success: bool, is_continue: bool = False, summary: str = '') -> str`. `is_continue=True` pauses an incomplete task so it resumes in a new sub-session.
+- **finish** — `finish(success: bool, is_continue: bool = False, summary_in_html: str = '') -> str`. The summary is always HTML (Markdown/plain-text input is converted). `is_continue=True` pauses an incomplete task so it resumes in a new sub-session.
 
 ## `kiss.agents.sorcar.sorcar_agent` — Coding + browser automation
 

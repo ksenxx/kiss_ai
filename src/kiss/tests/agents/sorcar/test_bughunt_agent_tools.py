@@ -63,7 +63,7 @@ def _finish_response(model: str = "gpt-4o-mini") -> dict:
                             "function": {
                                 "name": "finish",
                                 "arguments": json.dumps(
-                                    {"success": "true", "summary": "done"}
+                                    {"success": "true", "summary_in_html": "done"}
                                 ),
                             },
                         }
@@ -165,7 +165,7 @@ class TestUseWorktreeKwargConsumed:
         )
         parsed = yaml.safe_load(result)
         assert isinstance(parsed, dict)
-        assert parsed.get("summary") == "done"
+        assert parsed.get("summary") == "<p>done</p>"
 
     def test_run_accepts_use_worktree_true(self) -> None:
         """Passing ``use_worktree=True`` must not raise TypeError either."""
@@ -179,7 +179,7 @@ class TestUseWorktreeKwargConsumed:
         )
         parsed = yaml.safe_load(result)
         assert isinstance(parsed, dict)
-        assert parsed.get("summary") == "done"
+        assert parsed.get("summary") == "<p>done</p>"
 
 
 
