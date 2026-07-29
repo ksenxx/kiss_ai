@@ -528,9 +528,15 @@ body {
   padding: 8px 52px 8px 12px;
   border: 2px solid rgb(255 200 0 / 50%);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--accent) 4%, transparent);
+
+  /* Reverse (invert) of the rest of the chat view: swap --bg and --fg. */
+  --panel-bg: var(--fg);
+  --panel-fg: var(--bg);
+  --panel-dim: color-mix(in srgb, var(--bg) 65%, var(--fg));
+
+  background: var(--panel-bg);
   font-size: var(--vscode-editor-font-size);
-  color: var(--fg);
+  color: var(--panel-fg);
   line-height: 1.6;
   display: none;
 }
@@ -541,7 +547,11 @@ body {
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-word;
+  scrollbar-color: var(--panel-dim) transparent;
 }
+
+#task-panel-text::-webkit-scrollbar-thumb { background: var(--panel-dim); }
+#task-panel-text::-webkit-scrollbar-thumb:hover { background: var(--panel-fg); }
 
 #task-panel-copy {
   position: absolute;
@@ -550,7 +560,7 @@ body {
   transform: translateY(-50%);
   background: none;
   border: none;
-  color: var(--dim);
+  color: var(--panel-dim);
   cursor: pointer;
   padding: 2px;
   display: flex;
@@ -560,7 +570,7 @@ body {
   user-select: none;
 }
 #task-panel-copy * { user-select: none; }
-#task-panel-copy:hover { color: var(--fg); }
+#task-panel-copy:hover { color: var(--panel-fg); }
 #task-panel-copy.copied { color: var(--green); }
 
 #task-panel-drawer-btn {
@@ -570,7 +580,7 @@ body {
   transform: translateY(-50%);
   background: none;
   border: none;
-  color: var(--dim);
+  color: var(--panel-dim);
   cursor: pointer;
   padding: 0;
   width: 24px;
@@ -582,7 +592,7 @@ body {
   user-select: none;
 }
 #task-panel-drawer-btn * { user-select: none; }
-#task-panel-drawer-btn:hover { color: var(--fg); }
+#task-panel-drawer-btn:hover { color: var(--panel-fg); }
 
 #task-panel-drawer-btn:focus-visible {
   outline: 1px solid var(--accent);
@@ -2365,6 +2375,11 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 
 #custom-tooltip.task-panel-tooltip {
   font-size: var(--vscode-editor-font-size);
+
+  /* Match the reversed (inverted) task panel palette. */
+  background: var(--fg);
+  color: var(--bg);
+  border-color: color-mix(in srgb, var(--bg) 30%, var(--fg));
 }
 
 .wt-bar {

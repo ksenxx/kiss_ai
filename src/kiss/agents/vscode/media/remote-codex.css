@@ -91,19 +91,26 @@ body.remote-chat #task-panel {
   margin: 8px 16px 0;
   margin-left: auto;
   max-width: 90%;
-  border: 1px solid rgb(255 255 255 / 10%);
+  border: 1px solid rgb(0 0 0 / 10%);
   border-radius: 22px;
-  background: #212121;
-  color: #ececec;
-  box-shadow: inset 0 0 1px rgb(255 255 255 / 20%);
+
+  /* Reverse (invert) of the rest of the remote chat view
+     (bg #0d0d0d / fg #ececec swapped). */
+  --panel-bg: #ececec;
+  --panel-fg: #0d0d0d;
+  --panel-dim: #5a5a5a;
+
+  background: var(--panel-bg);
+  color: var(--panel-fg);
+  box-shadow: inset 0 0 1px rgb(0 0 0 / 20%);
   padding: 10px 58px 10px 16px;
 }
 
-body.remote-chat #task-panel-copy { color: #8e8e8e; }
-body.remote-chat #task-panel-copy:hover { color: #ececec; }
+body.remote-chat #task-panel-copy { color: var(--panel-dim); }
+body.remote-chat #task-panel-copy:hover { color: var(--panel-fg); }
 
-body.remote-chat #task-panel-drawer-btn { color: #8e8e8e; }
-body.remote-chat #task-panel-drawer-btn:hover { color: #ececec; }
+body.remote-chat #task-panel-drawer-btn { color: var(--panel-dim); }
+body.remote-chat #task-panel-drawer-btn:hover { color: var(--panel-fg); }
 
 body.remote-chat #input-drawer-btn {
   background: #212121;

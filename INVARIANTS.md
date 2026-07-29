@@ -72,7 +72,7 @@ are noted inline. One-off task instructions are excluded.
   optional list of tools. Tools are passed as a file path to a Python file whose top-level public
   functions become tools (clients never serialize Python functions).
 - [2026-07-18] Agents in ./src/kiss/agents/third_party_agents/ must be implemented using the
-  kiss.server.sorcar.run API; they launch via _CommandsMixin._cmd_run() as kiss-web registered
+  kiss.server.sorcar.run API; they launch via \_CommandsMixin.\_cmd_run() as kiss-web registered
   agents instead of calling SorcarAgent.run directly [2026-07-12].
 - [2026-07-16] No backward compatibility shims: do not create alias/shim modules (static re-exports
   plus `sys.modules[...]` at old import paths) when moving or refactoring code; remove existing
@@ -179,7 +179,7 @@ are noted inline. One-off task instructions are excluded.
   prompt of the task [2026-05-18].
 - [2026-05-22] The agent must NOT commit changes before the task finishes (commits happen only at
   task completion).
-- [2026-06-03] A working directory must be provided for every git operation (git_worktree.py:_git()
+- [2026-06-03] A working directory must be provided for every git operation (git_worktree.py:\_git()
   takes cwd as a required parameter, no None default); VSCodeServer git operations use a
   per-command work_dir.
 - [2026-06-03] When a task runs in a git repo and the agent modified no files, never report "Not a
@@ -195,7 +195,7 @@ are noted inline. One-off task instructions are excluded.
   a task runs in worktree mode and copied back to the original branch when the worktree is merged.
 - [2026-06-22] kiss-sorcar.vsix must not be committed to the git repo, and install.sh must not
   commit it.
-- [2026-04-24] *.aux, *.out, *.blg, *.bbl LaTeX build artifacts must never be added to git.
+- [2026-04-24] \*.aux, \*.out, \*.blg, \*.bbl LaTeX build artifacts must never be added to git.
 - [2026-04-30] No one may be able to submit pull requests to https://github.com/ksenxx/kiss_ai.
 
 ## 7. work_dir rules
@@ -261,7 +261,7 @@ are noted inline. One-off task instructions are excluded.
   task by its own agent in parallel (never the whole list as one task, never per-character splits).
   Parallel sub-agents run with the same chat_id as the parent and accumulate responses in the
   shared chat history.
-- [2026-05-18] Subagent marking: extra_payload["subagent"] = {"parent_task_id": <parent's
+- [2026-05-18] Subagent marking: extra_payload["subagent"] = {"parent_task_id": \<parent's
   task_history.id>}; is_subagent is implied by the key's presence. A subagent task is a regular
   task except in tab display: its tab does not load other tasks of the chat id and has a different
   header color/icon.
@@ -290,7 +290,7 @@ are noted inline. One-off task instructions are excluded.
 - [2026-05-22] Subagent result panels are NEVER shown in the parent agent's chat webview.
 - [2026-06-11] When an agent with subagents is restored after a VS Code restart, it loads its own
   chat events in a tab and each subagent's events in separate tabs to the right of the parent tab.
-- [2026-05-22] _resolve_parent_tab_id_for_sub must never produce a self-referential parent_tab_id
+- [2026-05-22] \_resolve_parent_tab_id_for_sub must never produce a self-referential parent_tab_id
   and returns "" when no real parent state exists.
 - [2026-06-28] While run_parallel is running, a spinner shows to the left of the send button.
 - [2026-05-16] Sub-agent tabs are not counted as regular tabs for tab-management decisions.
@@ -345,7 +345,7 @@ are noted inline. One-off task instructions are excluded.
 - [2026-04-26] When a user stops an agent or the agent is killed, the error message is part of the
   result panel; if cost exceeds max budget the task stops and shows "Budget exceeded" [2026-04-28].
 - [2026-04-26] If a task runs with no model available, the result panel must show exactly
-  "No model available.  Set at least one API key in the environment.".
+  "No model available. Set at least one API key in the environment.".
 - [2026-06-27] The "Previous sessions" panel appears before the "Results" panel for multi-session
   tasks.
 - [2026-06-28] Clicking a filepath in the chat webview opens it in the VS Code editor or a native
@@ -417,7 +417,7 @@ are noted inline. One-off task instructions are excluded.
   textbox.
 - [2026-06-11] Every tab shows the running time as elapsed-since-start while running and
   (end − start) when ended; task cards show time spent in hh:mm:ss after the cost [2026-06-20].
-- [2026-05-02] There is NO 10000-task cap in the database; _MAX_FILE_USAGE_ENTRIES is 10000.
+- [2026-05-02] There is NO 10000-task cap in the database; \_MAX_FILE_USAGE_ENTRIES is 10000.
 - [2026-05-02] frequent_tasks table (task, count, timestamp) capped at 100 entries; every sent task
   increments count and refreshes timestamp; eviction removes the lowest-count oldest entry; the
   frequent-tasks panel shows up to 50 entries with a scrollbar [2026-05-07], opens bottom-to-top
@@ -511,7 +511,7 @@ are noted inline. One-off task instructions are excluded.
 - [2026-06-28] On installation: do not copy SAMPLE_TASKS.md, INJECTIONS.md, or MODEL_INFO.json to
   ~/.kiss/; auto-create ~/.kiss/MY_TASK_TEMPLATES.md ("Hi!"), ~/.kiss/MY_INJECTION.md (the
   100%-coverage-tests-first promptlet), and ~/.kiss/MY_MODELS.json (docs + example entry) when
-  missing; load the MY_* files before the bundled ones. (Supersedes 2026-06-22 copy-and-overwrite
+  missing; load the MY\_\* files before the bundled ones. (Supersedes 2026-06-22 copy-and-overwrite
   rules for SAMPLE_TASKS.md/INJECTIONS.md.)
 - [2026-05-06] After install + restart, VS Code opens the KISS Sorcar tab in the secondary sidebar,
   focuses the input textbox, and sets the sidebar width to 1/3 of the window.
@@ -545,7 +545,7 @@ are noted inline. One-off task instructions are excluded.
 - [2026-04-28] The remote web server handles ALL webview commands, reusing the extension code with
   minimal modification; no extension feature may be missing from the remote server.
 - [2026-05-02] Blocking of accounts.google.com is implemented via a Playwright context.route() call
-  in _launch_browser right after launch_persistent_context returns (NOT in web_use_tool.py).
+  in \_launch_browser right after launch_persistent_context returns (NOT in web_use_tool.py).
 - [2026-06-03] RemoteAccessServer.start() calls logging.basicConfig(level=logging.INFO).
 - [2026-07-17] When a remote webapp opens, it loads all running tasks in separate tabs and focuses
   the tab running the latest task.
@@ -574,7 +574,7 @@ are noted inline. One-off task instructions are excluded.
   and blinking cursor, horizontal lines above and below, an always-visible input bar
   [2026-06-20], screen cleared at launch, no raw YAML output, nothing printed after the Result
   panel, and ConsolePrinter panels content-matching the chat webview.
-- [2026-07-07] The CLI REPL input header reads "TAB for autocomplete .  Alt+Enter/Shift+Enter for
+- [2026-07-07] The CLI REPL input header reads "TAB for autocomplete . Alt+Enter/Shift+Enter for
   newline"; left/right arrows move the cursor for editing; up/down arrows navigate within the
   input, traversing task history when nothing is typed — identical to the chat webview.
 - [2026-06-12] Pressing @ shows a file/folder completion list navigable with arrows and selectable
@@ -644,7 +644,7 @@ are noted inline. One-off task instructions are excluded.
 - [2026-07-06] The tips window (shown after a fresh install, and from the settings "Tips" button)
   renders the markdown after each "# Tip" line of ./src/kiss/TIPS.md with previous/next/close
   buttons; it has fixed height and width, centered both ways, scrollable overflow, a contrasting
-  border, copy buttons on every ``` code block, aesthetically pleasing (non-Claude/GPT-default)
+  border, copy buttons on every \`\`\` code block, aesthetically pleasing (non-Claude/GPT-default)
   colors, and larger fonts.
 
 ## 21. Papers, website, and content rules
@@ -655,7 +655,7 @@ are noted inline. One-off task instructions are excluded.
   first-person "we", Strunk & White style [2026-04-24]; no minted — prompts verbatim
   [2026-04-26]; each paragraph on a single line [2026-04-26]; marketing tone toned down
   [2026-05-14].
-- [2026-07-14] Cite with LaTeX \cite{...} (never "(arxiv:xxx)", listed titles, or obscure
+- [2026-07-14] Cite with LaTeX \\cite{...} (never "(arxiv:xxx)", listed titles, or obscure
   abbreviations); no made-up attributions (e.g., "Tramèr Standard") — cite specific papers, not
   people; citations must be well known, actually read, validated via internet search, with related
   work post-August-2025 and highly cited [2026-04-23/2026-06-06].
@@ -694,13 +694,13 @@ are noted inline. One-off task instructions are excluded.
   words.
 - [2026-06-12] Fact-check all content of generated artifacts; verify claims independently.
 - [2026-07-21] When replying to Slack, format the final summary with Slack mrkdwn — *bold*,
-  _italic_, ~strike~, `code`, fenced code blocks, <url|label> links, "- item" bullets — never
+  _italic_, ~strike~, `code`, fenced code blocks, \<url|label> links, "- item" bullets — never
   markdown **bold**, __italic__, or [label](url). (First seen 2026-05-15.)
 
 ## 22. Agent behavior and process rules
 
 - [2026-05-16] Internet research: visit at least 10 distinct websites using go_to_url() (not
-  curl/wget), tracked in PWD/tmp/information-*.md with a "Websites visited: N/10" counter, ≤10
+  curl/wget), tracked in PWD/tmp/information-\*.md with a "Websites visited: N/10" counter, ≤10
   bullets per site; prefer small targeted pages; do not call get_page_content() right after
   go_to_url(). (Supersedes the 2026-05-04 "at least 30 websites" rule.)
 - [2026-06-26] Use internet search extensively for research, feature design, reviews, and
