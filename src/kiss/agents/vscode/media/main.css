@@ -525,7 +525,7 @@ body {
   position: relative;
   flex-shrink: 0;
   margin: 8px 10px 0;
-  padding: 8px 52px 8px 12px;
+  padding: 8px 64px 8px 12px;
   border: 2px solid rgb(255 200 0 / 50%);
   border-radius: 8px;
 
@@ -583,8 +583,9 @@ body {
   color: var(--panel-dim);
   cursor: pointer;
   padding: 0;
-  width: 24px;
-  height: 24px;
+  width: 36px;
+  height: 36px;
+  font-size: 1.5em;
   display: flex;
   align-items: center;
   justify-content: center;

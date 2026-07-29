@@ -145,20 +145,33 @@ async function testOtherTooltipsKeepSmallFont() {
   mouse(win, txt, 'mouseout');
 
   const drawerBtn = win.document.getElementById('task-panel-drawer-btn');
-  assert.ok(
+  assert.strictEqual(
     drawerBtn.getAttribute('data-tooltip'),
-    'drawer button must keep its own data-tooltip',
+    null,
+    'drawer button must NOT have a data-tooltip',
   );
   mouse(win, drawerBtn, 'mouseover');
   await sleep(500);
   assert.ok(
+    !tip.classList.contains('visible'),
+    'hovering the drawer button must not show a tooltip',
+  );
+
+  const modelBtn = win.document.getElementById('model-btn');
+  assert.ok(
+    modelBtn.getAttribute('data-tooltip'),
+    'model button must keep its own data-tooltip',
+  );
+  mouse(win, modelBtn, 'mouseover');
+  await sleep(500);
+  assert.ok(
     tip.classList.contains('visible'),
-    'drawer button tooltip must still work',
+    'model button tooltip must still work',
   );
   assert.strictEqual(
     tip.textContent,
-    drawerBtn.getAttribute('data-tooltip'),
-    'drawer button keeps its own tooltip text',
+    modelBtn.getAttribute('data-tooltip'),
+    'model button keeps its own tooltip text',
   );
   assert.ok(
     !tip.classList.contains('task-panel-tooltip'),

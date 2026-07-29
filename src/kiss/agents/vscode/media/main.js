@@ -1550,7 +1550,7 @@
         ? 'Expand task panel'
         : 'Collapse task panel';
       taskPanelDrawerBtn.setAttribute('aria-label', taskLabel);
-      taskPanelDrawerBtn.setAttribute('data-tooltip', taskLabel);
+      taskPanelDrawerBtn.removeAttribute('data-tooltip');
     }
     if (inputAreaEl && inputDrawerBtn) {
       inputAreaEl.classList.toggle('drawer-collapsed', inputDrawerCollapsed);
