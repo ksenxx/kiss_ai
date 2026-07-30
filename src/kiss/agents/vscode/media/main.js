@@ -391,6 +391,34 @@
   let _noScroll = false;
   let _sbScrollTarget = -1;
   let _deferHighlight = false;
+
+  // followtail-coverage:start
+  // Per-panel tailing for inner scrollable panels (think, bash output,
+  // thoughts, prompt bodies): keep following the streamed text, stand
+  // down while the user has scrolled up inside the panel, and resume
+  // once the user returns to the panel's bottom.
+  function watchPanelScroll(el) {
+    el._autoScrollTarget = -1;
+    el._userScrolledUp = false;
+    el.addEventListener('scroll', () => {
+      const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+      const fromAuto =
+        el._autoScrollTarget >= 0 && el.scrollTop >= el._autoScrollTarget - 2;
+      el._autoScrollTarget = -1;
+      if (dist <= 2) el._userScrolledUp = false;
+      else if (!fromAuto) el._userScrolledUp = true;
+    });
+  }
+
+  function autoScrollPanel(el) {
+    if (!el || _scrollLock || el._userScrolledUp) return;
+    const target = el.scrollHeight - el.clientHeight;
+    if (el.scrollTop < target) el._autoScrollTarget = target;
+    if (typeof el.scrollTo === 'function')
+      el.scrollTo({top: el.scrollHeight, behavior: 'instant'});
+    else el.scrollTop = el.scrollHeight;
+  }
+  // followtail-coverage:end
   let scrollRaf = 0;
   let acIdx = -1;
 
@@ -529,6 +557,9 @@
     addCollapse(panel, hdr, ts);
     panel.appendChild(hdr);
     stampPanelStart(panel);
+    // followtail-coverage:start
+    watchPanelScroll(panel);
+    // followtail-coverage:end
     return panel;
   }
 
@@ -2577,6 +2608,9 @@
         tState.thinkCnt = tState.thinkEl.querySelector('.cnt');
         tState.thinkBuf = '';
         tState.thinkRaf = 0;
+        // followtail-coverage:start
+        watchPanelScroll(tState.thinkEl);
+        // followtail-coverage:end
         target.appendChild(tState.thinkEl);
         break;
       case 'thinking_delta':
@@ -2597,8 +2631,9 @@
                 cnt.appendChild(document.createTextNode(tState.thinkBuf));
               }
               tState.thinkBuf = '';
-              if (tState.thinkEl && !_scrollLock)
-                tState.thinkEl.scrollTop = tState.thinkEl.scrollHeight;
+              // followtail-coverage:start
+              if (tState.thinkEl) autoScrollPanel(tState.thinkEl);
+              // followtail-coverage:end
             });
           }
         }
@@ -2797,6 +2832,9 @@
           bp.appendChild(bpContent);
           addCopyButton(bp);
           c.appendChild(bp);
+          // followtail-coverage:start
+          watchPanelScroll(bpContent);
+          // followtail-coverage:end
           tState.bashPanel = bpContent;
         }
         hlBlock(c);
@@ -2861,8 +2899,9 @@
               }
               tState.bashBuf = '';
               tState.bashRaf = 0;
-              if (tState.bashPanel && !_scrollLock)
-                tState.bashPanel.scrollTop = tState.bashPanel.scrollHeight;
+              // followtail-coverage:start
+              if (tState.bashPanel) autoScrollPanel(tState.bashPanel);
+              // followtail-coverage:end
             });
           }
         } else {
@@ -2911,6 +2950,11 @@
         }
         const fresh = !el;
         if (fresh) el = mkEl('div', 'ev ' + cls);
+        // followtail-coverage:start
+        const prevBody = fresh ? null : el.querySelector('.' + cls + '-body');
+        const keepUp = !!(prevBody && prevBody._userScrolledUp);
+        const prevTop = prevBody ? prevBody.scrollTop : 0;
+        // followtail-coverage:end
         const body =
           typeof marked !== 'undefined'
             ? kissSanitize(marked.parse(ev.text || ''))
@@ -2938,7 +2982,12 @@
         const bodyEl = el.querySelector('.' + cls + '-body');
         if (bodyEl) {
           linkifyFilePaths(bodyEl);
-          bodyEl.scrollTop = bodyEl.scrollHeight;
+          // followtail-coverage:start
+          watchPanelScroll(bodyEl);
+          bodyEl._userScrolledUp = keepUp;
+          if (keepUp) bodyEl.scrollTop = prevTop;
+          else autoScrollPanel(bodyEl);
+          // followtail-coverage:end
         }
         break;
       }
@@ -3058,7 +3107,9 @@
       const _lp = llmPanel;
       _lp._scrollRaf = requestAnimationFrame(() => {
         _lp._scrollRaf = 0;
-        if (!_scrollLock) _lp.scrollTop = _lp.scrollHeight;
+        // followtail-coverage:start
+        autoScrollPanel(_lp);
+        // followtail-coverage:end
       });
     }
     if (!_demoActive) applyChevronState(currentTaskName);
@@ -3217,13 +3268,54 @@
     }
   }
 
-  O.addEventListener('wheel', e => {
-    if (
-      isRunning &&
-      (e.deltaY < 0 || Math.abs(e.deltaX) > Math.abs(e.deltaY))
-    ) {
-      _scrollLock = true;
+  // followtail-coverage:start
+  // Watched inner panels (think/bash/thoughts/prompt bodies) between
+  // the wheel target and the chat output, innermost first.
+  function watchedPanelsFor(node) {
+    const out = [];
+    let el = node;
+    while (el && el !== O && el.nodeType === 1) {
+      if (el._userScrolledUp !== undefined) out.push(el);
+      el = el.parentElement;
     }
+    return out;
+  }
+  // followtail-coverage:end
+
+  O.addEventListener('wheel', e => {
+    // followtail-coverage:start
+    if (isRunning) {
+      const wheelUp = e.deltaY < 0;
+      const sideways = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+      if (O.scrollHeight - O.clientHeight > 2 && (wheelUp || sideways)) {
+        _scrollLock = true;
+      } else if (
+        e.deltaY > 0 &&
+        O.scrollHeight - O.scrollTop - O.clientHeight <= 2
+      ) {
+        // Wheeling down while the chat is already at its end: the
+        // user wants the tail back.  This also releases a lock that
+        // was engaged by a wheel inside a nested panel, where no
+        // output scroll event can ever fire to clear it.
+        _scrollLock = false;
+      }
+      const panels = watchedPanelsFor(e.target);
+      for (let i = 0; i < panels.length; i++) {
+        const p = panels[i];
+        if (
+          (wheelUp && p.scrollHeight - p.clientHeight > 2) ||
+          (sideways && p.scrollWidth - p.clientWidth > 2)
+        ) {
+          p._userScrolledUp = true;
+        } else if (
+          e.deltaY > 0 &&
+          p.scrollHeight - p.scrollTop - p.clientHeight <= 2
+        ) {
+          p._userScrolledUp = false;
+        }
+      }
+    }
+    // followtail-coverage:end
 
     const _activeTabForAdj = getTab(activeTabId);
     const _isSubagentActive = !!(
@@ -4647,12 +4739,27 @@
   }
 
   function setRunningState(running) {
+    // taskstart-coverage:start
+    // A task transitioning into the running state must re-activate the
+    // tail: clear any scroll lock left over from reading earlier output
+    // and jump to the end so the new run's events are followed from the
+    // start.  A redundant running=true mid-run (isRunning already true,
+    // e.g. reconnect re-broadcasts) must NOT yank a user who scrolled
+    // up during that same run.
+    const taskStarting = running && !isRunning;
+    // taskstart-coverage:end
     isRunning = running;
     sendBtn.style.display = 'flex';
     stopBtn.style.display = running ? 'flex' : 'none';
 
     updateInputDisabled();
     if (running) {
+      // taskstart-coverage:start
+      if (taskStarting) {
+        _scrollLock = false;
+        sb();
+      }
+      // taskstart-coverage:end
       startTimer();
       showSpinner();
     } else {
