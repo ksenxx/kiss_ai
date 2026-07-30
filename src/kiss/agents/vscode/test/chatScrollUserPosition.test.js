@@ -122,6 +122,13 @@ function userScrollTo(win, O, top) {
   O.dispatchEvent(new win.Event('scroll'));
 }
 
+// Wait past the resume-at-bottom debounce (RESUME_AT_BOTTOM_MS in
+// media/main.js): a return to the bottom only resumes the tail after
+// the position has settled there, so jitter cannot toggle the tail.
+function settle() {
+  return new Promise(resolve => setTimeout(resolve, 250));
+}
+
 function startRunningTask(win, posted) {
   const ready = posted.find(m => m.type === 'ready');
   assert.ok(ready && ready.tabId, 'webview must post ready with a tabId');
@@ -254,6 +261,7 @@ async function testAutoScrollResumesAtTheVeryEnd() {
   await streamOutput(win, geo, 'a'.repeat(50));
   assert.strictEqual(O.scrollTop, 500, 'locked while scrolled up');
   userScrollTo(win, O, geo.sh - geo.ch);
+  await settle();
 
   const before = scrollCalls.length;
   await streamOutput(win, geo, 'b'.repeat(50));
@@ -282,6 +290,7 @@ async function testAutoScrollResumesAtTheVeryEnd() {
     'sanity: view held in place after uncollapse',
   );
   userScrollTo(win, O, geo.sh - geo.ch);
+  await settle();
   const before2 = scrollCalls.length;
   await streamOutput(win, geo, 'e'.repeat(50));
   assert.ok(

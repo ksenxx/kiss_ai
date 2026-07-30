@@ -405,8 +405,11 @@
       const fromAuto =
         el._autoScrollTarget >= 0 && el.scrollTop >= el._autoScrollTarget - 2;
       el._autoScrollTarget = -1;
-      if (dist <= 2) el._userScrolledUp = false;
-      else if (!fromAuto) el._userScrolledUp = true;
+      if (dist <= 2) resumePanelAtBottom(el, !fromAuto);
+      else if (!fromAuto) {
+        cancelPanelResume(el);
+        el._userScrolledUp = true;
+      }
     });
   }
 
@@ -419,6 +422,61 @@
     else el.scrollTop = el.scrollHeight;
   }
   // followtail-coverage:end
+
+  // resumedebounce-coverage:start
+  // Debounce for the resume-at-bottom logic: while a task is streaming,
+  // rapid small scroll fluctuations near the bottom (e.g. trackpad
+  // jitter) must not repeatedly toggle auto-scroll on and off.  A pause
+  // still engages immediately, but the tail only resumes once the
+  // scroll position has settled at the bottom for RESUME_AT_BOTTOM_MS.
+  const RESUME_AT_BOTTOM_MS = 150;
+  let _resumeTimer = 0;
+
+  function cancelOutputResume() {
+    if (_resumeTimer) {
+      clearTimeout(_resumeTimer);
+      _resumeTimer = 0;
+    }
+  }
+
+  function resumeOutputAtBottom(fromUser) {
+    if (fromUser && isRunning && _scrollLock) {
+      if (_resumeTimer) return;
+      // A surviving timer means the user stayed in the bottom band for
+      // the whole interval (leaving it cancels the timer), so resume
+      // unconditionally: during fast streaming the bottom itself keeps
+      // moving away and must not defeat a deliberate return to it.
+      _resumeTimer = setTimeout(() => {
+        _resumeTimer = 0;
+        _scrollLock = false;
+        if (isRunning) sb();
+      }, RESUME_AT_BOTTOM_MS);
+    } else {
+      cancelOutputResume();
+      _scrollLock = false;
+    }
+  }
+
+  function cancelPanelResume(el) {
+    if (el._resumeTimer) {
+      clearTimeout(el._resumeTimer);
+      el._resumeTimer = 0;
+    }
+  }
+
+  function resumePanelAtBottom(el, fromUser) {
+    if (fromUser && isRunning && el._userScrolledUp) {
+      if (el._resumeTimer) return;
+      el._resumeTimer = setTimeout(() => {
+        el._resumeTimer = 0;
+        el._userScrolledUp = false;
+      }, RESUME_AT_BOTTOM_MS);
+    } else {
+      cancelPanelResume(el);
+      el._userScrolledUp = false;
+    }
+  }
+  // resumedebounce-coverage:end
   let scrollRaf = 0;
   let acIdx = -1;
 
@@ -2145,8 +2203,10 @@
           _scrollLock = false;
       } else {
         panelEl.classList.add('user-pinned');
-        if (O.scrollHeight - O.scrollTop - O.clientHeight > 2)
+        if (O.scrollHeight - O.scrollTop - O.clientHeight > 2) {
+          cancelOutputResume();
           _scrollLock = true;
+        }
         highlightPending(panelEl);
       }
       collapsePreview(panelEl);
@@ -3288,6 +3348,7 @@
       const wheelUp = e.deltaY < 0;
       const sideways = Math.abs(e.deltaX) > Math.abs(e.deltaY);
       if (O.scrollHeight - O.clientHeight > 2 && (wheelUp || sideways)) {
+        cancelOutputResume();
         _scrollLock = true;
       } else if (
         e.deltaY > 0 &&
@@ -3296,8 +3357,9 @@
         // Wheeling down while the chat is already at its end: the
         // user wants the tail back.  This also releases a lock that
         // was engaged by a wheel inside a nested panel, where no
-        // output scroll event can ever fire to clear it.
-        _scrollLock = false;
+        // output scroll event can ever fire to clear it.  The release
+        // is debounced so trackpad jitter cannot rapidly toggle it.
+        resumeOutputAtBottom(true);
       }
       const panels = watchedPanelsFor(e.target);
       for (let i = 0; i < panels.length; i++) {
@@ -3306,12 +3368,13 @@
           (wheelUp && p.scrollHeight - p.clientHeight > 2) ||
           (sideways && p.scrollWidth - p.clientWidth > 2)
         ) {
+          cancelPanelResume(p);
           p._userScrolledUp = true;
         } else if (
           e.deltaY > 0 &&
           p.scrollHeight - p.scrollTop - p.clientHeight <= 2
         ) {
-          p._userScrolledUp = false;
+          resumePanelAtBottom(p, true);
         }
       }
     }
@@ -3454,11 +3517,14 @@
     const dist = O.scrollHeight - O.scrollTop - O.clientHeight;
     const fromSb = _sbScrollTarget >= 0 && O.scrollTop >= _sbScrollTarget - 2;
     _sbScrollTarget = -1;
+    // resumedebounce-coverage:start
     if (dist <= 2) {
-      _scrollLock = false;
+      resumeOutputAtBottom(!fromSb);
     } else if (!fromSb) {
+      cancelOutputResume();
       _scrollLock = true;
     }
+    // resumedebounce-coverage:end
     updateVisibleTask();
   });
   new MutationObserver(() => {

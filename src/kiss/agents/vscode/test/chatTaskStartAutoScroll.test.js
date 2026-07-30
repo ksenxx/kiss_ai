@@ -326,8 +326,10 @@ async function testPauseAndResumeStillWorkAfterRestart(remote) {
       ')',
   );
 
-  // Returning to the bottom resumes the tail.
+  // Settling back at the bottom resumes the tail (the resume is
+  // debounced by RESUME_AT_BOTTOM_MS in media/main.js).
   userScroll(win, O, geo.sh - geo.ch);
+  await new Promise(resolve => setTimeout(resolve, 250));
   geo.sh += 200;
   before = scrollCalls.length;
   send(win, {type: 'system_output', text: 'resumed\n'});

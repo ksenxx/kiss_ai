@@ -258,6 +258,9 @@ async function testLockReleasesWhenUserReturnsToBottom() {
 
   O.scrollTop = O.scrollHeight - O.clientHeight;
   O.dispatchEvent(new win.Event('scroll'));
+  // Wait past the resume-at-bottom debounce (RESUME_AT_BOTTOM_MS in
+  // media/main.js) so the return to the bottom settles.
+  await new Promise(resolve => setTimeout(resolve, 250));
 
   const before = scrollCalls.length;
   send(win, {type: 'system_output', text: 'c'.repeat(200) + '\n'});

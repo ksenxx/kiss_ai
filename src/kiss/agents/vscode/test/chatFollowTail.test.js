@@ -125,6 +125,13 @@ function wheel(win, el, deltaY, deltaX) {
   );
 }
 
+// Wait past the resume-at-bottom debounce (RESUME_AT_BOTTOM_MS in
+// media/main.js): a return to the bottom only resumes the tail after
+// the position has settled there, so jitter cannot toggle the tail.
+function settle() {
+  return new Promise(resolve => setTimeout(resolve, 250));
+}
+
 function startRunningTask(win, posted) {
   const ready = posted.find(m => m.type === 'ready');
   assert.ok(ready && ready.tabId, 'webview must post ready with a tabId');
@@ -211,8 +218,9 @@ async function testWheelUpOnScrollableOutputStillSuspends() {
       'the scroll event arrives',
   );
 
-  // ...and returning to the bottom must resume tailing.
+  // ...and settling back at the bottom must resume tailing.
   userScroll(win, O, geo.sh - geo.ch);
+  await settle();
   geo.sh += 200;
   const before2 = scrollCalls.length;
   send(win, {type: 'system_output', text: 'c'.repeat(200) + '\n'});
@@ -264,6 +272,7 @@ async function testThinkPanelHonorsUserScroll(remote) {
   );
 
   userScroll(win, think, gt.sh - gt.ch);
+  await settle();
   gt.sh += 200;
   send(win, {type: 'thinking_delta', text: 'c'.repeat(80)});
   await nextFrames(win);
@@ -313,6 +322,7 @@ async function testBashPanelHonorsUserScroll(remote) {
   );
 
   userScroll(win, bp, gb.sh - gb.ch);
+  await settle();
   gb.sh += 100;
   send(win, {type: 'system_output', text: 'c'.repeat(120) + '\n'});
   await nextFrames(win);
@@ -360,6 +370,7 @@ async function testThoughtsPanelHonorsUserScroll() {
   );
 
   userScroll(win, lp, gl.sh - gl.ch);
+  await settle();
   gl.sh += 200;
   send(win, {type: 'text_delta', text: 'even more '});
   await nextFrames(win);
@@ -525,6 +536,7 @@ async function testNestedWheelPauseAndResume() {
   // BOTH the panel pause and the chat lock the bubbled wheel set.
   think.scrollTop = gt.sh - gt.ch; // wheel moved the panel...
   wheel(win, think, 30); // ...and keeps going at its bottom
+  await settle();
   gt.sh += 200;
   const before = scrollCalls.length;
   send(win, {type: 'thinking_delta', text: 'c'.repeat(80)});
@@ -571,6 +583,7 @@ async function testSidePanOverPanelPausesItsTail() {
   );
 
   userScroll(win, bp, gb.sh - gb.ch);
+  await settle();
   gb.sh += 100;
   send(win, {type: 'system_output', text: 'c'.repeat(120) + '\n'});
   await nextFrames(win);
