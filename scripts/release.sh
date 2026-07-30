@@ -16,7 +16,8 @@
 # 5. Build VS Code extension (.vsix) so it's included in the commit
 # 6. Commit changes with "Version bumped" (includes vsix)
 # 7. Push to origin
-# 8. Push to kiss_ai repo and tag with version
+# 8. Push to kiss_ai repo (excluding paths listed in scripts/exclude.json)
+#    and tag with version
 # 9. Create GitHub release and upload VSIX asset
 # 10. Publish to PyPI
 # 11. Publish VS Code extension to marketplace
@@ -41,6 +42,11 @@ README_FILE="README.md"
 SYSTEM_FILE="src/kiss/SYSTEM.md"
 PYPI_PACKAGE_NAME="kiss-agent-framework"
 VSCODE_EXT_DIR="src/kiss/agents/vscode"
+# JSON list of literal file/folder paths (repo-relative, no globs) that MUST
+# NOT be pushed to the public kiss_ai repo. Everything listed here is stripped
+# from the snapshot pushed to $PUBLIC_REPO_URL while remaining tracked in
+# origin. The file is required; use [] to exclude nothing.
+EXCLUDE_FILE="scripts/exclude.json"
 
 # Colors for output
 RED='\033[0;31m'
@@ -212,6 +218,114 @@ ensure_remote() {
     fi
 }
 
+# Print the paths listed in $EXCLUDE_FILE, one per line. The file must contain
+# a JSON list of strings, e.g. ["secrets/", "notes.md"]. Each entry is treated
+# as a LITERAL file or folder path relative to the repo root (no globs).
+# The file is required so that its accidental absence cannot silently publish
+# everything: use [] to exclude nothing. Fails on malformed JSON.
+read_exclude_paths() {
+    if [[ ! -f "$EXCLUDE_FILE" ]]; then
+        echo "$EXCLUDE_FILE not found - create it (use [] to exclude nothing)" >&2
+        return 1
+    fi
+    python3 - "$EXCLUDE_FILE" <<'PYEOF'
+import json
+import sys
+
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+if not isinstance(data, list) or not all(isinstance(p, str) for p in data):
+    sys.exit(f"{sys.argv[1]} must contain a JSON list of path strings")
+for path in data:
+    if "\n" in path or "\r" in path or "\x00" in path:
+        sys.exit(f"{sys.argv[1]}: path {path!r} must not contain newlines or NUL")
+    if path.startswith("/") or any(part == ".." for part in path.split("/")):
+        sys.exit(f"{sys.argv[1]}: path {path!r} must be repo-relative without '..'")
+    path = path.rstrip("/")
+    if path:
+        print(path)
+PYEOF
+}
+
+# Print the tree sha of <commit> with all paths listed in $EXCLUDE_FILE
+# removed. Uses a temporary index so neither the real index nor the working
+# tree is touched. Prints the commit's own tree when nothing is excluded.
+filtered_tree() {
+    local commit="$1"
+    local paths tmp_index path
+    if ! paths=$(read_exclude_paths); then
+        print_error "Failed to read $EXCLUDE_FILE - aborting" >&2
+        return 1
+    fi
+    tmp_index=$(mktemp)
+    if ! GIT_INDEX_FILE="$tmp_index" git read-tree "$commit"; then
+        rm -f "$tmp_index"
+        return 1
+    fi
+    if [[ -n "$paths" ]]; then
+        while IFS= read -r path; do
+            # :(literal) treats the path verbatim - no glob/wildcard expansion -
+            # so an entry like "foo[1]" cannot accidentally remove "foo1".
+            if ! GIT_INDEX_FILE="$tmp_index" \
+                git rm -r -f -q --cached --ignore-unmatch -- ":(literal)$path" >/dev/null; then
+                print_error "Failed to exclude '$path' from public tree" >&2
+                rm -f "$tmp_index"
+                return 1
+            fi
+        done <<< "$paths"
+    fi
+    GIT_INDEX_FILE="$tmp_index" git write-tree
+    local status=$?
+    rm -f "$tmp_index"
+    return $status
+}
+
+# Create a commit for the public repo: the tree of <source-commit> minus the
+# excluded paths, parented on the public repo's current main (passed as
+# <parent>, may be empty for the first release) so that excluded content is
+# never reachable from public history. Sets PUBLIC_COMMIT to the new sha.
+create_public_commit() {
+    local source_commit="$1" version="$2" parent="$3"
+    local tree
+    tree=$(filtered_tree "$source_commit")
+    if [[ -n "$parent" ]]; then
+        PUBLIC_COMMIT=$(git commit-tree "$tree" -p "$parent" -m "Release $version")
+    else
+        PUBLIC_COMMIT=$(git commit-tree "$tree" -m "Release $version")
+    fi
+    print_info "Created filtered public commit $PUBLIC_COMMIT (source $source_commit)"
+}
+
+# Fail if any excluded path is still present in <commit>'s tree. Matches each
+# excluded entry literally, as an exact file path or a folder prefix.
+verify_no_excluded_paths() {
+    local commit="$1"
+    local paths path file leaked
+    if ! paths=$(read_exclude_paths); then
+        print_error "Failed to read $EXCLUDE_FILE - aborting"
+        return 1
+    fi
+    if [[ -z "$paths" ]]; then
+        return 0
+    fi
+    while IFS= read -r path; do
+        leaked=""
+        # -z: NUL-delimited raw filenames, so unusual names (quotes, non-ASCII)
+        # are matched verbatim rather than in git's quoted form.
+        while IFS= read -r -d '' file; do
+            if [[ "$file" == "$path" || "$file" == "$path"/* ]]; then
+                leaked+="$file"$'\n'
+            fi
+        done < <(git ls-tree -r --name-only -z "$commit")
+        if [[ -n "$leaked" ]]; then
+            print_error "Excluded path '$path' leaked into public commit $commit:"
+            printf '%s' "$leaked"
+            return 1
+        fi
+    done <<< "$paths"
+    print_info "Verified: no excluded paths present in public commit"
+}
+
 publish_to_pypi() {
     local version="$1"
     
@@ -364,6 +478,19 @@ main() {
     # Ensure public remote exists
     ensure_remote
 
+    # The exclude list must exist, parse, and be committed: uncommitted edits
+    # to it would be stashed away below and the release would silently run
+    # with stale exclusion rules.
+    if [[ ! -f "$EXCLUDE_FILE" ]]; then
+        print_error "$EXCLUDE_FILE not found - create it (use [] to exclude nothing)"
+        exit 1
+    fi
+    if [[ -n "$(git status --porcelain -- "$EXCLUDE_FILE")" ]]; then
+        print_error "$EXCLUDE_FILE has uncommitted changes - commit them before releasing"
+        exit 1
+    fi
+    read_exclude_paths > /dev/null
+
     # Step 1: Stash uncommitted changes, sync with origin, then check against public
     print_step "Syncing with origin and checking kiss_ai repo..."
     STASHED=false
@@ -380,15 +507,27 @@ main() {
     ORIGIN_HEAD=$(git rev-parse HEAD)
     PUBLIC_HEAD=$(git rev-parse "$PUBLIC_REMOTE/main" 2>/dev/null || echo "")
 
+    # Compute the filtered tree up front so a broken exclude.json aborts the
+    # release here, before any side effects (set -e catches the failure; a
+    # failure inside the [[ ]] condition below would be silently swallowed).
+    FILTERED_ORIGIN_TREE=$(filtered_tree "$ORIGIN_HEAD")
+
+    # The public repo holds filtered snapshots (excluded paths stripped), so
+    # compare the filtered tree of origin's HEAD with the public tree.
     if [[ -z "$PUBLIC_HEAD" ]]; then
         print_info "Public repo has no main branch yet - will create it"
-    elif [[ "$ORIGIN_HEAD" == "$PUBLIC_HEAD" ]]; then
-        print_info "Origin and kiss_ai are in sync - nothing to release"
+    elif [[ "$FILTERED_ORIGIN_TREE" == "$(git rev-parse "${PUBLIC_HEAD}^{tree}")" ]]; then
+        print_info "kiss_ai already matches origin (minus excluded paths) - nothing to release"
         exit 0
-    elif git merge-base --is-ancestor "$PUBLIC_HEAD" "$ORIGIN_HEAD"; then
-        print_info "Origin is ahead of kiss_ai - proceeding with release"
     else
-        print_warn "Origin and kiss_ai have diverged - will force-push to sync"
+        print_info "Origin differs from kiss_ai - proceeding with release"
+        # Filtering only affects snapshots pushed from now on: if an excluded
+        # path was already published in an earlier release, it remains in the
+        # public repo's old commits until that history is purged manually.
+        if ! verify_no_excluded_paths "$PUBLIC_HEAD" > /dev/null 2>&1; then
+            print_warn "Some excluded paths exist in kiss_ai's current history;"
+            print_warn "they are removed from new snapshots, but purge old public history manually if needed"
+        fi
     fi
 
     # Step 2: Bump version in _version.py and README.md
@@ -465,13 +604,18 @@ main() {
     done
     print_info "Pushed to origin"
 
-    # Step 7: Push to kiss_ai repo (mirror from origin, force to ensure sync)
-    print_step "Pushing to kiss_ai repo..."
-    git push "$PUBLIC_REMOTE" "$CURRENT_BRANCH:main" --force
-    print_info "Pushed to kiss_ai repo"
+    # Step 7: Push filtered snapshot to kiss_ai repo. The pushed commit is
+    # parented on the public repo's current main (not on origin's history),
+    # so paths listed in scripts/exclude.json are never reachable from any
+    # commit in the public repo.
+    print_step "Pushing to kiss_ai repo (excluding paths listed in $EXCLUDE_FILE)..."
+    create_public_commit "$(git rev-parse HEAD)" "$VERSION" "$PUBLIC_HEAD"
+    verify_no_excluded_paths "$PUBLIC_COMMIT"
+    git push "$PUBLIC_REMOTE" "$PUBLIC_COMMIT:refs/heads/main" --force
+    print_info "Pushed filtered commit to kiss_ai repo"
 
     print_step "Creating and pushing tag..."
-    git tag -a "$TAG_NAME" -m "Release $VERSION"
+    git tag -a "$TAG_NAME" -m "Release $VERSION" "$PUBLIC_COMMIT"
     git push "$PUBLIC_REMOTE" "$TAG_NAME"
     print_info "Created and pushed tag: $TAG_NAME"
 
@@ -520,4 +664,7 @@ main() {
     echo
 }
 
-main "$@"
+# Run main only when executed directly, so tests can source the functions.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
