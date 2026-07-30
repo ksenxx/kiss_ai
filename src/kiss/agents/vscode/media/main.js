@@ -606,6 +606,11 @@
       O.appendChild(tab.outputFragment);
       tab.outputFragment = null;
       reviveActivePanelTimes(O);
+      // autoscroll-coverage:start
+      // Events may have streamed into the fragment while the tab was
+      // hidden: land the restored chat at the end of its latest panel.
+      autoScrollLatestEventPanel(O.lastElementChild);
+      // autoscroll-coverage:end
     }
     if (taskPanel && taskPanelText) {
       const restoredTask = (tab.taskPanelHTML || '').trim();
@@ -2733,6 +2738,46 @@
     return html;
   }
 
+  // autoscroll-coverage:start
+  // Auto-scroll: the chat webview (extension and remote webapp alike)
+  // always follows the tail of the latest event panel, and every
+  // scrollable subpanel of an event panel follows its own tail as
+  // streamed text appears inside it.
+  const AUTO_SCROLL_SUBPANEL_SEL =
+    '.think, .bash-panel-content, .llm-panel, .tc-b, .tr, ' +
+    '.prompt-body, .system-prompt-body';
+
+  function scrollPanelToEnd(el) {
+    const top = Math.max(0, el.scrollHeight - el.clientHeight);
+    if (el.scrollTop !== top) el.scrollTop = top;
+  }
+
+  function autoScrollStreamed(el) {
+    // Scroll every scrollable panel enclosing a streamed text update,
+    // then the outer chat, so the newest text stays visible.  Nodes
+    // still inside a background tab's detached fragment are skipped.
+    if (!el || !O.contains(el)) return;
+    let n = el;
+    while (n && n !== O) {
+      if (n.matches && n.matches(AUTO_SCROLL_SUBPANEL_SEL)) scrollPanelToEnd(n);
+      n = n.parentElement;
+    }
+    scrollPanelToEnd(O);
+  }
+
+  function autoScrollLatestEventPanel(panel) {
+    // Scroll the latest event panel's scrollable subpanels to their
+    // end, then the outer chat to the end of that panel.
+    if (panel && O.contains(panel)) {
+      if (panel.matches && panel.matches(AUTO_SCROLL_SUBPANEL_SEL))
+        scrollPanelToEnd(panel);
+      const subs = panel.querySelectorAll(AUTO_SCROLL_SUBPANEL_SEL);
+      for (let i = 0; i < subs.length; i++) scrollPanelToEnd(subs[i]);
+    }
+    scrollPanelToEnd(O);
+  }
+  // autoscroll-coverage:end
+
   function handleOutputEvent(ev, target, tState, ownerWorkDir) {
     const evWorkDir =
       typeof ownerWorkDir === 'string'
@@ -2769,6 +2814,9 @@
                 cnt.appendChild(document.createTextNode(tState.thinkBuf));
               }
               tState.thinkBuf = '';
+              // autoscroll-coverage:start
+              autoScrollStreamed(cnt);
+              // autoscroll-coverage:end
             });
           }
         }
@@ -2782,6 +2830,9 @@
             const last = cnt.lastChild;
             if (last && last.nodeType === 3) last.appendData(tState.thinkBuf);
             else cnt.appendChild(document.createTextNode(tState.thinkBuf));
+            // autoscroll-coverage:start
+            autoScrollStreamed(cnt);
+            // autoscroll-coverage:end
           }
           tState.thinkBuf = '';
         }
@@ -2808,6 +2859,9 @@
             tState.txtRaf = 0;
             if (tState.txtNode && tState.txtPending) {
               tState.txtNode.appendData(tState.txtPending);
+              // autoscroll-coverage:start
+              autoScrollStreamed(tState.txtEl);
+              // autoscroll-coverage:end
             }
             tState.txtPending = '';
           });
@@ -2841,6 +2895,12 @@
           tState.bashPanel.textContent += tState.bashBuf;
           tState.bashBuf = '';
           linkifyFilePaths(tState.bashPanel, evWorkDir);
+          // autoscroll-coverage:start
+          // The flushed text belongs to the PREVIOUS tool's bash
+          // subpanel; scroll it now, before this new tool call
+          // becomes the latest event panel.
+          autoScrollStreamed(tState.bashPanel);
+          // autoscroll-coverage:end
         }
         tState.bashPanel = null;
         tState.bashRaf = 0;
@@ -3044,6 +3104,9 @@
               if (tState.bashPanel) {
                 tState.bashPanel.textContent += tState.bashBuf;
                 linkifyFilePaths(tState.bashPanel, evWorkDir);
+                // autoscroll-coverage:start
+                autoScrollStreamed(tState.bashPanel);
+                // autoscroll-coverage:end
               }
               tState.bashBuf = '';
               tState.bashRaf = 0;
@@ -3222,6 +3285,15 @@
       tState = llmPanelState;
     }
     handleOutputEvent(ev, target, tState);
+    // autoscroll-coverage:start
+    // Capture the latest event panel now: right below, a provisional
+    // thoughts panel may be appended after a tool_result, which would
+    // hide the tool panel that actually received the result output.
+    const autoScrollPanel =
+      target !== O
+        ? target
+        : (t === 'tool_result' && tState.lastToolCallEl) || O.lastElementChild;
+    // autoscroll-coverage:end
     if (target === O) collapseOlderPanels();
     if (t === 'tool_result' && lastToolName !== 'finish' && !llmPanel) {
       llmPanel = mkThoughtsPanel(ev.ts);
@@ -3246,6 +3318,9 @@
       }
       pendingPanel = true;
     }
+    // autoscroll-coverage:start
+    autoScrollLatestEventPanel(autoScrollPanel);
+    // autoscroll-coverage:end
     if (!_demoActive) applyChevronState(currentTaskName);
   }
 
@@ -4139,6 +4214,9 @@
           inp.focus();
         });
         O.appendChild(fu);
+        // autoscroll-coverage:start
+        autoScrollLatestEventPanel(fu);
+        // autoscroll-coverage:end
         break;
       }
       case 'tasks_updated':
@@ -4862,6 +4940,9 @@
     const div = mkEl('div', 'ev tr ' + cls);
     div.innerHTML = '<strong>' + label + '</strong> ' + esc(text);
     O.appendChild(div);
+    // autoscroll-coverage:start
+    autoScrollLatestEventPanel(div);
+    // autoscroll-coverage:end
   }
 
   function addError(text) {
@@ -5158,6 +5239,9 @@
     });
     const rSteps = countReplayedSteps(events);
     if (rSteps > 0) updateStepCount(rSteps);
+    // autoscroll-coverage:start
+    autoScrollLatestEventPanel(O.lastElementChild);
+    // autoscroll-coverage:end
     currentTaskMetrics.tokens = statusTokens ? statusTokens.textContent : '';
     currentTaskMetrics.budget = statusBudget ? statusBudget.textContent : '';
     currentTaskMetrics.steps = statusSteps ? statusSteps.textContent : '';
@@ -5207,6 +5291,9 @@
     const div = mkEl('div', 'ev ' + cls);
     div.textContent = (ev && ev.message) || '';
     O.appendChild(div);
+    // autoscroll-coverage:start
+    autoScrollLatestEventPanel(div);
+    // autoscroll-coverage:end
   }
 
   let worktreeBar = null;
