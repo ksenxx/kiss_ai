@@ -116,7 +116,13 @@ type ToWebviewMessageBody =
       new_string?: string;
       extras?: Record<string, string>;
     }
-  | {type: 'tool_result'; content: string; is_error?: boolean}
+  | {
+      type: 'tool_result';
+      content: string;
+      is_error?: boolean;
+      tool_name?: string;
+      path?: string;
+    }
   | {type: 'system_output'; text: string}
   | {
       type: 'result';

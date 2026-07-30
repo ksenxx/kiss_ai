@@ -1173,7 +1173,9 @@
     area.appendChild(view);
     tab.contentViewEl = view;
     const lower = (ev.name || '').toLowerCase();
-    if (lower.endsWith('.html') || lower.endsWith('.htm')) {
+    // report-coverage:start
+    if (ev.isReport || lower.endsWith('.html') || lower.endsWith('.htm')) {
+      // report-coverage:end
       const iframe = document.createElement('iframe');
       iframe.className = 'content-html-frame';
       iframe.setAttribute('sandbox', 'allow-scripts');
@@ -1213,6 +1215,86 @@
     renderContentView(tab, ev);
     switchToTab(tab.id);
   }
+
+  // report-coverage:start
+  function reportPathInfo(p) {
+    const raw = String(p || '').split(/[\\/]/);
+    const segs = [];
+    for (let i = 0; i < raw.length; i++) {
+      const s = raw[i];
+      if (s === '' || s === '.') continue;
+      if (s === '..') segs.pop();
+      else segs.push(s);
+    }
+    const file = segs.pop() || '';
+    const dot = file.lastIndexOf('.');
+    const ext = dot >= 0 ? file.slice(dot + 1).toLowerCase() : '';
+    const isMarkdown = ext === 'md' || ext === 'markdown';
+    if (!isMarkdown && ext !== 'html' && ext !== 'htm') return null;
+    const inReports = segs.some(s => {
+      return s.toLowerCase() === 'reports';
+    });
+    if (!inReports) return null;
+    return {name: file, isMarkdown: isMarkdown};
+  }
+
+  function markdownReportToHtml(text) {
+    let body = null;
+    if (typeof marked !== 'undefined') {
+      try {
+        body = marked.parse(text || '');
+      } catch (_e) {
+        body = null;
+      }
+    }
+    if (body === null) body = '<pre>' + esc(text || '') + '</pre>';
+    return (
+      '<!DOCTYPE html><html><head><meta charset="utf-8"><style>' +
+      'body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",' +
+      'Helvetica,Arial,sans-serif;line-height:1.6;color:#24292f;' +
+      'background:#fff;max-width:860px;margin:0 auto;padding:2em 1.5em}' +
+      'pre{background:#f6f8fa;padding:12px;border-radius:6px;' +
+      'overflow-x:auto}code{background:#f6f8fa;padding:.1em .3em;' +
+      'border-radius:4px}pre code{background:none;padding:0}' +
+      'table{border-collapse:collapse}td,th{border:1px solid #d0d7de;' +
+      'padding:5px 10px}img{max-width:100%}' +
+      'blockquote{border-left:4px solid #d0d7de;margin-left:0;' +
+      'padding-left:1em;color:#57606a}' +
+      '</style></head><body>' +
+      body +
+      '</body></html>'
+    );
+  }
+
+  function stashPendingReport(tState, ev) {
+    tState.pendingReport = null;
+    if (ev.name !== 'Write' || !ev.path) return;
+    const info = reportPathInfo(ev.path);
+    if (!info) return;
+    tState.pendingReport = {
+      path: ev.path,
+      name: info.name,
+      isMarkdown: info.isMarkdown,
+      content: ev.content || '',
+    };
+  }
+
+  function maybeOpenReportTab(tState, ev) {
+    const rep = tState.pendingReport;
+    tState.pendingReport = null;
+    if (!rep || tState.suppressReportOpen || _demoActive) return;
+    if (ev.tool_name !== 'Write') return;
+    if (ev.path && ev.path !== rep.path) return;
+    const rc = String(ev.content || '');
+    if (rc.lastIndexOf('Successfully wrote ', 0) !== 0) return;
+    handleFileContent({
+      path: rep.path,
+      name: rep.name,
+      content: rep.isMarkdown ? markdownReportToHtml(rep.content) : rep.content,
+      isReport: true,
+    });
+  }
+  // report-coverage:end
 
   const tabCtxMenu = document.createElement('div');
   tabCtxMenu.id = 'tab-context-menu';
@@ -1751,6 +1833,7 @@
       bashBuf: '',
       bashRaf: 0,
       lastToolCallEl: null,
+      pendingReport: null,
     };
   }
 
@@ -2769,6 +2852,9 @@
         }
         tState.bashPanel = null;
         tState.bashRaf = 0;
+        // report-coverage:start
+        stashPendingReport(tState, ev);
+        // report-coverage:end
         const c = mkEl('div', 'ev tc');
         const hdr = mkEl('div', 'tc-h');
         hdr.textContent = ev.name || 'Tool';
@@ -2918,6 +3004,10 @@
         ) {
           tState.lastToolCallEl._rpDone = true;
         }
+        // report-coverage:start
+        if (ev.is_error) tState.pendingReport = null;
+        else maybeOpenReportTab(tState, ev);
+        // report-coverage:end
         if (hadBash && !ev.is_error) break;
         const resultTarget = tState.lastToolCallEl || target;
         if (ev.is_error) {
@@ -5061,6 +5151,9 @@
 
   function replayEventsInto(container, events, opts) {
     const rState = mkS();
+    // report-coverage:start
+    rState.suppressReportOpen = true;
+    // report-coverage:end
     let rLlmPanel = null;
     let rLlmPanelState = mkS();
     let rLastToolName = '';
