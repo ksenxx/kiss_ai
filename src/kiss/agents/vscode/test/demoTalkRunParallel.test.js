@@ -39,7 +39,6 @@ function makeDemoWindow(events, opts) {
     setTaskText() {},
     updateTabTitle() {},
     hideWelcome() {},
-    scrollToBottom() {},
     getActiveTabId() {
       return 'demo-tab';
     },

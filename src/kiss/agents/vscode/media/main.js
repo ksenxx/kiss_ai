@@ -387,133 +387,7 @@
   let allModels = [];
   let modelDDIdx = -1;
   let attachments = [];
-  let _scrollLock = false;
-  let _noScroll = false;
-  let _sbScrollTarget = -1;
   let _deferHighlight = false;
-
-  // followtail-coverage:start
-  // Per-panel tailing for inner scrollable panels (think, bash output,
-  // thoughts, prompt bodies): keep following the streamed text, stand
-  // down while the user has scrolled up inside the panel, and resume
-  // once the user returns to the panel's bottom.
-  function watchPanelScroll(el) {
-    el._autoScrollTarget = -1;
-    el._userScrolledUp = false;
-    el.addEventListener('scroll', () => {
-      const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-      const fromAuto =
-        el._autoScrollTarget >= 0 && el.scrollTop >= el._autoScrollTarget - 2;
-      el._autoScrollTarget = -1;
-      if (dist <= 2) resumePanelAtBottom(el, !fromAuto);
-      else if (!fromAuto) {
-        cancelPanelResume(el);
-        el._userScrolledUp = true;
-      }
-    });
-  }
-
-  function autoScrollPanel(el) {
-    if (!el || _scrollLock || el._userScrolledUp) return;
-    const target = el.scrollHeight - el.clientHeight;
-    if (el.scrollTop < target) el._autoScrollTarget = target;
-    if (typeof el.scrollTo === 'function')
-      el.scrollTo({top: el.scrollHeight, behavior: 'instant'});
-    else el.scrollTop = el.scrollHeight;
-  }
-  // followtail-coverage:end
-
-  // resumedebounce-coverage:start
-  // Debounce for the INNER panels' resume-at-bottom logic: while a task
-  // is streaming, rapid small scroll fluctuations near a panel's bottom
-  // (e.g. trackpad jitter) must not repeatedly toggle its tail on and
-  // off.  A pause still engages immediately, but the panel tail only
-  // resumes once its scroll position has settled at its bottom for
-  // RESUME_AT_BOTTOM_MS.
-  const RESUME_AT_BOTTOM_MS = 150;
-  // resumedebounce-coverage:end
-
-  // fivelines-coverage:start
-  // Outer chat auto-scroll contract: the tail is ALWAYS on, except
-  // when the user has scrolled back at least AUTO_SCROLL_PAUSE_LINES
-  // lines from the bottom; it resumes as soon as the user returns to
-  // the bottom.  Wheel-up deltas are accumulated per gesture (reset
-  // after WHEEL_UP_WINDOW_MS of inactivity) so a deliberate wheel-up
-  // of at least AUTO_SCROLL_PAUSE_LINES lines pauses the tail even
-  // while streaming keeps snapping the position back to the bottom
-  // between wheel events.
-  const AUTO_SCROLL_PAUSE_LINES = 5;
-  const WHEEL_UP_WINDOW_MS = 500;
-  let _wheelUpAccum = 0;
-  let _wheelUpTimer = 0;
-
-  function outputLinePx() {
-    const cs = window.getComputedStyle(O);
-    let lh = parseFloat(cs.lineHeight);
-    // 'line-height: normal' computes to no length: use ~1.2x the font
-    // size (the CSS default), so the threshold scales with the user's
-    // configured font size; last-resort fallback is 19px.
-    if (!isFinite(lh) || lh <= 0) lh = 1.2 * parseFloat(cs.fontSize);
-    if (!isFinite(lh) || lh <= 0) lh = 19;
-    return lh;
-  }
-
-  function pauseThresholdPx() {
-    return AUTO_SCROLL_PAUSE_LINES * outputLinePx();
-  }
-
-  function wheelDeltaPx(e) {
-    // deltaMode 1 = lines, 2 = pages (e.g. Firefox); 0 = pixels.
-    if (e.deltaMode === 1) return e.deltaY * outputLinePx();
-    if (e.deltaMode === 2) return e.deltaY * O.clientHeight;
-    return e.deltaY;
-  }
-
-  function accumulateWheelUp(delta) {
-    _wheelUpAccum += delta;
-    clearTimeout(_wheelUpTimer);
-    _wheelUpTimer = setTimeout(() => {
-      _wheelUpAccum = 0;
-    }, WHEEL_UP_WINDOW_MS);
-    const threshold = pauseThresholdPx();
-    const dist = O.scrollHeight - O.scrollTop - O.clientHeight;
-    if (_wheelUpAccum >= threshold || dist >= threshold) {
-      _wheelUpAccum = 0;
-      _scrollLock = true;
-    }
-  }
-
-  function resumeOutputAtBottom(fromUser) {
-    _scrollLock = false;
-    if (fromUser) {
-      _wheelUpAccum = 0;
-      if (isRunning) sb();
-    }
-  }
-  // fivelines-coverage:end
-
-  // resumedebounce-coverage:start
-  function cancelPanelResume(el) {
-    if (el._resumeTimer) {
-      clearTimeout(el._resumeTimer);
-      el._resumeTimer = 0;
-    }
-  }
-
-  function resumePanelAtBottom(el, fromUser) {
-    if (fromUser && isRunning && el._userScrolledUp) {
-      if (el._resumeTimer) return;
-      el._resumeTimer = setTimeout(() => {
-        el._resumeTimer = 0;
-        el._userScrolledUp = false;
-      }, RESUME_AT_BOTTOM_MS);
-    } else {
-      cancelPanelResume(el);
-      el._userScrolledUp = false;
-    }
-  }
-  // resumedebounce-coverage:end
-  let scrollRaf = 0;
   let acIdx = -1;
 
   let histCache = [];
@@ -651,9 +525,6 @@
     addCollapse(panel, hdr, ts);
     panel.appendChild(hdr);
     stampPanelStart(panel);
-    // followtail-coverage:start
-    watchPanelScroll(panel);
-    // followtail-coverage:end
     return panel;
   }
 
@@ -782,9 +653,6 @@
     lastToolName = tab.streamLastToolName || '';
     pendingPanel = tab.streamPendingPanel || false;
     stepCount = tab.streamStepCount || 0;
-    _scrollLock = false;
-    _wheelUpAccum = 0;
-    _sbScrollTarget = -1;
     if (worktreeBar && worktreeBar.parentNode)
       worktreeBar.parentNode.removeChild(worktreeBar);
     worktreeBar = null;
@@ -1881,9 +1749,6 @@
     lastToolName = '';
     pendingPanel = false;
     stepCount = 0;
-    _scrollLock = false;
-    _wheelUpAccum = 0;
-    _sbScrollTarget = -1;
   }
 
   function resetAdjacentState() {
@@ -2411,24 +2276,15 @@
     headerEl.style.userSelect = 'none';
     headerEl.addEventListener('click', e => {
       e.stopPropagation();
-      _noScroll = true;
       panelEl.classList.toggle('collapsed');
       if (panelEl.classList.contains('collapsed')) {
         panelEl.classList.remove('user-pinned');
-        if (O.scrollHeight - O.scrollTop - O.clientHeight <= 2)
-          _scrollLock = false;
       } else {
         panelEl.classList.add('user-pinned');
-        if (O.scrollHeight - O.scrollTop - O.clientHeight > 2) {
-          _scrollLock = true;
-        }
         highlightPending(panelEl);
       }
       collapsePreview(panelEl);
       syncRunParallelPanel(panelEl);
-      setTimeout(() => {
-        _noScroll = false;
-      }, 0);
     });
     addCopyButton(panelEl);
     addPanelTimestamp(panelEl, ts);
@@ -2893,9 +2749,6 @@
         tState.thinkCnt = tState.thinkEl.querySelector('.cnt');
         tState.thinkBuf = '';
         tState.thinkRaf = 0;
-        // followtail-coverage:start
-        watchPanelScroll(tState.thinkEl);
-        // followtail-coverage:end
         target.appendChild(tState.thinkEl);
         break;
       case 'thinking_delta':
@@ -2916,9 +2769,6 @@
                 cnt.appendChild(document.createTextNode(tState.thinkBuf));
               }
               tState.thinkBuf = '';
-              // followtail-coverage:start
-              if (tState.thinkEl) autoScrollPanel(tState.thinkEl);
-              // followtail-coverage:end
             });
           }
         }
@@ -3129,9 +2979,6 @@
           bp.appendChild(bpContent);
           addCopyButton(bp);
           c.appendChild(bp);
-          // followtail-coverage:start
-          watchPanelScroll(bpContent);
-          // followtail-coverage:end
           tState.bashPanel = bpContent;
         }
         hlBlock(c);
@@ -3200,9 +3047,6 @@
               }
               tState.bashBuf = '';
               tState.bashRaf = 0;
-              // followtail-coverage:start
-              if (tState.bashPanel) autoScrollPanel(tState.bashPanel);
-              // followtail-coverage:end
             });
           }
         } else {
@@ -3260,11 +3104,6 @@
         }
         const fresh = !el;
         if (fresh) el = mkEl('div', 'ev ' + cls);
-        // followtail-coverage:start
-        const prevBody = fresh ? null : el.querySelector('.' + cls + '-body');
-        const keepUp = !!(prevBody && prevBody._userScrolledUp);
-        const prevTop = prevBody ? prevBody.scrollTop : 0;
-        // followtail-coverage:end
         const body =
           typeof marked !== 'undefined'
             ? kissSanitize(marked.parse(ev.text || ''))
@@ -3292,12 +3131,6 @@
         const bodyEl = el.querySelector('.' + cls + '-body');
         if (bodyEl) {
           linkifyFilePaths(bodyEl, evWorkDir);
-          // followtail-coverage:start
-          watchPanelScroll(bodyEl);
-          bodyEl._userScrolledUp = keepUp;
-          if (keepUp) bodyEl.scrollTop = prevTop;
-          else autoScrollPanel(bodyEl);
-          // followtail-coverage:end
         }
         break;
       }
@@ -3412,15 +3245,6 @@
         if (rTab) rTab.lastTaskFailed = true;
       }
       pendingPanel = true;
-    }
-    if (target === llmPanel && llmPanel && !llmPanel._scrollRaf) {
-      const _lp = llmPanel;
-      _lp._scrollRaf = requestAnimationFrame(() => {
-        _lp._scrollRaf = 0;
-        // followtail-coverage:start
-        autoScrollPanel(_lp);
-        // followtail-coverage:end
-      });
     }
     if (!_demoActive) applyChevronState(currentTaskName);
   }
@@ -3540,23 +3364,6 @@
     tab.welcomeVisible = false;
   }
 
-  function sb() {
-    if (
-      !_scrollLock &&
-      !_noScroll &&
-      !scrollRaf &&
-      !(welcome && welcome.style.display !== 'none')
-    ) {
-      scrollRaf = requestAnimationFrame(() => {
-        scrollRaf = 0;
-        if (_scrollLock || _noScroll) return;
-        const sbTarget = O.scrollHeight - O.clientHeight;
-        if (O.scrollTop < sbTarget) _sbScrollTarget = sbTarget;
-        O.scrollTo({top: O.scrollHeight, behavior: 'instant'});
-      });
-    }
-  }
-
   function accumulateOverscroll(dir, delta, taskId) {
     if (taskId === undefined || taskId === null || taskId === '') return;
     if (overscrollDir !== dir) {
@@ -3578,68 +3385,7 @@
     }
   }
 
-  // followtail-coverage:start
-  // Watched inner panels (think/bash/thoughts/prompt bodies) between
-  // the wheel target and the chat output, innermost first.
-  function watchedPanelsFor(node) {
-    const out = [];
-    let el = node;
-    while (el && el !== O && el.nodeType === 1) {
-      if (el._userScrolledUp !== undefined) out.push(el);
-      el = el.parentElement;
-    }
-    return out;
-  }
-  // followtail-coverage:end
-
   O.addEventListener('wheel', e => {
-    // followtail-coverage:start
-    if (isRunning) {
-      const wheelUp = e.deltaY < 0;
-      const sideways = Math.abs(e.deltaX) > Math.abs(e.deltaY);
-      // followtail-coverage:end
-      // fivelines-coverage:start
-      if (O.scrollHeight - O.clientHeight > 2 && (wheelUp || sideways)) {
-        if (sideways) {
-          // A horizontal pan over wide content must not be yanked
-          // back down vertically while the user reads sideways.
-          _scrollLock = true;
-        } else {
-          // Wheel-up: pause the tail only once the gesture has moved
-          // back at least AUTO_SCROLL_PAUSE_LINES lines.
-          accumulateWheelUp(-wheelDeltaPx(e));
-        }
-      } else if (
-        e.deltaY > 0 &&
-        O.scrollHeight - O.scrollTop - O.clientHeight <= 2
-      ) {
-        // Wheeling down while the chat is already at its end: the
-        // user wants the tail back immediately.  This also releases a
-        // lock that was engaged by a wheel inside a nested panel,
-        // where no output scroll event can ever fire to clear it.
-        resumeOutputAtBottom(true);
-      }
-      // fivelines-coverage:end
-      // followtail-coverage:start
-      const panels = watchedPanelsFor(e.target);
-      for (let i = 0; i < panels.length; i++) {
-        const p = panels[i];
-        if (
-          (wheelUp && p.scrollHeight - p.clientHeight > 2) ||
-          (sideways && p.scrollWidth - p.clientWidth > 2)
-        ) {
-          cancelPanelResume(p);
-          p._userScrolledUp = true;
-        } else if (
-          e.deltaY > 0 &&
-          p.scrollHeight - p.scrollTop - p.clientHeight <= 2
-        ) {
-          resumePanelAtBottom(p, true);
-        }
-      }
-    }
-    // followtail-coverage:end
-
     const _activeTabForAdj = getTab(activeTabId);
     const _isSubagentActive = !!(
       _activeTabForAdj && _activeTabForAdj.isSubagentTab
@@ -3774,23 +3520,8 @@
   }
 
   O.addEventListener('scroll', () => {
-    const dist = O.scrollHeight - O.scrollTop - O.clientHeight;
-    const fromSb = _sbScrollTarget >= 0 && O.scrollTop >= _sbScrollTarget - 2;
-    _sbScrollTarget = -1;
-    // fivelines-coverage:start
-    if (dist <= 2) {
-      resumeOutputAtBottom(!fromSb);
-    } else if (!fromSb && dist >= pauseThresholdPx()) {
-      // The user scrolled back at least AUTO_SCROLL_PAUSE_LINES lines:
-      // pause the tail.  Smaller excursions keep auto-scroll on.
-      _scrollLock = true;
-    }
-    // fivelines-coverage:end
     updateVisibleTask();
   });
-  new MutationObserver(() => {
-    if (isRunning) sb();
-  }).observe(O, {childList: true, subtree: true, characterData: true});
 
   const TASK_WHEEL_STEP = 60;
   // taskwheel-coverage:start
@@ -4689,7 +4420,6 @@
         isMerging = true;
         showMergeToolbar((ev && ev.tabId) || activeTabId);
         updateInputDisabled();
-        sb();
         break;
       case 'merge_ended':
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
@@ -5023,7 +4753,6 @@
         }
         processOutputEvent(ev);
         if (isActiveTabRunning()) showSpinner();
-        sb();
         break;
     }
   }
@@ -5069,27 +4798,12 @@
   }
 
   function setRunningState(running) {
-    // taskstart-coverage:start
-    // A task transitioning into the running state must re-activate the
-    // tail: clear any scroll lock left over from reading earlier output
-    // and jump to the end so the new run's events are followed from the
-    // start.  A redundant running=true mid-run (isRunning already true,
-    // e.g. reconnect re-broadcasts) must NOT yank a user who scrolled
-    // up during that same run.
-    const taskStarting = running && !isRunning;
-    // taskstart-coverage:end
     isRunning = running;
     sendBtn.style.display = 'flex';
     stopBtn.style.display = running ? 'flex' : 'none';
 
     updateInputDisabled();
     if (running) {
-      // taskstart-coverage:start
-      if (taskStarting) {
-        _scrollLock = false;
-        sb();
-      }
-      // taskstart-coverage:end
       startTimer();
       showSpinner();
     } else {
@@ -5148,7 +4862,6 @@
     const div = mkEl('div', 'ev tr ' + cls);
     div.innerHTML = '<strong>' + label + '</strong> ' + esc(text);
     O.appendChild(div);
-    sb();
   }
 
   function addError(text) {
@@ -5449,7 +5162,6 @@
     currentTaskMetrics.budget = statusBudget ? statusBudget.textContent : '';
     currentTaskMetrics.steps = statusSteps ? statusSteps.textContent : '';
     applyChevronState(currentTaskName);
-    sb();
   }
 
   function createActionBar(labelText, buttons) {
@@ -5495,7 +5207,6 @@
     const div = mkEl('div', 'ev ' + cls);
     div.textContent = (ev && ev.message) || '';
     O.appendChild(div);
-    sb();
   }
 
   let worktreeBar = null;
@@ -5543,7 +5254,6 @@
   function handleWorktreeResult(ev) {
     clearWorktreeBar();
     if (isSilentDiscardMessage(ev)) {
-      sb();
       return;
     }
     appendActionResult(ev);
@@ -5770,7 +5480,6 @@
         api.mergeAction({action: mergeActions[id], tabId: capturedTabId});
       });
     });
-    sb();
   }
 
   function hideMergeToolbar() {
@@ -8027,7 +7736,6 @@
         refreshWelcomeLayout();
       }
     },
-    scrollToBottom: sb,
     getActiveTabId: function () {
       return activeTabId;
     },

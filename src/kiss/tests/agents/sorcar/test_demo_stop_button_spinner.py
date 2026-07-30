@@ -238,7 +238,6 @@ window._demoApi = {
     setTaskText: function(t) { _demoCalls.push('setTaskText:' + t); },
     updateTabTitle: function(t) { _demoCalls.push('updateTabTitle:' + t); },
     hideWelcome: function() { _demoCalls.push('hideWelcome'); },
-    scrollToBottom: function() {},
     getActiveTabId: function() { return 'tab1'; },
     sendMessage: function(msg) {
         var self = window._demoApi;

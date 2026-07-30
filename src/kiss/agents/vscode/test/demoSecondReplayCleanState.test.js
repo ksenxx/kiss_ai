@@ -476,7 +476,6 @@ function makeStubDemoWindow() {
     setTaskText() {},
     updateTabTitle() {},
     hideWelcome() {},
-    scrollToBottom() {},
     getActiveTabId() {
       return 'demo-tab';
     },

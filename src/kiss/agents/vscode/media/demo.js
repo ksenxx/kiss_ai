@@ -178,7 +178,6 @@
     body.className = 'rc-body md-body';
     rc.appendChild(body);
     O.appendChild(rc);
-    api.scrollToBottom();
 
     const text = (ev.summary || ev.text || '(no result)')
       .replace(/\n{3,}/g, '\n\n')
@@ -201,7 +200,6 @@
         } else {
           body.textContent = accumulated;
         }
-        api.scrollToBottom();
         await sleep(TICK_MS);
         await pauseGate(gen);
       }
@@ -412,20 +410,17 @@
           api.processEvent(group[k]);
           const speech = executeDemoToolCall(api, group[k]);
           if (speech && typeof speech.then === 'function') {
-            api.scrollToBottom();
             await speech;
             await pauseGate(myGen);
             if (replayStopped(myGen)) break;
           }
         }
         if (replayStopped(myGen)) break;
-        api.scrollToBottom();
 
         await sleep(groupHasFanOut(group) ? 2500 : 500);
         await pauseGate(myGen);
         if (!replayStopped(myGen)) {
           api.collapsePanels();
-          api.scrollToBottom();
         }
       }
 

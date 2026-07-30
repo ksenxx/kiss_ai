@@ -297,8 +297,8 @@ are noted inline. One-off task instructions are excluded.
 
 ## 10. Chat webview UI (extension and remote webapp)
 
-- [2026-07-16] Auto-scroll to the end of the chat only when the user is already scrolled to the
-  end; never force-scroll when the user has scrolled up or has uncollapsed an event panel.
+- [2026-07-31] The chat webview has no auto-scroll: streamed chat and nested-panel updates must
+  never move the chat or inner-panel scroll positions; only explicit user navigation may scroll.
 - [2026-07-19] The fixed task panel and the input textbox+buttons panel are drawer-style
   collapsible widgets; collapsed space is used for events; on mobile both open collapsed.
 - [2026-07-28] The input drawer button must not show the "Collapse input panel" (or "Expand input
