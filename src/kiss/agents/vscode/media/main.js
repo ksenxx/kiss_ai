@@ -2173,7 +2173,7 @@
     'SELECT',
   ]);
 
-  function linkifyFilePaths(root) {
+  function linkifyFilePaths(root, workDir) {
     if (!root || root.nodeType !== 1) return;
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
@@ -2183,7 +2183,12 @@
             if (_LINK_SKIP_TAGS.has(p.tagName)) {
               return NodeFilter.FILTER_REJECT;
             }
-            if (p.dataset && p.dataset.path) {
+            if (
+              p.dataset &&
+              (p.dataset.path ||
+                p.dataset.pathCandidate ||
+                p.dataset.pathMissing)
+            ) {
               return NodeFilter.FILTER_REJECT;
             }
           }
@@ -2217,9 +2222,7 @@
           );
         }
         const span = node.ownerDocument.createElement('span');
-        span.className = 'kiss-filelink';
-        span.setAttribute('data-path', m[1]);
-        span.title = 'Open ' + m[1];
+        span.setAttribute('data-path-candidate', m[1]);
         span.textContent = m[1];
         frag.appendChild(span);
         last = end;
@@ -2228,6 +2231,98 @@
         frag.appendChild(node.ownerDocument.createTextNode(text.slice(last)));
       }
       if (node.parentNode) node.parentNode.replaceChild(frag, node);
+    }
+    verifyFileLinkCandidates(root, workDir);
+  }
+
+  // File paths found by linkifyFilePaths start as inert
+  // [data-path-candidate] spans and become clickable [data-path] links
+  // ONLY after the host confirms the file exists (checkPaths ->
+  // pathsExist round-trip).  Each candidate is stamped with the workDir
+  // it was checked under (data-path-wd) so replies for one workDir never
+  // resolve spans checked under another.  Existence results are NOT
+  // cached: only in-flight checks are deduped (per workDir+path), so
+  // paths in NEW panels are re-checked and files created or deleted
+  // mid-run get fresh clickability.  Candidate spans awaiting a reply
+  // are tracked in a registry because panels are often linkified before
+  // they are attached to the document, where a document query could not
+  // find them.
+  const _pendingPathChecks = new Set();
+  const _pendingFileLinkSpans = new Set();
+
+  function _fileLinkCacheKey(workDir, p) {
+    return workDir + '\u0000' + p;
+  }
+
+  function _stripLineSuffix(p) {
+    const m = p.match(/^(.+):\d+$/);
+    return m ? m[1] : p;
+  }
+
+  function promoteFileLink(span) {
+    const raw = span.getAttribute('data-path-candidate');
+    span.removeAttribute('data-path-candidate');
+    span.removeAttribute('data-path-wd');
+    span.setAttribute('data-path', raw);
+    span.classList.add('kiss-filelink');
+    span.title = 'Open ' + raw;
+    _pendingFileLinkSpans.delete(span);
+  }
+
+  function demoteFileLink(span) {
+    span.removeAttribute('data-path-candidate');
+    span.removeAttribute('data-path-wd');
+    span.setAttribute('data-path-missing', '1');
+    span.classList.remove('kiss-filelink');
+    _pendingFileLinkSpans.delete(span);
+  }
+
+  function verifyFileLinkCandidates(root, workDir) {
+    const spans = root.querySelectorAll('[data-path-candidate]');
+    if (!spans.length) return;
+    const wd =
+      typeof workDir === 'string' ? workDir : workDirForTab(activeTabId) || '';
+    const toCheck = [];
+    for (const span of spans) {
+      const p = _stripLineSuffix(span.getAttribute('data-path-candidate'));
+      span.setAttribute('data-path-wd', wd);
+      _pendingFileLinkSpans.add(span);
+      const key = _fileLinkCacheKey(wd, p);
+      if (!_pendingPathChecks.has(key)) {
+        _pendingPathChecks.add(key);
+        toCheck.push(p);
+      }
+    }
+    if (toCheck.length) {
+      api.send({
+        type: 'checkPaths',
+        paths: toCheck,
+        workDir: wd,
+        tabId: activeTabId,
+      });
+    }
+  }
+
+  function handlePathsExist(ev) {
+    const results = ev.results;
+    if (!results || typeof results !== 'object') return;
+    const workDir = typeof ev.workDir === 'string' ? ev.workDir : '';
+    for (const p of Object.keys(results)) {
+      _pendingPathChecks.delete(_fileLinkCacheKey(workDir, p));
+    }
+    const spans = new Set(_pendingFileLinkSpans);
+    for (const span of document.querySelectorAll('[data-path-candidate]')) {
+      spans.add(span);
+    }
+    for (const span of spans) {
+      if ((span.getAttribute('data-path-wd') || '') !== workDir) continue;
+      const p = _stripLineSuffix(
+        span.getAttribute('data-path-candidate') || '',
+      );
+      if (Object.prototype.hasOwnProperty.call(results, p)) {
+        if (results[p]) promoteFileLink(span);
+        else demoteFileLink(span);
+      }
     }
   }
 
@@ -2630,7 +2725,13 @@
     }
   }
 
-  function createResultPanel(ev, summaryOverride, titleOverride, showStatus) {
+  function createResultPanel(
+    ev,
+    summaryOverride,
+    titleOverride,
+    showStatus,
+    workDir,
+  ) {
     const rc = mkEl('div', 'ev rc');
     let rb = '';
     let rawBody = '';
@@ -2678,7 +2779,7 @@
     addCopyButton(rc);
     addPanelTimestamp(rc, ev.ts);
     const rcBody = rc.querySelector('.rc-body');
-    if (rcBody) linkifyFilePaths(rcBody);
+    if (rcBody) linkifyFilePaths(rcBody, workDir);
     return rc;
   }
 
@@ -2776,7 +2877,11 @@
     return html;
   }
 
-  function handleOutputEvent(ev, target, tState) {
+  function handleOutputEvent(ev, target, tState, ownerWorkDir) {
+    const evWorkDir =
+      typeof ownerWorkDir === 'string'
+        ? ownerWorkDir
+        : workDirForTab(activeTabId) || '';
     const t = ev.type;
     switch (t) {
       case 'thinking_start':
@@ -2874,7 +2979,7 @@
           } else if (tState.txtNode && tState.txtPending) {
             tState.txtNode.appendData(tState.txtPending);
           }
-          linkifyFilePaths(tState.txtEl);
+          linkifyFilePaths(tState.txtEl, evWorkDir);
           tState.txtEl = null;
           tState.txtBuf = '';
           tState.txtNode = null;
@@ -2885,7 +2990,7 @@
         if (tState.bashPanel && tState.bashBuf) {
           tState.bashPanel.textContent += tState.bashBuf;
           tState.bashBuf = '';
-          linkifyFilePaths(tState.bashPanel);
+          linkifyFilePaths(tState.bashPanel, evWorkDir);
         }
         tState.bashPanel = null;
         tState.bashRaf = 0;
@@ -2923,7 +3028,7 @@
         if (ev.path) {
           const ep = esc(ev.path).replace(/"/g, '&quot;');
           b +=
-            '<div class="tc-arg"><span class="tc-arg-name">path:</span> <span class="tp" data-path="' +
+            '<div class="tc-arg"><span class="tc-arg-name">path:</span> <span class="tp" data-path-candidate="' +
             ep +
             '">' +
             esc(ev.path) +
@@ -2978,7 +3083,7 @@
             sd.classList.add('md-body');
             sd.innerHTML = kissSanitize(marked.parse(rawDesc));
             hlBlock(sd);
-            linkifyFilePaths(sd);
+            linkifyFilePaths(sd, evWorkDir);
           } else {
             sd.textContent = rawDesc;
           }
@@ -2986,6 +3091,7 @@
           c.appendChild(sd);
         } else {
           c.appendChild(tcBody);
+          verifyFileLinkCandidates(tcBody, evWorkDir);
         }
         addCollapse(c, hdr, ev.ts);
         target.appendChild(c);
@@ -3035,9 +3141,9 @@
         if (tState.bashPanel && tState.bashBuf) {
           tState.bashPanel.textContent += tState.bashBuf;
           tState.bashBuf = '';
-          linkifyFilePaths(tState.bashPanel);
+          linkifyFilePaths(tState.bashPanel, evWorkDir);
         } else if (tState.bashPanel) {
-          linkifyFilePaths(tState.bashPanel);
+          linkifyFilePaths(tState.bashPanel, evWorkDir);
         }
         const hadBash = !!tState.bashPanel;
         tState.bashPanel = null;
@@ -3069,12 +3175,12 @@
           );
           resultTarget.appendChild(r);
           const trBody = r.querySelector('.tr-content');
-          if (trBody) linkifyFilePaths(trBody);
+          if (trBody) linkifyFilePaths(trBody, evWorkDir);
         } else {
           const op = mkEl('div', 'bash-panel');
           const opContent = mkEl('div', 'bash-panel-content');
           opContent.textContent = ev.content;
-          linkifyFilePaths(opContent);
+          linkifyFilePaths(opContent, evWorkDir);
           op.appendChild(opContent);
           addCopyButton(op);
           if (!tState.lastToolCallEl) addPanelTimestamp(op, ev.ts);
@@ -3090,7 +3196,7 @@
             tState.bashRaf = requestAnimationFrame(() => {
               if (tState.bashPanel) {
                 tState.bashPanel.textContent += tState.bashBuf;
-                linkifyFilePaths(tState.bashPanel);
+                linkifyFilePaths(tState.bashPanel, evWorkDir);
               }
               tState.bashBuf = '';
               tState.bashRaf = 0;
@@ -3102,7 +3208,7 @@
         } else {
           const s = mkEl('div', 'ev sys');
           s.textContent = (ev.text || '').replace(/\n\n+/g, '\n');
-          linkifyFilePaths(s);
+          linkifyFilePaths(s, evWorkDir);
           target.appendChild(s);
         }
         break;
@@ -3117,13 +3223,22 @@
               multiSummary.previous,
               'Previous Sessions',
               false,
+              evWorkDir,
             ),
           );
           target.appendChild(
-            createResultPanel(ev, multiSummary.final, 'Result', true),
+            createResultPanel(
+              ev,
+              multiSummary.final,
+              'Result',
+              true,
+              evWorkDir,
+            ),
           );
         } else {
-          target.appendChild(createResultPanel(ev, undefined, 'Result', true));
+          target.appendChild(
+            createResultPanel(ev, undefined, 'Result', true, evWorkDir),
+          );
         }
         if (statusTokens && ev.total_tokens)
           statusTokens.textContent = 'Tokens: ' + fmtN(ev.total_tokens);
@@ -3176,7 +3291,7 @@
         if (fresh) target.appendChild(el);
         const bodyEl = el.querySelector('.' + cls + '-body');
         if (bodyEl) {
-          linkifyFilePaths(bodyEl);
+          linkifyFilePaths(bodyEl, evWorkDir);
           // followtail-coverage:start
           watchPanelScroll(bodyEl);
           bodyEl._userScrolledUp = keepUp;
@@ -3384,7 +3499,7 @@
       const prevBudgetText = statusBudget ? statusBudget.textContent : '';
       const prevStepsText = statusSteps ? statusSteps.textContent : '';
 
-      handleOutputEvent(ev, target, tState);
+      handleOutputEvent(ev, target, tState, tab.workDir || configWorkDir || '');
 
       stepCount = prevStepCount;
       if (statusTokens) statusTokens.textContent = prevTokensText;
@@ -4070,6 +4185,9 @@
         break;
       case 'fileContent':
         handleFileContent(ev);
+        return;
+      case 'pathsExist':
+        handlePathsExist(ev);
         return;
       case 'status': {
         const evTab = findTabByEvt(ev);
@@ -5206,6 +5324,10 @@
   }
 
   function replayEventsInto(container, events, opts) {
+    const rWorkDir =
+      opts && opts.ownerTabId !== undefined
+        ? workDirForTab(opts.ownerTabId) || ''
+        : undefined;
     const rState = mkS();
     // report-coverage:start
     rState.suppressReportOpen = true;
@@ -5271,7 +5393,7 @@
           target = rLlmPanel;
           tState = rLlmPanelState;
         }
-        handleOutputEvent(ev, target, tState);
+        handleOutputEvent(ev, target, tState, rWorkDir);
       });
     } finally {
       _deferHighlight = prevDefer;

@@ -33,7 +33,23 @@ function makeWebview() {
   win.acquireVsCodeApi = function () {
     let state;
     return {
-      postMessage: msg => posted.push(msg),
+      // Confirm every checkPaths existence query, like the extension
+      // host does for files that exist: these tests exercise the
+      // linkifier itself (clickFilePathExistsOnly.test.js covers the
+      // exists / does-not-exist split against the real filesystem).
+      postMessage: msg => {
+        posted.push(msg);
+        if (msg.type === 'checkPaths') {
+          const results = {};
+          for (const p of msg.paths) results[p] = true;
+          send(win, {
+            type: 'pathsExist',
+            results,
+            workDir: msg.workDir,
+            tabId: msg.tabId,
+          });
+        }
+      },
       getState: () => state,
       setState: s => {
         state = s;

@@ -267,6 +267,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("getFiles", required=("prefix",)),
     ApiCommand("recordFileUsage", required=("path",)),
     ApiCommand("openFile", required=("path",), handler="open_file"),
+    ApiCommand("checkPaths", required=("paths",), handler="check_paths"),
     ApiCommand("complete", required=("query",)),
     ApiCommand("mergeAction", required=("action",), handler="merge_action"),
     ApiCommand("worktreeAction", required=("action",)),
@@ -460,6 +461,10 @@ class ServerBackend(Protocol):
     ) -> None: ...
 
     async def _handle_open_file(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_check_paths(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
 
@@ -863,6 +868,26 @@ class ServerApi:
         if ctx.is_uds:
             return
         await self._backend._handle_open_file(cmd, ctx.endpoint)
+
+    async def check_paths(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
+        """Report which file paths exist to a remote-web client.
+
+        The chat webview linkifies file-path-looking strings in event
+        panel contents lazily: a path only becomes a clickable link
+        after this check confirms that clicking it (``openFile``)
+        would actually serve a file.  UDS clients (VS Code windows)
+        never take this path: their webview's ``checkPaths`` is
+        consumed by the extension host, which checks the local
+        filesystem itself — so a UDS-delivered ``checkPaths`` is
+        dropped as a defensive no-op.
+
+        Args:
+            cmd: The ``checkPaths`` command.
+            ctx: The transport context of the current call.
+        """
+        if ctx.is_uds:
+            return
+        await self._backend._handle_check_paths(cmd, ctx.endpoint)
 
     async def voice_transcribe(
         self, cmd: dict[str, Any], ctx: ApiContext,

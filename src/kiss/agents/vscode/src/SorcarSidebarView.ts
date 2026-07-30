@@ -893,6 +893,37 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         }
         break;
 
+      case 'checkPaths': {
+        // The chat webview linkifies file-path-looking strings in event
+        // panel contents lazily: a path only becomes a clickable link
+        // after this existence check confirms that clicking it would
+        // actually open a file (same resolution rules as 'openFile').
+        const wd = this._getWorkDir();
+        const results: Record<string, boolean> = {};
+        const paths = Array.isArray(message.paths) ? message.paths : [];
+        for (const p of paths) {
+          if (typeof p !== 'string' || !p) continue;
+          const resolved = path.resolve(wd, p);
+          let exists = false;
+          try {
+            exists =
+              isPathInside(resolved, wd) &&
+              fs.existsSync(resolved) &&
+              fs.statSync(resolved).isFile();
+          } catch {
+            exists = false;
+          }
+          results[p] = exists;
+        }
+        this._sendToWebview({
+          type: 'pathsExist',
+          results,
+          workDir: message.workDir,
+          tabId: message.tabId,
+        });
+        break;
+      }
+
       case 'resumeSession': {
         const resumeTabId = message.tabId;
         this._getApi().resumeSession({

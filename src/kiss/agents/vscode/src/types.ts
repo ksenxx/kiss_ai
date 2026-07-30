@@ -43,6 +43,7 @@ export type FromWebviewMessage =
   | {type: 'getFiles'; prefix: string; workDir?: string}
   | {type: 'userAnswer'; answer: string; tabId?: string}
   | {type: 'openFile'; path: string; line?: number}
+  | {type: 'checkPaths'; paths: string[]; workDir?: string; tabId?: string}
   | {type: 'recordFileUsage'; path: string; workDir?: string}
   | {
       type: 'ready';
@@ -124,6 +125,11 @@ type ToWebviewMessageBody =
       path?: string;
     }
   | {type: 'system_output'; text: string}
+  | {
+      type: 'pathsExist';
+      results: Record<string, boolean>;
+      workDir?: string;
+    }
   | {
       type: 'result';
       text?: string;

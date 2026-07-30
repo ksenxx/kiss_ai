@@ -33,6 +33,7 @@
     'getFiles',
     'recordFileUsage',
     'openFile',
+    'checkPaths',
     'complete',
     'mergeAction',
     'worktreeAction',

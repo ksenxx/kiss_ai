@@ -4351,6 +4351,70 @@ class RemoteAccessServer:
         except Exception:
             logger.debug("openFile: failed to write reply", exc_info=True)
 
+    async def _handle_check_paths(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Tell a remote-web client which candidate file paths exist.
+
+        Handles the ``checkPaths`` command sent by ``media/main.js``
+        after it linkifies file-path-looking strings in event panel
+        contents: a path is rendered as a clickable link ONLY when this
+        check confirms it names an existing regular file, i.e. that a
+        subsequent ``openFile`` click would actually serve content.
+        Paths are resolved exactly like :meth:`_handle_open_file`
+        resolves them (``~`` expansion, then relative to the command's
+        ``workDir``, falling back to the daemon work dir).  The reply
+        is sent directly to the requesting *endpoint* — never
+        broadcast — with the shape::
+
+            {"type": "pathsExist", "results": {<path>: <bool>, ...},
+             "workDir": <echo of cmd workDir>,
+             "tabId": <echo of cmd tabId>}
+
+        Args:
+            cmd: The parsed ``checkPaths`` command (``paths``, optional
+                ``workDir``, ``tabId``).
+            endpoint: The requesting WSS connection.
+        """
+        raw_paths = cmd.get("paths")
+        if not isinstance(raw_paths, list):
+            raw_paths = []
+        raw_work_dir = cmd.get("workDir", "")
+        if not isinstance(raw_work_dir, str):
+            raw_work_dir = ""
+        work_dir = raw_work_dir
+        if not work_dir:
+            work_dir = self._vscode_server.work_dir or self.work_dir
+        tab_id = cmd.get("tabId", "")
+        if not isinstance(tab_id, str):
+            tab_id = ""
+
+        def _check_paths() -> dict[str, bool]:
+            results: dict[str, bool] = {}
+            for raw_path in raw_paths:
+                if not isinstance(raw_path, str) or not raw_path:
+                    continue
+                try:
+                    path = Path(os.path.expanduser(raw_path))
+                    if not path.is_absolute() and work_dir:
+                        path = Path(work_dir) / path
+                    results[raw_path] = path.resolve().is_file()
+                except OSError:
+                    results[raw_path] = False
+            return results
+
+        results = await asyncio.to_thread(_check_paths)
+        reply = {
+            "type": "pathsExist",
+            "results": results,
+            "workDir": raw_work_dir,
+            "tabId": tab_id,
+        }
+        try:
+            await self._endpoint_send(endpoint, json.dumps(reply))
+        except Exception:
+            logger.debug("checkPaths: failed to write reply", exc_info=True)
+
     async def _handle_active_tasks_query(self, endpoint: Any) -> None:
         """Report in-flight agent tasks back to a single client.
 

@@ -1020,6 +1020,131 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "models")
 
+    async def test_ws_check_paths_reports_existing_files_only(self) -> None:
+        """checkPaths replies pathsExist with true only for real files.
+
+        End-to-end over WSS: the chat webview served by the remote
+        webapp sends ``checkPaths`` for the file-path-looking strings
+        it linkified in event panel contents, and only paths naming an
+        existing regular file may become clickable links.
+        """
+        work_dir = self.server.work_dir
+        real = Path(work_dir) / "real.txt"
+        real.write_text("hello\n")
+        sub = Path(work_dir) / "subdir"
+        sub.mkdir()
+        missing = str(Path(work_dir) / "missing.txt")
+        too_long = "/" + "x" * 5000  # resolve() raises OSError
+
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "checkPaths",
+                        "paths": [
+                            str(real),      # absolute, exists
+                            "real.txt",     # relative to workDir, exists
+                            missing,        # absolute, missing
+                            "missing.txt",  # relative, missing
+                            "subdir",       # a directory, not a file
+                            too_long,       # triggers OSError on resolve
+                            "",             # degenerate: empty
+                            42,             # degenerate: not a string
+                        ],
+                        "workDir": work_dir,
+                        "tabId": "cp-tab",
+                    }
+                )
+            )
+            reply: dict[str, Any] | None = None
+            deadline = asyncio.get_event_loop().time() + 5
+            while asyncio.get_event_loop().time() < deadline:
+                raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                ev = json.loads(raw)
+                if ev.get("type") == "pathsExist":
+                    reply = ev
+                    break
+            assert reply is not None, "no pathsExist reply received"
+            self.assertEqual(reply["tabId"], "cp-tab")
+            self.assertEqual(reply["workDir"], work_dir)
+            self.assertEqual(
+                reply["results"],
+                {
+                    str(real): True,
+                    "real.txt": True,
+                    missing: False,
+                    "missing.txt": False,
+                    "subdir": False,
+                    too_long: False,
+                },
+            )
+
+    async def test_ws_check_paths_empty_workdir_uses_daemon_dir(self) -> None:
+        """checkPaths without workDir resolves against the daemon work dir."""
+        work_dir = self.server.work_dir
+        real = Path(work_dir) / "fallback.txt"
+        real.write_text("hi\n")
+
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "checkPaths",
+                        "paths": ["fallback.txt", "nope.txt"],
+                        "tabId": "cp-tab2",
+                    }
+                )
+            )
+            reply: dict[str, Any] | None = None
+            deadline = asyncio.get_event_loop().time() + 5
+            while asyncio.get_event_loop().time() < deadline:
+                raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                ev = json.loads(raw)
+                if ev.get("type") == "pathsExist":
+                    reply = ev
+                    break
+            assert reply is not None, "no pathsExist reply received"
+            self.assertEqual(reply["workDir"], "")
+            self.assertEqual(
+                reply["results"],
+                {"fallback.txt": True, "nope.txt": False},
+            )
+
+    async def test_ws_check_paths_malformed_paths_yields_empty(self) -> None:
+        """checkPaths with a non-list paths field replies with no results."""
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "checkPaths",
+                        "paths": "not-a-list",
+                        "workDir": 123,
+                        "tabId": 7,
+                    }
+                )
+            )
+            reply: dict[str, Any] | None = None
+            deadline = asyncio.get_event_loop().time() + 5
+            while asyncio.get_event_loop().time() < deadline:
+                raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                ev = json.loads(raw)
+                if ev.get("type") == "pathsExist":
+                    reply = ev
+                    break
+            assert reply is not None, "no pathsExist reply received"
+            self.assertEqual(reply["results"], {})
+            self.assertEqual(reply["workDir"], "")
+            self.assertEqual(reply["tabId"], "")
+
     async def test_ws_generate_commit_message(self) -> None:
         """generateCommitMessage command does not produce Unknown command error."""
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
@@ -1183,6 +1308,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 {"type": "autocommitAction", "action": "skip", "tabId": "t"},
                 {"type": "saveConfig", "config": {}, "apiKeys": {}},
                 {"type": "openFile", "path": "/tmp/x"},
+                {"type": "checkPaths", "paths": ["/tmp/x"]},
                 {"type": "focusEditor"},
 
                 {"type": "webviewFocusChanged", "focused": True},
