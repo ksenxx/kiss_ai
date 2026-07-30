@@ -766,6 +766,7 @@ body.remote-chat #welcome-config { display: none !important; }
   color: var(--fg);
 }
 .tc.tc-summary.collapsed > .tc-summary-desc { display: block; }
+.tc-summary-desc.md-body { white-space: normal; }
 
 .tc-summary > .tc-h > .collapse-preview { display: none; }
 

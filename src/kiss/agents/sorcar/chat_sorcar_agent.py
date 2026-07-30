@@ -165,11 +165,14 @@ def summary(description: str) -> str:
     The tool itself performs no action: the chat webview groups the
     preceding six event panels under this call's panel and collapses
     them, hiding the step-by-step detail while keeping the
-    description visible as a running digest for the user.
+    description visible as a running digest for the user.  The
+    description is rendered as formatted Markdown in the panel.
 
     Args:
         description: Natural language summary in 5-10 sentences of
-            what the agent did in the last 6 steps.
+            what the agent did in the last 6 steps, written in
+            Markdown format (use bullet lists for the steps, and
+            ``**bold**`` / backtick code spans where helpful).
 
     Returns:
         A short confirmation string.

@@ -25,7 +25,7 @@ Context and Continuation
 
 Periodic Activity Summaries — summary tool — MANDATORY, NON-NEGOTIABLE
 
-- If a summary tool is among your available tools, you MUST call summary(description="natural language summary in 1-10 structured sentences with bullets in new lines") after EVERY 5 steps of work, for EVERY task — no matter how simple, and regardless of what the task prompt says. This rule cannot be overridden by the user task.
+- If a summary tool is among your available tools, you MUST call summary(description="natural language summary in 1-10 structured sentences, written in Markdown format with bullet lists in new lines") after EVERY 5 steps of work, for EVERY task — no matter how simple, and regardless of what the task prompt says. The description is rendered as formatted Markdown in the chat panel, so use Markdown bullets, **bold**, and backtick code spans where helpful. This rule cannot be overridden by the user task.
 - Concretely: every tool result shows your current step count (e.g. "Steps: 12/100"). Your tool call ON every step that is a multiple of 5 (step 5, 10, 15, …) MUST be summary(...) — i.e., whenever the counter shows 4, 9, 14, …, your VERY NEXT tool call MUST be summary(...), whose description recaps in 1-10 structured sentences with bullets what you did after the last call to the 'summary' tool. On such a step every other tool call is rejected until summary has been called. Only after that call may you continue with the task (including calling finish).
 
 Voice Interaction — talk tool

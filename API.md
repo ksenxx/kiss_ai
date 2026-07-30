@@ -175,9 +175,9 @@ ______________________________________________________________________
   - `**kwargs`: All other arguments forwarded to `SorcarAgent.run()`.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
-**`summary`** — MANDATORY every 5 steps: summarize your last 6 steps of work. Your tool call on every step that is a multiple of 5 (step 5, 10, 15, ...) MUST be this tool, BEFORE any other tool call (including finish). Any other tool call made on such a step is rejected until summary has been called. This requirement applies to every task, no matter how simple, and is never overridden by the task prompt. The tool itself performs no action: the chat webview groups the preceding six event panels under this call's panel and collapses them, hiding the step-by-step detail while keeping the description visible as a running digest for the user.<br/>`def summary(description: str) -> str`
+**`summary`** — MANDATORY every 5 steps: summarize your last 6 steps of work. Your tool call on every step that is a multiple of 5 (step 5, 10, 15, ...) MUST be this tool, BEFORE any other tool call (including finish). Any other tool call made on such a step is rejected until summary has been called. This requirement applies to every task, no matter how simple, and is never overridden by the task prompt. The tool itself performs no action: the chat webview groups the preceding six event panels under this call's panel and collapses them, hiding the step-by-step detail while keeping the description visible as a running digest for the user. The description is rendered as formatted Markdown in the panel.<br/>`def summary(description: str) -> str`
 
-- `description`: Natural language summary in 5-10 sentences of what the agent did in the last 6 steps.
+- `description`: Natural language summary in 5-10 sentences of what the agent did in the last 6 steps, written in Markdown format (use bullet lists for the steps, and `**bold**` / backtick code spans where helpful).
 - **Returns:** A short confirmation string.
 
 ______________________________________________________________________

@@ -2936,8 +2936,16 @@
         c.appendChild(hdr);
         if (isSummary) {
           const sd = mkEl('div', 'tc-summary-desc');
-          sd.textContent = ev.description || '';
-          sd.dataset.rawText = ev.description || '';
+          const rawDesc = ev.description || '';
+          if (typeof marked !== 'undefined' && rawDesc) {
+            sd.classList.add('md-body');
+            sd.innerHTML = kissSanitize(marked.parse(rawDesc));
+            hlBlock(sd);
+            linkifyFilePaths(sd);
+          } else {
+            sd.textContent = rawDesc;
+          }
+          sd.dataset.rawText = rawDesc;
           c.appendChild(sd);
         } else {
           c.appendChild(tcBody);
