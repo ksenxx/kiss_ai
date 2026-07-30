@@ -3,19 +3,20 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// End-to-end tests for the DEBOUNCED resume-at-bottom contract, in both
-// the extension webview and the remote webapp (same main.js, remote-chat
-// body class):
-//   * rapid, small scroll fluctuations near the bottom (e.g. trackpad
-//     jitter) must NOT repeatedly toggle auto-scroll on and off while a
-//     task is streaming — touching the bottom mid-jitter must not
-//     instantly resume the tail and yank the view;
-//   * once the user SETTLES at the bottom (stays there longer than the
-//     debounce interval), tailing resumes;
-//   * scrolling away from the bottom during the debounce window cancels
-//     the pending resume.
-// The same contract holds for the outer chat, for wheel gestures at the
-// end, and for inner streaming panels (think / bash output).
+// End-to-end tests for the DEBOUNCED resume-at-bottom contract of the
+// INNER streaming panels (think / bash output), in both the extension
+// webview and the remote webapp (same main.js, remote-chat body class):
+//   * rapid, small scroll fluctuations near a panel's bottom (e.g.
+//     trackpad jitter) must NOT repeatedly toggle its tail on and off
+//     while a task is streaming — touching the panel bottom mid-jitter
+//     must not instantly resume its tail and yank the panel;
+//   * once the user SETTLES at the panel bottom (stays there longer
+//     than the debounce interval), the panel's tailing resumes;
+//   * scrolling away from the panel bottom during the debounce window
+//     cancels the pending resume.
+// The OUTER chat has a different contract (auto-scroll always on unless
+// the user scrolls back at least 5 lines; instant resume at the
+// bottom): see chatAutoScrollFiveLines.test.js.
 
 'use strict';
 
@@ -151,208 +152,7 @@ function startRunningTask(win, posted) {
   return ready.tabId;
 }
 
-function autoScrollsSince(scrollCalls, el, from) {
-  return scrollCalls
-    .slice(from)
-    .filter(c => c.el === el && typeof c.top === 'number');
-}
-
 const label = remote => (remote ? 'remote webapp' : 'extension webview');
-
-// --------------------------------------------------------------------
-// Outer chat: scrollbar/touch jitter near the bottom must not toggle
-// the tail on and off; settling at the bottom resumes it.
-// --------------------------------------------------------------------
-
-async function testOuterJitterDoesNotToggleTail(remote) {
-  const {win, posted, scrollCalls} = makeWebview({remote});
-  const O = win.document.getElementById('output');
-  const geo = {sh: 3000, ch: 500};
-  fakeGeometry(O, geo);
-  startRunningTask(win, posted);
-
-  send(win, {type: 'system_output', text: 'seed\n'});
-  await nextFrames(win);
-  const bottom = geo.sh - geo.ch;
-  assert.strictEqual(O.scrollTop, bottom, 'sanity: the chat tails to end');
-
-  // Trackpad jitter: tiny up/down fluctuations near the bottom, faster
-  // than the debounce interval.  Each return-to-bottom must NOT
-  // instantly re-arm the tail.
-  userScroll(win, O, bottom - 8);
-  userScroll(win, O, bottom);
-  userScroll(win, O, bottom - 6);
-  userScroll(win, O, bottom);
-  userScroll(win, O, bottom); // repeated at-bottom event mid-jitter
-
-  geo.sh += 300;
-  const before = scrollCalls.length;
-  send(win, {type: 'system_output', text: 'a'.repeat(200) + '\n'});
-  await nextFrames(win);
-
-  assert.strictEqual(
-    autoScrollsSince(scrollCalls, O, before).length,
-    0,
-    'BUG (' +
-      label(remote) +
-      '): a mid-jitter touch of the bottom instantly resumed auto-scroll ' +
-      'and yanked the view during streaming',
-  );
-  assert.strictEqual(
-    O.scrollTop,
-    bottom,
-    'the view must hold its position while the jitter has not settled (' +
-      label(remote) +
-      ')',
-  );
-
-  // The jitter ended AT the bottom: once it settles for longer than the
-  // debounce interval, the pending resume fires, re-arms the tail and
-  // catches it up — even though streaming moved the bottom meanwhile.
-  await sleep(SETTLE_MS);
-  assert.strictEqual(
-    O.scrollTop,
-    geo.sh - geo.ch,
-    'the settled jitter (which ended at the bottom) must resume the ' +
-      'tail and catch it up (' +
-      label(remote) +
-      ')',
-  );
-  geo.sh += 200;
-  const before2 = scrollCalls.length;
-  send(win, {type: 'system_output', text: 'b'.repeat(200) + '\n'});
-  await nextFrames(win);
-  assert.ok(
-    autoScrollsSince(scrollCalls, O, before2).length > 0,
-    'tailing must continue after the jitter settles at the bottom (' +
-      label(remote) +
-      ')',
-  );
-
-  // A deliberate scroll-up DURING the debounce window cancels the
-  // pending resume: the user is reading and must not be yanked later.
-  userScroll(win, O, geo.sh - geo.ch - 400);
-  userScroll(win, O, geo.sh - geo.ch); // touches the bottom...
-  userScroll(win, O, geo.sh - geo.ch - 400); // ...but leaves again
-  await sleep(SETTLE_MS);
-  geo.sh += 100;
-  const before3 = scrollCalls.length;
-  send(win, {type: 'system_output', text: 'c'.repeat(200) + '\n'});
-  await nextFrames(win);
-  assert.strictEqual(
-    autoScrollsSince(scrollCalls, O, before3).length,
-    0,
-    'a resume pending from a transient bottom touch must be cancelled ' +
-      'when the user scrolls away again (' +
-      label(remote) +
-      ')',
-  );
-  assert.strictEqual(
-    O.scrollTop,
-    geo.sh - geo.ch - 500,
-    'the reading position must be held (' + label(remote) + ')',
-  );
-
-  // Settling at the bottom again resumes tailing.
-  userScroll(win, O, geo.sh - geo.ch);
-  await sleep(SETTLE_MS);
-  geo.sh += 200;
-  const before4 = scrollCalls.length;
-  send(win, {type: 'system_output', text: 'd'.repeat(200) + '\n'});
-  await nextFrames(win);
-  assert.ok(
-    autoScrollsSince(scrollCalls, O, before4).length > 0,
-    'tailing must resume after the user settles at the bottom (' +
-      label(remote) +
-      ')',
-  );
-  assert.strictEqual(
-    O.scrollTop,
-    geo.sh - geo.ch,
-    'the chat must be tailing at the very end again (' + label(remote) + ')',
-  );
-  win.close();
-  console.log(
-    '  ok - outer scroll jitter near the bottom does not toggle the ' +
-      'tail (' +
-      label(remote) +
-      ')',
-  );
-}
-
-// --------------------------------------------------------------------
-// Outer chat: alternating tiny wheel deltas at the end (trackpad
-// jitter) must not toggle the tail; settling resumes it.
-// --------------------------------------------------------------------
-
-async function testWheelJitterAtEndDoesNotToggleTail(remote) {
-  const {win, posted, scrollCalls} = makeWebview({remote});
-  const O = win.document.getElementById('output');
-  const geo = {sh: 3000, ch: 500};
-  fakeGeometry(O, geo);
-  startRunningTask(win, posted);
-
-  send(win, {type: 'system_output', text: 'seed\n'});
-  await nextFrames(win);
-  const bottom = geo.sh - geo.ch;
-  assert.strictEqual(O.scrollTop, bottom, 'sanity: the chat tails to end');
-
-  // Trackpad wheel jitter at the very end: -3 / +3 / -3 / +3 / +3.
-  wheel(win, O, -3);
-  wheel(win, O, 3);
-  wheel(win, O, -3);
-  wheel(win, O, 3);
-  wheel(win, O, 3); // repeated wheel-down at end mid-jitter
-
-  geo.sh += 300;
-  const before = scrollCalls.length;
-  send(win, {type: 'system_output', text: 'a'.repeat(200) + '\n'});
-  await nextFrames(win);
-
-  assert.strictEqual(
-    autoScrollsSince(scrollCalls, O, before).length,
-    0,
-    'BUG (' +
-      label(remote) +
-      '): a mid-jitter wheel-down at the end instantly re-armed the ' +
-      'tail and yanked the view during streaming',
-  );
-  assert.strictEqual(
-    O.scrollTop,
-    bottom,
-    'the view must hold its position during wheel jitter (' +
-      label(remote) +
-      ')',
-  );
-
-  // The wheel jitter ended with a wheel-down at the end: once it
-  // settles past the debounce interval the tail re-arms and catches up,
-  // even though streaming moved the bottom meanwhile.
-  await sleep(SETTLE_MS);
-  assert.strictEqual(
-    O.scrollTop,
-    geo.sh - geo.ch,
-    'the settled wheel jitter must resume the tail and catch it up (' +
-      label(remote) +
-      ')',
-  );
-  geo.sh += 200;
-  const before2 = scrollCalls.length;
-  send(win, {type: 'system_output', text: 'b'.repeat(200) + '\n'});
-  await nextFrames(win);
-  assert.ok(
-    autoScrollsSince(scrollCalls, O, before2).length > 0,
-    'tailing must resume after the wheel jitter settles at the bottom (' +
-      label(remote) +
-      ')',
-  );
-  win.close();
-  console.log(
-    '  ok - wheel jitter at the end does not toggle the tail (' +
-      label(remote) +
-      ')',
-  );
-}
 
 // --------------------------------------------------------------------
 // Inner think panel: jitter near the panel bottom must not toggle the
@@ -490,10 +290,6 @@ async function testBashPanelWheelJitterDoesNotToggleTail(remote) {
 }
 
 async function runTests() {
-  await testOuterJitterDoesNotToggleTail(true);
-  await testOuterJitterDoesNotToggleTail(false);
-  await testWheelJitterAtEndDoesNotToggleTail(true);
-  await testWheelJitterAtEndDoesNotToggleTail(false);
   await testThinkPanelJitterDoesNotToggleTail(true);
   await testThinkPanelJitterDoesNotToggleTail(false);
   await testBashPanelWheelJitterDoesNotToggleTail(true);
@@ -502,7 +298,7 @@ async function runTests() {
 
 runTests()
   .then(() => {
-    console.log('\n8 passed, 0 failed');
+    console.log('\n4 passed, 0 failed');
     process.exit(0);
   })
   .catch(err => {

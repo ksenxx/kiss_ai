@@ -204,7 +204,9 @@ async function testWheelUpOnScrollableOutputStillSuspends() {
   send(win, {type: 'tool_call', name: 'Bash', command: 'make'});
   O.scrollTop = geo.sh - geo.ch;
 
-  wheel(win, O, -30);
+  // A deliberate wheel-up of well over 5 lines (the auto-scroll pause
+  // threshold in media/main.js) must suspend the tail.
+  wheel(win, O, -500);
 
   geo.sh += 200;
   const before = scrollCalls.length;
@@ -524,8 +526,9 @@ async function testNestedWheelPauseAndResume() {
   await nextFrames(win);
   assert.ok(O.scrollTop >= go.sh - go.ch, 'sanity: chat tails at the end');
 
-  // A real wheel-up INSIDE the panel bubbles up to the chat output.
-  wheel(win, think, -30);
+  // A real wheel-up INSIDE the panel bubbles up to the chat output;
+  // over 5 lines' worth, it also engages the chat lock.
+  wheel(win, think, -500);
   userScroll(win, think, 50);
   gt.sh += 200;
   send(win, {type: 'thinking_delta', text: 'b'.repeat(80)});

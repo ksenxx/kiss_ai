@@ -424,39 +424,75 @@
   // followtail-coverage:end
 
   // resumedebounce-coverage:start
-  // Debounce for the resume-at-bottom logic: while a task is streaming,
-  // rapid small scroll fluctuations near the bottom (e.g. trackpad
-  // jitter) must not repeatedly toggle auto-scroll on and off.  A pause
-  // still engages immediately, but the tail only resumes once the
-  // scroll position has settled at the bottom for RESUME_AT_BOTTOM_MS.
+  // Debounce for the INNER panels' resume-at-bottom logic: while a task
+  // is streaming, rapid small scroll fluctuations near a panel's bottom
+  // (e.g. trackpad jitter) must not repeatedly toggle its tail on and
+  // off.  A pause still engages immediately, but the panel tail only
+  // resumes once its scroll position has settled at its bottom for
+  // RESUME_AT_BOTTOM_MS.
   const RESUME_AT_BOTTOM_MS = 150;
-  let _resumeTimer = 0;
+  // resumedebounce-coverage:end
 
-  function cancelOutputResume() {
-    if (_resumeTimer) {
-      clearTimeout(_resumeTimer);
-      _resumeTimer = 0;
+  // fivelines-coverage:start
+  // Outer chat auto-scroll contract: the tail is ALWAYS on, except
+  // when the user has scrolled back at least AUTO_SCROLL_PAUSE_LINES
+  // lines from the bottom; it resumes as soon as the user returns to
+  // the bottom.  Wheel-up deltas are accumulated per gesture (reset
+  // after WHEEL_UP_WINDOW_MS of inactivity) so a deliberate wheel-up
+  // of at least AUTO_SCROLL_PAUSE_LINES lines pauses the tail even
+  // while streaming keeps snapping the position back to the bottom
+  // between wheel events.
+  const AUTO_SCROLL_PAUSE_LINES = 5;
+  const WHEEL_UP_WINDOW_MS = 500;
+  let _wheelUpAccum = 0;
+  let _wheelUpTimer = 0;
+
+  function outputLinePx() {
+    const cs = window.getComputedStyle(O);
+    let lh = parseFloat(cs.lineHeight);
+    // 'line-height: normal' computes to no length: use ~1.2x the font
+    // size (the CSS default), so the threshold scales with the user's
+    // configured font size; last-resort fallback is 19px.
+    if (!isFinite(lh) || lh <= 0) lh = 1.2 * parseFloat(cs.fontSize);
+    if (!isFinite(lh) || lh <= 0) lh = 19;
+    return lh;
+  }
+
+  function pauseThresholdPx() {
+    return AUTO_SCROLL_PAUSE_LINES * outputLinePx();
+  }
+
+  function wheelDeltaPx(e) {
+    // deltaMode 1 = lines, 2 = pages (e.g. Firefox); 0 = pixels.
+    if (e.deltaMode === 1) return e.deltaY * outputLinePx();
+    if (e.deltaMode === 2) return e.deltaY * O.clientHeight;
+    return e.deltaY;
+  }
+
+  function accumulateWheelUp(delta) {
+    _wheelUpAccum += delta;
+    clearTimeout(_wheelUpTimer);
+    _wheelUpTimer = setTimeout(() => {
+      _wheelUpAccum = 0;
+    }, WHEEL_UP_WINDOW_MS);
+    const threshold = pauseThresholdPx();
+    const dist = O.scrollHeight - O.scrollTop - O.clientHeight;
+    if (_wheelUpAccum >= threshold || dist >= threshold) {
+      _wheelUpAccum = 0;
+      _scrollLock = true;
     }
   }
 
   function resumeOutputAtBottom(fromUser) {
-    if (fromUser && isRunning && _scrollLock) {
-      if (_resumeTimer) return;
-      // A surviving timer means the user stayed in the bottom band for
-      // the whole interval (leaving it cancels the timer), so resume
-      // unconditionally: during fast streaming the bottom itself keeps
-      // moving away and must not defeat a deliberate return to it.
-      _resumeTimer = setTimeout(() => {
-        _resumeTimer = 0;
-        _scrollLock = false;
-        if (isRunning) sb();
-      }, RESUME_AT_BOTTOM_MS);
-    } else {
-      cancelOutputResume();
-      _scrollLock = false;
+    _scrollLock = false;
+    if (fromUser) {
+      _wheelUpAccum = 0;
+      if (isRunning) sb();
     }
   }
+  // fivelines-coverage:end
 
+  // resumedebounce-coverage:start
   function cancelPanelResume(el) {
     if (el._resumeTimer) {
       clearTimeout(el._resumeTimer);
@@ -747,6 +783,7 @@
     pendingPanel = tab.streamPendingPanel || false;
     stepCount = tab.streamStepCount || 0;
     _scrollLock = false;
+    _wheelUpAccum = 0;
     _sbScrollTarget = -1;
     if (worktreeBar && worktreeBar.parentNode)
       worktreeBar.parentNode.removeChild(worktreeBar);
@@ -1845,6 +1882,7 @@
     pendingPanel = false;
     stepCount = 0;
     _scrollLock = false;
+    _wheelUpAccum = 0;
     _sbScrollTarget = -1;
   }
 
@@ -2287,7 +2325,6 @@
       } else {
         panelEl.classList.add('user-pinned');
         if (O.scrollHeight - O.scrollTop - O.clientHeight > 2) {
-          cancelOutputResume();
           _scrollLock = true;
         }
         highlightPending(panelEl);
@@ -3445,20 +3482,30 @@
     if (isRunning) {
       const wheelUp = e.deltaY < 0;
       const sideways = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+      // followtail-coverage:end
+      // fivelines-coverage:start
       if (O.scrollHeight - O.clientHeight > 2 && (wheelUp || sideways)) {
-        cancelOutputResume();
-        _scrollLock = true;
+        if (sideways) {
+          // A horizontal pan over wide content must not be yanked
+          // back down vertically while the user reads sideways.
+          _scrollLock = true;
+        } else {
+          // Wheel-up: pause the tail only once the gesture has moved
+          // back at least AUTO_SCROLL_PAUSE_LINES lines.
+          accumulateWheelUp(-wheelDeltaPx(e));
+        }
       } else if (
         e.deltaY > 0 &&
         O.scrollHeight - O.scrollTop - O.clientHeight <= 2
       ) {
         // Wheeling down while the chat is already at its end: the
-        // user wants the tail back.  This also releases a lock that
-        // was engaged by a wheel inside a nested panel, where no
-        // output scroll event can ever fire to clear it.  The release
-        // is debounced so trackpad jitter cannot rapidly toggle it.
+        // user wants the tail back immediately.  This also releases a
+        // lock that was engaged by a wheel inside a nested panel,
+        // where no output scroll event can ever fire to clear it.
         resumeOutputAtBottom(true);
       }
+      // fivelines-coverage:end
+      // followtail-coverage:start
       const panels = watchedPanelsFor(e.target);
       for (let i = 0; i < panels.length; i++) {
         const p = panels[i];
@@ -3615,14 +3662,15 @@
     const dist = O.scrollHeight - O.scrollTop - O.clientHeight;
     const fromSb = _sbScrollTarget >= 0 && O.scrollTop >= _sbScrollTarget - 2;
     _sbScrollTarget = -1;
-    // resumedebounce-coverage:start
+    // fivelines-coverage:start
     if (dist <= 2) {
       resumeOutputAtBottom(!fromSb);
-    } else if (!fromSb) {
-      cancelOutputResume();
+    } else if (!fromSb && dist >= pauseThresholdPx()) {
+      // The user scrolled back at least AUTO_SCROLL_PAUSE_LINES lines:
+      // pause the tail.  Smaller excursions keep auto-scroll on.
       _scrollLock = true;
     }
-    // resumedebounce-coverage:end
+    // fivelines-coverage:end
     updateVisibleTask();
   });
   new MutationObserver(() => {
