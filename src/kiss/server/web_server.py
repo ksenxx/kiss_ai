@@ -2400,6 +2400,8 @@ def _build_html() -> str:
         "      --vscode-font-family: -apple-system, BlinkMacSystemFont, "
         "'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;\n"
         "      --vscode-editor-font-size: 16px;\n"
+        "      --vscode-editor-font-family: Menlo, Monaco, "
+        "'Courier New', monospace;\n"
         "      --vscode-editor-background: #1e1e1e;\n"
         "      --vscode-editor-foreground: #cccccc;\n"
         "      --vscode-input-background: #3c3c3c;\n"

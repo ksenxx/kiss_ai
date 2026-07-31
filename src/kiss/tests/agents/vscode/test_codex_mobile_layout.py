@@ -30,6 +30,10 @@ Coverage:
 * The Codex design tokens are actually in the stylesheet: page
   ``#0d0d0d``, composer surface ``#212121`` at 28px radius with
   circular 36px controls, white circular send button, pill tab chips.
+* The restyle stops at the chrome: the EVENT PANELS and the pinned
+  ``#task-panel`` are NOT touched, so they render exactly like the VS
+  Code extension webview (see
+  ``test_remote_panels_match_extension.py``).
 * ``chat.html`` itself does not hardcode the new stylesheet (the VS
   Code webview must never load it) and ``buildChatHtml``'s HEAD_STYLE
   placeholder path is untouched.
@@ -341,21 +345,12 @@ def test_codex_pill_tabs_and_status() -> None:
     assert "body.remote-chat #tab-status-bar" in css
 
 
-def test_codex_user_prompt_bubble() -> None:
-    """The pinned user prompt is a right-aligned bubble whose colors are
-    the REVERSE of the rest of the remote chat view (bg #0d0d0d and fg
-    #ececec swapped)."""
-    css = _read_codex_css()
-    m = re.search(r"body\.remote-chat #task-panel\s*\{([^}]*)\}", css)
-    assert m, "remote task/user-prompt rule missing"
-    rule = m.group(1)
-    assert "--panel-bg: #ececec" in rule
-    assert "--panel-fg: #0d0d0d" in rule
-    assert "background: var(--panel-bg)" in rule
-    assert "color: var(--panel-fg)" in rule
-    assert "border-radius: 22px" in rule
-    assert "max-width: 90%" in rule
-    assert "margin-left: auto" in rule
+def test_task_panel_not_restyled_on_remote() -> None:
+    """The pinned task panel must render EXACTLY like the VS Code
+    extension webview (full-width inverted panel from main.css), so
+    remote-codex.css must not target #task-panel at all."""
+    css = re.sub(r"/\*.*?\*/", "", _read_codex_css(), flags=re.S)
+    assert "#task-panel" not in css
 
 
 def test_codex_rounded_panels() -> None:
@@ -365,19 +360,6 @@ def test_codex_rounded_panels() -> None:
     assert "body.remote-chat #settings-panel" in css
     assert "#171717" in css, "drawer surface #171717 missing"
 
-
-
-def _find_rule(css: str, selector: str) -> str:
-    """Return the declaration body of the first ``body.remote-chat``
-    scoped rule for *selector* in remote-codex.css, or fail."""
-    pattern = (
-        r"body\.remote-chat[^{,]*"
-        + re.escape(selector)
-        + r"\s*(?:,[^{]*)?\{([^}]*)\}"
-    )
-    m = re.search(pattern, css)
-    assert m, f"body.remote-chat scoped rule for {selector!r} missing"
-    return m.group(1)
 
 
 def test_desktop_media_query_docks_sidebar() -> None:
@@ -415,32 +397,6 @@ def test_desktop_media_query_docks_sidebar() -> None:
     )
 
 
-DECOLORIZED_PANEL_SELECTORS = [
-    ".tc-h",
-    ".tc-h.tc-h-bash",
-    ".rc",
-    ".rc-h",
-    ".rc-h h3",
-    ".system-prompt-h",
-    ".prompt-h",
-    ".think",
-    ".think .lbl",
-    ".llm-panel",
-    ".tr",
-    ".tr.note strong",
-    ".tr.warn",
-    ".merge-info",
-    ".merge-info-hdr",
-    ".wt-result-ok",
-]
-
-
-@pytest.mark.parametrize("selector", DECOLORIZED_PANEL_SELECTORS)
-def test_chat_panel_decolorized(selector: str) -> None:
-    """Each colored chat panel gets a neutral remote override rule."""
-    _find_rule(_read_codex_css(), selector)
-
-
 def test_no_decorative_color_tokens_in_codex_css() -> None:
     """remote-codex.css must stay neutral: none of main.css's
     decorative color variables may appear (red stays in main.css for
@@ -467,138 +423,10 @@ def test_error_panels_keep_red() -> None:
     assert ".wt-result-err" not in css
 
 
-def test_chat_panels_left_aligned() -> None:
-    """Non-task chat panels align LEFT (Codex assistant column) while
-    the pinned #task-panel keeps its right-aligned bubble."""
-    css = _read_codex_css()
-    left = re.search(
-        r"body\.remote-chat #output > \*:not\(#welcome\)\s*\{([^}]*)\}",
-        css,
-    )
-    assert left, "left-align rule for #output children missing"
-    rule = left.group(1)
-    assert "margin-left: 0" in rule
-    assert "margin-right: auto" in rule
-    assert "max-width" in rule
-    task = re.search(r"body\.remote-chat #task-panel\s*\{([^}]*)\}", css)
-    assert task and "margin-left: auto" in task.group(1)
-
-
-FLAT_PAGE_BG_SELECTORS = [
-    ".tc",
-    ".rc",
-    ".system-prompt",
-    ".prompt",
-    ".think",
-    ".llm-panel",
-    ".merge-info",
-]
-
-
-@pytest.mark.parametrize("selector", FLAT_PAGE_BG_SELECTORS)
-def test_chat_panel_sits_on_page_background(selector: str) -> None:
-    """Codex thread items are flat: each container panel must use the
-    transparent page background, not an elevated #171717 card."""
-    rule = _find_rule(_read_codex_css(), selector)
-    assert "background: transparent" in rule, (
-        f"{selector} must sit flat on the page background like Codex"
-    )
-    assert "#171717" not in rule
-
-
-QUIET_HEADER_SELECTORS = [
-    ".tc-h",
-    ".rc-h",
-    ".system-prompt-h",
-    ".prompt-h",
-    ".llm-panel-hdr",
-]
-
-
-@pytest.mark.parametrize("selector", QUIET_HEADER_SELECTORS)
-def test_chat_panel_headers_are_quiet(selector: str) -> None:
-    """Codex activity labels are quiet sentence-case muted rows: no
-    uppercase transform, no letter-spacing, no filled header strip."""
-    rule = _find_rule(_read_codex_css(), selector)
-    assert "text-transform: none" in rule, (
-        f"{selector} must drop main.css's UPPERCASE transform"
-    )
-    assert "letter-spacing: normal" in rule, (
-        f"{selector} must drop main.css's letter-spacing"
-    )
-    assert "background: transparent" in rule, (
-        f"{selector} must not paint a filled header strip"
-    )
-
-
-def test_think_label_is_quiet() -> None:
-    """The Thinking label matches Codex: sentence case, muted gray."""
-    rule = _find_rule(_read_codex_css(), ".think .lbl")
-    assert "text-transform: none" in rule
-    assert "letter-spacing: normal" in rule
-
-
-def test_mono_output_blocks_keep_inset_surface() -> None:
-    """Monospace output (bash stream, tool results) keeps a subtle
-    inset #171717 surface at a 12px radius — the one elevated element
-    in the Codex thread."""
-    css = _read_codex_css()
-    for selector in (".bash-panel", ".tr"):
-        rule = _find_rule(css, selector)
-        assert "#171717" in rule, (
-            f"{selector} must keep the inset #171717 mono surface"
-        )
-        assert "border-radius: 12px" in rule, (
-            f"{selector} must use the Codex 12px block radius"
-        )
-
-
-def test_result_card_is_flat_and_quiet() -> None:
-    """The final result renders like a plain Codex assistant reply:
-    flat container, no green border, quiet plain heading."""
-    css = _read_codex_css()
-    rc = _find_rule(css, ".rc")
-    assert "border: none" in rc or "border-color: transparent" in rc, (
-        ".rc must not keep a visible card border"
-    )
-    h3 = _find_rule(css, ".rc-h h3")
-    assert "#ececec" in h3
-
-
 def test_muted_label_color_tokens_present() -> None:
     """Activity labels use the Codex muted grays."""
     css = _read_codex_css()
     assert "#8e8e8e" in css or "#afafaf" in css
-
-
-def test_markdown_code_blocks_match_inset_surface() -> None:
-    """Fenced code blocks in streamed text (.txt pre) AND rendered
-    markdown bodies (.md-body pre) both use the #171717 inset surface
-    at the Codex 12px radius."""
-    css = _read_codex_css()
-    m = re.search(
-        r"body\.remote-chat \.txt pre,\s*"
-        r"body\.remote-chat \.md-body pre\s*\{([^}]*)\}",
-        css,
-    )
-    assert m, ".txt pre / .md-body pre inset-surface rule missing"
-    rule = m.group(1)
-    assert "#171717" in rule
-    assert "border-radius: 12px" in rule
-
-
-def test_hljs_background_neutralized_inside_code_blocks() -> None:
-    """main.css paints .hljs with `var(--surface2) !important`; the
-    remote stylesheet must force it transparent inside pre blocks so
-    the #171717 inset surface shows through."""
-    css = _read_codex_css()
-    m = re.search(
-        r"body\.remote-chat \.txt pre code\.hljs,\s*"
-        r"body\.remote-chat \.md-body pre code\.hljs\s*\{([^}]*)\}",
-        css,
-    )
-    assert m, "code.hljs transparency override missing"
-    assert "background: transparent !important" in m.group(1)
 
 
 def test_main_js_remote_desktop_wiring() -> None:
@@ -708,23 +536,19 @@ def test_sidebar_defaults_to_quarter_screen() -> None:
     )
 
 
-def test_chat_column_spans_ninety_percent() -> None:
-    """Chat panels and the pinned task panel span 90% of the chat
-    webview column (no more 768px / 85% / 75% caps), while the composer
-    (input textbox + buttons) spans the FULL chat webview width with no
-    max-width cap at all."""
-    css = _read_codex_css()
-    panels = re.search(
-        r"body\.remote-chat #output > \*:not\(#welcome\)\s*\{([^}]*)\}",
-        css,
+def test_chat_column_spans_full_width() -> None:
+    """Chat panels and the pinned task panel keep the extension's
+    full-width layout (remote-codex.css must not cap or realign
+    #output children or #task-panel), and the composer (input textbox
+    + buttons) spans the FULL chat webview width with no max-width cap
+    at all."""
+    css = re.sub(r"/\*.*?\*/", "", _read_codex_css(), flags=re.S)
+    assert "#output" not in css, (
+        "remote-codex.css must not restyle #output or its children; "
+        "the chat thread layout comes from main.css like the extension"
     )
-    assert panels and re.search(r"max-width:\s*90%", panels.group(1)), (
-        "chat panels must span 90% of the chat webview"
-    )
-    assert "768px" not in panels.group(1)
-    task = re.search(r"body\.remote-chat #task-panel\s*\{([^}]*)\}", css)
-    assert task and re.search(r"max-width:\s*90%", task.group(1)), (
-        "the fixed task panel must span 90% of the chat webview"
+    assert "#task-panel" not in css, (
+        "remote-codex.css must not restyle the fixed task panel"
     )
     composer = re.search(
         r"body\.remote-chat #input-container\s*\{([^}]*)\}", css

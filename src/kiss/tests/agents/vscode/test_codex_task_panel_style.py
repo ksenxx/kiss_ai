@@ -4,15 +4,15 @@
 # add your name here
 """E2E tests: remote-webapp task-panel-matched typography + history rows.
 
-Three features on the remote webapp (served by ``RemoteAccessServer``):
+Features on the remote webapp (served by ``RemoteAccessServer``):
 
-1. Chat-panel CONTENTS use the same font family, style, and size as the
-   pinned task panel (``#task-panel``): the task panel renders in the
-   page's sans-serif ``--vscode-font-family`` at
-   ``--vscode-editor-font-size`` (16px), while main.css puts tool
-   paths/bodies/results, system output, bash output, merge hunks and
-   all ``code``/``pre`` content in a monospace editor font, and
-   renders thinking content in italic.  Colors must NOT change.
+1. The pinned task panel (``#task-panel``) inherits main.css's
+   inverted look verbatim (the remote page merely swaps the palette
+   variables), sized by the page's injected 16px
+   ``--vscode-editor-font-size``.  The event panels likewise inherit
+   the extension's main.css typography — that extension-parity
+   contract is pinned end to end by
+   ``test_remote_panels_match_extension.py``.
 2. History rows (``.running-item``) drop their per-chat pastel
    BACKGROUND color; the per-chat color moves to a thick LEFT border.
    The VS Code webview keeps its pastel look via an equivalent
@@ -67,39 +67,6 @@ def _find_rule(css: str, selector: str) -> str:
     bodies = re.findall(pattern, CODEX_CSS.read_text(encoding="utf-8"))
     assert bodies, f"body.remote-chat scoped rule for {selector!r} missing"
     return "\n".join(bodies)
-
-
-MONO_CONTENT_SELECTORS = [
-    ".tp",
-    ".tc-b",
-    ".tr",
-    ".sys",
-    ".bash-panel-content",
-    ".merge-ctx",
-    ".merge-hunk",
-    "#output pre",
-    "#output code",
-]
-
-
-@pytest.mark.parametrize("selector", MONO_CONTENT_SELECTORS)
-def test_panel_content_uses_task_panel_font_family(selector: str) -> None:
-    """remote-codex.css repins *selector* to var(--vscode-font-family)."""
-    rule = _find_rule(CODEX_CSS.read_text(encoding="utf-8"), selector)
-    assert "font-family: var(--vscode-font-family" in rule, (
-        f"{selector} must use the task panel's sans "
-        f"var(--vscode-font-family) stack; got declarations: {rule!r}"
-    )
-
-
-def test_thinking_content_font_style_matches_task_panel() -> None:
-    """main.css italicises .think .cnt; the task panel is upright, so
-    the remote page must set font-style: normal on thinking content."""
-    rule = _find_rule(CODEX_CSS.read_text(encoding="utf-8"), ".think .cnt")
-    assert "font-style: normal" in rule, (
-        ".think .cnt must drop the italic style to match the task "
-        f"panel; got declarations: {rule!r}"
-    )
 
 
 def test_remote_page_font_size_vars_match_task_panel() -> None:
@@ -369,52 +336,9 @@ _INJECT_HISTORY_JS = r"""
 })()
 """
 
-_TYPOGRAPHY_PROBES = {
-    "txt": ".ev.txt",
-    "txtCode": ".ev.txt code",
-    "txtPreCode": ".ev.txt pre code",
-    "txtTh": ".ev.txt th",
-    "txtTd": ".ev.txt td",
-    "thinkCnt": ".ev.think .cnt",
-    "tcB": ".tc-b",
-    "tcArg": ".tc-arg",
-    "tp": ".tp",
-    "tcPre": ".tc-b pre",
-    "tcPreCode": ".tc-b pre code",
-    "bashContent": ".bash-panel-content",
-    "tr": ".tr .tr-content",
-    "sys": ".ev.sys",
-    "llmTxt": ".llm-panel .txt",
-    "systemPromptBody": ".system-prompt-body",
-    "promptBody": ".prompt-body",
-    "mergeInfoHdr": ".merge-info-hdr",
-    "mergeInfoBody": ".merge-info-body",
-    "mergeCtx": ".merge-ctx",
-    "mergeHunk": ".merge-hunk",
-    "mergeFileName": ".merge-file-name",
-    "wtResultOk": ".wt-result-ok",
-    "rcH3": ".rc-h h3",
-    "rs": ".rs",
-    "rsB": ".rs b",
-    "rcBody": ".rc-body",
-    "rcStatus": ".rc-status",
-}
-
 _PROBE_STYLES_JS = (
-    "(() => { const probes = "
-    + repr(_TYPOGRAPHY_PROBES).replace("'", '"')
-    + r""";
-  const fonts = {};
-  for (const key of Object.keys(probes)) {
-    const el = document.querySelector(probes[key]);
-    if (!el) { fonts[key] = 'MISSING'; continue; }
-    const cs = getComputedStyle(el);
-    fonts[key] = cs.fontFamily + ' | ' + cs.fontSize;
-  }
+    r"""(() => {
   const tp = getComputedStyle(document.getElementById('task-panel'));
-  const thinkCnt = document.querySelector('.ev.think .cnt');
-  const txtEl = document.querySelector('.ev.txt');
-  const trContent = document.querySelector('.tr .tr-content');
 
   // Expected per-chat accent: same djb2 hash as chatIdBgColor,
   // resolved to an rgb() string via a probe element.
@@ -452,16 +376,9 @@ _PROBE_STYLES_JS = (
     infoClipped = info.scrollWidth > info.clientWidth + 1;
   }
   return {
-    fonts,
-    taskPanelFont: tp.fontFamily + ' | ' + tp.fontSize,
-    taskPanelFontStyle: tp.fontStyle,
+    taskPanelFontSize: tp.fontSize,
     taskPanelColor: tp.color,
     taskPanelBg: tp.backgroundColor,
-    thinkFontStyle: thinkCnt ? getComputedStyle(thinkCnt).fontStyle
-      : 'MISSING',
-    thinkColor: thinkCnt ? getComputedStyle(thinkCnt).color : 'MISSING',
-    txtColor: txtEl ? getComputedStyle(txtEl).color : 'MISSING',
-    trColor: trContent ? getComputedStyle(trContent).color : 'MISSING',
     infoLineRects,
     infoClipped,
     expectedAccent,
@@ -541,10 +458,10 @@ def _start_live_server(
 def test_live_task_panel_typography_and_history_rows(
     tmp_path: Path,
 ) -> None:
-    """Served page + real Chromium: chat-panel contents share the task
-    panel's computed font family/style/size; history rows paint the
-    per-chat color on the left border over a neutral background; all
-    metadata flows as one wrapping line."""
+    """Served page + real Chromium: the pinned task panel keeps the
+    extension's inverted look under the remote palette; history rows
+    paint the per-chat color on the left border over a neutral
+    background; all metadata flows as one wrapping line."""
     ready = threading.Event()
     done = threading.Event()
     state: dict[str, object] = {}
@@ -622,37 +539,19 @@ def test_live_task_panel_typography_and_history_rows(
             "RemoteAccessServer thread failed"
         ) from thread_error
 
-    task_panel_font = probes["taskPanelFont"]
-    assert " | 16px" in task_panel_font, probes
-    fonts = probes["fonts"]
-    missing = [k for k, v in fonts.items() if v == "MISSING"]
-    assert not missing, f"probe elements missing from the page: {missing}"
-    mismatched = {
-        k: v for k, v in fonts.items() if v != task_panel_font
-    }
-    assert not mismatched, (
-        "chat-panel contents do not match the task panel typography "
-        f"({task_panel_font!r}); mismatches: {mismatched!r}"
-    )
-    assert probes["thinkFontStyle"] == probes["taskPanelFontStyle"], (
-        "thinking content font style must match the task panel: "
-        + repr(probes)
+    assert probes["taskPanelFontSize"] == "16px", (
+        "the task panel must size itself from the injected 16px "
+        "--vscode-editor-font-size: " + repr(probes)
     )
     assert probes["taskPanelColor"] == "rgb(13, 13, 13)", (
-        "the task panel text must use the inverted #0d0d0d foreground: "
+        "the task panel text must use the inverted #0d0d0d foreground "
+        "(main.css --panel-fg: var(--bg) under the remote palette): "
         + repr(probes)
     )
     assert probes["taskPanelBg"] == "rgb(236, 236, 236)", (
         "the task panel background must be the inverted light #ececec "
-        "surface: " + repr(probes)
-    )
-    assert probes["thinkColor"] == "rgb(142, 142, 142)", (
-        "thinking content must keep its muted #8e8e8e color: "
-        + repr(probes)
-    )
-    assert probes["trColor"] == "rgb(175, 175, 175)", (
-        "tool results must keep their muted #afafaf color: "
-        + repr(probes)
+        "surface (main.css --panel-bg: var(--fg) under the remote "
+        "palette): " + repr(probes)
     )
 
     row = probes["row"]

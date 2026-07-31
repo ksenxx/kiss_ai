@@ -87,31 +87,6 @@ body.remote-chat #tab-status-bar .status-metric {
   color: #afafaf;
 }
 
-body.remote-chat #task-panel {
-  margin: 8px 16px 0;
-  margin-left: auto;
-  max-width: 90%;
-  border: 1px solid rgb(0 0 0 / 10%);
-  border-radius: 22px;
-
-  /* Reverse (invert) of the rest of the remote chat view
-     (bg #0d0d0d / fg #ececec swapped). */
-  --panel-bg: #ececec;
-  --panel-fg: #0d0d0d;
-  --panel-dim: #5a5a5a;
-
-  background: var(--panel-bg);
-  color: var(--panel-fg);
-  box-shadow: inset 0 0 1px rgb(0 0 0 / 20%);
-  padding: 10px 58px 10px 16px;
-}
-
-body.remote-chat #task-panel-copy { color: var(--panel-dim); }
-body.remote-chat #task-panel-copy:hover { color: var(--panel-fg); }
-
-body.remote-chat #task-panel-drawer-btn { color: var(--panel-dim); }
-body.remote-chat #task-panel-drawer-btn:hover { color: var(--panel-fg); }
-
 body.remote-chat #input-drawer-btn {
   background: #212121;
   border-color: rgb(255 255 255 / 15%);
@@ -123,22 +98,13 @@ body.remote-chat #input-drawer-btn:hover {
   border-color: rgb(255 255 255 / 30%);
 }
 
-body.remote-chat #task-panel.drawer-collapsed {
-  padding-top: 6px;
-  padding-bottom: 6px;
-}
-
 body.remote-chat #input-area.drawer-collapsed {
   padding-top: 10px;
   padding-bottom: calc(2px + env(safe-area-inset-bottom, 0px));
 }
 
-body.remote-chat #output {
-  background: #0d0d0d;
-  padding: 16px 16px 24px;
-}
-
 body.remote-chat #welcome h2 { color: #ececec; }
+
 body.remote-chat #welcome p { color: #afafaf; }
 
 body.remote-chat #input-area {
@@ -208,6 +174,7 @@ body.remote-chat #voice-btn.active {
 }
 
 body.remote-chat #menu-btn { margin-left: 0; }
+
 body.remote-chat #voice-btn { margin-right: 0; }
 
 body.remote-chat #model-btn {
@@ -354,205 +321,10 @@ body.remote-chat .server-reset-confirm-btn {
 }
 
 @media (width <= 600px) {
-  body.remote-chat #output { padding: 12px 12px 20px; }
-
   body.remote-chat #input-area {
     padding-left: 8px;
     padding-right: 8px;
   }
-}
-
-body.remote-chat .tc {
-  border: 1px solid rgb(255 255 255 / 8%);
-  border-radius: 12px;
-  background: transparent;
-}
-
-body.remote-chat .tc-h {
-  background: transparent;
-  color: #8e8e8e;
-  text-transform: none;
-  letter-spacing: normal;
-  font-weight: 500;
-}
-
-body.remote-chat .tc-h.tc-h-bash {
-  background: transparent;
-  color: #8e8e8e;
-}
-
-body.remote-chat .rc {
-  border: none;
-  border-radius: 0;
-  background: transparent;
-}
-
-body.remote-chat .rc-h {
-  background: transparent;
-  text-transform: none;
-  letter-spacing: normal;
-  padding-left: 0;
-  padding-right: 0;
-}
-
-body.remote-chat .rc-h h3 {
-  color: #ececec;
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .rc-body {
-  padding-left: 0;
-  padding-right: 0;
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .system-prompt,
-body.remote-chat .prompt {
-  border: 1px solid rgb(255 255 255 / 8%);
-  border-radius: 12px;
-  background: transparent;
-}
-
-body.remote-chat .system-prompt-h,
-body.remote-chat .prompt-h {
-  background: transparent;
-  color: #8e8e8e;
-  text-transform: none;
-  letter-spacing: normal;
-  font-weight: 500;
-}
-
-body.remote-chat .think {
-  border: none;
-  background: transparent;
-  padding-left: 0;
-  padding-right: 0;
-}
-
-body.remote-chat .think .lbl {
-  color: #8e8e8e;
-  text-transform: none;
-  letter-spacing: normal;
-  font-weight: 500;
-}
-
-body.remote-chat .think .cnt {
-  color: #8e8e8e;
-  font-size: var(--fs-base);
-  font-style: normal;
-}
-
-body.remote-chat .llm-panel {
-  border: 1px solid rgb(255 255 255 / 8%);
-  border-radius: 12px;
-  background: transparent;
-}
-
-body.remote-chat .llm-panel-hdr {
-  background: transparent;
-  color: #8e8e8e;
-  text-transform: none;
-  letter-spacing: normal;
-  font-weight: 500;
-}
-
-body.remote-chat .tr {
-  background: #171717;
-  border: 1px solid rgb(255 255 255 / 8%);
-  border-radius: 12px;
-  color: #afafaf;
-  font-size: var(--fs-base);
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
-}
-
-body.remote-chat .tr .rl {
-  color: #8e8e8e;
-  text-transform: none;
-  letter-spacing: normal;
-  font-weight: 500;
-}
-
-body.remote-chat .tr.note {
-  border-color: rgb(255 255 255 / 15%);
-}
-
-body.remote-chat .tr.note strong {
-  color: #ececec;
-}
-
-body.remote-chat .tr.warn {
-  background: #171717;
-  border-color: rgb(255 255 255 / 15%);
-}
-
-body.remote-chat .tr.warn strong {
-  color: #ececec;
-}
-
-body.remote-chat .merge-info {
-  border: 1px solid rgb(255 255 255 / 8%);
-  border-radius: 12px;
-  background: transparent;
-}
-
-body.remote-chat .merge-info-hdr {
-  color: #ececec;
-  font-weight: 500;
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .wt-result-ok {
-  color: #ececec;
-  border-left-color: rgb(255 255 255 / 30%);
-}
-
-body.remote-chat .bash-panel {
-  background: #171717;
-  border: 1px solid rgb(255 255 255 / 8%);
-  border-radius: 12px;
-}
-
-body.remote-chat .tc > .bash-panel,
-body.remote-chat .tc > .tr {
-  border: none;
-  border-radius: 0 0 12px 12px;
-  border-top: 1px solid rgb(255 255 255 / 8%);
-}
-
-body.remote-chat .txt pre,
-body.remote-chat .md-body pre {
-  background: #171717;
-  border: 1px solid rgb(255 255 255 / 8%);
-  border-radius: 12px;
-}
-
-body.remote-chat .txt pre code.hljs,
-body.remote-chat .md-body pre code.hljs {
-  background: transparent !important;
-  border-radius: 0;
-}
-
-body.remote-chat .tc-arg {
-  color: #8e8e8e;
-}
-
-body.remote-chat .tc-arg-name {
-  color: #afafaf;
-}
-
-body.remote-chat .panel-time {
-  color: #8e8e8e;
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
-}
-
-body.remote-chat .collapse-preview {
-  color: #8e8e8e;
-}
-
-body.remote-chat #output > *:not(#welcome) {
-  max-width: 90%;
-  margin-left: 0;
-  margin-right: auto;
 }
 
 body.remote-chat #sidebar-resizer {
@@ -561,99 +333,6 @@ body.remote-chat #sidebar-resizer {
 
 body.remote-chat.sidebar-resizing {
   user-select: none;
-}
-
-body.remote-chat .txt {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .llm-panel .txt {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .llm-panel .think .cnt {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .tc-b {
-  font-size: var(--fs-base);
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
-}
-
-body.remote-chat .tp {
-  font-size: var(--fs-base);
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
-}
-
-body.remote-chat .bash-panel-content {
-  font-size: var(--fs-base);
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
-}
-
-body.remote-chat .rs {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .rs b {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .rc-status {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .system-prompt-body {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .prompt-body {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .sys {
-  font-size: var(--fs-base);
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
-}
-
-body.remote-chat .merge-info-body {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .merge-ctx {
-  font-size: var(--fs-base);
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
-}
-
-body.remote-chat .merge-hunk {
-  font-size: var(--fs-base);
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
-}
-
-body.remote-chat .txt code {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .md-body code {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .md-body pre code {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .md-body th,
-body.remote-chat .md-body td {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat #output pre,
-body.remote-chat #output code {
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
-}
-
-body.remote-chat .adjacent-loader,
-body.remote-chat .adjacent-task-placeholder {
-  font-style: normal;
 }
 
 body.remote-chat .running-item {

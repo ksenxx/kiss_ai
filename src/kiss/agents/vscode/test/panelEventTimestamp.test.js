@@ -766,8 +766,9 @@ async function run() {
       'utf8',
     );
     assert.ok(
-      /body\.remote-chat\s+\.panel-time\s*\{/.test(remoteCss),
-      'remote-codex.css keeps its body.remote-chat .panel-time override',
+      !/\.panel-time/.test(remoteCss.replace(/\/\*[\s\S]*?\*\//g, '')),
+      'remote-codex.css must not restyle .panel-time: the remote ' +
+        'webapp inherits the extension look from main.css',
     );
   });
 

@@ -541,8 +541,9 @@ function testRemoteCollapsedPadding() {
   click(win, 'input-drawer-btn');
   assert.strictEqual(
     cs(win, 'task-panel').paddingTop,
-    '6px',
-    'remote: collapsed task drawer must get the slim remote padding',
+    '4px',
+    'remote: collapsed task drawer must keep the extension padding ' +
+      '(remote-codex.css no longer restyles #task-panel)',
   );
   assert.strictEqual(
     cs(win, 'input-area').paddingTop,

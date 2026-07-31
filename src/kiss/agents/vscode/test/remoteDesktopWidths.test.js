@@ -134,27 +134,20 @@ function testCssSidebarQuarterScreenDefault() {
   console.log('PASS CSS defaults the docked sidebar to 1/4 screen (25vw)');
 }
 
-function testCssChatPanelsNinetyPercent() {
-  const rule = cssRule('body.remote-chat #output > *:not(#welcome)');
+function testCssChatPanelsNotRestyled() {
+  // The chat thread and the fixed task panel must render exactly like
+  // the VS Code extension webview (main.css), so remote-codex.css must
+  // not target #output children or #task-panel at all.
+  const stripped = CSS.replace(/\/\*[\s\S]*?\*\//g, '');
   assert.ok(
-    /max-width:\s*90%/.test(rule),
-    `chat panels must span 90% of the chat webview — got: ${rule.trim()}`,
-  );
-  assert.ok(!rule.includes('768px'), 'the old 768px cap must be gone');
-  console.log('PASS CSS chat panels span 90% of the chat webview');
-}
-
-function testCssTaskPanelNinetyPercent() {
-  const rule = cssRule('body.remote-chat #task-panel');
-  assert.ok(
-    /max-width:\s*90%/.test(rule),
-    `the fixed task panel must span 90% — got: ${rule.trim()}`,
+    !stripped.includes('#output'),
+    'remote-codex.css must not restyle #output or its children',
   );
   assert.ok(
-    rule.includes('margin-left: auto'),
-    'task panel must stay right-aligned',
+    !stripped.includes('#task-panel'),
+    'remote-codex.css must not restyle the fixed task panel',
   );
-  console.log('PASS CSS fixed task panel spans 90% of the chat webview');
+  console.log('PASS CSS chat panels and task panel keep the extension look');
 }
 
 function testCssComposerFullWidth() {
@@ -267,8 +260,7 @@ function testVsCodeWebviewIsolation() {
 }
 
 testCssSidebarQuarterScreenDefault();
-testCssChatPanelsNinetyPercent();
-testCssTaskPanelNinetyPercent();
+testCssChatPanelsNotRestyled();
 testCssComposerFullWidth();
 testDefaultSeededFromQuarterWindow();
 testKeyboardBaselineQuarterWindow();
