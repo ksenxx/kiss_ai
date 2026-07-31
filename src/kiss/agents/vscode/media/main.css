@@ -1906,10 +1906,7 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   white-space: normal;
   align-items: center;
   row-gap: 8px;
-  padding-top: 18px;
-  padding-bottom: 9px;
   padding-left: 13px;
-  min-height: 96px;
   background-color: var(--task-color, color-mix(in srgb, var(--fg) 3%, transparent));
   color: #1a1a1a;
 }
@@ -1988,7 +1985,7 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 
 .sidebar-item-actions {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   gap: 6px;
   flex-shrink: 0;
   margin-left: 6px;

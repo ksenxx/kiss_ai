@@ -557,6 +557,55 @@ def test_live_task_panel_typography_and_history_rows(
                     "history panels must render one collapse toggle: "
                     + repr(collapse_probe)
                 )
+                # The collapsed task panel must hug its content: no
+                # forced min-height and no oversized padding leaving
+                # blank bands above/below the task text.
+                spacing_probe = page.evaluate(
+                    """() => {
+                        const row = document.querySelector(
+                            '#history-list .running-item'
+                        );
+                        const text = row.querySelector(
+                            '.sidebar-item-text'
+                        );
+                        const cs = getComputedStyle(row);
+                        const rowBox = row.getBoundingClientRect();
+                        const textBox = text.getBoundingClientRect();
+                        return {
+                            minHeight: cs.minHeight,
+                            paddingTop: parseFloat(cs.paddingTop),
+                            paddingBottom: parseFloat(
+                                cs.paddingBottom
+                            ),
+                            spaceAbove: textBox.top - rowBox.top,
+                            spaceBelow:
+                                rowBox.bottom - textBox.bottom,
+                        };
+                    }"""
+                )
+                assert spacing_probe["minHeight"] in ("0px", "auto"), (
+                    "collapsed history panel must not reserve a "
+                    "min-height: " + repr(spacing_probe)
+                )
+                assert spacing_probe["paddingTop"] <= 8, (
+                    "history panel must not pad extra space above "
+                    "the task text: " + repr(spacing_probe)
+                )
+                assert spacing_probe["paddingBottom"] <= 8, (
+                    "history panel must not pad extra space below "
+                    "the task text: " + repr(spacing_probe)
+                )
+                # The blank band between the panel edge and the task
+                # text itself must stay small: padding plus border
+                # plus at most a few px of flex centering slack.
+                assert spacing_probe["spaceAbove"] <= 12, (
+                    "extra space above the task text in a history "
+                    "panel: " + repr(spacing_probe)
+                )
+                assert spacing_probe["spaceBelow"] <= 12, (
+                    "extra space below the task text in a history "
+                    "panel: " + repr(spacing_probe)
+                )
                 # Expand the row via its chevron so the metadata
                 # becomes visible.
                 page.click(
