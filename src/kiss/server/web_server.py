@@ -60,6 +60,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Callable
@@ -866,13 +867,19 @@ def _try_adopt_existing_cloudflared() -> tuple[int, int, str] | None:
         )
         return None
     ready = _probe_tunnel_ready(metrics_port)
-    if ready is None:
+    if ready is not True:
+        # Re-probe before declining: ``None`` (endpoint unreachable —
+        # e.g. metrics socket still binding after wake) and ``False``
+        # (HTTP 503 — "zero ready connections *right now*", which a
+        # tunnel mid-reconnect reports briefly) are both potentially
+        # transient.  Terminating on the first such reading would
+        # needlessly rotate a recoverable quick-tunnel URL.
         for _ in range(4):
             time.sleep(0.5)
             ready = _probe_tunnel_ready(metrics_port)
-            if ready is not None:
+            if ready is True:
                 break
-    if not ready:
+    if ready is not True:
         logger.info(
             "cloudflared pid %d alive but metrics port %d reports "
             "no ready connections; not adopting",
@@ -928,12 +935,19 @@ def _probe_tunnel_ready(metrics_port: int) -> bool | None:
     Returns:
         ``True`` if the endpoint reports ``readyConnections > 0``.
         ``False`` if the endpoint *successfully* reports
-        ``readyConnections == 0`` (confirmed deregistration).
-        ``None`` if the endpoint is unreachable, the response is not
-        valid JSON, or the value is non-numeric — callers should treat
-        this as "no information" and *not* count it toward an unhealthy
-        streak.
+        ``readyConnections == 0`` (confirmed deregistration).  Real
+        ``cloudflared`` sends this as **HTTP 503** with a JSON body
+        (``{"status":503,"readyConnections":0,...}``) — ``urlopen``
+        raises :class:`urllib.error.HTTPError` for it, so the 503
+        reply is parsed from the error object; a 503 whose body
+        cannot be parsed still counts as ``False`` because a 503
+        from ``/ready`` is by definition "not ready".
+        ``None`` if the endpoint is unreachable, replies with a
+        non-503 HTTP error, the response is not valid JSON, or the
+        value is non-numeric — callers should treat this as "no
+        information" and *not* count it toward an unhealthy streak.
     """
+    not_ready_status = 503
     try:
         req = urllib.request.Request(
             f"http://127.0.0.1:{metrics_port}/ready",
@@ -941,6 +955,17 @@ def _probe_tunnel_ready(metrics_port: int) -> bool | None:
         )
         with urllib.request.urlopen(req, timeout=2) as resp:
             data = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        # cloudflared's /ready replies 503 (with a JSON body) while
+        # the tunnel has zero ready edge connections — the canonical
+        # "deregistered, public hostname is NXDOMAIN" signal.
+        if exc.code != not_ready_status:
+            return None
+        try:
+            data = json.loads(exc.read())
+            return int(data.get("readyConnections", 0)) > 0
+        except Exception:
+            return False
     except Exception:
         return None
     try:
