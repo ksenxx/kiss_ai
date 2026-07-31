@@ -59,7 +59,6 @@ REPO = Path(__file__).resolve().parents[5]
 INSTALL_SCRIPT = REPO / "install.sh"
 RELEASE_SCRIPTS = [
     REPO / "scripts" / "release.sh",
-    REPO / "scripts" / "release_exp.sh",
 ]
 
 

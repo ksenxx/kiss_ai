@@ -638,10 +638,13 @@ def test_live_task_panel_typography_and_history_rows(
         "thinking content font style must match the task panel: "
         + repr(probes)
     )
-    assert probes["taskPanelColor"] == "rgb(236, 236, 236)", probes
-    assert probes["taskPanelBg"] == "rgb(33, 33, 33)", (
-        "the task panel background must be the dark #212121 surface: "
+    assert probes["taskPanelColor"] == "rgb(13, 13, 13)", (
+        "the task panel text must use the inverted #0d0d0d foreground: "
         + repr(probes)
+    )
+    assert probes["taskPanelBg"] == "rgb(236, 236, 236)", (
+        "the task panel background must be the inverted light #ececec "
+        "surface: " + repr(probes)
     )
     assert probes["thinkColor"] == "rgb(142, 142, 142)", (
         "thinking content must keep its muted #8e8e8e color: "
