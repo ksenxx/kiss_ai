@@ -38,6 +38,8 @@ import threading
 import unittest
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parents[5]
 
 HAVE_MAC_TTS = bool(shutil.which("say")) and bool(shutil.which("afconvert"))
@@ -166,6 +168,7 @@ class ClosingHttpServer:
 class TestWakeWordSurvivesStalledTranscription(unittest.TestCase):
     """Saying "Sorcar" again works while a transcription is stalled."""
 
+    @pytest.mark.slow
     def test_second_wake_fires_during_stalled_transcription(self) -> None:
         stall = StallingHttpServer()
         try:

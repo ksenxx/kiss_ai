@@ -30,11 +30,14 @@ import sys
 import threading
 import time
 
+import pytest
+
 from kiss.agents.sorcar.mcp_servers import MCPManager, MCPServerConfig
 
 _PROMPT_DEADLINE = 30.0
 
 
+@pytest.mark.slow
 def test_shutdown_unblocks_stuck_connect_waiter() -> None:
     """A connect() blocked on a silent server returns promptly on shutdown."""
     config = MCPServerConfig(

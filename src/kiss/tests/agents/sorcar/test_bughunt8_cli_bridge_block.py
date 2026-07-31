@@ -29,10 +29,13 @@ import tempfile
 import threading
 from pathlib import Path
 
+import pytest
+
 from kiss.ui.cli import cli_daemon_bridge
 
 
 class TestBridgeNeverBlocksForever:
+    @pytest.mark.slow
     def test_send_event_returns_when_daemon_stops_reading(self) -> None:
         tmp_dir = Path(tempfile.mkdtemp(prefix="kiss-bh8-", dir="/tmp"))
         sock_path = tmp_dir / "wedged.sock"

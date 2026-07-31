@@ -26,6 +26,8 @@ import shutil
 import tempfile
 from typing import Any
 
+import pytest
+
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent, summary
 from kiss.core.printer import Printer
 
@@ -196,6 +198,7 @@ def _tool_calls_by_step(
     return calls
 
 
+@pytest.mark.slow
 def test_live_agent_calls_summary_on_every_step_divisible_by_5() -> None:
     """A real run calls summary exactly on steps 5, 10, 15, ....
 

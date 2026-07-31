@@ -43,6 +43,8 @@ import threading
 import unittest
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parents[5]
 
 HAVE_MAC_TTS = bool(shutil.which("say")) and bool(shutil.which("afconvert"))
@@ -144,6 +146,7 @@ class TestSensitivityCliRealVoice(unittest.TestCase):
                          msg=rejects.stdout)
         self.assertEqual(rejects.returncode, 1, msg=rejects.stdout)
 
+    @pytest.mark.slow
     def test_high_sensitivity_wakes_on_trailing_alias(self) -> None:
         strict = _run_listener(self.hey_wav, "--sensitivity", "50")
         self.assertIn("READY", strict.stdout.split(),
@@ -220,6 +223,7 @@ class TestSensitivitySliderBrowser(unittest.TestCase):
             self.loop.close()
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    @pytest.mark.slow
     def test_slider_changes_browser_wake_sensitivity(self) -> None:
         from playwright.sync_api import sync_playwright
 

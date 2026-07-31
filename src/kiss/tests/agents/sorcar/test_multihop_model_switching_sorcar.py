@@ -131,6 +131,7 @@ class TestSorcarSetModelMultiHopLive:
         }
         assert "reveal_secret" in names
 
+    @pytest.mark.slow
     def test_five_hop_chain_via_set_model_tool(self) -> None:
         """gpt-4o -> gpt-5.5 (Responses) -> Claude -> Gemini -> gpt-5.5,
         each hop making a live tool call; the final model recalls all
@@ -222,6 +223,7 @@ class TestSorcarSetModelMultiHopLive:
 class TestSorcarAgentRunMultiHopLive:
     """Full SorcarAgent.run loop switching providers mid-task via set_model."""
 
+    @pytest.mark.slow
     def test_agent_run_switches_models_and_recalls_secrets(
         self, tmp_path: Path
     ) -> None:

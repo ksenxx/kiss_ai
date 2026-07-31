@@ -160,6 +160,7 @@ def test_source_change_reuses_live_connection(
 
 
 
+@pytest.mark.slow
 def test_call_tool_session_nulled_between_check_and_use(
     tmp_path: Path, real_stdin: None,
 ) -> None:
@@ -228,6 +229,7 @@ def test_call_tool_session_nulled_between_check_and_use(
 
 
 
+@pytest.mark.slow
 def test_connect_timeout_straggler_is_torn_down_not_poisoned(
     tmp_path: Path,
     real_stdin: None,

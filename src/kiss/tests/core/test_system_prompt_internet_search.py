@@ -65,6 +65,7 @@ def _run_task(model_name: str, task: str) -> str:
     )
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("model_name", TEST_MODELS)
 def test_current_info_task_triggers_internet_search(model_name: str) -> None:
     """A task needing current information must trigger real go_to_url calls."""

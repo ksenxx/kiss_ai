@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
+import pytest
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
@@ -382,6 +383,7 @@ class TestM5SpawnRetriesOnImmediateExit(IsolatedAsyncioTestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
         self._snap.__exit__()
 
+    @pytest.mark.slow
     async def test_spawn_retries_on_immediate_exit(self) -> None:
         """First spawn exits with rc=7, second succeeds; final proc is alive."""
         loop = asyncio.get_running_loop()

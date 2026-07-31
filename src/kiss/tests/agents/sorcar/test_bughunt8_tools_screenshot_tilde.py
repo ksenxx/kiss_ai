@@ -17,6 +17,7 @@ import pytest
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 
 
+@pytest.mark.slow
 def test_screenshot_tilde_path_targets_home_not_literal_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

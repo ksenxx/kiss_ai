@@ -31,6 +31,8 @@ import json
 import os
 from typing import Any
 
+import pytest
+
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.gemini_model import GeminiModel
 from kiss.core.models.model import Model
@@ -142,6 +144,7 @@ def _make_v2() -> OpenAICompatibleModel2:
 class TestMultiHopModelSwitchingLive:
     """Five-hop live hand-off chain: chat -> v2 -> Anthropic -> Gemini -> v2."""
 
+    @pytest.mark.slow
     def test_five_hop_chain_is_lossless(self) -> None:
         """Every hop tool-calls on the accumulated mixed-format history and
         the final model recalls all secrets from all previous hops."""

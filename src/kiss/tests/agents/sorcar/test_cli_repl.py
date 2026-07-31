@@ -465,6 +465,7 @@ def _complete_line_over_pty(
     not hasattr(os, "fork") or not _gnu_readline_active(),
     reason="cycling needs a POSIX pty and GNU readline (menu-complete)",
 )
+@pytest.mark.slow
 def test_tab_cycles_forward_through_candidates(tmp_path: Path, kiss_db) -> None:
     """Pressing Tab repeatedly cycles forward through the candidates.
 
@@ -494,6 +495,7 @@ def test_tab_cycles_forward_through_candidates(tmp_path: Path, kiss_db) -> None:
     not hasattr(os, "fork") or not _gnu_readline_active(),
     reason="cycling needs a POSIX pty and GNU readline (menu-complete)",
 )
+@pytest.mark.slow
 def test_shift_tab_cycles_backward(tmp_path: Path, kiss_db) -> None:
     """Shift-Tab steps back through the menu after Tab moved forward.
 
