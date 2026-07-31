@@ -847,6 +847,9 @@
     for (const id of toClose) {
       const i = tabs.findIndex(t => t.id === id);
       if (i >= 0) tabs.splice(i, 1);
+      // report-coverage:start
+      discardReadyReports(id);
+      // report-coverage:end
       api.closeTab({tabId: id});
     }
     rpAfterTabsClosed(toClose);
@@ -1189,7 +1192,17 @@
     };
   }
 
-  function maybeOpenReportTab(tState, ev) {
+  // Reports confirmed by a successful Write, keyed by owning tab id and
+  // kept in write order; their tabs open only when that task finishes.
+  const readyReportsByTab = Object.create(null);
+
+  function reportTabKey(evTabId) {
+    const key =
+      evTabId === undefined || evTabId === null ? activeTabId : evTabId;
+    return String(key);
+  }
+
+  function confirmReadyReport(tState, ev) {
     const rep = tState.pendingReport;
     tState.pendingReport = null;
     if (!rep || tState.suppressReportOpen || _demoActive) return;
@@ -1197,11 +1210,32 @@
     if (ev.path && ev.path !== rep.path) return;
     const rc = String(ev.content || '');
     if (rc.lastIndexOf('Successfully wrote ', 0) !== 0) return;
-    handleFileContent({
-      path: rep.path,
-      name: rep.name,
-      content: rep.isMarkdown ? markdownReportToHtml(rep.content) : rep.content,
-      isReport: true,
+    const key = reportTabKey(ev.tabId);
+    const list = readyReportsByTab[key] || (readyReportsByTab[key] = []);
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (list[i].path === rep.path) list.splice(i, 1);
+    }
+    list.push(rep);
+  }
+
+  function discardReadyReports(evTabId) {
+    delete readyReportsByTab[reportTabKey(evTabId)];
+  }
+
+  function openReadyReportTabs(evTabId) {
+    const key = reportTabKey(evTabId);
+    const reps = readyReportsByTab[key];
+    delete readyReportsByTab[key];
+    if (!reps || _demoActive) return;
+    reps.forEach(rep => {
+      handleFileContent({
+        path: rep.path,
+        name: rep.name,
+        content: rep.isMarkdown
+          ? markdownReportToHtml(rep.content)
+          : rep.content,
+        isReport: true,
+      });
     });
   }
   // report-coverage:end
@@ -3064,7 +3098,7 @@
         }
         // report-coverage:start
         if (ev.is_error) tState.pendingReport = null;
-        else maybeOpenReportTab(tState, ev);
+        else confirmReadyReport(tState, ev);
         // report-coverage:end
         if (hadBash && !ev.is_error) break;
         const resultTarget = tState.lastToolCallEl || target;
@@ -4120,6 +4154,11 @@
         break;
       }
       case 'clear': {
+        // report-coverage:start
+        // A new task is starting in this tab: any report queued by a
+        // previous task that never reached a terminal event is stale.
+        discardReadyReports(ev.tabId);
+        // report-coverage:end
         const clearTab =
           ev.tabId !== undefined ? getTab(ev.tabId) : getTab(activeTabId);
         if (clearTab) {
@@ -4642,6 +4681,9 @@
           ev.endTs,
         );
         focusFinishedTab(ev.tabId);
+        // report-coverage:start
+        openReadyReportTabs(ev.tabId);
+        // report-coverage:end
         break;
       }
       case 'task_error':
@@ -4672,6 +4714,11 @@
               : 'Stopped';
         setReady(label, ev.tabId, ev.startTs, ev.endTs);
         focusFinishedTab(ev.tabId);
+        // report-coverage:start
+        // The task finished (with an error / stop): a successfully
+        // written report is still a real artifact — open it.
+        openReadyReportTabs(ev.tabId);
+        // report-coverage:end
         break;
       }
       case 'new_tab': {
@@ -4771,6 +4818,9 @@
       case 'subagentDone': {
         const doneTab = getTab(ev.tab_id);
         if (doneTab) {
+          // report-coverage:start
+          openReadyReportTabs(doneTab.id);
+          // report-coverage:end
           doneTab.isDone = true;
           doneTab.isRunning = false;
           if (doneTab.id === activeTabId) {
