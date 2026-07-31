@@ -260,7 +260,6 @@ class _CommandsMixin:
         def _handle_autocommit_action(
             self, action: str, tab_id: str = "", *, work_dir: str = "",
         ) -> None: ...
-        def _handle_delete_task(self, task_id: str) -> None: ...
         def _handle_delete_frequent_task(self, task: str) -> None: ...
         def _handle_set_favorite(
             self, task_id: str, is_favorite: bool,
@@ -399,12 +398,6 @@ class _CommandsMixin:
         self._get_frequent_tasks(
             50 if limit is None else limit, cmd.get("connId", ""),
         )
-
-    def _cmd_delete_task(self, cmd: dict[str, Any]) -> None:
-        """Delete a task from the database and refresh history."""
-        task_id = _opt_str(cmd.get("taskId"))
-        if task_id is not None:
-            self._handle_delete_task(task_id)
 
     def _cmd_delete_frequent_task(self, cmd: dict[str, Any]) -> None:
         """Delete a row from the ``frequent_tasks`` table by task text."""
@@ -1208,7 +1201,6 @@ class _CommandsMixin:
         "selectModel": _cmd_select_model,
         "getHistory": _cmd_get_history,
         "getFrequentTasks": _cmd_get_frequent_tasks,
-        "deleteTask": _cmd_delete_task,
         "deleteFrequentTask": _cmd_delete_frequent_task,
         "setFavorite": _cmd_set_favorite,
         "getFiles": _cmd_get_files,

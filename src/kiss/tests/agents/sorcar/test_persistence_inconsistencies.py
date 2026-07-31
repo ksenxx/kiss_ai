@@ -11,8 +11,6 @@ Each test class targets one confirmed bug (see ``tmp/findings-1.md``):
   the ENTIRE batch, silently dropping events of every other task in
   that batch.  The code comment claimed dangling events are skipped but
   no validation happened.
-* **A2** — ``_delete_task`` never invalidated the chat-context cache,
-  so ghost-text autocomplete kept serving deleted task/result text.
 * **A3** — ``_save_task_extra`` blind-overwrote the ``extra`` JSON
   column, destroying the ``is_favorite`` flag that
   ``_set_task_favorite`` merge-updates.
@@ -37,15 +35,12 @@ from pathlib import Path
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.persistence import (
     _add_task,
-    _delete_task,
     _flush_chat_events,
-    _load_chat_context_text,
     _load_chat_events_by_task_id,
     _load_history,
     _prefix_match_tasks,
     _queue_chat_event,
     _save_task_extra,
-    _save_task_result,
     _set_task_favorite,
 )
 
@@ -79,6 +74,19 @@ class _TempDbTestBase:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
+def _drop_task_row(task_id: str) -> None:
+    """Remove a task_history row (and its events) with raw SQL.
+
+    Simulates a row that vanished underneath the event queue (e.g.
+    external DB maintenance) so its queued events become dangling.
+    """
+    db = th._get_db()
+    with th._rw_lock.write_lock():
+        db.execute("DELETE FROM events WHERE task_id = ?", (task_id,))
+        db.execute("DELETE FROM task_history WHERE id = ?", (task_id,))
+        db.commit()
+
+
 def _read_extra(task_id: str) -> dict[str, object]:
     """Load the parsed ``extra`` JSON of a history row via the public reader."""
     for entry in _load_history():
@@ -95,7 +103,7 @@ class TestA1DanglingEventDoesNotDropBatch(_TempDbTestBase):
     def test_live_task_events_survive_dangling_event_in_same_batch(self) -> None:
         tid_live, _ = _add_task("live task")
         tid_doomed, _ = _add_task("doomed task")
-        assert _delete_task(tid_doomed) is True
+        _drop_task_row(tid_doomed)
 
         _queue_chat_event({"type": "ev_doomed"}, tid_doomed)
         _queue_chat_event({"type": "ev_live"}, tid_live)
@@ -112,7 +120,7 @@ class TestA1DanglingEventDoesNotDropBatch(_TempDbTestBase):
     def test_seq_cache_stays_consistent_after_skipped_event(self) -> None:
         tid_live, _ = _add_task("live task 2")
         tid_doomed, _ = _add_task("doomed task 2")
-        assert _delete_task(tid_doomed) is True
+        _drop_task_row(tid_doomed)
 
         _queue_chat_event({"type": "ev_doomed"}, tid_doomed)
         _queue_chat_event({"type": "first"}, tid_live)
@@ -126,25 +134,6 @@ class TestA1DanglingEventDoesNotDropBatch(_TempDbTestBase):
         assert isinstance(events, list)
         assert [e["type"] for e in events] == ["first", "second"]
         assert tid_doomed not in th._next_seq_cache
-
-
-class TestA2DeleteTaskInvalidatesChatContextCache(_TempDbTestBase):
-    """[A2] ``_delete_task`` must invalidate the chat-context cache."""
-
-    def test_deleted_task_text_disappears_from_chat_context(self) -> None:
-        tid, chat_id = _add_task("secret task")
-        _save_task_result("secret result", task_id=tid)
-
-        text_before = _load_chat_context_text(chat_id)
-        assert "secret task" in text_before
-        assert "secret result" in text_before
-
-        assert _delete_task(tid) is True
-
-        text_after = _load_chat_context_text(chat_id)
-        assert "secret task" not in text_after
-        assert "secret result" not in text_after
-        assert text_after == ""
 
 
 class TestA3SaveTaskExtraPreservesFavorite(_TempDbTestBase):

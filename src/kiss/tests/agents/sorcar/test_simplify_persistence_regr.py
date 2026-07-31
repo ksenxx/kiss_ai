@@ -11,7 +11,6 @@ Covers the exact code paths simplified in ``persistence.py`` and
   orphan-event dropping),
 * safe numeric coercers (``_safe_int`` / ``_safe_float``),
 * ``_add_task`` / ``_save_task_extra`` parent-id shapes and error paths,
-* ``_delete_task`` recursive cascade,
 * ``_shutdown_persist_in_flight_results`` sentinel rewrite,
 * prefix matching helpers,
 * ``cli_steering`` box-geometry helpers.
@@ -220,29 +219,6 @@ class TestAddTaskAndExtra(_TempDbTestBase):
         assert [s["task_id"] for s in subs] == [task_id]
 
 
-class TestDeleteCascade(_TempDbTestBase):
-    """Recursive sub-agent cascade delete, events included."""
-
-    def test_grandchildren_and_events_deleted(self) -> None:
-        parent_id, chat_id = th._add_task("parent")
-        child_id, _ = th._add_task(
-            "child", chat_id, extra={"parent_task_id": parent_id})
-        grand_id, _ = th._add_task(
-            "grand", chat_id, extra={"parent_task_id": child_id})
-        other_id, other_chat = th._add_task("other")
-        for tid in (parent_id, child_id, grand_id, other_id):
-            th._append_chat_event({"type": "x"}, task_id=tid)
-        assert th._delete_task(parent_id) is True
-        db = th._get_db()
-        left = db.execute("SELECT id FROM task_history").fetchall()
-        assert [r["id"] for r in left] == [other_id]
-        evs = db.execute("SELECT DISTINCT task_id FROM events").fetchall()
-        assert [r["task_id"] for r in evs] == [other_id]
-        assert th._delete_task(parent_id) is False
-        assert th._chat_has_tasks(chat_id) is False
-        assert th._chat_has_tasks(other_chat) is True
-
-
 class TestShutdownPersist(_TempDbTestBase):
     """Pre-emptive sentinel rewrite touches only sentinel rows."""
 
@@ -290,7 +266,7 @@ class TestPrefixMatch(_TempDbTestBase):
 
 
 class TestChatContextCache(_TempDbTestBase):
-    """Cache round-trip and invalidation on add/save/delete."""
+    """Cache round-trip and invalidation on add/save."""
 
     def test_cache_invalidation(self) -> None:
         task_id, chat_id = th._add_task("taskA")
@@ -302,8 +278,6 @@ class TestChatContextCache(_TempDbTestBase):
         assert th._load_chat_context_text(chat_id) == (
             "taskA\nresA\ntaskB\nresB"
         )
-        th._delete_task(t2)
-        assert th._load_chat_context_text(chat_id) == "taskA\nresA"
 
 
 class TestBoxGeometry:

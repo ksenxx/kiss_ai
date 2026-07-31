@@ -251,7 +251,6 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("getHistory"),
     ApiCommand("getAdjacentTask", required=("direction",)),
     ApiCommand("getFrequentTasks"),
-    ApiCommand("deleteTask", required=("taskId",)),
     ApiCommand("deleteFrequentTask", required=("task",)),
     ApiCommand("setFavorite", required=("taskId", "isFavorite")),
     ApiCommand("getInputHistory"),

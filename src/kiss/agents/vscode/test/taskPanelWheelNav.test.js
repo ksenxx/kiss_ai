@@ -743,32 +743,24 @@ function testAccumulatorClearedOnTaskLoad() {
   console.log('PASS wheel accumulator resets when a task loads');
 }
 
-function testPinDissolvesWhenTaskDeleted() {
+function testPinDissolvesWhenPinnedNodeRemoved() {
   const ctx = setupWithThreeTasks();
   const {win, panel, O} = ctx;
   scrollToMain(ctx);
   wheel(win, panel, -120);
   assert.strictEqual(panelText(win), 'Prev task');
-  send(win, {
-    type: 'taskDeleted',
-    chatId: 'chat-abc',
-    taskId: '41',
-    chatHasMoreTasks: true,
-  });
-  assert.strictEqual(
-    O.querySelector('.adjacent-task[data-task-id="41"]'),
-    null,
-    'setup: taskDeleted removed the pinned container',
-  );
+  const pinned = O.querySelector('.adjacent-task[data-task-id="41"]');
+  assert.ok(pinned, 'setup: the prev task container is pinned');
+  pinned.remove();
   wheel(win, panel, 120);
   assert.strictEqual(
     panelText(win),
     'Next task',
-    'after the pinned task is deleted, the probe resolves the main ' +
-      'task (now topmost) and wheel-down steps to the next one',
+    'after the pinned container leaves the DOM, the probe resolves the ' +
+      'main task (now topmost) and wheel-down steps to the next one',
   );
   win.close();
-  console.log('PASS deleting the pinned task dissolves the pin');
+  console.log('PASS removing the pinned container dissolves the pin');
 }
 
 async function main() {
@@ -795,7 +787,7 @@ async function main() {
   testHiddenFirstMainChild();
   testClampedShortLastTask();
   testAccumulatorClearedOnTaskLoad();
-  testPinDissolvesWhenTaskDeleted();
+  testPinDissolvesWhenPinnedNodeRemoved();
   console.log('All taskPanelWheelNav tests passed');
 }
 

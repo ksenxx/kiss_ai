@@ -4263,35 +4263,6 @@
         api.getInputHistory();
         break;
 
-      case 'taskDeleted': {
-        const tdChatId = ev.chatId;
-        const tdTaskId = ev.taskId;
-        const tdHasMore = !!ev.chatHasMoreTasks;
-        if (tdTaskId === undefined || tdTaskId === null) break;
-        const tdSelector =
-          '.adjacent-task[data-task-id="' + String(tdTaskId) + '"]';
-        const tdSnapshot = tabs.slice();
-        tdSnapshot.forEach(t => {
-          if (!t || t.backendChatId !== tdChatId) return;
-          if (t.id === activeTabId && O) {
-            const liveBlock = O.querySelector(tdSelector);
-            if (liveBlock && liveBlock.parentNode)
-              liveBlock.parentNode.removeChild(liveBlock);
-          }
-          if (t.outputFragment) {
-            const fragBlock = t.outputFragment.querySelector(tdSelector);
-            if (fragBlock && fragBlock.parentNode)
-              fragBlock.parentNode.removeChild(fragBlock);
-          }
-          const isCurrent =
-            t.currentTaskId !== undefined &&
-            t.currentTaskId !== null &&
-            String(t.currentTaskId) === String(tdTaskId);
-          if (isCurrent || !tdHasMore) closeTab(t.id);
-        });
-        break;
-      }
-
       case 'task_events': {
         const teTabId = ev.tabId || activeTabId;
         const teTab = getTab(teTabId);
@@ -6723,6 +6694,50 @@
     return {delBtn: delBtn, confirmWrap: confirmWrap};
   }
 
+  // Expanded-state store for history task panels. Keyed by a stable
+  // per-task key (not the transient session objects) so that the
+  // expanded/collapsed choice survives backend-driven history
+  // re-renders, which always deliver freshly constructed sessions.
+  const historyExpandedTaskKeys = new Set();
+
+  function historyCollapseKey(session) {
+    if (session.task_id) return 'task:' + session.task_id;
+    return (
+      'chat:' + String(session.id || '') + ':' + String(session.timestamp || 0)
+    );
+  }
+
+  function makeSidebarCollapseToggle(itemDiv, session) {
+    const key = historyCollapseKey(session);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'sidebar-item-collapse';
+    btn.innerHTML =
+      '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
+    const applyCollapseState = () => {
+      const collapsed = !historyExpandedTaskKeys.has(key);
+      itemDiv.classList.toggle('collapsed', collapsed);
+      btn.dataset.tooltip = collapsed ? 'Show details' : 'Hide details';
+      btn.setAttribute(
+        'aria-label',
+        collapsed ? 'Expand task details' : 'Collapse task details',
+      );
+      btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    };
+    applyCollapseState();
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      e.preventDefault();
+      if (historyExpandedTaskKeys.has(key)) {
+        historyExpandedTaskKeys.delete(key);
+      } else {
+        historyExpandedTaskKeys.add(key);
+      }
+      applyCollapseState();
+    });
+    return btn;
+  }
+
   function makeSidebarCopyButton(text) {
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -6859,10 +6874,10 @@
       textSpan.textContent = itemText;
       div.appendChild(textSpan);
 
-      if (s.task_id) {
-        const actions = document.createElement('div');
-        actions.className = 'sidebar-item-actions';
+      const actions = document.createElement('div');
+      actions.className = 'sidebar-item-actions';
 
+      if (s.task_id) {
         const FAV_FILLED_SVG =
           '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>';
         const FAV_OUTLINE_SVG =
@@ -6898,19 +6913,10 @@
 
         const copyBtn = makeSidebarCopyButton(s.preview || itemText);
         actions.appendChild(copyBtn);
-
-        const {delBtn, confirmWrap} = makeSidebarDeleteConfirm({
-          ariaLabel: 'Delete task',
-          onConfirm: () => {
-            api.deleteTask({taskId: s.task_id});
-            div.remove();
-          },
-        });
-
-        actions.appendChild(delBtn);
-        actions.appendChild(confirmWrap);
-        div.appendChild(actions);
       }
+
+      actions.appendChild(makeSidebarCollapseToggle(div, s));
+      div.appendChild(actions);
 
       const info = document.createElement('div');
       info.className = 'running-item-info';

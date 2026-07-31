@@ -129,7 +129,6 @@ def test_unknown_command_non_string_type_routed_to_error() -> None:
 def test_bad_task_ids_are_ignored_without_broadcast() -> None:
     server, printer = _make_server()
     printer.events.clear()
-    server._handle_command({"type": "deleteTask", "taskId": 123})
     server._handle_command(
         {"type": "setFavorite", "taskId": "", "isFavorite": True}
     )

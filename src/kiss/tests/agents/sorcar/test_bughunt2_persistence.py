@@ -10,9 +10,8 @@ fallback exists for LEGACY callers whose ``task_id`` is malformed (an
 old integer id, a non-UUID string) — see
 ``test_review_round4_bugs.py``.  But the fallback also fired when the
 caller supplied a perfectly well-formed ``uuid4().hex`` id whose row
-had simply been DELETED (user removes a running task from the history
-sidebar via ``VSCodeServer._handle_delete_task``, or a stale id from a
-finished tab).  Because those callers pass ``task=None``, the fallback
+no longer exists (a stale id from a finished tab, or a row dropped by
+external DB maintenance).  Because those callers pass ``task=None``, the fallback
 resolved to the MOST RECENT row overall — an unrelated task — so:
 
 * ``_save_task_result(result, task_id=<deleted>)`` (invoked from
@@ -43,12 +42,23 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.persistence import (
     _add_task,
     _append_chat_event,
-    _delete_task,
     _load_chat_events_by_task_id,
     _resolve_task_id,
     _save_task_extra,
     _save_task_result,
 )
+
+
+def _drop_task_row(task_id: str) -> None:
+    """Remove a task_history row (and its events) with raw SQL.
+
+    Simulates a well-formed task id whose row no longer exists.
+    """
+    db = th._get_db()
+    with th._rw_lock.write_lock():
+        db.execute("DELETE FROM events WHERE task_id = ?", (task_id,))
+        db.execute("DELETE FROM task_history WHERE id = ?", (task_id,))
+        db.commit()
 
 
 class _TempDbTestBase:
@@ -72,13 +82,13 @@ class _TempDbTestBase:
 
 
 class TestDeletedTaskIdWritesAreDropped(_TempDbTestBase):
-    """Writes with a valid-but-deleted UUID id must be no-ops."""
+    """Writes with a valid id whose row is gone must be no-ops."""
 
     def test_save_task_result_does_not_clobber_unrelated_task(self) -> None:
         victim_id, _ = _add_task("victim task")
         _save_task_result("victim finished fine", task_id=victim_id)
         doomed_id, _ = _add_task("doomed task")
-        assert _delete_task(doomed_id) is True
+        _drop_task_row(doomed_id)
 
         _save_task_result("Task failed: agent crashed", task_id=doomed_id)
 
@@ -97,7 +107,7 @@ class TestDeletedTaskIdWritesAreDropped(_TempDbTestBase):
             "victim task", extra={"tokens": 111, "cost": 1.5, "steps": 7},
         )
         doomed_id, _ = _add_task("doomed task")
-        assert _delete_task(doomed_id) is True
+        _drop_task_row(doomed_id)
 
         _save_task_extra(
             {"tokens": 99999, "cost": 42.0, "steps": 3}, task_id=doomed_id,
@@ -115,7 +125,7 @@ class TestDeletedTaskIdWritesAreDropped(_TempDbTestBase):
     def test_append_chat_event_does_not_pollute_unrelated_task(self) -> None:
         victim_id, _ = _add_task("victim task")
         doomed_id, _ = _add_task("doomed task")
-        assert _delete_task(doomed_id) is True
+        _drop_task_row(doomed_id)
 
         _append_chat_event(
             {"type": "followup_suggestion", "text": "stale"},

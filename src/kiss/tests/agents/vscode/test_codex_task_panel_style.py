@@ -141,7 +141,7 @@ REMOTE_METADATA_COLOR_RULES = [
     (".running-item-workspace", "color: #8e8e8e"),
     (".running-item-ids", "color: #8e8e8e"),
     (".running-item .ids-copy-btn", "color: #ececec"),
-    (".running-item .sidebar-item-delete", "color: #ececec"),
+    (".running-item .sidebar-item-collapse", "color: #ececec"),
     (".running-item .sidebar-item-copy", "color: #ececec"),
     (".running-item .sidebar-item-favorite", "color: #ececec"),
 ]
@@ -514,6 +514,88 @@ def test_live_task_panel_typography_and_history_rows(
                     except PlaywrightTimeoutError:
                         if attempt == 2:
                             raise
+                # History panels are collapsed by default: only the
+                # clamped task text shows, the metadata is hidden, and
+                # there is no delete button (replaced by the collapse
+                # chevron).
+                collapse_probe = page.evaluate(
+                    """() => {
+                        const row = document.querySelector(
+                            '#history-list .running-item'
+                        );
+                        const info = row.querySelector(
+                            '.running-item-info'
+                        );
+                        return {
+                            collapsed: row.classList.contains(
+                                'collapsed'
+                            ),
+                            infoDisplay: getComputedStyle(info)
+                                .display,
+                            deleteButtons: row.querySelectorAll(
+                                '.sidebar-item-delete'
+                            ).length,
+                            toggles: row.querySelectorAll(
+                                '.sidebar-item-collapse'
+                            ).length,
+                        };
+                    }"""
+                )
+                assert collapse_probe["collapsed"] is True, (
+                    "history panel must be collapsed by default: "
+                    + repr(collapse_probe)
+                )
+                assert collapse_probe["infoDisplay"] == "none", (
+                    "collapsed panel must hide the metadata block: "
+                    + repr(collapse_probe)
+                )
+                assert collapse_probe["deleteButtons"] == 0, (
+                    "history panels must not render a delete button: "
+                    + repr(collapse_probe)
+                )
+                assert collapse_probe["toggles"] == 1, (
+                    "history panels must render one collapse toggle: "
+                    + repr(collapse_probe)
+                )
+                # Expand the row via its chevron so the metadata
+                # becomes visible.
+                page.click(
+                    "#history-list .running-item "
+                    ".sidebar-item-collapse"
+                )
+                # Collapse it back, then expand again: the toggle must
+                # round-trip in the real browser.
+                page.click(
+                    "#history-list .running-item "
+                    ".sidebar-item-collapse"
+                )
+                recollapsed = page.evaluate(
+                    """() => document.querySelector(
+                        '#history-list .running-item'
+                    ).classList.contains('collapsed')"""
+                )
+                assert recollapsed is True, (
+                    "clicking the chevron again must collapse the "
+                    "panel back"
+                )
+                page.click(
+                    "#history-list .running-item "
+                    ".sidebar-item-collapse"
+                )
+                # Park the mouse away from the row so the style probe
+                # below does not read the :hover background, and wait
+                # out the 0.15s background transition
+                # (body.remote-chat .sidebar-item in remote-codex.css).
+                page.mouse.move(0, 0)
+                page.wait_for_function(
+                    """() => getComputedStyle(
+                        document.querySelector(
+                            '#history-list .running-item'
+                        )
+                    ).backgroundColor === 'rgba(255, 255, 255, 0.04)'
+                    """,
+                    timeout=10000,
+                )
                 page.wait_for_function(
                     """() => {
                         const info = document.querySelector(

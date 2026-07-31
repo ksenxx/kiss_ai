@@ -37,7 +37,6 @@ export type FromWebviewMessage =
   | {type: 'selectModel'; model: string; tabId?: string}
   | {type: 'getHistory'; query?: string; offset?: number; generation?: number}
   | {type: 'getFrequentTasks'; limit?: number}
-  | {type: 'deleteTask'; taskId: number}
   | {type: 'deleteFrequentTask'; task: string}
   | {type: 'setFavorite'; taskId: number; isFavorite: boolean}
   | {type: 'getFiles'; prefix: string; workDir?: string}
@@ -254,12 +253,6 @@ type ToWebviewMessageBody =
       events: unknown[];
     }
   | {type: 'triggerStop'}
-  | {
-      type: 'taskDeleted';
-      chatId: number;
-      taskId: number;
-      chatHasMoreTasks: boolean;
-    }
   | {type: 'measureSize'}
   | {type: 'daemonStatus'; connected: boolean}
   | {
@@ -288,7 +281,6 @@ export interface AgentCommand {
     | 'selectModel'
     | 'getHistory'
     | 'getFrequentTasks'
-    | 'deleteTask'
     | 'deleteFrequentTask'
     | 'setFavorite'
     | 'getFiles'

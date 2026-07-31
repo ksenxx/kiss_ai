@@ -18,15 +18,13 @@ break it.  Locked-down contracts:
 3. ``_save_task_result`` overwrites the ``"Agent Failed Abruptly"`` sentinel;
    ``_save_task_extra`` round-trips JSON; both honor the flush-before-write
    contract with respect to queued events.
-4. ``_get_task_chat_id(task_id)`` returns the row's chat_id and ``""``
-   for missing rows.
+4. ``_add_task`` persists a distinct chat_id on each task row, visible
+   via ``_load_history``.
 5. ``has_events`` is set to 1 via BOTH the synchronous ``_append_chat_event``
    path and the queued ``_queue_chat_event`` + ``_flush_chat_events`` path.
 6. ``_load_chat_context_text`` cache freshness: writes after a cached read
    are reflected on the next read, including after a global invalidation.
-7. ``_delete_task`` removes the row AND its events and returns False for a
-   missing id; ``_delete_frequent_task`` returns True only when the row
-   existed.
+7. ``_delete_frequent_task`` returns True only when the row existed.
 """
 
 from __future__ import annotations
@@ -225,20 +223,16 @@ class TestSaveResultAndExtra(_PersistenceTestBase):
 
 
 class TestChatIdLookups(_PersistenceTestBase):
-    """(4) ``_get_task_chat_id`` contract."""
+    """(4) ``_add_task`` persists a distinct chat_id per task row."""
 
-    def test_get_task_chat_id_returns_row_chat(self) -> None:
+    def test_add_task_persists_row_chat_id(self) -> None:
         old_id, old_chat = th._add_task("repeated task")
         time.sleep(0.02)
         new_id, new_chat = th._add_task("repeated task")
         assert old_chat != new_chat
 
-        assert th._get_task_chat_id(old_id) == old_chat
-        assert th._get_task_chat_id(new_id) == new_chat
-
-    def test_lookups_return_empty_for_missing(self) -> None:
-        th._add_task("present task")
-        assert th._get_task_chat_id("999999") == ""
+        assert _history_row(old_id)["chat_id"] == old_chat
+        assert _history_row(new_id)["chat_id"] == new_chat
 
 
 class TestHasEventsFlag(_PersistenceTestBase):
@@ -289,25 +283,7 @@ class TestChatContextCacheFreshness(_PersistenceTestBase):
 
 
 class TestDeletions(_PersistenceTestBase):
-    """(7) ``_delete_task`` / ``_delete_frequent_task`` contracts."""
-
-    def test_delete_task_removes_row_and_events(self) -> None:
-        task_id, _ = th._add_task("doomed task")
-        th._append_chat_event(
-            {"type": "agent_text", "text": "ev"}, task_id=task_id
-        )
-        th._queue_chat_event({"type": "agent_text", "text": "ev2"}, task_id)
-
-        assert th._delete_task(task_id) is True
-        assert th._load_chat_events_by_task_id(task_id) is None
-        assert _event_seqs(task_id) == []
-        assert all(r["id"] != task_id for r in th._load_history())
-
-    def test_delete_task_missing_returns_false(self) -> None:
-        assert th._delete_task("424242") is False
-        task_id, _ = th._add_task("delete twice")
-        assert th._delete_task(task_id) is True
-        assert th._delete_task(task_id) is False
+    """(7) ``_delete_frequent_task`` contract."""
 
     def test_delete_frequent_task_true_only_when_existed(self) -> None:
         th._record_frequent_task("freq task")

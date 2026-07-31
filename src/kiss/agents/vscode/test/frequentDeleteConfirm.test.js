@@ -3,11 +3,10 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// Validates that the history-list and frequent-tasks-list delete widgets
-// behave identically (same tooltip/aria-label, same confirm/cancel flow).
-// The two lists historically built the widget with duplicated code that
-// drifted: the history delete button lacked the tooltip and aria-label
-// that the frequent-task delete button carried.
+// Validates the frequent-tasks-list delete widget (tooltip/aria-label,
+// confirm/cancel flow) and that the history list carries NO delete
+// widget at all: task-history rows are permanent and expose a
+// collapse/uncollapse toggle instead (see historyTaskCollapse.test.js).
 
 'use strict';
 
@@ -47,12 +46,12 @@ function checkDeleteWidget(row, expectedAria) {
   assert.strictEqual(
     delBtn.dataset.tooltip,
     'Delete',
-    'delete button must have the Delete tooltip in BOTH lists',
+    'delete button must have the Delete tooltip',
   );
   assert.strictEqual(
     delBtn.getAttribute('aria-label'),
     expectedAria,
-    'delete button must carry an aria-label in BOTH lists',
+    'delete button must carry an aria-label',
   );
   const confirmWrap = row.querySelector('.sidebar-item-confirm');
   const confirmBtn = row.querySelector('.sidebar-confirm-yes');
@@ -81,15 +80,23 @@ function main() {
 
   const hRow = historyRow(win);
   assert.ok(hRow, 'history row rendered');
-  checkDeleteWidget(hRow, 'Delete task');
-  const delMsg = posted.find(m => m.type === 'deleteTask');
-  assert.ok(delMsg, 'confirm posts deleteTask');
-  assert.strictEqual(delMsg.taskId, 'task-1');
-  assert.strictEqual(historyRow(win), null, 'history row removed on confirm');
+  assert.strictEqual(
+    hRow.querySelector('.sidebar-item-delete'),
+    null,
+    'history rows must NOT render a delete button',
+  );
+  assert.strictEqual(
+    hRow.querySelector('.sidebar-item-confirm'),
+    null,
+    'history rows must NOT render a delete-confirm widget',
+  );
   assert.ok(
-    !posted.some(m => m.type === 'resumeSession'),
-    'delete/confirm/cancel clicks must not bubble into the history row ' +
-      'click handler (no resumeSession may be posted)',
+    hRow.querySelector('.sidebar-item-collapse'),
+    'history rows render the collapse toggle where delete used to be',
+  );
+  assert.ok(
+    !posted.some(m => m.type === 'deleteTask'),
+    'the webview must never post a deleteTask command',
   );
 
   const fRow = frequentRow(win);
@@ -116,7 +123,10 @@ function main() {
       'click handler (task input must keep the user draft)',
   );
 
-  console.log('  ok - history and frequent delete widgets behave identically');
+  console.log(
+    '  ok - frequent delete widget works; history rows have no delete',
+  );
 }
 
 main();
+console.log('All frequentDeleteConfirm tests passed');

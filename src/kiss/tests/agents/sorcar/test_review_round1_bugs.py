@@ -171,7 +171,7 @@ def test_persist_bug11_add_task_rejects_legacy_int_parent_task_id(
     """A legacy integer ``parent_task_id`` must NOT be written as ``"123"``.
 
     The new column is UUID-hex; a numeric string would never match any
-    real id, silently breaking ``_subagent_child_ids`` lookups.
+    real id, silently breaking parent/child sub-agent row lookups.
     """
     task_id, _ = persistence._add_task(
         "child task", "", extra={"subagent": {"parent_task_id": 123}}
@@ -287,7 +287,7 @@ def test_vs_bug3_commands_reject_non_string_taskid() -> None:
     """A non-string ``taskId`` payload must be dropped before SQL.
 
     The previous pattern ``str(raw_task_id) if raw_task_id else None``
-    accepted dicts and lists and stringified them.  All four relevant
+    accepted dicts and lists and stringified them.  All three relevant
     handlers now validate through the shared ``_opt_str`` guard, which
     rejects every non-string payload.
     """
@@ -297,8 +297,8 @@ def test_vs_bug3_commands_reject_non_string_taskid() -> None:
         "src/kiss/server/commands.py"
     ).read_text()
     occurrences = src.count('task_id = _opt_str(cmd.get("taskId"))')
-    assert occurrences == 4, (
-        f"expected 4 hardened taskId guards, found {occurrences}"
+    assert occurrences == 3, (
+        f"expected 3 hardened taskId guards, found {occurrences}"
     )
     assert _opt_str({"a": 1}) is None
     assert _opt_str([1]) is None

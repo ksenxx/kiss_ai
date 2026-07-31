@@ -345,29 +345,6 @@ function testGenuineEndOfChatStillLatches() {
   console.log('PASS genuine end-of-chat still latches noPrevTask');
 }
 
-function testTaskDeletedRemovesPlaceholder() {
-  const {win, posted, tabId, O} = setupWithHistoryTask();
-  O.scrollTop = 0;
-  wheel(win, O, -50, 10);
-  send(win, {
-    type: 'adjacent_task_events',
-    tabId,
-    direction: 'prev',
-    task: 'Short task',
-    task_id: '41',
-    events: [],
-  });
-  assert.ok(O.querySelector('.adjacent-task[data-task-id="41"]'));
-  send(win, {type: 'taskDeleted', chatId: 'chat-abc', taskId: '41', chatHasMoreTasks: true});
-  assert.strictEqual(
-    O.querySelector('.adjacent-task[data-task-id="41"]'),
-    null,
-    'taskDeleted must remove the placeholder adjacent-task container',
-  );
-  win.close();
-  console.log('PASS taskDeleted removes placeholder container');
-}
-
 function testEmptyTitleTaskStillChains() {
   const {win, posted, tabId, O} = setupWithHistoryTask();
   O.scrollTop = 0;
@@ -442,7 +419,6 @@ testTouchPrev();
 testShortPrevTaskDoesNotBlockChaining();
 testShortNextTaskDoesNotBlockChaining();
 testGenuineEndOfChatStillLatches();
-testTaskDeletedRemovesPlaceholder();
 testEmptyTitleTaskStillChains();
 testTerminalOnlyTrajectoryRendersPlaceholder();
 console.log('All adjacentTaskScroll tests passed');

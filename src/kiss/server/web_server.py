@@ -81,11 +81,7 @@ from kiss.core.config import kiss_home
 from kiss.core.vscode_config import load_config, source_shell_env
 from kiss.server import sorcar as sorcar_api
 from kiss.server.diff_merge import _read_lines_preserved as _read_lines_preserved
-from kiss.server.json_printer import (
-    GLOBAL_EVENT_TYPES,
-    JsonPrinter,
-    stamp_event_ts,
-)
+from kiss.server.json_printer import JsonPrinter, stamp_event_ts
 from kiss.server.server import VSCodeServer, broadcast_to_conn
 from kiss.server.tips import read_tips
 from kiss.server.tricks import read_tricks
@@ -1767,10 +1763,6 @@ class WebPrinter(JsonPrinter):
           or persisted — except ``prompt`` echoes that ALSO carry a
           ``taskId``, whose tabId-stripped copy is recorded and
           persisted under that task (see the tabId branch below).
-        * Events whose type is in :data:`GLOBAL_EVENT_TYPES`
-          (``taskDeleted``) carry a ``taskId`` payload field but are
-          global system broadcasts: sent verbatim to every connected
-          client, never recorded, persisted, or fanned out per tab.
         * Events with no ``tabId`` but a thread-local ``task_id`` are
           task events: ``taskId`` is injected, the event is recorded
           under the task and queued for persistence, and one stamped
@@ -1828,10 +1820,6 @@ class WebPrinter(JsonPrinter):
                 self._persist_event(record)
             if record_only:
                 return
-            self._send_to_ws_clients(json.dumps(event))
-            return
-
-        if event.get("type") in GLOBAL_EVENT_TYPES:
             self._send_to_ws_clients(json.dumps(event))
             return
 

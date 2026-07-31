@@ -129,31 +129,6 @@ def test_set_task_favorite_toggles_column(fresh_kiss_db):
     assert P._set_task_favorite("does-not-exist", True) is False
 
 
-def test_subagent_child_ids_uses_parent_task_id_column(fresh_kiss_db):
-    P = fresh_kiss_db
-    parent, _ = P._add_task("parent")
-    child, _ = P._add_task(
-        "child", extra={"subagent": {"parent_task_id": parent}}
-    )
-    db = P._get_db()
-    children = P._subagent_child_ids(db, parent)
-    assert children == [child]
-
-
-def test_delete_task_cascades_to_nested_subagents(fresh_kiss_db):
-    P = fresh_kiss_db
-    parent, _ = P._add_task("parent")
-    child, _ = P._add_task(
-        "c", extra={"subagent": {"parent_task_id": parent}}
-    )
-    P._add_task(
-        "gc", extra={"subagent": {"parent_task_id": child}}
-    )
-    assert P._delete_task(parent) is True
-    db = P._get_db()
-    assert db.execute("SELECT COUNT(*) FROM task_history").fetchone()[0] == 0
-
-
 def test_load_history_excludes_subagents(fresh_kiss_db):
     P = fresh_kiss_db
     parent, _ = P._add_task("parent")
@@ -388,4 +363,4 @@ def test_resume_after_migration_uses_new_uuid_ids(tmp_path, monkeypatch):
         new_id = entries[0]["id"]
         assert isinstance(new_id, str)
         assert len(new_id) == 32
-        assert P._get_task_chat_id(new_id) == "chatX"
+        assert entries[0]["chat_id"] == "chatX"

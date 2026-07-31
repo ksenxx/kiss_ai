@@ -36,8 +36,6 @@ from kiss.core.printer import (
     truncate_result,
 )
 
-GLOBAL_EVENT_TYPES = frozenset({"taskDeleted"})
-
 _DISPLAY_EVENT_TYPES = frozenset({
     "clear", "thinking_start", "thinking_delta", "thinking_end",
     "text_delta", "text_end", "tool_call", "tool_result",
@@ -596,8 +594,6 @@ class JsonPrinter(Printer):
                 with self._lock:
                     self._record_event(record)
                 self._persist_event(record)
-            return
-        if event.get("type") in GLOBAL_EVENT_TYPES:
             return
         event = self._inject_task_id(event)
         with self._lock:

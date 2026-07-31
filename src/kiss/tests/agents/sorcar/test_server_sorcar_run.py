@@ -39,6 +39,14 @@ from kiss.server import sorcar
 from kiss.server.web_server import RemoteAccessServer
 
 
+def _task_chat_id(task_id: str) -> str:
+    """Return the persisted chat_id of *task_id* via ``_load_history``."""
+    for row in _persistence._load_history():
+        if row["id"] == task_id:
+            return str(row["chat_id"] or "")
+    return ""
+
+
 def _init_repo(repo: str) -> None:
     def git(*args: str) -> None:
         subprocess.run(
@@ -200,7 +208,7 @@ class SorcarRunApiTest(unittest.TestCase):
         assert abs(result.cost - 0.4567) < 1e-9
         assert result.task_id
         assert result.chat_id
-        assert _persistence._get_task_chat_id(result.task_id) == result.chat_id
+        assert _task_chat_id(result.task_id) == result.chat_id
 
     def test_failure_returns_not_success_with_metrics(self) -> None:
         """A failing agent yields ``success=False`` plus its usage.
@@ -243,7 +251,7 @@ class SorcarRunApiTest(unittest.TestCase):
         assert abs(result.cost - 0.0123) < 1e-9
         assert result.task_id
         assert result.chat_id
-        assert _persistence._get_task_chat_id(result.task_id) == result.chat_id
+        assert _task_chat_id(result.task_id) == result.chat_id
 
     def test_chat_id_continues_existing_chat(self) -> None:
         """Passing ``chat_id`` runs the task on that chat with context.
@@ -298,9 +306,7 @@ class SorcarRunApiTest(unittest.TestCase):
         assert second.success is True
         assert second.chat_id == first.chat_id
         assert second.task_id and second.task_id != first.task_id
-        assert (
-            _persistence._get_task_chat_id(second.task_id) == first.chat_id
-        )
+        assert _task_chat_id(second.task_id) == first.chat_id
         assert len(prompts_seen) == 2
         assert "remember the magic word xyzzy" in prompts_seen[1]
         assert "first answer marker" in prompts_seen[1]

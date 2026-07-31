@@ -133,7 +133,6 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   newChat: ['tabId'],
   getHistory: ['query', 'offset', 'generation'],
   getFrequentTasks: ['limit'],
-  deleteTask: ['taskId'],
   setFavorite: ['taskId', 'isFavorite'],
   deleteFrequentTask: ['task'],
   getFiles: ['prefix', 'workDir'],

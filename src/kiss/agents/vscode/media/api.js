@@ -19,7 +19,6 @@
     'getHistory',
     'getAdjacentTask',
     'getFrequentTasks',
-    'deleteTask',
     'deleteFrequentTask',
     'setFavorite',
     'getInputHistory',

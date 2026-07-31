@@ -897,24 +897,6 @@ def _allocate_chat_id() -> str:
     return uuid.uuid4().hex
 
 
-def _get_task_chat_id(task_id: str) -> str:
-    """Return the chat_id of the task with the given row id, or ``""``.
-
-    Args:
-        task_id: The primary key of the task_history row.
-
-    Returns:
-        The chat_id string, or ``""`` if the row is not found or its
-        chat_id column is empty.
-    """
-    with _rw_lock.read_lock():
-        db = _get_db()
-        row = db.execute(
-            "SELECT chat_id FROM task_history WHERE id = ?", (task_id,),
-        ).fetchone()
-        return str(row["chat_id"]) if row and row["chat_id"] else ""
-
-
 def _get_task_start_ts(task_id: str) -> int:
     """Return the ``start_ts`` of the task with the given row id, or 0.
 
@@ -934,107 +916,6 @@ def _get_task_start_ts(task_id: str) -> int:
             "SELECT start_ts FROM task_history WHERE id = ?", (task_id,),
         ).fetchone()
         return _safe_int(row["start_ts"], 0) if row else 0
-
-
-def _chat_has_tasks(chat_id: str) -> bool:
-    """Return True if the given chat_id has at least one task row.
-
-    Args:
-        chat_id: The chat session identifier string.
-
-    Returns:
-        True when at least one ``task_history`` row carries this
-        ``chat_id``, otherwise False.  Returns False for ``""``.
-    """
-    if not chat_id:
-        return False
-    with _rw_lock.read_lock():
-        db = _get_db()
-        row = db.execute(
-            "SELECT 1 FROM task_history WHERE chat_id = ? LIMIT 1", (chat_id,),
-        ).fetchone()
-        return row is not None
-
-
-def _subagent_child_ids(
-    db: sqlite3.Connection, parent_task_id: str,
-) -> list[str]:
-    """Return ids of persisted sub-agent rows whose parent is *parent_task_id*.
-
-    Children are identified by the dedicated ``parent_task_id`` column.
-    Callers must hold ``_rw_lock`` (read or write).
-
-    Args:
-        db: Active database connection.
-        parent_task_id: Primary key of the parent ``task_history`` row.
-
-    Returns:
-        List of child row ids (possibly empty).
-    """
-    if not parent_task_id:
-        return []
-    rows = db.execute(
-        "SELECT id FROM task_history WHERE parent_task_id = ?",
-        (parent_task_id,),
-    ).fetchall()
-    return [str(r["id"]) for r in rows]
-
-
-def _delete_task(task_id: str) -> bool:
-    """Delete a task, its events, and its persisted sub-agent rows.
-
-    Removes the events table rows that reference the given task_id,
-    then removes the task_history row itself.  Sub-agent rows spawned
-    by this task's ``run_parallel`` call
-    (``extra.subagent.parent_task_id == task_id``) are cascade-deleted
-    together with their events — recursively, because a sub-agent is a
-    full ``ChatSorcarAgent`` that can itself fan out nested sub-agents
-    whose rows point at the *child's* id, not the top-level parent's.
-    They are reachable only through the parent chain (via
-    :func:`_load_subagent_rows_by_parent_task_id`), so leaving any
-    level behind would leak unreachable rows and make
-    :func:`_chat_has_tasks` report a visually-empty chat as non-empty.
-
-    Args:
-        task_id: The primary key of the task_history row to delete.
-
-    Returns:
-        True if the task existed and was deleted, False otherwise.
-    """
-    _flush_chat_events()
-    db = _get_db()
-    with _rw_lock.write_lock():
-        row = db.execute(
-            "SELECT chat_id FROM task_history WHERE id = ?", (task_id,),
-        ).fetchone()
-        chat_id = (row["chat_id"] or "") if row is not None else ""
-        doomed_ids: list[str] = [task_id]
-        if row is not None:
-            seen: set[str] = {task_id}
-            frontier: list[str] = [task_id]
-            while frontier:
-                next_frontier: list[str] = []
-                for parent_id in frontier:
-                    for child_id in _subagent_child_ids(db, parent_id):
-                        if child_id not in seen:
-                            seen.add(child_id)
-                            next_frontier.append(child_id)
-                doomed_ids.extend(next_frontier)
-                frontier = next_frontier
-        deleted = False
-        for did in doomed_ids:
-            db.execute("DELETE FROM events WHERE task_id = ?", (did,))
-            cursor = db.execute(
-                "DELETE FROM task_history WHERE id = ?", (did,)
-            )
-            if did == task_id:
-                deleted = (cursor.rowcount or 0) > 0
-            _next_seq_cache.pop(did, None)
-            _marked_has_events.discard(did)
-        db.commit()
-    if deleted:
-        _invalidate_chat_context_cache(chat_id)
-    return deleted
 
 
 def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:

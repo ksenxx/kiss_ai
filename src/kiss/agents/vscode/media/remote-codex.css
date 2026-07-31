@@ -351,14 +351,14 @@ body.remote-chat .running-item-ids {
 }
 
 body.remote-chat .running-item .ids-copy-btn,
-body.remote-chat .running-item .sidebar-item-delete,
+body.remote-chat .running-item .sidebar-item-collapse,
 body.remote-chat .running-item .sidebar-item-copy,
 body.remote-chat .running-item .sidebar-item-favorite {
   color: #ececec;
 }
 
 body.remote-chat .running-item .ids-copy-btn:hover,
-body.remote-chat .running-item .sidebar-item-delete:hover,
+body.remote-chat .running-item .sidebar-item-collapse:hover,
 body.remote-chat .running-item .sidebar-item-copy:hover,
 body.remote-chat .running-item .sidebar-item-favorite:hover {
   background: rgb(255 255 255 / 10%);
