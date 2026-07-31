@@ -174,6 +174,7 @@ class TestSetModelDoesNotLeakIntoNextWebviewTask:
     def teardown_method(self) -> None:
         _RunningAgentState.running_agent_states.clear()
 
+    @pytest.mark.slow
     def test_next_task_runs_on_picker_model(self, tmp_path: Any) -> None:
         """Task 2 in the same chat webview runs on the picker's model A."""
         available = get_available_models()

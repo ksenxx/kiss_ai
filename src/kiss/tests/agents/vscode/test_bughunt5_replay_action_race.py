@@ -40,6 +40,7 @@ import unittest
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
+import pytest
 from websockets.asyncio.client import ClientConnection, connect
 
 import kiss.agents.sorcar.persistence as th
@@ -191,6 +192,7 @@ class TestReplayMergeActionRace(IsolatedAsyncioTestCase):
         with self.server._merge_states_lock:
             self.assertIn(tab_id, self.server._merge_states)
 
+    @pytest.mark.slow
     async def test_replay_waits_for_in_flight_merge_action(self) -> None:
         """No merge replay may be emitted while a merge action is running."""
         tab_id = "tab-replay-race"

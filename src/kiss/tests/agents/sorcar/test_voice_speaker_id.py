@@ -35,6 +35,8 @@ import wave
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from kiss.server.voice_wake import (
     SAMPLE_RATE,
     SpeakerRegistry,
@@ -194,6 +196,7 @@ class TestSpeakerIdFromWav(unittest.TestCase):
                 return f"{keyword!r} not found in transcript {text!r}"
         return None
 
+    @pytest.mark.slow
     def test_two_voices_numbered_in_order_and_repeat_matches(self) -> None:
         pair = _two_english_voices()
         if not pair:

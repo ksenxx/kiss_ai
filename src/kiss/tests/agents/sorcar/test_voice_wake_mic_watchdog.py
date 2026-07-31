@@ -32,6 +32,8 @@ import subprocess
 import unittest
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parents[5]
 
 SILENT_BLOCK_SIZE = 16000 * 60
@@ -56,6 +58,7 @@ def _have_input_device() -> bool:
 class TestMicWatchdog(unittest.TestCase):
     """A silent mic stream is detected, retried, and reported."""
 
+    @pytest.mark.slow
     def test_silent_stream_exits_nonzero_with_diagnostic(self) -> None:
         if not _have_input_device():
             self.skipTest("no audio input device available")

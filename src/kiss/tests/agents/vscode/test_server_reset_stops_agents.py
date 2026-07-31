@@ -42,6 +42,8 @@ import time
 from pathlib import Path
 from unittest import TestCase
 
+import pytest
+
 _CHILD_SCRIPT = r"""
 import os
 import queue
@@ -342,6 +344,7 @@ class TestServerResetStopsRunningAgents(TestCase):
         self._send_server_reset()
         self._assert_agent_stopped_and_daemon_exited()
 
+    @pytest.mark.slow
     def test_server_reset_stops_agent_when_loop_swallows_interrupts(
         self,
     ) -> None:

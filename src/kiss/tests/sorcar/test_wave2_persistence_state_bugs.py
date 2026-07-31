@@ -58,6 +58,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 import kiss.agents.sorcar.persistence as th
 import kiss.core.vscode_config as vc
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
@@ -165,6 +167,7 @@ class TestA10SaveLastModelLostUpdate:
         vc.CONFIG_DIR, vc.CONFIG_PATH = self.saved
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    @pytest.mark.slow
     def test_concurrent_work_dir_update_survives_save_last_model(self) -> None:
         """A ``work_dir`` write racing ``_save_last_model`` must never be lost.
 
