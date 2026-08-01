@@ -989,11 +989,11 @@ def get_default_model() -> str:
     """
     return _model_for_first_configured_provider(
         {
-            "ANTHROPIC_API_KEY": "claude-fable-5",
-            "OPENAI_API_KEY": "gpt-5.6-sol",
-            "GEMINI_API_KEY": "gemini-3.1-pro-preview",
-            "OPENROUTER_API_KEY": "openrouter/anthropic/claude-fable-5",
-            "TOGETHER_API_KEY": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+            "ANTHROPIC_API_KEY": "claude-opus-4-7",
+            "OPENAI_API_KEY": "gpt-5.6-luna",
+            "GEMINI_API_KEY": "gemini-3.6-flash",
+            "OPENROUTER_API_KEY": "openrouter/anthropic/claude-opus-4-7",
+            "TOGETHER_API_KEY": "moonshotai/Kimi-K3",
             "cc": "cc/opus",
             "codex": "codex/default",
         }
