@@ -31,7 +31,7 @@ ______________________________________________________________________
   - `system_prompt`: Optional system prompt to provide to the model. Default is empty string (no system prompt).
   - `tools`: The tools to use for the agent. If None, no tools are provided (only the built-in finish tool is added).
   - `is_agentic`: Whether the agent is agentic. Default is True.
-  - `max_steps`: The maximum number of steps to take. Default is 100.
+  - `max_steps`: The maximum number of steps to take. Default is 10000.
   - `max_budget`: The maximum budget to spend. Default is 10.0.
   - `model_config`: The model configuration to use for the agent. Default is None.
   - `printer`: Optional printer for streaming output. Default is None.

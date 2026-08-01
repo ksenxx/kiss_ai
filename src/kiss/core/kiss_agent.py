@@ -137,7 +137,7 @@ class KISSAgent(Base):
                 thinking_callback=thinking_callback,
             )
         self.is_agentic = is_agentic
-        self.max_steps = max_steps if max_steps is not None else 100
+        self.max_steps = max_steps if max_steps is not None else 10000
         self.max_budget = max_budget if max_budget is not None else 10.0
         self.function_map: dict[str, Callable[..., Any]] = {}
         self._cached_tools_schema: list[dict[str, Any]] | None = None
@@ -204,7 +204,7 @@ class KISSAgent(Base):
                 If None, no tools are provided (only the built-in finish tool is added).
             is_agentic (bool): Whether the agent is agentic. Default is True.
             max_steps (int): The maximum number of steps to take.
-                Default is 100.
+                Default is 10000.
             max_budget (float): The maximum budget to spend.
                 Default is 10.0.
             model_config (dict[str, Any] | None): The model configuration to use for the agent.

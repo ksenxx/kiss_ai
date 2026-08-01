@@ -306,7 +306,7 @@ A KISS agent using native function calling.
       print_prompts: bool = True) -> str
   ```
 
-  Key parameters: `model_name` (LLM to use), `prompt_template` + `arguments` (task prompt with substitutions), `tools` (callables exposed to the model; a built-in `finish` tool is always added), `max_steps` (default 100), `max_budget` (default $10), `attachments` (images/PDFs for the initial prompt). Returns the result string of the agent's task.
+  Key parameters: `model_name` (LLM to use), `prompt_template` + `arguments` (task prompt with substitutions), `tools` (callables exposed to the model; a built-in `finish` tool is always added), `max_steps` (default 10000), `max_budget` (default $10), `attachments` (images/PDFs for the initial prompt). Returns the result string of the agent's task.
 
 - **finish** — `finish(result: str) -> str`. The agent must call this with the final answer.
 
