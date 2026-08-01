@@ -96,16 +96,6 @@ Reproduce the issue by writing real end-to-end tests with 100% coverage. Then fi
 
 # Tip
 
-## The Internet Has Fresher Knowledge than a Frontier Model
-
-Add the following sentence to your prompt to make KISS Sorcar search the internet extensively for information:
-
-```
-Search the internet extensively.
-```
-
-# Tip
-
 ## If You Get a git Merge Conflict
 
 Then run the following task:
@@ -127,7 +117,7 @@ Just type or speak your shell command in the chat input textbox.
 All you need to do is use a variant of the following prompt with KISS Sorcar:
 
 ```
-Can you AI discover the lightest and fastest AI model that will give the best accuracy and recall on the data at \<</path/to/data>> at the cheapest price? Separate 20% of the data for evals, and your discovery strategy must not look at the evals data. Use 'modal' CLI to train your models on GPUs and evaluate if needed. The total budget for Modal.com is $ 1,000. Experiment with a smaller subset of data and fewer model parameters to run experiments quickly, then extrapolate. Do not STOP until accuracy/recall reaches 95% on evals and you can process each query in less than 600 seconds and under 50 USD per query, amortized over all queries. Create an HTML report with diagrams and illustrations (which does not look AI-generated) in ./reports and open it in the user's default browser?
+Can you AI discover the lightest and fastest AI model that will give >95% accuracy and recall on the data at \<</path/to/data>> at the cost of $0.25 per query?  Use 'modal' CLI to train your models on GPUs and evaluate if needed. The total budget for Modal.com is $ 1,000. Experiment with a smaller subset of data and fewer model parameters to run experiments quickly, then extrapolate. Do not STOP until you reach the goals. Create a detailed report.
 ```
 
 # Tip
@@ -137,7 +127,7 @@ Can you AI discover the lightest and fastest AI model that will give the best ac
 All you need to do is use a variant of the following prompt with KISS Sorcar:
 
 ```
-Can you run the command \<<command>> in the background and monitor its output in real time to optimize the code at \<<folder_name_or_url>> with respect to the following metrics: \<<speed, accuracy, recall, cost>>. Then use AI discovery to optimize.  You can add a diagnostic code that prints metrics, such as running time, at a finer granularity.  Do not forget to remove the diagnostic code after the optimization is complete. You MUST NOT STOP until the metrics achieve the following values: \<<give_concrete_values_for_metrics>>. Create an HTML report with diagrams and illustrations (that do not look AI-generated) in ./reports, and open it in the user's default browser.
+Can you run the command \<<command>> in the background and monitor its output in real time to optimize the code at \<<folder_name_or_url>> with respect to the following metrics: \<<speed, accuracy, recall, cost>>. Then use AI discovery to optimize.  You can add a diagnostic code that prints metrics, such as running time, at a finer granularity.  Do not forget to remove the diagnostic code after the optimization is complete. You MUST NOT STOP until the metrics achieve the following values: \<<give_concrete_values_for_metrics>>. Create a detailed report.
 ```
 
 # Tip
