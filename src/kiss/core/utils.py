@@ -5,6 +5,7 @@
 
 """Utility functions for the KISS core module."""
 
+import html as html_module
 import re
 from typing import Any, cast
 
@@ -113,7 +114,15 @@ def ensure_html(text: str) -> str:
         return text
     if text.lstrip()[:9].lower() == "<!doctype" or _HTML_TAG_RE.search(text):
         return text
-    from markdown_it import MarkdownIt
+    try:
+        from markdown_it import MarkdownIt
+    except ImportError:
+        # markdown_it can be momentarily unimportable (e.g. the installer
+        # is rebuilding the venv with `uv sync`).  finish() runs on error
+        # reporting paths, so it must NEVER raise here — degrade to
+        # HTML-escaped text instead of masking the original error.
+        escaped = html_module.escape(text).replace("\n", "<br/>")
+        return f"<p>{escaped}</p>"
 
     rendered: str = (
         MarkdownIt("commonmark", {"breaks": False}).enable("table").render(text)
