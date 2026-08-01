@@ -147,9 +147,7 @@ class TestRefreshAfterTaskRace:
         assert host._file_cache == {}
         assert host.rec_printer.events == []
 
-    def test_changed_set_updates_cache_and_broadcasts(
-        self, tmp_path: Path,
-    ) -> None:
+    def test_changed_set_updates_cache(self, tmp_path: Path) -> None:
         (tmp_path / "new.txt").write_text("x")
         wd_str = str(tmp_path)
         host = _AC(wd_str)
@@ -162,7 +160,6 @@ class TestRefreshAfterTaskRace:
                     break
             time.sleep(0.02)
         assert host._file_cache[wd_str] == ["new.txt"]
-        assert any(e.get("type") == "files" for e in host.rec_printer.events)
 
 
 

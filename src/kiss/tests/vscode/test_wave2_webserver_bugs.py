@@ -300,6 +300,17 @@ class TestF8SpawnCloudflaredRetries(unittest.TestCase):
     """F8: exhausted retries keep last proc's stderr open, reap the rest."""
 
     def setUp(self) -> None:
+        self._orig_failfast_window = ws_mod._SPAWN_FAILFAST_WINDOW
+        # The fake exits immediately, but under an eight-process test load even
+        # scheduling and exec can exceed production's intentional one-second
+        # heuristic.  Widen only this test's detection window.
+        ws_mod._SPAWN_FAILFAST_WINDOW = 10.0
+        self.addCleanup(
+            setattr,
+            ws_mod,
+            "_SPAWN_FAILFAST_WINDOW",
+            self._orig_failfast_window,
+        )
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-w2f5-cf-")
         fake = Path(self.tmpdir) / "cloudflared"
         fake.write_text("#!/bin/sh\nexit 1\n")
@@ -308,6 +319,7 @@ class TestF8SpawnCloudflaredRetries(unittest.TestCase):
         os.environ["PATH"] = f"{self.tmpdir}{os.pathsep}{self.saved_path}"
 
     def tearDown(self) -> None:
+        ws_mod._SPAWN_FAILFAST_WINDOW = self._orig_failfast_window
         os.environ["PATH"] = self.saved_path
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

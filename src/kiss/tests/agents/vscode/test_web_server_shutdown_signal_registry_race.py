@@ -27,13 +27,11 @@ unhandled traceback — visible to the user as a kiss-web flap.
 
 This test reproduces the race by hammering the signal handler from
 the main thread while a worker thread continuously adds and removes
-entries from the registry.  We use SIGHUP rather than SIGTERM
-because the SIGTERM path also raises :class:`KeyboardInterrupt` on
-the first invocation (deliberately, to drive shutdown) and would
-make it impossible to deliver the signal in a tight loop without
-unwinding the test.  SIGHUP follows the *identical* iteration code
-path inside the handler but does *not* raise, so we can deliver it
-many times in a row to expose the race.
+entries through the production registry API.  Both SIGHUP and SIGTERM
+now deliberately initiate shutdown.  The test first consumes the
+expected initial :class:`KeyboardInterrupt` from an unstarted server,
+then repeats SIGHUP calls: each still snapshots the registry before the
+already-shutting-down guard returns, exercising the race safely.
 """
 
 from __future__ import annotations
@@ -95,29 +93,15 @@ class TestShutdownSignalRegistryRace(unittest.TestCase):
                 )
 
         def churn() -> None:
-            """Mutate the registry without holding ``_registry_lock``.
-
-            Direct unlocked ``dict`` mutation is the worst-case
-            equivalent of a worker thread that has *not* yet
-            acquired the lock but whose ``__setitem__`` /
-            ``pop`` still goes through.  In production, ``register``
-            and ``unregister`` *do* hold the lock — but the fix
-            under test makes the signal handler hold the SAME lock,
-            so the contract is "either side holding the lock is
-            enough".  This stress-test exercises the still-bad case
-            where the handler is the *only* one not holding it.
-            """
+            """Mutate through the lock-aware production registry API."""
             i = 0
             try:
                 while not stop.is_set():
                     for j in range(50):
-                        key = f"churn-{i}-{j}"
-                        _RunningAgentState.running_agent_states[key] = (
-                            template
-                        )
+                        _RunningAgentState.register(f"churn-{i}-{j}", template)
                     for j in range(50):
-                        _RunningAgentState.running_agent_states.pop(
-                            f"churn-{i}-{j}", None,
+                        _RunningAgentState.unregister(
+                            f"churn-{i}-{j}", template,
                         )
                     i += 1
             except BaseException as exc:  # noqa: BLE001
@@ -126,28 +110,23 @@ class TestShutdownSignalRegistryRace(unittest.TestCase):
         churn_thread = threading.Thread(target=churn, daemon=True)
         churn_thread.start()
 
-        deadline = time.monotonic() + 2.0
         handler_errors: list[BaseException] = []
-        invocations = 0
         try:
-            while time.monotonic() < deadline:
+            with self.assertRaisesRegex(KeyboardInterrupt, "Received SIGHUP"):
+                self.server._handle_shutdown_signal(signal.SIGHUP)
+            for _ in range(25):
                 try:
                     self.server._handle_shutdown_signal(signal.SIGHUP)
                 except BaseException as exc:  # noqa: BLE001
                     handler_errors.append(exc)
-                invocations += 1
         finally:
             stop.set()
             churn_thread.join(timeout=2.0)
 
+        self.assertFalse(churn_thread.is_alive(), "Churn thread did not stop")
         self.assertFalse(
             errors,
             f"Churn thread raised: {errors!r}",
-        )
-        self.assertGreater(
-            invocations,
-            3,
-            "Test did not run the handler enough times",
         )
         self.assertFalse(
             handler_errors,

@@ -47,11 +47,12 @@ class TestTemplateConstants(unittest.TestCase):
         self.assertIn("done step 1", formatted)
 
     def test_important_instructions_placeholders(self) -> None:
-        """IMPORTANT_INSTRUCTIONS has step_threshold, work_dir, current_pid."""
+        """IMPORTANT_INSTRUCTIONS renders context risk, workdir, and PID."""
         formatted = IMPORTANT_INSTRUCTIONS.format(
-            step_threshold="8", work_dir="/tmp/test", current_pid="12345"
+            work_dir="/tmp/test", current_pid="12345"
         )
-        self.assertIn("step 8", formatted)
+        self.assertIn("risk of running out of context", formatted)
+        self.assertNotIn("**) or", formatted)
         self.assertIn("/tmp/test", formatted)
         self.assertIn("12345", formatted)
         self.assertIn("MOST IMPORTANT INSTRUCTIONS", formatted)

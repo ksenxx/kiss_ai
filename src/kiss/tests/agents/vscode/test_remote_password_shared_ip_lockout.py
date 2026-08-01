@@ -249,11 +249,13 @@ class TestSharedIpLockoutRegression(IsolatedAsyncioTestCase):
                 made += 1
                 if made >= guesses:
                     return
-                await ws.send(json.dumps({"type": "auth", "password": "nope2"}))
                 try:
+                    await ws.send(
+                        json.dumps({"type": "auth", "password": "nope2"})
+                    )
                     await asyncio.wait_for(ws.recv(), timeout=5)
                 except Exception:
-                    pass
+                    return
                 made += 1
 
     async def test_attacker_lockout_is_not_global(self) -> None:
@@ -262,7 +264,7 @@ class TestSharedIpLockoutRegression(IsolatedAsyncioTestCase):
             "auth_required",
         )
 
-        await self._make_failures("203.0.113.99", _AUTH_FAIL_MAX + 1)
+        await self._make_failures("203.0.113.99", _AUTH_FAIL_MAX)
 
         self.assertEqual(
             await self._first_handshake_frame("203.0.113.99", ""),

@@ -224,7 +224,7 @@ class TestGetAvailableModels:
         import os
 
         from kiss.core import config as config_module
-        from kiss.core.models.model_info import get_default_model
+        from kiss.core.models.model_info import MODEL_INFO, get_default_model
 
         env_keys = [
             "ANTHROPIC_API_KEY",
@@ -234,6 +234,7 @@ class TestGetAvailableModels:
             "TOGETHER_API_KEY",
         ]
         saved = {k: os.environ.get(k) for k in env_keys}
+        original_config = config_module.DEFAULT_CONFIG
         try:
             for k in env_keys:
                 os.environ.pop(k, None)
@@ -251,23 +252,33 @@ class TestGetAvailableModels:
 
             os.environ["TOGETHER_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
-            assert get_default_model() == "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
+            selected = get_default_model()
+            assert selected == "moonshotai/Kimi-K3"
+            assert selected in MODEL_INFO
 
             os.environ["OPENROUTER_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
-            assert get_default_model() == "openrouter/anthropic/claude-fable-5"
+            selected = get_default_model()
+            assert selected == "openrouter/anthropic/claude-opus-4.7"
+            assert selected in MODEL_INFO
 
             os.environ["GEMINI_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
-            assert get_default_model() == "gemini-3.1-pro-preview"
+            selected = get_default_model()
+            assert selected == "gemini-3.6-flash"
+            assert selected in MODEL_INFO
 
             os.environ["OPENAI_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
-            assert get_default_model() == "gpt-5.6-sol"
+            selected = get_default_model()
+            assert selected == "gpt-5.6-luna"
+            assert selected in MODEL_INFO
 
             os.environ["ANTHROPIC_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
-            assert get_default_model() == "claude-fable-5"
+            selected = get_default_model()
+            assert selected == "claude-opus-4-7"
+            assert selected in MODEL_INFO
         finally:
             for k in env_keys:
                 val = saved[k]
@@ -275,7 +286,7 @@ class TestGetAvailableModels:
                     os.environ[k] = val
                 else:
                     os.environ.pop(k, None)
-            config_module.DEFAULT_CONFIG = config_module.Config()
+            config_module.DEFAULT_CONFIG = original_config
 
 
 class TestAttachment:

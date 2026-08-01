@@ -111,6 +111,7 @@ class TestCurrentSkipsResolvedHunk(IsolatedAsyncioTestCase):
         good = _modified_file_entry(self.work, "good.txt")
         bad = _deleted_file_entry(self.work, "cfg")
         (self.work / "cfg").mkdir()
+        (self.work / "cfg" / "inner.txt").write_text("x\n")
         self.server._register_merge_state(
             tab_id, {"work_dir": str(self.work), "files": [good, bad]},
         )

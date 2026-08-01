@@ -24,10 +24,10 @@ def _read(rel_path: str) -> str:
 
 _DEFAULT_MODELS = [
     "claude-opus-4-7",
-    "gpt-5.5",
-    "gemini-3.1-pro-preview",
+    "gpt-5.6-luna",
+    "gemini-3.6-flash",
     "openrouter/anthropic/claude-opus-4.7",
-    "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+    "moonshotai/Kimi-K3",
 ]
 
 _FAST_MODELS = [

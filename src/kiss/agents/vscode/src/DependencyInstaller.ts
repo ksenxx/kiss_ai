@@ -303,10 +303,10 @@ function findNodeDirWindows(baseDir: string): string {
 export function getFallbackDefaultModel(): string {
   const env = process.env;
   if (env.ANTHROPIC_API_KEY) return 'claude-opus-4-7';
-  if (env.OPENAI_API_KEY) return 'gpt-5.5';
-  if (env.GEMINI_API_KEY) return 'gemini-3.1-pro-preview';
+  if (env.OPENAI_API_KEY) return 'gpt-5.6-luna';
+  if (env.GEMINI_API_KEY) return 'gemini-3.6-flash';
   if (env.OPENROUTER_API_KEY) return 'openrouter/anthropic/claude-opus-4.7';
-  if (env.TOGETHER_API_KEY) return 'Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8';
+  if (env.TOGETHER_API_KEY) return 'moonshotai/Kimi-K3';
   const whichCmd = process.platform === 'win32' ? 'where' : 'which';
   try {
     execFileSync(whichCmd, ['claude'], {stdio: 'ignore', timeout: 2_000});

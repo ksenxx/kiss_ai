@@ -76,7 +76,7 @@ class TestActiveFileIdentifierMatches:
             f.write("frobnicate_widget = 1\n")
             path = f.name
         try:
-            matches = _server()._active_file_identifier_matches("frob", path, "")
+            matches = _server()._active_file_identifier_matches("frob", path, None)
             assert matches == ["frobnicate_widget"]
         finally:
             os.unlink(path)

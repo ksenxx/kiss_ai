@@ -235,7 +235,8 @@ def _tab_busy(tab: _RunningAgentState) -> bool:
     state reset.
 
     A tab is busy while a task is active, a merge review is in
-    progress, or its worker thread is still alive.  Shared by the
+    progress, or its worker thread is installed but not yet started or
+    still alive.  Shared by the
     immediate (``_close_tab``) and deferred (``_dispose_if_closed``)
     disposal paths, AND by :meth:`_replay_session` as the
     ``not _tab_busy`` gate on resetting ``tab.use_worktree`` /
@@ -253,7 +254,13 @@ def _tab_busy(tab: _RunningAgentState) -> bool:
     return (
         tab.is_task_active
         or tab.is_merging
-        or (tab.task_thread is not None and tab.task_thread.is_alive())
+        or (
+            tab.task_thread is not None
+            and (
+                tab.task_thread.ident is None
+                or tab.task_thread.is_alive()
+            )
+        )
     )
 
 

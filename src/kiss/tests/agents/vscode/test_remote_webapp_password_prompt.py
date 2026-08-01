@@ -69,6 +69,7 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosed
 
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server.web_server import (
@@ -262,7 +263,7 @@ class TestRemoteWebappAlwaysPrompts(IsolatedAsyncioTestCase):
                 "The second failed attempt must yield a terminal error "
                 "frame before the socket is closed.",
             )
-            with self.assertRaises(Exception):
+            with self.assertRaises(ConnectionClosed):
                 await asyncio.wait_for(ws.recv(), timeout=5)
 
     async def test_malformed_first_frame_closes_socket(self) -> None:
@@ -274,7 +275,7 @@ class TestRemoteWebappAlwaysPrompts(IsolatedAsyncioTestCase):
         """
         async with await self._ws_connect() as ws:
             await ws.send("this is not json")
-            with self.assertRaises(Exception):
+            with self.assertRaises(ConnectionClosed):
                 await asyncio.wait_for(ws.recv(), timeout=5)
         self.assertEqual(await self._probe(""), "auth_required")
 
@@ -292,13 +293,18 @@ class TestRemoteWebappAlwaysPrompts(IsolatedAsyncioTestCase):
         re-prompt once it expires.  The lockout itself (no password on
         this socket is ever examined) is deliberately preserved.
         """
-        for i in range(_AUTH_FAIL_MAX):
+        for i in range(_AUTH_FAIL_MAX - 1):
             self.assertEqual(
                 await self._probe(f"brute-{i}"),
                 "auth_required",
                 f"Setup guess #{i} must be processed (auth_required) so the "
                 "lockout is driven by genuine recorded non-empty failures.",
             )
+        self.assertEqual(
+            await self._probe("brute-threshold"),
+            "auth_locked",
+            "The threshold-crossing guess must engage the lock immediately.",
+        )
         async with await self._ws_connect() as ws:
             with contextlib.suppress(Exception):
                 await ws.send(
@@ -316,7 +322,7 @@ class TestRemoteWebappAlwaysPrompts(IsolatedAsyncioTestCase):
             self.assertIsInstance(retry_after, int)
             self.assertGreater(retry_after, 0)
             self.assertLessEqual(retry_after, int(_AUTH_LOCKOUT))
-            with self.assertRaises(Exception):
+            with self.assertRaises(ConnectionClosed):
                 await asyncio.wait_for(ws.recv(), timeout=5)
 
     async def test_non_auth_first_message_closes_without_penalty(self) -> None:
@@ -331,7 +337,7 @@ class TestRemoteWebappAlwaysPrompts(IsolatedAsyncioTestCase):
             try:
                 async with await self._ws_connect() as ws:
                     await ws.send(json.dumps({"type": "ready", "tabId": "t"}))
-                    with self.assertRaises(Exception):
+                    with self.assertRaises(ConnectionClosed):
                         await asyncio.wait_for(ws.recv(), timeout=5)
             except Exception:
                 pass

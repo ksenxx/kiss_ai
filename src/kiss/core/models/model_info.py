@@ -1020,7 +1020,7 @@ def get_default_model() -> str:
             "ANTHROPIC_API_KEY": "claude-opus-4-7",
             "OPENAI_API_KEY": "gpt-5.6-luna",
             "GEMINI_API_KEY": "gemini-3.6-flash",
-            "OPENROUTER_API_KEY": "openrouter/anthropic/claude-opus-4-7",
+            "OPENROUTER_API_KEY": "openrouter/anthropic/claude-opus-4.7",
             "TOGETHER_API_KEY": "moonshotai/Kimi-K3",
             "cc": "cc/opus",
             "codex": "codex/default",

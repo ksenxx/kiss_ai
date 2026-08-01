@@ -271,7 +271,8 @@ class TestRejectWriteFailure(IsolatedAsyncioTestCase):
         good = _modified_file_entry(work, "good.txt")
         bad = _deleted_file_entry(work, "cfg")
         (work / "cfg").mkdir()
-        self._open_review(tab_id, [good, bad])
+        (work / "cfg" / "inner.txt").write_text("x\n")
+        self._open_review(tab_id, [bad, good])
 
         ws = await self._connect_ok()
         await ws.send(json.dumps({
@@ -305,7 +306,7 @@ class TestRejectWriteFailure(IsolatedAsyncioTestCase):
         statuses = {
             (r["fi"], r["hi"]): r["status"] for r in state.resolutions()
         }
-        self.assertEqual(statuses, {(0, 0): "rejected"})
+        self.assertEqual(statuses, {(1, 0): "rejected"})
 
     async def test_unhashable_tab_id_does_not_kill_connection(self) -> None:
         """A malformed client field that raises (unhashable tabId) must be

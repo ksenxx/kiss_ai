@@ -41,7 +41,7 @@ def _file_suffix(
     server: VSCodeServer,
     query: str,
     snapshot_file: str = "",
-    snapshot_content: str = "",
+    snapshot_content: str | None = None,
     chat_id: str = "",
 ) -> str:
     """Longest identifier-completion suffix for *query*.
@@ -286,7 +286,7 @@ class TestVSCodeServerBranches:
             path = f.name
         try:
             server = VSCodeServer()
-            result = _file_suffix(server, "calc", path, "")
+            result = _file_suffix(server, "calc", path, None)
             assert result == "ulate_total"
         finally:
             os.unlink(path)
@@ -631,15 +631,13 @@ class TestSorcarAgentAttachmentNoParts:
             pass
 
 
-class TestWebUseToolResolveLocatorInvisible:
-    """Cover _resolve_locator loop where is_visible returns False (200->198)."""
+class TestWebUseToolResolveLocatorDuplicateOccurrences:
+    """Duplicate role/name IDs resolve to their exact snapshot occurrences."""
 
-    def test_resolve_locator_invisible_element(self, tmp_path: Path) -> None:
-        """When first matching element is not visible, loop skips it (200->198).
-
-        Use a zero-size button (clip:rect(0,0,0,0) + width/height 0) which stays
-        in the accessibility tree but makes is_visible() return False.
-        """
+    def test_hidden_and_visible_duplicates_keep_distinct_ids(
+        self, tmp_path: Path,
+    ) -> None:
+        """A hidden button ID must not silently redirect to its visible twin."""
         html_file = tmp_path / "hidden.html"
         html_file.write_text(
             "<html><body>"
@@ -651,13 +649,17 @@ class TestWebUseToolResolveLocatorInvisible:
         tool = WebUseTool(headless=True)
         try:
             tool.go_to_url(f"file://{html_file}")
-            btn_id = None
-            for i, el in enumerate(tool._elements):
-                if el["role"] == "button" and el["name"] == "Submit":
-                    btn_id = i + 1
-                    break
-            assert btn_id is not None, "Should find Submit button in elements"
-            result = tool.click(btn_id)
-            assert "Error" not in result or "Page:" in result
+            button_ids = [
+                i + 1
+                for i, element in enumerate(tool._elements)
+                if element["role"] == "button" and element["name"] == "Submit"
+            ]
+            assert len(button_ids) == 2
+            assert not tool._resolve_locator(button_ids[0]).is_visible()
+            assert tool._resolve_locator(button_ids[1]).is_visible()
+
+            result = tool.click(button_ids[1])
+            assert "Error" not in result
+            assert "Page:" in result
         finally:
             tool.close()
