@@ -37,11 +37,12 @@ TASK_PROMPT = """
 
 IMPORTANT_INSTRUCTIONS = """
 # MOST IMPORTANT INSTRUCTIONS
-- **At step {step_threshold}: you MUST call finish(success=False, is_continue=True, \
+- **If the task is not complete and you are at risk of running out of context \
+length,  you MUST call finish(success=False, is_continue=True, \
 summary_in_html="precise chronologically-ordered list of things the agent did \
 with the reason for doing that along with relevant code snippets, formatted \
 as HTML (e.g. <ol>, <p>, <pre><code>), never Markdown")** or \
-if the task is not complete and you are at risk of running out of steps or context length.
+
 - The summary_in_html argument of finish MUST always be formatted as HTML.
 - Work dir: {work_dir}
 - Current process PID: {current_pid} — NEVER kill this process.
