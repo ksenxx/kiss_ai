@@ -39,6 +39,11 @@ from kiss.core.models.openai_compatible_model import (
 
 ALL_LEVELS = ("low", "medium", "high", "xhigh")
 
+KNOWN_LEVELS = ("low", "medium", "high", "xhigh", "max")
+"""Every level across all vendor scales: the OpenAI ladder plus the
+Moonshot/Kimi top level ``max`` (see ``_thinking_scale_for`` in
+``update_models.py``)."""
+
 
 def _alias_pairs() -> list[tuple[str, str]]:
     """Return every ``(base_name, alias_name)`` pair marked in MODEL_INFO."""
@@ -70,7 +75,7 @@ def test_every_marked_alias_has_consistent_base() -> None:
         assert alias.input_price_per_1M == base.input_price_per_1M
         assert alias.output_price_per_1M == base.output_price_per_1M
         assert alias.is_function_calling_supported == base.is_function_calling_supported
-        assert alias.thinking in ALL_LEVELS
+        assert alias.thinking in KNOWN_LEVELS
 
 
 def test_strip_thinking_alias_strips_marked_level_suffixes() -> None:

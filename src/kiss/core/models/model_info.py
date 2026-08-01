@@ -438,17 +438,18 @@ _QUARTER_CACHE_OPENROUTER_PREFIXES = (
 
 _XHIGH_SUFFIX = "-xhigh"
 
-_LEVEL_ALIAS_SUFFIXES = ("-high", "-medium", "-low")
+_LEVEL_ALIAS_SUFFIXES = ("-max", "-high", "-medium", "-low")
 
 
 def _strip_thinking_alias(bare: str) -> str:
     """Strip a synthetic ``-{thinking_level}`` alias suffix from a model name.
 
-    ``-xhigh`` / ``-high`` / ``-medium`` / ``-low`` are KISS-internal alias
-    suffixes (see ``update_models.py``) that map onto the same provider
-    model id as their base entry. Provider pricing tables and endpoints
-    only know the base names, so every pricing lookup and outbound request
-    must consult the base name.
+    ``-xhigh`` / ``-max`` / ``-high`` / ``-medium`` / ``-low`` are
+    KISS-internal alias suffixes (see ``update_models.py``) that map onto
+    the same provider model id as their base entry (``-max`` is the top of
+    the Moonshot/Kimi scale, ``-xhigh`` the top of the OpenAI scale).
+    Provider pricing tables and endpoints only know the base names, so
+    every pricing lookup and outbound request must consult the base name.
 
     ``-xhigh`` is stripped unconditionally (no real upstream model ends in
     it). The other level suffixes collide with real upstream model names

@@ -413,23 +413,97 @@ def test_embedding(model_name: str) -> bool:
 
 
 _THINKING_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh")
-"""All ``reasoning_effort`` levels KISS materializes as ``-{level}`` aliases,
-in ascending order of effort."""
+"""The OpenAI-family ``reasoning_effort`` scale, in ascending order of effort.
 
-_THINKING_LEVELS_TO_PROBE: tuple[str, ...] = tuple(reversed(_THINKING_LEVELS))
+This is the default scale for every vendor without an entry in
+:func:`_thinking_scale_for`."""
+
+_MOONSHOT_THINKING_LEVELS: tuple[str, ...] = ("low", "high", "max")
+"""The Moonshot/Kimi ``reasoning_effort`` scale, in ascending order.
+
+Kimi K3 accepts ``low`` / ``high`` / ``max`` (vendor default ``max``);
+``medium`` and ``xhigh`` are rejected with HTTP 400, and thinking cannot
+be disabled. Source:
+https://platform.kimi.ai/docs/guide/use-reasoning-effort."""
+
+_ALL_THINKING_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+"""Union of every vendor scale, used when sweeping generated ``-{level}``
+aliases regardless of which scale produced them."""
+
+_MOONSHOT_MODEL_PREFIXES: tuple[str, ...] = (
+    "kimi-",
+    "moonshot-",
+    "moonshotai/",
+    "openrouter/moonshotai/",
+    "openrouter/~moonshotai/",
+)
+"""Catalog-key prefixes of Moonshot/Kimi models across every routing path:
+direct (``kimi-*`` / ``moonshot-*``), Together (``moonshotai/*``), and
+OpenRouter (``openrouter/moonshotai/*``)."""
+
+
+def _is_kimi_k3_family(model_name: str) -> bool:
+    """Return True when ``model_name`` is a Kimi K3-generation model.
+
+    ``reasoning_effort`` is a K3-introduced API surface: Moonshot's docs
+    define it (``low``/``high``/``max``) for ``kimi-k3*`` only, while
+    K2.x models control thinking via the separate ``thinking.type``
+    request field and ``moonshot-v1-*`` models have no thinking at all.
+    The probe gate in :func:`detect_thinking_level` therefore admits only
+    the K3 family — probing older Moonshot models through a gateway that
+    silently drops unknown parameters (e.g. a passthrough that ignores
+    ``reasoning_effort``) would otherwise fabricate alias levels the
+    model does not honor.
+
+    The check is on the last ``/``-separated segment, case-insensitively,
+    so it covers ``kimi-k3``, ``moonshotai/Kimi-K3`` (Together) and
+    ``openrouter/moonshotai/kimi-k3`` alike.
+
+    Args:
+        model_name: The catalog key of the model.
+
+    Returns:
+        True when the model belongs to the Kimi K3 family.
+    """
+    base = model_name.rsplit("/", 1)[-1].lower()
+    return base.startswith("kimi-k3")
+
+
+def _thinking_scale_for(model_name: str) -> tuple[str, ...]:
+    """Return the ascending ``reasoning_effort`` scale for ``model_name``.
+
+    The scale is vendor-specific: Moonshot/Kimi models use
+    :data:`_MOONSHOT_THINKING_LEVELS` (``low``/``high``/``max``), every
+    other model uses the OpenAI ladder :data:`_THINKING_LEVELS`
+    (``low``/``medium``/``high``/``xhigh``). Every scale is required to
+    contain ``"high"`` — the level stored on base entries when the
+    detected maximum is higher (see
+    :func:`_write_entry_with_thinking_split`).
+
+    Args:
+        model_name: The catalog key of the model.
+
+    Returns:
+        The ordered tuple of levels the vendor accepts.
+    """
+    if model_name.startswith(_MOONSHOT_MODEL_PREFIXES):
+        return _MOONSHOT_THINKING_LEVELS
+    return _THINKING_LEVELS
 
 
 def detect_thinking_level(model_name: str) -> str | None:
     """Detect the highest ``reasoning_effort`` level the model accepts.
 
-    Probes each level in :data:`_THINKING_LEVELS_TO_PROBE` (descending:
-    ``xhigh``, ``high``, ``medium``, ``low``) by issuing a minimal generate
+    Probes each level of the model's vendor scale (see
+    :func:`_thinking_scale_for`) in descending order — ``xhigh``,
+    ``high``, ``medium``, ``low`` for the OpenAI family; ``max``,
+    ``high``, ``low`` for Moonshot/Kimi — by issuing a minimal generate
     call with ``model_config={"reasoning_effort": <level>}`` explicitly so
-    that the OpenAI Chat Completions API itself decides the verdict,
+    that the vendor's Chat Completions API itself decides the verdict,
     regardless of whether the model is already flagged in ``MODEL_INFO``.
     Returns the first (highest) level that succeeds, or ``None`` if none
     did. Levels below the returned one are assumed supported too — the
-    OpenAI API accepts every standard level once it accepts any.
+    probed vendors accept every level of their scale once they accept any.
 
     Returns ``None`` (without making any API call) for backends that don't
     accept ``reasoning_effort`` at all:
@@ -440,6 +514,12 @@ def detect_thinking_level(model_name: str) -> str | None:
       ``reasoning_effort``.
     * Variants known to reject ``reasoning_effort`` entirely (``-pro``,
       ``-chat-latest``, ``-image``).
+    * Moonshot models outside the Kimi K3 family (K2.x controls thinking
+      via ``thinking.type``, ``moonshot-v1-*`` has none; see
+      :func:`_is_kimi_k3_family`).
+    * Every other vendor not yet verified to support the parameter (only
+      the OpenAI family — direct and via OpenRouter — and Kimi K3 are
+      probed).
     """
     from kiss.core.models.model_info import _OPENAI_PREFIXES
 
@@ -451,12 +531,15 @@ def detect_thinking_level(model_name: str) -> str | None:
         "text-embedding"
     )
     is_openrouter_openai = model_name.startswith(("openrouter/openai/", "openrouter/~openai/"))
-    if not (is_openai or is_openrouter_openai):
+    is_moonshot_k3 = model_name.startswith(_MOONSHOT_MODEL_PREFIXES) and _is_kimi_k3_family(
+        model_name
+    )
+    if not (is_openai or is_openrouter_openai or is_moonshot_k3):
         return None
 
     from kiss.core.models.model_info import model as create_model
 
-    for level in _THINKING_LEVELS_TO_PROBE:
+    for level in reversed(_thinking_scale_for(model_name)):
         try:
             m = create_model(
                 model_name,
@@ -1068,9 +1151,11 @@ def _pop_generated_aliases(
     Only entries recognized as generated aliases of ``name`` (via
     :func:`_alias_base_name`) are removed; a real upstream model that
     happens to be called ``{name}-high`` (e.g. ``o3-mini-high``) is left
-    untouched.
+    untouched. The sweep covers :data:`_ALL_THINKING_LEVELS` (the union
+    of every vendor scale) so aliases left behind by a scale change are
+    cleaned up too.
     """
-    for level in _THINKING_LEVELS:
+    for level in _ALL_THINKING_LEVELS:
         if level in keep_levels:
             continue
         sibling_name = f"{name}-{level}"
@@ -1088,13 +1173,18 @@ def _write_entry_with_thinking_split(
 ) -> None:
     """Write ``entry`` under ``name``, materializing one alias per thinking level.
 
-    When ``entry["thinking"]`` is a level in :data:`_THINKING_LEVELS`, the
-    catalog emits the base entry **plus one generated sibling per supported
-    level** — every level from ``low`` up to the detected maximum:
+    When ``entry["thinking"]`` is a level on the model's vendor scale
+    (see :func:`_thinking_scale_for`), the catalog emits the base entry
+    **plus one generated sibling per supported level** — every level from
+    ``low`` up to the detected maximum:
 
-    * ``thinking="xhigh"`` → base (downgraded to ``thinking="high"``) and
-      ``-low`` / ``-medium`` / ``-high`` / ``-xhigh`` siblings;
-    * ``thinking="high"`` → base and ``-low`` / ``-medium`` / ``-high``;
+    * OpenAI family, ``thinking="xhigh"`` → base (downgraded to
+      ``thinking="high"``) and ``-low`` / ``-medium`` / ``-high`` /
+      ``-xhigh`` siblings;
+    * OpenAI family, ``thinking="high"`` → base and ``-low`` /
+      ``-medium`` / ``-high``;
+    * Moonshot/Kimi, ``thinking="max"`` → base (downgraded to
+      ``thinking="high"``) and ``-low`` / ``-high`` / ``-max`` siblings;
     * lower levels analogously.
 
     Each sibling inherits every other field on ``entry`` (context length,
@@ -1108,9 +1198,10 @@ def _write_entry_with_thinking_split(
     pre-existing generated aliases at unsupported levels are removed so the
     catalog stays consistent with the latest probe results. Set it false
     for routine updates that did not re-test ``thinking``: those are not
-    evidence that a level was lost, so an existing generated ``-xhigh``
-    sibling is trusted as proof of xhigh support and the full alias set is
-    regenerated (and synchronized) from it.
+    evidence that a level was lost, so an existing generated top-level
+    sibling (``-xhigh`` on the OpenAI scale, ``-max`` on the Moonshot
+    scale) is trusted as proof of top-level support and the full alias
+    set is regenerated (and synchronized) from it.
 
     The helper short-circuits with a plain write when ``name`` itself is a
     generated alias (marker on the incoming or on-disk entry, or the legacy
@@ -1126,24 +1217,26 @@ def _write_entry_with_thinking_split(
         return
     entry = dict(entry)
     entry.pop("alias_of", None)
+    scale = _thinking_scale_for(name)
     stored_level = entry.get("thinking")
-    if stored_level not in _THINKING_LEVELS:
+    if stored_level not in scale:
         data[name] = entry
         if remove_stale_siblings:
             _pop_generated_aliases(data, name)
         return
+    top_level = scale[-1]
     max_level = stored_level
-    if not remove_stale_siblings and stored_level != "xhigh":
-        sibling_name = name + _XHIGH_SUFFIX
+    if not remove_stale_siblings and stored_level != top_level:
+        sibling_name = f"{name}-{top_level}"
         sibling = data.get(sibling_name)
         if sibling is not None and _alias_base_name(sibling_name, sibling) == name:
-            max_level = "xhigh"
+            max_level = top_level
     base = dict(entry)
-    high_rank = _THINKING_LEVELS.index("high")
-    max_rank = _THINKING_LEVELS.index(max_level)
+    high_rank = scale.index("high")
+    max_rank = scale.index(max_level)
     base["thinking"] = "high" if max_rank > high_rank else max_level
     data[name] = base
-    supported = _THINKING_LEVELS[: max_rank + 1]
+    supported = scale[: max_rank + 1]
     for level in supported:
         sibling_name = f"{name}-{level}"
         existing = data.get(sibling_name)
@@ -1163,17 +1256,20 @@ def _stored_max_thinking_level(
     """Return the max reasoning level recorded on disk for base entry ``name``.
 
     The base entry stores at most ``"high"`` (see
-    :func:`_write_entry_with_thinking_split`), so a generated ``-xhigh``
-    sibling promotes the stored maximum to ``"xhigh"``.
+    :func:`_write_entry_with_thinking_split`), so a generated top-level
+    sibling — ``-xhigh`` on the OpenAI scale, ``-max`` on the Moonshot
+    scale — promotes the stored maximum to that top level.
     """
+    scale = _thinking_scale_for(name)
     level = entry.get("thinking")
-    if level not in _THINKING_LEVELS:
+    if level not in scale:
         return None
-    if level != "xhigh":
-        sibling_name = name + _XHIGH_SUFFIX
+    top_level = scale[-1]
+    if level != top_level:
+        sibling_name = f"{name}-{top_level}"
         sibling = data.get(sibling_name)
         if sibling is not None and _alias_base_name(sibling_name, sibling) == name:
-            return "xhigh"
+            return top_level
     return str(level)
 
 
@@ -1285,7 +1381,7 @@ def apply_updates_to_file(
     for name in deprecated_names:
         if data.pop(name, None) is not None:
             removed += 1
-        for level in _THINKING_LEVELS:
+        for level in _ALL_THINKING_LEVELS:
             sibling_name = f"{name}-{level}"
             sibling = data.get(sibling_name)
             if sibling is not None and _alias_base_name(sibling_name, sibling) == name:
@@ -1615,9 +1711,10 @@ def main() -> None:
             caps = test_model_capabilities(name, verbose=args.verbose)
             fc_changed = caps["fc"] != cur["fc"]
             stored_thinking = cur.get("thinking")
-            sibling_thinking = current.get(name + _XHIGH_SUFFIX, {}).get("thinking")
-            if stored_thinking == "high" and sibling_thinking == "xhigh":
-                stored_thinking = "xhigh"
+            top_level = _thinking_scale_for(name)[-1]
+            sibling_thinking = current.get(f"{name}-{top_level}", {}).get("thinking")
+            if stored_thinking == "high" and sibling_thinking == top_level:
+                stored_thinking = top_level
             thinking_changed = caps["thinking"] != stored_thinking
             if not (fc_changed or thinking_changed):  # pragma: no branch
                 continue
