@@ -945,8 +945,10 @@ class SorcarAgent(RelentlessAgent):
                 # task-specific one.  Both native adapters build their
                 # SDK client from self.api_key inside initialize(), so
                 # overriding BEFORE initialize() routes requests with
-                # the task's credential.
-                new_model.api_key = old_api_key
+                # the task's credential.  setattr: the attribute lives
+                # on the concrete adapters, not the Model base class
+                # (the hasattr guard above ensures it exists).
+                setattr(new_model, "api_key", old_api_key)  # noqa: B010
             new_model.initialize("")
             new_model.conversation = old_model.conversation
             new_model.usage_info_for_messages = old_model.usage_info_for_messages

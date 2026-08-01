@@ -367,7 +367,11 @@ def _file_lock(lock_path: Path) -> Any:
             os.lseek(descriptor, 0, os.SEEK_SET)
             while True:
                 try:
-                    msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+                    msvcrt.locking(  # pyright: ignore[reportAttributeAccessIssue]
+                        descriptor,
+                        msvcrt.LK_LOCK,  # pyright: ignore[reportAttributeAccessIssue]
+                        1,
+                    )
                     break
                 except OSError:
                     time.sleep(0.05)
@@ -379,7 +383,11 @@ def _file_lock(lock_path: Path) -> Any:
             elif msvcrt is not None:  # pragma: no cover — Windows-only branch
                 os.lseek(descriptor, 0, os.SEEK_SET)
                 with suppress(OSError):
-                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                    msvcrt.locking(  # pyright: ignore[reportAttributeAccessIssue]
+                        descriptor,
+                        msvcrt.LK_UNLCK,  # pyright: ignore[reportAttributeAccessIssue]
+                        1,
+                    )
         finally:
             os.close(descriptor)
 

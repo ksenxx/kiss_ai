@@ -52,7 +52,6 @@ import signal
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from kiss.agents.sorcar.persistence import _default_kiss_dir
 from kiss.agents.sorcar.skills import (
@@ -255,17 +254,14 @@ def _run_injected_shell(command: str, work_dir: str) -> str:
         note on failure), stripped of surrounding newlines.
     """
     command = command.strip()
-    popen_kwargs: dict[str, Any] = {}
-    if os.name == "nt":  # pragma: no cover — Windows-only branch
-        popen_kwargs["creationflags"] = getattr(
-            subprocess, "CREATE_NEW_PROCESS_GROUP", 0,
-        )
-    else:
-        popen_kwargs["start_new_session"] = True
+    is_windows = os.name == "nt"
     proc: subprocess.Popen[bytes] = subprocess.Popen(
         command, shell=True, cwd=work_dir,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        **popen_kwargs,
+        creationflags=(
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if is_windows else 0
+        ),
+        start_new_session=not is_windows,
     )
     try:
         stdout_bytes, stderr_bytes = proc.communicate(timeout=_SHELL_TIMEOUT_SECONDS)
