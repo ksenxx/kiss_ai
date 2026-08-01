@@ -39,7 +39,10 @@ def test_single_quoted_yaml_name_unescapes_doubled_apostrophe() -> None:
 
     _, elements = _number_interactive_elements(snap)
 
-    assert elements == [{"role": "link", "name": "Bob's: list"}]
+    assert elements == [{
+        "role": "link", "name": "Bob's: list",
+        "occurrence": "0", "role_occurrence": "0",
+    }]
 
 
 def test_plain_double_quoted_name_keeps_literal_apostrophes() -> None:
@@ -48,7 +51,10 @@ def test_plain_double_quoted_name_keeps_literal_apostrophes() -> None:
 
     _, elements = _number_interactive_elements(snap)
 
-    assert elements == [{"role": "button", "name": "a''b"}]
+    assert elements == [{
+        "role": "button", "name": "a''b",
+        "occurrence": "0", "role_occurrence": "0",
+    }]
 
 
 def test_click_element_with_apostrophe_and_colon_in_name(tmp_path: Path) -> None:

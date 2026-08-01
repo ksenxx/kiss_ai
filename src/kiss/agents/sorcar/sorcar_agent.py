@@ -38,6 +38,8 @@ from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import (
     MODEL_INFO,
     OPENAI_COMPATIBLE_PROVIDERS,
+    _match_openai_compatible_provider,
+    _strip_provider_prefix,
     get_default_model,
 )
 from kiss.core.models.model_info import model as _model_factory
@@ -131,10 +133,11 @@ def auto_commit_changes(
             Both hooks are SKIPPED when there is nothing to commit
             (no staged diff after the initial ``stage_all``), so the
             webview never sees a misleading "Generating commit
-            message" toast without a follow-up.  The "committed"
-            hook is also not invoked when ``commit_staged`` returns
-            ``False`` after *message_fn* (e.g. pre-commit hook
-            rejected the commit).
+            message" toast without a follow-up.  When
+            ``commit_staged`` returns ``False`` after *message_fn*
+            (e.g. a pre-commit hook rejected the commit),
+            ``notify_fn("failed", "")`` is invoked instead so the
+            sticky "generating" toast always gets a terminal update.
 
             All ``notify_fn`` exceptions are swallowed so a broken
             UI hook can never block the commit itself.
@@ -167,6 +170,12 @@ def auto_commit_changes(
     committed = GitWorktreeOps.commit_staged(commit_dir, msg)
     if committed:
         _safe_notify(notify_fn, "committed", _commit_subject(msg))
+    else:
+        # Terminal notification for the failure path: without it the
+        # sticky "Generating commit message" toast (emitted above)
+        # would linger in the webview forever after e.g. a pre-commit
+        # hook rejection.
+        _safe_notify(notify_fn, "failed", "")
     return committed
 
 
@@ -284,7 +293,7 @@ class _LiveUsageMonitor:
         self._agents: list[Any] = []
         self._done = threading.Event()
         self._thread: threading.Thread | None = None
-        self._last_emitted: tuple[str, int, int] | None = None
+        self._last_emitted: tuple[float, int, int] | None = None
         thread_local = getattr(printer, "_thread_local", None) if printer else None
         self._parent_task_id = (
             getattr(thread_local, "task_id", "") if thread_local else ""
@@ -346,11 +355,25 @@ class _LiveUsageMonitor:
             budget += sub_budget
             tokens += sub_tokens
             steps += sub_steps
-        cost = f"${budget:.4f}"
-        snapshot = (cost, tokens, steps)
+        snapshot = (budget, tokens, steps)
         if snapshot == self._last_emitted:
             return
+        if self._last_emitted is not None:
+            last_budget, last_tokens, last_steps = self._last_emitted
+            if (
+                budget < last_budget - 1e-9
+                or tokens < last_tokens
+                or steps < last_steps
+            ):
+                # Torn read: at every RelentlessAgent session handoff the
+                # executor is detached BEFORE its spend is folded into the
+                # agent fields, so a poll in that window sees neither copy.
+                # Never emit a total where ANY cumulative dimension
+                # (budget, tokens, or steps) regresses — the next poll
+                # repairs it.
+                return
         self._last_emitted = snapshot
+        cost = f"${budget:.4f}"
         self._printer.print(
             f"Tokens: {tokens:,}, Budget: {cost} (live, incl. parallel sub-agents), ",
             type="usage_info",
@@ -408,6 +431,70 @@ def _attribute_tts_usage(agent: Any, usage: dict[str, Any]) -> None:
 _FACTORY_DEFAULT_BASE_URLS: frozenset[str] = frozenset(
     provider.base_url.rstrip("/") for provider in OPENAI_COMPATIBLE_PROVIDERS
 )
+
+
+_PROVIDER_SPECIFIC_CONFIG_KEYS: dict[str, frozenset[str]] = {
+    "openai": frozenset({"reasoning_effort", "use_responses_api"}),
+    "anthropic": frozenset({"thinking"}),
+    "gemini": frozenset({"thinking_config"}),
+}
+
+
+def _model_family(model_name: str) -> str:
+    """Return the provider family *model_name* routes to in the factory.
+
+    Mirrors the routing order of :func:`kiss.core.models.model_info.model`:
+    OpenAI-compatible providers first, then Gemini, then Anthropic.
+
+    Args:
+        model_name: A model name, possibly carrying a harbor-style
+            ``provider/`` prefix.
+
+    Returns:
+        One of ``"openai"``, ``"gemini"``, ``"anthropic"``, or
+        ``"other"``.
+    """
+    name = _strip_provider_prefix(model_name)
+    if _match_openai_compatible_provider(name) is not None:
+        return "openai"
+    if name.startswith("gemini-"):
+        return "gemini"
+    if name.startswith("claude-"):
+        return "anthropic"
+    return "other"
+
+
+def _sanitize_model_config_for_switch(
+    config: dict[str, Any], old_model_name: str, new_model_name: str,
+) -> dict[str, Any]:
+    """Drop source-provider request options that the target cannot accept.
+
+    ``set_model`` copies the old adapter's complete ``model_config``
+    onto the new one.  Provider-specific request options (Anthropic's
+    ``thinking``, Gemini's ``thinking_config``, OpenAI's
+    ``reasoning_effort`` / ``use_responses_api``) survive that copy and
+    are then sent as unsupported SDK kwargs by the target adapter, so
+    the switch reports success but the next model request fails.  When
+    the provider family changes, remove every known provider-specific
+    key that does not belong to the target family.
+
+    Args:
+        config: The config dict to sanitize (mutated in place).
+        old_model_name: The model name the config came from.
+        new_model_name: The model name the config is being given to.
+
+    Returns:
+        The same *config* dict, for chaining.
+    """
+    new_family = _model_family(new_model_name)
+    if new_family == _model_family(old_model_name):
+        return config
+    for family, keys in _PROVIDER_SPECIFIC_CONFIG_KEYS.items():
+        if family == new_family:
+            continue
+        for key in keys:
+            config.pop(key, None)
+    return config
 
 
 _ATTACHMENT_KINDS: tuple[tuple[str, str], ...] = (
@@ -553,13 +640,18 @@ class SorcarAgent(RelentlessAgent):
                 model_config=getattr(self, "model_config", None),
             )
         finally:
+            # stop() joins the monitor BEFORE the offsets bump below so a
+            # late emission can never double-count.  The attribution runs
+            # in this finally so an interrupt (user stop) that unwinds
+            # the fan-out cannot make the sub-agents' spend disappear
+            # from the parent task's budget/token/step totals.
             monitor.stop()
-        _attribute_sub_usage(
-            self,
-            float(totals.get("budget_used", 0.0)),
-            int(totals.get("total_tokens_used", 0)),
-            int(totals.get("total_steps", 0)),
-        )
+            _attribute_sub_usage(
+                self,
+                float(totals.get("budget_used", 0.0)),
+                int(totals.get("total_tokens_used", 0)),
+                int(totals.get("total_steps", 0)),
+            )
         return results
 
     def _get_tools(self) -> list:
@@ -791,25 +883,82 @@ class SorcarAgent(RelentlessAgent):
                 and new_config.get("reasoning_effort") == old_info.thinking
             ):
                 new_config.pop("reasoning_effort", None)
+            _sanitize_model_config_for_switch(
+                new_config, old_model.model_name, model_name,
+            )
             old_base_url = getattr(old_model, "base_url", None)
             old_api_key = getattr(old_model, "api_key", None)
-            if (
-                old_base_url
-                and old_base_url.rstrip("/") not in _FACTORY_DEFAULT_BASE_URLS
-                and "base_url" not in new_config
-            ):
-                new_config["base_url"] = old_base_url
-                if old_api_key is not None:
-                    new_config["api_key"] = old_api_key
+            if "use_responses_api" in new_config:
+                # `use_responses_api` forces /responses delegation, which
+                # only some OpenAI-compatible vendors support.  Keep it
+                # only when the switch stays on the SAME vendor endpoint.
+                from kiss.core.models.model_info import (
+                    openai_compatible_provider_for_base_url,
+                )
+
+                old_vendor = openai_compatible_provider_for_base_url(
+                    old_base_url or ""
+                )
+                new_vendor = _match_openai_compatible_provider(
+                    _strip_provider_prefix(model_name)
+                )
+                if old_vendor is None or old_vendor is not new_vendor:
+                    new_config.pop("use_responses_api", None)
+            if old_base_url and "base_url" not in new_config:
+                normalized = old_base_url.rstrip("/")
+                if normalized in _FACTORY_DEFAULT_BASE_URLS:
+                    # Standard provider endpoint: preserve routing (and
+                    # crucially the possibly task-specific api_key) only
+                    # when the target model routes to the SAME provider
+                    # default — otherwise the factory would silently
+                    # replace a per-task key with the process-global one.
+                    target_provider = _match_openai_compatible_provider(
+                        _strip_provider_prefix(model_name)
+                    )
+                    preserve = (
+                        target_provider is not None
+                        and target_provider.base_url.rstrip("/") == normalized
+                    )
+                else:
+                    # Custom endpoint: always carry it (and its key) over.
+                    preserve = True
+                if preserve:
+                    new_config["base_url"] = old_base_url
+                    if old_api_key is not None:
+                        new_config["api_key"] = old_api_key
             new_model = _model_factory(
                 model_name,
                 model_config=new_config or None,
                 token_callback=old_model.token_callback,
                 thinking_callback=old_model.thinking_callback,
             )
+            old_family = _model_family(old_model.model_name)
+            if (
+                old_api_key
+                and old_family in ("gemini", "anthropic")
+                and old_family == _model_family(model_name)
+                and hasattr(new_model, "api_key")
+            ):
+                # Native same-provider switch (Gemini→Gemini,
+                # Claude→Claude): the factory always injects the
+                # process-global key, which would silently replace a
+                # task-specific one.  Both native adapters build their
+                # SDK client from self.api_key inside initialize(), so
+                # overriding BEFORE initialize() routes requests with
+                # the task's credential.
+                new_model.api_key = old_api_key
             new_model.initialize("")
             new_model.conversation = old_model.conversation
             new_model.usage_info_for_messages = old_model.usage_info_for_messages
+            old_sigs = getattr(old_model, "_thought_signatures", None)
+            new_sigs = getattr(new_model, "_thought_signatures", None)
+            if isinstance(old_sigs, dict) and isinstance(new_sigs, dict):
+                # Gemini-to-Gemini switch: the conversation references
+                # historical tool-call ids whose thought signatures live
+                # only in this side map (initialize() cleared the new
+                # model's copy); without them signature-enforcing Gemini
+                # models reject the next request.
+                new_sigs.update(old_sigs)
 
             previous_name = old_model.model_name
             target.model = new_model  # type: ignore[attr-defined, union-attr]
@@ -863,8 +1012,10 @@ class SorcarAgent(RelentlessAgent):
         all_tools = self._get_tools() + tools
         if getattr(self, "_tab_id", None):
             self.pre_step_hook = self._drain_pending_user_messages
+            self.tool_call_guard = self._block_finish_when_user_message_pending
         else:
             self.pre_step_hook = None
+            self.tool_call_guard = None
         return super().perform_task(all_tools, attachments=attachments)
 
     def _reset(
@@ -989,6 +1140,7 @@ class SorcarAgent(RelentlessAgent):
             self.web_use_tool = None
             self._ask_user_question_callback = None
             self.pre_step_hook = None
+            self.tool_call_guard = None
 
     def _drain_pending_user_messages(self, model: Any) -> None:
         """Append any queued follow-up prompts to *model*'s conversation.
@@ -1030,29 +1182,100 @@ class SorcarAgent(RelentlessAgent):
             return
         with _RunningAgentState._registry_lock:
             tab = _RunningAgentState.running_agent_states.get(tab_id)
-            if tab is None or not tab.pending_user_messages:
+            if tab is None or (tab.agent is not None and tab.agent is not self):
+                # Ownership check: register() explicitly allows a different
+                # state to replace this key (tab reuse), so a stale agent
+                # must never consume the replacement's queued input.
+                return
+            if not tab.pending_user_messages and not tab.unattributed_prompt_echoes:
                 return
             queued = list(tab.pending_user_messages)
             tab.pending_user_messages.clear()
             deferred = list(tab.unattributed_prompt_echoes)
             tab.unattributed_prompt_echoes.clear()
-        if deferred:
-            broadcast = getattr(
-                getattr(self, "printer", None), "broadcast", None,
-            )
-            if broadcast is not None:
-                for msg in deferred:
-                    broadcast({
-                        "type": "prompt",
-                        "text": msg,
-                        "recordOnly": True,
-                    })
         for msg in queued:
             model.add_message_to_conversation(
                 "user",
                 f"User says: {msg}. "
                 "Take the message into account and finish your task.",
             )
+        # The recordOnly echoes are emitted AFTER the queued messages
+        # entered the model conversation, and each broadcast is guarded:
+        # a broken printer must never lose the (already cleared) steering
+        # input or abort the task from this best-effort persistence hook.
+        if deferred:
+            broadcast = getattr(
+                getattr(self, "printer", None), "broadcast", None,
+            )
+            if broadcast is not None:
+                for msg in deferred:
+                    try:
+                        broadcast({
+                            "type": "prompt",
+                            "text": msg,
+                            "recordOnly": True,
+                        })
+                    except Exception:
+                        # Requeue so the durable echo is retried on the
+                        # next drain instead of being lost forever.
+                        logger.debug(
+                            "recordOnly prompt echo broadcast failed",
+                            exc_info=True,
+                        )
+                        with _RunningAgentState._registry_lock:
+                            owner = _RunningAgentState.running_agent_states.get(
+                                tab_id
+                            )
+                            if owner is not None and (
+                                owner.agent is None or owner.agent is self
+                            ):
+                                owner.unattributed_prompt_echoes.append(msg)
+
+    def _block_finish_when_user_message_pending(
+        self, name: str, args: dict[str, Any],
+    ) -> str | None:
+        """Reject ``finish`` while a queued user follow-up is undrained.
+
+        The server accepts ``appendUserMessage`` while a model call is
+        in flight, but queued messages are drained only by the
+        pre-step hook at the TOP of a step.  Without this guard, a
+        prompt queued after the last drain would be silently discarded
+        when the in-flight response calls ``finish`` — the user sees
+        their follow-up echoed in the UI even though the agent never
+        saw it.  Blocking the ``finish`` forces one more step, whose
+        pre-step drain injects the queued message.
+
+        Args:
+            name: The tool name the model is calling.
+            args: The tool call arguments (unused).
+
+        Returns:
+            ``None`` to allow the call, or a rejection message when
+            ``finish`` was attempted with steering input still queued.
+        """
+        del args
+        if name != "finish":
+            return None
+        tab_id = getattr(self, "_tab_id", "") or ""
+        if not tab_id:
+            return None
+        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+
+        with _RunningAgentState._registry_lock:
+            tab = _RunningAgentState.running_agent_states.get(tab_id)
+            pending = (
+                tab is not None
+                and (tab.agent is None or tab.agent is self)
+                and bool(tab.pending_user_messages)
+            )
+        if not pending:
+            return None
+        return (
+            "Error: finish rejected — the user sent a new message while "
+            "you were working. It will be appended to the conversation "
+            "at the start of your next step; take it into account "
+            "before finishing."
+        )
 
 
 def _coerce_tasks(tasks: Any) -> list[str]:
@@ -1210,17 +1433,25 @@ def run_tasks_parallel(
         except Exception as exc:
             return _yaml_failure(exc)
         finally:
-            sub_usage[idx] = _agent_usage(agent)
+            # _live_agent_usage (not _agent_usage): an interrupted child
+            # never folds its in-flight executor session's spend into the
+            # agent totals, so the folded-only read would undercount it.
+            sub_usage[idx] = _live_agent_usage(agent)
             if printer is not None and parent_key:
                 _broadcast_subagent_done(
                     printer, [f"task-{parent_key}__sub_{idx}"],
                 )
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        results = list(pool.map(_run_single, enumerate(tasks)))
-
-    if totals_out is not None:
-        totals_out["budget_used"] = sum(u[0] for u in sub_usage)
-        totals_out["total_tokens_used"] = sum(u[1] for u in sub_usage)
-        totals_out["total_steps"] = sum(u[2] for u in sub_usage)
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            results = list(pool.map(_run_single, enumerate(tasks)))
+    finally:
+        # Fill totals_out even when a worker propagates an interrupt:
+        # the pool's __exit__ has already joined every worker, so the
+        # sub_usage slots are final and completed siblings' spend is
+        # not lost from the parent's accounting.
+        if totals_out is not None:
+            totals_out["budget_used"] = sum(u[0] for u in sub_usage)
+            totals_out["total_tokens_used"] = sum(u[1] for u in sub_usage)
+            totals_out["total_steps"] = sum(u[2] for u in sub_usage)
     return results

@@ -93,7 +93,7 @@ def parse_frontmatter(path: Path) -> tuple[dict[str, Any], str] | None:
     """
     try:
         text = path.read_text(encoding="utf-8-sig")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         logger.debug("unreadable definition file: %s", path, exc_info=True)
         return None
     meta: dict[str, Any] = {}
@@ -415,7 +415,7 @@ def load_skill_content(skill: Skill) -> str:
     """
     try:
         text = Path(skill.path).read_text(encoding="utf-8-sig")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return f"Error: skill file is no longer readable: {skill.path}"
     match = _FRONTMATTER_RE.match(text)
     body = text[match.end():].strip() if match else text.strip()

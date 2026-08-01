@@ -41,7 +41,13 @@ export type FromWebviewMessage =
   | {type: 'setFavorite'; taskId: number; isFavorite: boolean}
   | {type: 'getFiles'; prefix: string; workDir?: string}
   | {type: 'userAnswer'; answer: string; tabId?: string}
-  | {type: 'openFile'; path: string; line?: number}
+  | {
+      type: 'openFile';
+      path: string;
+      line?: number;
+      workDir?: string;
+      tabId?: string;
+    }
   | {type: 'checkPaths'; paths: string[]; workDir?: string; tabId?: string}
   | {type: 'recordFileUsage'; path: string; workDir?: string}
   | {
@@ -70,7 +76,7 @@ export type FromWebviewMessage =
       tabId?: string;
       workDir?: string;
     }
-  | {type: 'resolveDroppedPaths'; uris: string[]}
+  | {type: 'resolveDroppedPaths'; uris: string[]; workDir?: string}
   | {type: 'webviewFocusChanged'; focused: boolean}
   | {
       type: 'getAdjacentTask';

@@ -732,14 +732,11 @@ async function restartKissWebDaemon(
   const health = await probeDaemonHealth(8787, 1500);
   const sockExists = fs.existsSync(sockPath);
 
-  let activeTasks:
-    {ok: true; count: number; tabs: string[]} | {ok: false; reason: string} = {
-    ok: false,
-    reason: 'not-probed',
-  };
-  if (health !== 'dead') {
-    activeTasks = await daemonHasActiveTasks(sockPath, 1500);
-  }
+  // Always query the UDS, even when the TCP listener looks dead: the task
+  // worker can be alive behind a transiently refused HTTP port, and
+  // decideRestart() protects any reported active task regardless of health.
+  const activeTasks: {ok: true; count: number; tabs: string[]} |
+    {ok: false; reason: string} = await daemonHasActiveTasks(sockPath, 1500);
 
   const decision = decideRestart({
     fingerprintMatches: !!currentFp && currentFp === savedFp,

@@ -596,8 +596,17 @@ class GitWorktreeOps:
 
         Returns:
             True if there are staged, unstaged, or untracked changes.
+            A failed status command (timeout, corrupt index, ...) is
+            reported as dirty so callers never destroy a worktree whose
+            cleanliness could not actually be verified.
         """
         status = _git("status", "--porcelain", cwd=wt_dir)
+        if status.returncode != 0:
+            logger.warning(
+                "git status failed in %s (rc=%s): %s; treating as dirty",
+                wt_dir, status.returncode, status.stderr.strip(),
+            )
+            return True
         return bool(status.stdout.strip())
 
     @staticmethod
@@ -704,12 +713,18 @@ class GitWorktreeOps:
         Returns:
             True if the pop succeeded, False on conflict or error.
         """
-        before = _git("status", "--porcelain", cwd=repo).stdout
+        before = _git("status", "--porcelain", cwd=repo)
         result = _git("stash", "pop", "--index", cwd=repo)
         if result.returncode == 0:
             return True
-        after = _git("status", "--porcelain", cwd=repo).stdout
-        if after != before:
+        after = _git("status", "--porcelain", cwd=repo)
+        if (
+            before.returncode != 0
+            or after.returncode != 0
+            or after.stdout != before.stdout
+        ):
+            # Either the tree changed, or we cannot prove it did not
+            # (a status command failed) — never risk a double-apply.
             return False
         result = _git("stash", "pop", cwd=repo)
         return result.returncode == 0
@@ -1102,13 +1117,24 @@ class GitWorktreeOps:
         Returns:
             True if any dirty state was copied, False if the main
             worktree was clean.
+
+        Raises:
+            OSError: If ``git status`` itself fails (timeout, corrupt
+                index, ...), so the caller falls back to direct
+                execution instead of silently running without the
+                user's dirty state.
         """
         status = _git("status", "--porcelain", "-uall", cwd=repo)
+        if status.returncode != 0:
+            raise OSError(
+                f"git status failed in {repo} (rc={status.returncode}): "
+                f"{status.stderr.strip()}"
+            )
         if not status.stdout.strip():
             return False
 
         copied = False
-        for _code, old_name, fname in _porcelain_entries(status.stdout):
+        for code, old_name, fname in _porcelain_entries(status.stdout):
             src = repo / fname
             dst = wt_dir / fname
 
@@ -1130,6 +1156,24 @@ class GitWorktreeOps:
                     shutil.rmtree(str(dst))
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(str(src), str(dst))
+                copied = True
+            elif src.is_dir() and not code.startswith("?"):
+                # A dirty TRACKED submodule shows up in porcelain output
+                # as the submodule directory itself (worktree code M/m).
+                # Mirror its working tree (minus .git) so the agent sees
+                # the user's dirty submodule content in the new worktree.
+                # Untracked directory entries (``?? dir/``) are embedded
+                # foreign repos/worktrees — git refuses to recurse into
+                # them and they must not be mirrored (copying e.g. an
+                # agent worktree under the repo into itself recurses
+                # until "File name too long").
+                if dst.is_symlink() or dst.is_file():
+                    GitWorktreeOps._remove_path(dst)
+                dst.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(
+                    str(src), str(dst), dirs_exist_ok=True, symlinks=True,
+                    ignore=shutil.ignore_patterns(".git"),
+                )
                 copied = True
             elif dst.is_symlink():
                 dst.unlink()

@@ -256,7 +256,7 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
     }
   });
 
-  await test('daemonHasActiveTasks: treats an OLD-daemon "Unknown command: activeTasksQuery" error as count:0 (install.sh abort regression)', async () => {
+  await test('daemonHasActiveTasks: an OLD-daemon "Unknown command: activeTasksQuery" error is INCONCLUSIVE (must not authorize a restart)', async () => {
     const sockPath = path.join(tmpRoot, 'old-daemon.sock');
     const server = await listenUds(sockPath, {
       type: 'error',
@@ -264,10 +264,17 @@ const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-daemonhealth-'));
     });
     try {
       const res = await daemonHasActiveTasks(sockPath, 1500);
-      assert.strictEqual(res.ok, true,
-        `expected ok:true on old-daemon error; got: ${JSON.stringify(res)}`);
-      assert.strictEqual(res.count, 0);
-      assert.deepStrictEqual(res.tabs, []);
+      assert.strictEqual(res.ok, false,
+        `expected ok:false on old-daemon error; got: ${JSON.stringify(res)}`);
+      assert.strictEqual(res.reason, 'unsupported-query');
+      // With an alive HTTP listener, this inconclusive probe must make
+      // decideRestart defer instead of killing a possibly-busy daemon.
+      const decision = decideRestart({
+        fingerprintMatches: false,
+        health: 'alive',
+        activeTasks: res,
+      });
+      assert.strictEqual(decision.skip, true);
     } finally {
       await server.close();
     }

@@ -85,7 +85,7 @@ class TestFastCompletePickerBackend:
         server: VSCodeServer,
         query: str,
         *,
-        snapshot_content: str = "",
+        snapshot_content: str | None = "",
         chat_id: str = "",
         conn_id: str = "",
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -282,7 +282,12 @@ class TestFastCompletePickerBackend:
         assert idents[0] == "alpha_much_longer_identifier"
 
     def test_active_file_disk_fallback(self) -> None:
-        """``snapshot_content == \"\"`` triggers an on-disk read of snapshot_file."""
+        """``snapshot_content is None`` triggers an on-disk read of snapshot_file.
+
+        ``None`` means "no editor snapshot available"; an explicitly
+        EMPTY snapshot (``""``, an open empty document) must NOT fall
+        back to the stale on-disk content (fixer-5 F5-01).
+        """
         server = VSCodeServer()
         p = Path(self._tmpdir) / "src.py"
         p.write_text(
@@ -293,7 +298,7 @@ class TestFastCompletePickerBackend:
         server._complete(
             "x = betaq_marker_",
             snapshot_file=str(p),
-            snapshot_content="",
+            snapshot_content=None,
         )
         comps = [e for e in events if e.get("type") == "completions"]
         texts = {c["text"] for c in comps[0]["completions"]}
@@ -306,7 +311,7 @@ class TestFastCompletePickerBackend:
         _, comps = self._run(
             server,
             "x = no_such_token_",
-            snapshot_content="",
+            snapshot_content=None,
         )
         types = {c["type"] for c in comps[0]["completions"]}
         assert "identifier" not in types

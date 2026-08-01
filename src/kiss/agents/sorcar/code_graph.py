@@ -49,6 +49,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -64,7 +65,13 @@ _QUERY_DEPTH = 3
 
 _UPDATE_LOCK = ".update.lock"
 
+_HOOK_LOCK = ".hook.lock"
+
 _STALE_LOCK_SECONDS = 60 * 60
+
+_BUILD_LOCK_TIMEOUT_S = 30.0
+
+_HOOK_LOCK_TIMEOUT_S = 10.0
 
 
 _HOOK_BEGIN = "# >>> kiss code_graph hook >>>"
@@ -643,6 +650,10 @@ def _record_to_graph_parts(
     for d in record["defs"]:
         key = int(d["key"])
         nid = f"def:{rel}:{d['name']}:{d['line']}"
+        if nid in nodes:
+            # Two same-named definitions on one physical line (legal in
+            # e.g. JavaScript) must not silently share one node.
+            nid = f"{nid}:{key}"
         nodes[nid] = {
             "id": nid,
             "label": d["name"],
@@ -886,6 +897,41 @@ def build_graph(
         The assembled :class:`CodeGraph` (``stats`` reports ``files``
         scanned and ``reextracted``).
     """
+    lock = _acquire_update_lock_blocking(work_dir, timeout=_BUILD_LOCK_TIMEOUT_S)
+    if lock is None:
+        # Building without the lock could silently overwrite a
+        # concurrent builder's newer cache/graph (the S2-10 lost
+        # update), so never enter the critical section unserialized.
+        existing = load_graph(work_dir)
+        if existing is not None:
+            logger.warning(
+                "code_graph update lock in %s busy for %.0fs; "
+                "returning the existing graph unmodified",
+                work_dir, _BUILD_LOCK_TIMEOUT_S,
+            )
+            return existing
+        raise RuntimeError(
+            f"code_graph update lock in {work_dir} is held by another "
+            "builder; try again later"
+        )
+    try:
+        return _build_graph_locked(work_dir, incremental, only_files)
+    finally:
+        _release_update_lock(lock)
+
+
+def _build_graph_locked(
+    work_dir: str,
+    incremental: bool = True,
+    only_files: list[str] | None = None,
+) -> CodeGraph:
+    """The :func:`build_graph` body; caller holds the update lock.
+
+    The cache read-modify-write below is not safe against a concurrent
+    builder (two writers can each read the same old records and each
+    atomically overwrite the other's newer cache/graph pair), so every
+    entry point must serialize through the ``.update.lock`` file.
+    """
     root = Path(work_dir).resolve()
     old_hashes, old_records = _load_cache(work_dir) if incremental else ({}, {})
     hashes: dict[str, str] = {}
@@ -1087,6 +1133,24 @@ def _hook_section() -> str:
     )
 
 
+def _atomic_write_hook(hook: Path, text: str) -> None:
+    """Atomically replace *hook* with *text* and mark it executable.
+
+    A direct ``write_text`` can be interrupted mid-write and truncate a
+    user's pre-existing hook; write-to-temp + ``os.replace`` cannot.
+    The temp name embeds the thread id as well as the PID — a PID-only
+    name is shared by two threads of one process, and the loser's
+    ``os.replace`` raises ``FileNotFoundError`` after the winner
+    consumed the shared temp.
+    """
+    tmp = hook.with_name(
+        f".{hook.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    )
+    tmp.write_text(text)
+    tmp.chmod(0o755)
+    os.replace(tmp, hook)
+
+
 def _is_shell_hook(text: str) -> bool:
     """Return whether *text* has a shell shebang we can safely append to."""
     if not text.startswith("#!"):
@@ -1119,6 +1183,24 @@ def install_post_commit_hook(work_dir: str) -> str:
     if hooks is None:
         return f"Error: {work_dir} is not a git repository."
     hooks.mkdir(parents=True, exist_ok=True)
+    lock = _acquire_update_lock_blocking(
+        work_dir, timeout=_HOOK_LOCK_TIMEOUT_S, lock_name=_HOOK_LOCK,
+    )
+    if lock is None:
+        return "Error: another code_graph hook update is in progress."
+    try:
+        return _install_post_commit_hook_locked(hooks)
+    finally:
+        _release_update_lock(lock)
+
+
+def _install_post_commit_hook_locked(hooks: Path) -> str:
+    """The hook-install read-modify-write; caller holds the hook lock.
+
+    Two unserialized installers (or an install racing an uninstall)
+    each read the same hook text and overwrite each other's edit, so
+    every entry point must hold the ``.hook.lock``.
+    """
     hook = hooks / "post-commit"
     if hook.is_file():
         try:
@@ -1137,9 +1219,17 @@ def install_post_commit_hook(work_dir: str) -> str:
             return "Error: existing post-commit hook is not a shell script."
         elif not text.endswith("\n"):
             text += "\n"
-        hook.write_text(text + _hook_section())
+        # Insert right after the shebang line rather than appending: an
+        # existing hook may unconditionally ``exit`` early, which would
+        # make an appended section unreachable.  The graph update is a
+        # detached nohup background job, so running it first is
+        # harmless.
+        shebang_end = text.index("\n") + 1
+        _atomic_write_hook(
+            hook, text[:shebang_end] + _hook_section() + text[shebang_end:]
+        )
     else:
-        hook.write_text("#!/bin/sh\n" + _hook_section())
+        _atomic_write_hook(hook, "#!/bin/sh\n" + _hook_section())
     hook.chmod(0o755)
     return f"code_graph post-commit hook installed at {hook}."
 
@@ -1156,6 +1246,19 @@ def uninstall_post_commit_hook(work_dir: str) -> str:
     hooks = _hooks_dir(work_dir)
     if hooks is None:
         return f"Error: {work_dir} is not a git repository."
+    lock = _acquire_update_lock_blocking(
+        work_dir, timeout=_HOOK_LOCK_TIMEOUT_S, lock_name=_HOOK_LOCK,
+    )
+    if lock is None:
+        return "Error: another code_graph hook update is in progress."
+    try:
+        return _uninstall_post_commit_hook_locked(hooks)
+    finally:
+        _release_update_lock(lock)
+
+
+def _uninstall_post_commit_hook_locked(hooks: Path) -> str:
+    """The hook-uninstall read-modify-write; caller holds the hook lock."""
     hook = hooks / "post-commit"
     if not hook.is_file():
         return "code_graph post-commit hook is not installed."
@@ -1175,7 +1278,7 @@ def uninstall_post_commit_hook(work_dir: str) -> str:
     if remaining in ("", "#!/bin/sh"):
         hook.unlink()
     else:
-        hook.write_text(remaining + "\n")
+        _atomic_write_hook(hook, remaining + "\n")
     return "code_graph post-commit hook removed."
 
 
@@ -1270,11 +1373,11 @@ def _pid_is_running(pid: int) -> bool:
     return True
 
 
-def _acquire_update_lock(work_dir: str) -> Path | None:
-    """Acquire the non-blocking hook-update lock, reclaiming stale locks."""
+def _acquire_update_lock(work_dir: str, lock_name: str = _UPDATE_LOCK) -> Path | None:
+    """Acquire the non-blocking *lock_name* lock, reclaiming stale locks."""
     storage = graph_dir(work_dir)
     storage.mkdir(parents=True, exist_ok=True)
-    lock = storage / _UPDATE_LOCK
+    lock = storage / lock_name
     for _attempt in range(2):
         try:
             descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -1302,6 +1405,29 @@ def _acquire_update_lock(work_dir: str) -> Path | None:
             stream.write(f"{os.getpid()}\n")
         return lock
     return None
+
+
+def _acquire_update_lock_blocking(
+    work_dir: str,
+    timeout: float = _BUILD_LOCK_TIMEOUT_S,
+    lock_name: str = _UPDATE_LOCK,
+) -> Path | None:
+    """Acquire the *lock_name* lock, waiting up to *timeout* seconds.
+
+    Serializes concurrent graph builds (hook updates vs. agent-tool
+    builds) so their cache read-modify-write cycles cannot overwrite
+    each other.  Returns ``None`` after *timeout*; the caller must NOT
+    enter the protected critical section in that case (an unserialized
+    build can silently lose another builder's newer cache/graph).
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        lock = _acquire_update_lock(work_dir, lock_name)
+        if lock is not None:
+            return lock
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.05)
 
 
 def _release_update_lock(lock: Path) -> None:
@@ -1342,7 +1468,7 @@ def main(argv: list[str]) -> int:
             return 0
         try:
             only = argv[2:] or None
-            graph = build_graph(root, incremental=True, only_files=only)
+            graph = _build_graph_locked(root, incremental=True, only_files=only)
             print(f"updated: {len(graph.nodes)} nodes, {len(graph.edges)} edges")
             return 0
         finally:

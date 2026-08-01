@@ -321,7 +321,20 @@ def _number_interactive_elements(snapshot: str) -> tuple[str, list[dict[str, str
         name = _NAME_UNESCAPE_RE.sub(r"\1", name_match.group(1)) if name_match else ""
         if quote:
             name = name.replace("''", "'")
-        elements.append({"role": role, "name": name})
+        # Record which occurrence of this (role, name) pair — and of the
+        # bare role — this element is, in snapshot (document) order, so
+        # resolving an ID targets *this* element rather than the first
+        # visible one that happens to share its role and name.
+        occurrence = sum(
+            1 for e in elements if e["role"] == role and e["name"] == name
+        )
+        role_occurrence = sum(1 for e in elements if e["role"] == role)
+        elements.append({
+            "role": role,
+            "name": name,
+            "occurrence": str(occurrence),
+            "role_occurrence": str(role_occurrence),
+        })
         result_lines.append(f"{indent}- [{counter}] {quote}{role} {rest}".rstrip())
     return "\n".join(result_lines), elements
 
@@ -610,13 +623,23 @@ class WebUseTool:
 
             try:
                 self._launch_browser(launcher, kwargs)
-            except Exception:  # pragma: no cover – Chromium always pre-installed in CI
+            except Exception as exc:  # pragma: no cover – Chromium pre-installed in CI
+                message = str(exc)
+                if (
+                    "Executable doesn't exist" not in message
+                    and "playwright install" not in message
+                ):
+                    # Profile locks, missing display libraries, resource
+                    # exhaustion, etc. — installing Chromium would not
+                    # help and would only bury the real error.
+                    raise
                 logger.info("Playwright Chromium not found, installing...")
                 self._close_browser_only()
                 subprocess.run(
                     [sys.executable, "-m", "playwright", "install", "chromium"],
                     check=True,
                     capture_output=True,
+                    timeout=900,
                 )
                 self._launch_browser(launcher, kwargs)
         except Exception:  # pragma: no cover — Playwright init failure
@@ -731,17 +754,29 @@ class WebUseTool:
                 _, self._elements = _number_interactive_elements(snapshot)
             if element_id < 1 or element_id > len(self._elements):
                 raise ValueError(f"Element with ID {element_id} not found.")
-        role = self._elements[element_id - 1]["role"]
-        name = self._elements[element_id - 1]["name"]
+        entry = self._elements[element_id - 1]
+        role = entry["role"]
+        name = entry["name"]
         if name:
             locator = self._page.get_by_role(role, name=name, exact=True)
+            occurrence = int(entry.get("occurrence", "0"))
         else:
+            # get_by_role(role) matches named and unnamed elements alike,
+            # so an unnamed element's index counts every element of the
+            # role in snapshot order.
             locator = self._page.get_by_role(role)
+            occurrence = int(entry.get("role_occurrence", "0"))
         n = locator.count()
         if n == 0:  # pragma: no cover — race between snapshot and DOM
             raise ValueError(f"Element with ID {element_id} not found on page.")
         if n == 1:
             return locator
+        if occurrence < n:
+            # Both the aria snapshot and get_by_role() enumerate the
+            # accessibility tree in document order, so the recorded
+            # occurrence picks the exact element this ID was assigned
+            # to — not merely the first visible role/name match.
+            return locator.nth(occurrence)
         for i in range(n):  # pragma: no branch — first visible element always found
             try:
                 if locator.nth(i).is_visible():
@@ -750,6 +785,20 @@ class WebUseTool:
                 logger.debug("Exception caught", exc_info=True)
                 continue
         return locator.first  # pragma: no cover — all elements invisible is rare
+
+    def _try_ensure_browser(self, context: str) -> str | None:
+        """Start the browser if needed; return an error string on failure.
+
+        Public tools document string error returns, so browser
+        startup/install failures must surface as ``Error <context>: ...``
+        instead of escaping the method (S2-27).
+        """
+        try:
+            self._ensure_browser()
+            return None
+        except Exception as exc:
+            logger.warning("browser startup failed", exc_info=True)
+            return f"Error {context}: {exc}"
 
     def go_to_url(self, url: str) -> str:
         """Navigate the browser to a URL and return the page accessibility tree.
@@ -762,7 +811,9 @@ class WebUseTool:
         Returns:
             On success: page title, URL, and accessibility tree with [N] IDs. For "tab:list":
             list of open tabs with indices. On error: "Error navigating to <url>: <message>"."""
-        self._ensure_browser()
+        err = self._try_ensure_browser(f"navigating to {url}")
+        if err is not None:
+            return err
         try:
             pages = self._context.pages
             if url == "tab:list":
@@ -796,7 +847,9 @@ class WebUseTool:
         Returns:
             Updated accessibility tree (title, URL, numbered elements), or on error
             "Error clicking element <id>: <message>"."""
-        self._ensure_browser()
+        err = self._try_ensure_browser(f"clicking element {element_id}")
+        if err is not None:
+            return err
         try:
             locator = self._resolve_locator(element_id)
 
@@ -828,7 +881,9 @@ class WebUseTool:
 
         Returns:
             Updated accessibility tree, or "Error typing into element <id>: <message>" on error."""
-        self._ensure_browser()
+        err = self._try_ensure_browser(f"typing into element {element_id}")
+        if err is not None:
+            return err
         try:
             locator = self._resolve_locator(element_id)
             select_all = "Meta+a" if sys.platform == "darwin" else "Control+a"
@@ -854,7 +909,9 @@ class WebUseTool:
 
         Returns:
             Updated accessibility tree, or "Error pressing key '<key>': <message>" on error."""
-        self._ensure_browser()
+        err = self._try_ensure_browser(f"pressing key {key!r}")
+        if err is not None:
+            return err
         try:
             self._page.keyboard.press(key)
             self._page.wait_for_timeout(300)
@@ -873,7 +930,9 @@ class WebUseTool:
         Returns:
             Updated accessibility tree after scrolling, or
             "Error scrolling <direction>: <message>" on error."""
-        self._ensure_browser()
+        err = self._try_ensure_browser(f"scrolling {direction}")
+        if err is not None:
+            return err
         try:
             dx, dy = _SCROLL_DELTA.get(direction, (0, 300))
             vw, vh = self.viewport[0] // 2, self.viewport[1] // 2
@@ -901,7 +960,9 @@ class WebUseTool:
         Returns:
             "Screenshot saved to <resolved_path>", or
             "Error taking screenshot: <message>" on error."""
-        self._ensure_browser()
+        err = self._try_ensure_browser("taking screenshot")
+        if err is not None:
+            return err
         try:
             path = Path(_absolutize(file_path, self.work_dir)).resolve()
             remapped = _active_worktree_remap(path, self.work_dir)
@@ -924,7 +985,9 @@ class WebUseTool:
         Returns:
             Accessibility tree or plain text as described above, or
             "Error getting page content: <message>" on error."""
-        self._ensure_browser()
+        err = self._try_ensure_browser("getting page content")
+        if err is not None:
+            return err
         try:
             if text_only:
                 title = self._page.title()

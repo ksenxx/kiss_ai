@@ -1,6 +1,6 @@
 ## Trick
 
-Reproduce the issue by writing real end-to-end tests with 100% coverage. Then fix the issue.  You can use screenshots to validate the implementation.
+Reproduce the issue by writing real end-to-end tests with 100% coverage. Then fix the issue. You can use screenshots to validate the implementation.
 
 ## Trick
 
@@ -8,7 +8,7 @@ Use 'claude-fable-5' model for all tasks, including software development. Use 'g
 
 ## Trick
 
-Can you run all tests? Use `run_parallel` tool to split and run tests in parallel. Determine which test failures are due to a bug in the project or a bug in the test. Fix them accordingly. 
+Can you run all tests? Use `run_parallel` tool to split and run tests in parallel. Determine which test failures are due to a bug in the project or a bug in the test. Fix them accordingly.
 
 ## Trick
 

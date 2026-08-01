@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import math
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -204,6 +205,36 @@ def _coerce_positive_int(value: str) -> int:
     return parsed
 
 
+def _parse_budget_value(value: str) -> float:
+    """Parse a ``--max_budget`` value as a positive finite float.
+
+    Rejects ``nan`` (which would disable the ``budget_used >= max_budget``
+    guard entirely because every comparison with NaN is false), ``inf``,
+    zero, and negative values.
+
+    Args:
+        value: Raw command-line string.
+
+    Returns:
+        The parsed budget as a float.
+
+    Raises:
+        argparse.ArgumentTypeError: If *value* is not a positive finite
+            number.
+    """
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"--max_budget must be a positive finite number, got {value!r}"
+        ) from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError(
+            f"--max_budget must be a positive finite number, got {value!r}"
+        )
+    return parsed
+
+
 def _print_recent_chats(limit: int = DEFAULT_RECENT_CHATS_LIMIT) -> None:
     """Print the most recent chat sessions with their tasks and results.
 
@@ -327,7 +358,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Custom HTTP header (format: 'Key:Value'). Can be used multiple times.",
     )
     parser.add_argument(
-        "-b", "--max_budget", type=float,
+        "-b", "--max_budget", type=_parse_budget_value,
         default=config_module.DEFAULT_CONFIG.max_budget,
         help="Maximum budget in USD",
     )

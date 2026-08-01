@@ -385,8 +385,13 @@ class TestH4AuthRateLimit(IsolatedAsyncioTestCase):
             return "closed"
 
     async def test_rate_limit_kicks_in_after_max_failures(self) -> None:
-        """After _AUTH_FAIL_MAX failures, new connections are rejected."""
-        for i in range(ws_mod._AUTH_FAIL_MAX):
+        """After _AUTH_FAIL_MAX failures, new connections are rejected.
+
+        The lockout is re-checked after every recorded failure, so the
+        guess that crosses the brute-force threshold is itself denied its
+        remaining retry (``auth_locked``) instead of being re-prompted.
+        """
+        for i in range(ws_mod._AUTH_FAIL_MAX - 1):
             resp = await self._try_auth("wrong-password")
             self.assertEqual(
                 resp, "auth_required",
@@ -394,9 +399,15 @@ class TestH4AuthRateLimit(IsolatedAsyncioTestCase):
             )
 
         resp = await self._try_auth("wrong-password")
+        self.assertEqual(
+            resp, "auth_locked",
+            "the threshold-crossing guess must be locked, not re-prompted",
+        )
+
+        resp = await self._try_auth("wrong-password")
         self.assertIn(
-            resp, ("closed", "timeout"),
-            "after lockout the socket must be closed without prompting",
+            resp, ("closed", "timeout", "auth_locked"),
+            "after lockout the socket must be refused without prompting",
         )
 
     async def test_correct_password_locked_out_too(self) -> None:

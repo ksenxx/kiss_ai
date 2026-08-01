@@ -2026,7 +2026,9 @@
     if (inp.value.replace(/\s/g, '').length < 2) return;
     ghostTimer = setTimeout(() => {
       ghostTimer = null;
-      api.complete({query: inp.value});
+      // Stamp the owning tab so the daemon completes against this tab's
+      // chat context, not the host's stale notion of the active tab.
+      api.complete({query: inp.value, tabId: activeTabId || undefined});
     }, 300);
   }
 

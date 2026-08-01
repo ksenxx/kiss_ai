@@ -43,12 +43,16 @@ The template supports the placeholder syntax common to those tools:
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 import re
 import shlex
+import signal
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from kiss.agents.sorcar.persistence import _default_kiss_dir
 from kiss.agents.sorcar.skills import (
@@ -69,7 +73,7 @@ _INJECT_RE = re.compile(
 )
 _NON_ARG_INJECT_RE = re.compile(r"@\{[^{}]+\}|!`[^`]+`")
 
-_SHELL_TIMEOUT_SECONDS = 60
+_SHELL_TIMEOUT_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -211,8 +215,28 @@ def _read_injected_file(raw: str, work_dir: str) -> str:
         path = Path(work_dir) / raw
     try:
         return path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return f"[could not read file: {raw}]"
+
+
+def _kill_shell_process_tree(proc: subprocess.Popen) -> None:
+    """Kill a timed-out injected shell command and all its descendants.
+
+    On POSIX the shell runs in its own session (``start_new_session``)
+    so the whole process group can be SIGKILLed; ``os.killpg`` does not
+    exist on Windows, where ``taskkill /T /F`` terminates the tree.
+
+    Args:
+        proc: The timed-out shell process.
+    """
+    if os.name == "nt":  # pragma: no cover — Windows-only branch
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+            capture_output=True, timeout=30,
+        )
+    else:
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
 
 
 def _run_injected_shell(command: str, work_dir: str) -> str:
@@ -231,16 +255,28 @@ def _run_injected_shell(command: str, work_dir: str) -> str:
         note on failure), stripped of surrounding newlines.
     """
     command = command.strip()
-    try:
-        proc = subprocess.run(
-            command, shell=True, cwd=work_dir, capture_output=True,
-            text=True, timeout=_SHELL_TIMEOUT_SECONDS,
+    popen_kwargs: dict[str, Any] = {}
+    if os.name == "nt":  # pragma: no cover — Windows-only branch
+        popen_kwargs["creationflags"] = getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0,
         )
+    else:
+        popen_kwargs["start_new_session"] = True
+    proc: subprocess.Popen[bytes] = subprocess.Popen(
+        command, shell=True, cwd=work_dir,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        **popen_kwargs,
+    )
+    try:
+        stdout_bytes, stderr_bytes = proc.communicate(timeout=_SHELL_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
+        _kill_shell_process_tree(proc)
+        with contextlib.suppress(Exception):
+            proc.communicate(timeout=10)
         return f"[shell command timed out: {command}]"
-    output = proc.stdout
+    output = stdout_bytes.decode("utf-8", errors="replace")
     if proc.returncode != 0:
-        output += proc.stderr
+        output += stderr_bytes.decode("utf-8", errors="replace")
         output += f"\n[Shell command exited with code {proc.returncode}]"
     return output.strip("\n")
 

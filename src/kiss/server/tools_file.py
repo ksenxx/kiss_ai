@@ -118,7 +118,13 @@ def load_tools_file(raw_path: Any) -> list[Callable[..., Any]]:
         source = path.read_text(encoding="utf-8")
         code = compile(source, str(path), "exec", dont_inherit=True)
         exec(code, module.__dict__)  # noqa: S102
-    except (Exception, SystemExit):
+    except BaseException:  # noqa: BLE001 — untrusted module code may raise anything
+        # BaseException (not just Exception/SystemExit): a tools file
+        # that raises e.g. KeyboardInterrupt at import time must
+        # degrade to "no extra tools" like any other bad module — the
+        # task runner treats an escaping KeyboardInterrupt as a task
+        # cancellation, so letting it propagate would cancel the whole
+        # agent task because of a broken tools file.
         logger.warning("Failed to import toolsFile %r", raw_path, exc_info=True)
         return []
     finally:

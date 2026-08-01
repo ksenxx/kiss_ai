@@ -97,6 +97,31 @@ def _owner_task_id(state: _RunningAgentState) -> str:
     return task_id if isinstance(task_id, str) else ""
 
 
+def _task_accepts_input(state: _RunningAgentState | None) -> bool:
+    """True when *state* has a live task that can drain queued input.
+
+    The worker thread raises ``is_task_active`` only AFTER
+    ``_cmd_run`` installs and starts ``task_thread``, so a follow-up
+    typed during that startup window used to be silently dropped
+    (S3-05).  Treating an alive worker thread as live closes the
+    window; the same predicate is used by the reattachment logic in
+    ``server.py``.  MUST be called while holding
+    :attr:`_RunningAgentState._registry_lock`.
+
+    Args:
+        state: The per-tab state to inspect (``None`` accepted).
+
+    Returns:
+        True when the tab's task is active or its worker thread is
+        still alive.
+    """
+    if state is None:
+        return False
+    if state.is_task_active:
+        return True
+    return state.task_thread is not None and state.task_thread.is_alive()
+
+
 def _restart_kiss_web_daemon() -> bool:
     """Restart the ``kiss-web`` daemon so it picks up config changes.
 
@@ -294,14 +319,13 @@ class _CommandsMixin:
                 _RunningAgentState.running_agent_states[tab_id] = tab
             if tab.task_thread is not None:
                 prompt = cmd.get("prompt", "")
-                if (
-                    isinstance(prompt, str)
-                    and prompt.strip()
-                    and (
-                        tab.is_task_active
-                        or not tab.task_thread.is_alive()
-                    )
-                ):
+                # S3-05: queue the prompt whenever a task thread is
+                # installed.  The worker sets ``is_task_active`` only
+                # AFTER the thread starts, so gating on the flag (or on
+                # thread death) silently dropped a second ``run``
+                # submitted during the startup window in which the
+                # thread was alive but the flag not yet raised.
+                if isinstance(prompt, str) and prompt.strip():
                     tab.pending_user_messages.append(prompt)
                     inject_prompt = prompt
                     inject_task = _owner_task_id(tab)
@@ -670,7 +694,7 @@ class _CommandsMixin:
             return
         with self._state_lock:
             tab = _RunningAgentState.running_agent_states.get(tab_id)
-            if tab is not None and tab.is_task_active:
+            if _task_accepts_input(tab) and tab is not None:
                 tab.pending_user_messages.append(prompt)
                 owner = tab
             else:
@@ -685,7 +709,7 @@ class _CommandsMixin:
                 source = _RunningAgentState.running_agent_states.get(
                     source_tab_id,
                 )
-                if source is None or not source.is_task_active:
+                if not _task_accepts_input(source) or source is None:
                     logger.debug(
                         "appendUserMessage dropped: viewer tab %s "
                         "source tab %s has no live task",
@@ -946,12 +970,24 @@ class _CommandsMixin:
                     if hasattr(self.printer, "work_dir"):
                         setattr(self.printer, "work_dir", new_work_dir)
 
-        api_keys = cmd.get("apiKeys", {})
-        if not isinstance(api_keys, dict):
-            api_keys = {}
-        for key_name, key_value in api_keys.items():
-            if isinstance(key_name, str) and isinstance(key_value, str) and key_value:
-                save_api_key_to_shell(key_name, key_value)
+            # Persist API keys INSIDE ``_save_config_lock``.  Each
+            # ``save_api_key_to_shell`` does an unlocked
+            # read-modify-atomic-replace of the same shell RC file, so two
+            # concurrent ``saveConfig`` calls saving different keys could
+            # both read the old file and then replace it independently,
+            # silently losing the first key.  Serializing the writes under
+            # the same lock that already guards config.json closes the
+            # lost-update window.
+            api_keys = cmd.get("apiKeys", {})
+            if not isinstance(api_keys, dict):
+                api_keys = {}
+            for key_name, key_value in api_keys.items():
+                if (
+                    isinstance(key_name, str)
+                    and isinstance(key_value, str)
+                    and key_value
+                ):
+                    save_api_key_to_shell(key_name, key_value)
 
         conn_id = cmd.get("connId", "")
         self._get_models(conn_id)

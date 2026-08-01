@@ -195,12 +195,31 @@ def _exec_flag(file_data: dict[str, Any]) -> bool | None:
     return val if isinstance(val, bool) else None
 
 
+def _remove_created_path(write_to: str) -> None:
+    """Remove an agent-created path so a full reject restores absence.
+
+    Used for manifest entries flagged ``created`` (F4-25): their base
+    is a synthetic empty file that never existed before the task, so
+    rejecting the creation must delete the path — an empty leftover
+    file would stay untracked and could still affect package/import/
+    build semantics.  Handles regular files and symlinks (including
+    broken ones); a missing path is a no-op.
+
+    Args:
+        write_to: Real workspace path to remove.
+    """
+    dest = Path(write_to)
+    if dest.is_symlink() or dest.exists():
+        dest.unlink()
+
+
 def _restore_base_bytes(
     base_path: str,
     write_to: str,
     link_target: str | None = None,
     *,
     make_executable: bool | None = None,
+    base_missing: bool = False,
 ) -> None:
     """Restore *write_to* to the exact bytes of *base_path*.
 
@@ -227,7 +246,16 @@ def _restore_base_bytes(
             bit the agent added is cleared), ``None`` when unknown
             (the on-disk mode is left untouched).
     """
+    if base_missing:
+        _remove_created_path(write_to)
+        return
     dest = Path(write_to)
+    if dest.is_dir() and not dest.is_symlink():
+        # The agent replaced the file with a directory (F4-26): an
+        # EMPTY leftover directory is removed so the base file can be
+        # restored; a non-empty one raises OSError to the caller's
+        # reject-failure handler (descendants must be rejected first).
+        dest.rmdir()
     dest.parent.mkdir(parents=True, exist_ok=True)
     if link_target is not None:
         if dest.is_symlink() or dest.exists():
@@ -254,6 +282,7 @@ def _reject_hunk_in_file(
     binary: bool = False,
     link_target: str | None = None,
     make_executable: bool | None = None,
+    base_missing: bool = False,
 ) -> None:
     """Revert a single hunk in the current file to the base version.
 
@@ -295,6 +324,12 @@ def _reject_hunk_in_file(
             bit, ``False`` clears it, ``None`` leaves the mode alone.
     """
     write_to = target_path or current_path
+    if base_missing:
+        # Agent-created file (F4-25): the base never existed, so the
+        # reject restores ABSENCE.  Created entries always carry a
+        # single whole-file hunk, so this is a full rejection.
+        _remove_created_path(write_to)
+        return
     if binary or link_target is not None:
         _restore_base_bytes(
             base_path, write_to, link_target,
@@ -325,6 +360,11 @@ def _reject_hunk_in_file(
         + cur_lines[hunk["cs"] + hunk["cc"] :]
     )
     dest = Path(write_to)
+    if dest.is_dir() and not dest.is_symlink():
+        # File replaced by a directory (F4-26): see
+        # _restore_base_bytes — remove an empty leftover directory so
+        # the open() below can restore the file.
+        dest.rmdir()
     dest.parent.mkdir(parents=True, exist_ok=True)
     if dest.is_symlink():
         dest.unlink()
@@ -413,6 +453,7 @@ def _reject_all_hunks_in_file(
                 file_data.get("target") or file_data["current"],
                 file_data.get("link_target"),
                 make_executable=_exec_flag(file_data),
+                base_missing=bool(file_data.get("created")),
             )
         return
     pending = set(hunk_indices)
@@ -422,6 +463,7 @@ def _reject_all_hunks_in_file(
             file_data["current"], file_data["base"], hunk,
             file_data.get("target"),
             make_executable=_exec_flag(file_data),
+            base_missing=bool(file_data.get("created")),
         )
         pending.discard(hi)
         _record_hunk_rejected(hunks, hi, pending.__contains__)

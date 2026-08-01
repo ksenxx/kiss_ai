@@ -102,7 +102,11 @@ function daemonHasActiveTasks(sockPath, timeoutMs) {
           typeof parsed.text === 'string' &&
           parsed.text.indexOf('Unknown command: activeTasksQuery') >= 0
         ) {
-          finish({ok: true, count: 0, tabs: []});
+          // An old daemon that cannot answer the query conveys NO
+          // information about whether it is running a task. Reporting
+          // "zero active tasks" here would authorize a restart that can
+          // abort in-flight work in exactly the process being upgraded.
+          finish({ok: false, reason: 'unsupported-query'});
           return;
         }
       }

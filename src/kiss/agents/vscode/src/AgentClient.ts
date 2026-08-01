@@ -4,10 +4,11 @@
 // add your name here
 
 import * as net from 'net';
-import * as os from 'os';
 import * as path from 'path';
 import {EventEmitter} from 'events';
+import {StringDecoder} from 'string_decoder';
 import {AgentCommand, ToWebviewMessage} from './types';
+import {kissHomeDir} from './userAssets';
 
 const MAX_LINE_BUFFER_BYTES = 32 * 1024 * 1024;
 
@@ -25,17 +26,29 @@ export class AgentClient extends EventEmitter {
   constructor(sockPath?: string) {
     super();
     this._sockPath =
-      sockPath ?? path.join(os.homedir(), '.kiss', 'sorcar.sock');
+      sockPath ??
+      process.env.KISS_SORCAR_SOCK ??
+      path.join(kissHomeDir(), 'sorcar.sock');
   }
 
   connect(): void {
     if (this._socket || this._disposed || this._connecting) return;
     this._connecting = true;
+    // Line-buffer state is connection-scoped: a partial line left over from
+    // a dead connection must not contaminate the next connection.
+    this._buffer = '';
     const sock = net.createConnection({path: this._sockPath});
     this._socket = sock;
     sock.setNoDelay(true);
+    // A persistent decoder per connection keeps UTF-8 code points intact
+    // even when they are split across stream chunks.
+    const decoder = new StringDecoder('utf8');
 
     sock.on('connect', () => {
+      if (this._disposed || this._socket !== sock) {
+        sock.destroy();
+        return;
+      }
       this._connecting = false;
       this.emit('connect');
       const pending = this._pendingSends;
@@ -43,7 +56,10 @@ export class AgentClient extends EventEmitter {
       for (const line of pending) sock.write(line);
     });
 
-    sock.on('data', (data: Buffer) => this._handleData(data.toString()));
+    sock.on('data', (data: Buffer) => {
+      if (this._socket !== sock) return;
+      this._handleData(decoder.write(data));
+    });
 
     sock.on('error', err => {
       const code = (err as NodeJS.ErrnoException).code;
@@ -53,8 +69,10 @@ export class AgentClient extends EventEmitter {
     });
 
     sock.on('close', () => {
+      if (this._socket !== sock) return;
       this._connecting = false;
       this._socket = null;
+      this._buffer = '';
       this.emit('disconnect');
       if (this._disposed) return;
       this._scheduleReconnect();

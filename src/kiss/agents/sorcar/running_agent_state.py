@@ -85,13 +85,28 @@ class _RunningAgentState:
             cls.running_agent_states[tab_id] = state
 
     @classmethod
-    def unregister(cls, tab_id: str) -> None:
+    def unregister(cls, tab_id: str, state: _RunningAgentState | None = None) -> None:
         """Atomically remove *tab_id* from :attr:`running_agent_states`.
 
         No-op when no entry is present.  See :meth:`register` for
         the locking discipline.
+
+        Args:
+            tab_id: The registry key to remove.
+            state: When provided, the entry is removed ONLY if it is
+                this exact object.  :meth:`register` explicitly allows
+                a different state to replace an entry under the same
+                key; a stale owner's key-only cleanup would otherwise
+                delete the replacement, orphaning ITS stop event,
+                thread, and agent routing (ABA bug).  Pass the state
+                you registered whenever you might have been replaced.
         """
         with cls._registry_lock:
+            if (
+                state is not None
+                and cls.running_agent_states.get(tab_id) is not state
+            ):
+                return
             cls.running_agent_states.pop(tab_id, None)
 
     __slots__ = (

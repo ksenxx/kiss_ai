@@ -168,6 +168,7 @@ class JsonPrinter(Printer):
         self._recordings: dict[str, list[dict[str, Any]]] = {}
         self._persist_agents: dict[str, Any] = {}
         self._subscribers: dict[str, set[str]] = {}
+        self._subscriber_expiry: dict[str, float] = {}
 
     @staticmethod
     def _coerce_task_id(value: Any) -> str:
@@ -208,6 +209,7 @@ class JsonPrinter(Printer):
         if not key or not tab_id:
             return
         with self._lock:
+            self._sweep_expired_subscribers()
             viewers = self._subscribers.get(key)
             if viewers is None:
                 viewers = set()
@@ -229,6 +231,7 @@ class JsonPrinter(Printer):
         if not key:
             return []
         with self._lock:
+            self._sweep_expired_subscribers()
             viewers = self._subscribers.get(key)
             if not viewers:
                 return []
@@ -325,39 +328,97 @@ class JsonPrinter(Printer):
         if not tab_id:
             return
         with self._lock:
+            self._sweep_expired_subscribers()
             for task_key in list(self._subscribers.keys()):
                 viewers = self._subscribers[task_key]
                 viewers.discard(tab_id)
                 if not viewers:
                     self._subscribers.pop(task_key, None)
+                    self._subscriber_expiry.pop(task_key, None)
 
-    def cleanup_task(self, task_id: Any) -> None:
+    def cleanup_task(
+        self, task_id: Any, subscriber_linger_seconds: float = 300.0,
+    ) -> None:
         """Remove all per-task state for *task_id* to free memory.
 
         Called by the task-runner once a task has fully terminated.
         Cancels any pending bash flush timer and drops the per-task
-        recording, persist-agent, and usage-offset entries.  The
-        subscriber set is **intentionally preserved** so any post-
-        task broadcasts (e.g. the async ``followup_suggestion``) still
-        fan out to the originating tab; subscriber cleanup happens
-        when the frontend tab itself closes via :meth:`cleanup_tab`.
+        recording, persist-agent, and usage-offset entries.
+
+        Bash-state teardown synchronizes with in-flight flushes in two
+        steps: the popped state's generation is bumped (under
+        ``_bash_lock``, where every flush path re-checks it), so a
+        flush that copied text but has not yet passed the generation
+        re-check discards it; then the state's ``flush_lock`` is
+        acquired and released (after ``_bash_lock`` is dropped, so the
+        lock order matches the flush paths), so a flush that already
+        passed its re-check and is broadcasting finishes BEFORE this
+        method returns.  After ``cleanup_task`` returns, no stale
+        ``system_output`` for the task can be broadcast.
+
+        The subscriber set is preserved for ``subscriber_linger_seconds``
+        so any post-task broadcasts (e.g. the async
+        ``followup_suggestion``) still fan out to the originating tab.
+        Expired sets are pruned opportunistically (no timer thread per
+        task) by every subscriber-map operation — previously they were
+        kept for the tab's whole lifetime, leaking one entry per
+        completed task in long-lived tabs.  A tab that closes earlier
+        is still removed immediately via :meth:`cleanup_tab`.
 
         Args:
             task_id: The task identifier whose state should be freed.
+            subscriber_linger_seconds: How long the task's subscriber
+                set survives to serve post-task broadcasts; ``<= 0``
+                prunes synchronously.
         """
         key = self._coerce_task_id(task_id)
         if not key:
             return
         with self._bash_lock:
             bs = self._bash_states.pop(key, None)
-            if bs is not None and bs.timer is not None:
-                bs.timer.cancel()
+            if bs is not None:
+                if bs.timer is not None:
+                    bs.timer.cancel()
+                bs.generation += 1
+                bs.buffer.clear()
+        if bs is not None:
+            # Wait out a flush that passed its generation re-check
+            # before the bump and is still broadcasting under
+            # ``flush_lock`` — its output belongs to the task's
+            # lifetime and must land before cleanup completes.
+            with bs.flush_lock:
+                pass
         with self._lock:
             self._recordings.pop(key, None)
             self._tokens_offsets.pop(key, None)
             self._budget_offsets.pop(key, None)
             self._steps_offsets.pop(key, None)
             self._persist_agents.pop(key, None)
+            if key in self._subscribers:
+                if subscriber_linger_seconds <= 0:
+                    self._subscribers.pop(key, None)
+                    self._subscriber_expiry.pop(key, None)
+                else:
+                    self._subscriber_expiry[key] = (
+                        time.monotonic() + subscriber_linger_seconds
+                    )
+            self._sweep_expired_subscribers()
+
+    def _sweep_expired_subscribers(self) -> None:
+        """Drop subscriber sets whose post-task linger has expired.
+
+        Must be called with ``self._lock`` held.  Cheap when nothing
+        is pending (the expiry map only holds completed tasks still
+        inside their linger window), so every subscriber-map operation
+        can afford to call it — this replaces a per-task timer thread.
+        """
+        if not self._subscriber_expiry:
+            return
+        now = time.monotonic()
+        for key, deadline in list(self._subscriber_expiry.items()):
+            if now >= deadline:
+                del self._subscriber_expiry[key]
+                self._subscribers.pop(key, None)
 
     def reset(self) -> None:
         """Reset internal streaming state for a new turn.
@@ -711,12 +772,18 @@ class JsonPrinter(Printer):
                             {"type": "system_output", "text": text},
                         )
             with self._bash_lock:
-                self._bash_state.streamed = True
+                # Use the state captured above — the creating
+                # ``_bash_state`` property would resurrect a state
+                # that ``cleanup_task`` freed while ``broadcast`` was
+                # running, leaking it forever under a dead task id.
+                bs.streamed = True
             return ""
         if type == "tool_call":
             self._flush_bash()
             with self._bash_lock:
-                self._bash_state.streamed = False
+                live = self._bash_states.get(self._task_key())
+                if live is not None:
+                    live.streamed = False
             self.broadcast({"type": "text_end"})
             self._format_tool_call(str(content), kwargs.get("tool_input", {}))
             return ""
@@ -782,8 +849,12 @@ class JsonPrinter(Printer):
         self._flush_bash()
         show_result = tool_name != "finish"
         with self._bash_lock:
-            streamed = self._bash_state.streamed
-            self._bash_state.streamed = False
+            # Non-creating lookup: a tool result arriving after
+            # ``cleanup_task`` must not resurrect the freed state.
+            live = self._bash_states.get(self._task_key())
+            streamed = live.streamed if live is not None else False
+            if live is not None:
+                live.streamed = False
         result_content = "" if streamed else truncate_result(str(content))
         if show_result:
             event: dict[str, Any] = {

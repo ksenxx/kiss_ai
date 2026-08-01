@@ -69,10 +69,11 @@ def ensure_user_asset_from_default(
             prefix=f".{name}-", dir=str(user_path.parent),
         )
         try:
-            try:
-                os.write(fd, default_content.encode("utf-8"))
-            finally:
-                os.close(fd)
+            # A buffered file object (unlike a bare ``os.write``, whose
+            # partial-write return count was ignored) guarantees the
+            # whole default is written before the link publishes it.
+            with os.fdopen(fd, "wb") as f:
+                f.write(default_content.encode("utf-8"))
             os.link(tmp, user_path)
         except FileExistsError:
             return user_path

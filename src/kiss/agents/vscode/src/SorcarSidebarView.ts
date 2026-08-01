@@ -5,7 +5,6 @@
 
 import * as vscode from 'vscode';
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
 
 function isPathInside(target: string, root: string): boolean {
@@ -14,6 +13,25 @@ function isPathInside(target: string, root: string): boolean {
   if (tg === rt) return true;
   const rel = path.relative(rt, tg);
   return rel.length > 0 && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+/**
+ * Resolve *p* against *root* and return the resolved path only when it is
+ * a real file inside *root* — comparing REAL paths, so a symlink inside
+ * the workspace cannot smuggle in a file that actually lives outside it.
+ */
+function resolveWorkspaceFile(p: string, root: string): string | null {
+  try {
+    const resolved = path.resolve(root, p);
+    if (!isPathInside(resolved, root)) return null;
+    const real = fs.realpathSync(resolved);
+    const realRoot = fs.realpathSync(root);
+    if (!isPathInside(real, realRoot)) return null;
+    if (!fs.statSync(real).isFile()) return null;
+    return resolved;
+  } catch {
+    return null;
+  }
 }
 
 function isSilentDiscardMessage(message: string | undefined): boolean {
@@ -98,6 +116,7 @@ import {MergeManager} from './MergeManager';
 import {getDefaultModel} from './DependencyInstaller';
 import {buildChatHtml, readSampleTasks} from './SorcarTab';
 import {VoiceWakeService} from './voiceWake';
+import {kissHomeDir} from './userAssets';
 import {playVoiceAckClip} from './voiceAckPlayer';
 import {findInstallScript, kissAiRoot} from './installerPath';
 import {
@@ -167,6 +186,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   public readonly onCommitMessage = this._onCommitMessage.event;
   private _commitPendingTabs: Set<string> = new Set();
   private _worktreeDirs: Map<string, string> = new Map();
+  // Repository directory carried by each tab's merge_data payload; echoed
+  // back on the all-done mergeAction so the daemon's post-merge dirty-file
+  // scan runs against the tab's own repository.
+  private _mergeWorkDirs: Map<string, string> = new Map();
   private _worktreeActionResolves: Map<string, () => void> = new Map();
   private _worktreeProgresses: Map<
     string,
@@ -225,6 +248,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             setTimeout(() => {
               if (tabId !== undefined && resolveMap.get(tabId) === resolve) {
                 resolveMap.delete(tabId);
+                // Drop the progress object too: a late progress event must
+                // not report() into a toast that has already been closed.
+                if (progressMap.get(tabId) === progress) {
+                  progressMap.delete(tabId);
+                }
                 resolve();
               }
             }, timeoutMs);
@@ -266,10 +294,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     this._mergeManagers.set(tabId, mgr);
     mgr.on('allDone', () => {
       this._mergeManagers.delete(tabId);
+      const openedByMerge = new Set(mgr.openedFiles);
       mgr.dispose();
       this.sendMergeAllDone(tabId);
       this._restoreChain = this._restoreChain
-        .then(() => this._restorePreMergeEditors(tabId))
+        .then(() => this._restorePreMergeEditors(tabId, openedByMerge))
         .catch(err => {
           console.error(
             '[SorcarSidebarView] restorePreMergeEditors failed:',
@@ -344,6 +373,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       if (msg.type === 'merge_data') {
         const mergeTabId = msg.tabId;
         if (mergeTabId !== undefined && this._ownTabs.has(mergeTabId)) {
+          const mergeWorkDir = (msg.data as {work_dir?: string}).work_dir;
+          if (mergeWorkDir) {
+            this._mergeWorkDirs.set(mergeTabId, mergeWorkDir);
+          }
           const mgr = this._getOrCreateMergeManager(mergeTabId);
           this._restoreChain = this._restoreChain
             .then(async () => {
@@ -554,7 +587,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     return files;
   }
 
-  private async _restorePreMergeEditors(tabId: string): Promise<void> {
+  private async _restorePreMergeEditors(
+    tabId: string,
+    openedByMerge?: Set<string>,
+  ): Promise<void> {
     const snapshot = this._preMergeOpenFiles.get(tabId);
     this._preMergeOpenFiles.delete(tabId);
     if (!snapshot) return;
@@ -562,7 +598,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     for (const group of vscode.window.tabGroups.all) {
       for (const tab of group.tabs) {
         if (tab.input instanceof vscode.TabInputText) {
-          if (!snapshot.has(tab.input.uri.fsPath)) {
+          const fp = tab.input.uri.fsPath;
+          // Close only editors the merge review itself opened; anything
+          // the user opened during the review must stay open.
+          if (
+            !snapshot.has(fp) &&
+            (openedByMerge === undefined || openedByMerge.has(fp))
+          ) {
             tabsToClose.push(tab);
           }
         }
@@ -595,7 +637,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   private _sendRemoteUrl(): void {
-    const urlFile = path.join(os.homedir(), '.kiss', 'remote-url.json');
+    const urlFile = path.join(kissHomeDir(), 'remote-url.json');
     this._tryReadAndSendUrl(urlFile);
     this._watchUrlFile(urlFile);
   }
@@ -623,7 +665,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   private _getNtfyUrl(): string {
     try {
-      const topicFile = path.join(os.homedir(), '.kiss', 'ntfy_topic');
+      const topicFile = path.join(kissHomeDir(), 'ntfy_topic');
       const topic = fs.readFileSync(topicFile, 'utf-8').trim();
       if (topic) {
         return `https://ntfy.sh/${topic}`;
@@ -651,7 +693,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   private _checkConfigFile(): void {
-    const configFile = path.join(os.homedir(), '.kiss', 'config.json');
+    const configFile = path.join(kissHomeDir(), 'config.json');
     let pw: string;
     try {
       const data = JSON.parse(fs.readFileSync(configFile, 'utf-8'));
@@ -792,12 +834,8 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
         const trimmed = message.prompt.trim();
         if (trimmed && !trimmed.includes('\n')) {
-          const resolved = path.resolve(effectiveWorkDir, trimmed);
-          if (
-            isPathInside(resolved, effectiveWorkDir) &&
-            fs.existsSync(resolved) &&
-            fs.statSync(resolved).isFile()
-          ) {
+          const resolved = resolveWorkspaceFile(trimmed, effectiveWorkDir);
+          if (resolved) {
             const uri = vscode.Uri.file(resolved);
             const doc = await vscode.workspace.openTextDocument(uri);
             await vscode.window.showTextDocument(doc, {
@@ -858,13 +896,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
       case 'openFile':
         if (message.path) {
-          const wd = this._getWorkDir();
-          const filePath = path.resolve(wd, message.path);
-          if (
-            !isPathInside(filePath, wd) ||
-            !fs.existsSync(filePath) ||
-            !fs.statSync(filePath).isFile()
-          ) {
+          const wd = message.workDir || this._getWorkDir();
+          const filePath = resolveWorkspaceFile(message.path, wd);
+          if (!filePath) {
             console.warn(
               '[SorcarSidebarView] refusing to open file outside workspace:',
               message.path,
@@ -897,22 +931,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         // panel contents lazily: a path only becomes a clickable link
         // after this existence check confirms that clicking it would
         // actually open a file (same resolution rules as 'openFile').
-        const wd = this._getWorkDir();
+        const wd = message.workDir || this._getWorkDir();
         const results: Record<string, boolean> = {};
         const paths = Array.isArray(message.paths) ? message.paths : [];
         for (const p of paths) {
           if (typeof p !== 'string' || !p) continue;
-          const resolved = path.resolve(wd, p);
-          let exists = false;
-          try {
-            exists =
-              isPathInside(resolved, wd) &&
-              fs.existsSync(resolved) &&
-              fs.statSync(resolved).isFile();
-          } catch {
-            exists = false;
-          }
-          results[p] = exists;
+          results[p] = resolveWorkspaceFile(p, wd) !== null;
         }
         this._sendToWebview({
           type: 'pathsExist',
@@ -947,7 +971,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           : undefined;
         this._getApi().complete({
           query: message.query,
-          tabId: this._activeTabId || undefined,
+          tabId: message.tabId || this._activeTabId || undefined,
           activeFile: editorFile || undefined,
           activeFileContent: completeDoc?.getText(),
         });
@@ -1008,7 +1032,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       }
 
       case 'resolveDroppedPaths': {
-        const workDir = this._getWorkDir();
+        const workDir = message.workDir || this._getWorkDir();
         const paths = (message.uris || [])
           .map((uri: string) => {
             try {
@@ -1018,7 +1042,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
               return '';
             }
           })
-          .filter((p: string) => p && !p.startsWith('..'));
+          // On Windows path.relative() across drives returns an ABSOLUTE
+          // path that does not start with '..'; reject those too.
+          .filter(
+            (p: string) => p && !p.startsWith('..') && !path.isAbsolute(p),
+          );
         this._sendToWebview({type: 'droppedPaths', paths} as ToWebviewMessage);
         break;
       }
@@ -1097,11 +1125,38 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       case 'closeTab': {
         const closeTabId = message.tabId;
         if (closeTabId) {
+          this._cleanupTabResources(closeTabId);
           this._getApi().closeTab(closeTabId);
         }
         break;
       }
     }
+  }
+
+  /** Release every host-side resource owned by a closed tab. */
+  private _cleanupTabResources(tabId: string): void {
+    const mgr = this._mergeManagers.get(tabId);
+    if (mgr) {
+      this._mergeManagers.delete(tabId);
+      mgr.dispose();
+    }
+    this._runningTabs.delete(tabId);
+    this._commitPendingTabs.delete(tabId);
+    this._worktreeDirs.delete(tabId);
+    this._mergeWorkDirs.delete(tabId);
+    this._preMergeOpenFiles.delete(tabId);
+    const wtResolve = this._worktreeActionResolves.get(tabId);
+    if (wtResolve) {
+      this._worktreeActionResolves.delete(tabId);
+      wtResolve();
+    }
+    this._worktreeProgresses.delete(tabId);
+    const acResolve = this._autocommitActionResolves.get(tabId);
+    if (acResolve) {
+      this._autocommitActionResolves.delete(tabId);
+      acResolve();
+    }
+    this._autocommitProgresses.delete(tabId);
   }
 
   public runUpdate(): void {
@@ -1140,7 +1195,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   public sendMergeAllDone(tabId?: string): void {
-    this._getApi().mergeAction('all-done', tabId, this._getWorkDir());
+    const mergeWorkDir =
+      tabId !== undefined ? this._mergeWorkDirs.get(tabId) : undefined;
+    if (tabId !== undefined) this._mergeWorkDirs.delete(tabId);
+    this._getApi().mergeAction(
+      'all-done',
+      tabId,
+      mergeWorkDir || this._getWorkDir(),
+    );
   }
 
   public async submitTask(prompt: string): Promise<void> {
@@ -1162,7 +1224,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   public stopTask(): void {
-    this._sendToWebview({type: 'triggerStop'} as ToWebviewMessage);
+    if (this._view && this._webviewReady) {
+      this._sendToWebview({type: 'triggerStop'} as ToWebviewMessage);
+      return;
+    }
+    // No resolved webview to relay through — stop running tasks directly.
+    for (const tab of this._runningTabs) {
+      this._getApi().stop(tab);
+    }
   }
 
   public async focusChatInput(): Promise<void> {
@@ -1182,9 +1251,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   public async appendToInput(text: string): Promise<void> {
+    // Resolve/show the view first so the command also works before the
+    // sidebar has ever been opened (parity with submitTask).
+    await this.focusChatInput();
     if (this._view) {
-      this._view.show(true);
-      await new Promise(r => setTimeout(r, 150));
       this._sendToWebview({type: 'appendToInput', text});
     }
   }
@@ -1260,18 +1330,21 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
     return new Promise<void>(resolve => {
       let resolved = false;
+      // eslint-disable-next-line prefer-const
+      let cancelSub: vscode.Disposable | undefined;
       const done = () => {
         if (resolved) return;
         resolved = true;
         this._commitPendingTabs.delete(tabId);
         disposable.dispose();
+        cancelSub?.dispose();
         clearTimeout(timer);
         resolve();
       };
       const disposable = this._onCommitMessage.event(ev => {
         if ((ev.tabId ?? '') === tabId) done();
       });
-      token?.onCancellationRequested(() => done());
+      cancelSub = token?.onCancellationRequested(() => done());
       const timer = setTimeout(done, 30_000);
     });
   }

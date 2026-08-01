@@ -90,13 +90,87 @@ from kiss.server.tools_file import resolve_tools_file
 
 logger = logging.getLogger(__name__)
 
-_MAX_LINE_BYTES = 16 * 1024 * 1024
+_MAX_LINE_BYTES = 64 * 1024 * 1024
 """Read buffer limit for a single daemon event line.
 
 The daemon emits large single-line JSON events (e.g.
-``system_prompt`` carrying the full SYSTEM.md), so this mirrors the
-CLI client's generous 16 MiB cap.
+``system_prompt`` carrying the full SYSTEM.md), so this MUST match the
+daemon-side transport frame limit (``web_server._MAX_LINE_BYTES``, 64
+MiB).  A smaller client cap would split an oversized newline-delimited
+frame; each fragment is then discarded as invalid JSON, and when the
+oversized frame is the terminal ``result`` event the client would
+return an empty unsuccessful :class:`TaskResult` for a task that
+actually succeeded.
 """
+
+
+def _job_dir_is_contained(
+    job_dir: Path, discovered: dict[str, Path],
+) -> bool:
+    """Return whether *job_dir* resolves inside a recognized job root.
+
+    ``discover_job_dirs`` follows directory symlinks, so a
+    ``jobs/job_link`` entry pointing outside every ``.kiss.artifacts/jobs``
+    root would still appear in its result.  This guard resolves *job_dir*
+    and requires the resolved path to live directly beneath one of the
+    genuine job roots (the parent directories of the discovered entries),
+    rejecting symlinks that escape the tree.
+
+    Args:
+        job_dir: The candidate job directory from ``discover_job_dirs``.
+        discovered: The full ``discover_job_dirs`` mapping, whose values'
+            parents form the set of legitimate job roots.
+
+    Returns:
+        ``True`` when *job_dir* resolves to a direct child of a recognized
+        job root, ``False`` otherwise.
+    """
+    try:
+        resolved = job_dir.resolve()
+    except OSError:
+        return False
+    allowed_roots = set()
+    for entry in discovered.values():
+        try:
+            allowed_roots.add(entry.parent.resolve())
+        except OSError:
+            continue
+    return resolved.parent in allowed_roots
+
+
+def _trajectory_sort_key(trajectory: dict) -> float:
+    """Sort key for trajectories: ascending run start timestamp."""
+    value = trajectory.get("run_start_timestamp", 0)
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def _load_trajectories_from_dir(job_dir: Path) -> list[dict]:
+    """Load all trajectory YAML files directly from *job_dir*.
+
+    Mirrors ``kiss.viz_trajectory.server.load_job_trajectories`` but
+    reads from the ALREADY-authorized directory instead of re-resolving
+    the job name through ``find_job_dir`` — the re-resolution prefers
+    the primary root and follows symlinks, so it can select a different
+    (older or symlinked out-of-tree) directory than the one the caller
+    just validated against the discovery allow-list.
+
+    Args:
+        job_dir: The validated job directory to read.
+
+    Returns:
+        The parsed trajectory dicts sorted by ascending
+        ``run_start_timestamp``.
+    """
+    from kiss.viz_trajectory.server import _parse_trajectory_yaml
+
+    trajectories: list[dict] = []
+    for file_path in sorted((job_dir / "trajectories").glob("trajectory_*.yaml")):
+        try:
+            trajectories.append(_parse_trajectory_yaml(file_path))
+        except Exception:
+            logger.debug("Error loading %s", file_path, exc_info=True)
+    trajectories.sort(key=_trajectory_sort_key)
+    return trajectories
 
 
 @dataclass(frozen=True)
@@ -694,6 +768,25 @@ class ServerApi:
         try:
             for is_retry, timeout in ((False, 30), (True, 60)):
                 raw = await asyncio.wait_for(websocket.recv(), timeout=timeout)
+                # Re-check the lockout BEFORE comparing or accepting the
+                # submitted credential: a peer socket may have tripped
+                # the per-IP threshold while this already-admitted
+                # connection was waiting for the user's input.  Without
+                # this check, any number of sockets admitted while the
+                # failure count was below the limit could still redeem
+                # a guessed password after the lock engaged.
+                lock_remaining = backend._auth_lock_remaining(ip)
+                if lock_remaining > 0.0:
+                    logger.warning(
+                        "Auth rate-limit engaged while %s awaited "
+                        "credentials; closing socket", ip,
+                    )
+                    await websocket.send(json.dumps({
+                        "type": "auth_locked",
+                        "retry_after": math.ceil(lock_remaining),
+                    }))
+                    await websocket.close()
+                    return False
                 msg = json.loads(raw)
                 client_pw = msg.get("password", "")
                 if not isinstance(client_pw, str):
@@ -708,6 +801,26 @@ class ServerApi:
                     return False
                 if client_pw:
                     backend._record_auth_failure(ip)
+                # Re-check the lockout AFTER recording this failure so a
+                # wrong guess that crosses the brute-force threshold is
+                # denied its remaining attempt(s) immediately — including
+                # the concurrent case where several sockets were admitted
+                # together while the failure count was still below the
+                # limit.  Without this the single check before the loop
+                # could be bypassed by racing connections or a serial
+                # attempt that trips the threshold on its first guess.
+                lock_remaining = backend._auth_lock_remaining(ip)
+                if lock_remaining > 0.0:
+                    logger.warning(
+                        "Auth rate-limit tripped mid-handshake for %s; "
+                        "closing socket", ip,
+                    )
+                    await websocket.send(json.dumps({
+                        "type": "auth_locked",
+                        "retry_after": math.ceil(lock_remaining),
+                    }))
+                    await websocket.close()
+                    return False
                 if not is_retry:
                     await websocket.send(json.dumps({"type": "auth_required"}))
             await websocket.send(
@@ -1061,19 +1174,43 @@ class ServerApi:
             when the job directory does not exist.
         """
         from kiss.server import web_server as _ws
+        from kiss.viz_trajectory.server import discover_job_dirs
 
         job_name = path[len("/api/jobs/") : -len("/trajectories")]
-        if "/" in job_name or "\\" in job_name or ".." in job_name:
+        # Reject the empty segment and path separators/NUL; a harmless
+        # ``..`` SUBSTRING (e.g. the legal name ``job_a..b``, which the
+        # listing exposes) is fine because authorization below is exact
+        # membership in the discovered allow-list, not path arithmetic.
+        if (
+            not job_name
+            or "/" in job_name
+            or "\\" in job_name
+            or "\x00" in job_name
+            or job_name in (".", "..")
+        ):
             return (400, "application/json", b'{"error": "Invalid job name"}')
         jobs_root = _ws.get_jobs_root()
-        if _ws.find_job_dir(jobs_root, job_name) is None:
+        # Authorize against the SAME allow-list the ``/api/jobs`` listing
+        # exposes (``discover_job_dirs`` — only ``job_*`` directories under a
+        # recognized ``.kiss.artifacts/jobs`` root).  Using ``find_job_dir``
+        # here would additionally accept any child directory of the primary
+        # root and follow directory symlinks pointing outside every job root,
+        # disclosing unlisted or out-of-tree data and disagreeing with the
+        # listing endpoint.
+        discovered = discover_job_dirs(jobs_root)
+        job_dir = discovered.get(job_name)
+        if job_dir is None or not _job_dir_is_contained(job_dir, discovered):
             body = json.dumps(
                 {"error": f"Job '{job_name}' not found"}
             ).encode("utf-8")
             return (404, "application/json", body)
-        body = json.dumps(
-            _ws.load_job_trajectories(jobs_root, job_name)
-        ).encode("utf-8")
+        # Load from the ALREADY-validated directory.  Passing
+        # ``(root, name)`` through ``load_job_trajectories`` would
+        # re-resolve the name via ``find_job_dir`` (primary-root
+        # preference, follows symlinks), discarding the containment
+        # check above and reintroducing the TOCTOU/duplicate-selection
+        # bypass it exists to prevent.
+        body = json.dumps(_load_trajectories_from_dir(job_dir)).encode("utf-8")
         return (200, "application/json", body)
 
 
@@ -1160,6 +1297,7 @@ def run(
     tab_id = f"api-{uuid.uuid4().hex}"
     deadline = time.monotonic() + timeout
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    reader: Any = None
     try:
         sock.settimeout(min(timeout, 10.0))
         try:
@@ -1208,6 +1346,17 @@ def run(
                     "The sorcar daemon closed the connection before the "
                     "task finished"
                 )
+            if len(line) >= _MAX_LINE_BYTES and not line.endswith(b"\n"):
+                # ``readline(size)`` returned a full-size chunk with no
+                # terminating newline: the daemon sent a frame larger
+                # than the client cap.  Silently skipping the fragments
+                # would discard a possibly terminal ``result`` event
+                # and misreport the task as failed — fail loudly
+                # instead.
+                raise ConnectionError(
+                    "The sorcar daemon sent an event frame larger than "
+                    f"the {_MAX_LINE_BYTES}-byte client limit"
+                )
             try:
                 event = json.loads(line.decode("utf-8"))
             except (json.JSONDecodeError, UnicodeDecodeError):
@@ -1227,6 +1376,16 @@ def run(
                 elif started:
                     return _to_task_result(result_event, chat_id, task_id)
     finally:
+        # ``sock.makefile()`` holds an independent reference to the
+        # socket descriptor, so closing only the socket object leaves
+        # the buffered reader (and its multi-MiB buffer) alive whenever
+        # a caller retains a raised exception whose traceback pins this
+        # frame.  Close the reader first so the peer promptly sees EOF.
+        try:
+            if reader is not None:
+                reader.close()
+        except OSError:
+            pass
         try:
             sock.close()
         except OSError:

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import queue
 import threading
@@ -151,6 +152,35 @@ def _coerce_id(value: object) -> str | None:
     return None
 
 
+def _safe_start_ms(value: object) -> int:
+    """Convert a persisted ``timestamp`` (seconds) to epoch milliseconds.
+
+    SQLite's dynamic typing lets the non-STRICT ``REAL NOT NULL``
+    timestamp column hold TEXT or non-finite floats in hand-edited or
+    third-party-corrupted rows.  A raw ``int(float(value) * 1000)``
+    raises ``ValueError``/``TypeError`` on such text and ``OverflowError``
+    on infinity, which would abort the entire history response.  This
+    helper degrades a single corrupt timestamp to ``0`` instead.
+
+    Args:
+        value: The raw ``timestamp`` value read from a history row.
+
+    Returns:
+        Epoch milliseconds as an ``int``, or ``0`` when *value* is
+        missing, non-numeric, or non-finite.
+    """
+    try:
+        seconds = float(value or 0)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+    if not math.isfinite(seconds):
+        return 0
+    try:
+        return int(seconds * 1000)
+    except (OverflowError, ValueError):
+        return 0
+
+
 def _coalesced_replay_events(events: object) -> list[dict[str, Any]]:
     """Coalesce a persisted event list for a replay broadcast.
 
@@ -254,9 +284,19 @@ def broadcast_to_conn(
 def _subagent_is_done(sub_task_id: Any) -> bool:
     """True when the sub-agent owning *sub_task_id* is no longer running.
 
-    Decided from the task-id-keyed :attr:`ChatSorcarAgent.running_agents`
-    map: presence under the sub-agent's own task id means its thread is
-    still running; absence means it finished.
+    Consults BOTH registries that track a live run, each under its own
+    lock, because they are updated at different moments of the task
+    lifecycle (S3-09): the agent publishes its ``task_history`` row
+    before inserting itself into
+    :attr:`ChatSorcarAgent.running_agents`, and at shutdown it pops
+    that map before the per-tab :class:`_RunningAgentState` is
+    unregistered.  Checking only the map therefore reported a task as
+    done during the startup gap while :meth:`_reattach_running_chat`
+    (which scans live ``_RunningAgentState`` entries) simultaneously
+    reattached it as running.  A task is considered running when its
+    id is in the map OR a live tab state (alive worker thread or
+    ``is_task_active``) owns the same task id — the same liveness
+    predicate reattachment uses.
 
     Args:
         sub_task_id: The sub-agent's ``task_history`` row id (any type;
@@ -267,11 +307,19 @@ def _subagent_is_done(sub_task_id: Any) -> bool:
     """
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-    return not (
-        isinstance(sub_task_id, str)
-        and sub_task_id
-        and sub_task_id in ChatSorcarAgent.running_agents
-    )
+    if not (isinstance(sub_task_id, str) and sub_task_id):
+        return True
+    with ChatSorcarAgent._running_agents_lock:
+        if sub_task_id in ChatSorcarAgent.running_agents:
+            return False
+    with _RunningAgentState._registry_lock:
+        for tab in _RunningAgentState.running_agent_states.values():
+            if _live_task_id(tab) != sub_task_id:
+                continue
+            alive = tab.task_thread is not None and tab.task_thread.is_alive()
+            if alive or tab.is_task_active:
+                return False
+    return True
 
 
 class VSCodeServer(
@@ -710,10 +758,7 @@ class VSCodeServer(
                 "is_worktree": False,
                 "is_parallel": False,
                 "auto_commit_mode": False,
-                "startTs": int(
-                    float(entry.get("timestamp", 0) or 0)  # type: ignore[arg-type]
-                    * 1000
-                ),
+                "startTs": _safe_start_ms(entry.get("timestamp", 0)),
                 "endTs": 0,
             }
             extra_raw = str(entry.get("extra", "") or "")
@@ -729,6 +774,11 @@ class VSCodeServer(
                         pid = _coerce_id(sub.get("parent_task_id"))
                         if pid is not None:
                             session["parent_task_id"] = pid
+                    # ``OverflowError`` must be caught alongside the
+                    # usual coercion errors: Python's JSON parser
+                    # accepts ``Infinity``/huge numbers in hand-edited
+                    # ``extra`` payloads and one corrupt row must not
+                    # abort the entire history response (S3-13/R7).
                     for key, cast, default in (
                         ("tokens", int, 0),
                         ("cost", float, 0.0),
@@ -736,11 +786,11 @@ class VSCodeServer(
                     ):
                         try:
                             session[key] = cast(extra_obj.get(key, default) or default)
-                        except (TypeError, ValueError):
+                        except (TypeError, ValueError, OverflowError):
                             session[key] = default
                     try:
                         session["endTs"] = int(extra_obj.get("endTs", 0) or 0)
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
                         session["endTs"] = 0
                     session["is_favorite"] = bool(extra_obj.get("is_favorite", False))
                     wd_raw = extra_obj.get("work_dir", "")
@@ -756,7 +806,7 @@ class VSCodeServer(
                         start_ts_raw = extra_obj.get("startTs", 0)
                         if start_ts_raw:
                             session["startTs"] = int(start_ts_raw)
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
                         pass
             if session.get("is_running") and entry_id is not None:
                 self._overlay_live_metrics(session, entry_id)
@@ -1474,6 +1524,23 @@ class VSCodeServer(
                     )
             except Exception:  # pragma: no cover — LLM API error handler
                 logger.debug("Async followup generation failed", exc_info=True)
+            finally:
+                # The task's subscriber set was kept alive (a bounded
+                # linger) solely so this broadcast could still fan out
+                # after ``cleanup_task``.  The follow-up is the last
+                # post-task event, so release the lease as soon as it
+                # is delivered (or failed) instead of waiting out the
+                # full linger.
+                if owner_task_key is not None:
+                    try:
+                        self.printer.cleanup_task(
+                            owner_task_key, subscriber_linger_seconds=0,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Follow-up subscriber release failed",
+                            exc_info=True,
+                        )
 
         threading.Thread(target=_run, daemon=True).start()
 

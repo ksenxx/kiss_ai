@@ -400,10 +400,35 @@ def _snapshot_files(work_dir: str, fnames: set[str]) -> dict[str, str]:
     for fname in fnames:
         fpath = Path(work_dir) / fname
         try:
-            result[fname] = hashlib.md5(fpath.read_bytes()).hexdigest()
+            result[fname] = _hash_path_identity(fpath)
         except OSError:
             logger.debug("Exception caught", exc_info=True)
     return result
+
+
+def _hash_path_identity(fpath: Path) -> str:
+    """Return an MD5 identity hash of *fpath* (symlink-aware).
+
+    For a symlink, hashes the link IDENTITY (its target string), not
+    the bytes behind it (F4-27): retargeting the link must register
+    as a change, and a change to the target's content must not.
+    Regular files hash their content.
+
+    Args:
+        fpath: Path to hash.
+
+    Returns:
+        Hex MD5 digest.
+
+    Raises:
+        OSError: When the path cannot be read.
+    """
+    if fpath.is_symlink():
+        target = os.readlink(fpath)
+        return hashlib.md5(
+            b"symlink\x00" + target.encode("utf-8", "surrogateescape"),
+        ).hexdigest()
+    return hashlib.md5(fpath.read_bytes()).hexdigest()
 
 
 def _safe_tab_component(tab_id: str) -> str:
@@ -513,6 +538,15 @@ def _save_untracked_base(
         for fname in sorted(files):
             fpath = Path(work_dir) / fname
             try:
+                if fpath.is_symlink():
+                    # Preserve the symlink ITSELF (F4-27): copying
+                    # through the link would snapshot the target's
+                    # bytes, and a later reject would then replace
+                    # the user's symlink with a regular file.
+                    dest = staging / fname
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    os.symlink(os.readlink(fpath), dest)
+                    continue
                 if not fpath.is_file() or fpath.stat().st_size > 2_000_000:  # pragma: no cover
                     continue
                 dest = staging / fname
@@ -691,6 +725,38 @@ def _agent_file_hunks(
     return _file_as_new_hunks(fpath)
 
 
+def _artifact_path(root: Path, fname: str) -> Path:
+    """Return a collision-safe artifact path for *fname* under *root*.
+
+    Normally ``root / fname``.  When the agent replaced a tracked file
+    with a directory (or vice versa, F4-26), the deleted file's
+    artifact and the new descendants' artifacts collide (``root/node``
+    cannot be both a file and a directory); the loser falls back to a
+    flat hashed name under ``root/.flat/``.  The manifest stores the
+    absolute path, so consumers are location-agnostic.
+
+    Args:
+        root: Artifact root directory (merge-temp or .deleted).
+        fname: Relative workspace path of the reviewed file.
+
+    Returns:
+        A path whose parent directory exists and which is not a
+        directory itself.
+    """
+    p = root / fname
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if p.is_dir():
+            raise FileExistsError(str(p))
+    except (FileExistsError, NotADirectoryError):
+        digest = hashlib.md5(
+            fname.encode("utf-8", "surrogatepass"),
+        ).hexdigest()
+        p = root / ".flat" / digest
+        p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
 def _write_base_copy(
     work_dir: str,
     merge_dir: Path,
@@ -715,10 +781,14 @@ def _write_base_copy(
     Returns:
         The path of the written base copy inside *merge_dir*.
     """
-    base_path = merge_dir / fname
-    base_path.parent.mkdir(parents=True, exist_ok=True)
+    base_path = _artifact_path(merge_dir, fname)
     saved_base = ub_dir / fname
-    if saved_base.is_file():
+    if saved_base.is_symlink():
+        # Preserve symlink identity in the base copy (F4-27).
+        if base_path.is_symlink() or base_path.exists():
+            base_path.unlink()
+        os.symlink(os.readlink(saved_base), base_path)
+    elif saved_base.is_file():
         shutil.copy2(saved_base, base_path)
     else:
         bin_result = _git_bytes(work_dir, "show", f"{base_ref}:{fname}")
@@ -804,7 +874,7 @@ def _prepare_merge_view(
         if pre_file_hashes is None or fname not in pre_file_hashes:
             return True
         try:
-            cur = hashlib.md5((Path(work_dir) / fname).read_bytes()).hexdigest()
+            cur = _hash_path_identity(Path(work_dir) / fname)
         except OSError:
             return True
         return cur != pre_file_hashes[fname]
@@ -814,8 +884,13 @@ def _prepare_merge_view(
         if not _file_changed(fname):
             continue
         fpath = Path(work_dir) / fname
-        if fpath.is_dir():
-            continue
+        # A tracked file replaced by a DIRECTORY is deliberately NOT
+        # skipped (F4-26): git reports the file's deletion in the
+        # diff, and hiding it would make the deletion invisible and
+        # unrejectable.  It flows through like a deleted file (a
+        # ``.deleted`` placeholder becomes the "current" side); real
+        # submodule paths are filtered below via their 160000 base
+        # mode.
         if not hunks:
             binary_files.add(fname)
             continue
@@ -825,16 +900,28 @@ def _prepare_merge_view(
         elif fpath.is_file() and _is_binary_file(fpath):
             binary_files.add(fname)
     new_files = _capture_untracked(work_dir) - pre_untracked
+    created_files: set[str] = set()
     for fname in new_files:
         fpath = Path(work_dir) / fname
+        if fpath.is_symlink() and not fpath.is_file():
+            # A new broken or directory-target symlink (F4-28):
+            # ``is_file()`` follows the link and returns False, so
+            # without this branch the path is dropped from review
+            # entirely even though git reports it untracked.
+            binary_files.add(fname)
+            created_files.add(fname)
+            continue
         if fpath.is_file() and _is_binary_file(fpath):
             binary_files.add(fname)
+            created_files.add(fname)
             continue
         filtered = _file_as_new_hunks(fpath)
         if filtered:
             file_hunks[fname] = filtered
+            created_files.add(fname)
         elif fpath.is_file():
             binary_files.add(fname)
+            created_files.add(fname)
     if pre_file_hashes:
         for fname in pre_untracked:
             if fname in file_hunks or fname in binary_files:
@@ -844,6 +931,17 @@ def _prepare_merge_view(
             if not _file_changed(fname):
                 continue
             fpath = Path(work_dir) / fname
+            if (ub_dir / fname).is_symlink():
+                # The pre-task base is a SYMLINK (F4-27 residual): a
+                # deleted or retargeted pre-task symlink must reach
+                # review as a link-identity change.  Content-diffing
+                # is meaningless here (the saved link is broken
+                # relative to ub_dir and a deleted path has no
+                # content), so route it to the binary/link path; the
+                # link_targets pass below attaches the pre-task
+                # target for reject to restore.
+                binary_files.add(fname)
+                continue
             if fpath.is_file() and _is_binary_file(fpath):
                 binary_files.add(fname)
                 continue
@@ -851,6 +949,19 @@ def _prepare_merge_view(
             if filtered:
                 file_hunks[fname] = filtered
     link_targets: dict[str, str] = {}
+    # A saved pre-task base that is itself a symlink (F4-27) takes
+    # precedence over any git blob: the user's pre-task link identity
+    # (its target string) is what a reject must restore, not the git
+    # baseline's target and not the target's file content.
+    for fname in set(file_hunks) | set(binary_files):
+        saved = ub_dir / fname
+        if saved.is_symlink():
+            try:
+                link_targets[fname] = os.readlink(saved)
+            except OSError:  # pragma: no cover — unreadable saved link
+                continue
+            file_hunks.pop(fname, None)
+            binary_files.add(fname)
     base_modes = _base_modes(
         work_dir, base_ref, set(file_hunks) | binary_files,
     )
@@ -859,7 +970,7 @@ def _prepare_merge_view(
             file_hunks.pop(fname, None)
             binary_files.discard(fname)
     for fname, mode in base_modes.items():
-        if mode != "120000":
+        if mode != "120000" or fname in link_targets:
             continue
         blob = _git_bytes(work_dir, "show", f"{base_ref}:{fname}")
         if blob.returncode != 0:
@@ -882,9 +993,9 @@ def _prepare_merge_view(
         target_path = Path(work_dir) / fname
         current_path = target_path
         if not current_path.is_file():
-            deleted_dir = merge_dir / ".deleted"
-            deleted_placeholder = deleted_dir / fname
-            deleted_placeholder.parent.mkdir(parents=True, exist_ok=True)
+            deleted_placeholder = _artifact_path(
+                merge_dir / ".deleted", fname,
+            )
             deleted_placeholder.write_text("", encoding="utf-8")
             current_path = deleted_placeholder
         base_path = _write_base_copy(
@@ -897,6 +1008,11 @@ def _prepare_merge_view(
             "target": str(target_path),
             "hunks": fh,
         }
+        if fname in created_files:
+            # Agent-created file (F4-25): its "base" is a synthetic
+            # empty file that never existed pre-task, so a full
+            # reject must REMOVE the path, not write an empty file.
+            text_entry["created"] = True
         exec_state = _base_exec_state(ub_dir, base_modes, fname)
         if exec_state is not None:
             text_entry["exec"] = exec_state
@@ -905,8 +1021,9 @@ def _prepare_merge_view(
         target_path = Path(work_dir) / fname
         current_path = target_path
         if not current_path.is_file():
-            deleted_placeholder = merge_dir / ".deleted" / fname
-            deleted_placeholder.parent.mkdir(parents=True, exist_ok=True)
+            deleted_placeholder = _artifact_path(
+                merge_dir / ".deleted", fname,
+            )
             deleted_placeholder.write_bytes(b"")
             current_path = deleted_placeholder
         base_path = _write_base_copy(
@@ -920,6 +1037,8 @@ def _prepare_merge_view(
             "hunks": [{"bs": 0, "bc": 0, "cs": 0, "cc": 0}],
             "binary": True,
         }
+        if fname in created_files:
+            entry["created"] = True
         if fname in link_targets:
             entry["link_target"] = link_targets[fname]
         else:

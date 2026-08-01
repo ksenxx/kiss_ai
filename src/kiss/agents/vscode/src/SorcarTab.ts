@@ -172,6 +172,16 @@ function mediaAssetVersion(extensionUri: vscode.Uri, name: string): string {
   return crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 16);
 }
 
+/** Escape a string for interpolation into an HTML text position. */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 export function buildChatHtml(
   webview: vscode.Webview,
   extensionUri: vscode.Uri,
@@ -228,7 +238,9 @@ export function buildChatHtml(
     BODY_CLASS_ATTR: '',
     INPUT_PLACEHOLDER: placeholder,
     ENTERKEYHINT: '',
-    MODEL_NAME: selectedModel,
+    // The model name can come from user settings or the daemon; escape it
+    // so a crafted value cannot inject markup into the privileged webview.
+    MODEL_NAME: escapeHtml(selectedModel),
     VERSION_SUFFIX: version ? ' ' + version : '',
     AUTH_MODAL: '',
     NONCE_ATTR: ` nonce="${nonce}"`,

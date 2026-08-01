@@ -140,7 +140,10 @@ def _atomic_publish(target: Path, write_tmp: Callable[[Path], object]) -> None:
         write_tmp: Callable that writes the content to the temp path.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    tmp = target.with_name(
+        f"{target.name}.{os.getpid()}.{threading.get_ident()}."
+        f"{uuid.uuid4().hex[:8]}.tmp",
+    )
     try:
         write_tmp(tmp)
         tmp.replace(target)
@@ -501,6 +504,12 @@ _HEAD_200 = (
     b"\r\n"
 )
 
+# Cap on the bytes buffered while waiting for the first CRLF of an
+# incoming request line.  Matches the conventional HTTP request-line
+# limit; anything longer is fed to the websockets parser (which
+# rejects it) instead of being buffered without bound (F4-08).
+_MAX_HEAD_LINE_BYTES = 8192
+
 
 class _HeadAwareServerConnection(ServerConnection):
     """``ServerConnection`` subclass that handles HEAD health checks.
@@ -543,6 +552,15 @@ class _HeadAwareServerConnection(ServerConnection):
         self._head_buffer += data
         idx = self._head_buffer.find(b"\r\n")
         if idx == -1:
+            if len(self._head_buffer) > _MAX_HEAD_LINE_BYTES:
+                # An unauthenticated peer sent an over-long first
+                # request line; stop buffering (which would otherwise
+                # grow without bound) and hand everything to the
+                # websockets HTTP parser, whose own limits reject it.
+                self._head_checked = True
+                buffered = self._head_buffer
+                self._head_buffer = b""
+                super().data_received(buffered)
             return
         self._head_checked = True
         first_line = self._head_buffer[:idx]
@@ -1189,8 +1207,7 @@ def _save_url_file(
     data: dict[str, str] = {"local": local_url}
     if tunnel_url:
         data["tunnel"] = tunnel_url
-    url_file.parent.mkdir(parents=True, exist_ok=True)
-    url_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    _atomic_write_text(url_file, json.dumps(data, indent=2) + "\n")
 
 
 def _remove_url_file(url_file: Path) -> None:
@@ -1687,16 +1704,47 @@ def _create_ssl_context(
         tls_dir = _tls_dir()
         cert_path = tls_dir / "cert.pem"
         key_path = tls_dir / "key.pem"
-        if not cert_path.is_file() or not key_path.is_file():
-            logger.info("Generating self-signed TLS certificate in %s", tls_dir)
-            _generate_self_signed_cert(cert_path, key_path)
-        elif _self_signed_cert_needs_renewal(cert_path):
-            logger.info(
-                "Self-signed TLS certificate %s is expired or "
-                "expiring within 30 days; regenerating",
-                cert_path,
-            )
-            _generate_self_signed_cert(cert_path, key_path)
+        # Serialise sibling daemons with an exclusive file lock: the
+        # check-then-generate sequence and the pair publication are
+        # not atomic, so two concurrent processes could otherwise
+        # publish (or load) a mismatched cert/key pair (F4-10).
+        import fcntl
+
+        tls_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = tls_dir / ".tls.lock"
+        with open(lock_path, "w", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            if not cert_path.is_file() or not key_path.is_file():
+                logger.info(
+                    "Generating self-signed TLS certificate in %s", tls_dir,
+                )
+                _generate_self_signed_cert(cert_path, key_path)
+            elif _self_signed_cert_needs_renewal(cert_path):
+                logger.info(
+                    "Self-signed TLS certificate %s is expired or "
+                    "expiring within 30 days; regenerating",
+                    cert_path,
+                )
+                _generate_self_signed_cert(cert_path, key_path)
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+            try:
+                ctx.load_cert_chain(str(cert_path), str(key_path))
+            except ssl.SSLError:
+                # Crash-consistent pair publish (F4-10 residual): a
+                # daemon that died between writing the key and the
+                # cert leaves a mismatched pair on disk that every
+                # future load would reject.  Self-heal under the
+                # lock: regenerate the pair and load the fresh one.
+                logger.warning(
+                    "Auto-generated TLS cert/key pair in %s is "
+                    "mismatched or corrupt; regenerating", tls_dir,
+                )
+                _generate_self_signed_cert(cert_path, key_path)
+                ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+                ctx.load_cert_chain(str(cert_path), str(key_path))
+            return ctx
 
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
@@ -3343,6 +3391,7 @@ class RemoteAccessServer:
         self._pending_tab_closes: dict[str, asyncio.TimerHandle] = {}
         self._pending_tab_closes_lock = threading.Lock()
         self._pending_close_tasks: set[asyncio.Task[None]] = set()
+        self._uds_handler_tasks: set[asyncio.Task[None]] = set()
         self._printer._merge_state_callback = self._register_merge_state
         self._active_url: str | None = None
         self._last_ips: frozenset[str] = frozenset()
@@ -3351,8 +3400,18 @@ class RemoteAccessServer:
         self._auth_failures: dict[str, list[float]] = {}
         self._install_root: Path = _KISS_AI_ROOT
         self._update_log_path: Path = _kiss_home_dir() / "update.log"
-        self._cli_running_tasks: set[str] = set()
+        self._update_proc: subprocess.Popen[bytes] | None = None
+        self._update_starting = False
+        # tab_id -> conn_id of the most recent live connection that
+        # used the tab.  Guarded by _pending_tab_closes_lock.  A stale
+        # connection's disconnect sweep must not arm a close timer for
+        # a tab that a replacement connection has claimed (F4-01).
+        self._tab_conn_owners: dict[str, str] = {}
+        # task_id -> number of live connections that announced it.
+        self._cli_running_tasks: dict[str, int] = {}
         self._cli_running_lock = threading.Lock()
+        self._lifecycle_lock = asyncio.Lock()
+        self._uds_inode: int | None = None
         self._vscode_server.set_cli_running_lookup(self._is_cli_task_running)
         self._vscode_server.set_cli_running_task_ids_lookup(
             self._snapshot_cli_running_task_ids,
@@ -3387,27 +3446,52 @@ class RemoteAccessServer:
         ``cli_tasks`` set so :meth:`_uds_handler` can clean it up if
         the CLI process disconnects without sending a matching
         ``cliTaskEnd`` (Ctrl+C, crash, abrupt termination).
+
+        :attr:`_cli_running_tasks` is a per-task-id refcount of live
+        announcing connections (F4-12): during a reconnect overlap the
+        old and the replacement connection both own the task id, and
+        the old connection's end/disconnect must not clear the global
+        running state out from under the live owner.
         """
+        cli_tasks = conn_state.setdefault("cli_tasks", set())
+        if task_id in cli_tasks:
+            return
+        cli_tasks.add(task_id)
         with self._cli_running_lock:
-            self._cli_running_tasks.add(task_id)
-        conn_state.setdefault("cli_tasks", set()).add(task_id)
+            self._cli_running_tasks[task_id] = (
+                self._cli_running_tasks.get(task_id, 0) + 1
+            )
 
     def _handle_cli_task_end(self, task_id: str, conn_state: dict[str, Any]) -> None:
-        """Mark *task_id* as no longer running and stop the indicator.
+        """Mark one connection's claim on *task_id* as ended.
 
-        Drops the task id from :attr:`_cli_running_tasks` and from
-        the connection's per-conn ``cli_tasks`` set, then broadcasts
-        a ``status:running=false`` event to every webview tab
-        currently subscribed to the task id so the
-        blinking-green-circle "running" indicator stops on the tab
-        title.
+        Decrements the task's refcount in :attr:`_cli_running_tasks`
+        when this connection had announced it; only when the count
+        reaches zero (no other live connection still owns the task)
+        is the task dropped and a ``status:running=false`` event
+        broadcast to subscribed webview tabs (F4-12).  An end from a
+        connection that never announced the task (e.g. a reconnected
+        CLI finishing a task it announced on a previous connection)
+        authoritatively clears the task.
         """
-        with self._cli_running_lock:
-            self._cli_running_tasks.discard(task_id)
         cli_tasks = conn_state.get("cli_tasks")
-        if isinstance(cli_tasks, set):
+        owned = isinstance(cli_tasks, set) and task_id in cli_tasks
+        if owned:
+            assert isinstance(cli_tasks, set)
             cli_tasks.discard(task_id)
-        self._fanout_cli_status(task_id, running=False)
+        still_running = False
+        with self._cli_running_lock:
+            if owned:
+                count = self._cli_running_tasks.get(task_id, 0) - 1
+                if count > 0:
+                    self._cli_running_tasks[task_id] = count
+                    still_running = True
+                else:
+                    self._cli_running_tasks.pop(task_id, None)
+            else:
+                self._cli_running_tasks.pop(task_id, None)
+        if not still_running:
+            self._fanout_cli_status(task_id, running=False)
 
     def _sweep_stale_cli_tasks(self, conn_state: dict[str, Any]) -> None:
         """End every CLI task still registered on a dropped connection.
@@ -3644,7 +3728,56 @@ class RemoteAccessServer:
             None, self._vscode_server._handle_command, cmd,
         )
 
-    def _schedule_tab_close(self, tab_id: str) -> None:
+    def _claim_tab(self, tab_id: str, conn_id: str) -> None:
+        """Record *conn_id* as the current live owner of *tab_id*.
+
+        Called on every dispatched command that names a tab, and on
+        the ``ready`` claim path.  Ownership decides whether a
+        dropping connection may arm the deferred ``closeTab`` timer
+        for the tab (F4-01): a stale connection that lost the tab to
+        a live replacement must not tear the tab's backend state
+        down.
+        """
+        if not tab_id or not conn_id:
+            return
+        with self._pending_tab_closes_lock:
+            prev_owner = self._tab_conn_owners.get(tab_id)
+            self._tab_conn_owners[tab_id] = conn_id
+            if prev_owner == conn_id:
+                return
+            # Ownership moved to a new live connection: atomically
+            # cancel any close timer armed by the previous owner's
+            # disconnect (same lock as the arm path, so a stale
+            # disconnect cannot re-arm in between).
+            handle = self._pending_tab_closes.pop(tab_id, None)
+        if handle is not None:
+            try:
+                handle.cancel()
+            except Exception:
+                logger.debug(
+                    "Cancel of pending close on tab reclaim failed",
+                    exc_info=True,
+                )
+
+    def _schedule_owned_tab_closes(
+        self, tabs_seen: set[str], conn_state: dict[str, Any],
+    ) -> None:
+        """Arm deferred closes for the dropped connection's own tabs.
+
+        Shared by the ``finally`` blocks of :meth:`_ws_handler` and
+        :meth:`_uds_handler`.  Skips any tab a live replacement
+        connection has since claimed (F4-01) — the replacement's own
+        disconnect will arm the timer when it really drops.
+        """
+        if self._shutdown_initiated:
+            return
+        conn_id = str(conn_state.get("conn_id", ""))
+        for tab in tabs_seen:
+            self._schedule_tab_close(tab, owner_conn_id=conn_id)
+
+    def _schedule_tab_close(
+        self, tab_id: str, owner_conn_id: str | None = None,
+    ) -> None:
         """Schedule a deferred ``closeTab`` for *tab_id* after a grace period.
 
         Called from :meth:`_ws_handler`'s ``finally`` block whenever a
@@ -3673,6 +3806,15 @@ class RemoteAccessServer:
         if loop is None or not loop.is_running():
             return
         with self._pending_tab_closes_lock:
+            if owner_conn_id is not None and (
+                self._tab_conn_owners.get(tab_id, owner_conn_id)
+                != owner_conn_id
+            ):
+                # Ownership check and timer arming under ONE lock
+                # acquisition (F4-01): a replacement connection that
+                # claimed the tab must not have its tab torn down by
+                # this stale disconnect.
+                return
             existing = self._pending_tab_closes.pop(tab_id, None)
             if existing is not None:
                 try:
@@ -3734,18 +3876,18 @@ class RemoteAccessServer:
         """
         with self._pending_tab_closes_lock:
             self._pending_tab_closes.pop(tab_id, None)
+            self._tab_conn_owners.pop(tab_id, None)
         if self._loop is None or not self._loop.is_running():
             return
-        merge_state = self._pop_merge_state(tab_id)
         task = asyncio.ensure_future(
-            self._finish_merge_and_close_tab(tab_id, merge_state),
+            self._finish_merge_and_close_tab(tab_id),
             loop=self._loop,
         )
         self._pending_close_tasks.add(task)
         task.add_done_callback(self._pending_close_tasks.discard)
 
     async def _finish_merge_and_close_tab(
-        self, tab_id: str, merge_state: _WebMergeState | None,
+        self, tab_id: str, merge_state: _WebMergeState | None = None,
     ) -> None:
         """End an in-flight merge review (if any) and close *tab_id*.
 
@@ -3763,11 +3905,26 @@ class RemoteAccessServer:
         worktree, and the subsequent ``closeTab`` disposes the
         backend tab instead of leaking it forever.
 
+        The merge state is popped UNDER the tab's merge-action lock
+        (F4-07): an in-flight reject holds that lock across
+        executor-backed file rewrites, and removing the state (and the
+        lock-map entry) without waiting would let the reject resume
+        against detached state while the merge artifacts are being
+        cleaned up.
+
         Args:
             tab_id: The frontend tab identifier being closed.
-            merge_state: The web-side merge state popped for the tab,
-                or ``None`` when no review was in flight.
+            merge_state: A merge state the caller already popped
+                (``ServerApi.close_tab``), or ``None`` to pop it here
+                under the action lock.
         """
+        if merge_state is None:
+            lock = await self._acquire_merge_action_lock(tab_id)
+            if lock is not None:
+                try:
+                    merge_state = self._pop_merge_state(tab_id)
+                finally:
+                    lock.release()
         if merge_state is not None:
             await self._run_cmd({
                 "type": "mergeAction",
@@ -3820,8 +3977,7 @@ class RemoteAccessServer:
         except Exception:
             logger.debug("WS handler error", exc_info=True)
         finally:
-            for tab in tabs_seen:
-                self._schedule_tab_close(tab)
+            self._schedule_owned_tab_closes(tabs_seen, conn_state)
             self._sweep_stale_cli_tasks(conn_state)
             self._vscode_server.drop_connection_state(conn_state["conn_id"])
             self._printer.unbind_conn(conn_state["conn_id"])
@@ -3849,6 +4005,14 @@ class RemoteAccessServer:
                 registered with :class:`WebPrinter` so backend
                 broadcasts reach this peer.
         """
+        task = asyncio.current_task()
+        if task is not None:
+            # Tracked so stop_async can DRAIN in-flight handlers:
+            # closing the client writer unblocks readline(), but
+            # without a join the handler (and its cleanup finally)
+            # may still be mid-flight after shutdown returns.
+            self._uds_handler_tasks.add(task)
+            task.add_done_callback(self._uds_handler_tasks.discard)
         self._printer.add_uds_writer(writer)
         tabs_seen: set[str] = set()
         conn_state: dict[str, Any] = {
@@ -3880,8 +4044,7 @@ class RemoteAccessServer:
         except Exception:
             logger.debug("UDS handler error", exc_info=True)
         finally:
-            for tab in tabs_seen:
-                self._schedule_tab_close(tab)
+            self._schedule_owned_tab_closes(tabs_seen, conn_state)
             local_tabs = conn_state.get("local_tabs")
             if isinstance(local_tabs, set):
                 self._printer.unregister_local_uds_tabs(local_tabs)
@@ -3964,6 +4127,9 @@ class RemoteAccessServer:
                 guarantees the per-window work_dir and autocomplete
                 isolation invariants.
         """
+        cmd_tab_id = cmd.get("tabId")
+        if isinstance(cmd_tab_id, str) and cmd_tab_id:
+            self._claim_tab(cmd_tab_id, str(conn_state.get("conn_id", "")))
         ctx = sorcar_api.ApiContext(
             endpoint=endpoint,
             tabs_seen=tabs_seen,
@@ -4144,10 +4310,27 @@ class RemoteAccessServer:
         """
         loop = self._loop
         assert loop is not None
+        if self._update_starting or (
+            self._update_proc is not None
+            and self._update_proc.poll() is None
+        ):
+            # Single-flight guard (F4-13): two windows clicking
+            # "Update" concurrently must not launch two installers
+            # that fetch/reset/overwrite the same tree in parallel.
+            self._broadcast_to_conn({
+                "type": "notice",
+                "text": (
+                    "A KISS Sorcar update is already running… "
+                    f"(output: {self._update_log_path})"
+                ),
+            }, conn_id)
+            return
+        self._update_starting = True
         script = await loop.run_in_executor(
             None, _find_install_script, self._install_root,
         )
         if script is None:
+            self._update_starting = False
             self._broadcast_to_conn({
                 "type": "error",
                 "text": (
@@ -4188,7 +4371,7 @@ class RemoteAccessServer:
         try:
             self._update_log_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self._update_log_path, "ab") as log:
-                subprocess.Popen(
+                self._update_proc = subprocess.Popen(
                     ["bash", str(script)],
                     cwd=str(script.parent),
                     stdin=subprocess.DEVNULL,
@@ -4201,6 +4384,8 @@ class RemoteAccessServer:
                 "type": "error",
                 "text": f"Failed to start KISS Sorcar update: {exc}",
             }, conn_id)
+        finally:
+            self._update_starting = False
 
     def _identify_voice_speaker(self, pcm: bytes) -> int | None:
         """Return the stable speaker number for an utterance's PCM.
@@ -4269,11 +4454,21 @@ class RemoteAccessServer:
         speaker: int | None = None
         if pcm:
             assert self._loop is not None
-            result = await self._loop.run_in_executor(
-                None, transcribe_pcm, pcm,
-            )
-            text = result["text"]
-            language = result["language"]
+            try:
+                result = await self._loop.run_in_executor(
+                    None, transcribe_pcm, pcm,
+                )
+                text = result["text"]
+                language = result["language"]
+            except Exception:
+                # A failed translation must still reply with empty
+                # text so the client can clear its transcribing
+                # spinner (F4-15).
+                logger.warning(
+                    "voiceTranscribe transcription failed", exc_info=True,
+                )
+                text = ""
+                language = None
             if text:
                 speaker = await self._loop.run_in_executor(
                     None, self._identify_voice_speaker, pcm,
@@ -4728,6 +4923,8 @@ class RemoteAccessServer:
             rt_id = rt["tabId"]
             if rt_id:
                 self._cancel_pending_tab_close(rt_id)
+                if isinstance(conn_id, str):
+                    self._claim_tab(rt_id, conn_id)
             chat_id = rt["chatId"]
             if chat_id:
                 await self._run_cmd(
@@ -4842,6 +5039,19 @@ class RemoteAccessServer:
             cmd: The ``submit`` message from the browser.
         """
         tab_id = cmd.get("tabId", "")
+        if self._shutdown_initiated:
+            # Shutdown admission gate (F4-06): a task submitted after
+            # the shutdown sweep snapshotted the active workers would
+            # be silently killed when the process exits.
+            self._printer.broadcast(
+                {"type": "status", "running": False, "tabId": tab_id},
+            )
+            self._printer.broadcast({
+                "type": "error",
+                "text": "Server is shutting down; task not started.",
+                "tabId": tab_id,
+            })
+            return
         prompt = cmd.get("prompt", "")
         if isinstance(prompt, str):
             prompt, prompt_size = _truncate_utf8_bytes(
@@ -5073,6 +5283,7 @@ class RemoteAccessServer:
                             binary=bool(fd.get("binary")),
                             link_target=fd.get("link_target"),
                             make_executable=_exec_flag(fd),
+                            base_missing=bool(fd.get("created")),
                         ),
                     )
                 except OSError as exc:
@@ -5288,6 +5499,17 @@ class RemoteAccessServer:
                 "1015 — Cloudflare is rate-limiting "
                 "trycloudflare.com quick-tunnels for this egress IP",
             )
+        # URL discovery failed for a still-live process (F4-11): kill
+        # it, or the watchdog would forever see a healthy tunnel whose
+        # public URL is never advertised (only the local URL is), and
+        # never retry discovery or restart it.
+        if self._tunnel_proc is not None and self._tunnel_proc.poll() is None:
+            logger.warning(
+                "cloudflared quick-tunnel started but its URL could "
+                "not be discovered; terminating it so the watchdog "
+                "can start a fresh tunnel",
+            )
+            self._terminate_tunnel_proc()
         return None
 
     def _start_named_tunnel(self) -> str | None:
@@ -5888,6 +6110,15 @@ class RemoteAccessServer:
         try:
             self._uds_path.parent.mkdir(parents=True, exist_ok=True)
             if self._uds_path.exists() or self._uds_path.is_symlink():
+                if await self._uds_socket_is_live():
+                    # Another live daemon owns this pathname (F4-03).
+                    # Unlinking it would strand that daemon's clients
+                    # on an unreachable inode; leave it alone and let
+                    # local clients fall back to WSS.
+                    raise OSError(
+                        f"UDS socket {self._uds_path} is owned by "
+                        "another live daemon; refusing to steal it",
+                    )
                 try:
                     self._uds_path.unlink()
                 except OSError:
@@ -5900,6 +6131,10 @@ class RemoteAccessServer:
                 limit=_MAX_LINE_BYTES,
             )
             os.chmod(self._uds_path, 0o600)
+            try:
+                self._uds_inode = os.stat(self._uds_path).st_ino
+            except OSError:
+                self._uds_inode = None
         except Exception:
             logger.warning(
                 "Failed to bind UDS at %s; local extension clients "
@@ -5908,6 +6143,73 @@ class RemoteAccessServer:
             )
             self._uds_server = None
 
+        try:
+            await self._setup_server_after_uds()
+        except BaseException:
+            # Rollback (F4-04): a TLS/WSS/tunnel failure or a
+            # cancellation must not leave the already-bound UDS
+            # listener (or a half-bound WSS listener) live in an
+            # embedder that catches the exception.
+            self._close_partial_setup()
+            raise
+
+    async def _uds_socket_is_live(self) -> bool:
+        """Return True when a live peer accepts connections on the UDS path.
+
+        Probes the existing socket pathname before startup unlinks it
+        (F4-03) so one daemon cannot silently strand another live
+        daemon's listener.
+        """
+        try:
+            _reader, writer = await asyncio.wait_for(
+                asyncio.open_unix_connection(str(self._uds_path)),
+                timeout=1.0,
+            )
+        except (OSError, TimeoutError, ValueError):
+            return False
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            logger.debug("UDS probe close failed", exc_info=True)
+        return True
+
+    def _close_partial_setup(self) -> None:
+        """Tear down listeners bound by a failed/cancelled ``_setup_server``."""
+        if self._uds_server is not None:
+            self._uds_server.close()
+            self._uds_server = None
+            self._unlink_own_uds_socket()
+        if self._ws_server is not None:
+            self._ws_server.close()
+            self._ws_server = None
+
+    def _unlink_own_uds_socket(self) -> None:
+        """Unlink the UDS pathname only when it still names OUR socket.
+
+        A successor daemon may have already rebound the shared
+        pathname; blindly unlinking would strand its live listener
+        (F4-03).  The inode recorded right after our bind is the
+        ownership witness.
+        """
+        if self._uds_inode is None:
+            # No ownership witness — fail CLOSED: never unlink a
+            # pathname a successor daemon may have rebound.
+            return
+        try:
+            if os.stat(self._uds_path).st_ino != self._uds_inode:
+                return
+        except OSError:
+            return
+        try:
+            self._uds_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.debug("UDS unlink failed", exc_info=True)
+
+    async def _setup_server_after_uds(self) -> None:
+        """Continue :meth:`_setup_server` after the UDS bind."""
         if self._ssl_context is None:
             self._ssl_context = await asyncio.to_thread(
                 _create_ssl_context,
@@ -6099,11 +6401,12 @@ class RemoteAccessServer:
             ", ".join(active_tabs) if active_tabs else "none",
             _rss_mb(),
         )
-        if signum == signal.SIGTERM:
+        if signum in (signal.SIGTERM, signal.SIGHUP):
             if self._shutdown_initiated:
                 logger.info(
-                    "SIGTERM during shutdown ignored: pid=%d "
+                    "%s during shutdown ignored: pid=%d "
                     "(cleanup already in progress)",
+                    sig_name,
                     os.getpid(),
                 )
                 return
@@ -6345,9 +6648,44 @@ class RemoteAccessServer:
 
         Returns after the server is listening.  The caller must keep
         the event loop running.
+
+        Serialised against :meth:`stop_async` with
+        :attr:`_lifecycle_lock` (F4-05): without it a concurrent stop
+        could tear down the fields bound so far and return while this
+        still-running setup binds the remaining listeners afterwards,
+        resurrecting the server after shutdown completed.
         """
         _raise_open_file_limit()
-        await self._setup_server()
+        async with self._lifecycle_lock:
+            if self._shutdown_initiated:
+                return
+            await self._setup_server()
+
+    async def _drain_tasks(
+        self, tasks: set[asyncio.Task[None]], timeout: float = 2.0,
+    ) -> None:
+        """Join *tasks*, cancelling any that outlive *timeout*.
+
+        Shutdown helper: waits up to *timeout* seconds for the given
+        asyncio tasks (in-flight UDS handlers, deferred tab-close
+        tasks) to finish on their own — closed streams already
+        unblock them — then cancels and awaits any stragglers so
+        none can touch server state after shutdown completes.
+
+        Args:
+            tasks: Tasks to join; a snapshot is taken, and the
+                current task (if present) is excluded.
+            timeout: Seconds to wait before cancelling stragglers.
+        """
+        current = asyncio.current_task()
+        pending = {t for t in tasks if t is not current and not t.done()}
+        if not pending:
+            return
+        _done, pending = await asyncio.wait(pending, timeout=timeout)
+        for t in pending:
+            t.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def stop_async(self) -> None:
         """Stop the server gracefully.
@@ -6364,48 +6702,75 @@ class RemoteAccessServer:
         this path deliberately calls :meth:`_stop_tunnel` to kill the
         tunnel: embedders and tests own their server's full lifecycle
         and must not leak a background cloudflared process.
+
+        Ordering: command ingress is quiesced FIRST — the WSS/UDS
+        listeners are closed and every established UDS client stream
+        is closed (F4-02) — and only then are the in-flight agent
+        worker threads stopped, so a surviving peer cannot launch
+        fresh work after the worker sweep (F4-06).  The whole method
+        is serialised against :meth:`start_async` with
+        :attr:`_lifecycle_lock` (F4-05) so a suspended setup cannot
+        resurrect the server after this returns.
         """
-        await asyncio.to_thread(self._stop_active_agent_tasks)
-        await _cancel_task(self._watchdog_task)
-        self._watchdog_task = None
-        await _cancel_task(self._version_check_task)
-        self._version_check_task = None
-        with self._pending_tab_closes_lock:
-            handles = list(self._pending_tab_closes.values())
-            self._pending_tab_closes.clear()
-        for handle in handles:
-            try:
-                handle.cancel()
-            except Exception:
-                logger.debug(
-                    "Cancel of pending tab close on shutdown failed",
-                    exc_info=True,
-                )
-        if self._ws_server is not None:
-            self._ws_server.close()
-            try:
-                await asyncio.wait_for(self._ws_server.wait_closed(), timeout=2)
-            except TimeoutError:
-                pass
-        if self._uds_server is not None:
-            self._uds_server.close()
-            try:
-                await asyncio.wait_for(
-                    self._uds_server.wait_closed(), timeout=2,
-                )
-            except TimeoutError:
-                pass
-            self._uds_server = None
-            try:
-                self._uds_path.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError:
-                logger.debug(
-                    "UDS unlink on shutdown failed", exc_info=True,
-                )
-        self._stop_tunnel()
-        _remove_url_file(self._url_file)
+        self._shutdown_initiated = True
+        async with self._lifecycle_lock:
+            await _cancel_task(self._watchdog_task)
+            self._watchdog_task = None
+            await _cancel_task(self._version_check_task)
+            self._version_check_task = None
+            with self._pending_tab_closes_lock:
+                handles = list(self._pending_tab_closes.values())
+                self._pending_tab_closes.clear()
+                self._tab_conn_owners.clear()
+            for handle in handles:
+                try:
+                    handle.cancel()
+                except Exception:
+                    logger.debug(
+                        "Cancel of pending tab close on shutdown failed",
+                        exc_info=True,
+                    )
+            if self._ws_server is not None:
+                self._ws_server.close()
+                try:
+                    await asyncio.wait_for(
+                        self._ws_server.wait_closed(), timeout=2,
+                    )
+                except TimeoutError:
+                    pass
+            if self._uds_server is not None:
+                self._uds_server.close()
+                try:
+                    await asyncio.wait_for(
+                        self._uds_server.wait_closed(), timeout=2,
+                    )
+                except TimeoutError:
+                    pass
+                self._uds_server = None
+                self._unlink_own_uds_socket()
+            # asyncio.Server.close() does not close streams that were
+            # already accepted: close every established UDS client so
+            # its handler unblocks from readline() and exits (F4-02).
+            for writer in list(self._printer._uds_writers):
+                try:
+                    writer.close()
+                except Exception:
+                    logger.debug(
+                        "UDS client close on shutdown failed",
+                        exc_info=True,
+                    )
+            # DRAIN in-flight UDS handlers and deferred tab-close
+            # tasks: closing writers merely unblocks readline(); the
+            # handler coroutines (and their cleanup `finally`
+            # blocks) plus any fired deferred-close tasks may still
+            # be running.  Join them so no coroutine touches server
+            # state after stop_async returns; cancel stragglers.
+            await self._drain_tasks(
+                self._uds_handler_tasks | self._pending_close_tasks,
+            )
+            await asyncio.to_thread(self._stop_active_agent_tasks)
+            self._stop_tunnel()
+            _remove_url_file(self._url_file)
 
 
 def _resolve_tunnel_settings() -> tuple[str | None, str | None]:

@@ -14,6 +14,7 @@ from __future__ import annotations
 import enum
 import functools
 import logging
+import shlex
 import sys
 import threading
 import time
@@ -69,8 +70,9 @@ def _manual_merge_cmd(wt: GitWorktree) -> str:
         A shell command string for manual merge.
     """
     if wt.baseline_commit:
-        return f"git cherry-pick --no-commit {wt.baseline_commit}..{wt.branch}"
-    return f"git merge --squash {wt.branch}"
+        rev_range = shlex.quote(f"{wt.baseline_commit}..{wt.branch}")
+        return f"git cherry-pick --no-commit {rev_range}"
+    return f"git merge --squash {shlex.quote(wt.branch)}"
 
 
 def _merge_fix_steps(wt: GitWorktree, fix_lines: str) -> str:
@@ -97,11 +99,11 @@ def _merge_fix_steps(wt: GitWorktree, fix_lines: str) -> str:
         The indented multi-line command block (no trailing newline).
     """
     return (
-        f"    cd {wt.repo_root}\n"
-        f"    git checkout {wt.original_branch}\n"
+        f"    cd {shlex.quote(str(wt.repo_root))}\n"
+        f"    git checkout {shlex.quote(wt.original_branch or '')}\n"
         f"    {_manual_merge_cmd(wt)}\n"
         + fix_lines
-        + f"    git branch -D {wt.branch}"
+        + f"    git branch -D {shlex.quote(wt.branch)}"
     )
 
 
@@ -237,16 +239,26 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         printer = getattr(self, "printer", None)
         if printer is None or not hasattr(printer, "broadcast"):
             return
+        severity = "info"
         if stage == "generating":
             message = "Generating commit message"
         elif stage == "committed":
             message = f"Committed {subject}" if subject else "Committed"
+        elif stage == "failed":
+            # Terminal update for the sticky "generating" toast: the
+            # commit did not land (e.g. a pre-commit hook rejected it),
+            # so replace the toast instead of leaving it forever.
+            message = (
+                "Auto-commit failed (a pre-commit hook may have "
+                "rejected it); the worktree is preserved"
+            )
+            severity = "warning"
         else:
             return
         event: dict[str, object] = {
             "type": "notification",
             "id": notification_id,
-            "severity": "info",
+            "severity": severity,
             "message": message,
             "tabId": self._tab_id,
         }
@@ -352,7 +364,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
     def _do_merge(
         self,
         wt: GitWorktree,
-    ) -> tuple[MergeResult, str]:
+    ) -> tuple[MergeResult, str, str]:
         """Stash, checkout, squash-merge, pop for a worktree branch.
 
         Serialized under ``repo_lock`` to prevent concurrent tabs from
@@ -362,9 +374,14 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             wt: The worktree state to merge.
 
         Returns:
-            ``(result, stash_warning)`` where *result* is the merge
-            outcome and *stash_warning* is a non-empty string if
-            stash-pop failed.  Checkout failures return
+            ``(result, stash_warning, cleanup_warning)`` where *result*
+            is the merge outcome, *stash_warning* is a non-empty string
+            if stash-pop failed, and *cleanup_warning* is a non-empty
+            string when the merge succeeded but the task branch could
+            not be deleted (the caller decides how to surface it — the
+            interactive ``merge()`` puts it in its immediate response,
+            ``_release_worktree`` defers it via ``_set_warnings``).
+            Checkout failures return
             ``MergeResult.CHECKOUT_FAILED`` (with a stash warning only
             when the pre-checkout stash could not be restored).  A
             dirty main tree whose ``git stash push`` itself failed
@@ -375,8 +392,9 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             ``git reset --hard`` would destroy their edits.
         """
         stash_warning = ""
+        cleanup_warning = ""
         if wt.original_branch is None:
-            return (MergeResult.CHECKOUT_FAILED, "")
+            return (MergeResult.CHECKOUT_FAILED, "", "")
         with repo_lock(wt.repo_root):
             try:
                 GitWorktreeOps.ensure_scratch_merge_driver(wt.repo_root)
@@ -388,7 +406,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             if not did_stash and GitWorktreeOps.has_uncommitted_changes(
                 wt.repo_root
             ):
-                return (MergeResult.STASH_FAILED, "")
+                return (MergeResult.STASH_FAILED, "", "")
             current = GitWorktreeOps.current_branch(wt.repo_root)
             if current != wt.original_branch:
                 ok, err = GitWorktreeOps.checkout(
@@ -408,7 +426,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                             "be auto-restored. Run 'git stash pop' to "
                             "recover them."
                         )
-                    return (MergeResult.CHECKOUT_FAILED, stash_warning)
+                    return (MergeResult.CHECKOUT_FAILED, stash_warning, "")
 
             user_prompt = getattr(self, "_last_user_prompt", "") or None
             task_result = getattr(self, "_last_result_summary", "") or None
@@ -448,10 +466,27 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                         "run 'git stash pop' to restore them."
                     )
 
-            if result == MergeResult.SUCCESS:
-                GitWorktreeOps.delete_branch(wt.repo_root, wt.branch)
+            if result == MergeResult.SUCCESS and not GitWorktreeOps.delete_branch(
+                wt.repo_root, wt.branch
+            ):
+                # The merge itself succeeded, but the task branch could
+                # not be deleted (delete_branch returns False when both
+                # normal and forced deletion fail).  Surface it instead
+                # of silently leaking the branch and its config.
+                logger.warning(
+                    "Merged branch '%s' could not be deleted; it still "
+                    "exists in %s",
+                    wt.branch,
+                    wt.repo_root,
+                )
+                cleanup_warning = (
+                    f"Merged branch '{wt.branch}' could not be deleted "
+                    "and still exists. Run "
+                    f"'git branch -D {shlex.quote(wt.branch)}' to "
+                    "remove it."
+                )
 
-        return (result, stash_warning)
+        return (result, stash_warning, cleanup_warning)
 
     def _release_worktree(self) -> str | None:
         """Auto-commit, auto-merge, and clean up a pending worktree.
@@ -510,9 +545,11 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             self._wt = None
             return None
 
-        result, stash_warning = self._do_merge(wt)
+        result, stash_warning, cleanup_warning = self._do_merge(wt)
         if stash_warning:
             self._set_warnings(stash=stash_warning)
+        if cleanup_warning:
+            self._set_warnings(merge=cleanup_warning)
 
         self._wt = None
 
@@ -678,11 +715,29 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         Returns:
             Worktree work directory path, or ``None`` on failure.
         """
-        with repo_lock(repo):
-            prev_repo_root = self._wt.repo_root if self._wt is not None else None
+        # Lock-ordering discipline (ABBA deadlock avoidance):
+        # _release_worktree -> _do_merge takes the PREVIOUS repo's lock.
+        # For a CROSS-repository switch, acquiring the destination lock
+        # first would nest the two locks in ABBA order (two agents
+        # switching A->B and B->A would deadlock forever), so the release
+        # runs BEFORE the destination lock is taken.  For a SAME-repo
+        # switch the re-entrant per-repo lock is held continuously
+        # across release and creation, keeping the released branch and
+        # the new worktree's HEAD atomic against concurrent tabs.
+        prev_repo_root = self._wt.repo_root if self._wt is not None else None
+        cross_repo = (
+            prev_repo_root is not None
+            and prev_repo_root.resolve() != repo.resolve()
+        )
+        released_branch: str | None = None
+        if cross_repo:
             released_branch = self._release_worktree()
             self._pending_review = False
 
+        with repo_lock(repo):
+            if not cross_repo:
+                released_branch = self._release_worktree()
+                self._pending_review = False
             original_branch: str | None
             if (
                 released_branch is not None
@@ -831,9 +886,25 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             merge_warning = self._merge_conflict_warning
             self._merge_conflict_warning = None
         if stash_warning:
-            printer.broadcast({"type": "warning", "message": stash_warning})
+            try:
+                printer.broadcast({"type": "warning", "message": stash_warning})
+            except Exception:
+                # Restore so a broken printer never permanently loses the
+                # (already-cleared) warning — but only when the slot is
+                # still empty, so a warning set concurrently while this
+                # broadcast was failing is never overwritten by the old one.
+                logger.debug("stash warning broadcast failed", exc_info=True)
+                with self._warning_lock:
+                    if self._stash_pop_warning is None:
+                        self._stash_pop_warning = stash_warning
         if merge_warning:
-            printer.broadcast({"type": "warning", "message": merge_warning})
+            try:
+                printer.broadcast({"type": "warning", "message": merge_warning})
+            except Exception:
+                logger.debug("merge warning broadcast failed", exc_info=True)
+                with self._warning_lock:
+                    if self._merge_conflict_warning is None:
+                        self._merge_conflict_warning = merge_warning
 
 
     def run(  # type: ignore[override]
@@ -969,7 +1040,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                     f"'{wt.branch}' has uncommitted changes. "
                     f"The worktree is preserved at: {wt.wt_dir}\n\n"
                     "Review and commit the changes manually:\n"
-                    f"    cd {wt.wt_dir}\n"
+                    f"    cd {shlex.quote(str(wt.wt_dir))}\n"
                     "    git add -A && git commit -m 'agent work'\n\n"
                     "Then retry: agent.merge()"
                 )
@@ -978,15 +1049,20 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 "(a pre-commit hook may have rejected the commit). "
                 f"The worktree is preserved at: {wt.wt_dir}\n\n"
                 "Fix the issue, then commit manually:\n"
-                f"    cd {wt.wt_dir}\n"
+                f"    cd {shlex.quote(str(wt.wt_dir))}\n"
                 "    git add -A && git commit -m 'agent work'\n\n"
                 "Then retry: agent.merge()"
             )
 
-        result, stash_warning = self._do_merge(wt)
+        result, stash_warning, cleanup_warning = self._do_merge(wt)
         stash_suffix = ""
         if stash_warning:
             stash_suffix = "\n\n⚠️  " + stash_warning
+        if cleanup_warning:
+            # Branch cleanup failed after a successful merge: put it in
+            # the immediate response so the caller/UI never reports an
+            # unqualified success while the task branch leaks.
+            stash_suffix += "\n\n⚠️  " + cleanup_warning
 
         if result == MergeResult.CHECKOUT_FAILED:
             return (
@@ -1071,7 +1147,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                     f"\n⚠️  Branch '{wt.branch}' could not be deleted "
                     "and still exists.  Switch to a different branch "
                     f"(e.g. 'git checkout <other>') and run "
-                    f"'git branch -D {wt.branch}' to remove it."
+                    f"'git branch -D {shlex.quote(wt.branch)}' to remove it."
                 )
         self._wt = None
         if delete_warning:

@@ -1122,7 +1122,12 @@ class TestDefensiveAndCoveragePaths:
         hook = _hook_path(repo) / "post-commit"
         hook.write_text("#!/bin/sh\necho existing")
         install_post_commit_hook(str(repo))
-        assert "existing\n# >>>" in hook.read_text()
+        text = hook.read_text()
+        # The section is inserted right after the shebang (so an early
+        # ``exit`` in the existing body cannot make it unreachable) and
+        # the missing trailing newline is repaired.
+        assert text.startswith("#!/bin/sh\n# >>>")
+        assert text.endswith("echo existing\n")
         hook.write_text("#!/bin/sh\n# >>> kiss code_graph hook >>>\n")
         assert "corrupt" in uninstall_post_commit_hook(str(repo)).lower()
 

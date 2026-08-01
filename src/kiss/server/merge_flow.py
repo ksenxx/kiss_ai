@@ -312,7 +312,12 @@ class _MergeFlowMixin:
                     tab_id,
                     exc_info=True,
                 )
-        self._dispose_if_closed(tab_id)
+            # Inside the finally (F4-30): an exception from
+            # _present_pending_worktree / _broadcast_autocommit_prompt
+            # must not skip the deferred disposal of a tab that was
+            # closed during the merge — no later lifecycle transition
+            # would ever dispose it.
+            self._dispose_if_closed(tab_id)
 
     def _main_dirty_files(self, work_dir: str = "") -> list[str]:
         """List modified, staged and untracked files in the main working tree.
@@ -534,9 +539,18 @@ class _MergeFlowMixin:
         (which itself no-ops unless the tab has ``use_worktree`` set
         and its transient agent still holds a pending worktree).
 
+        A tab whose merge review is already in flight is skipped
+        (F4-20): a session replay must not regenerate the merge view
+        and replace the registered merge state, which would erase the
+        user's accepted/rejected hunk resolutions mid-review.
+
         Args:
             tab_id: The tab to check for pending worktree.
         """
+        with self._state_lock:
+            tab = _RunningAgentState.running_agent_states.get(tab_id)
+            if tab is not None and tab.is_merging:
+                return
         self._present_pending_worktree(tab_id, try_merge_review=True)
 
     def _present_pending_worktree(
@@ -589,7 +603,15 @@ class _MergeFlowMixin:
         if changed and try_merge_review:
             wt_dir = wt_agent._wt_dir
             if wt_dir is not None and wt_dir.exists():
-                base_ref = wt_agent._baseline_commit or "HEAD"
+                # Resolve the fork point exactly like
+                # _get_worktree_changed_files does (F4-22): a plain
+                # "HEAD" fallback omits changes the agent already
+                # COMMITTED in the worktree from the hunk review.
+                base_ref = self._resolve_base_ref(
+                    str(wt_dir),
+                    wt_agent._baseline_commit,
+                    wt_agent._original_branch or "HEAD",
+                )
                 try:
                     if self._prepare_and_start_merge(
                         str(wt_dir), base_ref=base_ref, tab_id=tab_id,
@@ -609,6 +631,10 @@ class _MergeFlowMixin:
                 finally:
                     with self._state_lock:
                         tab.is_merging = prev_merging
+                    # A close that arrived during the discard saw the
+                    # tab busy and deferred disposal; nothing later
+                    # would dispose it (F4-29).
+                    self._dispose_if_closed(tab_id)
                 return
         if not changed:
             return
@@ -771,10 +797,27 @@ class _MergeFlowMixin:
             if tracked.returncode == 0:
                 files = _unquoted_name_lines(tracked.stdout)
             else:
+                # The diff query failed (e.g. the original branch was
+                # renamed/deleted so base_ref no longer resolves).  A
+                # clean ``status --porcelain`` alone must NOT be taken
+                # as "no changes" (F4-21): the worktree may hold
+                # COMMITTED task work, and callers auto-discard the
+                # branch when this returns [].  Also list files from
+                # commits unique to this worktree (not reachable from
+                # any other branch) so committed work is never
+                # mistaken for a clean worktree.
                 status = _git(str(wt_dir), "status", "--porcelain")
                 files = _porcelain_paths(
                     status.stdout, rename_both_sides=True,
                 )
+                unique_args = ["log", "--pretty=format:", "--name-only",
+                               "--no-renames", "HEAD", "--not"]
+                if wt._wt_branch:
+                    unique_args.append(f"--exclude={wt._wt_branch}")
+                unique_args.append("--branches")
+                unique = _git(str(wt_dir), *unique_args)
+                if unique.returncode == 0:
+                    files.extend(_unquoted_name_lines(unique.stdout))
             files.extend(_capture_untracked(str(wt_dir)))
             return sorted(set(files))
         if not wt._wt_branch:
@@ -887,6 +930,22 @@ class _MergeFlowMixin:
                 busy = self._check_worktree_busy(tab, verb)
                 if busy:
                     return busy
+            elif self._any_non_wt_running():
+                # internal=True only bypasses this tab's OWN
+                # is_task_active/is_merging flags (the post-task
+                # auto-finalize runs on the task thread that owns
+                # them).  It must NOT bypass the main-tree guard
+                # (F4-19): finalizing stashes/checkouts/merges the
+                # main working tree while a direct task on another
+                # tab is still writing it.
+                return {
+                    "success": False,
+                    "message": (
+                        "Another tab is running a task on the main "
+                        "working tree. Wait for it to finish before "
+                        f"{verb}."
+                    ),
+                }
             tab.is_merging = True
         wt._pending_review = False
         try:
@@ -903,7 +962,17 @@ class _MergeFlowMixin:
                     success = "Successfully merged" in msg
                     return {"success": success, "message": msg}
                 msg = wt.discard()
-                return {"success": True, "message": msg}
+                # A partial discard (branch deletion failed) must not
+                # report success: the UI would close the workflow
+                # while an orphan branch remains (F4-24).
+                return {
+                    "success": "Partially discarded" not in msg,
+                    "message": msg,
+                }
         finally:
             with self._state_lock:
                 tab.is_merging = False
+            # A close that arrived during the merge/discard saw the
+            # tab busy and deferred disposal; without this call the
+            # backend tab state would leak indefinitely (F4-23).
+            self._dispose_if_closed(tab_id)

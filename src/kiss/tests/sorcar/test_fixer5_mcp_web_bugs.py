@@ -41,7 +41,11 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.mcp_servers import MCPManager, MCPServerConfig
+from kiss.agents.sorcar.mcp_servers import (
+    MCPManager,
+    MCPServerConfig,
+    _connection_key,
+)
 from kiss.agents.sorcar.skills import discover_skills, load_skill_content
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.ui.cli.mcp_cli import _OAuthCallbackServer
@@ -127,11 +131,14 @@ def test_disconnect_racing_connection_start_stops_task(
             target=manager.connect, args=(cfg,), daemon=True,
         )
         connect_thread.start()
+        # Connections are keyed by name + config digest (so same-named
+        # servers of different agents stay isolated).
+        key = _connection_key(cfg)
         deadline = time.monotonic() + 5
-        while cfg.name not in manager._connections:
+        while key not in manager._connections:
             assert time.monotonic() < deadline, "connect never registered"
             time.sleep(0.01)
-        conn = manager._connections[cfg.name]
+        conn = manager._connections[key]
 
         start = time.monotonic()
         manager.disconnect_all()

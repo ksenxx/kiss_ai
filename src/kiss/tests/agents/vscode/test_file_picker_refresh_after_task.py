@@ -22,9 +22,14 @@ This test reproduces the bug by:
 3. invoking the task-completion hook the production task runner
    fires at the end of every ``_run_task_inner`` cleanup,
 4. asserting the next ``getFiles`` returns the post-task file set
-   (``new_file.py`` present, ``old_file.py`` absent) and that an
-   updated ``files`` event was broadcast so any open picker UI can
-   refresh without further user action.
+   (``new_file.py`` present, ``old_file.py`` absent).
+
+The hook must NOT broadcast an unsolicited ``files`` event: a reply
+stamped ``conn_id="", prefix=""`` would be accepted by every client
+whose picker shows a bare ``@`` — including windows rooted at a
+DIFFERENT work_dir — overwriting their picker with files from this
+task's workspace (fixer-5 F5-03/R5-03).  The refreshed cache is
+served by the next ``getFiles`` instead.
 """
 
 from __future__ import annotations
@@ -122,8 +127,10 @@ def test_file_cache_refreshes_after_task_completion(
     2. Simulate the agent: create ``new_file.py``, delete ``old_file.py``.
     3. Fire the task-completion hook the production task runner calls
        at the tail of ``_run_task_inner``.
-    4. Wait for the broadcast ``files`` event and assert the new list.
-    5. Issue another ``getFiles`` — the cache itself must now match.
+    4. Wait for the cache to refresh — WITHOUT any unsolicited
+       ``files`` broadcast (which other-workspace pickers would
+       wrongly accept).
+    5. Issue another ``getFiles`` — it must serve the new list.
     """
     server, events = _make_server(workspace)
 
@@ -141,14 +148,21 @@ def test_file_cache_refreshes_after_task_completion(
     events.clear()
     server._refresh_files_after_task(workspace)
 
-    refreshed = _wait_for_files_event(
-        events,
-        must_contain="new_file.py",
-        must_not_contain="old_file.py",
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        with server._state_lock:
+            cached = server._file_cache.get(workspace) or []
+        if any("new_file.py" in c for c in cached):
+            break
+        time.sleep(0.01)
+    with server._state_lock:
+        cached = server._file_cache.get(workspace) or []
+    assert any("new_file.py" in c for c in cached), cached
+    assert not any("old_file.py" in c for c in cached), cached
+    assert [e for e in events if e.get("type") == "files"] == [], (
+        "the post-task refresh must not broadcast an unsolicited "
+        f"files event (cross-workspace stale picker); got {events}"
     )
-    refreshed_names = _names(refreshed["files"])
-    assert "new_file.py" in refreshed_names
-    assert "old_file.py" not in refreshed_names
 
     events.clear()
     server._handle_command(

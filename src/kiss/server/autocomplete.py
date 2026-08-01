@@ -195,12 +195,13 @@ class _AutocompleteMixin:
         _complete_worker: threading.Thread | None
         _complete_seq_latest: dict[str, int]
         _file_cache: dict[str, list[str]]
+        _files_latest_request: dict[str, object]
 
     def _active_file_identifier_matches(
         self,
         query: str,
         snapshot_file: str = "",
-        snapshot_content: str = "",
+        snapshot_content: str | None = None,
         chat_id: str = "",
     ) -> list[str]:
         """Return every identifier from the active file/chat context.
@@ -220,9 +221,16 @@ class _AutocompleteMixin:
         the leading non-token portion of the query with each
         identifier.
         """
-        content = snapshot_content
-        if not content and snapshot_file:
+        if snapshot_content is not None:
+            # A live editor snapshot was supplied — honour it verbatim,
+            # INCLUDING the empty string (an open but empty document).
+            # Falling back to the on-disk file here would resurrect
+            # identifiers the user has deleted from the unsaved buffer.
+            content = snapshot_content
+        elif snapshot_file:
             content = read_active_file_head(snapshot_file)
+        else:
+            content = ""
         partial = trailing_identifier(query)
         if not partial:
             return []
@@ -265,7 +273,7 @@ class _AutocompleteMixin:
         query: str,
         seq: int = -1,
         snapshot_file: str = "",
-        snapshot_content: str = "",
+        snapshot_content: str | None = None,
         chat_id: str = "",
         conn_id: str = "",
     ) -> None:
@@ -299,6 +307,16 @@ class _AutocompleteMixin:
         completions = self._complete_many(
             query, snapshot_file, snapshot_content, chat_id,
         )
+        # Re-check freshness AFTER the (potentially slow) computation:
+        # a newer request on the same connection may have advanced the
+        # sequence while this one was doing file/DB work, and emitting
+        # now would overwrite the newer request's result with a stale
+        # one (the frontend only compares the echoed query text, which
+        # can be identical across the two requests).
+        if seq >= 0:
+            with self._state_lock:
+                if seq != self._complete_seq_latest.get(conn_id, -1):
+                    return
         fast = _ghost_suffix(query, completions)
         fast = clip_autocomplete_suggestion(query, fast)
         self._emit_ghost(fast, query, conn_id)
@@ -308,7 +326,7 @@ class _AutocompleteMixin:
         self,
         query: str,
         snapshot_file: str = "",
-        snapshot_content: str = "",
+        snapshot_content: str | None = None,
         chat_id: str = "",
     ) -> list[dict[str, str]]:
         """Gather every fast-complete candidate for *query*.
@@ -451,6 +469,23 @@ class _AutocompleteMixin:
         """
         return work_dir or self.work_dir
 
+    def _files_request_map(self) -> dict[str, object]:
+        """Return the per-connection latest file-picker request map.
+
+        Maps a connection id to a unique token identifying its most
+        recent ``getFiles`` request.  Entries are SHORT-LIVED: each is
+        removed as soon as the request it names has been answered (see
+        :meth:`_get_files` and :meth:`_refresh_file_cache`), so the map
+        never accumulates departed connections and needs no teardown
+        wiring.  Created lazily on first use (the daemon's ``__init__``
+        predates this guard).  Callers must hold ``_state_lock``.
+        """
+        reqs = getattr(self, "_files_latest_request", None)
+        if reqs is None:
+            reqs = {}
+            self._files_latest_request = reqs
+        return reqs
+
     def _refresh_file_cache(
         self,
         then_emit_for_prefix: str | None = None,
@@ -461,8 +496,8 @@ class _AutocompleteMixin:
 
         When ``then_emit_for_prefix`` is set, broadcasts a ``files``
         event ranked for that prefix once the scan finishes.  This lets
-        callers (``_get_files``) kick off a non-blocking refresh and
-        still deliver suggestions to the UI.
+        the only caller (``_get_files``) kick off a non-blocking
+        refresh and still deliver suggestions to the UI.
 
         ``work_dir`` selects which directory to scan; an empty value
         defaults to ``self.work_dir`` so existing callers that omit it
@@ -470,31 +505,41 @@ class _AutocompleteMixin:
         entry in ``self._file_cache`` (keyed by the resolved path) so
         tabs with different working directories never share file lists.
 
-        Race protection: when invoked from ``_get_files`` (i.e.
-        ``then_emit_for_prefix is not None``, meaning the cache was
-        empty at the call site), this preserves the original double-
-        check pattern from commit ``e49d867c`` — the scan result is
-        only published if the cache is still empty when the scan
-        finishes.  This prevents a slow scan from clobbering a fresher
-        result published by a concurrent refresh thread.  Explicit
-        refresh requests (``then_emit_for_prefix is None``) overwrite
-        unconditionally, matching their callers' intent (the user just
-        asked for a refresh).
+        Race protection (two layers):
+
+        * Cache publication preserves the double-check pattern from
+          commit ``e49d867c`` — the scan result is only published if
+          the cache is still empty when the scan finishes, so a slow
+          scan never clobbers a fresher result published by a
+          concurrent refresh thread.
+        * Emission is guarded by the per-connection request token
+          captured at call time: if the connection has since issued a
+          newer ``getFiles`` (e.g. the same typed prefix from a
+          different tab/work_dir), the stale scan's reply is dropped
+          instead of overwriting the newer picker contents.  When the
+          reply IS still the latest, its token entry is removed — the
+          request is answered, so the map stays empty for idle
+          connections (no per-connection teardown needed).
         """
         from kiss.server.diff_merge import _scan_files
 
         wd = self._resolve_work_dir(work_dir)
-        only_if_empty = then_emit_for_prefix is not None
+        with self._state_lock:
+            request_token = self._files_request_map().get(conn_id)
 
         def _do_refresh() -> None:
             result = _scan_files(wd)
             with self._state_lock:
                 existing = self._file_cache.get(wd)
-                if only_if_empty and existing is not None:
+                if existing is not None:
                     result = existing
                 else:
                     self._file_cache[wd] = result
-            if then_emit_for_prefix is not None:
+                reqs = self._files_request_map()
+                stale = reqs.get(conn_id) is not request_token
+                if not stale:
+                    reqs.pop(conn_id, None)
+            if then_emit_for_prefix is not None and not stale:
                 usage = _load_file_usage()
                 ranked = rank_file_suggestions(
                     result, then_emit_for_prefix, usage,
@@ -516,15 +561,17 @@ class _AutocompleteMixin:
 
         This hook is invoked by :meth:`_TaskRunnerMixin._run_task_inner`
         at the tail of every task's cleanup ``finally``.  It rescans
-        *work_dir* in a background thread (no caller blocking) and:
+        *work_dir* in a background thread (no caller blocking) and
+        only updates the cache when the *set* of files actually
+        changed — pure modifications never alter the picker's list so
+        the rescan is a no-op.  The next ``getFiles`` (every picker
+        keystroke issues one) serves the refreshed list.
 
-        * only updates the cache when the *set* of files actually
-          changed — pure modifications never alter the picker's list
-          so the rescan is a no-op; and
-        * broadcasts a fresh ``files`` event (with no ``connId`` so
-          every connected client receives it) only when the list
-          changed, so any open ``@``-mention picker UI refreshes
-          without further user action.
+        No ``files`` event is broadcast: an unsolicited reply stamped
+        ``conn_id="", prefix=""`` would be accepted by every client
+        whose picker shows a bare ``@`` — including windows whose tab
+        roots at a DIFFERENT work_dir — overwriting their picker with
+        files from this task's workspace (fixer-5 F5-03/R5-03).
 
         When *work_dir* has no cache entry (no ``@``-mention picker
         has ever opened there) the hook is a no-op: there is nothing
@@ -549,9 +596,6 @@ class _AutocompleteMixin:
                 if self._file_cache.get(wd) is not cached:
                     return
                 self._file_cache[wd] = result
-            usage = _load_file_usage()
-            ranked = rank_file_suggestions(result, "", usage)
-            self._emit_files(ranked, conn_id="", prefix="")
 
         threading.Thread(target=_do_refresh, daemon=True).start()
 
@@ -612,7 +656,10 @@ class _AutocompleteMixin:
         results without the caller blocking.
         """
         wd = self._resolve_work_dir(work_dir)
+        token: object = object()
         with self._state_lock:
+            reqs = self._files_request_map()
+            reqs[conn_id] = token
             cache = self._file_cache.get(wd)
         if cache is None:
             self._refresh_file_cache(
@@ -623,3 +670,8 @@ class _AutocompleteMixin:
         usage = _load_file_usage()
         ranked = rank_file_suggestions(cache, prefix, usage)
         self._emit_files(ranked, conn_id, prefix=prefix)
+        with self._state_lock:
+            # This request is answered; drop its token so the map only
+            # ever holds connections with a scan still in flight.
+            if reqs.get(conn_id) is token:
+                del reqs[conn_id]

@@ -5,7 +5,6 @@
 
 import * as vscode from 'vscode';
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
 import {MERGE_ACTIONS, SorcarSidebarView} from './SorcarSidebarView';
 import {getGitApi} from './gitApi';
@@ -13,6 +12,7 @@ import {isReloadReady} from './reloadGuard';
 
 import {ensureDependencies, ensureLocalBinInPath} from './DependencyInstaller';
 import {findKissProject} from './kissPaths';
+import {kissHomeDir} from './userAssets';
 import {resetTipsOnExtensionUpdate} from './SorcarTab';
 import {checkForExtensionUpdate} from './UpdateChecker';
 import {
@@ -116,27 +116,66 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  const setScmMessage = async (message: string, reveal = false) => {
-    try {
-      const api = await getGitApi();
-      if (api && api.repositories.length > 0) {
-        api.repositories[0].inputBox.value = message;
-        if (reveal) vscode.commands.executeCommand('workbench.view.scm');
-      }
-    } catch (err) {
-      console.error('[kissSorcar] Failed to set SCM message:', err);
+  const repoRootOf = (rootUri: unknown): string | undefined => {
+    const fsPath = (rootUri as {fsPath?: unknown} | undefined)?.fsPath;
+    return typeof fsPath === 'string' ? fsPath : undefined;
+  };
+
+  type GitRepoLike = {
+    rootUri?: {fsPath?: string};
+    inputBox: {value: string};
+    state: {indexChanges: unknown[]};
+  };
+
+  const pickRepo = (
+    repositories: GitRepoLike[],
+    repoRoot?: string,
+  ): GitRepoLike | undefined => {
+    if (repoRoot) {
+      const match = repositories.find(r => r.rootUri?.fsPath === repoRoot);
+      if (match) return match;
     }
+    return repositories[0];
+  };
+
+  // Serialize SCM input-box writes: an older, slower write (e.g. a stale
+  // countdown tick) must never land after — and overwrite — a newer one.
+  let scmWriteChain: Promise<void> = Promise.resolve();
+  const setScmMessage = (
+    message: string,
+    reveal = false,
+    repoRoot?: string,
+  ): Promise<void> => {
+    scmWriteChain = scmWriteChain.then(async () => {
+      try {
+        const api = await getGitApi();
+        const repo = api
+          ? pickRepo(api.repositories as GitRepoLike[], repoRoot)
+          : undefined;
+        if (repo) {
+          repo.inputBox.value = message;
+          if (reveal) vscode.commands.executeCommand('workbench.view.scm');
+        }
+      } catch (err) {
+        console.error('[kissSorcar] Failed to set SCM message:', err);
+      }
+    });
+    return scmWriteChain;
   };
 
   const commitCountdownSeconds = 20;
   let stopCommitCountdown: (() => void) | undefined;
-  const startCommitCountdown = () => {
+  // Repository root of the generation currently in flight, or undefined
+  // when none is (used to route the result and ignore canceled ones).
+  let pendingCommitRepoRoot: string | undefined;
+  let commitGenPending = false;
+  const startCommitCountdown = (repoRoot?: string) => {
     stopCommitCountdown?.();
     let seconds = commitCountdownSeconds;
-    void setScmMessage(`Generating in ${seconds}s ...`, true);
+    void setScmMessage(`Generating in ${seconds}s ...`, true, repoRoot);
     const interval = setInterval(() => {
       seconds = Math.max(seconds - 1, 0);
-      void setScmMessage(`Generating in ${seconds}s ...`);
+      void setScmMessage(`Generating in ${seconds}s ...`, false, repoRoot);
     }, 1000);
     stopCommitCountdown = () => {
       clearInterval(interval);
@@ -147,24 +186,30 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     sidebarView!.onCommitMessage(ev => {
       if ((ev.tabId ?? '') !== '') return;
+      // A canceled generation must not apply a late backend result.
+      if (!commitGenPending) return;
+      commitGenPending = false;
+      const repoRoot = pendingCommitRepoRoot;
       const countdownWasRunning = stopCommitCountdown !== undefined;
       stopCommitCountdown?.();
       if (ev.error) {
         showWarningNotification(`Commit message: ${ev.error}`);
-        if (countdownWasRunning) void setScmMessage('');
+        if (countdownWasRunning) void setScmMessage('', false, repoRoot);
       } else if (ev.message) {
-        void setScmMessage(ev.message, true);
+        void setScmMessage(ev.message, true, repoRoot);
       } else if (countdownWasRunning) {
-        void setScmMessage('');
+        void setScmMessage('', false, repoRoot);
       }
     }),
   );
 
-  const hasStagedChanges = async (): Promise<boolean> => {
+  const hasStagedChanges = async (repoRoot?: string): Promise<boolean> => {
     try {
       const api = await getGitApi();
       if (!api || api.repositories.length === 0) return true;
-      return api.repositories[0].state.indexChanges.length > 0;
+      const repo = pickRepo(api.repositories as GitRepoLike[], repoRoot);
+      if (!repo) return true;
+      return repo.state.indexChanges.length > 0;
     } catch (err) {
       console.error('[kissSorcar] Failed to check staged changes:', err);
       return true;
@@ -172,23 +217,34 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   const triggerCommitMessageGeneration = async (
-    _rootUri?: unknown,
+    rootUri?: unknown,
     _context?: unknown,
     token?: vscode.CancellationToken,
   ): Promise<void> => {
-    if (!(await hasStagedChanges())) {
-      await setScmMessage('Error: nothing staged', true);
+    const repoRoot = repoRootOf(rootUri);
+    if (!(await hasStagedChanges(repoRoot))) {
+      await setScmMessage('Error: nothing staged', true, repoRoot);
       return;
     }
-    startCommitCountdown();
+    pendingCommitRepoRoot = repoRoot;
+    commitGenPending = true;
+    startCommitCountdown(repoRoot);
     const teardown = () => {
       if (stopCommitCountdown) {
         stopCommitCountdown();
-        void setScmMessage('');
+        void setScmMessage('', false, repoRoot);
       }
     };
-    token?.onCancellationRequested(teardown);
-    return sidebarView!.generateCommitMessage(token).finally(teardown);
+    const cancelSub = token?.onCancellationRequested(() => {
+      commitGenPending = false;
+      teardown();
+    });
+    return sidebarView!.generateCommitMessage(token).finally(() => {
+      cancelSub?.dispose();
+      commitGenPending = false;
+      pendingCommitRepoRoot = undefined;
+      teardown();
+    });
   };
 
   context.subscriptions.push(
@@ -218,8 +274,9 @@ export function activate(context: vscode.ExtensionContext): void {
   }
 
   const extJsPath = path.join(context.extensionPath, 'out', 'extension.js');
-  const markerPath = path.join(os.homedir(), '.kiss', '.extension-updated');
-  const sockPath = path.join(os.homedir(), '.kiss', 'sorcar.sock');
+  const markerPath = path.join(kissHomeDir(), '.extension-updated');
+  const sockPath =
+    process.env.KISS_SORCAR_SOCK || path.join(kissHomeDir(), 'sorcar.sock');
 
   let reloadTriggered = false;
   let settleTimer: ReturnType<typeof setInterval> | undefined;
@@ -251,7 +308,10 @@ export function activate(context: vscode.ExtensionContext): void {
         prevSize,
       );
       prevSize = size;
-      if (codeReady && codeReadySince < 0) codeReadySince = waited;
+      // Reset the stability clock whenever the bundle changes again, so
+      // time spent through unstable writes never counts as "stable".
+      if (!codeReady) codeReadySince = -1;
+      else if (codeReadySince < 0) codeReadySince = waited;
       const codeStableFor = codeReadySince < 0 ? 0 : waited - codeReadySince;
       if (
         (codeReady && (socketUp || codeStableFor >= RELOAD_SOCKET_GRACE_MS)) ||
@@ -295,24 +355,23 @@ export function activate(context: vscode.ExtensionContext): void {
 
   if (!context.workspaceState.get<boolean>('sidebarWidened')) {
     sidebarView!.onFirstResolve(() => {
-      setTimeout(async () => {
+      const widenTimer = setTimeout(async () => {
+        // The extension may have been deactivated before this fires.
+        if (!sidebarView) return;
         await vscode.commands.executeCommand(
           'workbench.action.focusAuxiliaryBar',
         );
-        await sidebarView!.widenToOneThird();
+        await sidebarView.widenToOneThird();
         await vscode.commands.executeCommand(
           'workbench.action.focusFirstEditorGroup',
         );
         await context.workspaceState.update('sidebarWidened', true);
       }, 500);
+      context.subscriptions.push({dispose: () => clearTimeout(widenTimer)});
     });
   }
 
-  const extensionUpdatedMarker = path.join(
-    os.homedir(),
-    '.kiss',
-    '.extension-updated',
-  );
+  const extensionUpdatedMarker = markerPath;
   let shouldAutoOpen = !context.workspaceState.get<boolean>('firstLaunchDone');
   if (fs.existsSync(extensionUpdatedMarker)) {
     shouldAutoOpen = true;
@@ -321,10 +380,12 @@ export function activate(context: vscode.ExtensionContext): void {
   resetTipsOnExtensionUpdate();
 
   if (shouldAutoOpen) {
-    setTimeout(async () => {
-      await sidebarView!.focusChatInput();
+    const autoOpenTimer = setTimeout(async () => {
+      if (!sidebarView) return;
+      await sidebarView.focusChatInput();
       await context.workspaceState.update('firstLaunchDone', true);
     }, 1000);
+    context.subscriptions.push({dispose: () => clearTimeout(autoOpenTimer)});
   }
 
   ensureDependencies().catch(err => {

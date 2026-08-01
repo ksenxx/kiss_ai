@@ -36,10 +36,10 @@ from kiss.agents.sorcar.persistence import (
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
-    _agent_usage,
     _attribute_sub_usage,
     _broadcast_subagent_done,
     _coerce_tasks,
+    _live_agent_usage,
     _LiveUsageMonitor,
     _yaml_failure,
 )
@@ -614,8 +614,8 @@ class ChatSorcarAgent(SorcarAgent):
         event: dict[str, object] = {
             "type": "result",
             "text": result_summary or "(no result)",
-            "total_tokens": int(self.total_tokens_used),
-            "cost": f"${self.budget_used:.4f}",
+            "total_tokens": int(getattr(self, "total_tokens_used", 0) or 0),
+            "cost": f"${float(getattr(self, 'budget_used', 0.0) or 0.0):.4f}",
             "step_count": int(getattr(self, "total_steps", 0) or 0),
         }
         parsed = parse_result_yaml(result_raw) if result_raw else None
@@ -735,7 +735,11 @@ class ChatSorcarAgent(SorcarAgent):
             finally:
                 with _RunningAgentState._registry_lock:
                     sub_state.task_thread = None
-                sub_usage[idx] = _agent_usage(agent)
+                # _live_agent_usage (not _agent_usage): an interrupted
+                # child never folds its in-flight executor session's
+                # spend into its totals, so the folded-only read would
+                # undercount that child.
+                sub_usage[idx] = _live_agent_usage(agent)
                 if printer is not None:
                     try:
                         sub_task_id = getattr(agent, "_last_task_id", None)
@@ -748,21 +752,27 @@ class ChatSorcarAgent(SorcarAgent):
                         _broadcast_subagent_done(printer, viewer_ids)
                     except Exception:
                         pass
-                _RunningAgentState.unregister(sub_tab_id)
+                _RunningAgentState.unregister(sub_tab_id, sub_state)
 
         usage_monitor.start()
         try:
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 results = list(pool.map(_run_single, enumerate(tasks)))
         finally:
+            # stop() joins the monitor BEFORE the offsets bump so a late
+            # emission can never double-count.  The attribution runs in
+            # this finally so a parent stop that unwinds pool.map cannot
+            # make completed siblings' (and interrupted children's live)
+            # spend disappear from the parent task's totals — the pool's
+            # __exit__ has already joined every worker, so the sub_usage
+            # slots are final here.
             usage_monitor.stop()
-
-        _attribute_sub_usage(
-            self,
-            sum(u[0] for u in sub_usage),
-            sum(u[1] for u in sub_usage),
-            sum(u[2] for u in sub_usage),
-        )
+            _attribute_sub_usage(
+                self,
+                sum(u[0] for u in sub_usage),
+                sum(u[1] for u in sub_usage),
+                sum(u[2] for u in sub_usage),
+            )
         return results
 
     def run(  # type: ignore[override]
@@ -827,71 +837,80 @@ class ChatSorcarAgent(SorcarAgent):
             raise
         with self._task_id_lock:
             self._last_task_id = task_id
-        with ChatSorcarAgent._running_agents_lock:
-            ChatSorcarAgent.running_agents[task_id] = self
-        if self._subagent_info is not None:
-            with _RunningAgentState._registry_lock:
-                for state in _RunningAgentState.running_agent_states.values():
-                    if state.agent is self:
-                        state.task_history_id = task_id
-                        break
         printer = kwargs.get("printer") or getattr(self, "printer", None)
         task_key = str(task_id)
-        if printer is not None:
-            tl = getattr(printer, "_thread_local", None)
-            if tl is not None:
-                tl.task_id = task_key
+        result_summary = ""
+        result_raw = ""
+        run_started = False
+        with ChatSorcarAgent._running_agents_lock:
+            ChatSorcarAgent.running_agents[task_id] = self
+        # From this point on, BOTH registries hold entries for this run,
+        # so every remaining setup step (printer wiring, subscription,
+        # frequent-task recording, ...) must run inside the try below:
+        # an exception in any of them would otherwise bypass the cleanup
+        # and leave a permanently "running" task behind (F-14).
+        try:
             if self._subagent_info is not None:
+                with _RunningAgentState._registry_lock:
+                    for state in (
+                        _RunningAgentState.running_agent_states.values()
+                    ):
+                        if state.agent is self:
+                            state.task_history_id = task_id
+                            break
+            if printer is not None:
+                tl = getattr(printer, "_thread_local", None)
+                if tl is not None:
+                    tl.task_id = task_key
+                if self._subagent_info is not None:
+                    broadcast = getattr(printer, "broadcast", None)
+                    if broadcast is not None:
+                        try:
+                            sub_info = self._subagent_info or {}
+                            parent_tab_id_payload = sub_info.get(
+                                "parent_tab_id", "",
+                            )
+                            broadcast({
+                                "type": "new_tab",
+                                "task_id": task_id,
+                                "parent_tab_id": parent_tab_id_payload,
+                                "taskId": "",
+                            })
+                        except Exception:
+                            pass
+                persist_map = getattr(printer, "_persist_agents", None)
+                if persist_map is not None:
+                    printer_lock = getattr(printer, "_lock", None)
+                    if printer_lock is not None:
+                        with printer_lock:
+                            persist_map[task_key] = self
+                    else:
+                        persist_map[task_key] = self
+                subscribe = getattr(printer, "subscribe_tab", None)
+                if subscribe is not None and subscribe_tab_id:
+                    subscribe(task_id, subscribe_tab_id)
+                start_rec = getattr(printer, "start_recording", None)
+                if start_rec is not None:
+                    start_rec()
                 broadcast = getattr(printer, "broadcast", None)
                 if broadcast is not None:
                     try:
-                        sub_info = self._subagent_info or {}
-                        parent_tab_id_payload = sub_info.get(
-                            "parent_tab_id", "",
-                        )
-                        broadcast({
-                            "type": "new_tab",
-                            "task_id": task_id,
-                            "parent_tab_id": parent_tab_id_payload,
-                            "taskId": "",
-                        })
+                        broadcast({"type": "tasks_updated", "taskId": ""})
                     except Exception:
                         pass
-            persist_map = getattr(printer, "_persist_agents", None)
-            if persist_map is not None:
-                printer_lock = getattr(printer, "_lock", None)
-                if printer_lock is not None:
-                    with printer_lock:
-                        persist_map[task_key] = self
-                else:
-                    persist_map[task_key] = self
-            subscribe = getattr(printer, "subscribe_tab", None)
-            if subscribe is not None and subscribe_tab_id:
-                subscribe(task_id, subscribe_tab_id)
-            start_rec = getattr(printer, "start_recording", None)
-            if start_rec is not None:
-                start_rec()
-            broadcast = getattr(printer, "broadcast", None)
-            if broadcast is not None:
+            if on_task_id_allocated is not None:
                 try:
-                    broadcast({"type": "tasks_updated", "taskId": ""})
+                    on_task_id_allocated(task_id, self._chat_id)
                 except Exception:
-                    pass
-        if on_task_id_allocated is not None:
-            try:
-                on_task_id_allocated(task_id, self._chat_id)
-            except Exception:
-                logging.getLogger(__name__).warning(
-                    "on_task_id_allocated(%r) raised",
-                    task_id,
-                    exc_info=True,
-                )
-        if self._subagent_info is None:
-            _record_frequent_task(prompt_template)
+                    logging.getLogger(__name__).warning(
+                        "on_task_id_allocated(%r) raised",
+                        task_id,
+                        exc_info=True,
+                    )
+            if self._subagent_info is None:
+                _record_frequent_task(prompt_template)
 
-        result_summary = ""
-        result_raw = ""
-        try:
+            run_started = True
             result = super().run(prompt_template=agent_prompt, **kwargs)
             result_raw = result if isinstance(result, str) else ""
             result_summary = _extract_result_summary(result)
@@ -909,6 +928,23 @@ class ChatSorcarAgent(SorcarAgent):
             if registered_here:
                 self._unregister_running_state()
             if printer is not None:
+                if not run_started:
+                    # Setup failed before the run started: nothing else
+                    # will ever remove the persist-agent registration we
+                    # installed above, so drop it here (identity-checked)
+                    # to avoid a stale strong reference in the printer.
+                    persist_map = getattr(printer, "_persist_agents", None)
+                    if (
+                        persist_map is not None
+                        and persist_map.get(task_key) is self
+                    ):
+                        printer_lock = getattr(printer, "_lock", None)
+                        if printer_lock is not None:
+                            with printer_lock:
+                                if persist_map.get(task_key) is self:
+                                    persist_map.pop(task_key, None)
+                        else:
+                            persist_map.pop(task_key, None)
                 stop_rec = getattr(printer, "stop_recording", None)
                 if stop_rec is not None:
                     try:
@@ -920,17 +956,25 @@ class ChatSorcarAgent(SorcarAgent):
                     tl.task_id = ""
             if not skip_persistence:
                 _save_task_result(task_id=task_id, result=result_summary)
+                # getattr defaults: when setup failed BEFORE super().run
+                # ran _reset (e.g. a broken printer hook), the usage
+                # fields do not exist yet; the persistence path must not
+                # raise from this finally and mask the original error.
                 extra_payload = self._build_extra_payload(
                     model=(
                         getattr(self, "_launch_model_name", "")
-                        or self.model_name
+                        or getattr(self, "model_name", "")
                     ),
                     work_dir=self.work_dir,
                     is_parallel=self._is_parallel,
                     is_worktree=is_worktree,
                 )
-                extra_payload["tokens"] = self.total_tokens_used
-                extra_payload["cost"] = round(self.budget_used, 6)
+                extra_payload["tokens"] = int(
+                    getattr(self, "total_tokens_used", 0) or 0
+                )
+                extra_payload["cost"] = round(
+                    float(getattr(self, "budget_used", 0.0) or 0.0), 6
+                )
                 _save_task_extra(extra_payload, task_id=task_id)
                 self._persist_replay_events_if_missing(
                     task_id=task_id,

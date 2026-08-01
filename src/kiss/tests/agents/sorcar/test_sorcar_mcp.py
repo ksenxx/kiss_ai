@@ -389,7 +389,12 @@ def test_file_token_storage_roundtrip(isolated_homes: Path) -> None:
     )
     asyncio.run(storage.set_client_info(info))
 
-    assert storage.path.name == "my_server.json"
+    # Sanitization is lossy for "my/server", so an injective digest
+    # suffix keeps it from sharing a file with e.g. "my server".
+    assert storage.path.name.startswith("my_server.")
+    assert storage.path.name.endswith(".json")
+    assert storage.path.name != "my_server.json"
+    assert FileTokenStorage("my server").path != storage.path
     assert (storage.path.stat().st_mode & 0o777) == 0o600
     back = asyncio.run(storage.get_tokens())
     assert back is not None and back.access_token == "at-1"

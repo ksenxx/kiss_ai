@@ -119,7 +119,33 @@ WAKE_ALIASES = [
 MODEL_NAME = "vosk-model-small-en-us-0.15"
 MODEL_ZIP_URL_TEMPLATE = "https://alphacephei.com/vosk/models/{}.zip"
 SPK_MODEL_NAME = "vosk-model-spk-0.4"
-DEFAULT_MODELS_DIR = Path.home() / ".kiss" / "models"
+
+
+def default_models_dir() -> Path:
+    """Return the voice-model cache dir under the active KISS home.
+
+    Resolved lazily on every call (via the repository-wide
+    :func:`kiss.core.config.kiss_home` contract) so a ``KISS_HOME``
+    override — profile isolation, tests — is honoured instead of
+    always downloading hundreds of MB of models into the real
+    ``~/.kiss/models``.
+    """
+    from kiss.core.config import kiss_home
+
+    return kiss_home() / "models"
+
+
+def __getattr__(name: str) -> Path:
+    """Resolve the legacy ``DEFAULT_MODELS_DIR`` module constant lazily.
+
+    Kept as a PEP 562 attribute so existing importers (e.g.
+    ``web_server.py``) still work while the value now respects
+    ``$KISS_HOME`` at access time instead of being frozen to the real
+    home directory at import time.
+    """
+    if name == "DEFAULT_MODELS_DIR":
+        return default_models_dir()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 SAMPLE_RATE = 16000
 BLOCK_SIZE = 4000
 COOLDOWN_SECONDS = 2.0
@@ -489,6 +515,9 @@ def parse_transcription_reply(reply: str) -> tuple[str, str | None]:
     This parser accepts all of those shapes and degrades gracefully:
 
     - Markdown fences are stripped.
+    - A "Here is the transcription:"-style preamble is stripped
+      BEFORE parsing, so a preamble line never masks the language
+      tag line that follows it.
     - A JSON object (tried from the first ``{`` to the last ``}``)
       yields its string ``text`` value (else ``""``) and normalized
       ``language`` value.
@@ -496,8 +525,8 @@ def parse_transcription_reply(reply: str) -> tuple[str, str | None]:
       language tag and more lines follow, the tag and the remaining
       lines are returned (the observed two-line shape, including
       trailing spaces on the tag line).
-    - Anything else falls back to the whole stripped reply as the
-      text with no language.
+    - Anything else falls back to the fence- and preamble-stripped
+      reply as the text with no language.
 
     Args:
         reply: The raw text reply of the transcription agent.
@@ -509,6 +538,7 @@ def parse_transcription_reply(reply: str) -> tuple[str, str | None]:
     stripped = reply.strip()
     fenced = _FENCE_RE.match(stripped)
     candidate = fenced.group(1).strip() if fenced else stripped
+    candidate = _PREAMBLE_RE.sub("", candidate).strip()
     start = candidate.find("{")
     end = candidate.rfind("}")
     if 0 <= start < end:
@@ -525,7 +555,10 @@ def parse_transcription_reply(reply: str) -> tuple[str, str | None]:
         language = _normalize_language_tag(first)
         if language is not None:
             return rest.strip(), language
-    return stripped, None
+    # Fall back to the fence-/preamble-stripped candidate — returning
+    # the raw ``stripped`` here would forward literal ``` fences as
+    # part of the user's dictated command.
+    return candidate, None
 
 
 def speaker_prefixed_text(
@@ -1424,7 +1457,7 @@ def main() -> int:
     parser.add_argument(
         "--models-dir",
         type=Path,
-        default=DEFAULT_MODELS_DIR,
+        default=default_models_dir(),
         help="Directory caching downloaded Vosk models",
     )
     parser.add_argument(

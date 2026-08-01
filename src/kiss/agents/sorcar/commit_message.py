@@ -159,14 +159,20 @@ def generate_commit_message_from_diff(
             "changes. Return ONLY the commit message text, no "
             "quotes or markdown fences.\n\n{context}"
         )
-    msg = _run_oneshot_llm(
-        agent_name="Commit Message Generator",
-        prompt_template=template,
-        arguments={"context": context},
-        model=get_fast_model(),
-        fallback=fallback,
-        failure_log="Commit message generation failed",
-    )
+    try:
+        model = get_fast_model()
+    except Exception:
+        logger.debug("Commit message model selection failed", exc_info=True)
+        msg = fallback
+    else:
+        msg = _run_oneshot_llm(
+            agent_name="Commit Message Generator",
+            prompt_template=template,
+            arguments={"context": context},
+            model=model,
+            fallback=fallback,
+            failure_log="Commit message generation failed",
+        )
     msg = _append_user_prompt(msg, user_prompt) if user_prompt else msg
     return _append_task_result(msg, task_result) if task_result else msg
 

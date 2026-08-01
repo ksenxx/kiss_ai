@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import ctypes
 import logging
+import math
 import queue
 import re
 import threading
@@ -162,6 +163,39 @@ def _client_task_id_of(cmd: dict[str, Any]) -> str:
     """
     raw = cmd.get("taskId", "")
     return raw if isinstance(raw, str) else ""
+
+
+def coerce_budget_override(raw: object) -> float | None:
+    """Coerce a wire ``maxBudget`` override to a valid spend cap.
+
+    The per-task budget override arrives straight off the JSON wire.
+    Python's ``json`` module parses and emits ``NaN``/``Infinity``, and
+    both budget enforcement sites compare spend with ``>= max_budget``
+    which is always ``False`` for ``NaN`` — silently disabling the cap.
+    Configuration-level code already rejects non-finite budgets, so this
+    override path must apply the same guard: only a finite, non-boolean
+    number is accepted; anything else returns ``None`` so the caller
+    falls back to the configured budget.
+
+    Args:
+        raw: The raw ``maxBudget`` value from the ``run`` command.
+
+    Returns:
+        The finite budget as a ``float``, or ``None`` when *raw* is
+        missing, a bool, non-numeric, or non-finite.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    try:
+        value = float(raw)
+    except OverflowError:
+        # A JSON-valid integer too large for a C double (json accepts
+        # thousands of digits) must degrade to the configured budget,
+        # not crash the task.
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
 
 
 def parse_task_tags(text: str) -> list[str]:
@@ -630,13 +664,7 @@ class _TaskRunnerMixin:
             _cfg_budget = float(_vcfg.get("max_budget", 100))
             _cfg_web = _vcfg.get("use_web_browser", True)
             _model_config = build_model_config(_vcfg)
-            _raw_budget = cmd.get("maxBudget")
-            _agent_budget = (
-                float(_raw_budget)
-                if isinstance(_raw_budget, (int, float))
-                and not isinstance(_raw_budget, bool)
-                else None
-            )
+            _agent_budget = coerce_budget_override(cmd.get("maxBudget"))
             _raw_web = cmd.get("webTools")
             _agent_web = _raw_web if isinstance(_raw_web, bool) else None
             _raw_model_config = cmd.get("modelConfig")
@@ -809,6 +837,7 @@ class _TaskRunnerMixin:
                 outer_failure_result["tabId"] = tab_id
             self.printer.broadcast(outer_failure_result)
         finally:
+            end_event_broadcast = False
             try:
                 _agent_parsed = parse_result_yaml(agent_returned) if agent_returned else None
                 _agent_reported_failure = bool(
@@ -931,6 +960,7 @@ class _TaskRunnerMixin:
                         "endTs": end_ms,
                     }
                 )
+                end_event_broadcast = True
                 self._refresh_files_after_task(work_dir)
                 logger.info(
                     "Task lifecycle complete: tab_id=%s task_id=%s elapsed_ms=%d event_type=%s",
@@ -939,33 +969,67 @@ class _TaskRunnerMixin:
                     end_ms - start_ms,
                     (task_end_event or {}).get("type", "none"),
                 )
-                if tab.task_history_id is not None:
+                hist_id = tab.task_history_id
+                if hist_id is not None:
+                    # S3-08: drop the printer's persist-agent BEFORE
+                    # starting the follow-up thread, so the follow-up
+                    # broadcast is never auto-persisted and the explicit
+                    # ``_append_chat_event`` inside the follow-up thread
+                    # is the single, scheduling-independent persistence
+                    # path.  ``cleanup_task`` keeps the subscriber set
+                    # alive for a linger period, so the broadcast still
+                    # fans out to the originating tab.
+                    self.printer.cleanup_task(hist_id)
+                    tab.task_history_id = None
                     self._generate_followup_async(
                         prompt,
                         result_summary,
-                        tab.task_history_id,
+                        hist_id,
                     )
-                if tab.task_history_id is not None:
-                    self.printer.cleanup_task(tab.task_history_id)
-                tl = getattr(self.printer, "_thread_local", None)
-                if tl is not None:
-                    tl.task_id = ""
-                tab.task_history_id = None
             except BaseException:  # pragma: no cover — cleanup interrupted
+                logger.debug("Cleanup interrupted", exc_info=True)
+                # Only emit the terminal event if the normal path did
+                # not already broadcast it — a failure AFTER that
+                # broadcast (refresh/follow-up/cleanup) must not send
+                # the same terminal event twice.
+                if task_end_event and not end_event_broadcast:
+                    try:
+                        self.printer.broadcast(
+                            {
+                                **task_end_event,
+                                "tabId": tab_id,
+                                "startTs": start_ms,
+                                "endTs": int(time.time() * 1000),
+                            }
+                        )
+                    except BaseException:
+                        logger.debug(
+                            "End-event broadcast failed",
+                            exc_info=True,
+                        )
+            finally:
+                # S3-07: mandatory lifecycle/identity cleanup lives in
+                # its own ``finally`` so an exception anywhere in the
+                # persistence/merge/broadcast block above can no longer
+                # leave the tab flagged active or retain its task id,
+                # the printer's persist-agent/recording, or the worker
+                # thread-local task id.
                 with self._state_lock:
                     tab.is_task_active = False
                     if not use_worktree:
                         tab.is_running_non_wt = False
-                logger.debug("Cleanup interrupted", exc_info=True)
-                if task_end_event:
-                    self.printer.broadcast(
-                        {
-                            **task_end_event,
-                            "tabId": tab_id,
-                            "startTs": start_ms,
-                            "endTs": int(time.time() * 1000),
-                        }
-                    )
+                if tab.task_history_id is not None:
+                    try:
+                        self.printer.cleanup_task(tab.task_history_id)
+                    except BaseException:
+                        logger.debug(
+                            "cleanup_task failed",
+                            exc_info=True,
+                        )
+                    tab.task_history_id = None
+                tl = getattr(self.printer, "_thread_local", None)
+                if tl is not None:
+                    tl.task_id = ""
 
     def _persist_subtask_row(
         self,

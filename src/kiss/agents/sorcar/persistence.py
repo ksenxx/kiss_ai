@@ -19,6 +19,7 @@ Thread safety is achieved with:
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import math
@@ -990,20 +991,11 @@ def _prefix_match_tasks(query: str, limit: int = 8) -> list[str]:
             "SELECT task FROM task_history "
             "WHERE task GLOB ? AND LENGTH(task) > ? "
             f"AND {_HISTORY_NOT_SUBAGENT} "
-            "ORDER BY timestamp DESC, rowid DESC LIMIT ?",
-            (escaped + "*", len(query), limit * 4),
+            "GROUP BY task "
+            "ORDER BY MAX(timestamp) DESC, MAX(rowid) DESC LIMIT ?",
+            (escaped + "*", len(query), limit),
         ).fetchall()
-    seen: set[str] = set()
-    out: list[str] = []
-    for row in rows:
-        task = row["task"]
-        if task in seen:
-            continue
-        seen.add(task)
-        out.append(task)
-        if len(out) >= limit:
-            break
-    return out
+    return [row["task"] for row in rows]
 
 
 def _search_history(
@@ -1558,14 +1550,68 @@ def _event_writer_loop(stop: threading.Event) -> None:
                 break
             batch.append(item)
         try:
-            _write_event_batch(batch)
-        except Exception:
-            logger.warning("event writer batch failed", exc_info=True)
+            _persist_batch_with_retry(batch)
         finally:
             for _ in batch:
                 _event_queue.task_done()
         if shutdown_pending:
             return
+
+
+def _persist_batch_with_retry(batch: list[tuple[str, str, float, str]]) -> None:
+    """Persist *batch*, retrying a few times before giving up.
+
+    Transient failures (e.g. external lock contention beyond the busy
+    timeout) must not silently drop events; a bounded retry keeps the
+    writer from stalling forever while still recovering the common
+    case.  Events are only abandoned — with an ``error`` log — after
+    every attempt fails.
+    """
+    attempts = 4
+    for attempt in range(attempts):
+        try:
+            _write_event_batch(batch)
+            return
+        except Exception:
+            if attempt < attempts - 1:
+                logger.warning("event writer batch failed; retrying", exc_info=True)
+                time.sleep(0.05 * (attempt + 1))
+            else:
+                _journal_failed_events(batch, attempts)
+
+
+def _journal_failed_events(
+    batch: list[tuple[str, str, float, str]], attempts: int,
+) -> None:
+    """Preserve a permanently unwritable batch in a durable sidecar file.
+
+    A batch that failed every write attempt must not be silently
+    acknowledged and lost — ``_flush_chat_events`` would then report
+    completion for events that were never persisted.  The rows are
+    appended as JSON lines to ``<db>.failed_events.jsonl`` next to the
+    database so they can be inspected or replayed, and the loss is
+    logged at ``error`` level with the sidecar path.
+    """
+    sidecar = _current_db_path() + ".failed_events.jsonl"
+    try:
+        with open(sidecar, "a", encoding="utf-8") as stream:
+            for task_id, event_json, timestamp, origin in batch:
+                stream.write(json.dumps({
+                    "task_id": task_id,
+                    "event_json": event_json,
+                    "timestamp": timestamp,
+                    "origin_db_path": origin,
+                }) + "\n")
+        logger.error(
+            "%d chat events could not be written after %d attempts; "
+            "preserved in %s", len(batch), attempts, sidecar, exc_info=True,
+        )
+    except OSError:
+        logger.error(
+            "dropping %d chat events after %d failed write attempts "
+            "(sidecar %s also unwritable)",
+            len(batch), attempts, sidecar, exc_info=True,
+        )
 
 
 def _write_event_batch(batch: list[tuple[str, str, float, str]]) -> None:
@@ -1586,44 +1632,71 @@ def _write_event_batch(batch: list[tuple[str, str, float, str]]) -> None:
     db = _get_db()
     task_ids = {tid for (tid, _ej, _ts, _op) in batch}
     with _rw_lock.write_lock(), _caches_lock:
-        for tid in task_ids:
-            if tid not in _next_seq_cache:
-                exists = db.execute(
-                    "SELECT 1 FROM task_history WHERE id = ?", (tid,),
-                ).fetchone()
-                if exists is None:
-                    continue
-                row = db.execute(
-                    "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq "
-                    "FROM events WHERE task_id = ?",
-                    (tid,),
-                ).fetchone()
-                _next_seq_cache[tid] = row["next_seq"] if row else 0
-        rows: list[tuple[str, int, str, float]] = []
-        for tid, ev_json, ts, _op in batch:
-            seq = _next_seq_cache.get(tid)
-            if seq is None:
+        try:
+            _write_event_batch_locked(db, batch, task_ids)
+        except Exception:
+            try:
+                db.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            # The seq cache may have advanced past rows that were
+            # rolled back; recompute from the database on retry.
+            for tid in task_ids:
+                _next_seq_cache.pop(tid, None)
+                _marked_has_events.discard(tid)
+            raise
+
+
+def _write_event_batch_locked(
+    db: sqlite3.Connection,
+    batch: list[tuple[str, str, float, str]],
+    task_ids: set[str],
+) -> None:
+    """Insert *batch* inside one explicit transaction.
+
+    Caller holds ``_rw_lock.write_lock()`` and ``_caches_lock`` and
+    rolls back + invalidates the seq caches on any failure, so a
+    mid-batch error can never diverge the cache from the database.
+    """
+    db.execute("BEGIN IMMEDIATE")
+    for tid in task_ids:
+        if tid not in _next_seq_cache:
+            exists = db.execute(
+                "SELECT 1 FROM task_history WHERE id = ?", (tid,),
+            ).fetchone()
+            if exists is None:
                 continue
-            _next_seq_cache[tid] = seq + 1
-            rows.append((tid, seq, ev_json, ts))
-        db.executemany(
-            "INSERT INTO events (task_id, seq, event_json, timestamp) "
-            "VALUES (?, ?, ?, ?)",
-            rows,
+            row = db.execute(
+                "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq "
+                "FROM events WHERE task_id = ?",
+                (tid,),
+            ).fetchone()
+            _next_seq_cache[tid] = row["next_seq"] if row else 0
+    rows: list[tuple[str, int, str, float]] = []
+    for tid, ev_json, ts, _op in batch:
+        seq = _next_seq_cache.get(tid)
+        if seq is None:
+            continue
+        _next_seq_cache[tid] = seq + 1
+        rows.append((tid, seq, ev_json, ts))
+    db.executemany(
+        "INSERT INTO events (task_id, seq, event_json, timestamp) "
+        "VALUES (?, ?, ?, ?)",
+        rows,
+    )
+    to_mark = [
+        tid for tid in task_ids
+        if tid in _next_seq_cache and tid not in _marked_has_events
+    ]
+    if to_mark:
+        placeholders = ",".join("?" * len(to_mark))
+        db.execute(
+            f"UPDATE task_history SET has_events = 1 "
+            f"WHERE id IN ({placeholders})",
+            to_mark,
         )
-        to_mark = [
-            tid for tid in task_ids
-            if tid in _next_seq_cache and tid not in _marked_has_events
-        ]
-        if to_mark:
-            placeholders = ",".join("?" * len(to_mark))
-            db.execute(
-                f"UPDATE task_history SET has_events = 1 "
-                f"WHERE id IN ({placeholders})",
-                to_mark,
-            )
-            _marked_has_events.update(to_mark)
-        db.commit()
+        _marked_has_events.update(to_mark)
+    db.execute("COMMIT")
 
 
 def _queue_chat_event(
@@ -1678,32 +1751,59 @@ def _flush_chat_events() -> None:
 
 
 def _stop_event_writer() -> None:
-    """Drain and stop the writer thread.  Used by ``_close_db``/tests."""
+    """Drain and stop the writer thread.  Used by ``_close_db``/tests.
+
+    A producer can enqueue an event *after* the drain below but
+    *before* the old writer observes its stop flag, in which case the
+    stopped writer exits without consuming it.  The loop re-checks the
+    queue after each stopped writer and drains again (starting a fresh
+    writer if needed) until nothing is left unfinished, so no queued
+    event is ever stranded.
+    """
     global _event_writer_thread, _caches_db_key
-    _flush_chat_events()
-    with _event_writer_lock:
-        t = _event_writer_thread
-        stop = _event_writer_stop
-    if t is not None:
-        stop.set()
-        try:
-            _event_queue.put_nowait(None)
-        except queue.Full:  # pragma: no cover — unbounded queue
-            pass
-        t.join(timeout=5)
-        if t.is_alive():
-            logger.warning(
-                "event writer thread did not stop within 5s; "
-                "deferring writer cleanup until it exits"
-            )
-            return
+    while True:
+        _flush_chat_events()
         with _event_writer_lock:
-            if _event_writer_thread is t:
-                _event_writer_thread = None
+            t = _event_writer_thread
+            stop = _event_writer_stop
+        if t is not None:
+            stop.set()
+            try:
+                _event_queue.put_nowait(None)
+            except queue.Full:  # pragma: no cover — unbounded queue
+                pass
+            t.join(timeout=5)
+            if t.is_alive():
+                logger.warning(
+                    "event writer thread did not stop within 5s; "
+                    "deferring writer cleanup until it exits"
+                )
+                return
+            with _event_writer_lock:
+                if _event_writer_thread is t:
+                    _event_writer_thread = None
+        if not _event_queue.unfinished_tasks:
+            break
     with _caches_lock:
         _next_seq_cache.clear()
         _marked_has_events.clear()
         _caches_db_key = None
+
+
+def _drain_events_at_exit() -> None:
+    """``atexit`` hook: flush queued events before interpreter teardown.
+
+    The writer is a daemon thread, so a process exiting right after
+    ``JsonPrinter`` enqueued events would otherwise lose them.  Thread
+    creation can fail during interpreter shutdown, hence best-effort.
+    """
+    try:
+        _stop_event_writer()
+    except Exception:  # pragma: no cover — interpreter shutdown edge
+        logger.debug("event drain at exit failed", exc_info=True)
+
+
+atexit.register(_drain_events_at_exit)
 
 
 def _append_chat_event(
