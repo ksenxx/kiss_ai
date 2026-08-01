@@ -44,10 +44,10 @@ function testRunningItemPaddingLeftHalved() {
   );
   assert.strictEqual(
     value,
-    '13px',
-    `expected .running-item padding-left to be halved from 26px to 13px, got "${value}"`,
+    '19px',
+    `expected .running-item padding-left to be 19px (dot column of 13px + 6px gap to text), got "${value}"`,
   );
-  console.log('  ok - .running-item padding-left is 13px (halved from 26px)');
+  console.log('  ok - .running-item padding-left is 19px (13px dot column + 6px gap)');
 }
 
 function testStatusIndicatorLeftHalved() {

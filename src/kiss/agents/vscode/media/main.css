@@ -1906,7 +1906,7 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   white-space: normal;
   align-items: center;
   row-gap: 8px;
-  padding-left: 13px;
+  padding-left: 19px;
   background-color: var(--task-color, color-mix(in srgb, var(--fg) 3%, transparent));
   color: #1a1a1a;
 }
