@@ -7,22 +7,30 @@
 Companion tests to the vendor-specific suites
 (:mod:`kiss.tests.scripts.test_update_models_thinking_levels` for the
 OpenAI ladder, :mod:`kiss.tests.scripts.test_update_models_moonshot_thinking`
-for Kimi K3).  Those suites cover the *positive* path for the two vendor
-scales that ``update_models.py`` currently supports; this file locks in
-the boundary — every model family that *does not* have an effort ladder
+for Kimi K3).  Those suites cover the *positive* path for two of the
+five distinct scale shapes that ``update_models.py`` supports today —
+OpenAI 4-level (``low``/``medium``/``high``/``xhigh``), Moonshot 3-level
+(``low``/``high``/``max``), Grok effort 3-level
+(``low``/``medium``/``high``), Grok-3-mini 2-level (``low``/``high``),
+and GLM-5.2 2-level (``high``/``max``).  This file locks in the
+boundary — every model family that *does not* have an effort ladder
 today must stay behind :func:`kiss.scripts.update_models.detect_thinking_level`'s
 gate, with zero network activity, and every family the gate lets
 through must dispatch to a scale (via
 :func:`kiss.scripts.update_models._thinking_scale_for`) whose top rung
-matches vendor documentation.
+matches vendor documentation — plus the positive path for the three
+newer families (Grok effort, GLM-5.2, gpt-oss): catalog-shape
+lock-ins, descending-probe fallback behavior, and wire-shape tests
+that verify ``reasoning_effort`` reaches the outgoing request payload.
 
-Three additional gaps identified during the November 2026 audit
-(``reports/reasoning_effort_alias_audit.html``) are pinned with
-:pyfunc:`pytest.mark.xfail(strict=True)`.  The moment any of the three
-gaps is fixed the corresponding xfail will XPASS and force the fixer to
-turn the test into a strict positive assertion — an intentional
-tripwire that prevents landing a fix without also landing a lock-in
-test.
+The four gaps identified during the November 2026 audit
+(``reports/reasoning_effort_alias_audit.html``) — A: xAI Grok effort
+family, B: z-ai GLM-5.2, C: Together-route ``openai/gpt-oss-*``, D:
+OpenRouter-route gpt-oss alias materialization — were all closed by
+commit ``854402ab``.  The tests in :class:`TestAuditGapTripwires`
+started life as strict expected-failure tripwires; when the fix landed
+each unexpectedly passed and was promoted to a plain positive
+assertion, retained here as regressions.
 
 The negative gate assertions monkey-patch
 ``kiss.core.models.model_info.model`` to a sentinel that records every
@@ -35,16 +43,23 @@ attempt — no real HTTP is issued in any of these tests.
 from __future__ import annotations
 
 import json
+import threading
+from collections.abc import Generator
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-# Levels expected on the two vendor scales currently supported by
-# ``update_models.py``.  Kept in sync with the module constants so a
-# refactor that renames or reorders them is caught here immediately.
+# Levels expected on the five vendor scale shapes supported by
+# ``update_models.py`` (OpenAI, Moonshot, Grok effort, Grok-3-mini,
+# GLM-5.2).  Kept in sync with the module constants so a refactor that
+# renames or reorders them is caught here immediately.
 OPENAI_LEVELS = ("low", "medium", "high", "xhigh")
 MOONSHOT_LEVELS = ("low", "high", "max")
+GROK_EFFORT_LEVELS = ("low", "medium", "high")
+GROK_3_MINI_LEVELS = ("low", "high")
+GLM_5_2_LEVELS = ("high", "max")
 ALL_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
@@ -153,13 +168,19 @@ class TestThinkingScaleDispatch:
             assert mod._thinking_scale_for(name) == MOONSHOT_LEVELS, name
 
     def test_ungated_families_fall_back_to_openai_ladder(self) -> None:
-        """Non-Moonshot, non-Grok/GLM/gpt-oss keys use the OpenAI ladder.
+        """Non-Moonshot / non-Grok-effort / non-GLM-5.2 keys use the OpenAI ladder.
 
         The scale is only *consulted* when the probe gate admits the
         model.  For ungated families this scale is inert — but pinning
         the fallback here guards against a stray refactor that swaps
         the default to Moonshot's shorter ladder and silently emits
         wrong ``-max`` aliases everywhere.
+
+        NB: ``bare`` ``glm-5.2`` (no ``zai-org/`` or ``openrouter/z-ai/``
+        prefix) intentionally falls back to the OpenAI ladder because
+        :func:`_is_glm_5_2_family` requires the vendor route prefix — a
+        rogue custom entry named ``glm-5.2`` under a different provider
+        would not automatically inherit z-ai's 2-level ladder.
         """
         import kiss.scripts.update_models as mod
 
@@ -168,19 +189,44 @@ class TestThinkingScaleDispatch:
             "gemini-3.6-flash",
             "glm-4.6",
             "glm-5.2",
-            "zai-org/GLM-5.2",
-            "openrouter/z-ai/glm-5.2",
             "openrouter/qwen/qwen3-235b-a22b-thinking-2507",
             "Qwen/Qwen3-Next-80B-A3B-Thinking",
             "deepseek-ai/DeepSeek-R1",
             "openrouter/deepseek/deepseek-r1",
-            "openrouter/x-ai/grok-4.5",
-            "openrouter/x-ai/grok-3-mini",
             "openrouter/x-ai/grok-4-fast",
             "openai/gpt-oss-120b",
             "openai/gpt-oss-20b",
         ):
             assert mod._thinking_scale_for(name) == OPENAI_LEVELS, name
+
+    def test_grok_effort_family_uses_grok_ladder(self) -> None:
+        """xAI Grok effort family uses the 3-level ``('low','medium','high')`` ladder."""
+        import kiss.scripts.update_models as mod
+
+        for name in ("openrouter/x-ai/grok-4.5", "openrouter/x-ai/grok-4.3"):
+            assert mod._thinking_scale_for(name) == ("low", "medium", "high"), name
+
+    def test_grok_3_mini_uses_two_level_ladder(self) -> None:
+        """xAI ``grok-3-mini`` / ``-beta`` use the 2-level ``('low','high')`` ladder.
+
+        ``medium`` is rejected by xAI for the mini family; emitting a
+        ``-medium`` alias for a ``grok-3-mini`` would fabricate an API-
+        rejected level. This test locks in the correct 2-level ladder.
+        """
+        import kiss.scripts.update_models as mod
+
+        for name in (
+            "openrouter/x-ai/grok-3-mini",
+            "openrouter/x-ai/grok-3-mini-beta",
+        ):
+            assert mod._thinking_scale_for(name) == ("low", "high"), name
+
+    def test_glm_5_2_family_uses_two_level_ladder(self) -> None:
+        """z-ai ``GLM-5.2`` uses the 2-level ``('high','max')`` ladder."""
+        import kiss.scripts.update_models as mod
+
+        for name in ("zai-org/GLM-5.2", "openrouter/z-ai/glm-5.2"):
+            assert mod._thinking_scale_for(name) == ("high", "max"), name
 
     def test_all_levels_covers_every_scale(self) -> None:
         """``_ALL_THINKING_LEVELS`` must be the union of every vendor scale."""
@@ -388,10 +434,10 @@ class TestDetectThinkingLevelGateHolds:
         """Grok models with only ``reasoning.enabled`` boolean, or no reasoning
         control at all, must never be probed with ``reasoning_effort``.
 
-        This test locks in that even after Grok effort family gating is
-        added, the boolean-only siblings stay out.  When Gap A from the
-        audit lands (``grok-4.5``, ``grok-4.3``, ``grok-3-mini``), this
-        parametrization must NOT be extended to include them.
+        This test locks in that even with Grok effort family gating in
+        place (Gap A landed: ``grok-4.5``, ``grok-4.3``, ``grok-3-mini``),
+        the boolean-only siblings stay out — this parametrization must
+        NOT be extended to include the effort-family models.
         """
         import kiss.scripts.update_models as mod
 
@@ -433,7 +479,7 @@ class TestDetectThinkingLevelGateHolds:
     ) -> None:
         """Every GLM except 5.2 uses only ``thinking.type: enabled/disabled``.
 
-        Must stay gated out even after Gap B lands (only 5.2 gets
+        Must stay gated out now that Gap B has landed (only 5.2 got
         effort-family gating).
         """
         import kiss.scripts.update_models as mod
@@ -586,9 +632,10 @@ class TestCatalogAliasesFrozen:
                     )
 
     def test_no_medium_aliases_on_moonshot_or_grok_3_mini(self) -> None:
-        """Moonshot scale has no ``medium``.  grok-3-mini (once fixed) also
-        has no ``medium`` — but is not in the catalog yet so this test is
-        the guard against a mis-fix that reintroduces it."""
+        """Moonshot scale has no ``medium``.  grok-3-mini (now on the
+        2-level scale) also has no ``medium`` — its aliases are not in
+        the catalog yet (they materialize on the next re-probe) so this
+        test is the guard against a mis-fix that reintroduces it."""
         data = _catalog()
         for name in data:
             if not name.endswith("-medium"):
@@ -631,37 +678,29 @@ class TestCatalogAliasesFrozen:
 
 
 # ---------------------------------------------------------------------------
-# Audit-gap tripwires.  Each of the three gaps identified in
-# ``reports/reasoning_effort_alias_audit.html`` §2 gets a strict-xfail test
-# here.  The test *fails today* (gap not fixed) and is marked
-# xfail(strict=True), which turns it into an XFAIL.  The moment the gap
-# fix lands, the test starts *passing* and pytest reports it as XPASS,
-# which under strict=True is treated as a hard failure — forcing the
-# fixer to update this test file into a plain positive assertion.
+# Audit-gap lock-ins.  Each of the four gaps (A/B/C/D) identified in
+# ``reports/reasoning_effort_alias_audit.html`` §2 was fixed in a follow-up
+# to the audit and is now pinned by a positive assertion.  These tests
+# started life as strict expected-failure tripwires (see git history at
+# the audit-landing commit) — the moment the gap fix landed each
+# tripwire started passing, which under strict mode forced the fixer
+# to promote the assertions to plain positives.  Keeping the same test
+# names lets ``git log`` follow the transition.
 # ---------------------------------------------------------------------------
 
 
 class TestAuditGapTripwires:
-    """Strict-xfail lock-ins for the three gaps identified in the audit.
+    """Positive lock-ins for the four audit gaps, now fixed.
 
-    The wording of each xfail reason includes the gap letter (A/B/C) from
-    the audit report so the fixer can find the relevant recommended-fix
-    outline quickly.
+    Each docstring still records the gap letter (A/B/C/D) from the audit
+    report so a bisector can jump straight to the corresponding
+    recommended-fix section.
     """
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Audit gap A: openrouter/x-ai/grok-4.5 / grok-4.3 accept "
-            "reasoning_effort per xAI docs but are not gated in "
-            "detect_thinking_level. The fix should also add a 3-level "
-            "scale (low, medium, high) for these submodels."
-        ),
-    )
     def test_gap_a_grok_effort_family_admitted_to_probe(
         self, gate_probe: _RecordingModelStub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When fixed: ``detect_thinking_level`` for grok-4.5 / grok-4.3
+        """Post-fix: ``detect_thinking_level`` for grok-4.5 / grok-4.3
         must reach the probe (recorded in ``gate_probe.calls``)."""
         import kiss.scripts.update_models as mod
 
@@ -675,17 +714,8 @@ class TestAuditGapTripwires:
         assert "openrouter/x-ai/grok-4.5" in recorded
         assert "openrouter/x-ai/grok-4.3" in recorded
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Audit gap A (grok-3-mini submodel): grok-3-mini accepts only "
-            "low and high (no medium). When Grok effort family gating "
-            "lands, this model needs a dedicated 2-level scale to avoid "
-            "the alias-writer emitting a bogus -medium alias."
-        ),
-    )
     def test_gap_a_grok_3_mini_uses_two_level_scale(self) -> None:
-        """When fixed: ``_thinking_scale_for("openrouter/x-ai/grok-3-mini")``
+        """Post-fix: ``_thinking_scale_for("openrouter/x-ai/grok-3-mini")``
         must return the 2-level ladder ``("low", "high")`` — not the
         default OpenAI ladder — because grok-3-mini rejects ``medium``.
         """
@@ -699,16 +729,8 @@ class TestAuditGapTripwires:
             "openrouter/x-ai/grok-3-mini-beta"
         ), "grok-3-mini-beta must share the same 2-level scale as grok-3-mini"
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Audit gap A (grok-4.5): once Grok gating lands, "
-            "_thinking_scale_for must return the 3-level ladder "
-            "('low', 'medium', 'high') for grok-4.5 / grok-4.3."
-        ),
-    )
     def test_gap_a_grok_4_5_uses_three_level_scale(self) -> None:
-        """When fixed: grok-4.5 / grok-4.3 use ``('low','medium','high')``
+        """Post-fix: grok-4.5 / grok-4.3 use ``('low','medium','high')``
         — never ``xhigh`` (xAI's ladder tops at ``high``), never ``max``."""
         import kiss.scripts.update_models as mod
 
@@ -721,19 +743,10 @@ class TestAuditGapTripwires:
                 f"{name!r} must use ('low','medium','high'); got {scale!r}"
             )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Audit gap B: zai-org/GLM-5.2 and openrouter/z-ai/glm-5.2 "
-            "accept reasoning_effort (native values high, max) but are "
-            "not gated in detect_thinking_level. Fix should add a "
-            "GLM-5.2-only gate with a 2-level scale ('high', 'max')."
-        ),
-    )
     def test_gap_b_glm_5_2_admitted_to_probe(
         self, gate_probe: _RecordingModelStub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When fixed: ``detect_thinking_level`` for GLM-5.2 must reach the probe."""
+        """Post-fix: ``detect_thinking_level`` for GLM-5.2 must reach the probe."""
         import kiss.scripts.update_models as mod
 
         monkeypatch.setattr(mod, "_probe_attachments", lambda name: {})
@@ -743,16 +756,8 @@ class TestAuditGapTripwires:
         assert "zai-org/GLM-5.2" in recorded
         assert "openrouter/z-ai/glm-5.2" in recorded
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Audit gap B: GLM-5.2 uses a 2-level ladder ('high', 'max'). "
-            "When the fix lands, _thinking_scale_for must return that "
-            "ladder for zai-org/GLM-5.2 and openrouter/z-ai/glm-5.2."
-        ),
-    )
     def test_gap_b_glm_5_2_uses_two_level_scale(self) -> None:
-        """When fixed: ``_thinking_scale_for`` on GLM-5.2 keys returns the
+        """Post-fix: ``_thinking_scale_for`` on GLM-5.2 keys returns the
         2-level ``('high', 'max')`` scale — never the OpenAI ladder."""
         import kiss.scripts.update_models as mod
 
@@ -762,22 +767,14 @@ class TestAuditGapTripwires:
                 f"{name!r} must use ('high', 'max'); got {scale!r}"
             )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Audit gap B (safety): every non-5.2 GLM must stay behind the "
-            "gate even after gap B lands. The fix must not accidentally "
-            "gate in the whole zai-org / z-ai namespace — only 5.2."
-        ),
-    )
     def test_gap_b_only_5_2_admitted_other_glms_still_gated_out(
         self, gate_probe: _RecordingModelStub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When fixed: GLM-5.2 admitted, every other GLM still gated out."""
+        """Post-fix: GLM-5.2 admitted, every other GLM still gated out."""
         import kiss.scripts.update_models as mod
 
         monkeypatch.setattr(mod, "_probe_attachments", lambda name: {})
-        # First: confirm 5.2 gets in (post-fix).
+        # First: confirm 5.2 gets in.
         mod.detect_thinking_level("zai-org/GLM-5.2")
         recorded_before = [c["model_name"] for c in gate_probe.calls]
         assert "zai-org/GLM-5.2" in recorded_before
@@ -798,22 +795,13 @@ class TestAuditGapTripwires:
         ):
             assert mod.detect_thinking_level(other) is None, other
         assert gate_probe.calls == [], (
-            "Non-5.2 GLMs must not reach the probe even after gap B lands"
+            "Non-5.2 GLMs must not reach the probe after gap B fix"
         )
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Audit gap C: openai/gpt-oss-{20,120}b (Together's naming) "
-            "accepts reasoning_effort (low/medium/high) but the current "
-            "gate matches neither _OPENAI_PREFIXES nor "
-            "openrouter/openai/. The fix should add the Together route."
-        ),
-    )
     def test_gap_c_together_gpt_oss_admitted_to_probe(
         self, gate_probe: _RecordingModelStub, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """When fixed: ``detect_thinking_level`` for the Together route
+        """Post-fix: ``detect_thinking_level`` for the Together route
         of gpt-oss (``openai/gpt-oss-*``) must reach the probe."""
         import kiss.scripts.update_models as mod
 
@@ -827,18 +815,8 @@ class TestAuditGapTripwires:
         assert "openai/gpt-oss-120b" in recorded
         assert "openai/gpt-oss-20b" in recorded
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Audit gap D (soft): openrouter/openai/gpt-oss-* is already "
-            "gated in but MODEL_INFO.json still has thinking=null on all "
-            "three catalog rows. A --test-existing rerun should promote "
-            "them to thinking='high' and materialize -low/-medium/-high "
-            "aliases (no -xhigh — gpt-oss ladder tops at high)."
-        ),
-    )
     def test_gap_d_openrouter_gpt_oss_has_effort_aliases(self) -> None:
-        """When fixed: OpenRouter gpt-oss rows must carry the 3-level ladder."""
+        """Post-fix: OpenRouter gpt-oss rows carry the 3-level ladder."""
         data = _catalog()
         for base in (
             "openrouter/openai/gpt-oss-120b",
@@ -846,7 +824,7 @@ class TestAuditGapTripwires:
             "openrouter/openai/gpt-oss-safeguard-20b",
         ):
             assert data.get(base, {}).get("thinking") == "high", (
-                f"{base} must have thinking='high' after the re-probe"
+                f"{base} must have thinking='high' after materialization"
             )
             for level in ("low", "medium", "high"):
                 alias = f"{base}-{level}"
@@ -857,3 +835,431 @@ class TestAuditGapTripwires:
             assert f"{base}-xhigh" not in data, (
                 f"{base}-xhigh must not exist; gpt-oss ladder tops at 'high'"
             )
+
+
+# ---------------------------------------------------------------------------
+# Catalog-shape lock-ins for the newer effort families (Grok 4.5/4.3,
+# GLM-5.2, gpt-oss).  Same pattern as the Kimi K3 lock-ins above:
+# exact-alias existence, byte-for-byte field parity with the base aside
+# from ``thinking`` / ``alias_of``, and no off-scale suffixes.
+# ---------------------------------------------------------------------------
+
+
+def _assert_alias_field_parity(data: dict[str, dict], base: str, alias: str) -> None:
+    """Assert ``alias`` mirrors ``base`` in every non-thinking/alias field."""
+    base_fields = {k: v for k, v in data[base].items() if k not in ("thinking", "alias_of")}
+    alias_fields = {k: v for k, v in data[alias].items() if k not in ("thinking", "alias_of")}
+    assert alias_fields == base_fields, (
+        f"{alias} must match {base} byte-for-byte outside thinking/alias_of; "
+        f"got {alias_fields!r} vs {base_fields!r}"
+    )
+
+
+class TestNewFamilyCatalogAliasesFrozen:
+    """Shipped alias sets for Grok / GLM-5.2 / gpt-oss must not regress."""
+
+    def test_grok_effort_family_has_low_medium_high_aliases(self) -> None:
+        """Gap A lock-in: grok-4.5 / grok-4.3 ship the 3-level Grok ladder."""
+        data = _catalog()
+        for base in ("openrouter/x-ai/grok-4.5", "openrouter/x-ai/grok-4.3"):
+            assert base in data, f"Base {base} missing"
+            assert data[base].get("thinking") == "high", (
+                f"Base {base} must store thinking='high'; "
+                f"got {data[base].get('thinking')!r}"
+            )
+            assert "alias_of" not in data[base]
+            for level in GROK_EFFORT_LEVELS:
+                alias = f"{base}-{level}"
+                assert alias in data, f"Missing Grok alias {alias}"
+                assert data[alias].get("thinking") == level
+                assert data[alias].get("alias_of") == base
+                _assert_alias_field_parity(data, base, alias)
+            for off_scale in ("xhigh", "max"):
+                assert f"{base}-{off_scale}" not in data, (
+                    f"{base}-{off_scale} must not exist; the Grok effort "
+                    "ladder tops at 'high'"
+                )
+
+    def test_glm_5_2_family_has_high_max_aliases(self) -> None:
+        """Gap B lock-in: GLM-5.2 ships the 2-level (high, max) ladder."""
+        data = _catalog()
+        for base in ("zai-org/GLM-5.2", "openrouter/z-ai/glm-5.2"):
+            assert base in data, f"Base {base} missing"
+            assert data[base].get("thinking") == "high", (
+                f"Base {base} must be capped at high; "
+                f"got {data[base].get('thinking')!r}"
+            )
+            assert "alias_of" not in data[base]
+            for level in GLM_5_2_LEVELS:
+                alias = f"{base}-{level}"
+                assert alias in data, f"Missing GLM-5.2 alias {alias}"
+                assert data[alias].get("thinking") == level
+                assert data[alias].get("alias_of") == base
+                _assert_alias_field_parity(data, base, alias)
+            for off_scale in ("low", "medium", "xhigh"):
+                assert f"{base}-{off_scale}" not in data, (
+                    f"{base}-{off_scale} must not exist; GLM-5.2's ladder "
+                    "is exactly (high, max)"
+                )
+
+    def test_together_gpt_oss_has_low_medium_high_aliases(self) -> None:
+        """Gap C lock-in: Together-route gpt-oss ships the 3-level ladder."""
+        data = _catalog()
+        for base in ("openai/gpt-oss-120b", "openai/gpt-oss-20b"):
+            assert base in data, f"Base {base} missing"
+            assert data[base].get("thinking") == "high", (
+                f"Base {base} must store thinking='high'; "
+                f"got {data[base].get('thinking')!r}"
+            )
+            assert "alias_of" not in data[base]
+            for level in ("low", "medium", "high"):
+                alias = f"{base}-{level}"
+                assert alias in data, f"Missing gpt-oss alias {alias}"
+                assert data[alias].get("thinking") == level
+                assert data[alias].get("alias_of") == base
+                _assert_alias_field_parity(data, base, alias)
+            for off_scale in ("xhigh", "max"):
+                assert f"{base}-{off_scale}" not in data, (
+                    f"{base}-{off_scale} must not exist; gpt-oss rejects "
+                    "xhigh and max"
+                )
+
+
+# ---------------------------------------------------------------------------
+# Probe fallback behavior — successful-probe tests through the real
+# ``detect_thinking_level`` loop with a controllable model factory.  The
+# stub accepts a configurable set of levels: accepted levels return a
+# model whose ``generate()`` succeeds, everything else raises (like a
+# vendor HTTP 400).  This locks in both the descending probe order and
+# the stop-on-first-success semantics for every new vendor scale.
+# ---------------------------------------------------------------------------
+
+
+class _StubProbeModel:
+    """Minimal model object returned by :class:`_ProbeFactoryStub`."""
+
+    def initialize(self, *args: Any, **kwargs: Any) -> None:
+        """Accept any prompt/attachments without doing anything."""
+
+    def generate(self) -> tuple[str, Any]:
+        """Return a non-empty completion so the probe records a success."""
+        return "hello", None
+
+
+class _ProbeFactoryStub:
+    """``create_model`` stand-in whose success depends on the effort level.
+
+    Records the ``reasoning_effort`` of every probe attempt in
+    :attr:`attempts` (in call order).  When the level is in
+    ``accepted_levels`` the returned model generates successfully;
+    otherwise the factory raises, emulating a vendor HTTP 400 for an
+    unsupported level (``detect_thinking_level`` treats any exception as
+    a rejection and walks down the scale).
+    """
+
+    def __init__(self, accepted_levels: tuple[str, ...] = ()) -> None:
+        self.accepted_levels = accepted_levels
+        self.attempts: list[str] = []
+
+    def __call__(self, model_name: str, **kwargs: Any) -> _StubProbeModel:
+        level = str((kwargs.get("model_config") or {}).get("reasoning_effort"))
+        self.attempts.append(level)
+        if level in self.accepted_levels:
+            return _StubProbeModel()
+        raise RuntimeError(f"reasoning_effort={level!r} rejected by test stub")
+
+
+def _probe_with_stub(
+    monkeypatch: pytest.MonkeyPatch,
+    model_name: str,
+    accepted_levels: tuple[str, ...],
+) -> tuple[str | None, list[str]]:
+    """Run ``detect_thinking_level`` against a controllable probe stub.
+
+    Returns the detected level and the ordered list of levels attempted.
+    """
+    import kiss.scripts.update_models as mod
+
+    stub = _ProbeFactoryStub(accepted_levels)
+    monkeypatch.setattr("kiss.core.models.model_info.model", stub)
+    monkeypatch.setattr(mod, "_probe_attachments", lambda name: None)
+    return mod.detect_thinking_level(model_name), stub.attempts
+
+
+class TestProbeFallbackBehavior:
+    """``detect_thinking_level`` walks each new vendor scale descending."""
+
+    # --- Grok effort family (3-level: low, medium, high) -----------------
+
+    def test_grok_4_5_accepts_high_stops_immediately(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Top level accepted → returns 'high' after a single attempt."""
+        level, attempts = _probe_with_stub(
+            monkeypatch, "openrouter/x-ai/grok-4.5", accepted_levels=("high",)
+        )
+        assert level == "high"
+        assert attempts == ["high"], (
+            "The probe must try the top of the Grok scale first and stop "
+            f"on success; attempted {attempts}"
+        )
+
+    def test_grok_4_5_falls_back_to_medium(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """'high' rejected, 'medium' accepted → returns 'medium'."""
+        level, attempts = _probe_with_stub(
+            monkeypatch, "openrouter/x-ai/grok-4.5", accepted_levels=("medium",)
+        )
+        assert level == "medium"
+        assert attempts == ["high", "medium"], (
+            f"The probe must walk high → medium and stop; attempted {attempts}"
+        )
+
+    def test_grok_4_5_all_rejected_walks_full_scale(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Everything rejected → None after exactly high, medium, low."""
+        level, attempts = _probe_with_stub(
+            monkeypatch, "openrouter/x-ai/grok-4.5", accepted_levels=()
+        )
+        assert level is None
+        assert attempts == ["high", "medium", "low"], (
+            "Every level of the Grok scale (and only those) must be tried "
+            f"in descending order; attempted {attempts}"
+        )
+
+    # --- grok-3-mini (2-level: low, high — no medium!) --------------------
+
+    def test_grok_3_mini_accepts_high_never_tries_medium(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """grok-3-mini top level accepted → 'high' with a single attempt."""
+        level, attempts = _probe_with_stub(
+            monkeypatch, "openrouter/x-ai/grok-3-mini", accepted_levels=("high",)
+        )
+        assert level == "high"
+        assert attempts == ["high"]
+
+    def test_grok_3_mini_all_rejected_skips_medium(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The 2-level mini scale must be honored: high, low — NO medium."""
+        level, attempts = _probe_with_stub(
+            monkeypatch, "openrouter/x-ai/grok-3-mini-beta", accepted_levels=()
+        )
+        assert level is None
+        assert attempts == ["high", "low"], (
+            "grok-3-mini must never be probed with 'medium' (the API "
+            f"rejects it); attempted {attempts}"
+        )
+        assert "medium" not in attempts
+
+    # --- GLM-5.2 (2-level: high, max) --------------------------------------
+
+    @pytest.mark.parametrize("name", ["zai-org/GLM-5.2", "openrouter/z-ai/glm-5.2"])
+    def test_glm_5_2_accepts_max_stops_immediately(
+        self, monkeypatch: pytest.MonkeyPatch, name: str
+    ) -> None:
+        """Top level 'max' accepted → returns 'max' after one attempt."""
+        level, attempts = _probe_with_stub(monkeypatch, name, accepted_levels=("max",))
+        assert level == "max"
+        assert attempts == ["max"], (
+            f"The probe must try GLM-5.2's top level 'max' first; attempted {attempts}"
+        )
+
+    def test_glm_5_2_falls_back_to_high(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """'max' rejected, 'high' accepted → returns 'high'."""
+        level, attempts = _probe_with_stub(
+            monkeypatch, "zai-org/GLM-5.2", accepted_levels=("high",)
+        )
+        assert level == "high"
+        assert attempts == ["max", "high"]
+
+    def test_glm_5_2_all_rejected_never_tries_low_or_medium(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Everything rejected → None after exactly max, high (no low/medium)."""
+        level, attempts = _probe_with_stub(
+            monkeypatch, "openrouter/z-ai/glm-5.2", accepted_levels=()
+        )
+        assert level is None
+        assert attempts == ["max", "high"], (
+            "GLM-5.2's scale is exactly (high, max); 'low' and 'medium' "
+            f"must never be probed; attempted {attempts}"
+        )
+
+    # --- gpt-oss (OpenAI ladder; vendor rejects xhigh, tops at high) -------
+
+    def test_together_gpt_oss_rejects_xhigh_falls_back_to_high(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The audit's expectation: xhigh fails, high succeeds → 'high'."""
+        level, attempts = _probe_with_stub(
+            monkeypatch, "openai/gpt-oss-120b", accepted_levels=("low", "medium", "high")
+        )
+        assert level == "high"
+        assert attempts == ["xhigh", "high"], (
+            "gpt-oss probes the OpenAI ladder; xhigh must fail and high "
+            f"succeed on the next rung; attempted {attempts}"
+        )
+
+    def test_together_gpt_oss_accepts_only_low(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only 'low' accepted → full descending walk down the OpenAI ladder."""
+        level, attempts = _probe_with_stub(
+            monkeypatch, "openai/gpt-oss-120b", accepted_levels=("low",)
+        )
+        assert level == "low"
+        assert attempts == ["xhigh", "high", "medium", "low"]
+
+    def test_openrouter_gpt_oss_rejects_xhigh_falls_back_to_high(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Gap D route: OpenRouter gpt-oss walks the same ladder."""
+        level, attempts = _probe_with_stub(
+            monkeypatch,
+            "openrouter/openai/gpt-oss-20b",
+            accepted_levels=("low", "medium", "high"),
+        )
+        assert level == "high"
+        assert attempts == ["xhigh", "high"]
+
+
+# ---------------------------------------------------------------------------
+# Wire-shape tests — one per vendor route.  A real ``generate()`` through
+# each new family's catalog alias must carry the base model id and the
+# alias's ``reasoning_effort`` in the outgoing request payload.  Mirrors
+# the in-process endpoint-emulator pattern of
+# ``test_update_models_moonshot_thinking.py``: only provider ``base_url``
+# constants and API keys are redirected; the code under test (catalog
+# alias resolution, ``OpenAICompatibleModel`` request building, HTTP
+# transport) runs unmodified.
+# ---------------------------------------------------------------------------
+
+
+class _EffortCaptureHandler(BaseHTTPRequestHandler):
+    """Generic OpenAI-compatible chat-completions emulator.
+
+    Captures every request body into ``captured_bodies`` and answers with
+    a minimal successful completion, echoing the requested model id.
+    Serves the OpenRouter and Together routes alike (both speak the same
+    ``/chat/completions`` wire dialect).
+    """
+
+    captured_bodies: list[dict] = []
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length).decode("utf-8"))
+        self.__class__.captured_bodies.append(body)
+        payload = json.dumps(
+            {
+                "id": "cmpl-wire",
+                "object": "chat.completion",
+                "created": 0,
+                "model": body.get("model", ""),
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "hello"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 1,
+                    "total_tokens": 4,
+                },
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        return
+
+
+@pytest.fixture
+def effort_wire(monkeypatch: pytest.MonkeyPatch) -> Generator[str]:
+    """Route the openrouter and together vendors at an in-process emulator."""
+    import dataclasses
+
+    from kiss.core import config as config_module
+    from kiss.core.models import model_info
+
+    _EffortCaptureHandler.captured_bodies = []
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _EffortCaptureHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}/v1"
+    providers = tuple(
+        dataclasses.replace(p, base_url=base_url)
+        if p.name in ("openrouter", "together")
+        else p
+        for p in model_info.OPENAI_COMPATIBLE_PROVIDERS
+    )
+    monkeypatch.setattr(model_info, "OPENAI_COMPATIBLE_PROVIDERS", providers)
+    monkeypatch.setattr(
+        config_module.DEFAULT_CONFIG, "OPENROUTER_API_KEY", "test-key", raising=False
+    )
+    monkeypatch.setattr(
+        config_module.DEFAULT_CONFIG, "TOGETHER_API_KEY", "test-key", raising=False
+    )
+    try:
+        yield base_url
+    finally:
+        server.shutdown()
+
+
+def _generate_and_capture(alias: str) -> dict:
+    """Run a real ``generate()`` through ``alias`` and return the wire body."""
+    from kiss.core.models.model_info import model as create_model
+
+    m = create_model(alias)
+    m.initialize("Say hello in one word.")
+    text, _ = m.generate()
+    assert text.strip() == "hello"
+    assert len(_EffortCaptureHandler.captured_bodies) == 1, (
+        f"Exactly one request expected for {alias}; "
+        f"got {len(_EffortCaptureHandler.captured_bodies)}"
+    )
+    return _EffortCaptureHandler.captured_bodies[0]
+
+
+class TestWireShapePerVendorRoute:
+    """Each new family's alias must put ``reasoning_effort`` on the wire."""
+
+    def test_grok_4_5_high_via_openrouter(self, effort_wire: str) -> None:
+        """openrouter/x-ai/grok-4.5-high → model=x-ai/grok-4.5, effort=high."""
+        body = _generate_and_capture("openrouter/x-ai/grok-4.5-high")
+        assert body["model"] == "x-ai/grok-4.5", "Wire id must be the base model"
+        assert body["reasoning_effort"] == "high"
+
+    def test_glm_5_2_max_via_together(self, effort_wire: str) -> None:
+        """zai-org/GLM-5.2-max → model=zai-org/GLM-5.2, effort=max."""
+        body = _generate_and_capture("zai-org/GLM-5.2-max")
+        assert body["model"] == "zai-org/GLM-5.2", "Wire id must be the base model"
+        assert body["reasoning_effort"] == "max"
+
+    def test_glm_5_2_max_via_openrouter(self, effort_wire: str) -> None:
+        """openrouter/z-ai/glm-5.2-max → model=z-ai/glm-5.2, effort=max."""
+        body = _generate_and_capture("openrouter/z-ai/glm-5.2-max")
+        assert body["model"] == "z-ai/glm-5.2", "Wire id must be the base model"
+        assert body["reasoning_effort"] == "max"
+
+    def test_gpt_oss_120b_medium_via_together(self, effort_wire: str) -> None:
+        """openai/gpt-oss-120b-medium → model=openai/gpt-oss-120b, effort=medium."""
+        body = _generate_and_capture("openai/gpt-oss-120b-medium")
+        assert body["model"] == "openai/gpt-oss-120b", "Wire id must be the base model"
+        assert body["reasoning_effort"] == "medium"
+
+    def test_gpt_oss_20b_low_via_openrouter(self, effort_wire: str) -> None:
+        """openrouter/openai/gpt-oss-20b-low → model=openai/gpt-oss-20b, effort=low."""
+        body = _generate_and_capture("openrouter/openai/gpt-oss-20b-low")
+        assert body["model"] == "openai/gpt-oss-20b", "Wire id must be the base model"
+        assert body["reasoning_effort"] == "low"

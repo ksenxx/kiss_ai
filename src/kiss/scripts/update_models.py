@@ -441,6 +441,135 @@ _MOONSHOT_MODEL_PREFIXES: tuple[str, ...] = (
 direct (``kimi-*`` / ``moonshot-*``), Together (``moonshotai/*``), and
 OpenRouter (``openrouter/moonshotai/*``)."""
 
+_GROK_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high")
+"""The xAI Grok ``reasoning_effort`` scale for the ``grok-4.3`` / ``grok-4.5``
+family. xAI docs (https://docs.x.ai/developers/model-capabilities/text/reasoning)
+document three levels; ``xhigh`` and ``max`` are rejected and thinking cannot
+be disabled entirely for these models."""
+
+_GROK_3_MINI_EFFORT_LEVELS: tuple[str, ...] = ("low", "high")
+"""The xAI ``grok-3-mini`` / ``grok-3-mini-beta`` ``reasoning_effort`` scale.
+Unlike ``grok-4.5``/``grok-4.3``, the mini family accepts ONLY ``low`` and
+``high`` — ``medium`` returns HTTP 400 (docs.x.ai). The alias-writer emits
+``-low`` and ``-high`` siblings only; a bogus ``-medium`` alias would be a
+correctness bug."""
+
+_XAI_MODEL_PREFIXES: tuple[str, ...] = (
+    "openrouter/x-ai/",
+    "openrouter/~x-ai/",
+)
+"""Catalog-key prefixes for xAI Grok models. Only routed through OpenRouter
+today; a direct-xAI namespace can be added here alongside if/when KISS adds
+a native xAI backend."""
+
+_GLM_5_2_EFFORT_LEVELS: tuple[str, ...] = ("high", "max")
+"""The z-ai ``GLM-5.2`` ``reasoning_effort`` scale. Per Zhipu docs the native
+levels are ``high`` and ``max``; OpenRouter's Zhipu routes accept both plus
+``xhigh`` as an alias for ``max``, so the source-of-truth 2-level ladder is
+preserved and ``xhigh`` is not materialized. Every other GLM (4.5 / 4.6 /
+4.7 / 5.0 / 5.1 / 5v-turbo) uses the older ``thinking.type`` boolean surface
+and is deliberately kept behind the probe gate."""
+
+_GLM_5_2_MODEL_PREFIXES: tuple[str, ...] = (
+    "zai-org/",
+    "openrouter/z-ai/",
+    "openrouter/~z-ai/",
+)
+"""Catalog-key prefixes under which a ``GLM-5.2`` model may appear. The
+narrower :func:`_is_glm_5_2_family` predicate refines the check to the
+5.2 base name; other GLMs sharing these prefixes stay gated out."""
+
+
+def _is_grok_effort_family(model_name: str) -> bool:
+    """Return True for xAI Grok models that accept ``reasoning_effort``.
+
+    Admits only the three ``reasoning_effort``-capable Grok families:
+    ``grok-4.5``, ``grok-4.3`` (three-level ladder), and ``grok-3-mini`` /
+    ``grok-3-mini-beta`` (two-level ladder). Every other Grok slug —
+    including the boolean-thinking ``grok-4`` / ``grok-4-fast`` /
+    ``grok-4.20`` / ``grok-4.20-multi-agent`` / ``grok-4.1-fast`` and every
+    non-reasoning legacy Grok (``grok-3``, ``grok-2*``, ``grok-code-*``,
+    ``grok-build-*``, ``grok-beta``, ``grok-vision-*``, ``grok-latest``) —
+    stays behind the probe gate: those models either don't accept the
+    parameter at all or repurpose it for agent count rather than depth.
+
+    The match is on the last ``/``-separated segment, case-insensitively,
+    so it covers both ``openrouter/x-ai/grok-4.5`` and any future direct
+    xAI routing.
+
+    Args:
+        model_name: The catalog key of the model.
+
+    Returns:
+        True when the model belongs to the Grok reasoning-effort family.
+    """
+    base = model_name.rsplit("/", 1)[-1].lower()
+    if base in ("grok-3-mini", "grok-3-mini-beta"):
+        return True
+    return base in ("grok-4.5", "grok-4.3")
+
+
+def _is_grok_3_mini_family(model_name: str) -> bool:
+    """Return True when ``model_name`` is a ``grok-3-mini`` variant.
+
+    ``grok-3-mini`` and ``grok-3-mini-beta`` accept only ``low`` and
+    ``high`` (no ``medium``), unlike ``grok-4.5``/``grok-4.3`` which
+    accept ``low``/``medium``/``high``. Distinguishing them is critical
+    to :func:`_thinking_scale_for`: emitting a ``-medium`` alias for a
+    ``grok-3-mini`` model would fabricate a level the API rejects.
+    """
+    base = model_name.rsplit("/", 1)[-1].lower()
+    return base in ("grok-3-mini", "grok-3-mini-beta")
+
+
+def _is_glm_5_2_family(model_name: str) -> bool:
+    """Return True when ``model_name`` is exactly a z-ai GLM-5.2 model.
+
+    Per the November 2026 audit, ``zai-org/GLM-5.2`` and
+    ``openrouter/z-ai/glm-5.2`` are the **only** Zhipu / GLM entries that
+    accept the ``reasoning_effort`` API surface (native values ``high`` and
+    ``max``). Every other GLM (4.5 / 4.6 / 4.7 / 5.0 / 5.1 / 5v-turbo /
+    ``glm-4.5-air`` etc.) uses the older ``thinking.type`` boolean and
+    must stay behind the probe gate.
+
+    The match requires:
+
+    * a recognized GLM-5.2 route prefix (``zai-org/``, ``openrouter/z-ai/``,
+      ``openrouter/~z-ai/``), AND
+    * a last-segment name equal to ``glm-5.2`` (case-insensitive) — so a
+      hypothetical ``glm-5.2v-turbo`` or ``glm-5.2-air`` stays gated out
+      unless it is separately verified to accept ``reasoning_effort``.
+
+    Args:
+        model_name: The catalog key of the model.
+
+    Returns:
+        True when the model is exactly a GLM-5.2 base.
+    """
+    if not model_name.startswith(_GLM_5_2_MODEL_PREFIXES):
+        return False
+    base = model_name.rsplit("/", 1)[-1].lower()
+    return base == "glm-5.2"
+
+
+def _is_together_gpt_oss(model_name: str) -> bool:
+    """Return True for the Together-route OpenAI gpt-oss family.
+
+    Together AI hosts the open-weight gpt-oss models under the ``openai/``
+    catalog namespace (``openai/gpt-oss-120b``, ``openai/gpt-oss-20b``).
+    That prefix does not overlap ``_OPENAI_PREFIXES`` (which starts with
+    ``gpt``, ``o1``, ``o3``, ``o4``, ``codex``, ``computer-use``), so
+    these entries would otherwise slip through the probe gate. They are
+    OpenAI-compatible chat-completions models and accept the OpenAI
+    ``reasoning_effort`` ladder (topping at ``high``); the standard
+    OpenAI scale returned by :func:`_thinking_scale_for` is correct for
+    them — the probe naturally lands at ``high`` and stops.
+
+    The check is scoped to ``openai/gpt-oss-*`` slugs specifically so
+    that no unrelated Together model is affected.
+    """
+    return model_name.startswith("openai/gpt-oss-")
+
 
 def _is_kimi_k3_family(model_name: str) -> bool:
     """Return True when ``model_name`` is a Kimi K3-generation model.
@@ -472,12 +601,23 @@ def _is_kimi_k3_family(model_name: str) -> bool:
 def _thinking_scale_for(model_name: str) -> tuple[str, ...]:
     """Return the ascending ``reasoning_effort`` scale for ``model_name``.
 
-    The scale is vendor-specific: Moonshot/Kimi models use
-    :data:`_MOONSHOT_THINKING_LEVELS` (``low``/``high``/``max``), every
-    other model uses the OpenAI ladder :data:`_THINKING_LEVELS`
-    (``low``/``medium``/``high``/``xhigh``). Every scale is required to
-    contain ``"high"`` — the level stored on base entries when the
-    detected maximum is higher (see
+    The scale is vendor-specific:
+
+    * Moonshot/Kimi models use :data:`_MOONSHOT_THINKING_LEVELS`
+      (``low``/``high``/``max``).
+    * xAI ``grok-3-mini`` / ``grok-3-mini-beta`` use
+      :data:`_GROK_3_MINI_EFFORT_LEVELS` (``low``/``high``).
+    * xAI ``grok-4.5`` / ``grok-4.3`` use :data:`_GROK_EFFORT_LEVELS`
+      (``low``/``medium``/``high``).
+    * z-ai ``GLM-5.2`` uses :data:`_GLM_5_2_EFFORT_LEVELS`
+      (``high``/``max``).
+    * Every other model uses the OpenAI ladder :data:`_THINKING_LEVELS`
+      (``low``/``medium``/``high``/``xhigh``) — including Together's
+      OpenAI-compatible ``openai/gpt-oss-*`` entries, which naturally top
+      at ``high``.
+
+    Every scale is required to contain ``"high"`` — the level stored on
+    base entries when the detected maximum is higher (see
     :func:`_write_entry_with_thinking_split`).
 
     Args:
@@ -488,6 +628,12 @@ def _thinking_scale_for(model_name: str) -> tuple[str, ...]:
     """
     if model_name.startswith(_MOONSHOT_MODEL_PREFIXES):
         return _MOONSHOT_THINKING_LEVELS
+    if model_name.startswith(_XAI_MODEL_PREFIXES) and _is_grok_effort_family(model_name):
+        if _is_grok_3_mini_family(model_name):
+            return _GROK_3_MINI_EFFORT_LEVELS
+        return _GROK_EFFORT_LEVELS
+    if _is_glm_5_2_family(model_name):
+        return _GLM_5_2_EFFORT_LEVELS
     return _THINKING_LEVELS
 
 
@@ -517,9 +663,17 @@ def detect_thinking_level(model_name: str) -> str | None:
     * Moonshot models outside the Kimi K3 family (K2.x controls thinking
       via ``thinking.type``, ``moonshot-v1-*`` has none; see
       :func:`_is_kimi_k3_family`).
+    * xAI Grok models outside the reasoning-effort family: only
+      ``grok-4.5``, ``grok-4.3``, ``grok-3-mini``, and ``grok-3-mini-beta``
+      are probed (see :func:`_is_grok_effort_family`). The boolean-only
+      variants (``grok-4``, ``grok-4-fast``, ``grok-4.20*``, ``grok-4.1*``,
+      etc.) either don't accept ``reasoning_effort`` or repurpose the
+      levels for agent count rather than depth.
+    * GLMs other than exactly ``GLM-5.2`` (see :func:`_is_glm_5_2_family`).
     * Every other vendor not yet verified to support the parameter (only
-      the OpenAI family — direct and via OpenRouter — and Kimi K3 are
-      probed).
+      the OpenAI family — direct and via OpenRouter, plus Together's
+      ``openai/gpt-oss-*`` — Kimi K3, the xAI Grok effort family, and
+      z-ai GLM-5.2 are probed).
     """
     from kiss.core.models.model_info import _OPENAI_PREFIXES
 
@@ -531,10 +685,22 @@ def detect_thinking_level(model_name: str) -> str | None:
         "text-embedding"
     )
     is_openrouter_openai = model_name.startswith(("openrouter/openai/", "openrouter/~openai/"))
+    is_together_gpt_oss = _is_together_gpt_oss(model_name)
     is_moonshot_k3 = model_name.startswith(_MOONSHOT_MODEL_PREFIXES) and _is_kimi_k3_family(
         model_name
     )
-    if not (is_openai or is_openrouter_openai or is_moonshot_k3):
+    is_grok_effort = model_name.startswith(_XAI_MODEL_PREFIXES) and _is_grok_effort_family(
+        model_name
+    )
+    is_glm_5_2 = _is_glm_5_2_family(model_name)
+    if not (
+        is_openai
+        or is_openrouter_openai
+        or is_together_gpt_oss
+        or is_moonshot_k3
+        or is_grok_effort
+        or is_glm_5_2
+    ):
         return None
 
     from kiss.core.models.model_info import model as create_model
