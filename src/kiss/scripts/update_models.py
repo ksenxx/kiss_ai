@@ -330,6 +330,7 @@ def get_current_model_info() -> dict[str, dict]:
             "emb": info.is_embedding_supported,
             "gen": info.is_generation_supported,
             "thinking": info.thinking,
+            "alias_of": info.alias_of,
         }
         for name, info in MODEL_INFO.items()
     }
@@ -411,18 +412,24 @@ def test_embedding(model_name: str) -> bool:
         return False
 
 
-_THINKING_LEVELS_TO_PROBE: tuple[str, ...] = ("xhigh",)
+_THINKING_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh")
+"""All ``reasoning_effort`` levels KISS materializes as ``-{level}`` aliases,
+in ascending order of effort."""
+
+_THINKING_LEVELS_TO_PROBE: tuple[str, ...] = tuple(reversed(_THINKING_LEVELS))
 
 
 def detect_thinking_level(model_name: str) -> str | None:
     """Detect the highest ``reasoning_effort`` level the model accepts.
 
-    Probes each level in :data:`_THINKING_LEVELS_TO_PROBE` (currently just
-    ``"xhigh"``) by issuing a minimal generate call with
-    ``model_config={"reasoning_effort": <level>}`` explicitly so that the
-    OpenAI Chat Completions API itself decides the verdict, regardless of
-    whether the model is already flagged in ``MODEL_INFO``. Returns the
-    first level that succeeds, or ``None`` if none did.
+    Probes each level in :data:`_THINKING_LEVELS_TO_PROBE` (descending:
+    ``xhigh``, ``high``, ``medium``, ``low``) by issuing a minimal generate
+    call with ``model_config={"reasoning_effort": <level>}`` explicitly so
+    that the OpenAI Chat Completions API itself decides the verdict,
+    regardless of whether the model is already flagged in ``MODEL_INFO``.
+    Returns the first (highest) level that succeeds, or ``None`` if none
+    did. Levels below the returned one are assumed supported too — the
+    OpenAI API accepts every standard level once it accepts any.
 
     Returns ``None`` (without making any API call) for backends that don't
     accept ``reasoning_effort`` at all:
@@ -557,7 +564,7 @@ def find_deprecated_models(
         if _is_excluded_provider(name):  # pragma: no branch
             deprecated.append({"name": name, "reason": "excluded provider"})
             continue
-        if name.endswith(_XHIGH_SUFFIX):
+        if name.endswith(_XHIGH_SUFFIX) or current[name].get("alias_of"):
             continue
         if name.startswith("codex/"):  # pragma: no branch
             if codex_slugs and name != "codex/default":
@@ -1010,98 +1017,196 @@ def _build_entry(
 _XHIGH_SUFFIX = "-xhigh"
 
 
-def _write_entry_with_xhigh_split(
+def _alias_base_name(name: str, entry: dict[str, Any]) -> str | None:
+    """Return the base model name when ``entry`` is a generated thinking alias.
+
+    A generated alias is recognized either by its explicit ``alias_of``
+    marker (written by :func:`_write_entry_with_thinking_split` on every
+    generated ``-{level}`` sibling) or — for catalogs written before the
+    marker existed — by the legacy ``-xhigh`` name suffix. The marker is
+    required for ``-low`` / ``-medium`` / ``-high`` because real upstream
+    models can end in those suffixes (e.g. ``openrouter/openai/o3-mini-high``)
+    and must never be mistaken for synthetic aliases.
+
+    Args:
+        name: The catalog key of the entry.
+        entry: The entry dict (may or may not carry ``alias_of``).
+
+    Returns:
+        The base model name, or ``None`` when ``entry`` is a real model.
+    """
+    alias_of = entry.get("alias_of")
+    if alias_of:
+        return str(alias_of)
+    if name.endswith(_XHIGH_SUFFIX):
+        return name.removesuffix(_XHIGH_SUFFIX)
+    return None
+
+
+def _expected_alias_entry(base_name: str, base: dict[str, Any], level: str) -> dict[str, Any]:
+    """Return the generated ``-{level}`` sibling expected for ``base``.
+
+    The sibling mirrors every field of ``base`` (context length, pricing,
+    ``fc`` / ``emb`` / ``gen``, ``comment``) except ``thinking``, which is
+    pinned to ``level``, and ``alias_of``, which records the base name so
+    runtime code and later runs can tell synthetic aliases apart from real
+    upstream models.
+    """
+    sibling = dict(base)
+    sibling["thinking"] = level
+    sibling["alias_of"] = base_name
+    return sibling
+
+
+def _pop_generated_aliases(
+    data: dict[str, dict],
+    name: str,
+    keep_levels: tuple[str, ...] = (),
+) -> None:
+    """Remove ``name``'s generated ``-{level}`` aliases not in ``keep_levels``.
+
+    Only entries recognized as generated aliases of ``name`` (via
+    :func:`_alias_base_name`) are removed; a real upstream model that
+    happens to be called ``{name}-high`` (e.g. ``o3-mini-high``) is left
+    untouched.
+    """
+    for level in _THINKING_LEVELS:
+        if level in keep_levels:
+            continue
+        sibling_name = f"{name}-{level}"
+        sibling = data.get(sibling_name)
+        if sibling is not None and _alias_base_name(sibling_name, sibling) == name:
+            data.pop(sibling_name)
+
+
+def _write_entry_with_thinking_split(
     data: dict[str, dict],
     name: str,
     entry: dict[str, Any],
     *,
-    remove_stale_sibling: bool = True,
+    remove_stale_siblings: bool = True,
 ) -> None:
-    """Write ``entry`` under ``name`` in ``data``, splitting xhigh into two siblings.
+    """Write ``entry`` under ``name``, materializing one alias per thinking level.
 
-    When the resulting ``entry["thinking"]`` is ``"xhigh"`` the catalog
-    emits **two** entries instead of one:
+    When ``entry["thinking"]`` is a level in :data:`_THINKING_LEVELS`, the
+    catalog emits the base entry **plus one generated sibling per supported
+    level** — every level from ``low`` up to the detected maximum:
 
-    * the base ``name`` with ``thinking`` downgraded to ``"high"`` so users
-      who reference the original model name still get a working
-      ``reasoning_effort`` setting, and
-    * a sibling at ``name + "-xhigh"`` with ``thinking="xhigh"`` so the
-      uncapped reasoning level is selectable explicitly.
+    * ``thinking="xhigh"`` → base (downgraded to ``thinking="high"``) and
+      ``-low`` / ``-medium`` / ``-high`` / ``-xhigh`` siblings;
+    * ``thinking="high"`` → base and ``-low`` / ``-medium`` / ``-high``;
+    * lower levels analogously.
 
-    The sibling inherits every other field on ``entry`` (context length,
-    pricing, ``fc`` / ``emb`` / ``gen`` flags, ``comment``), so its
-    pricing / capability signature matches the base byte for byte aside
-    from the ``thinking`` key.
+    Each sibling inherits every other field on ``entry`` (context length,
+    pricing, ``fc`` / ``emb`` / ``gen`` flags, ``comment``) and carries an
+    ``alias_of`` marker naming the base, so its pricing / capability
+    signature matches the base byte for byte aside from ``thinking`` and
+    ``alias_of``.
 
-    When ``entry["thinking"]`` is anything other than ``"xhigh"`` (``None``,
-    ``"high"``, ``"medium"``, ...) this is a plain ``data[name] = entry``
-    write. When ``remove_stale_sibling`` is true, any pre-existing stale
-    ``name + "-xhigh"`` sibling left over from a previous run is removed so
-    the catalog stays consistent with the latest probe results: a model that
-    no longer accepts xhigh must not advertise the ``-xhigh`` alias. Set
-    ``remove_stale_sibling`` false for routine updates that did not explicitly
-    re-test ``thinking``; those updates are not evidence that xhigh support was
-    lost, so an existing sibling is preserved and synchronized.
+    When ``entry`` has no recognized ``thinking`` level this is a plain
+    ``data[name] = entry`` write. When ``remove_stale_siblings`` is true,
+    pre-existing generated aliases at unsupported levels are removed so the
+    catalog stays consistent with the latest probe results. Set it false
+    for routine updates that did not re-test ``thinking``: those are not
+    evidence that a level was lost, so an existing generated ``-xhigh``
+    sibling is trusted as proof of xhigh support and the full alias set is
+    regenerated (and synchronized) from it.
 
-    The helper short-circuits when ``name`` already ends in ``"-xhigh"`` to
-    keep the split idempotent on re-runs (we never produce
-    ``foo-xhigh-xhigh``).
+    The helper short-circuits with a plain write when ``name`` itself is a
+    generated alias (marker on the incoming or on-disk entry, or the legacy
+    ``-xhigh`` suffix), preserving the marker; we never produce nested
+    aliases like ``foo-xhigh-xhigh``.
     """
-    if name.endswith(_XHIGH_SUFFIX):
+    alias_base = entry.get("alias_of") or (data.get(name) or {}).get("alias_of")
+    if alias_base or name.endswith(_XHIGH_SUFFIX):
+        if alias_base:
+            entry = dict(entry)
+            entry["alias_of"] = alias_base
         data[name] = entry
         return
-    sibling_name = name + _XHIGH_SUFFIX
-    if entry.get("thinking") != "xhigh":
+    entry = dict(entry)
+    entry.pop("alias_of", None)
+    stored_level = entry.get("thinking")
+    if stored_level not in _THINKING_LEVELS:
         data[name] = entry
-        if remove_stale_sibling:
-            data.pop(sibling_name, None)
-            return
-        if sibling_name in data:
-            data[sibling_name] = _expected_xhigh_sibling(entry)
+        if remove_stale_siblings:
+            _pop_generated_aliases(data, name)
         return
+    max_level = stored_level
+    if not remove_stale_siblings and stored_level != "xhigh":
+        sibling_name = name + _XHIGH_SUFFIX
+        sibling = data.get(sibling_name)
+        if sibling is not None and _alias_base_name(sibling_name, sibling) == name:
+            max_level = "xhigh"
     base = dict(entry)
-    base["thinking"] = "high"
-    sibling = dict(entry)
-    sibling["thinking"] = "xhigh"
+    high_rank = _THINKING_LEVELS.index("high")
+    max_rank = _THINKING_LEVELS.index(max_level)
+    base["thinking"] = "high" if max_rank > high_rank else max_level
     data[name] = base
-    data[sibling_name] = sibling
-
-
-def _expected_xhigh_sibling(base: dict[str, Any]) -> dict[str, Any]:
-    """Return the generated ``-xhigh`` sibling expected for ``base``."""
-    sibling = dict(base)
-    sibling["thinking"] = "xhigh"
-    return sibling
-
-
-def _has_xhigh_normalization_changes(data: dict[str, dict]) -> bool:
-    """Return True when ``data`` needs generated xhigh alias normalization."""
-    for name, entry in data.items():
-        if name.endswith(_XHIGH_SUFFIX):
-            base_name = name.removesuffix(_XHIGH_SUFFIX)
-            base = data.get(base_name)
-            if base is None:
-                return True
-            if base.get("thinking") == "high" and entry != _expected_xhigh_sibling(base):
-                return True
-        elif entry.get("thinking") == "xhigh":
-            return True
-    return False
-
-
-def _normalize_xhigh_splits(data: dict[str, dict]) -> None:
-    """Normalize existing entries to the base-high plus ``-xhigh`` convention."""
-    for name, entry in list(data.items()):
-        if name.endswith(_XHIGH_SUFFIX):
-            base_name = name.removesuffix(_XHIGH_SUFFIX)
-            base = data.get(base_name)
-            if base is None:
-                data.pop(name, None)
-            elif base.get("thinking") == "high":
-                data[name] = _expected_xhigh_sibling(base)
+    supported = _THINKING_LEVELS[: max_rank + 1]
+    for level in supported:
+        sibling_name = f"{name}-{level}"
+        existing = data.get(sibling_name)
+        if existing is not None and _alias_base_name(sibling_name, existing) != name:
+            # A real upstream model (e.g. o3-mini-high) or a foreign alias
+            # occupies this name; never clobber it with a generated alias.
             continue
-        if entry.get("thinking") == "xhigh":
-            _write_entry_with_xhigh_split(data, name, entry)
+        data[sibling_name] = _expected_alias_entry(name, base, level)
+    _pop_generated_aliases(data, name, keep_levels=supported)
+
+
+def _stored_max_thinking_level(
+    data: dict[str, dict],
+    name: str,
+    entry: dict[str, Any],
+) -> str | None:
+    """Return the max reasoning level recorded on disk for base entry ``name``.
+
+    The base entry stores at most ``"high"`` (see
+    :func:`_write_entry_with_thinking_split`), so a generated ``-xhigh``
+    sibling promotes the stored maximum to ``"xhigh"``.
+    """
+    level = entry.get("thinking")
+    if level not in _THINKING_LEVELS:
+        return None
+    if level != "xhigh":
+        sibling_name = name + _XHIGH_SUFFIX
+        sibling = data.get(sibling_name)
+        if sibling is not None and _alias_base_name(sibling_name, sibling) == name:
+            return "xhigh"
+    return str(level)
+
+
+def _normalize_thinking_splits(data: dict[str, dict]) -> None:
+    """Normalize entries to the base plus ``-{level}`` alias convention.
+
+    Two passes:
+
+    1. Drop orphan generated aliases whose base entry no longer exists.
+    2. For every base entry with a recognized ``thinking`` level, regenerate
+       the full set of ``-{level}`` siblings (repairing malformed ones and
+       adding the ``alias_of`` marker to legacy ``-xhigh`` siblings).
+    """
+    for name, entry in list(data.items()):
+        base_name = _alias_base_name(name, entry)
+        if base_name is not None and base_name not in data:
+            data.pop(name)
+    for name, entry in list(data.items()):
+        if _alias_base_name(name, entry) is not None:
+            continue
+        max_level = _stored_max_thinking_level(data, name, entry)
+        if max_level is None:
+            continue
+        normalized = dict(entry)
+        normalized["thinking"] = max_level
+        _write_entry_with_thinking_split(data, name, normalized)
+
+
+def _has_thinking_normalization_changes(data: dict[str, dict]) -> bool:
+    """Return True when ``data`` needs generated thinking-alias normalization."""
+    normalized = {name: dict(entry) for name, entry in data.items()}
+    _normalize_thinking_splits(normalized)
+    return normalized != data
 
 
 def _read_model_info_json(path: Path) -> dict[str, dict]:
@@ -1173,15 +1278,19 @@ def apply_updates_to_file(
             touching disk.
     """
     data = _read_model_info_json(MODEL_INFO_PATH)
-    _normalize_xhigh_splits(data)
+    _normalize_thinking_splits(data)
 
     deprecated_names = {d["name"] for d in deprecated}
     removed = 0
     for name in deprecated_names:
         if data.pop(name, None) is not None:
             removed += 1
-        if data.pop(name + _XHIGH_SUFFIX, None) is not None:
-            removed += 1
+        for level in _THINKING_LEVELS:
+            sibling_name = f"{name}-{level}"
+            sibling = data.get(sibling_name)
+            if sibling is not None and _alias_base_name(sibling_name, sibling) == name:
+                data.pop(sibling_name)
+                removed += 1
 
     applied = 0
     for upd in updates:  # pragma: no branch
@@ -1202,11 +1311,11 @@ def apply_updates_to_file(
                 entry.pop("thinking", None)
             else:
                 entry[field] = value
-        _write_entry_with_xhigh_split(
+        _write_entry_with_thinking_split(
             data,
             name,
             entry,
-            remove_stale_sibling="thinking" in changes,
+            remove_stale_siblings="thinking" in changes,
         )
         applied += 1
 
@@ -1223,7 +1332,7 @@ def apply_updates_to_file(
             thinking=nm.get("thinking"),
             comment=comment,
         )
-        _write_entry_with_xhigh_split(data, nm["name"], entry)
+        _write_entry_with_thinking_split(data, nm["name"], entry)
         added += 1
 
     print(f"\n  Removed {removed} deprecated, applied {applied} updates, added {added} new")
@@ -1460,14 +1569,14 @@ def main() -> None:
     new_models = [nm for nm in new_models if nm["name"] not in deprecated_names]
 
     on_disk = _read_model_info_json(MODEL_INFO_PATH)
-    needs_xhigh_normalization = _has_xhigh_normalization_changes(on_disk)
+    needs_thinking_normalization = _has_thinking_normalization_changes(on_disk)
     needs_context_cap = _has_context_cap_changes(on_disk)
     if (  # pragma: no branch
         not updates
         and not new_models
         and not deprecated
         and not args.test_existing
-        and not needs_xhigh_normalization
+        and not needs_thinking_normalization
         and not needs_context_cap
     ):
         print("\nEverything is up to date!")
@@ -1501,7 +1610,7 @@ def main() -> None:
         print("\n  Re-testing existing models...")
         update_by_name = {upd["name"]: upd for upd in updates}
         for name, cur in current.items():  # pragma: no branch
-            if name.endswith(_XHIGH_SUFFIX):
+            if name.endswith(_XHIGH_SUFFIX) or cur.get("alias_of"):
                 continue
             caps = test_model_capabilities(name, verbose=args.verbose)
             fc_changed = caps["fc"] != cur["fc"]

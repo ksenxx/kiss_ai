@@ -36,14 +36,18 @@ def _provider_model_name(model_name: str) -> str:
 
     Two transformations are applied in order:
 
+    * A trailing thinking-level alias suffix (``-xhigh``, or a
+      marker-verified ``-high`` / ``-medium`` / ``-low``) is stripped so
+      the synthetic alias maps back to its base model id.  The alias is
+      resolved against the full catalog key BEFORE prefix removal so only
+      an exact ``alias_of``-marked entry can rewrite the name (an
+      unrelated catalog alias can never rewrite a similarly-named custom
+      model).  ``MODEL_INFO`` carries the sibling entries purely so
+      callers can select a ``reasoning_effort`` level by model name; the
+      provider's HTTP endpoint only knows the base name.
     * An ``openrouter/`` routing prefix is removed (callers reach
       OpenRouter via the catalog key ``openrouter/<provider>/<id>`` but
       the OpenRouter API itself wants the bare ``<provider>/<id>``).
-    * A trailing ``-xhigh`` is stripped so the synthetic xhigh alias
-      maps back to its base model id.  ``MODEL_INFO`` carries the
-      sibling entry purely so callers can select ``reasoning_effort=
-      "xhigh"`` by model name; the provider's HTTP endpoint only knows
-      the base name.
 
     Args:
         model_name: The catalog model name as passed in.
@@ -51,14 +55,12 @@ def _provider_model_name(model_name: str) -> str:
     Returns:
         The string to send as ``model=`` over the wire.
     """
-    provider_name = (
-        model_name[len("openrouter/") :]
-        if model_name.startswith("openrouter/")
-        else model_name
-    )
-    from kiss.core.models.model_info import _strip_xhigh_alias
+    from kiss.core.models.model_info import _strip_thinking_alias
 
-    return _strip_xhigh_alias(provider_name)
+    base_name = _strip_thinking_alias(model_name)
+    if base_name.startswith("openrouter/"):
+        return base_name[len("openrouter/") :]
+    return base_name
 
 
 def _model_thinking_level(model_name: str) -> str | None:

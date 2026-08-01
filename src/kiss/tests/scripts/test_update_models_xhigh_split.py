@@ -320,9 +320,14 @@ def test_xhigh_split_idempotent_on_rerun(
     mod.apply_updates_to_file(updates, [], [], current, dry_run=False)
     second = _read(target)
 
-    assert set(second.keys()) == {"gpt-5.5", "gpt-5.5-xhigh"}, (
-        f"Idempotency violated: keys={sorted(second.keys())}"
-    )
+    assert set(second.keys()) == {
+        "gpt-5.5",
+        "gpt-5.5-low",
+        "gpt-5.5-medium",
+        "gpt-5.5-high",
+        "gpt-5.5-xhigh",
+    }, f"Idempotency violated: keys={sorted(second.keys())}"
+    assert second == first, "Re-running the split must not change the catalog"
     assert "gpt-5.5-xhigh-xhigh" not in second
     assert second["gpt-5.5"]["thinking"] == "high"
     assert second["gpt-5.5-xhigh"]["thinking"] == "xhigh"
@@ -639,6 +644,7 @@ def test_malformed_generated_xhigh_sibling_is_repaired(
     assert data["gpt-5.5-xhigh"] == {
         **data["gpt-5.5"],
         "thinking": "xhigh",
+        "alias_of": "gpt-5.5",
     }
 
 

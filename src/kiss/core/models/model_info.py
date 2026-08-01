@@ -41,6 +41,7 @@ class ModelInfo:
         adaptive_thinking: bool | None = None,
         audio_input_price_per_million: float | None = None,
         audio_output_price_per_million: float | None = None,
+        alias_of: str | None = None,
     ):
         self.context_length = context_length
         self.input_price_per_1M = input_price_per_million
@@ -57,6 +58,7 @@ class ModelInfo:
         self.fallback = fallback
         self.extended_thinking = extended_thinking
         self.adaptive_thinking = adaptive_thinking
+        self.alias_of = alias_of
 
 
 PACKAGE_MODEL_INFO_PATH = Path(__file__).parent / "MODEL_INFO.json"
@@ -194,6 +196,7 @@ def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
         adaptive_thinking=entry.get("adaptive_thinking"),
         audio_input_price_per_million=entry.get("audio_input_price_per_1M"),
         audio_output_price_per_million=entry.get("audio_output_price_per_1M"),
+        alias_of=entry.get("alias_of"),
     )
 
 
@@ -435,24 +438,47 @@ _QUARTER_CACHE_OPENROUTER_PREFIXES = (
 
 _XHIGH_SUFFIX = "-xhigh"
 
+_LEVEL_ALIAS_SUFFIXES = ("-high", "-medium", "-low")
 
-def _strip_xhigh_alias(bare: str) -> str:
-    """Strip the synthetic ``-xhigh`` alias suffix from a model name.
 
-    ``-xhigh`` is a KISS-internal alias suffix (see ``update_models.py``)
-    that maps onto the same provider model id as its base entry. Provider
-    pricing tables only mention the base names, so every pricing lookup
-    must consult the base name. Returning the input unchanged when the
-    suffix is absent keeps callers simple.
+def _strip_thinking_alias(bare: str) -> str:
+    """Strip a synthetic ``-{thinking_level}`` alias suffix from a model name.
+
+    ``-xhigh`` / ``-high`` / ``-medium`` / ``-low`` are KISS-internal alias
+    suffixes (see ``update_models.py``) that map onto the same provider
+    model id as their base entry. Provider pricing tables and endpoints
+    only know the base names, so every pricing lookup and outbound request
+    must consult the base name.
+
+    ``-xhigh`` is stripped unconditionally (no real upstream model ends in
+    it). The other level suffixes collide with real upstream model names
+    (e.g. ``openrouter/openai/o3-mini-high``), so they are stripped only
+    when ``bare`` is EXACTLY a catalog key carrying the ``alias_of``
+    marker that ``update_models.py`` writes on every generated alias; in
+    that case the marker's recorded base key is returned verbatim. Callers
+    must therefore pass the full catalog key (including any
+    ``openrouter/`` prefix) BEFORE removing routing prefixes — fuzzy
+    suffix-tail matching is deliberately avoided so an unrelated catalog
+    alias can never rewrite a similarly-named custom model. Returning the
+    input unchanged when no alias matches keeps callers simple.
 
     Args:
-        bare: A model name, possibly ending in ``-xhigh``.
+        bare: A model name, possibly ending in a thinking-level suffix.
 
     Returns:
-        ``bare`` with a trailing ``-xhigh`` removed if present.
+        The alias's recorded base catalog key when ``bare`` is a generated
+        alias, otherwise ``bare`` unchanged (modulo unconditional
+        ``-xhigh`` stripping).
     """
     if bare.endswith(_XHIGH_SUFFIX):
         return bare[: -len(_XHIGH_SUFFIX)]
+    for suffix in _LEVEL_ALIAS_SUFFIXES:
+        if not bare.endswith(suffix):
+            continue
+        info = MODEL_INFO.get(bare)
+        if info is not None and info.alias_of:
+            return info.alias_of
+        return bare
     return bare
 
 
@@ -532,15 +558,16 @@ def _openai_bare_name(name: str) -> str | None:
         The OpenAI model name without provider prefix, or ``None`` if ``name``
         is not an OpenAI cache-eligible model.
     """
+    name = _strip_thinking_alias(name)
     if name.startswith(_OPENAI_OPENROUTER_PREFIXES):
         bare = name.split("/", 2)[2]
         if bare.startswith("gpt-oss"):
             return None
-        return _strip_xhigh_alias(bare)
+        return bare
     if name.startswith(_OPENAI_PREFIXES) and not name.startswith(
         ("text-embedding", "openai/", "codex/")
     ):
-        return _strip_xhigh_alias(name)
+        return name
     return None
 
 
@@ -1023,10 +1050,9 @@ def _openai_long_context_prices(
     families).  Prices verified against the OpenAI pricing page
     (https://developers.openai.com/api/docs/pricing).
     """
-    bare = _strip_provider_prefix(model_name)
+    bare = _strip_thinking_alias(_strip_provider_prefix(model_name))
     if bare.startswith(_OPENAI_OPENROUTER_PREFIXES):
         bare = bare.split("/", 2)[2]
-    bare = _strip_xhigh_alias(bare)
     if bare.startswith("gpt-5.6-sol"):
         return 272_000, 10.00, 45.00, 1.00, 12.50
     if bare.startswith("gpt-5.6-terra"):
@@ -1055,10 +1081,9 @@ def _gemini_long_context_prices(
     caching never incurs).  Prices verified against
     https://ai.google.dev/gemini-api/docs/pricing.
     """
-    bare = _strip_provider_prefix(model_name)
+    bare = _strip_thinking_alias(_strip_provider_prefix(model_name))
     if bare.startswith(_GOOGLE_OPENROUTER_PREFIXES):
         bare = bare.split("/", 2)[2]
-    bare = _strip_xhigh_alias(bare)
     if bare.startswith(("gemini-3-pro", "gemini-3.1-pro")):
         return 200_000, 4.00, 18.00, 0.40, None
     if bare.startswith("gemini-2.5-pro"):
