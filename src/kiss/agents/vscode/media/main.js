@@ -602,6 +602,12 @@
     hideContentArea();
     activeTabId = tab.id;
     O.innerHTML = '';
+    // autoscroll-coverage:start
+    // A switched-to (or newly created) tab is a fresh view, so any
+    // scroll lock the user engaged on the previous tab's chat no
+    // longer applies.
+    resetUserScrollLock();
+    // autoscroll-coverage:end
     if (tab.outputFragment) {
       O.appendChild(tab.outputFragment);
       tab.outputFragment = null;
@@ -1899,6 +1905,11 @@
   function clearOutput() {
     if (welcome && welcome.parentNode === O) O.removeChild(welcome);
     O.innerHTML = '';
+    // autoscroll-coverage:start
+    // The output was rebuilt from scratch (a new task's `clear`, a
+    // replay, or a welcome reset): any user scroll lock is stale.
+    resetUserScrollLock();
+    // autoscroll-coverage:end
   }
 
   function removeSpinner() {
@@ -2774,9 +2785,10 @@
 
   // autoscroll-coverage:start
   // Auto-scroll: the chat webview (extension and remote webapp alike)
-  // always follows the tail of the latest event panel, and every
-  // scrollable subpanel of an event panel follows its own tail as
-  // streamed text appears inside it.
+  // follows the tail of the latest event panel — unless the user
+  // scroll lock below is engaged — and every scrollable subpanel of an
+  // event panel follows its own tail as streamed text appears inside
+  // it.
   const AUTO_SCROLL_SUBPANEL_SEL =
     '.think, .bash-panel-content, .llm-panel, .tc-b, .tr, ' +
     '.prompt-body, .system-prompt-body';
@@ -2784,6 +2796,35 @@
   function scrollPanelToEnd(el) {
     const top = Math.max(0, el.scrollHeight - el.clientHeight);
     if (el.scrollTop !== top) el.scrollTop = top;
+  }
+
+  // User scroll lock: when a task is running and the user scrolls the
+  // chat up by at least 1/8th of its visible height, outer auto-scroll
+  // is disabled; it resumes once the user scrolls back to the bottom
+  // of the chat.
+  let userScrollLock = false;
+
+  function chatDistanceFromBottom() {
+    return Math.max(0, O.scrollHeight - O.clientHeight - O.scrollTop);
+  }
+
+  function updateUserScrollLock() {
+    const dist = chatDistanceFromBottom();
+    if (dist >= O.clientHeight / 8) {
+      if (isRunning) userScrollLock = true;
+    } else if (dist <= 1) {
+      userScrollLock = false;
+    }
+  }
+
+  function resetUserScrollLock() {
+    userScrollLock = false;
+  }
+
+  function autoScrollChat() {
+    // The outer chat follows the tail only while the user has not
+    // scrolled up (the lock re-arms when they return to the bottom).
+    if (!userScrollLock) scrollPanelToEnd(O);
   }
 
   function autoScrollStreamed(el) {
@@ -2796,7 +2837,7 @@
       if (n.matches && n.matches(AUTO_SCROLL_SUBPANEL_SEL)) scrollPanelToEnd(n);
       n = n.parentElement;
     }
-    scrollPanelToEnd(O);
+    autoScrollChat();
   }
 
   function autoScrollLatestEventPanel(panel) {
@@ -2808,7 +2849,7 @@
       const subs = panel.querySelectorAll(AUTO_SCROLL_SUBPANEL_SEL);
       for (let i = 0; i < subs.length; i++) scrollPanelToEnd(subs[i]);
     }
-    scrollPanelToEnd(O);
+    autoScrollChat();
   }
   // autoscroll-coverage:end
 
@@ -3629,6 +3670,9 @@
   }
 
   O.addEventListener('scroll', () => {
+    // autoscroll-coverage:start
+    updateUserScrollLock();
+    // autoscroll-coverage:end
     updateVisibleTask();
   });
 
@@ -5261,6 +5305,8 @@
     const rSteps = countReplayedSteps(events);
     if (rSteps > 0) updateStepCount(rSteps);
     // autoscroll-coverage:start
+    // clearOutput() above released any user scroll lock: the replayed
+    // chat lands at the end of its latest event panel.
     autoScrollLatestEventPanel(O.lastElementChild);
     // autoscroll-coverage:end
     currentTaskMetrics.tokens = statusTokens ? statusTokens.textContent : '';
