@@ -261,6 +261,9 @@ class RelentlessAgent(Base):
             work_dir=self.work_dir,
             current_pid=current_pid,
         )
+        sorcar_md = config_module.kiss_home() / "SORCAR.md"
+        if sorcar_md.is_file():
+            important_instructions += "\n" + sorcar_md.read_text()
         system_prompt = self.system_prompt + important_instructions
         for session in range(self.max_sub_sessions):
             remaining_budget = self.max_budget - self.budget_used
