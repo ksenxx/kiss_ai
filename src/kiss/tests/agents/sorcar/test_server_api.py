@@ -334,9 +334,9 @@ class TestServerApiCodeBindings(unittest.TestCase):
         self.assertEqual(
             DROPPED_COMMANDS,
             frozenset({
-                "focusEditor", "webviewFocusChanged", "notificationAction",
-                "sizeReport", "resolveDroppedPaths", "voiceToggle",
-                "voiceSensitivity", "voiceAck", "auth",
+                "focusEditor", "webviewFocusChanged", "activeTabChanged",
+                "notificationAction", "sizeReport", "resolveDroppedPaths",
+                "voiceToggle", "voiceSensitivity", "voiceAck", "auth",
             }),
         )
 

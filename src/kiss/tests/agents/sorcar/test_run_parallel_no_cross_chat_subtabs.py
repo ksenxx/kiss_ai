@@ -117,9 +117,10 @@ class TestNewTabHandlerGuardsOnParentTabId:
         )
         assert "tabs.find" in block
         guard_idx = block.find("ev.parent_tab_id")
-        create_idx = block.find("createNewTab()")
+        create_idx = block.find("createBackgroundSubagentTab(")
         assert 0 < guard_idx < create_idx, (
-            "The parent_tab_id guard must appear BEFORE createNewTab()."
+            "The parent_tab_id guard must appear BEFORE the tab is "
+            "created (createBackgroundSubagentTab)."
         )
 
 

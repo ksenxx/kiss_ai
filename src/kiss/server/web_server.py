@@ -86,9 +86,9 @@ from kiss.server.server import VSCodeServer, broadcast_to_conn
 from kiss.server.tips import read_tips
 from kiss.server.tricks import read_tricks
 from kiss.server.voice_wake import (
-    DEFAULT_MODELS_DIR,
     MODEL_NAME,
     SpeakerIdentifier,
+    default_models_dir,
     transcribe_pcm,
 )
 from kiss.server.web_merge import (
@@ -117,8 +117,23 @@ VOICE_MODEL_URL = (
     "https://ccoreilly.github.io/vosk-browser/models/"
     "vosk-model-small-en-us-0.15.tar.gz"
 )
-VOICE_MODEL_CACHE = DEFAULT_MODELS_DIR / f"{MODEL_NAME}.tar.gz"
 _voice_model_lock = threading.Lock()
+
+
+def _voice_model_cache_path() -> Path:
+    """Return the wake-word archive path: override or lazy default.
+
+    Resolved on every call so a ``KISS_HOME`` set after this module
+    was imported is honoured — freezing it at import time made the
+    browser wake-word pipeline re-download the 40MB archive into an
+    empty test home instead of reusing ``~/.kiss/models``.  Assigning
+    ``web_server.VOICE_MODEL_CACHE`` remains a supported test
+    override, matching the lazy ``_URL_FILE`` attribute below.
+    """
+    override = globals().get("VOICE_MODEL_CACHE")
+    if isinstance(override, Path):
+        return override
+    return default_models_dir() / f"{MODEL_NAME}.tar.gz"
 
 
 def _atomic_publish(target: Path, write_tmp: Callable[[Path], object]) -> None:
@@ -197,11 +212,12 @@ def _ensure_voice_model() -> Path | None:
         download failed (e.g. no network).
     """
     with _voice_model_lock:
-        if VOICE_MODEL_CACHE.is_file() and VOICE_MODEL_CACHE.stat().st_size > 0:
-            return VOICE_MODEL_CACHE
+        cache = _voice_model_cache_path()
+        if cache.is_file() and cache.stat().st_size > 0:
+            return cache
         try:
-            _atomic_publish(VOICE_MODEL_CACHE, _download_voice_model_to)
-            return VOICE_MODEL_CACHE
+            _atomic_publish(cache, _download_voice_model_to)
+            return cache
         except Exception:
             logger.exception("voice model download failed: %s", VOICE_MODEL_URL)
             return None
@@ -324,6 +340,12 @@ def _truncate_utf8_bytes(text: str, max_bytes: int) -> tuple[str, int]:
 
 _MAX_LINE_BYTES = 64 * 1024 * 1024
 
+# ``websockets`` wraps the whole opening handshake - including a plain
+# HTTP reply produced by ``process_request`` - in ``open_timeout``.  Its
+# 10s default silently guillotines large downloads such as the 40MB
+# wake-word model, which reaches the browser as ERR_EMPTY_RESPONSE.
+_OPEN_TIMEOUT_SECONDS = 300.0
+
 _MAX_VOICE_AUDIO_B64 = 4 * 1024 * 1024
 
 _TAB_CLOSE_GRACE = 10.0
@@ -358,17 +380,20 @@ def _url_file_path() -> Path:
 
 if TYPE_CHECKING:
     _URL_FILE: Path
+    VOICE_MODEL_CACHE: Path
 
 
 def __getattr__(name: str) -> Path:
-    """Resolve ``_URL_FILE`` lazily (PEP 562).
+    """Resolve ``_URL_FILE`` / ``VOICE_MODEL_CACHE`` lazily (PEP 562).
 
-    Several test modules import ``_URL_FILE`` by value; resolving it at
-    access time keeps that import surface working while honoring a
+    Several test modules import these names by value; resolving them
+    at access time keeps that import surface working while honoring a
     ``KISS_HOME`` set after this module was first imported.
     """
     if name == "_URL_FILE":
         return _url_file_path()
+    if name == "VOICE_MODEL_CACHE":
+        return _voice_model_cache_path()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -4412,7 +4437,7 @@ class RemoteAccessServer:
             try:
                 if self._voice_speaker_identifier is None:
                     self._voice_speaker_identifier = SpeakerIdentifier(
-                        DEFAULT_MODELS_DIR,
+                        default_models_dir(),
                     )
                 return self._voice_speaker_identifier.speaker_of(pcm)
             except Exception:
@@ -6229,6 +6254,7 @@ class RemoteAccessServer:
                     self.port,
                     process_request=self._process_request,
                     ssl=self._ssl_context,
+                    open_timeout=_OPEN_TIMEOUT_SECONDS,
                     ping_interval=None,
                     ping_timeout=None,
                     max_size=_MAX_LINE_BYTES,

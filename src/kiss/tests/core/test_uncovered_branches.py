@@ -271,7 +271,7 @@ class TestGetAvailableModels:
             os.environ["OPENAI_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
             selected = get_default_model()
-            assert selected == "gpt-5.6-luna"
+            assert selected == "gpt-5.6-sol-medium"
             assert selected in MODEL_INFO
 
             os.environ["ANTHROPIC_API_KEY"] = "t"
