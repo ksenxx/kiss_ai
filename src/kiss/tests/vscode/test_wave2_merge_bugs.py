@@ -4,12 +4,14 @@
 # add your name here
 """End-to-end regression tests for Wave2-Fixer-7 findings (real repos, no mocks).
 
-F1  ``_MergeFlowMixin._present_pending_worktree`` must atomically claim
-    the main tree (``tab.is_merging = True``) together with the
-    "no non-worktree task running" check before auto-discarding an
-    empty worktree — ``discard()`` runs ``git checkout`` in the MAIN
+F1  ``_MergeFlowMixin._present_pending_worktree`` must claim the main
+    tree (``tab.is_merging = True``) before auto-discarding an empty
+    worktree — ``discard()`` runs ``git checkout`` in the MAIN
     repository, so a non-wt task starting in the TOCTOU window would
-    race the checkout.
+    race the checkout.  The discard itself is never skipped: an empty
+    worktree changes no files and the checkout is a no-op onto the
+    branch the tree is already on, so bailing out merely leaked the
+    worktree (see ``test_worktree_leak_when_main_tree_busy.py``).
 F3  ``_MergeFlowMixin._finish_merge`` must keep ``tab.is_merging``
     claimed until the pending-worktree presentation and the autocommit
     dirty-file scan are done — clearing it first lets a task start on
@@ -205,10 +207,17 @@ class TestEmptyWorktreeDiscardClaimsMainTree:
         finally:
             _RunningAgentState.running_agent_states.pop(tab_id, None)
 
-    def test_discard_skipped_while_non_wt_task_running(
+    def test_discard_still_claims_the_tree_while_non_wt_task_running(
         self, tmp_path: Path,
     ) -> None:
-        """No discard (no main-repo checkout) while a non-wt task runs."""
+        """A busy main tree delays nothing — but the claim still holds.
+
+        Discarding an EMPTY worktree does not modify the main working
+        tree's files and leaves it on the branch it was already on, so
+        skipping the discard only leaked the worktree forever.  It now
+        runs regardless, and must still hold ``tab.is_merging`` while
+        it does.
+        """
         repo = tmp_path / "repo"
         _make_repo(repo)
         tab_id = "w2f7-f1b-tab"
@@ -225,8 +234,8 @@ class TestEmptyWorktreeDiscardClaimsMainTree:
 
             host._present_pending_worktree(tab_id, try_merge_review=True)
 
-            assert agent.observed_merging_during_discard is None
-            assert agent._wt_pending
+            assert agent.observed_merging_during_discard is True
+            assert not agent._wt_pending
             assert tab.is_merging is False
         finally:
             if agent._wt_pending:
