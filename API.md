@@ -11,6 +11,7 @@
   - [`kiss.agents.sorcar.chat_sorcar_agent`](#kissagentssorcarchat_sorcar_agent)
   - [`kiss.agents.sorcar.git_worktree`](#kissagentssorcargit_worktree)
   - [`kiss.agents.sorcar.worktree_sorcar_agent`](#kissagentssorcarworktree_sorcar_agent)
+- [`kiss.server.sorcar`](#kissserversorcar)
 ```
 
 </details>
@@ -365,5 +366,160 @@ ______________________________________________________________________
 - **discard** — Throw away the task branch and worktree, checkout original. Every step is idempotent — safe to call multiple times. Acquires `repo_lock` to serialize against concurrent merge/release operations on the same repository.<br/>`discard() -> str`
 
   - **Returns:** Confirmation message (includes a warning if checkout to the original branch failed).
+
+______________________________________________________________________
+
+#### `kiss.server.sorcar` — *The Sorcar server API and a minimal synchronous client for it.*
+
+##### `class TaskResult` — Final outcome of one synchronous daemon task run.
+
+##### `class ApiCommand` — One command of the Sorcar server API.
+
+##### `class ApiContext` — Transport context of one in-flight server API call.
+
+##### `class ServerBackend(Protocol)` — Daemon capabilities the server API dispatches onto.
+
+##### `class ServerApi` — The Sorcar server's code-level API.
+
+**Constructor:** `ServerApi(backend: ServerBackend) -> None`
+
+- `backend`: The daemon object providing the transports and command implementations (in production the `RemoteAccessServer`).
+
+- **dispatch** — Route one client command to its API method. The single entry point of the code API. Applies, in order: 1. Silently drops :data:`DROPPED_COMMANDS` (host-consumed messages) BEFORE validation so they never surface errors. 2. Validates *cmd* against the catalog (:func:`validate_command`) and answers an invalid command with a direct `error` event to the sender only. 3. Records the command's `tabId` for the transport's deferred-close bookkeeping (:meth:`_record_tab`). 4. Stamps the connection's `conn_id` as `connId` — overwriting any client-supplied value so it cannot be spoofed — which keys the backend's per-connection autocomplete state. 5. Maintains the per-window work_dir invariant: a `setWorkDir` updates the connection's `work_dir`; every other command lacking an explicit `workDir` is stamped with it, so two VS Code windows sharing the daemon can never observe each other's folder through the daemon-global fallback. The CLI-bridge commands (:data:`_CLI_HANDLERS`) are exempt: they describe tasks the CLI runs itself, never read `workDir`, and must not be mutated on their way to the relay. 6. Invokes the :class:`ServerApi` method named by the command's catalog entry.<br/>`async dispatch(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The parsed JSON command dictionary (the transport guarantees a dict).
+  - `ctx`: The transport context of this call.
+
+- **authenticate** — Authenticate a remote WSS client with the `auth` handshake. The remote webapp's entry point into the API: before a browser connection may issue any catalog command, its very first frames must complete this handshake (the `_WS_SHIM_JS` shim served with the webapp sends `{"type": "auth", "password": ...}` as soon as the socket opens). Local UDS clients (the VS Code extension, the CLI) skip it — POSIX file permissions on the socket already gate access to the owning user. Protocol serviced here, in order: 1. A source IP that is still rate-limited after too many failed logins is answered with `auth_locked` (carrying `retry_after` seconds) and closed — telling the client WHY instead of leaving its loading overlay spinning. 2. Otherwise up to two `auth` attempts are read: a correct password (constant-time compare against the configured `remote_password`, which may be empty) is answered with `auth_ok`; the first wrong password elicits an `auth_required` retry prompt; the second failure is answered with an `error` event and the socket is closed. A first message that is not an `auth` at all closes the socket without counting a failed login. 3. Only NON-EMPTY wrong guesses count toward the brute-force lockout: every fresh page load probes with the (possibly empty) password stored in `localStorage`, and behind the shared cloudflared tunnel penalising that benign empty probe would let a handful of normal page loads lock the password prompt away from every visitor.<br/>`async authenticate(websocket: Any) -> bool`
+
+  - `websocket`: The remote client's WebSocket connection.
+  - **Returns:** `True` when the client authenticated; `False` when it failed (the socket is then already closed).
+
+- **forward** — Run *cmd* on the backend agent server. The default handler: commands with no daemon-side special casing (`run`, `stop`, `getModels`, `getConfig`, `getHistory`, `complete`, …) are executed by the backend `VSCodeServer` in the thread-pool executor.<br/>`async forward(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The validated, connection-stamped command.
+  - `ctx`: The transport context of the current call (unused).
+
+- **resume_session** — Resume a chat session in the issuing tab. Translates the webview wire field `id` to the backend's `chatId` (:func:`translate_webview_command`), then forwards.<br/>`async resume_session(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `resumeSession` command.
+  - `ctx`: The transport context of the current call.
+
+- **ready** — Initialize a (re)loaded chat webview. Sanitizes the command's `restoredTabs` ONCE (warnings included) and writes the cleaned list back so the backend's own sanitize pass finds nothing left to reject or truncate, then records every restored tab id in the connection's bookkeeping: the deferred-close contract is "schedule a closeTab for every tab id this connection touched", and `_handle_ready` re-claims (cancels the pending close of, and resumes) every `restoredTabs` entry — without recording them a later disconnect would never re-arm their deferred close, leaking the restored backend state forever. Finally fans the command out through the backend's ready handler (models / input history / config / session replay).<br/>`async ready(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `ready` command.
+  - `ctx`: The transport context of the current call.
+
+- **submit** — Start a task from a webview `submit`. The backend translates the webview `submit` into a `run` (path resolution, running-tab tracking) exactly as the VS Code TypeScript extension would.<br/>`async submit(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `submit` command.
+  - `ctx`: The transport context of the current call (unused).
+
+- **close_tab** — Dispose the backend state of a closed frontend tab. A WEB (WSS) client closing its chat tab destroys the only UI that could ever finish an in-flight (server-tracked) merge review for that tab, so the review is ended first (close = accept the remaining hunks; no disk writes) and the tab is disposed instead of leaking in `is_merging` limbo. UDS (VS Code) clients are exempt: their TypeScript MergeManager owns the review in real editor tabs that survive the chat tab's closure and will still send `all-done` — their `closeTab` forwards to the backend unchanged.<br/>`async close_tab(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `closeTab` command.
+  - `ctx`: The transport context of the current call.
+
+- **merge_action** — Advance a merge review (accept / reject / navigate / finish). Non-`all-done` actions are processed by the daemon's server-side merge engine (the web twin of the VS Code TypeScript `MergeManager`). An `all-done` arriving FROM a client is the extension's MergeManager finishing its editor-managed review (its per-hunk actions never reach the backend): the server-side shadow merge state registered when the `merge_data` event was broadcast is dropped — leaving it would replay a ZOMBIE review on the next webview reload, fire a spurious second all-done from the deferred-close path, and leak one state (with full file payloads) per finished review — and the command still falls through to the backend (`_cmd_merge_action` → `_finish_merge`).<br/>`async merge_action(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `mergeAction` command.
+  - `ctx`: The transport context of the current call.
+
+- **open_file** — Serve a file's content to a remote-web client. A remote-web (WSS) client clicked a file link in a chat webview. The browser has no editor to open the file in, so the daemon reads the file and replies with its content for an in-page content tab. UDS clients (VS Code windows) never take this path: their webview's `openFile` is consumed by the extension host, which opens the file in a real editor tab — so a UDS-delivered `openFile` is dropped as a defensive no-op.<br/>`async open_file(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `openFile` command.
+  - `ctx`: The transport context of the current call.
+
+- **check_paths** — Report which file paths exist to a remote-web client. The chat webview linkifies file-path-looking strings in event panel contents lazily: a path only becomes a clickable link after this check confirms that clicking it (`openFile`) would actually serve a file. UDS clients (VS Code windows) never take this path: their webview's `checkPaths` is consumed by the extension host, which checks the local filesystem itself — so a UDS-delivered `checkPaths` is dropped as a defensive no-op.<br/>`async check_paths(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `checkPaths` command.
+  - `ctx`: The transport context of the current call.
+
+- **voice_transcribe** — Transcribe a remote-web client's post-wake utterance. A remote-web (browser mode) client heard the "Sorcar" wake word and captured the utterance that followed in the page (VS Code webviews never send this: their speech is captured and translated by the extension host's local listener). The audio is translated with the same gpt-audio call the local listener uses and answered with the `voiceSpeech` message `voice.js` already handles.<br/>`async voice_transcribe(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `voiceTranscribe` command carrying the audio.
+  - `ctx`: The transport context of the current call.
+
+- **active_tasks_query** — Report in-flight agent tasks back to the requesting client.<br/>`async active_tasks_query(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `activeTasksQuery` command (unused).
+  - `ctx`: The transport context of the current call.
+
+- **get_welcome_suggestions** — Broadcast the welcome-screen suggestions.<br/>`async get_welcome_suggestions(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `getWelcomeSuggestions` command (unused).
+  - `ctx`: The transport context of the current call (unused).
+
+- **run_update** — Run the KISS Sorcar installer to update the checkout.<br/>`async run_update(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `runUpdate` command (unused).
+  - `ctx`: The transport context of the current call; supplies the requesting `conn_id` so acknowledgement notifications reach only the requesting window.
+
+- **server_reset** — Restart the kiss-web daemon at the user's request.<br/>`async server_reset(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `serverReset` command (unused).
+  - `ctx`: The transport context of the current call; supplies the requesting `conn_id` so acknowledgement notifications reach only the requesting window.
+
+- **cli_event** — Relay one CLI display event to subscribed webview tabs. CLI → daemon live-stream bridge: the sorcar CLI forwards every display event here so any chat webview subscribed to the task's chat id sees the event immediately instead of having to reload to replay it from the events DB.<br/>`async cli_event(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `cliEvent` envelope carrying the event.
+  - `ctx`: The transport context of the current call (unused).
+
+- **cli_tab_hello** — Register a sorcar CLI REPL's tab id for talk arbitration. A CLI REPL announces its tab id so talk-playback arbitration can tell CLI terminal players apart from webview tabs. Only local UDS peers are terminal players; a WSS/browser peer cannot suppress playback on the daemon machine.<br/>`async cli_tab_hello(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `cliTabHello` command.
+  - `ctx`: The transport context of the current call.
+
+- **cli_task_start** — Record a CLI-launched task as running. The CLI announces a fresh running task so a webview tab that later resumes it from the history sidebar is subscribed to the live stream and shows the blinking-green-circle "running" indicator.<br/>`async cli_task_start(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `cliTaskStart` command.
+  - `ctx`: The transport context of the current call.
+
+- **cli_task_end** — Mark a CLI-launched task as finished. The CLI announces the task finished; the daemon stops the running indicator on every subscribed webview tab.<br/>`async cli_task_end(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `cliTaskEnd` command.
+  - `ctx`: The transport context of the current call.
+
+- **trajectory_jobs** — List all trajectory jobs (the `/api/jobs` endpoint). Mirrors the `/api/jobs` endpoint of the standalone trajectory visualizer (:mod:`kiss.viz_trajectory.server`, imported lazily so this client-importable module stays light).<br/>`trajectory_jobs() -> tuple[int, str, bytes]`
+
+  - **Returns:** `(200, "application/json", body)` with the JSON job list.
+
+- **job_trajectories** — Serve one job's trajectory list (`/api/jobs/<job>/trajectories`). Mirrors the `/api/jobs/<job_name>/trajectories` endpoint of the standalone trajectory visualizer.<br/>`job_trajectories(path: str) -> tuple[int, str, bytes]`
+
+  - `path`: Request path of the form `/api/jobs/<job_name>/trajectories`. The transport has already URL-decoded it exactly once; the job segment must NOT be unquoted again or names containing literal percent-escapes would spuriously 404.
+  - **Returns:** `(200, "application/json", body)` with the trajectory list, a 400 reply for an invalid job name, or a 404 reply when the job directory does not exist.
+
+**`validate_command`** — Validate one client command against the server API catalog.<br/>`def validate_command(cmd: Any) -> str | None`
+
+- `cmd`: The parsed JSON value received from a client.
+- **Returns:** `None` when *cmd* is a valid API command, otherwise a human-readable error string (unknown command name or missing required field).
+
+**`translate_webview_command`** — Translate a webview wire command into a backend command. The chat webview (`media/main.js`) speaks the wire dialect of this API; the backend agent server expects slightly different field names for one command. Translation applied: * `resumeSession` → renames the `id` field to `chatId` (`media/main.js` posts `userAnswer` directly, so no `userActionDone` rewrite is needed here.)<br/>`def translate_webview_command(cmd: dict[str, Any]) -> dict[str, Any]`
+
+- `cmd`: Raw command dictionary received from a client.
+- **Returns:** The (possibly copied and modified) command dictionary ready for the backend agent server (`VSCodeServer._handle_command`).
+
+**`passwords_equal`** — Compare two passwords in constant time to defeat timing attacks. Encodes both strings to UTF-8 bytes and delegates to :func:`secrets.compare_digest`.<br/>`def passwords_equal(a: str, b: str) -> bool`
+
+- `a`: First password string.
+- `b`: Second password string.
+- **Returns:** `True` when the two strings are equal.
+
+**`run`** — Run *prompt* as a task on the local Sorcar daemon and block until done. Connects to the `sorcar web` daemon's Unix-domain socket, sends the same `run` command a chat webview would, streams the task's events, and returns once the daemon reports the task finished.<br/>`def run(prompt: str, *, work_dir: str = '', model: str = '', chat_id: str = '', tools: str | Path | None = None, use_worktree: bool = False, auto_commit: bool = False, max_budget: float | None = None, model_config: dict[str, Any] | None = None, web_tools: bool | None = None, is_parallel: bool = False, timeout: float = 3600.0, sock_path: str | Path | None = None) -> TaskResult`
+
+- `prompt`: The task instruction to run.
+- `work_dir`: Working directory for the task; the daemon's current default is used when empty.
+- `model`: Model name; the daemon's selected default when empty.
+- `chat_id`: Optional existing chat session id to continue. Pass the `chat_id` of a previous :class:`TaskResult` to run this task in the same chat — the agent then sees the prior tasks and results of that chat as context. A new chat is started when empty.
+- `tools`: Optional path to a Python file supplying extra tools for the agent. The daemon imports the file and registers every top-level public function that is suitable as a tool (plain synchronous functions whose parameters are all keyword-bindable; `*args`/`**kwargs`/positional-only parameters and coroutine/generator functions are skipped). Each function's name, docstring (Google-style `Args:` section for parameter descriptions), and annotated parameters define the tool schema the agent sees, exactly like a native tool. The functions are never serialized by the client — they run **in the daemon process**. The path is resolved against this process's working directory.
+- `use_worktree`: Run the task in an isolated git worktree.
+- `auto_commit`: Auto-commit the task's changes on success.
+- `max_budget`: Per-task budget override in USD; `None` uses the daemon's configured default.
+- `model_config`: Per-task model configuration override (custom endpoint / headers); `None` uses the daemon's configured model endpoint. Must be JSON-serializable.
+- `web_tools`: Per-task browser-tool enablement override; `None` uses the daemon's configured default.
+- `is_parallel`: Whether the agent may spawn parallel sub-agents.
+- `timeout`: Maximum seconds to wait for the task to finish.
+- `sock_path`: Daemon UDS path override (defaults to `$KISS_SORCAR_SOCK` or `$KISS_HOME/sorcar.sock`).
+- **Returns:** A :class:`TaskResult` with the result text, success flag, cost (USD), total tokens, step count, chat id, and task id of the task. `chat_id` is the daemon chat session id and `task_id` the persisted `task_history` row id — both usable later to look up or resume the run in the daemon's history.
 
 ______________________________________________________________________
