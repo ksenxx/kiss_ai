@@ -708,12 +708,14 @@ def test_failed_dot_is_centered_middle_left_in_history_task_panel(
     _browser,
 ) -> None:
     """At a narrow viewport the failed marker must remain at the
-    middle-left of the whole task panel.
+    middle-left of the task panel's first text line.
 
     The History sidebar renders each task as a multi-line panel with
     title, metrics, and workspace metadata.  The red failed marker
-    should stay on the left edge while being vertically centered in the
-    panel, not pinned to the first text line at the top-left.
+    should stay on the left edge, vertically centered on the first line
+    of the task title.  The action buttons occupy a line of their own
+    below the title, so centering on the whole panel would drop the
+    marker away from the text it belongs to.
     """
     context, page = _open_history_page(_browser, width=180, height=900)
     try:
@@ -732,7 +734,14 @@ def test_failed_dot_is_centered_middle_left_in_history_task_panel(
               const textRect = text.getBoundingClientRect();
               return {
                 rowWidth: rowRect.width,
-                rowMiddle: rowRect.top + rowRect.height / 2,
+                firstLineMiddle: (() => {
+                  const probe = document.createElement('span');
+                  probe.textContent = 'x';
+                  text.appendChild(probe);
+                  const lineHeight = probe.getBoundingClientRect().height;
+                  probe.remove();
+                  return textRect.top + lineHeight / 2;
+                })(),
                 dotMiddle: dotRect.top + dotRect.height / 2,
                 textLeft: textRect.left,
                 dotLeft: dotRect.left,
@@ -741,7 +750,9 @@ def test_failed_dot_is_centered_middle_left_in_history_task_panel(
             """
         )
         assert geometry["rowWidth"] < 170, geometry
-        assert abs(geometry["dotMiddle"] - geometry["rowMiddle"]) <= 2, geometry
+        assert abs(geometry["dotMiddle"] - geometry["firstLineMiddle"]) <= 2, (
+            geometry
+        )
         assert geometry["dotLeft"] < geometry["textLeft"], geometry
     finally:
         context.close()

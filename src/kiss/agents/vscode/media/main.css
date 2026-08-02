@@ -1890,12 +1890,17 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   box-shadow: 0 0 0 1px rgb(0 0 0 / 15%);
 }
 
+/* The panel is at least two lines tall - the task text and, below it,
+   the action strip - so the status dot is centred on the first line of
+   the task text rather than on the whole panel.  The offset is the
+   panel's own padding-top plus half a line box, and the translation
+   then centres the dot on that point. */
 .running-item > .sidebar-item-failed,
 .running-item > .sidebar-item-running,
 .running-item > .sidebar-item-completed {
   position: absolute;
   left: 5px;
-  top: 50%;
+  top: calc(7px + 0.5lh);
   transform: translateY(-50%);
   margin-right: 0;
 }
@@ -1912,6 +1917,9 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 }
 
 .running-item > .sidebar-item-text {
+  /* The action strip below takes a full-width line, so the task text
+     claims one too; without it the text would be squeezed to nothing. */
+  flex-basis: 100%;
   white-space: normal;
   word-break: break-word;
   overflow: hidden;
@@ -2022,6 +2030,31 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 
 .sidebar-item-favorite.favorited { color: #f5b400; opacity: 1; }
 .sidebar-item-favorite.favorited:hover { color: #f5b400; opacity: 1; }
+
+/* A task panel in the task-history list gives its favourite / copy /
+   collapse buttons a full-width line of their own below the task text,
+   and draws them 50% bigger than the compact buttons used by the other
+   sidebar lists: the 12px icon becomes 18px and the 12x16 button box
+   becomes 18x24, so both axes grow by exactly half. */
+.running-item > .sidebar-item-actions {
+  flex-basis: 100%;
+  margin-left: 0;
+  margin-top: 2px;
+  gap: 9px;
+}
+
+.running-item > .sidebar-item-actions > button {
+  min-width: 18px;
+  min-height: 24px;
+  padding: 3px 0;
+  justify-content: center;
+  border-radius: 5px;
+}
+
+.running-item > .sidebar-item-actions svg {
+  width: 18px;
+  height: 18px;
+}
 
 .sidebar-item-confirm {
   display: flex; align-items: center; gap: 4px; flex-shrink: 0; margin-left: 6px;
