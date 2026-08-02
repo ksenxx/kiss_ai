@@ -218,6 +218,43 @@ def parse_task_tags(text: str) -> list[str]:
     return tasks if tasks else [text]
 
 
+def _release_worktree_without_merging(
+    agent: Any, has_changes: bool,
+) -> None:
+    """Dispose of *agent*'s pending worktree without touching the main tree.
+
+    Used when a new task starts on a tab that still holds a pending
+    worktree while another tab runs a task directly on the main
+    working tree.  Auto-merging is unsafe then (it would stash,
+    checkout and merge the tree that other task is writing), but
+    simply dropping ``agent._wt`` is worse: that handle is the only
+    in-memory reference to the worktree, so the directory, the
+    ``kiss/wt-*`` branch and its ``branch.<name>.*`` config section
+    would leak forever with nothing left to retry the cleanup.
+
+    A change-free worktree is therefore discarded outright — removing
+    it touches neither the main working tree's files nor its HEAD.  A
+    worktree with real work is preserved as a *branch* the user can
+    recover with ``git checkout``, while its on-disk directory is
+    committed, removed and pruned.  Either way no artifact is
+    orphaned.
+
+    Args:
+        agent: The tab's worktree agent, known to have ``_wt_pending``.
+        has_changes: Whether the worktree contains work worth keeping.
+    """
+    branch = agent._wt_branch
+    if not has_changes:
+        agent.discard()
+        return
+    agent._preserve_pending_worktree_for_review()
+    agent._merge_conflict_warning = (
+        f"Could not auto-merge branch '{branch}' because another task "
+        "is running on the main working tree. Your work is committed "
+        f"on that branch; recover it with: git checkout {branch}"
+    )
+
+
 _STOP_SENTINEL: object = object()
 
 
@@ -623,14 +660,11 @@ class _TaskRunnerMixin:
 
         if use_worktree and getattr(tab.agent, "_wt_pending", False):
             with self._state_lock:
-                if self._any_non_wt_running():
-                    tab.agent._merge_conflict_warning = (
-                        f"Could not auto-merge branch "
-                        f"'{tab.agent._wt_branch}' because another "
-                        "task is running on the main working tree. "
-                        "The branch is preserved for manual resolution."
-                    )
-                    tab.agent._wt = None
+                main_tree_busy = self._any_non_wt_running()
+            if main_tree_busy:
+                _release_worktree_without_merging(
+                    tab.agent, bool(self._get_worktree_changed_files(tab_id)),
+                )
 
         with self._state_lock:
             opened_task_id = self._tab_opened_task_ids.pop(tab_id, "")

@@ -569,10 +569,11 @@ class _MergeFlowMixin:
           ``worktree_done``.
         - Worktree has changed files and *try_merge_review* is False
           (merge review already finished): broadcast ``worktree_done``.
-        - Worktree has no changes and *discard_if_empty* is True
-          and no non-wt task is running: auto-discard the empty
-          branch (BUG-66 — clean up stale resumed sessions and
-          finished merge reviews).
+        - Worktree has no changes and *discard_if_empty* is True:
+          auto-discard the empty branch (BUG-66 — clean up stale
+          resumed sessions and finished merge reviews).  A
+          concurrent non-worktree task does not block this: an
+          empty discard never touches the main working tree.
         - Worktree has no changes and *discard_if_empty* is False:
           preserve the branch and broadcast ``worktree_done``.
           The post-task path passes ``discard_if_empty=False``
@@ -620,22 +621,24 @@ class _MergeFlowMixin:
                 except BaseException:
                     logger.debug("Worktree merge review error", exc_info=True)
         if not changed and discard_if_empty:
+            # Discarding an EMPTY worktree removes its directory and
+            # its unmerged branch without touching the main working
+            # tree, so a concurrent non-worktree task is no reason to
+            # skip it — skipping leaks the worktree forever because
+            # nothing ever retries.
             with self._state_lock:
-                non_wt_busy = self._any_non_wt_running()
                 prev_merging = tab.is_merging
-                if not non_wt_busy:
-                    tab.is_merging = True
-            if not non_wt_busy:
-                try:
-                    wt_agent.discard()
-                finally:
-                    with self._state_lock:
-                        tab.is_merging = prev_merging
-                    # A close that arrived during the discard saw the
-                    # tab busy and deferred disposal; nothing later
-                    # would dispose it (F4-29).
-                    self._dispose_if_closed(tab_id)
-                return
+                tab.is_merging = True
+            try:
+                wt_agent.discard()
+            finally:
+                with self._state_lock:
+                    tab.is_merging = prev_merging
+                # A close that arrived during the discard saw the
+                # tab busy and deferred disposal; nothing later
+                # would dispose it (F4-29).
+                self._dispose_if_closed(tab_id)
+            return
         if not changed:
             return
         event: dict[str, Any] = {
@@ -901,7 +904,10 @@ class _MergeFlowMixin:
                 auto-merge / auto-discard block (RACE-3 fix), which
                 runs on the same task thread that owns
                 ``tab.is_task_active = True`` and therefore would
-                otherwise be refused by its own guard.
+                otherwise be refused by its own guard.  A concurrent
+                non-worktree task on the main tree still blocks a
+                ``"merge"`` — but never a ``"discard"``, which does
+                not touch the main working tree.
 
         Returns:
             Dict with ``success`` bool and ``message`` string.
@@ -930,14 +936,18 @@ class _MergeFlowMixin:
                 busy = self._check_worktree_busy(tab, verb)
                 if busy:
                     return busy
-            elif self._any_non_wt_running():
+            elif action == "merge" and self._any_non_wt_running():
                 # internal=True only bypasses this tab's OWN
                 # is_task_active/is_merging flags (the post-task
                 # auto-finalize runs on the task thread that owns
                 # them).  It must NOT bypass the main-tree guard
-                # (F4-19): finalizing stashes/checkouts/merges the
+                # (F4-19): merging stashes/checkouts/merges the
                 # main working tree while a direct task on another
-                # tab is still writing it.
+                # tab is still writing it.  A DISCARD is exempt: it
+                # only removes .kiss-worktrees/<slug> and deletes the
+                # unmerged branch, touching neither the main working
+                # tree's files nor its HEAD, so refusing it would
+                # leak the worktree forever (nothing ever retries).
                 return {
                     "success": False,
                     "message": (
