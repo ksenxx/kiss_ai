@@ -25,7 +25,7 @@ A KISS agent using native function calling.
 
 - **finish** — `finish(result: str) -> str`. The agent must call this with the final answer.
 
-## `kiss.core.relentless_agent` — Auto-continuation for long tasks
+## `kiss.agents.sorcar.relentless_agent` — Auto-continuation for long tasks
 
 ### `class RelentlessAgent(Base)`
 

@@ -33,9 +33,9 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.core.kiss_error import KISSError
 from kiss.core.printer import Printer
-from kiss.core.relentless_agent import RelentlessAgent
 
 _MODEL = "gpt-4o-mini"
 _TASK = "Do nothing forever."

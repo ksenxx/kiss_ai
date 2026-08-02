@@ -23,9 +23,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
-from kiss.core.relentless_agent import RelentlessAgent
 
 
 def _chat_response_with_tool_call() -> dict:

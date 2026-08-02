@@ -28,9 +28,9 @@ from typing import Any
 
 import yaml
 
+from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.core.print_to_console import ConsolePrinter
 from kiss.core.printer import Printer
-from kiss.core.relentless_agent import RelentlessAgent
 from kiss.core.utils import ensure_html, finish
 
 

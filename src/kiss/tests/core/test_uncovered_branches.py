@@ -307,8 +307,8 @@ class TestAttachment:
 
 class TestRelentlessAgentDockerBash:
     def test_docker_bash_raises_without_manager(self) -> None:
+        from kiss.agents.sorcar.relentless_agent import RelentlessAgent
         from kiss.core.kiss_error import KISSError
-        from kiss.core.relentless_agent import RelentlessAgent
 
         agent = RelentlessAgent("test")
         agent._reset(

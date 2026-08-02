@@ -19,6 +19,8 @@ import yaml
 from pydantic import BaseModel
 
 from kiss.agents.obsolete.gepa.template_utils import escape_invalid_template_field_names
+from kiss.agents.sorcar.relentless_agent import RelentlessAgent, _str_to_bool
+from kiss.agents.sorcar.relentless_agent import finish as relentless_finish
 from kiss.core import config as config_module
 from kiss.core.base import Base
 from kiss.core.config import Config, set_artifact_base_dir
@@ -26,8 +28,6 @@ from kiss.core.config_builder import add_config, build_config
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.print_to_console import ConsolePrinter
 from kiss.core.printer import parse_result_yaml
-from kiss.core.relentless_agent import RelentlessAgent, _str_to_bool
-from kiss.core.relentless_agent import finish as relentless_finish
 from kiss.core.utils import (
     config_to_dict,
 )

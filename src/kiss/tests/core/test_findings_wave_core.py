@@ -23,11 +23,11 @@ from typing import Any
 
 import yaml
 
+from kiss.agents.sorcar.relentless_agent import SUMMARIZER_PROMPT
+from kiss.agents.sorcar.relentless_agent import finish as relentless_finish
+from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.printer import parse_result_yaml
-from kiss.core.relentless_agent import SUMMARIZER_PROMPT
-from kiss.core.relentless_agent import finish as relentless_finish
-from kiss.core.useful_tools import UsefulTools
 from kiss.core.utils import finish as utils_finish
 
 
@@ -110,7 +110,7 @@ class FreshImportContract(unittest.TestCase):
     def test_relentless_agent_imports_in_fresh_interpreter(self) -> None:
         """Direct core import must not cycle through sorcar.__init__."""
         completed = subprocess.run(
-            [sys.executable, "-c", "import kiss.core.relentless_agent"],
+            [sys.executable, "-c", "import kiss.agents.sorcar.relentless_agent"],
             capture_output=True,
             text=True,
             check=False,

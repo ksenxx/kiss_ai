@@ -13,7 +13,7 @@ import unittest
 import pytest
 import yaml
 
-from kiss.core.relentless_agent import (
+from kiss.agents.sorcar.relentless_agent import (
     CONTINUATION_PROMPT,
     IMPORTANT_INSTRUCTIONS,
     TASK_PROMPT,

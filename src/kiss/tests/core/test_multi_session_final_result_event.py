@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """End-to-end tests for the final ``type="result"`` event emitted by
-:class:`kiss.core.relentless_agent.RelentlessAgent`.
+:class:`kiss.agents.sorcar.relentless_agent.RelentlessAgent`.
 
 Reproduces (and locks in the fix for) the front-end regression where the
 Result panel of a multi-session task would show a stale
@@ -31,13 +31,13 @@ from typing import Any
 import pytest
 import yaml
 
-from kiss.core.kiss_error import KISSError
-from kiss.core.printer import Printer
-from kiss.core.relentless_agent import (
+from kiss.agents.sorcar.relentless_agent import (
     RelentlessAgent,
     _build_exhaustion_summary,
     _prior_sessions_section,
 )
+from kiss.core.kiss_error import KISSError
+from kiss.core.printer import Printer
 
 
 class RecordingPrinter(Printer):

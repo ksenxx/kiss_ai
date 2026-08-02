@@ -13,7 +13,7 @@ from typing import Any, cast
 import yaml
 
 import kiss.core.utils as utils
-from kiss.core.docker_manager import DockerManager
+from kiss.agents.sorcar.docker_manager import DockerManager
 from kiss.core.kiss_agent import KISSAgent
 
 prompt_template_refiner = """

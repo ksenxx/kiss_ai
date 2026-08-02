@@ -23,7 +23,7 @@ from typing import Any
 
 import yaml
 
-from kiss.core.relentless_agent import RelentlessAgent
+from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 
 
 def _auth_error_response() -> dict:

@@ -6,7 +6,7 @@
 
 ```
 - [`kiss.core.kiss_agent`](#kisscorekiss_agent)
-- [`kiss.core.relentless_agent`](#kisscorerelentless_agent)
+  - [`kiss.agents.sorcar.relentless_agent`](#kissagentssorcarrelentless_agent)
   - [`kiss.agents.sorcar.sorcar_agent`](#kissagentssorcarsorcar_agent)
   - [`kiss.agents.sorcar.chat_sorcar_agent`](#kissagentssorcarchat_sorcar_agent)
   - [`kiss.agents.sorcar.worktree_sorcar_agent`](#kissagentssorcarworktree_sorcar_agent)
@@ -47,7 +47,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.core.relentless_agent` — *Base relentless agent with smart continuation for long tasks.*
+#### `kiss.agents.sorcar.relentless_agent` — *Base relentless agent with smart continuation for long tasks.*
 
 ##### `class RelentlessAgent(Base)` — Base agent with auto-continuation for long tasks.
 

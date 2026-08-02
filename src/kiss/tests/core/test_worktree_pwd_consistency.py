@@ -19,7 +19,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from kiss.core.relentless_agent import (
+from kiss.agents.sorcar.relentless_agent import (
     IMPORTANT_INSTRUCTIONS,
     RelentlessAgent,
 )

@@ -33,6 +33,7 @@ from typing import Any
 import pytest
 import yaml
 
+from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
     _attribute_sub_usage,
@@ -40,7 +41,6 @@ from kiss.agents.sorcar.sorcar_agent import (
 )
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
-from kiss.core.relentless_agent import RelentlessAgent
 
 
 def _tool_calls_response(

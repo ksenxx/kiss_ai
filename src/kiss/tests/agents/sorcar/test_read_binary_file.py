@@ -21,9 +21,9 @@ from pathlib import Path
 
 import pytest
 
+from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core.models.model import parse_binary_attachments
 from kiss.core.printer import truncate_result
-from kiss.core.useful_tools import UsefulTools
 
 _PNG_1x1 = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"

@@ -39,7 +39,7 @@ class TestCodexModelStuckBug:
     def test_codex_model_returns_quickly_when_cli_missing(self) -> None:
         """When the codex CLI is not installed, the agent must fail promptly
         instead of retrying 10000 times in the RelentlessAgent loop."""
-        from kiss.core.relentless_agent import RelentlessAgent
+        from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 
         saved_path = os.environ.get("PATH", "")
         saved_candidates = codex_module._UI_CANDIDATE_PATHS

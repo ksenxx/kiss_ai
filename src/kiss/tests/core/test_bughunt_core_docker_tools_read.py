@@ -22,7 +22,7 @@ they validate end-to-end behavior without any mocks.
 import subprocess
 from pathlib import Path
 
-from kiss.core.docker_tools import DockerTools
+from kiss.agents.sorcar.docker_tools import DockerTools
 
 
 def _local_bash(command: str, description: str) -> str:

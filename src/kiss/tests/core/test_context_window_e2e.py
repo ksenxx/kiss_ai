@@ -25,6 +25,11 @@ import unittest
 import pytest
 import yaml
 
+from kiss.agents.sorcar.relentless_agent import (
+    MAX_PROGRESS_CHARS,
+    RelentlessAgent,
+    _capped_progress_text,
+)
 from kiss.core.kiss_agent import (
     CONTEXT_LIMIT_FRACTION,
     KISSAgent,
@@ -32,7 +37,6 @@ from kiss.core.kiss_agent import (
 )
 from kiss.core.kiss_error import ContextWindowExceededError, KISSError
 from kiss.core.models import model_info
-from kiss.core.relentless_agent import MAX_PROGRESS_CHARS, RelentlessAgent, _capped_progress_text
 from kiss.tests.conftest import requires_openai_api_key
 
 TEST_MODEL = "gpt-4o-mini"

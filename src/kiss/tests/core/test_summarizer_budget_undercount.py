@@ -30,9 +30,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import calculate_cost
-from kiss.core.relentless_agent import RelentlessAgent
 
 _PROMPT_TOKENS = 1000
 _COMPLETION_TOKENS = 100

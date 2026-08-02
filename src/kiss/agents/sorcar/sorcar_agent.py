@@ -30,7 +30,9 @@ from kiss.agents.sorcar.cli_helpers import (
 )
 from kiss.agents.sorcar.code_graph import intercept_grep_hint
 from kiss.agents.sorcar.persistence import _load_last_model
+from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.agents.sorcar.skills import make_skill_tool
+from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.kiss_error import BudgetExceededError
@@ -44,8 +46,6 @@ from kiss.core.models.model_info import (
 )
 from kiss.core.models.model_info import model as _model_factory
 from kiss.core.printer import Printer
-from kiss.core.relentless_agent import RelentlessAgent
-from kiss.core.useful_tools import UsefulTools
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +249,7 @@ def _live_agent_usage(agent: Any) -> tuple[float, int, int]:
     """Return live ``(budget, tokens, steps)`` for *agent*, including its
     in-flight executor session.
 
-    :class:`~kiss.core.relentless_agent.RelentlessAgent` folds a session
+    :class:`~kiss.agents.sorcar.relentless_agent.RelentlessAgent` folds a session
     executor's spend into the agent's totals only when the session ends,
     so mid-session the live spend is visible only on
     ``agent._current_executor``.
@@ -755,7 +755,7 @@ class SorcarAgent(RelentlessAgent):
             return f"Spoke to the user in language {language!r}."
 
         if self.docker_manager:
-            from kiss.core.docker_tools import DockerTools
+            from kiss.agents.sorcar.docker_tools import DockerTools
 
             docker_tools = DockerTools(self._docker_bash)
             code_graph_hints_seen: set[str] = set()
