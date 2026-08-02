@@ -251,6 +251,7 @@ class MergeResult(enum.Enum):
 
 _WORKTREE_SUBDIR = ".kiss-worktrees"
 _WORKTREE_SLUG_PREFIX = "kiss_wt-"
+_WORKTREE_BRANCH_PREFIX = "kiss/wt-"
 
 
 def strip_worktree_suffix(path: str) -> str:
@@ -1332,3 +1333,133 @@ class GitWorktreeOps:
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.prune(repo)
         GitWorktreeOps.delete_branch(repo, branch)
+
+    @staticmethod
+    def checked_out_branches(repo: Path) -> set[str]:
+        """Return the branches currently checked out in any worktree.
+
+        A branch listed here is in use by a live worktree (including
+        the main working tree) and must never be deleted.
+
+        Args:
+            repo: Git repo root path.
+
+        Returns:
+            Set of branch names, empty if the listing fails.
+        """
+        result = _git("worktree", "list", "--porcelain", cwd=repo)
+        if result.returncode != 0:  # pragma: no cover — git failure
+            return set()
+        prefix = "branch refs/heads/"
+        return {
+            line[len(prefix):].strip()
+            for line in result.stdout.splitlines()
+            if line.startswith(prefix)
+        }
+
+    @staticmethod
+    def _config_branch_sections(repo: Path) -> set[str]:
+        """Return branch names that own a ``branch.<name>.*`` config section.
+
+        Only agent-minted ``kiss/wt-*`` names are reported; the user's
+        own branch sections are never touched.
+
+        Args:
+            repo: Git repo root path.
+
+        Returns:
+            Set of ``kiss/wt-*`` branch names present in git config.
+        """
+        prefix = "branch."
+        result = _git("config", "--get-regexp", rf"^{prefix}kiss/wt-", cwd=repo)
+        if result.returncode != 0:
+            # git config exits 1 when the regexp matches nothing.
+            return set()
+        # Each line is "branch.<name>.<setting> <value>"; strip the
+        # known prefix off the front and the setting off the tail.
+        return {
+            line.split(" ", 1)[0][len(prefix):].rpartition(".")[0]
+            for line in result.stdout.splitlines()
+        }
+
+    @staticmethod
+    def _branch_is_expendable(repo: Path, branch: str) -> bool:
+        """Whether *branch* holds no work that would be lost by deleting it.
+
+        A worktree branch is expendable once every one of its commits
+        is reachable from another ref — i.e. it was merged, or it never
+        diverged in the first place.  ``git branch -d`` applies exactly
+        this rule but only against HEAD, so ``--merged HEAD`` would
+        keep branches that were squash-merged into a different base.
+        Checking reachability from *all* other refs is both stricter
+        and cheaper than replaying the merge.
+
+        Args:
+            repo: Git repo root path.
+            branch: Branch name to test.
+
+        Returns:
+            True if the branch has no commits unique to it.
+        """
+        result = _git(
+            "rev-list",
+            "--count",
+            "--max-count=1",
+            branch,
+            "--not",
+            "--exclude=refs/heads/" + branch,
+            "--all",
+            cwd=repo,
+        )
+        if result.returncode != 0:  # pragma: no cover — git failure
+            return False
+        return result.stdout.strip() == "0"
+
+    @staticmethod
+    def sweep_orphaned_state(repo: Path) -> int:
+        """Delete leftover ``kiss/wt-*`` branches and config sections.
+
+        A crashed, killed, or refused cleanup leaves three kinds of
+        debris behind: a registered worktree whose directory is gone, a
+        branch nobody has checked out, and the ``branch.kiss/wt-*.*``
+        git config section that names it.  None of it is visible in
+        ``git status``, so it accumulates silently — the user only
+        notices as a swelling ``git branch`` listing.
+
+        Only debris is removed.  A branch is kept when it is checked
+        out by a live worktree (the task may still be running) or when
+        it holds commits no other ref can reach (unmerged work the user
+        could still want).  Config sections are only purged once their
+        branch is gone.
+
+        Args:
+            repo: Git repo root path.
+
+        Returns:
+            The number of branches deleted.
+        """
+        with repo_lock(repo):
+            GitWorktreeOps.prune(repo)
+            in_use = GitWorktreeOps.checked_out_branches(repo)
+            result = _git(
+                "for-each-ref",
+                "--format=%(refname:short)",
+                f"refs/heads/{_WORKTREE_BRANCH_PREFIX}*",
+                cwd=repo,
+            )
+            if result.returncode != 0:  # pragma: no cover — git failure
+                return 0
+            deleted = 0
+            for branch in result.stdout.split():
+                if branch in in_use:
+                    continue
+                if not GitWorktreeOps._branch_is_expendable(repo, branch):
+                    continue
+                # git refuses to delete a branch some worktree has
+                # checked out; the in_use guard skips those first so
+                # the sweep never logs a warning for a running task.
+                deleted += int(GitWorktreeOps.delete_branch(repo, branch))
+            for name in GitWorktreeOps._config_branch_sections(repo):
+                if not GitWorktreeOps.branch_exists(repo, name):
+                    GitWorktreeOps._remove_branch_config_section(repo, name)
+            return deleted

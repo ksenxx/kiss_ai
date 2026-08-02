@@ -763,6 +763,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             try:
                 GitWorktreeOps.ensure_excluded(repo)
                 GitWorktreeOps.ensure_scratch_merge_driver(repo)
+                GitWorktreeOps.sweep_orphaned_state(repo)
             except Exception:  # pragma: no cover — filesystem permission error
                 logger.warning("Failed to update git exclude", exc_info=True)
 
