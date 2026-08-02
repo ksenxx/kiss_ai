@@ -410,7 +410,7 @@ async function main() {
         console.log('      (skipped: requires macOS audio tooling)');
         return;
       }
-      for (const tool of ['say', 'afplay', 'osascript', 'uv']) {
+      for (const tool of ['say', 'afplay', 'uv']) {
         if (!which(tool)) {
           console.log(`      (skipped: ${tool} not available)`);
           return;
@@ -423,12 +423,6 @@ async function main() {
       }
 
       const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-wake-req-'));
-      const savedVolume = spawnSync('osascript', [
-        '-e',
-        'output volume of (get volume settings)',
-      ])
-        .stdout.toString()
-        .trim();
       let recorder = null;
       let bridge = null;
       try {
@@ -448,7 +442,6 @@ async function main() {
         const recorderOut = {buf: ''};
         const ready = await readLine(recorder, recorderOut);
         assert.strictEqual(ready, 'ready', 'mic recorder must start');
-        spawnSync('osascript', ['-e', 'set volume output volume 55']);
         const play = spawnSync('afplay', [aiff]);
         assert.strictEqual(play.status, 0, 'speaker playback must work');
         await new Promise(r => setTimeout(r, 500));
@@ -521,12 +514,6 @@ async function main() {
       } finally {
         if (recorder) recorder.kill();
         if (bridge) bridge.kill();
-        if (savedVolume) {
-          spawnSync('osascript', [
-            '-e',
-            `set volume output volume ${savedVolume}`,
-          ]);
-        }
         fs.rmSync(tmpdir, {recursive: true, force: true});
       }
     },
