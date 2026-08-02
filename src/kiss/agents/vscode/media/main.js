@@ -791,6 +791,14 @@
         }
       }
 
+      if (tab.askPendingQuestion !== null && tab.id !== activeTabId) {
+        const attention = document.createElement('span');
+        attention.className = 'chat-tab-attention';
+        attention.textContent = '?';
+        attention.title = 'Waiting for your answer';
+        el.appendChild(attention);
+      }
+
       const label = document.createElement('span');
       label.className = 'chat-tab-label';
       label.textContent = tab.title;
@@ -4234,10 +4242,8 @@
         const askTab = getTab(askTabId);
         if (!askTab) break;
         askTab.askPendingQuestion = ev.question || '';
-        if (askTab.id !== activeTabId) {
-          switchToTab(askTab.id);
-        }
         showAskForTab(askTab);
+        renderTabBar();
         break;
       }
       case 'askUserDone': {
@@ -4634,10 +4640,7 @@
       case 'merge_started':
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgMergeTab = getTab(ev.tabId);
-          if (bgMergeTab) {
-            bgMergeTab.isMerging = true;
-            switchToTab(ev.tabId);
-          }
+          if (bgMergeTab) bgMergeTab.isMerging = true;
           break;
         }
         isMerging = true;
@@ -6669,6 +6672,7 @@
       if (tab.id === activeTabId) shouldClearSlot = true;
     }
     if (shouldClearSlot) clearAskSlot();
+    renderTabBar();
   }
 
   function submitAskForTab(tab) {

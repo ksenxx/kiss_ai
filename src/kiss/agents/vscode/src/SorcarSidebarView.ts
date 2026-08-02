@@ -473,9 +473,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         }
       }
 
-      if (msg.type === 'askUser' && this._view && this._isOwnTab(msg.tabId)) {
-        this._view.show(true);
-      }
+      // A question raised by a still-running task must not steal focus: the
+      // webview flags the waiting tab instead, so the user decides when to
+      // answer it.
 
       if (msg.type !== 'merge_data') {
         this._sendToWebview(msg);

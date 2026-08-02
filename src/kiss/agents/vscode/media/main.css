@@ -426,6 +426,12 @@ body {
 .chat-tab-ok { color: var(--green); }
 .chat-tab-fail { color: var(--red); }
 
+.chat-tab-attention {
+  font-size: 12px; font-weight: 700; flex-shrink: 0; line-height: 1;
+  color: var(--yellow, #d29922);
+  animation: running-pulse 1.5s ease-in-out infinite;
+}
+
 .chat-tab-close {
   display: inline-flex;
   align-items: center;

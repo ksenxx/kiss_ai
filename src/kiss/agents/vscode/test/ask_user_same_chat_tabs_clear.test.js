@@ -91,10 +91,15 @@ function testAnswerClearsSiblingTabsWithSameBackendChatId() {
     question: 'Question from the shared chat?',
     tabId: firstTab,
   });
-  assert.strictEqual(api.getActiveTabId(), firstTab, 'first ask switches active tab');
-  assert.ok(
-    visibleAskText(win).includes('Question from the shared chat?'),
-    'first tab must show its ask-user prompt',
+  assert.strictEqual(
+    api.getActiveTabId(),
+    secondTab,
+    'a background ask must not steal the active tab',
+  );
+  assert.strictEqual(
+    visibleAskText(win),
+    '',
+    'a background ask must not pop a modal over the active tab',
   );
 
   send(win, {
@@ -102,7 +107,11 @@ function testAnswerClearsSiblingTabsWithSameBackendChatId() {
     question: 'Same shared chat question in sibling tab?',
     tabId: secondTab,
   });
-  assert.strictEqual(api.getActiveTabId(), secondTab, 'second ask switches active tab');
+  assert.strictEqual(
+    api.getActiveTabId(),
+    secondTab,
+    'an ask for the active tab keeps it active',
+  );
 
   const modal = win.document.getElementById('ask-user-modal');
   const input = modal.querySelector('.ask-user-input');
