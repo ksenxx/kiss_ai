@@ -47,6 +47,7 @@
     'voiceAck',
     'focusEditor',
     'webviewFocusChanged',
+    'activeTabChanged',
     'notificationAction',
     'sizeReport',
     'resolveDroppedPaths',

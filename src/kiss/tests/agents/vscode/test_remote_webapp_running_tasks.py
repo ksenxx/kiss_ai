@@ -7,11 +7,11 @@
 When a remote (WSS) client connects and sends ``ready``, the web
 server's ``_handle_ready`` must report every task currently running in
 the backend with a targeted ``openRunningTasks`` message so the page
-can open one chat tab per running task and focus the tab running the
-LATEST task.  The message lists one entry per running top-level chat —
-``{chatId, taskId, title, startTs}`` — sorted by ``startTs`` ascending
-(oldest first), so the client's natural open-in-order loop ends focused
-on the newest task.
+can open one chat tab per running task.  Those tabs are opened in the
+background: a task that is still running never takes the user off the
+tab they are on.  The message lists one entry per running top-level
+chat — ``{chatId, taskId, title, startTs}`` — sorted by ``startTs``
+ascending (oldest first), so restored tabs appear in start order.
 
 These tests drive the real ``RemoteAccessServer`` over a real WebSocket
 connection, with real ``_RunningAgentState`` registry entries and real

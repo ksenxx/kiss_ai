@@ -386,7 +386,16 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
                   this._getOpenEditorFiles(),
                 );
               }
-              await mgr.openMerge(msg.data);
+              // A merge from a chat tab the user is not looking at must
+              // not pull an editor in front of them: prepare the review
+              // state and let them see it when they visit that tab.
+              // Preparing the merge awaits several host operations, and
+              // the user can switch tabs while they run, so pass a live
+              // predicate rather than a snapshot of the answer.
+              await mgr.openMerge(
+                msg.data,
+                () => mergeTabId === this._activeTabId,
+              );
             })
             .catch(err => {
               console.error(
@@ -1053,6 +1062,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
       case 'webviewFocusChanged':
         this._webviewHasFocus = message.focused;
+        break;
+
+      // Which chat tab the user is looking at. Host-side actions that
+      // take over the editor (opening a merge) are only allowed for it.
+      case 'activeTabChanged':
+        this._activeTabId = message.tabId;
         break;
 
       case 'voiceToggle': {

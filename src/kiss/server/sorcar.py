@@ -362,6 +362,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("cliInfo"),
     ApiCommand("focusEditor", handler="drop"),
     ApiCommand("webviewFocusChanged", handler="drop"),
+    ApiCommand("activeTabChanged", required=("tabId",), handler="drop"),
     ApiCommand("notificationAction", required=("id",), handler="drop"),
     ApiCommand("sizeReport", handler="drop"),
     ApiCommand("resolveDroppedPaths", required=("uris",), handler="drop"),

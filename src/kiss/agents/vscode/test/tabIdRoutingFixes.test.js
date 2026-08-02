@@ -195,7 +195,7 @@ function testForeignTabNotificationDropped() {
 function testBackgroundTabErrorRetained() {
   const {win, posted} = makeWebview();
   const bgTabId = initialTabId(posted);
-  send(win, {type: 'new_tab', task_id: 'task-b3'});
+  win._demoApi.createNewTab();
   assert.notStrictEqual(
     tabElement(win, bgTabId).className.includes('active'),
     true,

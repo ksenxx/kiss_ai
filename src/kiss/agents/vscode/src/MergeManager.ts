@@ -47,6 +47,22 @@ export interface MergeData {
   files: MergeFileData[];
 }
 
+/**
+ * Whether a merge may bring an editor in front of the user.
+ *
+ * A plain boolean is a snapshot; a predicate is re-read at the moment the
+ * editor would actually be opened, which is the only correct answer when
+ * the decision depends on which chat tab the user is looking at right now.
+ */
+export type RevealPermission = boolean | (() => boolean);
+
+const ALWAYS_REVEAL = (): boolean => true;
+
+function toRevealPredicate(reveal: RevealPermission): () => boolean {
+  if (typeof reveal === 'function') return reveal;
+  return reveal ? ALWAYS_REVEAL : () => false;
+}
+
 export class MergeManager extends EventEmitter {
   private _ms: Record<string, MergeFileState> = {};
   private _curHunk: {fp: string; idx: number} | null = null;
@@ -56,6 +72,7 @@ export class MergeManager extends EventEmitter {
   private _hunkOpInProgress: boolean = false;
   private _mergeInProgress: boolean = false;
   private _pendingMerge: MergeData | null = null;
+  private _pendingReveal: () => boolean = ALWAYS_REVEAL;
   private _navSeq: number = 0;
   private _reinsertingFiles = new Set<string>();
   // Files this manager opened in the editor itself (i.e. that were not
@@ -648,33 +665,60 @@ export class MergeManager extends EventEmitter {
     );
   }
 
-  async openMerge(data: MergeData): Promise<void> {
+  /**
+   * Load a merge payload and, unless suppressed, show its first hunk.
+   *
+   * Args:
+   *   data: The merge payload to review.
+   *   reveal: Whether the first changed file may be brought in front of
+   *     the user. Pass ``false`` -- or a predicate that will return
+   *     ``false`` -- for a merge produced by a chat tab the user is not
+   *     looking at: the hunk state and decorations are still prepared,
+   *     but no editor is opened or scrolled. The user sees the diff when
+   *     they switch to that tab and navigate a hunk. Prefer a predicate:
+   *     preparing a merge awaits several host operations, and the user
+   *     can leave the tab while they run, so the permission is only
+   *     meaningful when it is read just before the editor is opened.
+   */
+  async openMerge(
+    data: MergeData,
+    reveal: RevealPermission = true,
+  ): Promise<void> {
+    const mayReveal = toRevealPredicate(reveal);
     if (this._mergeInProgress) {
       this._pendingMerge = data;
+      this._pendingReveal = mayReveal;
       return;
     }
     this._mergeInProgress = true;
     try {
       let next: MergeData | null = data;
+      let nextReveal = mayReveal;
       while (next) {
         const cur: MergeData = next;
+        const curReveal = nextReveal;
         next = null;
         try {
-          await this._doOpenMerge(cur);
+          await this._doOpenMerge(cur, curReveal);
         } catch (err) {
           // A failed open must not leave a stale _pendingMerge behind:
           // it would replay an outdated payload over a newer merge.
           console.error('[MergeManager] openMerge failed:', err);
         }
         next = this._pendingMerge;
+        nextReveal = this._pendingReveal;
         this._pendingMerge = null;
+        this._pendingReveal = ALWAYS_REVEAL;
       }
     } finally {
       this._mergeInProgress = false;
     }
   }
 
-  private async _doOpenMerge(data: MergeData): Promise<void> {
+  private async _doOpenMerge(
+    data: MergeData,
+    mayReveal: () => boolean = ALWAYS_REVEAL,
+  ): Promise<void> {
     try {
       await vscode.workspace.saveAll(false);
     } catch {}
@@ -820,29 +864,38 @@ export class MergeManager extends EventEmitter {
 
     if (firstFileFp && this._ms[firstFileFp]?.hunks.length) {
       this._curHunk = {fp: firstFileFp, idx: 0};
-      this._recordOpen(firstFileFp);
-      if (this._ms[firstFileFp].isBinary) {
-        await vscode.commands.executeCommand(
-          'vscode.open',
-          vscode.Uri.file(firstFileFp),
-          {viewColumn: vscode.ViewColumn.One, preview: false},
-        );
-      } else {
-        const firstDoc = await vscode.workspace.openTextDocument(
-          vscode.Uri.file(firstFileFp),
-        );
-        const firstEd = await vscode.window.showTextDocument(firstDoc, {
-          preview: false,
-          viewColumn: vscode.ViewColumn.One,
-        });
-        const fh = this._ms[firstFileFp].hunks[0];
-        const fl = fh.nc > 0 ? fh.ns : fh.os;
-        firstEd.revealRange(
-          new vscode.Range(fl, 0, fl, 0),
-          vscode.TextEditorRevealType.InCenter,
-        );
-        firstEd.selection = new vscode.Selection(fl, 0, fl, 0);
+      // A merge from a chat tab the user is not looking at keeps its hunk
+      // state but must not pull an editor in front of them. Nothing was
+      // opened, so there is also nothing for the restore pass to close.
+      // The permission is read here, after every await above, because the
+      // user may have switched or closed the chat tab while they ran.
+      if (!mayReveal()) {
         this._refreshDeco(firstFileFp);
+      } else {
+        this._recordOpen(firstFileFp);
+        if (this._ms[firstFileFp].isBinary) {
+          await vscode.commands.executeCommand(
+            'vscode.open',
+            vscode.Uri.file(firstFileFp),
+            {viewColumn: vscode.ViewColumn.One, preview: false},
+          );
+        } else {
+          const firstDoc = await vscode.workspace.openTextDocument(
+            vscode.Uri.file(firstFileFp),
+          );
+          const firstEd = await vscode.window.showTextDocument(firstDoc, {
+            preview: false,
+            viewColumn: vscode.ViewColumn.One,
+          });
+          const fh = this._ms[firstFileFp].hunks[0];
+          const fl = fh.nc > 0 ? fh.ns : fh.os;
+          firstEd.revealRange(
+            new vscode.Range(fl, 0, fl, 0),
+            vscode.TextEditorRevealType.InCenter,
+          );
+          firstEd.selection = new vscode.Selection(fl, 0, fl, 0);
+          this._refreshDeco(firstFileFp);
+        }
       }
     } else {
       this._curHunk = null;

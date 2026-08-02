@@ -78,6 +78,7 @@ export type FromWebviewMessage =
     }
   | {type: 'resolveDroppedPaths'; uris: string[]; workDir?: string}
   | {type: 'webviewFocusChanged'; focused: boolean}
+  | {type: 'activeTabChanged'; tabId: string}
   | {
       type: 'getAdjacentTask';
       tabId?: string;

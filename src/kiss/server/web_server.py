@@ -1508,8 +1508,10 @@ def _snapshot_running_task_rows() -> list[dict[str, Any]]:
 
     ``startTs`` is the ``task_history.start_ts`` of the in-flight task
     (``0`` when the row is missing) and the result is sorted by it
-    ascending, so a client opening one tab per row in order naturally
-    ends focused on the tab running the LATEST task.  ``title`` is the
+    ascending, so a client opening one tab per row in order lays the
+    restored tabs out oldest-first.  Those tabs open in the background:
+    a task that is still running never steals the user's focus.
+    ``title`` is the
     task's user prompt for an immediate tab label; the follow-up
     ``resumeSession`` replay repaints the tab with the real events.
     """

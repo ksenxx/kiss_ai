@@ -739,7 +739,11 @@ function testBackgroundTabReportOpensAtItsTaskDone() {
   console.log('  ok - background-tab report opens at its own task_done');
 }
 
-function testSubagentDoneOpensReport() {
+// A sub-agent finishing is not the user's task finishing: the parent
+// task keeps running, so the report it wrote must become reachable in
+// the tab bar without pulling the user onto it - not even when the user
+// was standing on the sub-agent tab that is now being closed.
+function testSubagentDoneOpensReportInTheBackground() {
   const {win} = makeWebview({withMarked: true});
   const addBtn = win.document.querySelector('.chat-tab-add');
   addBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
@@ -748,13 +752,32 @@ function testSubagentDoneOpensReport() {
   writeReport(win, 'reports/sub.md', '# from subagent', {tabId: subTabId});
   assertNoReportTab(win, 'subagent report before subagentDone');
   send(win, {type: 'subagentDone', tab_id: subTabId});
-  assertReportTabActive(win, 'subagent report');
+
+  const found = contentTabs(win);
+  assert.strictEqual(
+    found.length,
+    1,
+    'subagent report: the report must open as a content tab',
+  );
+  assert.ok(
+    !found[0].classList.contains('active'),
+    'subagent report: the parent task is still running, so the report ' +
+      'must stay in the background',
+  );
+  const out = win.document.getElementById('output');
+  assert.notStrictEqual(
+    out.style.display,
+    'none',
+    'subagent report: the chat surface must stay on screen',
+  );
+
+  found[0].dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
   assert.ok(
     /<h1[^>]*>from subagent<\/h1>/.test(activeSrcdoc(win)),
-    'the subagent report must be rendered when its subtask finishes',
+    'the subagent report must render once the user opens it',
   );
   win.close();
-  console.log('  ok - subagent report opens when the subagent finishes');
+  console.log('  ok - subagent report opens in the background on done');
 }
 
 function testSwitchBackToChatRestoresOutput() {
@@ -809,7 +832,7 @@ function main() {
   testRegenerationReusesSameTab();
   testReportsSegmentVariants();
   testBackgroundTabReportOpensAtItsTaskDone();
-  testSubagentDoneOpensReport();
+  testSubagentDoneOpensReportInTheBackground();
   testSwitchBackToChatRestoresOutput();
   console.log('reportAutoOpen.test.js: all tests passed');
 }

@@ -473,6 +473,9 @@
 
   let tabs = [];
   let activeTabId = '';
+  // The chat tab the host believes is on screen. Kept in step with the host
+  // so a tab that gets closed can never be left standing there.
+  let reportedChatTabId = '';
 
   let configWorkDir = '';
 
@@ -639,9 +642,38 @@
     persistTabState();
   }
 
+  // The single place that moves the host's idea of the on-screen chat tab.
+  // The empty string is a legitimate value meaning "no chat tab at all", so
+  // it is reported like any other change rather than swallowed.
+  function reportChatTab(tabId) {
+    const id = tabId || '';
+    if (id === reportedChatTabId) return;
+    reportedChatTabId = id;
+    api.activeTabChanged({tabId: id});
+  }
+
+  // Closing tabs must never leave the host naming one that is gone: it would
+  // keep matching merges (and completions) against a dead chat. When the
+  // reported tab is removed and the tab taking its place on screen is a
+  // content tab, point the host at whichever chat tab survives — and when
+  // none survives, clear it, so the deleted chat stops owning the editor.
+  function reportSurvivingChatTab() {
+    if (tabs.some(t => t.id === reportedChatTabId)) return;
+    const chat = tabs.find(t => !t.isContentTab);
+    reportChatTab(chat ? chat.id : '');
+  }
+
   function restoreTab(tab) {
     hideContentArea();
     activeTabId = tab.id;
+    // Every chat tab activation funnels through here — switching, creating,
+    // and falling back after a close — so this is the one place that tells
+    // the host which chat is on screen. The host only lets that chat take
+    // over the editor (e.g. to open a merge for review), so a stale id would
+    // yank an editor in front of a user looking at a different tab.
+    // Content tabs deliberately do not report: the host compares this id
+    // against chat tab ids only, so viewing a file leaves it untouched.
+    reportChatTab(tab.id);
     O.innerHTML = '';
     // autoscroll-coverage:start
     // A switched-to (or newly created) tab is a fresh view, so any
@@ -878,7 +910,34 @@
     focusInputWithRetry();
   }
 
-  function closeTab(tabId) {
+  // Which tab takes over when the tab the user was on is closed.
+  //
+  // A close the user asked for is a user action, so plain index
+  // adjacency is right: whatever sits where the tab was - a file the
+  // user opened included - may come forward.  A close the agent did on
+  // its own (a sub-agent finishing) must not switch the user to a
+  // content tab: the sub-agent may have parked its report there moments
+  // earlier while the parent task is still running, and showing it would
+  // break the "no tab switch unless finished" rule.  For those closes
+  // prefer the closed tab's parent chat tab, then the nearest surviving
+  // chat tab, falling back to adjacency only if no chat tab is left.
+  function pickSuccessorTab(closed, origIdx, agentInitiated) {
+    const adjacent = tabs[Math.min(origIdx, tabs.length - 1)];
+    if (!agentInitiated) return adjacent;
+    const parent = closed.parentTabId ? getTab(closed.parentTabId) : null;
+    if (parent && !parent.isContentTab) return parent;
+    for (let d = 0; d < tabs.length; d++) {
+      const after = tabs[origIdx + d];
+      if (after && !after.isContentTab) return after;
+      const before = tabs[origIdx - 1 - d];
+      if (before && !before.isContentTab) return before;
+    }
+    return adjacent;
+  }
+
+  // agentInitiated marks a close the agent performed by itself rather
+  // than one the user asked for; see pickSuccessorTab.
+  function closeTab(tabId, agentInitiated) {
     const origIdx = tabs.findIndex(t => {
       return t.id === tabId;
     });
@@ -899,6 +958,7 @@
       }
     }
     const activeWasClosed = toClose.has(activeTabId);
+    const closed = tabs[origIdx];
     for (const id of toClose) {
       const i = tabs.findIndex(t => t.id === id);
       if (i >= 0) tabs.splice(i, 1);
@@ -913,10 +973,9 @@
         createNewTab();
         return;
       }
-      const newIdx = Math.min(origIdx, tabs.length - 1);
-      const newTab = tabs[newIdx];
-      activateAdjacentTab(newTab);
+      activateAdjacentTab(pickSuccessorTab(closed, origIdx, agentInitiated));
     }
+    reportSurvivingChatTab();
     renderTabBar();
     persistTabState();
   }
@@ -1203,7 +1262,12 @@
     renderCodeContent(tab, holder, ev.content || '', languageFromPath(lower));
   }
 
-  function handleFileContent(ev) {
+  // mayFocus tells whether this content tab is allowed to become the
+  // active tab. It defaults to true because every caller but one acts on
+  // a user request or a finished task; pass false to open the tab in the
+  // background instead.
+  function handleFileContent(ev, mayFocus) {
+    if (mayFocus === undefined) mayFocus = true;
     if (ev.error) {
       updateNotification({
         id: 'file-open-error',
@@ -1219,7 +1283,7 @@
     if (existing) {
       renderContentView(existing, ev);
       if (activeTabId === existing.id) showContentTab(existing);
-      else switchToTab(existing.id);
+      else if (mayFocus) switchToTab(existing.id);
       return;
     }
     const tab = makeTab(ev.name || path || 'file');
@@ -1227,7 +1291,8 @@
     tab.contentPath = path;
     tabs.push(tab);
     renderContentView(tab, ev);
-    switchToTab(tab.id);
+    if (mayFocus) switchToTab(tab.id);
+    else renderTabBar();
   }
 
   // report-coverage:start
@@ -1323,20 +1388,27 @@
     delete readyReportsByTab[reportTabKey(evTabId)];
   }
 
-  function openReadyReportTabs(evTabId) {
+  // mayFocus defaults to true: a task that reached a terminal event may
+  // put its report on screen. Pass false when the owning work is not the
+  // user's task finishing (see the subagentDone case).
+  function openReadyReportTabs(evTabId, mayFocus) {
+    if (mayFocus === undefined) mayFocus = true;
     const key = reportTabKey(evTabId);
     const reps = readyReportsByTab[key];
     delete readyReportsByTab[key];
     if (!reps || _demoActive) return;
     reps.forEach(rep => {
-      handleFileContent({
-        path: rep.path,
-        name: rep.name,
-        content: rep.isMarkdown
-          ? markdownReportToHtml(rep.content)
-          : rep.content,
-        isReport: true,
-      });
+      handleFileContent(
+        {
+          path: rep.path,
+          name: rep.name,
+          content: rep.isMarkdown
+            ? markdownReportToHtml(rep.content)
+            : rep.content,
+          isReport: true,
+        },
+        mayFocus,
+      );
     });
   }
   // report-coverage:end
@@ -1472,6 +1544,29 @@
     renderTabBar();
     persistTabState();
     return subTab;
+  }
+
+  // A regular chat tab that is created without being switched to. Used to
+  // restore tasks that are still running when a client (re)connects: they
+  // must be reachable, but must not take the user off the tab they are on.
+  function createBackgroundChatTab(title) {
+    const tab = makeTab(title);
+    tabs.push(tab);
+    renderTabBar();
+    persistTabState();
+    return tab;
+  }
+
+  function setTabTitle(tab, title) {
+    if (!tab) return;
+    const t = (title || '').trim();
+    tab.title = t
+      ? t.length > 30
+        ? t.substring(0, 30) + '\u2026'
+        : t
+      : 'new chat';
+    renderTabBar();
+    persistTabState();
   }
 
   function createNewTab() {
@@ -4543,30 +4638,21 @@
       }
       case 'openRunningTasks': {
         const runningTasks = Array.isArray(ev.tasks) ? ev.tasks : [];
-        let focusTabId = '';
         runningTasks.forEach(rt => {
           if (!rt || !rt.chatId) return;
           const rtChatId = String(rt.chatId);
-          const existing = getTabByBackendChatId(rtChatId);
-          if (existing) {
-            focusTabId = existing.id;
-            return;
-          }
-          createNewTab();
-          const rtTab = getTab(activeTabId);
-          if (rtTab) rtTab.backendChatId = rtChatId;
-          const rtTitle = String(rt.title || '').trim();
-          if (rtTitle) updateActiveTabTitle(rtTitle);
+          if (getTabByBackendChatId(rtChatId)) return;
+          // A task that is still running gets a reachable tab, but the user
+          // stays on whatever tab they are looking at.
+          const rtTab = createBackgroundChatTab('new chat');
+          rtTab.backendChatId = rtChatId;
+          setTabTitle(rtTab, String(rt.title || ''));
           api.resumeSession({
             id: rtChatId,
             taskId: rt.taskId || '',
-            tabId: activeTabId,
+            tabId: rtTab.id,
           });
-          focusTabId = activeTabId;
         });
-        if (focusTabId && focusTabId !== activeTabId) {
-          switchToTab(focusTabId);
-        }
         persistTabState();
         break;
       }
@@ -4853,8 +4939,7 @@
             );
           }
         } else {
-          createNewTab();
-          subAgentTabId = activeTabId;
+          subAgentTabId = createBackgroundSubagentTab('').id;
         }
         api.resumeSession({taskId: ev.task_id, tabId: subAgentTabId});
         break;
@@ -4928,7 +5013,9 @@
         const doneTab = getTab(ev.tab_id);
         if (doneTab) {
           // report-coverage:start
-          openReadyReportTabs(doneTab.id);
+          // A sub-agent finishing is not the task finishing: the parent
+          // task keeps running, so its report opens in the background.
+          openReadyReportTabs(doneTab.id, false);
           // report-coverage:end
           doneTab.isDone = true;
           doneTab.isRunning = false;
@@ -4936,7 +5023,7 @@
             setRunningState(false);
             if (inputContainer) inputContainer.style.display = 'none';
           }
-          closeTab(doneTab.id);
+          closeTab(doneTab.id, true);
         }
         break;
       }
@@ -5059,6 +5146,11 @@
     if (tab) {
       tab.hasRunTask = true;
       tab.lastTaskFailed = !!failed;
+      // A question can only be answered while its task is alive. The server
+      // sends `askUserDone` only for an accepted answer, so a task that ends
+      // with a question outstanding must retire it here. Only THIS task
+      // ended, so tabs sharing its backend chat keep their own questions.
+      if (tab.askPendingQuestion !== null) clearAskForTab(tab);
     }
   }
 
@@ -5746,7 +5838,12 @@
       .map(t => {
         return {tabId: t.id, chatId: t.backendChatId};
       });
+    // `ready` seeds the host's active chat tab exactly like an
+    // `activeTabChanged` would, so the local mirror has to start out
+    // agreeing with it — otherwise the first real change looks like a
+    // no-op and is never sent.
     api.ready({tabId: activeTabId, restoredTabs: restoredTabs});
+    reportedChatTabId = activeTabId;
     api.getConfig();
   }
 
@@ -6662,14 +6759,27 @@
     return !!chatId && String(candidate.backendChatId || '') === chatId;
   }
 
+  // Retire the question of exactly one tab. Returns true when the retired
+  // question was the one on screen, so callers can drop the modal once.
+  function retireAskForTab(tab) {
+    tab.askPendingQuestion = null;
+    if (tab.askInputEl) tab.askInputEl.value = '';
+    return tab.id === activeTabId;
+  }
+
+  // A tab's own task ended, so only its question dies. Sibling tabs sharing
+  // the backend chat run their own tasks and may still be waiting on answers.
+  function clearAskForTab(tab) {
+    if (retireAskForTab(tab)) clearAskSlot();
+    renderTabBar();
+  }
+
   function clearAskForMatchingChatTabs(sourceTab) {
     let shouldClearSlot = false;
     for (let i = 0; i < tabs.length; i++) {
       const tab = tabs[i];
       if (!isAskSameChatTab(sourceTab, tab)) continue;
-      tab.askPendingQuestion = null;
-      if (tab.askInputEl) tab.askInputEl.value = '';
-      if (tab.id === activeTabId) shouldClearSlot = true;
+      if (retireAskForTab(tab)) shouldClearSlot = true;
     }
     if (shouldClearSlot) clearAskSlot();
     renderTabBar();
