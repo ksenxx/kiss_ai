@@ -70,6 +70,10 @@
     return getApi().kissSanitize(html);
   }
 
+  function resultSummaryHtml(summary) {
+    return getApi().resultSummaryHtml(summary);
+  }
+
   function sleep(ms) {
     return new Promise(resolve => {
       setTimeout(resolve, ms);
@@ -191,12 +195,13 @@
       if (replayStopped(gen)) break;
       accumulated += words[i];
       if (i % WORDS_PER_TICK === WORDS_PER_TICK - 1 || i === words.length - 1) {
-        // The summary wire format is always HTML (see finish() in
-        // kiss/core/utils.py); render it sanitized, never via Markdown —
-        // matching createResultPanel() in main.js.  Fall back to plain
-        // text when the host api exposes no sanitizer.
-        if (typeof getApi().kissSanitize === 'function') {
-          body.innerHTML = kissSanitize(accumulated);
+        // New summaries are HTML; legacy persisted events are Markdown.
+        // Use the same conversion and sanitizer as the live Result panel.
+        if (
+          typeof getApi().resultSummaryHtml === 'function' &&
+          typeof getApi().kissSanitize === 'function'
+        ) {
+          body.innerHTML = kissSanitize(resultSummaryHtml(accumulated));
         } else {
           body.textContent = accumulated;
         }

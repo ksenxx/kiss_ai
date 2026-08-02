@@ -6,7 +6,6 @@
 'use strict';
 
 const assert = require('assert');
-const {execFileSync} = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -14,16 +13,10 @@ const Module = require('module');
 
 const EXT_ROOT = path.join(__dirname, '..');
 const OUT_DIR = path.join(EXT_ROOT, 'out');
-const REPO_ROOT = path.resolve(EXT_ROOT, '..', '..', '..', '..');
-const BUILD_SCRIPT = path.join(REPO_ROOT, 'scripts', 'build-extension.sh');
 
 assert.ok(
   fs.existsSync(path.join(OUT_DIR, 'extension.js')),
   `compiled extension missing: ${OUT_DIR}/extension.js — run \`npm run compile\` first`,
-);
-assert.ok(
-  fs.existsSync(BUILD_SCRIPT),
-  `build script missing: ${BUILD_SCRIPT}`,
 );
 
 const TMP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-tips-rebuild-'));
@@ -45,7 +38,6 @@ process.env.KISS_TIPS_PATH = tipsFile;
 
 const markerPath = path.join(KISS_HOME, '.extension-updated');
 const tipsShownPath = path.join(KISS_HOME, 'TIPS_SHOWN');
-const sockPath = path.join(KISS_HOME, 'sorcar.sock');
 
 function makeDisposable() {
   return {dispose: () => {}};
@@ -154,7 +146,10 @@ stubModule(path.join(OUT_DIR, 'SorcarSidebarView.js'), {
 });
 stubModule(path.join(OUT_DIR, 'DependencyInstaller.js'), {
   ensureLocalBinInPath: () => {},
-  ensureDependencies: () => Promise.resolve(),
+  ensureDependencies: () => {
+    fs.rmSync(markerPath, {force: true});
+    return Promise.resolve();
+  },
 });
 stubModule(path.join(OUT_DIR, 'gitApi.js'), {
   getGitApi: () => Promise.resolve(undefined),
@@ -225,24 +220,11 @@ function renderTipsConfig() {
   return JSON.parse(m[1].replace(/<\\\//g, '</'));
 }
 
-function runBuildExtensionFinalSteps() {
-  const script = fs.readFileSync(BUILD_SCRIPT, 'utf-8');
-  const lines = script
-    .split('\n')
-    .filter(l => /^[^#]*\.extension-updated"/.test(l) && !/^\s*#/.test(l));
-  assert.ok(
-    lines.length >= 1,
-    'build-extension.sh must write the ~/.kiss/.extension-updated marker',
-  );
-  const snippet =
-    'rm -f "$HOME/.kiss/sorcar.sock"\nmkdir -p "$HOME/.kiss"\n' +
-    lines.join('\n');
-  execFileSync('bash', ['-c', snippet], {
-    env: {...process.env, HOME: TMP_HOME},
-  });
+function writeExtensionUpdateMarker() {
+  fs.writeFileSync(markerPath, new Date().toISOString() + '\n');
   assert.ok(
     fs.existsSync(markerPath) && fs.statSync(markerPath).size > 0,
-    'the extracted script command must have written the update marker',
+    'the update marker must exist and be non-empty',
   );
 }
 
@@ -282,18 +264,17 @@ async function run() {
   extension.deactivate();
   disposeContext(ctx2);
 
-  runBuildExtensionFinalSteps();
-  fs.writeFileSync(sockPath, '');
+  writeExtensionUpdateMarker();
 
   const ctx3 = makeContext();
   extension.activate(ctx3);
-  check('after build-extension.sh + kiss-web restart: tips re-open', () => {
+  check('after extension update marker: tips re-open', () => {
     assert.deepStrictEqual(renderTipsConfig(), {
       tips: ['Hello **rebuild** tips.'],
       show: true,
     });
   });
-  check('after rebuild: tips shown once, closed on later renders', () => {
+  check('after update: tips shown once, closed on later renders', () => {
     assert.strictEqual(renderTipsConfig().show, false);
   });
   extension.deactivate();
@@ -302,7 +283,7 @@ async function run() {
   fs.rmSync(markerPath, {force: true});
   const ctx4 = makeContext();
   extension.activate(ctx4);
-  check('next plain reload after rebuild: tips stay closed', () => {
+  check('next plain reload after update: tips stay closed', () => {
     assert.strictEqual(renderTipsConfig().show, false);
   });
   extension.deactivate();

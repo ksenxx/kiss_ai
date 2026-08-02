@@ -410,14 +410,20 @@ class TestRestartTunnelUrlBackoff(IsolatedAsyncioTestCase):
         self.server._tunnel_failure_count = 0
         before = time.monotonic()
         await self.server._restart_tunnel_url()
+        after = time.monotonic()
         delay_floor = ws_mod._TUNNEL_RATE_LIMIT_BACKOFF
         delay_ceil = (
             ws_mod._TUNNEL_RATE_LIMIT_BACKOFF
             + ws_mod._TUNNEL_RATE_LIMIT_JITTER
         )
-        scheduled = self.server._tunnel_next_retry - before
-        self.assertGreaterEqual(scheduled, delay_floor - 1)
-        self.assertLessEqual(scheduled, delay_ceil + 5)
+        self.assertGreaterEqual(
+            self.server._tunnel_next_retry,
+            before + delay_floor,
+        )
+        self.assertLessEqual(
+            self.server._tunnel_next_retry,
+            after + delay_ceil,
+        )
         self.assertEqual(self.server._tunnel_failure_count, 1)
         self.assertFalse(self.server._tunnel_rate_limited)
 

@@ -121,9 +121,11 @@ function testPromptTextCannotSpawnBlankPanel() {
   console.log('  ok - prompt text cannot spawn a blank tips panel');
 }
 
-function testCodeSpanMentionStaysVisibleText() {
+function testLegacyCodeSpanMentionStaysVisibleText() {
   const {win} = makeWebview({show: false});
 
+  // Persisted result events from before the HTML summary migration contain
+  // Markdown and are replayed unchanged from history.
   send(win, {
     type: 'result',
     summary: 'The Tips window is the `<kiss-tips-panel>` web component.',
@@ -135,10 +137,64 @@ function testCodeSpanMentionStaysVisibleText() {
   const output = win.document.getElementById('output');
   assert.ok(
     output.textContent.includes('<kiss-tips-panel>'),
-    'a code-span mention must stay visible as literal text',
+    'a legacy code-span mention must stay visible as literal text',
   );
+  assert.ok(output.querySelector('code'), 'legacy Markdown code span renders');
   win.close();
-  console.log('  ok - code-span mention stays visible literal text');
+  console.log('  ok - legacy code-span mention stays visible literal text');
+}
+
+function testHtmlCodeSpanMentionStaysVisibleText() {
+  const {win} = makeWebview({show: false});
+
+  send(win, {
+    type: 'result',
+    summary:
+      '<p>The Tips window is the ' +
+      '<code>&lt;kiss-tips-panel&gt;</code> web component.</p>',
+    total_tokens: 10,
+    cost: '$0.01',
+  });
+
+  assert.strictEqual(panels(win).length, 0, 'no panel from escaped HTML');
+  const output = win.document.getElementById('output');
+  assert.ok(output.textContent.includes('<kiss-tips-panel>'));
+  assert.ok(output.querySelector('code'), 'HTML code element survives');
+  win.close();
+  console.log('  ok - HTML code-span mention stays visible literal text');
+}
+
+function testLegacyKnownTagCodeSpanStaysLiteral() {
+  const {win} = makeWebview({show: false});
+
+  send(win, {
+    type: 'result',
+    summary: 'Legacy `<div>` code and **bold** history.',
+  });
+
+  const output = win.document.getElementById('output');
+  const code = output.querySelector('code');
+  assert.ok(code, 'known HTML tag inside legacy code span must render as code');
+  assert.strictEqual(code.textContent, '<div>');
+  assert.ok(output.querySelector('strong'), 'legacy Markdown remains formatted');
+  win.close();
+  console.log('  ok - known HTML tag in legacy code span stays literal');
+}
+
+function testLegacyEncodedJavascriptLinkIsStripped() {
+  const {win} = makeWebview({show: false});
+
+  send(win, {
+    type: 'result',
+    summary: '[click](java&#x09;script:window.__pwned=1)',
+  });
+
+  const link = win.document.querySelector('#output a');
+  assert.ok(link, 'legacy Markdown link renders');
+  assert.ok(!link.hasAttribute('href'), 'encoded javascript URL is stripped');
+  assert.strictEqual(win.__pwned, undefined, 'unsafe URL must not execute');
+  win.close();
+  console.log('  ok - encoded javascript URL is stripped');
 }
 
 function testParsedPanelSelfRemovesButProgrammaticPanelSurvives() {
@@ -169,6 +225,9 @@ function testParsedPanelSelfRemovesButProgrammaticPanelSurvives() {
 
 testResultSummaryCannotSpawnBlankPanel();
 testPromptTextCannotSpawnBlankPanel();
-testCodeSpanMentionStaysVisibleText();
+testLegacyCodeSpanMentionStaysVisibleText();
+testHtmlCodeSpanMentionStaysVisibleText();
+testLegacyKnownTagCodeSpanStaysLiteral();
+testLegacyEncodedJavascriptLinkIsStripped();
 testParsedPanelSelfRemovesButProgrammaticPanelSurvives();
 console.log('tipsNoBlankPanelFromTranscript: all tests passed');

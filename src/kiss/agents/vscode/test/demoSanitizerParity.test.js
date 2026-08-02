@@ -77,7 +77,7 @@ const MALICIOUS_SUMMARY =
   '<a href="javascript:window.__pwned=1">link</a> ' +
   '<h2>HtmlHeading</h2> keep **stars** literal end';
 
-async function runDemoReplay(win) {
+async function runDemoReplay(win, summary = MALICIOUS_SUMMARY) {
   dispatch(win, {type: 'configData', config: {demo_mode: true}, apiKeys: {}});
   dispatch(win, {
     type: 'history',
@@ -99,7 +99,7 @@ async function runDemoReplay(win) {
       dispatch(win, {
         type: 'task_events',
         tabId: msg.tabId,
-        events: [{type: 'result', summary: MALICIOUS_SUMMARY}],
+        events: [{type: 'result', summary}],
         task: 'Do the demo task',
         chat_id: 'chat-1',
         extra: '',
@@ -185,7 +185,29 @@ async function main() {
   assert.ok(!/x-evil/.test(live), 'shared sanitizer strips custom elements');
   assert.ok(!/onmouseover/.test(live), 'shared sanitizer strips on* attrs');
 
+  const {win: legacyWin} = makeWebview();
+  await runDemoReplay(
+    legacyWin,
+    'Legacy `<kiss-tips-panel>` code and **bold** history.',
+  );
+  const legacyBody = legacyWin.document.querySelector('.rc-body');
+  assert.ok(legacyBody, 'legacy demo result panel body rendered');
+  assert.ok(
+    legacyBody.textContent.includes('<kiss-tips-panel>'),
+    'legacy code-span text must survive demo replay',
+  );
+  assert.ok(legacyBody.querySelector('code'), 'legacy code span renders');
+  assert.ok(legacyBody.querySelector('strong'), 'legacy bold text renders');
+  assert.strictEqual(
+    legacyBody.querySelector('kiss-tips-panel'),
+    null,
+    'legacy code text must not instantiate a custom element',
+  );
+
+  win.close();
+  legacyWin.close();
   console.log('  ok - demo replay sanitizer matches live chat sanitizer');
+  console.log('  ok - demo replay converts legacy Markdown safely');
 }
 
 main().then(

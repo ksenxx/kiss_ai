@@ -131,7 +131,12 @@
     const walk = root => {
       const elements = Array.from(root.querySelectorAll('*'));
       for (const el of elements) {
-        if (BAD_TAGS.has(el.tagName) || el.tagName.includes('-')) {
+        if (BAD_TAGS.has(el.tagName)) {
+          el.remove();
+          continue;
+        }
+        if (el.tagName.includes('-')) {
+          while (el.firstChild) el.before(el.firstChild);
           el.remove();
           continue;
         }
@@ -142,8 +147,15 @@
             continue;
           }
           if (URL_ATTRS.has(name)) {
-            const v = (attr.value || '').trim();
-            if (/^(javascript|data|vbscript):/i.test(v)) {
+            const value = attr.value || '';
+            let schemeProbe = '';
+            for (const char of value) {
+              const code = char.charCodeAt(0);
+              if (code > 0x20 && (code < 0x7f || code > 0x9f)) {
+                schemeProbe += char;
+              }
+            }
+            if (/^(javascript|data|vbscript):/i.test(schemeProbe)) {
               el.removeAttribute(attr.name);
             }
           }
@@ -152,6 +164,35 @@
     };
     walk(t.content);
     return t.innerHTML;
+  }
+
+  const RESULT_HTML_TAG_RE = new RegExp(
+    '</?(?:p|div|h[1-6]|ul|ol|li|br|hr|table|thead|tbody|tr|td|th|' +
+      'pre|code|span|b|i|u|strong|em|a|img|blockquote|section|article|' +
+      'details|summary)(?:\\s[^<>]*)?/?>',
+    'i',
+  );
+
+  /**
+   * Normalize a result summary for HTML rendering.
+   *
+   * New finish() results are already HTML. Persisted events from before the
+   * HTML wire-format migration still contain Markdown, so convert only input
+   * that has no known HTML tag. This mirrors kiss.core.utils.ensure_html().
+   */
+  function resultSummaryHtml(summary) {
+    const text = String(summary == null ? '' : summary);
+    const detectionText = text
+      .replace(/```[\s\S]*?```/g, '')
+      .replace(/`[^`\n]*`/g, '');
+    if (
+      text.trimStart().slice(0, 9).toLowerCase() === '<!doctype' ||
+      RESULT_HTML_TAG_RE.test(detectionText)
+    ) {
+      return text;
+    }
+    if (typeof marked !== 'undefined') return marked.parse(text);
+    return '<p>' + esc(text).replace(/\n/g, '<br>') + '</p>';
   }
 
   const notificationTimers = new Map();
@@ -2657,9 +2698,8 @@
       const sum = String(summaryText)
         .replace(/\n{3,}/g, '\n\n')
         .trim();
-      // The summary wire format is always HTML (see finish() in
-      // kiss/core/utils.py); render it sanitized, never via Markdown.
-      rb += kissSanitize(sum);
+      // New summaries are HTML; legacy persisted events are Markdown.
+      rb += kissSanitize(resultSummaryHtml(sum));
       usePre = false;
       rawBody += sum;
     } else {
@@ -7901,6 +7941,7 @@
     },
     resolveEvents: null,
     kissSanitize: kissSanitize,
+    resultSummaryHtml: resultSummaryHtml,
     createNewTab: createNewTab,
     setInput: function (text) {
       inp.value = text;
