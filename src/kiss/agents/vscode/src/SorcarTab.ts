@@ -248,6 +248,7 @@ export function buildChatHtml(
     MARKED_SRC: u('marked.min.js'),
     API_SRC: u('api.js'),
     PANEL_COPY_SRC: u('panelCopy.js'),
+    CTX_MENU_SRC: u('contentContextMenu.js'),
     MAIN_SRC: u('main.js'),
     DEMO_SRC: u('demo.js'),
     SHIM_SCRIPT: '',

@@ -1124,6 +1124,50 @@
       });
   }
 
+  // ctxmenu-coverage:start
+  // An opened .html file renders inside an iframe sandboxed with
+  // `allow-scripts` only, i.e. an opaque origin the webview cannot script.
+  // The Copy / Select All menu therefore has to be shipped *into* that
+  // document: contentContextMenuBootstrapHtml() serialises the very same
+  // implementation the parent document uses.
+  function withContentContextMenu(html) {
+    const api = window.ContentContextMenu;
+    if (!api) return html;
+    const boot = api.contentContextMenuBootstrapHtml();
+    // The ORIGINAL string is searched case-insensitively: lower-casing is
+    // not length preserving in Unicode (U+0130 becomes two UTF-16 units),
+    // so an index taken from a lower-cased copy can land mid-tag.
+    const re = /<\/body\s*>/gi;
+    let at = -1;
+    let m = re.exec(html);
+    while (m) {
+      at = m.index;
+      m = re.exec(html);
+    }
+    if (at < 0) return html + boot;
+    return html.slice(0, at) + boot + html.slice(at);
+  }
+
+  // The menu belongs to read-only content surfaces only — the tab that
+  // shows an opened file or report.  Everywhere else (composer, settings,
+  // panels, tab strip) the chat UI has its own menus and native editing
+  // affordances, which this must never replace.
+  function contentContextMenuAllowed(e) {
+    if (e.defaultPrevented) return false;
+    const target = e.target;
+    if (!target || typeof target.closest !== 'function') return false;
+    return !!target.closest('#content-tab-area');
+  }
+
+  function installParentContentContextMenu() {
+    const api = window.ContentContextMenu;
+    if (!api) return null;
+    return api.installContentContextMenu(document, {
+      shouldOpen: contentContextMenuAllowed,
+    });
+  }
+  // ctxmenu-coverage:end
+
   function renderContentView(tab, ev) {
     const area = ensureContentArea();
     disposeTabContentView(tab);
@@ -1139,7 +1183,9 @@
       const iframe = document.createElement('iframe');
       iframe.className = 'content-html-frame';
       iframe.setAttribute('sandbox', 'allow-scripts');
-      iframe.srcdoc = ev.content || '';
+      // ctxmenu-coverage:start
+      iframe.srcdoc = withContentContextMenu(ev.content || '');
+      // ctxmenu-coverage:end
       view.appendChild(iframe);
       return;
     }
@@ -1403,6 +1449,9 @@
       closeTabContextMenu();
     }
   });
+  // ctxmenu-coverage:start
+  installParentContentContextMenu();
+  // ctxmenu-coverage:end
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') closeTabContextMenu();
   });

@@ -2501,6 +2501,7 @@ def _build_html() -> str:
         "MARKED_SRC": _media_url("marked.min.js"),
         "API_SRC": _media_url("api.js"),
         "PANEL_COPY_SRC": _media_url("panelCopy.js"),
+        "CTX_MENU_SRC": _media_url("contentContextMenu.js"),
         "MAIN_SRC": _media_url("main.js"),
         "DEMO_SRC": _media_url("demo.js"),
         "SHIM_SCRIPT": f"<script>{_WS_SHIM_JS}</script>\n  ",
