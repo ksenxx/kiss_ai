@@ -101,23 +101,86 @@ def _anthropic_cache_creation_tokens(usage: Any) -> tuple[int, int]:
     return 0, aggregate
 
 
+_THINKING_FAMILIES = ("opus", "sonnet", "haiku", "fable")
+
+
+def _parse_claude_version(model_name: str) -> tuple[str, int, int | None] | None:
+    """Parse ``claude-<family>-<major>[-<minor>][-<date>]`` model names.
+
+    The accepted shapes are exactly ``claude-<family>-<major>``,
+    ``claude-<family>-<major>-<date>``, ``claude-<family>-<major>-<minor>``,
+    and ``claude-<family>-<major>-<minor>-<date>``, where ``<family>`` is
+    alphabetic, ``<major>`` and ``<minor>`` are non-zero-padded runs of
+    digits, ``<minor>`` is not 8 digits long, and ``<date>`` is exactly
+    8 digits and may only be the final segment.
+
+    Args:
+        model_name: The model name to parse (e.g. ``claude-opus-4-8``,
+            ``claude-opus-5``, ``claude-haiku-4-5-20251001``).
+
+    Returns:
+        A ``(family, major, minor)`` tuple, where ``minor`` is ``None``
+        when the name has no minor version (e.g. ``claude-opus-4`` or a
+        dated snapshot of a bare major like ``claude-opus-4-20250514``,
+        whose 8-digit date segment is not a minor version).  Returns
+        ``None`` for every name outside the grammar above: non-Claude
+        models, legacy ``claude-3-5-sonnet-*`` names whose family slot
+        holds a digit, zero-padded or non-numeric majors or minors
+        (``claude-opus-04``, ``claude-opus-x``, ``claude-opus-5-04``),
+        empty or non-numeric trailing segments (``claude-opus-5-``,
+        ``claude-opus-5-junk``), extra segments beyond
+        ``<minor>-<date>`` (``claude-opus-5-1-2``,
+        ``claude-opus-5-1-20260301-777``), and non-final 8-digit date
+        segments (``claude-opus-4-20250514-1``,
+        ``claude-opus-5-20260301-99``).
+    """
+    parts = model_name.split("-")
+    if len(parts) < 3 or len(parts) > 5 or parts[0] != "claude":
+        return None
+    family = parts[1]
+    if not family.isalpha():
+        return None
+    major_str = parts[2]
+    if not major_str.isdigit() or (len(major_str) > 1 and major_str[0] == "0"):
+        return None
+    tail = parts[3:]
+    if tail and len(tail[-1]) == 8 and tail[-1].isdigit():
+        tail = tail[:-1]  # a trailing 8-digit segment is a date, not a minor
+    if len(tail) > 1:
+        return None
+    minor: int | None = None
+    if tail:
+        minor_str = tail[0]
+        if (
+            not minor_str.isdigit()
+            or len(minor_str) == 8
+            or (len(minor_str) > 1 and minor_str[0] == "0")
+        ):
+            return None
+        minor = int(minor_str)
+    return family, int(major_str), minor
+
+
 def _uses_adaptive_thinking(model_name: str) -> bool:
     """Return True if the Claude model requires ``thinking.type=adaptive``.
 
     Consultation order:
 
     1. ``MODEL_INFO[model_name].adaptive_thinking`` when explicitly set
-       (``True`` / ``False``) — the source of truth for
-       ``claude-fable-*``, ``claude-sonnet-5`` and any other new-family
-       Claude models whose name does not fit the legacy prefix
-       heuristic.  This is loaded from ``MODEL_INFO.json`` at import
-       time so a JSON edit reconfigures the adapter without a code
-       change.
-    2. The legacy prefix heuristic: newer Claude Opus models (4.6 and
-       later) no longer support ``thinking.type=enabled`` and must use
-       ``adaptive`` instead. Older Opus 4.x models (4, 4.1, 4.5) still
-       use ``enabled``. Sonnet/Haiku 4 models continue to use
-       ``enabled`` as before.
+       (``True`` / ``False``) — the highest-priority source of truth.
+       This is loaded from ``MODEL_INFO.json`` at import time so a JSON
+       edit reconfigures the adapter without a code change.
+    2. A version-aware heuristic on the model name, parsed as
+       ``claude-<family>-<major>[-<minor>]``:
+
+       * every modern-family model (opus/sonnet/haiku/fable) with major
+         version >= 5 uses adaptive thinking (``claude-opus-5``,
+         ``claude-fable-5``, future ``claude-*-6`` ... included), since
+         Anthropic rejects ``thinking.type=enabled`` for these models;
+       * within the 4.x generation only Opus 4.6 and later use
+         adaptive; older Opus 4.x (4, 4.1, 4.5) and all Sonnet/Haiku
+         4.x still use ``enabled``. An 8-digit date segment (e.g.
+         ``claude-opus-4-20250514``) is not treated as a minor version.
     """
     from kiss.core.models.model_info import MODEL_INFO
 
@@ -125,18 +188,15 @@ def _uses_adaptive_thinking(model_name: str) -> bool:
     if info is not None and info.adaptive_thinking is not None:
         return info.adaptive_thinking
 
-    prefix = "claude-opus-4-"
-    if not model_name.startswith(prefix):
+    version = _parse_claude_version(model_name)
+    if version is None:
         return False
-    suffix = model_name[len(prefix):]
-    minor_str = suffix.split("-", 1)[0]
-    if len(minor_str) == 8 and minor_str.isdigit():
+    family, major, minor = version
+    if family not in _THINKING_FAMILIES:
         return False
-    try:
-        minor = int(minor_str)
-    except ValueError:
-        return False
-    return minor >= 6
+    if major >= 5:
+        return True
+    return family == "opus" and major == 4 and minor is not None and minor >= 6
 
 
 def _supports_extended_thinking(model_name: str) -> bool:
@@ -145,28 +205,34 @@ def _supports_extended_thinking(model_name: str) -> bool:
     Consultation order:
 
     1. ``MODEL_INFO[model_name].extended_thinking`` when explicitly set —
-       the source of truth for new-family Claude models whose name is
-       not covered by the legacy prefix allowlist below (e.g.
-       ``claude-fable-5``, ``claude-sonnet-5``). Setting the flag to
-       ``False`` also lets ``MODEL_INFO.json`` opt a specific model out
-       of extended thinking without a code change.
-    2. Legacy prefix allowlist: every ``claude-{opus,sonnet,haiku}-4``
-       model supports extended thinking.
+       the highest-priority source of truth. Setting the flag to
+       ``False`` lets ``MODEL_INFO.json`` opt a specific model out of
+       extended thinking without a code change.
+    2. A version-aware heuristic on the model name, parsed as
+       ``claude-<family>-<major>``: every modern-family model
+       (opus/sonnet/haiku/fable) with major version >= 4 supports
+       extended thinking. Legacy ``claude-3*`` names (whose family slot
+       holds a digit) and non-Claude names never match, so they stay
+       non-thinking.
 
-    The paper-analysed ``claude-fable-5`` failure lived in the gap
-    between these two rules: its name does not match the prefix
-    allowlist, so before this helper existed the adapter never sent the
-    ``thinking`` param and the model returned encrypted-only reasoning
-    turns that ``KISSAgent`` misread as "empty response".
+    The paper-analysed ``claude-fable-5`` failure — and the identical
+    ``claude-opus-5`` regression after it — lived in the gap between an
+    unset JSON flag and the previous hardcoded ``claude-*-4`` prefix
+    allowlist: the adapter never sent the ``thinking`` param, so the
+    model's reasoning stayed invisible (or came back encrypted-only and
+    ``KISSAgent`` misread it as "empty response").
     """
     from kiss.core.models.model_info import MODEL_INFO
 
     info = MODEL_INFO.get(model_name)
     if info is not None and info.extended_thinking is not None:
         return info.extended_thinking
-    return model_name.startswith(
-        ("claude-opus-4", "claude-sonnet-4", "claude-haiku-4")
-    )
+
+    version = _parse_claude_version(model_name)
+    if version is None:
+        return False
+    family, major, _minor = version
+    return family in _THINKING_FAMILIES and major >= 4
 
 
 _AUDIO_FORMAT_TO_MIME: dict[str, str] = {
@@ -674,7 +740,9 @@ class AnthropicModel(Model):
 
         if "thinking" not in kwargs and _supports_extended_thinking(self.model_name):
             if not user_set_max_tokens:
-                max_tokens = 65536 if self.model_name.startswith("claude-opus-4") else 64000
+                version = _parse_claude_version(self.model_name)
+                is_opus = version is not None and version[0] == "opus"
+                max_tokens = 65536 if is_opus else 64000
             if _uses_adaptive_thinking(self.model_name):
                 kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
             else:

@@ -307,7 +307,9 @@
     "fc": true,
     "emb": false,
     "gen": true,
-    "comment": "NEW"
+    "comment": "NEW",
+    "extended_thinking": true,
+    "adaptive_thinking": true
   },
   "claude-sonnet-4-5": {
     "context_length": 200000,
