@@ -368,7 +368,7 @@ class TestAnthropicBuildKwargs:
         """No room for the 1024-token minimum thinking budget → no thinking."""
         from kiss.core.models.anthropic_model import AnthropicModel
 
-        m = AnthropicModel("claude-sonnet-4-test", api_key="test")
+        m = AnthropicModel("claude-sonnet-4-5", api_key="test")
         m.model_config = {"max_tokens": 999}
         m.conversation = [{"role": "user", "content": "hello"}]
         kwargs = m._build_create_kwargs()
@@ -379,7 +379,7 @@ class TestAnthropicBuildKwargs:
         """The API requires max_tokens > budget_tokens; budget is capped."""
         from kiss.core.models.anthropic_model import AnthropicModel
 
-        m = AnthropicModel("claude-sonnet-4-test", api_key="test")
+        m = AnthropicModel("claude-sonnet-4-5", api_key="test")
         m.model_config = {"max_tokens": 5000}
         m.conversation = [{"role": "user", "content": "hello"}]
         kwargs = m._build_create_kwargs()
@@ -389,7 +389,7 @@ class TestAnthropicBuildKwargs:
     def test_build_kwargs_large_max_tokens_default_thinking_budget(self) -> None:
         from kiss.core.models.anthropic_model import AnthropicModel
 
-        m = AnthropicModel("claude-sonnet-4-test", api_key="test")
+        m = AnthropicModel("claude-sonnet-4-5", api_key="test")
         m.model_config = {"max_tokens": 20000}
         m.conversation = [{"role": "user", "content": "hello"}]
         kwargs = m._build_create_kwargs()
@@ -423,7 +423,7 @@ class TestAnthropicBuildKwargs:
     def test_build_kwargs_custom_thinking_not_overridden(self) -> None:
         from kiss.core.models.anthropic_model import AnthropicModel
 
-        m = AnthropicModel("claude-sonnet-4-test", api_key="test")
+        m = AnthropicModel("claude-sonnet-4-5", api_key="test")
         m.model_config = {"thinking": {"type": "disabled"}}
         m.conversation = [{"role": "user", "content": "hello"}]
         kwargs = m._build_create_kwargs()

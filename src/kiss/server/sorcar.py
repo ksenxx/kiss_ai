@@ -355,6 +355,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("voiceToggle", required=("enabled",), handler="drop"),
     ApiCommand("voiceSensitivity", required=("value",), handler="drop"),
     ApiCommand("voiceAck", handler="drop"),
+    ApiCommand("voiceDropped", required=("text",), handler="drop"),
     ApiCommand("cliEvent", required=("event",), handler="cli_event"),
     ApiCommand("cliTabHello", required=("tabId",), handler="cli_tab_hello"),
     ApiCommand("cliTaskStart", required=("taskId",), handler="cli_task_start"),

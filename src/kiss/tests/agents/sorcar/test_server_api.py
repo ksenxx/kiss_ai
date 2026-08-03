@@ -231,6 +231,45 @@ class TestServerApiOverUds(unittest.TestCase):
         )
         self.assertEqual(event.get("type"), "activeTasksResponse")
 
+    def test_voice_dropped_frame_is_dropped_silently(self) -> None:
+        """A ``voiceDropped`` frame must not draw an error banner.
+
+        ``media/voice.js`` posts ``voiceDropped`` when the user switches
+        chat tabs mid-utterance; only the VS Code extension host
+        consumes it.  When the webview is served by the daemon the frame
+        reaches this dispatcher, so the catalog must know it and drop
+        it instead of replying ``Unknown command: voiceDropped``.
+        """
+
+        async def _talk() -> dict[str, Any]:
+            reader, writer = await asyncio.open_unix_connection(
+                self.sock_path
+            )
+            try:
+                writer.write(
+                    json.dumps({
+                        "type": "voiceDropped",
+                        "tabId": "tab-x",
+                        "text": "words spoken into a stale tab",
+                    }).encode()
+                    + b"\n"
+                )
+                writer.write(
+                    json.dumps({"type": "activeTasksQuery"}).encode() + b"\n"
+                )
+                await writer.drain()
+                line = await asyncio.wait_for(reader.readline(), timeout=10)
+                event: dict[str, Any] = json.loads(line)
+                return event
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        event = asyncio.run_coroutine_threadsafe(_talk(), self.loop).result(
+            timeout=15
+        )
+        self.assertEqual(event.get("type"), "activeTasksResponse")
+
     def test_error_reply_goes_only_to_the_sender(self) -> None:
         async def _talk() -> tuple[dict[str, Any], dict[str, Any]]:
             reader_a, writer_a = await asyncio.open_unix_connection(
@@ -336,7 +375,8 @@ class TestServerApiCodeBindings(unittest.TestCase):
             frozenset({
                 "focusEditor", "webviewFocusChanged", "activeTabChanged",
                 "notificationAction", "sizeReport", "resolveDroppedPaths",
-                "voiceToggle", "voiceSensitivity", "voiceAck", "auth",
+                "voiceToggle", "voiceSensitivity", "voiceAck",
+                "voiceDropped", "auth",
             }),
         )
 
