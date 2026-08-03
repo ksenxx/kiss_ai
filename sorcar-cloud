@@ -106,7 +106,37 @@ PORT="${ARGS[1]:-8080}"
 [[ "$PORT" =~ ^[0-9]+$ ]] && ((PORT >= 1 && PORT <= 65535)) \
     || die "PORT must be a number between 1 and 65535 (got '$PORT')."
 
-URL="http://localhost:${PORT}"
+# Pick the local end of the IDE tunnel.  $PORT (default 8080) is a busy
+# neighbourhood on a laptop: another sorcar-cloud run, a dev server, or a
+# stale forward left by a crashed session may already hold it.  Because the
+# tunnel below sets ExitOnForwardFailure=yes, a busy LOCAL port makes ssh
+# abort with "Could not request local forwarding" (and the whole deploy
+# dies) rather than silently forwarding nothing.  So probe for a free local
+# port, preferring $PORT itself, exactly like pick_local_web_port() does for
+# the webapp.  Only the laptop end of the forward moves — the remote
+# code-server still binds $PORT.
+pick_local_ide_port() {
+    local candidate
+    for candidate in "$PORT" $((PORT + 10000)) $((PORT + 10001)) $((PORT + 10002)) $((PORT + 10003)); do
+        ((candidate >= 1 && candidate <= 65535)) || continue
+        if ! nc -z 127.0.0.1 "$candidate" >/dev/null 2>&1; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+if command -v nc >/dev/null 2>&1; then
+    LOCAL_PORT="$(pick_local_ide_port || true)"
+else
+    LOCAL_PORT="$PORT"
+fi
+[[ -n "$LOCAL_PORT" ]] \
+    || die "Local IDE port $PORT and its fallbacks are all busy — free one (e.g. 'lsof -nP -iTCP:$PORT -sTCP:LISTEN') or pass a different PORT."
+[[ "$LOCAL_PORT" == "$PORT" ]] \
+    || info "Local port $PORT is busy — tunneling the remote IDE to local port $LOCAL_PORT instead."
+
+URL="http://localhost:${LOCAL_PORT}"
 
 # Pick the local end of the webapp tunnel.  The laptop usually runs its own
 # kiss-web on 8787, and forwarding onto a busy port would leave
@@ -757,19 +787,23 @@ info "Remote KISS Sorcar / code-server is ready."
 if [[ -n "${SORCAR_NO_TUNNEL:-}" ]]; then
     # Lets scripts/CI run the deployment and return without a tunnel.
     info "SORCAR_NO_TUNNEL set — skipping the tunnel and the browser.  Run:"
-    info "  ssh -N -L ${PORT}:127.0.0.1:${PORT} -L ${LOCAL_WEB_PORT:-$WEB_PORT}:127.0.0.1:${WEB_PORT} ${TARGET}"
+    info "  ssh -N -L ${LOCAL_PORT}:127.0.0.1:${PORT} -L ${LOCAL_WEB_PORT:-$WEB_PORT}:127.0.0.1:${WEB_PORT} ${TARGET}"
     exit 0
 fi
 
 TUNNEL_ARGS=(-N -f -o ExitOnForwardFailure=yes -o ServerAliveInterval=30
-             -L "${PORT}:127.0.0.1:${PORT}")
+             -L "${LOCAL_PORT}:127.0.0.1:${PORT}")
 if [[ -n "$LOCAL_WEB_PORT" ]]; then
     TUNNEL_ARGS+=(-L "${LOCAL_WEB_PORT}:127.0.0.1:${WEB_PORT}")
 fi
-step "Opening SSH tunnels to ${TARGET} (IDE ${PORT}, webapp ${LOCAL_WEB_PORT:-none}) ..."
+step "Opening SSH tunnels to ${TARGET} (IDE ${LOCAL_PORT}->${PORT}, webapp ${LOCAL_WEB_PORT:-none}) ..."
 ssh "${TUNNEL_ARGS[@]}" "$TARGET" \
-    || die "Could not open the SSH tunnels (is local port $PORT already in use?)."
-TUNNEL_PID="$(pgrep -f "ssh -N -f.*-L ${PORT}:127.0.0.1:${PORT}.*${TARGET}" | head -1 || true)"
+    || die "Could not open the SSH tunnels (is local port $LOCAL_PORT already in use?)."
+# ssh backgrounds itself for -f and the process then shows its flags in
+# '-f -N' order (the fork reorders them), so match that — a 'ssh -N -f'
+# pattern would never find the pid and TUNNEL_PID would come back empty,
+# leaving the Ctrl+C trap below with nothing to kill.
+TUNNEL_PID="$(pgrep -f "ssh -f -N.*-L ${LOCAL_PORT}:127.0.0.1:${PORT}.*${TARGET}" | head -1 || true)"
 info "Tunnels are up${TUNNEL_PID:+ (ssh pid $TUNNEL_PID)}."
 
 # ---------------------------------------------------------------------------
