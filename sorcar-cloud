@@ -20,11 +20,18 @@
 # Flow (every run is a full, from-scratch redeploy):
 #   1. SSH connectivity check.
 #   2. DELETE  ~/<basename>  on the remote host, then copy the local folder
-#      there VERBATIM — no excludes, so .venv, node_modules, build output
-#      and every dotfile travel exactly as they are on the laptop.  The
-#      only rewrite is the git plumbing: a git *worktree* stores an
-#      absolute laptop path in its ``.git`` file, which is meaningless on
-#      the remote, so the remote copy gets a fresh single-commit repo.
+#      there verbatim — node_modules, build output and every dotfile travel
+#      exactly as they are on the laptop.  Two things are NOT cloned,
+#      because they describe the laptop rather than the project:
+#        .venv  a virtualenv is machine-bound (the laptop's points at a
+#               macOS/arm64 interpreter and holds Mach-O .so files), and
+#               nothing downstream repairs a foreign one — so it is left
+#               out of the copy and any unusable one already on the remote
+#               is deleted before install.sh runs (step 6).  The remote
+#               builds its own from uv.lock.
+#        .git   a git *worktree* stores an absolute laptop path in its
+#               ``.git`` file, meaningless on the remote, so the remote
+#               copy gets a fresh single-commit repo instead.
 #   3. Copy  ~/.kiss/  (models, credentials, task templates, config) to
 #      the remote, minus host-local state that must not be cloned
 #      (databases, sockets, logs, browser profiles, TLS certs, the
@@ -38,9 +45,11 @@
 #   5. Install code-server (standalone, no sudo) if it is missing, plus a
 #      ``code`` shim so the copied ``install.sh`` drops the built VSIX into
 #      code-server instead of a desktop VS Code a headless server lacks.
-#   6. Run the FULL ``install.sh`` on the remote with
-#      KISS_CODE_CLI=code-server and KISS_SKIP_LAUNCH=1 — that skips the
-#      desktop launch and lets us start code-server ourselves.
+#   6. Delete any leftover ``.venv`` in the remote workspace that cannot
+#      run there (its bin/python must execute and bin/kiss-web must exist),
+#      then run the FULL ``install.sh`` with KISS_CODE_CLI=code-server and
+#      KISS_SKIP_LAUNCH=1 — that skips the desktop launch and lets us start
+#      code-server ourselves.
 #   7. (Re)launch code-server on 127.0.0.1:$PORT, workspace = the copied
 #      folder.
 #   8. Open SSH tunnels  localhost:$PORT -> remote $PORT  (the IDE) and
@@ -202,15 +211,28 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 4. Delete the remote folder, then copy the local one over verbatim.
+# 4. Delete the remote folder, then copy the local one over.
 #
 # The delete makes every run a clean redeploy: no file the laptop no longer
 # has can linger on the remote, and no half-built artifact from an older
 # deploy can confuse install.sh.  A previous run's ``.venv`` is torn down
 # with it, which is exactly what "run the full install.sh" implies.
 #
-# The copy is *verbatim*: no --exclude filters at all, so .venv,
-# node_modules, build output and every dotfile travel as-is.
+# The copy is verbatim except for ONE filter: ``.venv``.  A virtualenv is
+# not source — it is a machine-bound build artifact.  The laptop's is a
+# 1.2 GB macOS/arm64 tree whose ``pyvenv.cfg`` says
+# ``home = ~/.local/share/uv/python/cpython-3.14-macos-aarch64-none/bin``,
+# whose ``bin/python`` is a symlink into a path that does not exist on
+# Linux, and whose site-packages hold Mach-O ``.so`` files the remote
+# CPython cannot load.  Copying it would be worse than useless: nothing in
+# ``install.sh`` rebuilds a Python environment, and the extension that does
+# (DependencyInstaller.ts) only runs ``uv sync`` ``if (!venvExists)`` — a
+# mere *directory* named ``.venv`` sends it down the "Fast path: uv and
+# .venv present" branch, so the broken macOS venv would be adopted as-is
+# and ``.venv/bin/kiss-web`` (the systemd unit's ExecStart) would never
+# exist.  Step 7f deletes any ``.venv`` that cannot run on the remote as a
+# second line of defence.  Everything else still travels as-is:
+# node_modules, build output and every dotfile.
 #
 # Two transports, chosen by ``copy_tree``:
 #   tar | ssh tar   for the from-scratch copy.  One stream, one round trip,
@@ -235,17 +257,23 @@ copy_tree() {
         # COPYFILE_DISABLE=1: stop macOS bsdtar from adding AppleDouble
         # "._foo" companion entries, which would litter the remote tree
         # (and end up inside the built VSIX).
-        COPYFILE_DISABLE=1 tar --no-xattrs -C "$src" -czpf - . \
+        # --exclude='.venv': see the block comment above — a virtualenv is
+        # host-bound, and the pattern is unanchored so nested project venvs
+        # are skipped too.
+        COPYFILE_DISABLE=1 tar --no-xattrs --exclude='.venv' -C "$src" -czpf - . \
             | ssh "$TARGET" "mkdir -p -- '$dst' && tar -C '$dst' -xzpf -"
     else
+        # --exclude='.venv': never overwrite the remote's own working
+        # virtualenv with the laptop's macOS one (and never waste the
+        # transfer); step 7f removes it if it turns out to be unusable.
         # --exclude='.git': in --keep-remote mode the remote already has the
         # self-contained snapshot repo created by an earlier run, while a
         # local worktree's ``.git`` is a one-line *file*.  rsync cannot
         # replace a non-empty directory with a file and aborts with
         # "unlinkat: Directory not empty" (rc=23), so leave git plumbing
         # alone and let step 7e refresh the snapshot instead.
-        rsync -aHz --numeric-ids --stats --exclude='.git' -e ssh \
-            "$src/" "$TARGET:$dst/"
+        rsync -aHz --numeric-ids --stats --exclude='.git' --exclude='.venv' \
+            -e ssh "$src/" "$TARGET:$dst/"
     fi
 }
 if [[ "$WIPE_REMOTE" == "1" ]]; then
@@ -272,7 +300,7 @@ else
     warn "--keep-remote given: rsyncing in place instead of redeploying from scratch."
 fi
 
-step "Copying $SCRIPT_DIR/ -> $TARGET:$REMOTE_DIR/ verbatim (no excludes) ..."
+step "Copying $SCRIPT_DIR/ -> $TARGET:$REMOTE_DIR/ (verbatim except .venv) ..."
 copy_tree "$SCRIPT_DIR" "$REMOTE_DIR"
 info "Folder copy complete: $(ssh "$TARGET" "du -sh -- '$REMOTE_DIR' 2>/dev/null | cut -f1")"
 
@@ -523,7 +551,7 @@ command -v code-server >/dev/null 2>&1 || { echo "ERROR: code-server install fai
 # install.sh probes `code` to drop the VSIX into the editor.  Forward the
 # extension subcommands to code-server so the KISS Sorcar VSIX lands in
 # code-server's extensions dir.  A plain ``code <dir>`` launch is
-# swallowed — we start code-server ourselves in 7g.
+# swallowed — we start code-server ourselves in 7h.
 cat > "$HOME/.local/bin/code" <<'SHIM'
 #!/bin/bash
 case "${1:-}" in
@@ -590,11 +618,45 @@ git -C "$WORKSPACE" config user.name "sorcar-cloud"
 git -C "$WORKSPACE" add -A 2>/dev/null || true
 git -C "$WORKSPACE" commit -q -m "sorcar-cloud snapshot" 2>/dev/null || true
 
-# --- 7f. Run the FULL install.sh --------------------------------------
+# --- 7f. Make sure any .venv here belongs to THIS machine -------------
+# Nothing downstream repairs a foreign virtualenv.  install.sh never
+# rebuilds the Python environment (it says so itself: "Restarting kiss-web
+# is owned entirely by the VS Code extension"), and the extension's
+# DependencyInstaller only runs ``uv sync`` when ``.venv`` is ABSENT —
+# otherwise it takes the "Fast path: uv and .venv present" branch.  Its one
+# safety net, checkPythonVersion(), shells out to ``uv run python
+# --version`` with a 30 s timeout and treats every failure as a transient
+# 'error' that KEEPS the venv.  So a stale or foreign ``.venv`` is adopted
+# forever: imports fail, and ``.venv/bin/kiss-web`` — the ExecStart of the
+# kiss-web systemd unit — is missing or carries a laptop shebang.
+#
+# The copy step already filters ``.venv`` out, so this only fires for a
+# venv left behind on the remote (an older deploy, a --keep-remote run, or
+# a hand-run install).  Keep it only if it is genuinely usable here:
+#   bin/python must EXECUTE   — catches macOS/arm64 trees, dangling
+#                               interpreter symlinks and moved homes;
+#   bin/kiss-web must EXIST   — catches a half-synced env that would still
+#                               satisfy the extension's fast path but leave
+#                               the webapp unit with nothing to start.
+# Otherwise delete it, so install.sh and the extension build a native one
+# from ``uv.lock``.
+if [ -d "$WORKSPACE/.venv" ]; then
+    if "$WORKSPACE/.venv/bin/python" -c 'pass' >/dev/null 2>&1 \
+       && [ -x "$WORKSPACE/.venv/bin/kiss-web" ]; then
+        rinfo "Keeping $WORKSPACE/.venv (native and complete on this host)."
+    else
+        rinfo "Deleting $WORKSPACE/.venv — not usable on this host; it will be rebuilt."
+        rm -rf "$WORKSPACE/.venv"
+    fi
+else
+    rinfo "No .venv in $WORKSPACE — it will be built here from uv.lock."
+fi
+
+# --- 7g. Run the FULL install.sh --------------------------------------
 # KISS_CODE_CLI=code-server routes install.sh's find_code_cli() to
 # code-server so the built VSIX lands in the browser IDE's extensions dir.
 # KISS_SKIP_LAUNCH=1 stops install.sh from launching a desktop VS Code (or
-# a second code-server on the same port) — we start code-server in 7g.
+# a second code-server on the same port) — we start code-server in 7h.
 rinfo "Running the full install.sh in $WORKSPACE (this can take several minutes)..."
 KISS_CODE_CLI=code-server KISS_SKIP_LAUNCH=1 bash "$WORKSPACE/install.sh"
 
@@ -608,7 +670,7 @@ else
     rinfo "WARNING: $VSIX not found — install.sh may have failed to build it."
 fi
 
-# --- 7g. (Re)launch code-server on 127.0.0.1:$PORT --------------------
+# --- 7h. (Re)launch code-server on 127.0.0.1:$PORT --------------------
 pkill -f "code-server.*--bind-addr 127.0.0.1:$PORT" 2>/dev/null || true
 sleep 1
 
@@ -662,7 +724,7 @@ done
 [ "$up" = "1" ] || { echo "ERROR: code-server did not come up on 127.0.0.1:$PORT (see ~/.kiss/code-server.log)" >&2; exit 1; }
 rinfo "code-server is up on 127.0.0.1:$PORT (log: ~/.kiss/code-server.log)."
 
-# --- 7h. Keep the user manager alive after we disconnect --------------
+# --- 7i. Keep the user manager alive after we disconnect --------------
 # kiss-web runs as a systemd *user* service, and without lingering the user
 # manager (and therefore kiss-web) is killed the moment this ssh session
 # closes.  The extension enables lingering too, but only once it activates,
