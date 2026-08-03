@@ -521,6 +521,13 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         wt = self._wt
 
         if not self._finalize_worktree():
+            # The worktree directory is being left on disk with
+            # uncommitted work.  Persist the preserve-for-review
+            # marker so a future
+            # :meth:`GitWorktreeOps.reclaim_orphaned_worktrees` in a
+            # fresh process cannot silently publish this deliberately
+            # parked work.
+            GitWorktreeOps.save_preserve_marker(wt.repo_root, wt.branch)
             if not self.auto_commit_enabled:
                 self._set_warnings(merge=(
                     f"Auto-commit is disabled (--no-auto-commit) and "
@@ -670,6 +677,16 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         wt = self._wt
         outcome, leftover = self._commit_and_clean_worktree(wt)
         self._last_preserve_outcome = outcome
+        if outcome in (
+            _WorktreeCleanupOutcome.PRESERVED_NO_AUTOCOMMIT,
+            _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED,
+        ):
+            # Persist the "preserve for manual review" decision so a
+            # future :meth:`GitWorktreeOps.reclaim_orphaned_worktrees`
+            # (running in a fresh process after the original agent
+            # died) does not silently publish this deliberately parked
+            # work.
+            GitWorktreeOps.save_preserve_marker(wt.repo_root, wt.branch)
         if outcome is _WorktreeCleanupOutcome.PRESERVED_NO_AUTOCOMMIT:
             logger.warning(
                 "Auto-commit disabled (--no-auto-commit); "
@@ -728,6 +745,30 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         self._flush_warnings(getattr(self, "printer", None))
         super().new_chat()
 
+
+    def _live_worktree_branches(self) -> set[str]:
+        """Return the set of ``kiss/wt-*`` branches owned by live agents.
+
+        Union of *self*'s current worktree branch (if any) and every
+        other tab's live agent branch as tracked by
+        :attr:`_RunningAgentState.running_agent_states`.  Used by
+        :meth:`_try_setup_worktree` to build the ``exclude_branches``
+        argument for
+        :meth:`GitWorktreeOps.reclaim_orphaned_worktrees` so a
+        concurrent tab's active worktree is never adopted, merged, or
+        removed by our reclaim pass.
+        """
+        branches: set[str] = set()
+        if self._wt is not None:
+            branches.add(self._wt.branch)
+        # Local import to avoid a circular import at module load time.
+        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+        for state in list(_RunningAgentState.running_agent_states.values()):
+            agent = getattr(state, "agent", None)
+            wt = getattr(agent, "_wt", None) if agent is not None else None
+            if wt is not None:
+                branches.add(wt.branch)
+        return branches
 
     def _retire_previous_worktree(self) -> str | None:
         """Clear the way for a new task's worktree, without publishing.
@@ -830,6 +871,17 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             try:
                 GitWorktreeOps.ensure_excluded(repo)
                 GitWorktreeOps.ensure_scratch_merge_driver(repo)
+                # Reclaim before sweep: reclaim may merge and delete
+                # orphan branches, and sweep purges leftover config
+                # sections whose branches were just removed.  Exclude
+                # every branch owned by a *live* agent in this
+                # process — self and every other tab — so a running
+                # sibling task's worktree is never adopted or
+                # destroyed by our reclaim pass.
+                GitWorktreeOps.reclaim_orphaned_worktrees(
+                    repo,
+                    exclude_branches=self._live_worktree_branches(),
+                )
                 GitWorktreeOps.sweep_orphaned_state(repo)
             except Exception:  # pragma: no cover — filesystem permission error
                 logger.warning("Failed to update git exclude", exc_info=True)

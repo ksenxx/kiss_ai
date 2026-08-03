@@ -1087,6 +1087,82 @@ class GitWorktreeOps:
         )
 
     @staticmethod
+    def _load_branch_config(repo: Path, branch: str, key: str) -> str | None:
+        """Read ``branch.<branch>.<key>`` from git config (best-effort).
+
+        Args:
+            repo: Git repo root path.
+            branch: The worktree branch name.
+            key: The config key set previously by
+                :meth:`_save_branch_config` (e.g. ``"kiss-original"``,
+                ``"kiss-baseline"``).
+
+        Returns:
+            The stored value, or ``None`` when the key is absent or
+            git itself failed.
+        """
+        result = _git("config", "--get", f"branch.{branch}.{key}", cwd=repo)
+        if result.returncode != 0:
+            return None
+        value = result.stdout.strip()
+        return value or None
+
+    @staticmethod
+    def load_original_branch(repo: Path, branch: str) -> str | None:
+        """Return the original branch stored for *branch*, or ``None``.
+
+        Reciprocal of :meth:`save_original_branch`.  Used by
+        :meth:`reclaim_orphaned_worktrees` to rehydrate a worktree
+        whose owning agent process died before it could publish or
+        release its work.
+        """
+        return GitWorktreeOps._load_branch_config(repo, branch, "kiss-original")
+
+    @staticmethod
+    def load_baseline_commit(repo: Path, branch: str) -> str | None:
+        """Return the baseline commit SHA stored for *branch*, or ``None``.
+
+        Reciprocal of :meth:`save_baseline_commit`.  Used by
+        :meth:`reclaim_orphaned_worktrees` to decide between
+        :meth:`squash_merge_from_baseline` (baseline present) and
+        :meth:`squash_merge_branch` (legacy worktree without a
+        baseline).
+        """
+        return GitWorktreeOps._load_branch_config(repo, branch, "kiss-baseline")
+
+    @staticmethod
+    def save_preserve_marker(repo: Path, branch: str) -> bool:
+        """Mark *branch* as intentionally preserved for manual review.
+
+        Persistent counterpart of the in-memory ``_pending_review``
+        flag on :class:`WorktreeSorcarAgent`.  When
+        :meth:`WorktreeSorcarAgent._preserve_pending_worktree_for_review`
+        deliberately leaves a worktree on disk (task stopped,
+        pre-commit hook rejection, or ``--no-auto-commit``), the
+        original agent process may die before the user chooses
+        merge/discard.  Reclaim on next startup must NOT silently
+        publish that preserved work — the persisted marker makes
+        that decision durable across process restarts.
+
+        Args:
+            repo: Git repo root path.
+            branch: The worktree branch name.
+
+        Returns:
+            True if the marker was saved successfully.
+        """
+        return GitWorktreeOps._save_branch_config(
+            repo, branch, "kiss-preserve", "1", "preserve-for-review marker",
+        )
+
+    @staticmethod
+    def load_preserve_marker(repo: Path, branch: str) -> bool:
+        """Return True when *branch* carries a preserve-for-review marker."""
+        return GitWorktreeOps._load_branch_config(
+            repo, branch, "kiss-preserve",
+        ) == "1"
+
+    @staticmethod
     def _remove_path(path: Path) -> None:
         """Remove *path* whatever it is (symlink, dir, file, or absent).
 
@@ -1463,3 +1539,226 @@ class GitWorktreeOps:
                 if not GitWorktreeOps.branch_exists(repo, name):
                     GitWorktreeOps._remove_branch_config_section(repo, name)
             return deleted
+
+    @staticmethod
+    def registered_worktrees(repo: Path) -> list[tuple[Path, str]]:
+        """Return ``(wt_dir, branch)`` for every registered worktree.
+
+        Parses ``git worktree list --porcelain``.  The main repo entry
+        (whose branch name is any user branch, e.g. ``main``) is
+        included alongside ``kiss/wt-*`` entries; callers filter by
+        the branch-name prefix themselves.
+
+        Detached-HEAD worktrees are skipped because they have no
+        branch name to reclaim by.
+
+        Args:
+            repo: Git repo root path.
+
+        Returns:
+            List of ``(wt_dir, branch)`` pairs in the order git
+            reports them, empty on git failure.
+        """
+        result = _git("worktree", "list", "--porcelain", cwd=repo)
+        if result.returncode != 0:  # pragma: no cover — git failure
+            return []
+        pairs: list[tuple[Path, str]] = []
+        cur_dir: Path | None = None
+        cur_branch: str | None = None
+        for raw in result.stdout.splitlines():
+            if raw.startswith("worktree "):
+                if cur_dir is not None and cur_branch is not None:
+                    pairs.append((cur_dir, cur_branch))
+                cur_dir = Path(raw[len("worktree "):].strip())
+                cur_branch = None
+            elif raw.startswith("branch refs/heads/"):
+                cur_branch = raw[len("branch refs/heads/"):].strip()
+        if cur_dir is not None and cur_branch is not None:
+            pairs.append((cur_dir, cur_branch))
+        return pairs
+
+    @staticmethod
+    def reclaim_orphaned_worktrees(
+        repo: Path,
+        *,
+        exclude_branches: set[str] | None = None,
+    ) -> int:
+        """Auto-commit and squash-merge orphan ``kiss/wt-*`` worktrees.
+
+        A Sorcar process that is killed / crashes / OOMs / reboots
+        while a worktree task is pending leaves its worktree
+        registered on disk with dirty uncommitted work.  No in-memory
+        ``self._wt`` state survives the restart, so no future
+        ``_release_worktree`` call ever runs — the work stays
+        stranded, invisible to :meth:`sweep_orphaned_state` (which
+        reaps plumbing debris only, never real work).
+
+        This reclaims each such worktree: it stages and commits any
+        dirty state under a generic ``"kiss: reclaim orphan
+        worktree"`` message, then squash-merges the branch into its
+        saved ``original_branch`` (from :meth:`load_original_branch`)
+        using the saved baseline commit (from
+        :meth:`load_baseline_commit`) when present, then removes the
+        worktree and deletes its branch.
+
+        Safety rules — a worktree is left completely untouched when
+        ANY of the following holds, so no work is ever destroyed:
+
+        * The branch is in *exclude_branches* (caller's live-agent
+          set — e.g. the current task's own worktree).
+        * The saved ``kiss-original`` config is missing (unknown
+          merge target).
+        * The saved original branch no longer exists in the repo.
+        * The main tree's current branch differs from the saved
+          original branch (reclaim never checks out for the user).
+        * The main tree's current HEAD is detached.
+        * ``git status --porcelain`` in the main tree reports dirty
+          state (a reclaim now would silently include the user's
+          uncommitted edits in the squash-merge commit).
+        * The auto-commit inside the worktree is rejected (e.g. a
+          pre-commit hook).
+        * The squash-merge returns anything other than
+          :attr:`MergeResult.SUCCESS` (conflict, cherry-pick failure).
+
+        Args:
+            repo: Git repo root path.
+            exclude_branches: Branches known to be owned by a still-
+                live agent in this process; they must not be
+                reclaimed.  ``None`` treats every registered
+                ``kiss/wt-*`` worktree as reclaimable.
+
+        Returns:
+            Number of worktrees successfully reclaimed (merged and
+            removed).
+        """
+        excluded = exclude_branches or set()
+        reclaimed = 0
+        with repo_lock(repo):
+            # ``.kiss-worktrees/`` under the main tree would otherwise
+            # show up as an untracked directory in ``git status`` and
+            # trip the "main tree is dirty" guard below.  ``ensure_
+            # excluded`` writes it to ``.git/info/exclude`` (never a
+            # tracked file) idempotently, so a reclaim can be called
+            # standalone (without the ``ensure_excluded`` that
+            # ``_try_setup_worktree`` normally runs just before it).
+            GitWorktreeOps.ensure_excluded(repo)
+            GitWorktreeOps.prune(repo)
+            current = GitWorktreeOps.current_branch(repo)
+            if current is None:
+                return 0
+            if GitWorktreeOps.has_uncommitted_changes(repo):
+                logger.info(
+                    "Skipping orphan-worktree reclaim in %s: main "
+                    "tree is dirty",
+                    repo,
+                )
+                return 0
+            for wt_dir, branch in GitWorktreeOps.registered_worktrees(repo):
+                if not branch.startswith(_WORKTREE_BRANCH_PREFIX):
+                    continue
+                if branch in excluded:
+                    continue
+                if not wt_dir.exists():  # pragma: no cover — prune above
+                    # ``prune`` at the top of this block already
+                    # dropped registrations whose directory is gone,
+                    # so this branch is only reachable on an rm-vs-
+                    # iteration race with an external process.
+                    continue
+                if GitWorktreeOps.load_preserve_marker(repo, branch):
+                    # The user (or the failed-task preserve path)
+                    # deliberately parked this worktree for manual
+                    # review; publishing its work here would violate
+                    # the "never silently merge unverified work"
+                    # contract.
+                    logger.info(
+                        "Skipping orphan-worktree reclaim of %s: "
+                        "branch '%s' is marked preserve-for-review",
+                        wt_dir, branch,
+                    )
+                    continue
+                original_branch = GitWorktreeOps.load_original_branch(
+                    repo, branch,
+                )
+                if not original_branch:
+                    # Legacy worktree without the kiss-original
+                    # config (created before that config landed, or
+                    # a save that failed silently).  Fall back to
+                    # the current branch of the main tree — that is
+                    # what the user is on right now, so it is the
+                    # branch a fresh task would merge into anyway.
+                    # The dirty-main and current-branch guards below
+                    # still protect against clobbering user state.
+                    logger.warning(
+                        "Orphan worktree %s (branch '%s') has no "
+                        "kiss-original config; falling back to the "
+                        "current branch '%s' of the main tree",
+                        wt_dir, branch, current,
+                    )
+                    original_branch = current
+                if not GitWorktreeOps.branch_exists(repo, original_branch):
+                    logger.warning(
+                        "Cannot reclaim orphan worktree %s: original "
+                        "branch '%s' no longer exists; preserving",
+                        wt_dir, original_branch,
+                    )
+                    continue
+                if original_branch != current:
+                    logger.info(
+                        "Skipping orphan-worktree reclaim of %s: "
+                        "main tree is on '%s' but the worktree "
+                        "targets '%s'",
+                        wt_dir, current, original_branch,
+                    )
+                    continue
+                if GitWorktreeOps.has_uncommitted_changes(wt_dir):
+                    GitWorktreeOps.stage_all(wt_dir)
+                    GitWorktreeOps.commit_all(
+                        wt_dir, "kiss: reclaim orphan worktree",
+                    )
+                    if GitWorktreeOps.has_uncommitted_changes(wt_dir):
+                        logger.warning(
+                            "Cannot reclaim orphan worktree %s: "
+                            "auto-commit failed (a pre-commit hook "
+                            "may have rejected it); preserving",
+                            wt_dir,
+                        )
+                        continue
+                baseline = GitWorktreeOps.load_baseline_commit(repo, branch)
+                try:
+                    GitWorktreeOps.ensure_scratch_merge_driver(repo)
+                except Exception:  # pragma: no cover — filesystem
+                    logger.warning(
+                        "Failed to install scratch merge driver",
+                        exc_info=True,
+                    )
+                if baseline:
+                    result = GitWorktreeOps.squash_merge_from_baseline(
+                        repo,
+                        branch,
+                        baseline,
+                        user_prompt=None,
+                        task_result=(
+                            "Auto-merged by orphan-worktree reclaim"
+                        ),
+                    )
+                else:
+                    result = GitWorktreeOps.squash_merge_branch(
+                        repo,
+                        branch,
+                        user_prompt=None,
+                        task_result=(
+                            "Auto-merged by orphan-worktree reclaim"
+                        ),
+                    )
+                if result != MergeResult.SUCCESS:
+                    logger.warning(
+                        "Reclaim of orphan worktree %s: squash "
+                        "merge into '%s' returned %s; preserving",
+                        wt_dir, original_branch, result.value,
+                    )
+                    continue
+                GitWorktreeOps.remove(repo, wt_dir)
+                GitWorktreeOps.prune(repo)
+                GitWorktreeOps.delete_branch(repo, branch)
+                reclaimed += 1
+        return reclaimed
