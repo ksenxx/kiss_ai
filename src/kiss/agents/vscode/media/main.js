@@ -7289,15 +7289,12 @@
           switchToTab(existingChatTab.id);
         } else if (s.has_events && s.id) {
           createNewTab();
-          const taskText = s.preview || s.title || '';
-          setTaskText(taskText);
-          inp.value = taskText;
-          syncClearBtn();
+          setTaskText(s.preview || s.title || '');
           api.resumeSession({id: s.id, taskId: s.task_id, tabId: activeTabId});
         } else {
+          // Nothing was ever run in this session, so there is no task to
+          // show and nothing to resume: just open a fresh tab for the user.
           createNewTab();
-          inp.value = s.preview || s.title || '';
-          syncClearBtn();
           inp.focus();
         }
         closeSidebar();
