@@ -2038,28 +2038,14 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 .sidebar-item-favorite.favorited:hover { color: #f5b400; opacity: 1; }
 
 /* A task panel in the task-history list gives its favourite / copy /
-   collapse buttons a full-width line of their own below the task text,
-   and draws them 50% bigger than the compact buttons used by the other
-   sidebar lists: the 12px icon becomes 18px and the 12x16 button box
-   becomes 18x24, so both axes grow by exactly half. */
+   collapse buttons a full-width line of their own below the task text.
+   Only the placement differs: the buttons themselves keep the compact
+   12x12 icon in a 12x16 box that every other sidebar list uses, so
+   nothing here may override their size. */
 .running-item > .sidebar-item-actions {
   flex-basis: 100%;
   margin-left: 0;
   margin-top: 2px;
-  gap: 9px;
-}
-
-.running-item > .sidebar-item-actions > button {
-  min-width: 18px;
-  min-height: 24px;
-  padding: 3px 0;
-  justify-content: center;
-  border-radius: 5px;
-}
-
-.running-item > .sidebar-item-actions svg {
-  width: 18px;
-  height: 18px;
 }
 
 .sidebar-item-confirm {

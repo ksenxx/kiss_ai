@@ -588,9 +588,9 @@ def test_live_task_panel_typography_and_history_rows(
                 assert spacing_probe["textToActions"] <= 12, (
                     "extra space between the task text and its action strip: " + repr(spacing_probe)
                 )
-                assert 24 <= spacing_probe["actionsHeight"] <= 32, (
+                assert 16 <= spacing_probe["actionsHeight"] <= 20, (
                     "the action strip must be exactly as tall as the "
-                    "enlarged buttons: " + repr(spacing_probe)
+                    "compact 16px buttons: " + repr(spacing_probe)
                 )
                 assert spacing_probe["actionsToBottom"] >= 0, (
                     "the action strip must stay inside the panel: " + repr(spacing_probe)
@@ -784,11 +784,12 @@ def _measure_history_action_row(page: Page) -> ActionRowGeometry:
 
 
 def _assert_action_row_layout(geometry: ActionRowGeometry, surface: str) -> None:
-    """Assert the rendered action strip owns a line and is 50% bigger.
+    """Assert the action strip owns a line at the compact button size.
 
-    The compact sidebar buttons elsewhere render 12x12 icons inside
-    12x16 boxes, so "50% bigger" is exactly 18x18 icons inside 18x24
-    boxes.
+    The strip keeps the full-width line of its own below the task text,
+    but the buttons are drawn at the same size as every other sidebar
+    list: a 12x12 icon inside a 12x16 box.  The 18x18-in-18x24
+    enlargement the panel briefly carried has been reverted.
     """
     assert geometry["buttonCount"] >= 2, (
         f"{surface}: the task panel must render its action buttons: " + repr(geometry)
@@ -808,23 +809,23 @@ def _assert_action_row_layout(geometry: ActionRowGeometry, surface: str) -> None
     assert geometry["stripWidth"] == geometry["contentWidth"], (
         f"{surface}: the action strip must span the panel's full content width: " + repr(geometry)
     )
-    assert geometry["buttons"] == [[18, 24]] * geometry["buttonCount"], (
-        f"{surface}: every action button must be 50% bigger than the "
-        "compact 12x16 sidebar button: " + repr(geometry)
+    assert geometry["buttons"] == [[12, 16]] * geometry["buttonCount"], (
+        f"{surface}: every action button must render at the compact "
+        "12x16 sidebar size, not the reverted 18x24 one: " + repr(geometry)
     )
-    assert geometry["icons"] == [[18, 18]] * geometry["buttonCount"], (
-        f"{surface}: every action icon must be 50% bigger than the "
-        "compact 12x12 sidebar icon: " + repr(geometry)
+    assert geometry["icons"] == [[12, 12]] * geometry["buttonCount"], (
+        f"{surface}: every action icon must render at the compact 12x12 "
+        "sidebar size, not the reverted 18x18 one: " + repr(geometry)
     )
 
 
 @pytest.mark.timeout(180)
-def test_live_history_action_buttons_own_a_bigger_line(
+def test_live_history_action_buttons_own_a_compact_line(
     tmp_path: Path,
 ) -> None:
     """Served page + real Chromium: in a task panel of the task
     history, the favourite/copy/collapse buttons render on a line of
-    their own below the task text and are 50% bigger.
+    their own below the task text, at the compact sidebar button size.
 
     Both shipped surfaces are measured from real layout boxes: the
     remote webapp exactly as ``RemoteAccessServer`` serves it

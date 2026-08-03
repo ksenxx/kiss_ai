@@ -9,9 +9,13 @@
 // A task panel (``.sidebar-item.running-item`` inside ``#history-list``)
 // used to squeeze its favourite / copy / collapse buttons onto the same
 // line as the task text, which left the text almost no room on a narrow
-// sidebar and made the 12px icons hard to hit.  The buttons must now sit
-// on their own full-width line *below* the task text, and each button
-// must be 50% bigger than the old 12px icon / 16px box.
+// sidebar.  The buttons must sit on their own full-width line *below*
+// the task text.
+//
+// They were briefly drawn 50% bigger than the compact buttons used by
+// every other sidebar list.  That size bump has been reverted: a task
+// panel now uses exactly the same 12x12 icon in a 12x16 box as the rest
+// of the sidebar, so only the *placement* differs.
 //
 // The same ``media/`` bundle is served to the VS Code webview and to the
 // remote webapp (``web_server.py`` renders ``chat.html`` with
@@ -27,21 +31,46 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-// Old geometry (before the fix) and the 50%-bigger geometry required now.
-// The compact button is a 12x16 box: a 12px icon with "2px 0" padding.
-// Both axes have to grow by exactly half, so 12x16 becomes 18x24.
-const OLD_ICON_PX = 12;
-const NEW_ICON_PX = 18;
-const OLD_BUTTON_W_PX = 12;
-const NEW_BUTTON_W_PX = 18;
-const OLD_BUTTON_H_PX = 16;
-const NEW_BUTTON_H_PX = 24;
+// The compact sidebar button is a 12x16 box: a 12px icon with "2px 0"
+// padding and no explicit min-width/min-height.  A history task panel
+// must use exactly that geometry - the 18x24 / 18x18 enlargement it
+// briefly carried has been reverted.
+const ICON_PX = 12;
+const BUTTON_W_PX = 12;
+const BUTTON_H_PX = 16;
+const REVERTED_ICON_PX = 18;
+const REVERTED_BUTTON_W_PX = 18;
+const REVERTED_BUTTON_H_PX = 24;
 
 const ACTION_BUTTON_SELECTORS = [
   '.sidebar-item-favorite',
   '.sidebar-item-copy',
   '.sidebar-item-collapse',
 ];
+
+// A compact icon takes its size from its own markup attributes, so no
+// stylesheet rule may set a width for it.  An icon left at its intrinsic
+// size therefore computes to the initial value, which jsdom reports as
+// 'auto' (or '' for an <svg> outside any layout).
+function assertCompactIcon(win, svg, what) {
+  const width = win.getComputedStyle(svg).width;
+  assert.ok(
+    width === '' || width === 'auto',
+    `${what}: no CSS rule may resize the icon away from its intrinsic ` +
+      `${ICON_PX}px; the reverted rule forced ${REVERTED_ICON_PX}px, ` +
+      `got width=${width}`,
+  );
+  assert.strictEqual(
+    px(svg.getAttribute('width')),
+    ICON_PX,
+    `${what}: the icon markup must stay ${ICON_PX}px`,
+  );
+  assert.strictEqual(
+    px(svg.getAttribute('height')),
+    ICON_PX,
+    `${what}: the icon markup must stay ${ICON_PX}px tall`,
+  );
+}
 
 function makeWebview(remote) {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
@@ -217,61 +246,73 @@ function testActionsOnSeparateLine(remote) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. The buttons are 50% bigger.
+// 2. The buttons keep the compact sidebar size.
 // ---------------------------------------------------------------------------
 
-function testActionsFiftyPercentBigger(remote) {
+function testActionsKeepCompactSize(remote) {
   const label = remote ? 'webapp' : 'extension';
   const {win} = makeWebview(remote);
   loadHistory(win, [makeSession()]);
   const row = historyRow(win);
+  const compact = win.document.createElement('button');
+  compact.className = 'sidebar-item-copy';
+  win.document.body.appendChild(compact);
+  const compactStyle = win.getComputedStyle(compact);
 
   ACTION_BUTTON_SELECTORS.forEach(sel => {
     const btn = row.querySelector(sel);
     assert.ok(btn, `${label}: ${sel} rendered`);
 
     const btnStyle = win.getComputedStyle(btn);
+    // No min-width/min-height override may survive: the box has to be
+    // sized by its 12px icon plus the shared "2px 0" padding.
     assert.strictEqual(
       px(btnStyle.minWidth),
-      NEW_BUTTON_W_PX,
-      `${label}: ${sel} must be ${NEW_BUTTON_W_PX}px wide (50% wider than ` +
-        `the old ${OLD_BUTTON_W_PX}px); got min-width=${btnStyle.minWidth}`,
+      0,
+      `${label}: ${sel} must not force a wider box; the reverted rule set ` +
+        `min-width=${REVERTED_BUTTON_W_PX}px, got ${btnStyle.minWidth}`,
     );
     assert.strictEqual(
       px(btnStyle.minHeight),
-      NEW_BUTTON_H_PX,
-      `${label}: ${sel} must be ${NEW_BUTTON_H_PX}px tall (50% taller than ` +
-        `the old ${OLD_BUTTON_H_PX}px); got min-height=${btnStyle.minHeight}`,
+      0,
+      `${label}: ${sel} must not force a taller box; the reverted rule set ` +
+        `min-height=${REVERTED_BUTTON_H_PX}px, got ${btnStyle.minHeight}`,
     );
     assert.strictEqual(
-      btnStyle.justifyContent,
-      'center',
-      `${label}: ${sel} must centre its icon in the bigger box`,
+      px(btnStyle.paddingTop),
+      2,
+      `${label}: ${sel} must keep the compact "2px 0" padding so the box ` +
+        `stays ${BUTTON_H_PX}px tall; got padding-top=${btnStyle.paddingTop}`,
     );
+    assert.strictEqual(
+      px(btnStyle.paddingLeft),
+      0,
+      `${label}: ${sel} must keep the compact "2px 0" padding so the box ` +
+        `stays ${BUTTON_W_PX}px wide; got padding-left=${btnStyle.paddingLeft}`,
+    );
+    // Every declaration must match a plain compact sidebar button, so no
+    // leftover of the enlargement (border-radius, justify-content, ...)
+    // can distinguish a history panel's button from the others.
+    ['borderRadius', 'justifyContent', 'alignItems', 'display'].forEach(prop => {
+      assert.strictEqual(
+        btnStyle[prop],
+        compactStyle[prop],
+        `${label}: ${sel} must render exactly like a compact sidebar ` +
+          `button; ${prop} differs (${btnStyle[prop]} vs ${compactStyle[prop]})`,
+      );
+    });
 
     const svg = btn.querySelector('svg');
     assert.ok(svg, `${label}: ${sel} renders an icon`);
-    const svgStyle = win.getComputedStyle(svg);
-    assert.strictEqual(
-      px(svgStyle.width),
-      NEW_ICON_PX,
-      `${label}: ${sel} icon must be ${NEW_ICON_PX}px wide (50% bigger than ` +
-        `the old ${OLD_ICON_PX}px); got width=${svgStyle.width}`,
-    );
-    assert.strictEqual(
-      px(svgStyle.height),
-      NEW_ICON_PX,
-      `${label}: ${sel} icon must be ${NEW_ICON_PX}px tall; ` +
-        `got height=${svgStyle.height}`,
-    );
+    assertCompactIcon(win, svg, `${label}: ${sel}`);
   });
 
   win.close();
-  console.log(`  ok - ${label}: action buttons are 50% bigger`);
+  console.log(`  ok - ${label}: action buttons keep the compact size`);
 }
 
 // ---------------------------------------------------------------------------
-// 3. The enlarged icons survive every innerHTML rewrite.
+// 3. The compact icon size survives every innerHTML rewrite.
 // ---------------------------------------------------------------------------
 
 function testIconSizeSurvivesStateChanges(remote) {
@@ -291,22 +332,14 @@ function testIconSizeSurvivesStateChanges(remote) {
     posted.some(m => m.type === 'setFavorite'),
     `${label}: favouriting still reaches the backend`,
   );
-  assert.strictEqual(
-    px(win.getComputedStyle(fav.querySelector('svg')).width),
-    NEW_ICON_PX,
-    `${label}: the filled star stays ${NEW_ICON_PX}px`,
-  );
+  assertCompactIcon(win, fav.querySelector('svg'), `${label}: filled star`);
 
   fav.click();
   assert.ok(
     !fav.classList.contains('favorited'),
     `${label}: clicking again unfavourites the task`,
   );
-  assert.strictEqual(
-    px(win.getComputedStyle(fav.querySelector('svg')).width),
-    NEW_ICON_PX,
-    `${label}: the outline star stays ${NEW_ICON_PX}px`,
-  );
+  assertCompactIcon(win, fav.querySelector('svg'), `${label}: outline star`);
 
   // The copy button swaps in a check mark after a successful copy.
   const copy = row.querySelector('.sidebar-item-copy');
@@ -328,11 +361,7 @@ function testIconSizeSurvivesStateChanges(remote) {
       copy.classList.contains('copied'),
       `${label}: the copy button flashes its success state`,
     );
-    assert.strictEqual(
-      px(win.getComputedStyle(copy.querySelector('svg')).width),
-      NEW_ICON_PX,
-      `${label}: the check mark stays ${NEW_ICON_PX}px`,
-    );
+    assertCompactIcon(win, copy.querySelector('svg'), `${label}: check mark`);
     win.close();
     console.log(`  ok - ${label}: icon size survives every state swap`);
   });
@@ -374,17 +403,22 @@ function testRowWithoutTaskIdKeepsOwnLine(remote) {
     `${label}: the lone collapse toggle still gets its own line`,
   );
   const toggle = actions.querySelector('.sidebar-item-collapse');
+  assertCompactIcon(
+    win,
+    toggle.querySelector('svg'),
+    `${label}: lone collapse toggle`,
+  );
   assert.strictEqual(
-    px(win.getComputedStyle(toggle.querySelector('svg')).width),
-    NEW_ICON_PX,
-    `${label}: the lone collapse toggle is 50% bigger too`,
+    px(win.getComputedStyle(toggle).minHeight),
+    0,
+    `${label}: the lone collapse toggle keeps the compact box too`,
   );
   win.close();
-  console.log(`  ok - ${label}: task-id-less rows keep the new layout`);
+  console.log(`  ok - ${label}: task-id-less rows keep the layout`);
 }
 
 // ---------------------------------------------------------------------------
-// 5. The enlarged strip must not break the existing row behaviour.
+// 5. The strip on its own line must not break the existing row behaviour.
 // ---------------------------------------------------------------------------
 
 function testBehaviourUnchanged(remote) {
@@ -401,7 +435,7 @@ function testBehaviourUnchanged(remote) {
   toggle.click();
   assert.ok(
     !row.classList.contains('collapsed'),
-    `${label}: the bigger chevron still expands the panel`,
+    `${label}: the chevron still expands the panel`,
   );
   assert.ok(
     !posted.some(m => m.type === 'resumeSession'),
@@ -441,19 +475,7 @@ function testFrequentListUnaffected() {
   const copy = item.querySelector('.sidebar-item-copy');
   assert.ok(copy, 'frequent-task row has a copy button');
   const svg = copy.querySelector('svg');
-  // No stylesheet rule may resize these icons: jsdom leaves the
-  // computed width empty because nothing in the cascade targets them,
-  // so the icon keeps the intrinsic 12px of its markup attributes.
-  assert.strictEqual(
-    px(win.getComputedStyle(svg).width),
-    0,
-    'no CSS rule may resize the compact frequent-task icons',
-  );
-  assert.strictEqual(
-    px(svg.getAttribute('width')),
-    OLD_ICON_PX,
-    `frequent-task buttons keep the compact ${OLD_ICON_PX}px icon`,
-  );
+  assertCompactIcon(win, svg, 'frequent-task copy');
   const btnStyle = win.getComputedStyle(copy);
   assert.strictEqual(
     px(btnStyle.minWidth),
@@ -472,7 +494,7 @@ function testFrequentListUnaffected() {
 async function main() {
   [false, true].forEach(remote => {
     testActionsOnSeparateLine(remote);
-    testActionsFiftyPercentBigger(remote);
+    testActionsKeepCompactSize(remote);
     testRowWithoutTaskIdKeepsOwnLine(remote);
     testBehaviourUnchanged(remote);
   });
