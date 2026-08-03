@@ -15,6 +15,7 @@
   const DEFAULT_SENSITIVITY = 80;
   const TRAILING_ALIAS_SENSITIVITY = 75;
   const SENSITIVITY_KEY = 'kissVoiceSensitivity';
+  const AUTO_SUBMIT_KEY = 'kissVoiceAutoSubmit';
 
   function sensitivityMinWordConf(s) {
     return 0.8 * (1 - s / 100);
@@ -32,7 +33,16 @@
     return DEFAULT_SENSITIVITY;
   }
 
+  function storedAutoSubmit() {
+    try {
+      return localStorage.getItem(AUTO_SUBMIT_KEY) !== 'off';
+    } catch (_e) {
+      return true;
+    }
+  }
+
   let sensitivity = storedSensitivity();
+  let autoSubmit = storedAutoSubmit();
   const SPEECH_RMS_THRESHOLD = 0.01;
   const CAPTURE_END_SILENCE_MS = 2000;
   const CAPTURE_NO_SPEECH_TIMEOUT_MS = 5000;
@@ -261,6 +271,10 @@
       speakWorkingOnIt();
       return;
     }
+    if (!autoSubmit) {
+      insertAtCursor(translated);
+      return;
+    }
     if (!inp.value) {
       inp.value = translated;
     } else {
@@ -272,6 +286,31 @@
     } catch (_e) {}
     window.dispatchEvent(new CustomEvent('kiss-voice-submit'));
     speakWorkingOnIt();
+  }
+
+  function insertAtCursor(text) {
+    const current = inp.value;
+    const start =
+      typeof inp.selectionStart === 'number'
+        ? inp.selectionStart
+        : current.length;
+    const end =
+      typeof inp.selectionEnd === 'number' ? inp.selectionEnd : current.length;
+    const before = current.slice(0, start);
+    const after = current.slice(end);
+    const leadPad = before.length === 0 || /\s$/.test(before) ? '' : ' ';
+    const trailPad = after.length === 0 || /^\s/.test(after) ? '' : ' ';
+    const injected = leadPad + text + trailPad;
+    inp.value = before + injected + after;
+    // Restore the caret before notifying listeners: assigning `value` parks
+    // the selection at the end, and main.js reads `selectionStart` inside its
+    // synchronous `input` handler to decide whether to request a completion.
+    const caret = start + leadPad.length + text.length;
+    try {
+      inp.focus();
+      inp.setSelectionRange(caret, caret);
+    } catch (_e) {}
+    inp.dispatchEvent(new Event('input', {bubbles: true}));
   }
 
   function speakWorkingOnIt() {
@@ -651,6 +690,30 @@
       }
     });
   }
+
+  const autoSubmitSelect = document.getElementById('cfg-voice-auto-submit');
+
+  function renderAutoSubmit() {
+    if (autoSubmitSelect) autoSubmitSelect.value = autoSubmit ? 'on' : 'off';
+  }
+
+  renderAutoSubmit();
+  if (autoSubmitSelect) {
+    autoSubmitSelect.addEventListener('change', () => {
+      autoSubmit = autoSubmitSelect.value !== 'off';
+      try {
+        localStorage.setItem(AUTO_SUBMIT_KEY, autoSubmit ? 'on' : 'off');
+      } catch (_e) {}
+    });
+  }
+
+  // Remote-web clients can have the same chat open in several same-origin
+  // tabs; keep them in step with the tab that changed the setting.
+  window.addEventListener('storage', event => {
+    if (!event || event.key !== AUTO_SUBMIT_KEY) return;
+    autoSubmit = event.newValue !== 'off';
+    renderAutoSubmit();
+  });
 
   function setEnabled(next) {
     if (enabled === next) return;

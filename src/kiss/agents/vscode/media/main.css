@@ -273,6 +273,7 @@ body {
 .config-label input[type="text"],
 .config-label input[type="password"],
 .config-label input[type="number"],
+.config-label select,
 .config-label textarea {
   display: block;
   width: 100%;
@@ -291,7 +292,10 @@ body {
 
 .config-label input[readonly] { color: var(--dim); }
 
+.config-label select { cursor: pointer; }
+
 .config-label input:focus,
+.config-label select:focus,
 .config-label textarea:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
 .config-checkbox { display: flex; align-items: center; gap: 8px; flex-direction: row; }
 .config-checkbox input[type="checkbox"] { margin: 0; width: auto; }
