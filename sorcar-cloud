@@ -376,7 +376,7 @@ if [[ -d "$HOME/.kiss" ]]; then
         --exclude='sorcar.db-shm' \
         --exclude='sorcar.sock' \
         --exclude='*.log' \
-        --exclude='browser_profile*/' \
+        --exclude='browser_profile*' \
         --exclude='tls/' \
         --exclude='.kiss-web.fingerprint' \
         --exclude='remote-url.json' \
