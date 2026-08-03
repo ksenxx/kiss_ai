@@ -45,6 +45,7 @@
     'voiceToggle',
     'voiceSensitivity',
     'voiceAck',
+    'voiceDropped',
     'focusEditor',
     'webviewFocusChanged',
     'activeTabChanged',

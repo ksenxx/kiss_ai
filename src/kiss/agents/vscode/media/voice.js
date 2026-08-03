@@ -69,6 +69,149 @@
   let lastWakeAt = 0;
   let outstandingRounds = 0;
 
+  // tableak-coverage:start
+  // The conversation that was on screen when each outstanding round began,
+  // keyed by that round's id. A transcript arrives seconds after the words
+  // were spoken and the user may have moved to a different task in the
+  // meantime, so submitting it against whatever tab is visible on arrival
+  // would put one task's words into another task's conversation.
+  //
+  // Rounds are keyed, not queued. They overlap -- the wake detector starts
+  // listening again while the previous utterance is still being transcribed
+  // -- and they finish out of order, and any of them can be cancelled
+  // mid-flight. Position in a queue therefore stops meaning anything: the
+  // shift that answers a late transcript from a cancelled round would hand
+  // it the owner of a round that is still waiting for its own words. The
+  // round id is carried through wake -> transcript by the producer, so it
+  // pairs each transcript with the utterance it actually belongs to.
+  const roundOwners = new Map();
+
+  // Owner recorded for a round that began in a page with no conversations at
+  // all -- voice.js also runs in hosts that have no tab machinery. Such a
+  // round has nothing to leak into, so it is not the same thing as a
+  // CANCELLED round, which must still fail closed.
+  const UNSCOPED = {unscoped: true};
+
+  // Owner recorded for a round that was cancelled while its audio was still
+  // being transcribed. The entry stays in the map so that the round's own
+  // late transcript is recognised and refused, instead of being charged to
+  // whichever round happens to be outstanding when it lands.
+  const CANCELLED = {cancelled: true};
+
+  // Rounds this webview started but could not name, because the producer sent
+  // no id. They can only be answered in order, so they keep the old
+  // positional behaviour among themselves.
+  const unkeyedOwners = [];
+
+  /**
+   * The conversation on screen, as `{tabId, taskId}`, or null when the
+   * webview has not published one.
+   */
+  function currentOwner() {
+    const read = window.kissVoiceOwner;
+    if (typeof read !== 'function') return null;
+    const owner = read();
+    return owner && owner.tabId ? owner : null;
+  }
+
+  /** The round id of a wake/speech message, or null when it carries none. */
+  function roundKey(msg) {
+    const id = msg ? msg.roundId : undefined;
+    if (id === undefined || id === null || id === '') return null;
+    return String(id);
+  }
+
+  /**
+   * Record the owner of an utterance that is starting now.
+   *
+   * `key` is the round id the producer will echo back with the transcript, or
+   * null when it sends none.
+   */
+  function markSpeechStart(key) {
+    const owner = currentOwner() || UNSCOPED;
+    if (key === null) unkeyedOwners.push(owner);
+    else roundOwners.set(key, owner);
+    outstandingRounds++;
+  }
+
+  /**
+   * Cancel every outstanding round, keeping each one recognisable.
+   *
+   * A cancelled round's transcript may still be on its way, so its id is kept
+   * with a CANCELLED marker: that is what makes the late words fail closed
+   * without stealing the owner of a round that is still live. Unkeyed rounds
+   * have nothing to be recognised by, so they are only counted.
+   */
+  function resetSpeechRounds() {
+    for (const key of roundOwners.keys()) roundOwners.set(key, CANCELLED);
+    cancelledUnkeyedRounds += unkeyedOwners.length;
+    unkeyedOwners.length = 0;
+    outstandingRounds = 0;
+  }
+
+  // Cancelled rounds that had no id. Their late transcripts must fail closed,
+  // but there is nothing to key them by, so they are charged only once every
+  // live unkeyed round has been answered.
+  let cancelledUnkeyedRounds = 0;
+
+  /**
+   * Close the round `key` names and hand back the owner it was started with.
+   *
+   * A round that is still on record returns its own owner -- CANCELLED when
+   * it was cancelled in flight, so its late words fail closed. An unkeyed
+   * transcript is answered from the unkeyed rounds in order, then from the
+   * cancelled unkeyed credit. With nothing outstanding at all the result is
+   * undefined: this transcript belongs to no round this webview ever saw --
+   * the host transcribes on its own too -- so it was never tied to a moment
+   * in time and there is no tab switch to detect.
+   */
+  function retireRound(key) {
+    if (key !== null && roundOwners.has(key)) {
+      const owner = roundOwners.get(key);
+      roundOwners.delete(key);
+      outstandingRounds = Math.max(0, outstandingRounds - 1);
+      return owner;
+    }
+    if (key !== null) return undefined;
+    outstandingRounds = Math.max(0, outstandingRounds - 1);
+    if (unkeyedOwners.length) return unkeyedOwners.shift();
+    if (cancelledUnkeyedRounds > 0) {
+      cancelledUnkeyedRounds--;
+      return CANCELLED;
+    }
+    return undefined;
+  }
+
+  /**
+   * True when an utterance recorded against `owner` may be typed into the
+   * conversation now on screen.
+   *
+   * Fails CLOSED whenever ownership cannot be proved: a round that was
+   * CANCELLED in flight, a page that has stopped publishing an owner, or a
+   * round whose owner is not the conversation now on screen. Two different
+   * tabs showing the SAME task are one conversation, which is the single
+   * exemption -- it matches isForActiveTab() in main.js.
+   *
+   * Two entries are not failures. `undefined` means no round was ever
+   * recorded for this transcript (see retireRound) -- the host transcribes
+   * on its own too. UNSCOPED means the round began in a page that has no
+   * conversations at all. Neither has another conversation to leak into.
+   */
+  function ownerIsOnScreen(owner) {
+    if (owner === undefined || owner === UNSCOPED) return true;
+    if (owner === CANCELLED) return false;
+    const now = currentOwner();
+    if (!now) return false;
+    if (owner.tabId === now.tabId) return true;
+    return !!owner.taskId && owner.taskId === now.taskId;
+  }
+
+  /** The tab an utterance was recorded against, or '' when it had none. */
+  function ownerTabId(owner) {
+    return owner && owner.tabId ? owner.tabId : '';
+  }
+  // tableak-coverage:end
+
   let model = null;
   let recognizer = null;
   let audioContext = null;
@@ -215,7 +358,7 @@
       lastFlashCls = null;
       applyFlashToAll();
       showListening(false);
-      outstandingRounds = 0;
+      resetSpeechRounds();
     }, timeoutMs);
   }
 
@@ -238,7 +381,12 @@
     return modal.querySelector('.ask-user-input');
   }
 
-  function insertSpeech(text, keepFlash, speaker, language) {
+  // owner is this round's conversation, already retired by the caller. It is
+  // taken as a parameter rather than read here so that the round is closed
+  // before anything can return early: an empty transcript still completes a
+  // round, and leaving its owner in the queue would pair the NEXT transcript
+  // with the wrong utterance.
+  function insertSpeech(text, keepFlash, speaker, language, owner) {
     if (!keepFlash) flash(null);
     let translated = String(typeof text === 'string' ? text : '').trim();
     if (!translated) return;
@@ -258,6 +406,20 @@
           translated
         : 'Speaker #' + speaker + ' says that: ' + translated;
     }
+    // tableak-coverage:start
+    // The user switched tasks while speaking: the words belong to the
+    // conversation that was on screen when the utterance began, and that
+    // tab's input is no longer the one in the DOM. Hand the transcript back
+    // to the host instead of typing it into a stranger's conversation.
+    if (!ownerIsOnScreen(owner)) {
+      postToHost({
+        type: 'voiceDropped',
+        tabId: ownerTabId(owner),
+        text: translated,
+      });
+      return;
+    }
+    // tableak-coverage:end
     const askInp = askAnswerInput();
     if (askInp) {
       askInp.value = askInp.value
@@ -267,7 +429,11 @@
       try {
         askInp.focus();
       } catch (_e) {}
-      window.dispatchEvent(new CustomEvent('kiss-voice-answer'));
+      window.dispatchEvent(
+        new CustomEvent('kiss-voice-answer', {
+          detail: {tabId: ownerTabId(owner)},
+        }),
+      );
       speakWorkingOnIt();
       return;
     }
@@ -284,7 +450,11 @@
     try {
       inp.focus();
     } catch (_e) {}
-    window.dispatchEvent(new CustomEvent('kiss-voice-submit'));
+    window.dispatchEvent(
+      new CustomEvent('kiss-voice-submit', {
+        detail: {tabId: ownerTabId(owner)},
+      }),
+    );
     speakWorkingOnIt();
   }
 
@@ -332,7 +502,9 @@
   let capture = null;
 
   function beginCapture() {
-    outstandingRounds++;
+    // The browser pipeline captures, transcribes and answers one round at a
+    // time in this closure, so there is no id to carry: the round is unkeyed.
+    markSpeechStart(null);
     capture = {
       chunks: [],
       sinceWakeMs: 0,
@@ -388,7 +560,11 @@
     const done = capture;
     capture = null;
     if (!done.speechStarted || !done.chunks.length) {
-      outstandingRounds = Math.max(0, outstandingRounds - 1);
+      // This round produced no audio, so no transcript will ever come back
+      // for it. Retire its owner with it, or the next transcript would be
+      // paired with this abandoned utterance's conversation. beginCapture()
+      // records browser-pipeline rounds unkeyed, so this retires the oldest.
+      retireRound(null);
       if (outstandingRounds > 0) flash('voice-transcribing', 60000);
       else flash(null);
       return;
@@ -720,7 +896,7 @@
     enabled = next;
     persist();
     if (!next) {
-      outstandingRounds = 0;
+      resetSpeechRounds();
       capture = null;
       flash(null);
     }
@@ -755,16 +931,29 @@
     const msg = event && event.data;
     if (!msg || typeof msg !== 'object') return;
     if (msg.type === 'voiceWake') {
-      outstandingRounds++;
+      // tableak-coverage:start
+      // The host stamps a monotonic round id on the wake and echoes it on the
+      // transcript, so this owner is looked up by the round it belongs to
+      // rather than by its position among the rounds still outstanding.
+      markSpeechStart(roundKey(msg));
+      // tableak-coverage:end
       triggerWake();
     } else if (msg.type === 'voiceTranscribing') {
       flash('voice-transcribing', 60000);
     } else if (msg.type === 'voiceSpeech') {
-      outstandingRounds = Math.max(0, outstandingRounds - 1);
-      insertSpeech(msg.text, outstandingRounds > 0, msg.speaker, msg.language);
+      // tableak-coverage:start
+      const owner = retireRound(roundKey(msg));
+      insertSpeech(
+        msg.text,
+        outstandingRounds > 0,
+        msg.speaker,
+        msg.language,
+        owner,
+      );
+      // tableak-coverage:end
     } else if (msg.type === 'voiceState') {
       if (msg.error) {
-        outstandingRounds = 0;
+        resetSpeechRounds();
         flash(null);
         enabled = false;
         persist();
@@ -772,7 +961,7 @@
       } else if (msg.listening) {
         setUi('listening');
       } else {
-        outstandingRounds = 0;
+        resetSpeechRounds();
         flash(null);
         if (!enabled) setUi('off');
       }

@@ -228,7 +228,7 @@ class _CommandsMixin:
         _complete_seq: int
         _complete_seq_latest: dict[str, int]
         _complete_queue: (
-            queue.Queue[tuple[str, int, str, str, str, str]] | None
+            queue.Queue[tuple[str, int, str, str, str, str, str]] | None
         )
         _last_active_file: dict[str, str]
         _last_active_content: dict[str, str]
@@ -254,13 +254,18 @@ class _CommandsMixin:
             self, limit: int = 50, conn_id: str = "",
         ) -> None: ...
         def _get_files(
-            self, prefix: str, work_dir: str = "", conn_id: str = "",
+            self,
+            prefix: str,
+            work_dir: str = "",
+            conn_id: str = "",
+            tab_id: str = "",
         ) -> None: ...
         def _refresh_file_cache(
             self,
             then_emit_for_prefix: str | None = None,
             work_dir: str = "",
             conn_id: str = "",
+            tab_id: str = "",
         ) -> None: ...
         def _replay_session(
             self, chat_id: str, tab_id: str = "", task_id: str | None = None,
@@ -450,7 +455,10 @@ class _CommandsMixin:
 
         The resulting ``files`` events are routed only to the
         requesting connection (via ``connId``) so typing ``@`` in one
-        VS Code window never pops the file picker in another window.
+        VS Code window never pops the file picker in another window,
+        and are stamped with the requesting ``tabId`` so within that
+        window they pop only in the chat tab that typed ``@`` — the
+        picker element is shared by every tab.
         """
         prefix = cmd.get("prefix", "")
         if not isinstance(prefix, str):
@@ -459,6 +467,7 @@ class _CommandsMixin:
             prefix,
             cmd.get("workDir", ""),
             cmd.get("connId", ""),
+            cmd.get("tabId", ""),
         )
 
     def _cmd_record_file_usage(self, cmd: dict[str, Any]) -> None:
@@ -806,7 +815,10 @@ class _CommandsMixin:
         if query:
             self._ensure_complete_worker()
             self._complete_queue.put(  # type: ignore[union-attr]
-                (query, seq, snapshot_file, snapshot_content, chat_id, conn_id),
+                (
+                    query, seq, snapshot_file, snapshot_content, chat_id,
+                    conn_id, tab_id,
+                ),
             )
 
     def _cmd_get_input_history(self, cmd: dict[str, Any]) -> None:

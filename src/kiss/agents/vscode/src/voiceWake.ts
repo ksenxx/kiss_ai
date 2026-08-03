@@ -6,11 +6,17 @@
 import {spawn, spawnSync, ChildProcess} from 'child_process';
 import {findKissProject, findUvPath} from './kissPaths';
 
-export type WakeCallback = () => void;
+// A wake and the transcript that answers it carry the same round id. The
+// listener resumes wake detection while the previous utterance is still being
+// transcribed, so rounds overlap and can finish out of order; the id is what
+// lets the webview pair a transcript with the conversation that was on screen
+// when those particular words were spoken.
+export type WakeCallback = (roundId: number) => void;
 
 export type StateCallback = (listening: boolean, error?: string) => void;
 
 export type SpeechCallback = (
+  roundId: number,
   text: string,
   speaker?: number,
   language?: string,
@@ -32,6 +38,15 @@ function extraListenerArgs(): string[] {
 
 export class VoiceWakeService {
   private _proc: ChildProcess | undefined;
+
+  // Monotonic across the whole session, so a round id is never reused and a
+  // transcript can only ever be paired with the wake it came from.
+  private _roundId: number = 0;
+
+  // The round the listener is currently transcribing. voice_wake prints one
+  // SPEECH/NO_SPEECH per WAKE, in that order, so the id of the last WAKE is
+  // the id the next transcript answers.
+  private _speechRoundId: number = 0;
 
   constructor(
     private readonly _onWake: WakeCallback,
@@ -98,10 +113,12 @@ export class VoiceWakeService {
         const line = stdoutBuf.slice(0, idx).trim();
         stdoutBuf = stdoutBuf.slice(idx + 1);
         if (this._proc !== proc) return;
-        if (line === 'WAKE') this._onWake();
-        else if (line === 'READY') this._onState(true);
+        if (line === 'WAKE') {
+          this._speechRoundId = ++this._roundId;
+          this._onWake(this._speechRoundId);
+        } else if (line === 'READY') this._onState(true);
         else if (line === 'TRANSCRIBING') this._onTranscribing();
-        else if (line === 'NO_SPEECH') this._onSpeech('');
+        else if (line === 'NO_SPEECH') this._onSpeech(this._speechRoundId, '');
         else if (line.startsWith('SPEECH ')) {
           let text = '';
           let speaker: number | undefined;
@@ -123,7 +140,7 @@ export class VoiceWakeService {
               if (typeof lang === 'string' && lang) language = lang;
             }
           } catch {}
-          this._onSpeech(text, speaker, language);
+          this._onSpeech(this._speechRoundId, text, speaker, language);
         }
         idx = stdoutBuf.indexOf('\n');
       }

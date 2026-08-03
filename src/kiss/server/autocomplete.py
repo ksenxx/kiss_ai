@@ -190,7 +190,7 @@ class _AutocompleteMixin:
         work_dir: str
         _state_lock: threading.RLock
         _complete_queue: (
-            queue.Queue[tuple[str, int, str, str, str, str]] | None
+            queue.Queue[tuple[str, int, str, str, str, str, str]] | None
         )
         _complete_worker: threading.Thread | None
         _complete_seq_latest: dict[str, int]
@@ -257,13 +257,14 @@ class _AutocompleteMixin:
         assert self._complete_queue is not None
         q = self._complete_queue
         while True:
-            query, seq, snapshot_file, snapshot_content, chat_id, conn_id = (
-                q.get()
-            )
+            (
+                query, seq, snapshot_file, snapshot_content, chat_id,
+                conn_id, tab_id,
+            ) = q.get()
             try:
                 self._complete(
                     query, seq, snapshot_file, snapshot_content, chat_id,
-                    conn_id,
+                    conn_id, tab_id,
                 )
             except Exception:
                 logger.debug("autocomplete request failed", exc_info=True)
@@ -276,6 +277,7 @@ class _AutocompleteMixin:
         snapshot_content: str | None = None,
         chat_id: str = "",
         conn_id: str = "",
+        tab_id: str = "",
     ) -> None:
         """Ghost text autocomplete via fast local prefix matching.
 
@@ -294,14 +296,18 @@ class _AutocompleteMixin:
                 direct callers).  Staleness is judged per connection so
                 concurrent typing in another VS Code window never
                 cancels this request.
+            tab_id: Chat tab the request came from (``""`` for direct
+                callers).  Echoed on both replies so the webview can
+                tell whether the suggestion still belongs to the
+                conversation on screen.
         """
         if seq >= 0:
             with self._state_lock:
                 if seq != self._complete_seq_latest.get(conn_id, -1):
                     return
         if not query or len(query) < 2:
-            self._emit_ghost("", query, conn_id)
-            self._emit_completions([], query, conn_id)
+            self._emit_ghost("", query, conn_id, tab_id)
+            self._emit_completions([], query, conn_id, tab_id)
             return
 
         completions = self._complete_many(
@@ -319,8 +325,8 @@ class _AutocompleteMixin:
                     return
         fast = _ghost_suffix(query, completions)
         fast = clip_autocomplete_suggestion(query, fast)
-        self._emit_ghost(fast, query, conn_id)
-        self._emit_completions(completions, query, conn_id)
+        self._emit_ghost(fast, query, conn_id, tab_id)
+        self._emit_completions(completions, query, conn_id, tab_id)
 
     def _complete_many(
         self,
@@ -394,6 +400,7 @@ class _AutocompleteMixin:
         completions: list[dict[str, str]],
         query: str,
         conn_id: str,
+        tab_id: str = "",
     ) -> None:
         """Emit one ``completions`` event for the fast-complete picker.
 
@@ -407,6 +414,7 @@ class _AutocompleteMixin:
             completions: List of ``{"type", "text"}`` items.
             query: The query string this list answers.
             conn_id: Requesting connection id (``""`` for direct callers).
+            tab_id: Requesting chat tab (``""`` for direct callers).
         """
         event: dict[str, Any] = {
             "type": "completions",
@@ -415,26 +423,37 @@ class _AutocompleteMixin:
         }
         if conn_id:
             event["connId"] = conn_id
+        if tab_id:
+            event["tabId"] = tab_id
         self.printer.broadcast(event)
 
-    def _emit_ghost(self, suggestion: str, query: str, conn_id: str) -> None:
+    def _emit_ghost(
+        self, suggestion: str, query: str, conn_id: str, tab_id: str = "",
+    ) -> None:
         """Emit one ``ghost`` autocomplete event.
 
         Stamped with the requesting connection's ``conn_id`` (when
         non-empty) so the suggestion is delivered only to the VS Code
         window that is typing — never to a sibling window whose input
-        happens to hold the same text.
+        happens to hold the same text.  ``tab_id`` narrows that one
+        window down to the chat tab that typed: the webview keeps a
+        single ghost overlay and a single picker, so a reply with no
+        tab of its own would render over whichever conversation the
+        user has since switched to.
 
         Args:
             suggestion: The ghost-text suffix to suggest (may be ``""``).
             query: The query string this suggestion answers.
             conn_id: Requesting connection id (``""`` for direct callers).
+            tab_id: Requesting chat tab (``""`` for direct callers).
         """
         event: dict[str, Any] = {
             "type": "ghost", "suggestion": suggestion, "query": query,
         }
         if conn_id:
             event["connId"] = conn_id
+        if tab_id:
+            event["tabId"] = tab_id
         self.printer.broadcast(event)
 
     def _ensure_complete_worker(self) -> None:
@@ -491,6 +510,7 @@ class _AutocompleteMixin:
         then_emit_for_prefix: str | None = None,
         work_dir: str = "",
         conn_id: str = "",
+        tab_id: str = "",
     ) -> None:
         """Refresh the file cache for *work_dir* in a background thread.
 
@@ -520,6 +540,9 @@ class _AutocompleteMixin:
           reply IS still the latest, its token entry is removed — the
           request is answered, so the map stays empty for idle
           connections (no per-connection teardown needed).
+
+        ``tab_id`` is carried through to the deferred ``files`` event
+        so the late reply still names the chat tab that typed ``@``.
         """
         from kiss.server.diff_merge import _scan_files
 
@@ -544,7 +567,12 @@ class _AutocompleteMixin:
                 ranked = rank_file_suggestions(
                     result, then_emit_for_prefix, usage,
                 )
-                self._emit_files(ranked, conn_id, prefix=then_emit_for_prefix)
+                self._emit_files(
+                    ranked,
+                    conn_id,
+                    prefix=then_emit_for_prefix,
+                    tab_id=tab_id,
+                )
 
         threading.Thread(target=_do_refresh, daemon=True).start()
 
@@ -605,6 +633,7 @@ class _AutocompleteMixin:
         conn_id: str,
         loading: bool = False,
         prefix: str = "",
+        tab_id: str = "",
     ) -> None:
         """Emit one ``files`` event for the ``@``-mention picker.
 
@@ -627,6 +656,10 @@ class _AutocompleteMixin:
             loading: True for the immediate empty reply sent while a
                 background directory scan is still running.
             prefix: The ``@``-mention query this reply was ranked for.
+            tab_id: Requesting chat tab (``""`` for direct callers).  A
+                window can show several chat tabs over one connection,
+                and they share a single picker element, so the tab is
+                what actually identifies the owner of the reply.
         """
         event: dict[str, Any] = {
             "type": "files", "files": ranked, "prefix": prefix,
@@ -635,10 +668,16 @@ class _AutocompleteMixin:
             event["loading"] = True
         if conn_id:
             event["connId"] = conn_id
+        if tab_id:
+            event["tabId"] = tab_id
         self.printer.broadcast(event)
 
     def _get_files(
-        self, prefix: str, work_dir: str = "", conn_id: str = "",
+        self,
+        prefix: str,
+        work_dir: str = "",
+        conn_id: str = "",
+        tab_id: str = "",
     ) -> None:
         """Send file list for the ``@``-mention picker, scoped to *work_dir*.
 
@@ -663,13 +702,18 @@ class _AutocompleteMixin:
             cache = self._file_cache.get(wd)
         if cache is None:
             self._refresh_file_cache(
-                then_emit_for_prefix=prefix, work_dir=wd, conn_id=conn_id,
+                then_emit_for_prefix=prefix,
+                work_dir=wd,
+                conn_id=conn_id,
+                tab_id=tab_id,
             )
-            self._emit_files([], conn_id, loading=True, prefix=prefix)
+            self._emit_files(
+                [], conn_id, loading=True, prefix=prefix, tab_id=tab_id,
+            )
             return
         usage = _load_file_usage()
         ranked = rank_file_suggestions(cache, prefix, usage)
-        self._emit_files(ranked, conn_id, prefix=prefix)
+        self._emit_files(ranked, conn_id, prefix=prefix, tab_id=tab_id)
         with self._state_lock:
             # This request is answered; drop its token so the map only
             # ever holds connections with a scan still in flight.

@@ -77,9 +77,9 @@ const wakes = [];
 const speeches = [];
 const states = [];
 const service = new VoiceWakeService(
-  () => wakes.push(Date.now()),
+  roundId => wakes.push(roundId),
   (listening, error) => states.push({listening, error}),
-  (text, speaker) => speeches.push({text, speaker}),
+  (roundId, text, speaker) => speeches.push({roundId, text, speaker}),
   () => {},
 );
 service.start();
@@ -98,10 +98,16 @@ function finish() {
       speeches.length >= 1,
       `expected an onSpeech callback, states=${JSON.stringify(states)}`,
     );
-    const {text, speaker} = speeches[0];
+    const {roundId, text, speaker} = speeches[0];
     assert.ok(
       /parser/i.test(text),
       `expected the translated task text, got ${JSON.stringify(text)}`,
+    );
+    // The words must come back labelled with the wake that produced them.
+    assert.strictEqual(
+      roundId,
+      wakes[0],
+      `the transcript must answer the wake that opened its round, got ${JSON.stringify(roundId)}`,
     );
     assert.strictEqual(
       speaker,

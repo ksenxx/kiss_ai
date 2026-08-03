@@ -486,6 +486,9 @@
       title: title || 'new chat',
       backendChatId: '',
       currentTaskId: null,
+      // Set by sendMessage() the moment a submit leaves this tab, so the tab
+      // owns the task before the daemon has told anyone its real id.
+      pendingTaskId: null,
       isRunning: false,
       outputFragment: null,
       taskPanelHTML: '',
@@ -1269,11 +1272,17 @@
   function handleFileContent(ev, mayFocus) {
     if (mayFocus === undefined) mayFocus = true;
     if (ev.error) {
-      updateNotification({
-        id: 'file-open-error',
-        message: ev.error,
-        severity: 'error',
-      });
+      // tableak-coverage:start
+      // A background task's failed file open is that task's problem. Toasting
+      // it would interrupt the conversation the user is actually reading.
+      if (mayFocus) {
+        updateNotification({
+          id: 'file-open-error',
+          message: ev.error,
+          severity: 'error',
+        });
+      }
+      // tableak-coverage:end
       return;
     }
     const path = ev.path || '';
@@ -2031,7 +2040,14 @@
     if (el && el.parentNode) el.parentNode.removeChild(el);
   }
 
-  function renderAdjacentTask(direction, task, events, taskId) {
+  /**
+   * Splice a neighbouring task's transcript into the visible #output.
+   *
+   * ownerTabId names the tab the transcript belongs to. It is threaded into
+   * the replay so file links are cached and stamped against that tab rather
+   * than against whichever tab happens to be on screen.
+   */
+  function renderAdjacentTask(direction, task, events, taskId, ownerTabId) {
     removeAdjacentLoader();
     adjacentLoading = false;
     // taskwheel-coverage:start
@@ -2056,7 +2072,11 @@
     const savedBudget = statusBudget ? statusBudget.textContent : '';
     const savedSteps = statusSteps ? statusSteps.textContent : '';
     if (events && events.length > 0) {
-      replayEventsInto(container, events);
+      // tableak-coverage:start
+      replayEventsInto(container, events, {
+        ownerTabId: ownerTabId || activeTabId,
+      });
+      // tableak-coverage:end
     }
     if (!container.firstChild) {
       const ph = mkEl('div', 'adjacent-task-placeholder');
@@ -2283,7 +2303,9 @@
     'SELECT',
   ]);
 
-  function linkifyFilePaths(root, workDir) {
+  // ownerTabId names the tab whose transcript `root` belongs to. It is not
+  // always the active tab: background fragments are linkified too.
+  function linkifyFilePaths(root, workDir, ownerTabId) {
     if (!root || root.nodeType !== 1) return;
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
@@ -2342,7 +2364,7 @@
       }
       if (node.parentNode) node.parentNode.replaceChild(frag, node);
     }
-    verifyFileLinkCandidates(root, workDir);
+    verifyFileLinkCandidates(root, workDir, ownerTabId);
   }
 
   // File paths found by linkifyFilePaths start as inert
@@ -2360,9 +2382,14 @@
   const _pendingPathChecks = new Set();
   const _pendingFileLinkSpans = new Set();
 
-  function _fileLinkCacheKey(workDir, p) {
-    return workDir + '\u0000' + p;
+  // tableak-coverage:start
+  // Keyed by tab as well as workDir: a check in flight for one tab must
+  // not suppress the same check for another, or that tab's links stay
+  // permanently inert.
+  function _fileLinkCacheKey(tabId, workDir, p) {
+    return String(tabId) + '\u0000' + workDir + '\u0000' + p;
   }
+  // tableak-coverage:end
 
   function _stripLineSuffix(p) {
     const m = p.match(/^(.+):\d+$/);
@@ -2373,6 +2400,7 @@
     const raw = span.getAttribute('data-path-candidate');
     span.removeAttribute('data-path-candidate');
     span.removeAttribute('data-path-wd');
+    span.removeAttribute('data-path-tab');
     span.setAttribute('data-path', raw);
     span.classList.add('kiss-filelink');
     span.title = 'Open ' + raw;
@@ -2382,22 +2410,29 @@
   function demoteFileLink(span) {
     span.removeAttribute('data-path-candidate');
     span.removeAttribute('data-path-wd');
+    span.removeAttribute('data-path-tab');
     span.setAttribute('data-path-missing', '1');
     span.classList.remove('kiss-filelink');
     _pendingFileLinkSpans.delete(span);
   }
 
-  function verifyFileLinkCandidates(root, workDir) {
+  function verifyFileLinkCandidates(root, workDir, ownerTabId) {
     const spans = root.querySelectorAll('[data-path-candidate]');
     if (!spans.length) return;
     const wd =
       typeof workDir === 'string' ? workDir : workDirForTab(activeTabId) || '';
+    // tableak-coverage:start
+    const owner = ownerTabId === undefined ? activeTabId : ownerTabId;
+    // tableak-coverage:end
     const toCheck = [];
     for (const span of spans) {
       const p = _stripLineSuffix(span.getAttribute('data-path-candidate'));
       span.setAttribute('data-path-wd', wd);
+      // tableak-coverage:start
+      span.setAttribute('data-path-tab', String(owner));
+      // tableak-coverage:end
       _pendingFileLinkSpans.add(span);
-      const key = _fileLinkCacheKey(wd, p);
+      const key = _fileLinkCacheKey(owner, wd, p);
       if (!_pendingPathChecks.has(key)) {
         _pendingPathChecks.add(key);
         toCheck.push(p);
@@ -2408,7 +2443,7 @@
         type: 'checkPaths',
         paths: toCheck,
         workDir: wd,
-        tabId: activeTabId,
+        tabId: owner,
       });
     }
   }
@@ -2417,14 +2452,25 @@
     const results = ev.results;
     if (!results || typeof results !== 'object') return;
     const workDir = typeof ev.workDir === 'string' ? ev.workDir : '';
+    // tableak-coverage:start
+    // The reply resolves only the spans of the tab that asked. Sweeping
+    // every span in the document would promote or grey out another
+    // conversation's file links whenever both tabs share a workspace.
+    const owner = ev.tabId === undefined ? activeTabId : ev.tabId;
     for (const p of Object.keys(results)) {
-      _pendingPathChecks.delete(_fileLinkCacheKey(workDir, p));
+      _pendingPathChecks.delete(_fileLinkCacheKey(owner, workDir, p));
     }
+    // tableak-coverage:end
     const spans = new Set(_pendingFileLinkSpans);
     for (const span of document.querySelectorAll('[data-path-candidate]')) {
       spans.add(span);
     }
     for (const span of spans) {
+      // tableak-coverage:start
+      if ((span.getAttribute('data-path-tab') || '') !== String(owner)) {
+        continue;
+      }
+      // tableak-coverage:end
       if ((span.getAttribute('data-path-wd') || '') !== workDir) continue;
       const p = _stripLineSuffix(
         span.getAttribute('data-path-candidate') || '',
@@ -3047,11 +3093,16 @@
   }
   // autoscroll-coverage:end
 
-  function handleOutputEvent(ev, target, tState, ownerWorkDir) {
+  function handleOutputEvent(ev, target, tState, ownerWorkDir, ownerTabId) {
     const evWorkDir =
       typeof ownerWorkDir === 'string'
         ? ownerWorkDir
         : workDirForTab(activeTabId) || '';
+    // tableak-coverage:start
+    // File-link candidates are stamped with the tab that owns this
+    // transcript so a later pathsExist reply resolves only its own spans.
+    const evOwnerTab = ownerTabId === undefined ? activeTabId : ownerTabId;
+    // tableak-coverage:end
     const t = ev.type;
     switch (t) {
       case 'thinking_start':
@@ -3152,7 +3203,7 @@
           } else if (tState.txtNode && tState.txtPending) {
             tState.txtNode.appendData(tState.txtPending);
           }
-          linkifyFilePaths(tState.txtEl, evWorkDir);
+          linkifyFilePaths(tState.txtEl, evWorkDir, evOwnerTab);
           tState.txtEl = null;
           tState.txtBuf = '';
           tState.txtNode = null;
@@ -3163,7 +3214,7 @@
         if (tState.bashPanel && tState.bashBuf) {
           tState.bashPanel.textContent += tState.bashBuf;
           tState.bashBuf = '';
-          linkifyFilePaths(tState.bashPanel, evWorkDir);
+          linkifyFilePaths(tState.bashPanel, evWorkDir, evOwnerTab);
           // autoscroll-coverage:start
           // The flushed text belongs to the PREVIOUS tool's bash
           // subpanel; scroll it now, before this new tool call
@@ -3262,7 +3313,7 @@
             sd.classList.add('md-body');
             sd.innerHTML = kissSanitize(marked.parse(rawDesc));
             hlBlock(sd);
-            linkifyFilePaths(sd, evWorkDir);
+            linkifyFilePaths(sd, evWorkDir, evOwnerTab);
           } else {
             sd.textContent = rawDesc;
           }
@@ -3317,9 +3368,9 @@
         if (tState.bashPanel && tState.bashBuf) {
           tState.bashPanel.textContent += tState.bashBuf;
           tState.bashBuf = '';
-          linkifyFilePaths(tState.bashPanel, evWorkDir);
+          linkifyFilePaths(tState.bashPanel, evWorkDir, evOwnerTab);
         } else if (tState.bashPanel) {
-          linkifyFilePaths(tState.bashPanel, evWorkDir);
+          linkifyFilePaths(tState.bashPanel, evWorkDir, evOwnerTab);
         }
         const hadBash = !!tState.bashPanel;
         tState.bashPanel = null;
@@ -3351,12 +3402,12 @@
           );
           resultTarget.appendChild(r);
           const trBody = r.querySelector('.tr-content');
-          if (trBody) linkifyFilePaths(trBody, evWorkDir);
+          if (trBody) linkifyFilePaths(trBody, evWorkDir, evOwnerTab);
         } else {
           const op = mkEl('div', 'bash-panel');
           const opContent = mkEl('div', 'bash-panel-content');
           opContent.textContent = ev.content;
-          linkifyFilePaths(opContent, evWorkDir);
+          linkifyFilePaths(opContent, evWorkDir, evOwnerTab);
           op.appendChild(opContent);
           addCopyButton(op);
           if (!tState.lastToolCallEl) addPanelTimestamp(op, ev.ts);
@@ -3372,7 +3423,7 @@
             tState.bashRaf = requestAnimationFrame(() => {
               if (tState.bashPanel) {
                 tState.bashPanel.textContent += tState.bashBuf;
-                linkifyFilePaths(tState.bashPanel, evWorkDir);
+                linkifyFilePaths(tState.bashPanel, evWorkDir, evOwnerTab);
                 // autoscroll-coverage:start
                 autoScrollStreamed(tState.bashPanel);
                 // autoscroll-coverage:end
@@ -3384,7 +3435,7 @@
         } else {
           const s = mkEl('div', 'ev sys');
           s.textContent = (ev.text || '').replace(/\n\n+/g, '\n');
-          linkifyFilePaths(s, evWorkDir);
+          linkifyFilePaths(s, evWorkDir, evOwnerTab);
           target.appendChild(s);
         }
         break;
@@ -3462,7 +3513,7 @@
         if (fresh) target.appendChild(el);
         const bodyEl = el.querySelector('.' + cls + '-body');
         if (bodyEl) {
-          linkifyFilePaths(bodyEl, evWorkDir);
+          linkifyFilePaths(bodyEl, evWorkDir, evOwnerTab);
         }
         break;
       }
@@ -3667,7 +3718,13 @@
       const prevBudgetText = statusBudget ? statusBudget.textContent : '';
       const prevStepsText = statusSteps ? statusSteps.textContent : '';
 
-      handleOutputEvent(ev, target, tState, tab.workDir || configWorkDir || '');
+      handleOutputEvent(
+        ev,
+        target,
+        tState,
+        tab.workDir || configWorkDir || '',
+        tab.id,
+      );
 
       stepCount = prevStepCount;
       if (statusTokens) statusTokens.textContent = prevTokensText;
@@ -4248,6 +4305,199 @@
     }
   }
 
+  // tableak-coverage:start
+  // The streaming transcript types. Each one carries a fragment of one
+  // task's output, so it is meaningless without a tab to attribute it to.
+  const TASK_SCOPED_STREAM_TYPES = new Set([
+    'thinking_start',
+    'thinking_delta',
+    'thinking_end',
+    'text_delta',
+    'text_end',
+    'tool_call',
+    'tool_result',
+    'system_output',
+    'system_prompt',
+    'prompt',
+    'result',
+    'usage_info',
+  ]);
+
+  /**
+   * The task a tab owns, as a string, or '' when it owns none yet.
+   *
+   * A tab adopts a task id from the first event the daemon sends back, but
+   * output can arrive before that. sendMessage() therefore stamps
+   * pendingTaskId on the tab it submits from, so the tab is a legitimate
+   * owner from the instant the request leaves the webview.
+   */
+  function tabTaskId(tab) {
+    if (!tab) return '';
+    const owned = tab.currentTaskId || tab.pendingTaskId;
+    return owned === undefined || owned === null ? '' : String(owned);
+  }
+
+  /**
+   * True when two tabs are showing the SAME task, and so are two views of one
+   * conversation rather than two conversations.
+   *
+   * Task identity is the only sound test. A backend chat can host several
+   * tasks, so backendChatId equality would let a tab running task A display
+   * task B's transcript -- exactly the leak this module exists to prevent.
+   */
+  function isSameTaskTab(a, b) {
+    if (!a || !b) return false;
+    if (a.id === b.id) return true;
+    const ta = tabTaskId(a);
+    return ta !== '' && ta === tabTaskId(b);
+  }
+
+  /**
+   * True when the visible tab is the only conversation that could own an
+   * unaddressed message.
+   *
+   * Content tabs (file previews) are not conversations: they never own task
+   * output, so they must not make a lone chat look like a crowd. Sub-agent
+   * tabs ARE conversations and do count, unless they prove they are showing
+   * the same task as the visible tab.
+   */
+  function isOnlyActiveConversation() {
+    const active = getTab(activeTabId);
+    if (!active || active.isContentTab) return false;
+    return tabs.every(t => t.isContentTab || isSameTaskTab(t, active));
+  }
+
+  // Every task-scoped message must prove it belongs to the conversation on
+  // screen before it may touch a shared surface (#output, #task-input, the
+  // autocomplete dropdown, the ghost overlay, the file-link spans, the toast
+  // container). The webview keeps ONE copy of each of those, so an
+  // unattributed write is attributed to whichever tab happens to be visible
+  // and is then baked into that tab's snapshot by the next saveCurrentTab().
+  //
+  // The decision therefore FAILS CLOSED: when the message cannot prove where
+  // it belongs it is dropped rather than shown in an arbitrary conversation,
+  // because guessing is exactly the bug. Proof comes from a tabId, or failing
+  // that from a taskId (see isForActiveTaskId). Genuinely global messages
+  // (daemon status, model list, remote URL, workspace suggestions, and the
+  // user-initiated input commands) never reach this helper -- they are
+  // handled by their own cases and stay global by construction.
+  //
+  // A message addressed to another tab is shown only when that tab is
+  // showing the SAME task as the visible one; that is the single exemption
+  // the product allows.
+  function isForActiveTab(ev) {
+    const evTabId = ev ? ev.tabId : undefined;
+    if (evTabId === undefined || evTabId === null || evTabId === '') {
+      return isForActiveTaskId(ev);
+    }
+    if (evTabId === activeTabId) return true;
+    return isSameTaskTab(getTab(evTabId), getTab(activeTabId));
+  }
+
+  // Fallback addressing for a message that names no tab. A taskId names the
+  // conversation just as precisely as a tabId would, so the message is not a
+  // guess: it belongs to the visible tab exactly when that tab owns the same
+  // task.
+  //
+  // A message with neither id is truly unaddressed. It is safe only when a
+  // single conversation is on screen, because then there is no other tab it
+  // could belong to and nothing to leak into; dropping it there would merely
+  // throw away the output of an ordinary one-tab session.
+  function isForActiveTaskId(ev) {
+    const evTaskId = ev ? ev.taskId : undefined;
+    if (evTaskId === undefined || evTaskId === null || evTaskId === '') {
+      return isOnlyActiveConversation();
+    }
+    const owned = tabTaskId(getTab(activeTabId));
+    if (owned === '') return mayPrecedeAdoption(ev);
+    return owned === String(evTaskId);
+  }
+
+  // The only message types that legitimately reach a tab BEFORE it knows
+  // which task it is running. The daemon reports these two aggregates as soon
+  // as it starts working, which can be before the reply carrying the task id
+  // has been processed, and neither is adopted (see the adoption guard in the
+  // streaming branch) -- so a tab that owns nothing yet would never be able
+  // to show its own header counters if they were held to the same rule as a
+  // transcript.
+  const PRE_ADOPTION_TYPES = new Set(['result', 'usage_info']);
+
+  /**
+   * True when `ev` may be shown in a visible tab that owns no task yet.
+   *
+   * "I have not adopted a task" is NOT proof of ownership, so a tab in that
+   * state fails closed for everything that carries a task's words: those are
+   * only ever produced for the tab that asked for them, and that tab proves
+   * itself with a tabId or with the pendingTaskId it claimed when it
+   * submitted. Only the header aggregates are exempt, and only because they
+   * are the ones that legitimately race ahead of adoption.
+   */
+  function mayPrecedeAdoption(ev) {
+    return !!ev && PRE_ADOPTION_TYPES.has(ev.type);
+  }
+
+  /**
+   * True when the visible tab may take `ev`'s taskId as its own.
+   *
+   * Adoption is how a tab decides which task's traffic it will accept from
+   * then on, so it must be driven by something that names this tab: a reply
+   * addressed to it, or the pendingTaskId it stamped on itself when it
+   * submitted. Adopting a bare task id off the wire instead mis-binds the tab
+   * to a task another tab is running, and every subsequent event for the task
+   * it was really showing is then rejected as foreign.
+   */
+  function mayAdoptTaskId(ev) {
+    if (!ev) return false;
+    if (ev.tabId !== undefined && ev.tabId !== null && ev.tabId !== '') {
+      return true;
+    }
+    const tab = getTab(activeTabId);
+    return !!tab && !!tab.pendingTaskId;
+  }
+
+  /**
+   * True when a message names the conversation it belongs to.
+   *
+   * An addressed message must satisfy isForActiveTab() before it may touch a
+   * shared surface. An unaddressed one is judged separately, because for
+   * legacy window-level traffic (install toasts, daemon diagnostics) the
+   * absence of an id means "everybody", not "nobody".
+   */
+  function isAddressed(ev) {
+    if (!ev) return false;
+    const hasTab = ev.tabId !== undefined && ev.tabId !== null;
+    const hasTask = ev.taskId !== undefined && ev.taskId !== null;
+    return hasTab || hasTask;
+  }
+
+  // A spoken transcript belongs to the tab that was on screen when the words
+  // were said, not to the tab that happens to be on screen when the audio
+  // finishes transcribing. voice.js stamps that tab on the event; an
+  // unstamped event predates any tab switch and stays allowed.
+  function isFromSpeechTab(event) {
+    const detail = event ? event.detail : null;
+    const tabId = detail ? detail.tabId : null;
+    if (tabId === undefined || tabId === null || tabId === '') return true;
+    return isForActiveTab({tabId: tabId});
+  }
+
+  /**
+   * The conversation on screen, for voice.js.
+   *
+   * voice.js runs in the same webview but in its own closure, so it reads the
+   * visible tab through this accessor rather than a shared variable. It
+   * returns the task id too, so voice can apply the same-task exemption that
+   * isForActiveTab() applies.
+   */
+  window.kissVoiceOwner = function () {
+    return {tabId: activeTabId, taskId: tabTaskId(getTab(activeTabId))};
+  };
+  // Retained for callers that only need the visible tab id.
+  window.kissActiveTabId = function () {
+    return activeTabId;
+  };
+  // tableak-coverage:end
+
   function handleEvent(ev) {
     const t = ev.type;
     switch (t) {
@@ -4258,11 +4508,25 @@
         }
         return;
       case 'notification':
-        if (ev.tabId && !getTab(ev.tabId)) break;
+        // tableak-coverage:start
+        // An untagged toast is window-level (install progress, updates);
+        // a tagged one belongs to a task and must stay with its tab.
+        if (ev.tabId !== undefined && !isForActiveTab(ev)) break;
+        // tableak-coverage:end
         updateNotification(ev);
         break;
       case 'fileContent':
-        handleFileContent(ev);
+        // tableak-coverage:start
+        // A file opened for a background task must never pull the user away
+        // from the conversation they are reading. It is still the user's
+        // file though, so open it in the background rather than throw it
+        // away -- the tab is waiting for them when they switch over.
+        if (ev.tabId !== undefined && !isForActiveTab(ev)) {
+          handleFileContent(ev, false);
+          return;
+        }
+        // tableak-coverage:end
+        handleFileContent(ev, true);
         return;
       case 'pathsExist':
         handlePathsExist(ev);
@@ -4321,6 +4585,9 @@
         renderFrequentTasks(ev.tasks || []);
         break;
       case 'files': {
+        // tableak-coverage:start
+        if (!isForActiveTab(ev)) break;
+        // tableak-coverage:end
         const filesCtx = getAtCtx();
         if (!filesCtx) {
           hideAC();
@@ -4369,23 +4636,35 @@
         break;
       }
       case 'error':
-        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
+        // tableak-coverage:start
+        // Diagnostics are task output like any other: a message that names a
+        // task or a tab belongs to that conversation and nowhere else.
+        if (isAddressed(ev) && !isForActiveTab(ev)) {
           const bgErrTab = findTabByEvt(ev);
           if (bgErrTab) processOutputEventForBgTab(ev, bgErrTab);
           break;
         }
+        // tableak-coverage:end
         addError(ev.text);
         break;
       case 'notice':
-        if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
+        // tableak-coverage:start
+        if (isAddressed(ev) && !isForActiveTab(ev)) {
+          const bgNoticeTab = findTabByEvt(ev);
+          if (bgNoticeTab) processOutputEventForBgTab(ev, bgNoticeTab);
+          break;
+        }
+        // tableak-coverage:end
         addNotice(ev.text);
         break;
       case 'warning': {
-        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
+        // tableak-coverage:start
+        if (isAddressed(ev) && !isForActiveTab(ev)) {
           const bgWarnTab = findTabByEvt(ev);
           if (bgWarnTab) processOutputEventForBgTab(ev, bgWarnTab);
           break;
         }
+        // tableak-coverage:end
         addWarning(ev.message || ev.text || '');
         break;
       }
@@ -4476,7 +4755,9 @@
         );
         break;
       case 'followup_suggestion': {
-        if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
+        // tableak-coverage:start
+        if (!isForActiveTab(ev)) break;
+        // tableak-coverage:end
         const fu = mkEl('div', 'followup-bar');
         fu.innerHTML =
           '<span class="fu-label">Suggested next</span>' +
@@ -4511,6 +4792,7 @@
         }
         if (teTab && ev.task_id !== undefined && ev.task_id !== null) {
           teTab.currentTaskId = ev.task_id;
+          teTab.pendingTaskId = null;
           const rpPanel = _rpTabPanel.get(teTabId);
           if (rpPanel && teTab.isSubagentTab) {
             rpRegisterSubagent(
@@ -4606,12 +4888,26 @@
         break;
       }
       case 'adjacent_task_events':
-        if (ev.tabId !== undefined && ev.tabId !== activeTabId) break;
-        renderAdjacentTask(ev.direction, ev.task, ev.events || [], ev.task_id);
+        // tableak-coverage:start
+        // A neighbouring task's transcript replays into the visible #output,
+        // so it must belong to the conversation on screen.
+        if (isAddressed(ev) && !isForActiveTab(ev)) break;
+        renderAdjacentTask(
+          ev.direction,
+          ev.task,
+          ev.events || [],
+          ev.task_id,
+          ev.tabId || activeTabId,
+        );
+        // tableak-coverage:end
         break;
       case 'setTaskText': {
         const stt = (ev.text || '').trim();
-        if (ev.tabId === undefined || ev.tabId === activeTabId) {
+        // tableak-coverage:start
+        // The header names the task the user is looking at. A foreign task
+        // may only retitle its OWN tab, never the one on screen.
+        if (!isAddressed(ev) || isForActiveTab(ev)) {
+          // tableak-coverage:end
           if (stt) {
             currentTaskName = stt;
             currentTaskId = null;
@@ -4696,11 +4992,17 @@
         if (histIdx < 0) histIdx = -1;
         break;
       case 'ghost':
+        // tableak-coverage:start
+        if (!isForActiveTab(ev)) break;
+        // tableak-coverage:end
         if (ev.suggestion && ev.query === inp.value) {
           updateGhost(ev.suggestion);
         }
         break;
       case 'completions': {
+        // tableak-coverage:start
+        if (!isForActiveTab(ev)) break;
+        // tableak-coverage:end
         if (ev.query !== undefined && ev.query !== inp.value) {
           break;
         }
@@ -5031,14 +5333,26 @@
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgTab = findTabByEvt(ev);
           if (bgTab) processOutputEventForBgTab(ev, bgTab);
-          break;
+          if (!isForActiveTab(ev)) break;
         }
+        // tableak-coverage:start
+        // Streaming transcript events are always task-scoped, so one that
+        // names no tab cannot be attributed and must not be shown.
+        if (TASK_SCOPED_STREAM_TYPES.has(t) && !isForActiveTab(ev)) break;
+        // tableak-coverage:end
         if (
           ev.taskId !== undefined &&
           ev.taskId !== null &&
           ev.taskId !== '' &&
-          ev.type !== 'result' &&
-          ev.type !== 'usage_info'
+          !PRE_ADOPTION_TYPES.has(ev.type) &&
+          // tableak-coverage:start
+          // A tab learns which task it is running from a reply that names it
+          // (tabId) or from the request it sent itself (pendingTaskId). A bare
+          // task id off the wire is not evidence of anything, and adopting one
+          // binds this tab to a task it never started -- permanently, since
+          // every later event for the real owner is then rejected.
+          mayAdoptTaskId(ev)
+          // tableak-coverage:end
         ) {
           const adoptTab = getTab(activeTabId);
           if (
@@ -5046,6 +5360,7 @@
             String(adoptTab.currentTaskId) !== String(ev.taskId)
           ) {
             adoptTab.currentTaskId = ev.taskId;
+            adoptTab.pendingTaskId = null;
             currentTaskId = ev.taskId;
             if (
               (oldestLoadedTaskId === null || oldestLoadedTaskId === '') &&
@@ -5438,7 +5753,13 @@
           target = rLlmPanel;
           tState = rLlmPanelState;
         }
-        handleOutputEvent(ev, target, tState, rWorkDir);
+        handleOutputEvent(
+          ev,
+          target,
+          tState,
+          rWorkDir,
+          opts ? opts.ownerTabId : undefined,
+        );
       });
     } finally {
       _deferHighlight = prevDefer;
@@ -6591,14 +6912,18 @@
       if (detail && detail.type) api.send(detail);
     });
 
-    window.addEventListener('kiss-voice-submit', () => {
+    // tableak-coverage:start
+    window.addEventListener('kiss-voice-submit', event => {
+      if (!isFromSpeechTab(event)) return;
       sendMessage();
     });
 
-    window.addEventListener('kiss-voice-answer', () => {
+    window.addEventListener('kiss-voice-answer', event => {
+      if (!isFromSpeechTab(event)) return;
       const tab = getTab(activeTabId);
       if (tab && tab.askPendingQuestion !== null) submitAskForTab(tab);
     });
+    // tableak-coverage:end
   }
 
   function readFileAsAttachment(file) {
@@ -6654,6 +6979,12 @@
     if (curTab) {
       curTab.t0 = t0;
       curTab.endTs = 0;
+      // tableak-coverage:start
+      // Claim the task before its id exists. Until the daemon replies with a
+      // real task id, this marker is what makes the submitting tab -- and
+      // only it -- a legitimate owner of the output that is about to arrive.
+      if (!curTab.currentTaskId) curTab.pendingTaskId = 'pending:' + curTab.id;
+      // tableak-coverage:end
     }
     inp.value = '';
     inp.style.height = 'auto';
@@ -7910,7 +8241,13 @@
   function checkAutocomplete() {
     const atCtx = getAtCtx();
     if (atCtx) {
-      api.getFiles({prefix: atCtx.query, workDir: workDirForTab(activeTabId)});
+      api.getFiles({
+        prefix: atCtx.query,
+        workDir: workDirForTab(activeTabId),
+        // Stamp the owning tab so a reply can never render over a sibling
+        // tab whose input happens to hold the same half-typed mention.
+        tabId: activeTabId || undefined,
+      });
     } else {
       hideAC();
     }
@@ -8137,6 +8474,19 @@
     getActiveTabId: function () {
       return activeTabId;
     },
+    // tableak-coverage:start
+    // The demo replay types a Result panel across many awaits, so it must be
+    // able to keep writing into the conversation it started in even after the
+    // user switches away. #output is a singleton whose children are moved
+    // into the outgoing tab's fragment, so the replay cannot hold onto an
+    // element: it has to re-ask for its own tab's live root before every
+    // append. Returns null once that tab is gone, which stops the replay from
+    // resurrecting a closed conversation.
+    outputRootForTab: function (tabId) {
+      if (!tabId) return null;
+      return rpTaskDomRootForParent(tabId);
+    },
+    // tableak-coverage:end
     sendMessage: function (msg) {
       api.send(msg);
     },

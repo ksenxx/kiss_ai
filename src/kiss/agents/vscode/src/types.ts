@@ -39,7 +39,7 @@ export type FromWebviewMessage =
   | {type: 'getFrequentTasks'; limit?: number}
   | {type: 'deleteFrequentTask'; task: string}
   | {type: 'setFavorite'; taskId: number; isFavorite: boolean}
-  | {type: 'getFiles'; prefix: string; workDir?: string}
+  | {type: 'getFiles'; prefix: string; workDir?: string; tabId?: string}
   | {type: 'userAnswer'; answer: string; tabId?: string}
   | {
       type: 'openFile';
@@ -97,14 +97,25 @@ export type FromWebviewMessage =
   | {type: 'notificationAction'; id: string; action?: string}
   | {type: 'voiceToggle'; enabled: boolean; sensitivity?: number}
   | {type: 'voiceSensitivity'; value: number}
-  | {type: 'voiceAck'};
+  | {type: 'voiceAck'}
+  | {type: 'voiceDropped'; tabId?: string; text: string};
 
 export type ToWebviewMessage = ToWebviewMessageBody & {tabId?: string};
 
 type ToWebviewMessageBody =
-  | {type: 'voiceWake'}
+  // roundId pairs a transcript with the wake that started it. Rounds overlap
+  // (the listener re-arms while the previous utterance is transcribed), so the
+  // webview needs the id to know which conversation was on screen when those
+  // words were spoken.
+  | {type: 'voiceWake'; roundId: number}
   | {type: 'voiceTranscribing'}
-  | {type: 'voiceSpeech'; text: string; speaker?: number; language?: string}
+  | {
+      type: 'voiceSpeech';
+      roundId: number;
+      text: string;
+      speaker?: number;
+      language?: string;
+    }
   | {type: 'voiceState'; listening: boolean; error?: string}
   | {type: 'thinking_start'}
   | {type: 'thinking_delta'; text: string}

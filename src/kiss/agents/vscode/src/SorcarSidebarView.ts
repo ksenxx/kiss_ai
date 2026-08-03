@@ -154,7 +154,10 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   getFrequentTasks: ['limit'],
   setFavorite: ['taskId', 'isFavorite'],
   deleteFrequentTask: ['task'],
-  getFiles: ['prefix', 'workDir'],
+  // tabId must survive: the daemon echoes it on the `files` reply so the
+  // webview can tell whether the @-mention picker still belongs to the
+  // conversation on screen.
+  getFiles: ['prefix', 'workDir', 'tabId'],
   getAdjacentTask: ['tabId', 'taskId', 'direction'],
   getConfig: [],
   saveConfig: ['config', 'apiKeys'],
@@ -1073,12 +1076,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       case 'voiceToggle': {
         if (!this._voiceWake) {
           this._voiceWake = new VoiceWakeService(
-            () => this._sendToWebview({type: 'voiceWake'}),
+            roundId => this._sendToWebview({type: 'voiceWake', roundId}),
             (listening, error) =>
               this._sendToWebview({type: 'voiceState', listening, error}),
-            (text, speaker, language) =>
+            (roundId, text, speaker, language) =>
               this._sendToWebview({
                 type: 'voiceSpeech',
+                roundId,
                 text,
                 speaker,
                 language,
@@ -1098,6 +1102,17 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       case 'voiceAck': {
         playVoiceAckClip(
           path.join(this._extensionUri.fsPath, 'media', 'working-on-it.mp3'),
+        );
+        break;
+      }
+
+      // The user switched chat tabs while speaking, so the transcript was
+      // never typed anywhere. Say so instead of losing the words silently.
+      case 'voiceDropped': {
+        if (typeof vscode.window.showWarningMessage !== 'function') break;
+        void vscode.window.showWarningMessage(
+          'Speech discarded because the chat tab changed while you spoke: ' +
+            message.text,
         );
         break;
       }

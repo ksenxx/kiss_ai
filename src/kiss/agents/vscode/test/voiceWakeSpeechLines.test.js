@@ -70,9 +70,9 @@ const speeches = [];
 const states = [];
 const transcribings = [];
 const service = new VoiceWakeService(
-  () => wakes.push(Date.now()),
+  roundId => wakes.push(roundId),
   (listening, error) => states.push({listening, error}),
-  text => speeches.push(text),
+  (roundId, text) => speeches.push({roundId, text}),
   () => transcribings.push(Date.now()),
 );
 service.start();
@@ -83,15 +83,29 @@ const startedAt = Date.now();
 function finish() {
   fs.rmSync(tmpdir, {recursive: true, force: true});
   try {
-    assert.ok(wakes.length >= 1, `expected a WAKE event, states=${JSON.stringify(states)}`);
+    assert.ok(
+      wakes.length >= 1,
+      `expected a WAKE event, states=${JSON.stringify(states)}`,
+    );
     assert.ok(
       speeches.length >= 1,
       `expected an onSpeech callback, states=${JSON.stringify(states)}`,
     );
     assert.strictEqual(
-      speeches[0],
+      speeches[0].text,
       '',
       'silence after the wake word must surface as onSpeech("")',
+    );
+    // The transcript must name the wake it answers, so the webview can pair
+    // it with the conversation that was on screen when the words were said.
+    assert.strictEqual(
+      speeches[0].roundId,
+      wakes[0],
+      'the silence must be reported for the round the wake opened',
+    );
+    assert.ok(
+      Number.isInteger(wakes[0]) && wakes[0] >= 1,
+      `round ids must be positive integers, got ${wakes[0]}`,
     );
     assert.ok(
       states.some(s => s.listening === true),

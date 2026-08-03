@@ -142,8 +142,35 @@
     return Number(n).toLocaleString('en-US');
   }
 
-  async function streamResultEvent(api, ev, gen) {
-    const O = document.getElementById('output');
+  /**
+   * The live DOM root of the conversation `ownerTabId` names.
+   *
+   * Asked for right before an append rather than captured once, because
+   * #output is a singleton whose children the webview moves into the outgoing
+   * tab's fragment on a switch: a held element would follow the user instead
+   * of staying with the replay. Returns null when the owner tab is gone.
+   *
+   * Pages with no tab machinery (the standalone chat page, and host harnesses
+   * that provide their own demo api) have exactly one conversation and so use
+   * #output directly -- there is nothing there to leak into.
+   */
+  function replayOutputRoot(api, ownerTabId) {
+    if (typeof api.outputRootForTab !== 'function') {
+      return document.getElementById('output');
+    }
+    return api.outputRootForTab(ownerTabId);
+  }
+
+  /**
+   * Type a result panel into the conversation identified by `ownerTabId`,
+   * three words at a time.
+   *
+   * The owner is a TAB ID, not an element, so that every append re-resolves
+   * the surface: this function awaits between every tick, and a tab switch in
+   * one of those gaps must not redirect the rest of the panel.
+   */
+  async function streamResultEvent(api, ev, gen, ownerTabId) {
+    const O = replayOutputRoot(api, ownerTabId);
     if (!O) return;
 
     const rc = document.createElement('div');
@@ -394,6 +421,11 @@
       api.setTaskText(taskText);
       api.updateTabTitle(taskText);
 
+      // Bind the replay to THIS conversation before the first await. The
+      // events request alone is long enough for the user to open another tab,
+      // and everything after it appends across awaits.
+      const ownerTabId = api.getActiveTabId();
+
       const events = await requestEvents(api, session);
       await pauseGate(myGen);
       if (replayStopped(myGen)) break;
@@ -407,7 +439,7 @@
         const group = panelGroups[j];
 
         if (group.length === 1 && group[0].type === 'result') {
-          await streamResultEvent(api, group[0], myGen);
+          await streamResultEvent(api, group[0], myGen, ownerTabId);
           continue;
         }
 
