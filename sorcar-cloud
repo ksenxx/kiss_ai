@@ -36,7 +36,10 @@
 #      the remote, minus host-local state that must not be cloned
 #      (databases, sockets, logs, browser profiles, TLS certs, the
 #      kiss-web fingerprint and the laptop's tunnel URL).  ``work_dir`` in
-#      config.json is rewritten to the remote workspace path.
+#      config.json is rewritten to the remote workspace path.  The laptop's
+#      ~/.ssh/ (private keys, config, known_hosts) is copied too so the
+#      remote can push to git and hop to other hosts — but authorized_keys
+#      is NEVER copied, so it can't overwrite the keys that let you ssh in.
 #   4. Copy the local shell rc file that holds your API keys (the first of
 #      ~/.zshrc  ~/.bashrc  ~/.envrc  ~/.profile  ~/.bash_profile
 #      ~/.zprofile that contains an "API_KEY" line) to $HOME on the remote
@@ -335,7 +338,7 @@ copy_tree "$SCRIPT_DIR" "$REMOTE_DIR"
 info "Folder copy complete: $(ssh "$TARGET" "du -sh -- '$REMOTE_DIR' 2>/dev/null | cut -f1")"
 
 # ---------------------------------------------------------------------------
-# 5. Copy ~/.kiss/ so the remote inherits models, credentials and settings.
+# 5a. Copy ~/.kiss/ so the remote inherits models, credentials and settings.
 #
 # "Verbatim" is the wrong contract for ~/.kiss: several entries are *host*
 # state, not user state, and cloning them actively breaks the remote.
@@ -415,6 +418,52 @@ FIXCFG
     info "~/.kiss copied (work_dir -> $REMOTE_DIR, kiss-web fingerprint cleared)."
 else
     warn "No local ~/.kiss directory — skipping."
+fi
+
+# ---------------------------------------------------------------------------
+# 5b. Copy ~/.ssh/ so the remote inherits your SSH identity — private keys,
+# client config and known_hosts — which lets the remote push to git, clone
+# private repos and hop to other hosts as "you".  Two hard safety rules:
+#
+#   * authorized_keys / authorized_keys2 are NEVER copied.  Those files list
+#     the keys allowed to log INTO a host; on the laptop they authorize
+#     access to the LAPTOP.  Overwriting the remote's copy would replace the
+#     very keys that let this script (and you) ssh into the remote — a great
+#     way to lock yourself out.  So they are excluded, and nothing is
+#     appended to the remote's authorized_keys.
+#
+#   * No --delete: the copy is purely additive.  A key or host entry that
+#     exists only on the remote is preserved, never pruned.
+#
+# ssh refuses to use a key directory or a private key with group/other
+# permissions, so the tree is re-permissioned on the remote AFTER the copy:
+# 700 on ~/.ssh itself, 600 on every file, and 644 on the world-safe ones
+# (*.pub, known_hosts*).  Control-master sockets (*.sock) and macOS's
+# .DS_Store are skipped — they are host-local junk, not identity.
+# ---------------------------------------------------------------------------
+if [[ -d "$HOME/.ssh" ]]; then
+    step "Copying ~/.ssh/ -> $TARGET:~/.ssh/ (excluding authorized_keys) ..."
+    ssh "$TARGET" 'mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"'
+    rsync -aHz --numeric-ids -e ssh \
+        --exclude='authorized_keys' \
+        --exclude='authorized_keys2' \
+        --exclude='environment' \
+        --exclude='*.sock' \
+        --exclude='.DS_Store' \
+        "$HOME/.ssh/" "$TARGET:.ssh/"
+    # -a preserves the laptop's modes, but a differing remote umask (or a
+    # pre-existing loose file) would make ssh reject the keys, so nail the
+    # permissions down explicitly.
+    ssh "$TARGET" 'bash -s' <<'FIXSSH'
+set -e
+chmod 700 "$HOME/.ssh" 2>/dev/null || true
+find "$HOME/.ssh" -type f -exec chmod 600 {} + 2>/dev/null || true
+find "$HOME/.ssh" -type f \( -name '*.pub' -o -name 'known_hosts*' \) \
+    -exec chmod 644 {} + 2>/dev/null || true
+FIXSSH
+    info "~/.ssh copied (authorized_keys left untouched; permissions fixed on remote)."
+else
+    warn "No local ~/.ssh directory — skipping."
 fi
 
 # ---------------------------------------------------------------------------
