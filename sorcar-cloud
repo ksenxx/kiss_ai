@@ -1,0 +1,537 @@
+#!/bin/bash
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+#
+# Push the *local* KISS Sorcar checkout (the folder that contains this
+# script) to a remote Linux machine over SSH, run its ``install.sh`` there,
+# start code-server, and open your local browser at the tunneled port.
+#
+# Unlike ``sorcar-linux`` — which curls a fresh checkout of ``kiss_ai`` from
+# GitHub — ``sorcar-cloud`` ships *this exact working directory* (your
+# uncommitted edits included) to the remote host.  Use it when you want the
+# remote code-server to run the code you have right now on your laptop, not
+# the last commit on ``main``.
+#
+# Usage:  ./sorcar-cloud [--force] user@ip-address [PORT]
+#
+# Flow:
+#   1. SSH connectivity check.
+#   2. Rsync the script's folder to  ~/<basename>/  on the remote host,
+#      skipping .venv, node_modules, .git, build/, dist/, __pycache__/,
+#      *.vsix, *.log, tmp/, .kiss-worktrees/, etc.
+#   3. Copy the local shell rc file that holds your API keys (the first
+#      of  ~/.zshrc  ~/.bashrc  ~/.envrc  ~/.profile  ~/.bash_profile
+#      ~/.zprofile that contains an "API_KEY" line) to $HOME on the
+#      remote host, so install.sh + kiss-web inherit them.
+#   4. Install code-server (standalone, no sudo) if it is missing.
+#   5. Install a small ``code`` shim so the copied ``install.sh`` drops the
+#      built KISS Sorcar VSIX straight into code-server instead of a
+#      desktop VS Code that a headless server does not have.
+#   6. Run the copied ``install.sh`` on the remote (sourced through the
+#      shell rc so API keys are exported) with KISS_CODE_CLI=code-server
+#      and KISS_SKIP_LAUNCH=1 — that skips the desktop launch and lets
+#      us start code-server ourselves.
+#   7. (Re)launch code-server on 127.0.0.1:$PORT, workspace = the copied
+#      folder.
+#   8. Open an SSH tunnel localhost:$PORT -> remote 127.0.0.1:$PORT and
+#      open your local browser at http://localhost:$PORT.
+#
+# ``--force`` reruns steps 4-6 even when the remote already looks
+# provisioned.  Without ``--force`` the script still rsyncs the folder and
+# recopies the rc file (both are fast/idempotent) but skips the code-server
+# install and re-runs of install.sh when everything is already in place.
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Logging helpers (mirrors sorcar-linux / sorcar-docker)
+# ---------------------------------------------------------------------------
+info() { printf '\033[0;32m[INFO]\033[0m  %s\n' "$*"; }
+step() { printf '\033[0;34m[STEP]\033[0m  %s\n' "$*"; }
+warn() { printf '\033[1;33m[WARN]\033[0m  %s\n' "$*"; }
+die()  { printf '\033[0;31m[ERR]\033[0m  %s\n' "$*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# 1. Parse arguments
+# ---------------------------------------------------------------------------
+FORCE=0
+ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --force|-f) FORCE=1 ;;
+        -h|--help)
+            sed -n '2,50p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0 ;;
+        *) ARGS+=("$arg") ;;
+    esac
+done
+TARGET="${ARGS[0]:-}"
+PORT="${ARGS[1]:-8080}"
+
+[[ -n "$TARGET" ]] || die "Usage: $0 [--force] user@ip-address [PORT]"
+[[ "$TARGET" == *"@"* ]] || warn "TARGET '$TARGET' has no 'user@' part; using the SSH default user."
+
+URL="http://localhost:${PORT}"
+
+# ---------------------------------------------------------------------------
+# 2. Pre-flight checks (local)
+# ---------------------------------------------------------------------------
+command -v ssh   &>/dev/null || die "ssh is not installed. Install OpenSSH first."
+command -v scp   &>/dev/null || die "scp is not installed. Install OpenSSH first."
+command -v rsync &>/dev/null || die "rsync is not installed. Install rsync first."
+command -v curl  &>/dev/null || die "curl is not installed. Install curl first."
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+[[ -f "$SCRIPT_DIR/install.sh" ]] || die "install.sh not found in $SCRIPT_DIR — is this really the kiss checkout?"
+
+# Determine the *logical* project name for the remote directory.
+# Priority:
+#   1. $SORCAR_REMOTE_DIR       — explicit override.
+#   2. Git worktree main repo   — if SCRIPT_DIR is a worktree
+#                                 (.git is a file, not a dir), the main
+#                                 repo's basename is what the user knows
+#                                 the project as (e.g. "kiss"), not the
+#                                 worktree hash directory (kiss_wt-abcd…).
+#   3. basename $SCRIPT_DIR     — plain fallback.
+if [[ -n "${SORCAR_REMOTE_DIR:-}" ]]; then
+    SCRIPT_BASE="$SORCAR_REMOTE_DIR"
+elif [[ -f "$SCRIPT_DIR/.git" ]]; then
+    # Worktree: .git contains "gitdir: <main>/.git/worktrees/<name>"
+    GITDIR_LINE="$(sed -n 's/^gitdir: //p' "$SCRIPT_DIR/.git" | head -1)"
+    MAIN_REPO=""
+    if [[ -n "$GITDIR_LINE" ]]; then
+        # Handle both absolute and script-dir-relative gitdir paths.
+        case "$GITDIR_LINE" in
+            /*) ABS_GITDIR="$GITDIR_LINE" ;;
+            *)  ABS_GITDIR="$SCRIPT_DIR/$GITDIR_LINE" ;;
+        esac
+        # <main>/.git/worktrees/<name> — climb three parents.
+        MAIN_REPO="$(cd "$ABS_GITDIR/../../.." 2>/dev/null && pwd || true)"
+    fi
+    if [[ -n "$MAIN_REPO" ]]; then
+        SCRIPT_BASE="$(basename "$MAIN_REPO")"
+        info "Worktree detected — will use logical project name '$SCRIPT_BASE' on the remote."
+    else
+        SCRIPT_BASE="$(basename "$SCRIPT_DIR")"
+    fi
+else
+    SCRIPT_BASE="$(basename "$SCRIPT_DIR")"
+fi
+
+step "Checking SSH connectivity to $TARGET..."
+ssh -o ConnectTimeout=15 -o BatchMode=no "$TARGET" 'echo ok' >/dev/null \
+    || die "Cannot SSH into $TARGET. Check the address and your SSH keys."
+info "SSH connection OK"
+
+# ---------------------------------------------------------------------------
+# 3. Find the shell rc file that carries API keys
+# ---------------------------------------------------------------------------
+RC_FILE=""
+for candidate in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.envrc" "$HOME/.bash_profile" "$HOME/.zprofile" "$HOME/.profile"; do
+    if [[ -f "$candidate" ]] && grep -q "API_KEY" "$candidate" 2>/dev/null; then
+        RC_FILE="$candidate"; break
+    fi
+done
+if [[ -z "$RC_FILE" ]]; then
+    warn "No ~/.*rc / profile file with an *API_KEY* line was found — the remote install will proceed without API keys."
+else
+    info "Found API-key rc file: $RC_FILE"
+fi
+
+# ---------------------------------------------------------------------------
+# 4. Copy the local folder to the remote host  ($HOME/$SCRIPT_BASE)
+#
+# We rsync into  $HOME/$SCRIPT_BASE/ so re-runs update in place instead of
+# nesting the folder (rsync of "SRC/" vs "SRC" — trailing slash matters).
+# --delete keeps the remote copy in sync with the local one; excludes match
+# the local .gitignore closely so build artifacts do not travel.
+# ---------------------------------------------------------------------------
+REMOTE_DIR="\$HOME/$SCRIPT_BASE"   # expanded on the remote side
+step "Rsyncing $SCRIPT_DIR/ -> $TARGET:$REMOTE_DIR/ ..."
+rsync -az --delete \
+    --exclude='.git' \
+    --exclude='.git/' \
+    --exclude='.venv/' \
+    --exclude='.uv/' \
+    --exclude='node_modules/' \
+    --exclude='__pycache__/' \
+    --exclude='.pytest_cache/' \
+    --exclude='.mypy_cache/' \
+    --exclude='.ruff_cache/' \
+    --exclude='.coverage*' \
+    --exclude='.DS_Store' \
+    --exclude='*.pyc' \
+    --exclude='*.vsix' \
+    --exclude='*.log' \
+    --exclude='*.egg-info' \
+    --exclude='build/' \
+    --exclude='dist/' \
+    --exclude='tmp/' \
+    --exclude='.kiss-worktrees/' \
+    --exclude='.kiss.artifacts/' \
+    --exclude='src/kiss/agents/vscode/out/' \
+    --exclude='src/kiss/agents/vscode/kiss-sorcar.vsix' \
+    --exclude='kiss_project/' \
+    --exclude='deepscholar_bench_workdir/' \
+    --exclude='jobs/' \
+    -e ssh \
+    "$SCRIPT_DIR/" "$TARGET:$SCRIPT_BASE/"
+info "Rsync complete."
+
+# ---------------------------------------------------------------------------
+# 5. Ship API keys to the remote host.
+#
+# We do two things:
+#   (a) Copy the whole rc file to  ~/<basename>  on the remote (unchanged)
+#       so `ssh user@host` interactive sessions keep working the same as on
+#       the laptop.  Also splice a `. "$HOME/<basename>"` line into the
+#       remote's ~/.bashrc (idempotent) so non-interactive ssh children
+#       inherit the env too.
+#   (b) Extract JUST the credentials-looking `export FOO=bar` lines from
+#       the local rc file into a small, bash-safe   ~/.kiss/api_keys.env
+#       on the remote.  Sourcing an entire zsh-flavoured `.zshrc` under
+#       bash is unreliable (zsh-only builtins, `${var:h}` splits, etc.),
+#       and if it errors early the exports never get executed — that is
+#       why the VS Code extension prompted for API keys in the previous
+#       run.  Sourcing a plain `export KEY=VAL` file under bash is
+#       bulletproof, so we use that file to seed BOTH ``install.sh`` and
+#       ``code-server``.
+# ---------------------------------------------------------------------------
+REMOTE_RC_NAME=""
+API_KEYS_ENV_LOCAL=""
+if [[ -n "$RC_FILE" ]]; then
+    REMOTE_RC_NAME="$(basename "$RC_FILE")"
+    step "Copying $RC_FILE -> $TARGET:~/$REMOTE_RC_NAME"
+    scp -p "$RC_FILE" "$TARGET:$REMOTE_RC_NAME" >/dev/null
+
+    # (b) Extract safe ``export FOO=BAR`` lines locally.  We accept two
+    # shapes commonly used across bash/zsh:
+    #     export NAME=value
+    #     NAME=value  (bare assignment; we wrap it with `export`)
+    # NAME must be all upper-case identifier so we do not grab random
+    # lowercase locals or PS1-ish variables.
+    API_KEYS_ENV_LOCAL="$(mktemp "${TMPDIR:-/tmp}/sorcar-cloud-env.XXXXXX")"
+    trap 'rm -f "$API_KEYS_ENV_LOCAL"' EXIT
+    {
+        echo "# Auto-generated by sorcar-cloud from $RC_FILE"
+        echo "# Sourced by install.sh and by the code-server launcher on the remote."
+        # `|| true` — an rc file with zero matching lines must not fail the pipe.
+        grep -E '^[[:space:]]*(export[[:space:]]+)?[A-Z][A-Z0-9_]*=' "$RC_FILE" 2>/dev/null \
+            | sed -E 's/^[[:space:]]*//; s/^([A-Z][A-Z0-9_]*=)/export \1/' \
+            || true
+    } > "$API_KEYS_ENV_LOCAL"
+    N_KEYS=$(grep -cE '^export ' "$API_KEYS_ENV_LOCAL" || true)
+    info "Extracted $N_KEYS export lines from $RC_FILE."
+    # Ship the extracted file to ~/.kiss/api_keys.env on the remote.
+    ssh "$TARGET" 'mkdir -p "$HOME/.kiss" && chmod 700 "$HOME/.kiss"'
+    scp -p "$API_KEYS_ENV_LOCAL" "$TARGET:.kiss/api_keys.env" >/dev/null
+    ssh "$TARGET" 'chmod 600 "$HOME/.kiss/api_keys.env"'
+    info "Wrote $TARGET:~/.kiss/api_keys.env"
+
+    # (a) Ensure future ssh sessions still see the full rc file too.
+    ssh "$TARGET" "REMOTE_RC_NAME='$REMOTE_RC_NAME' bash -s" <<'ENSURE_SOURCED'
+set -e
+MARKER="# sorcar-cloud: source API-keys rc"
+touch "$HOME/.bashrc"
+if ! grep -qF "$MARKER" "$HOME/.bashrc" 2>/dev/null; then
+    printf '\n%s\n[ -f "$HOME/%s" ] && . "$HOME/%s"\n[ -f "$HOME/.kiss/api_keys.env" ] && . "$HOME/.kiss/api_keys.env"\n' \
+        "$MARKER" "$REMOTE_RC_NAME" "$REMOTE_RC_NAME" >> "$HOME/.bashrc"
+fi
+ENSURE_SOURCED
+    info "API-key files installed on remote and sourced from ~/.bashrc."
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Idempotency probe — anything already provisioned we can skip?
+# ---------------------------------------------------------------------------
+if [[ "$FORCE" == "1" ]]; then
+    STATUS="forced"
+    warn "--force given: reprovisioning $TARGET even if already set up."
+else
+    step "Checking whether $TARGET is already provisioned..."
+    STATUS=$(ssh "$TARGET" "PORT='$PORT' REMOTE_BASE='$SCRIPT_BASE' bash -s" <<'PROBE' || echo unprovisioned
+PORT="${PORT:-8080}"
+export PATH="$HOME/.local/bin:$PATH"
+command -v code-server >/dev/null 2>&1        || { echo unprovisioned; exit 0; }
+[ -d "$HOME/$REMOTE_BASE" ]                   || { echo unprovisioned; exit 0; }
+code-server --list-extensions 2>/dev/null | grep -qi 'ksenxx.kiss-sorcar' \
+                                              || { echo unprovisioned; exit 0; }
+if curl -sf "http://127.0.0.1:$PORT/healthz" -o /dev/null 2>/dev/null \
+   || curl -sf "http://127.0.0.1:$PORT"          -o /dev/null 2>/dev/null; then
+    echo provisioned-running
+else
+    echo provisioned-stopped
+fi
+PROBE
+    )
+fi
+info "Remote status: $STATUS"
+
+# ---------------------------------------------------------------------------
+# 7. Remote bootstrap: code-server + code-shim + install.sh + launch.
+# ---------------------------------------------------------------------------
+# Decide what to skip on the remote:
+#   forced or unprovisioned  -> full install (SKIP_INSTALL=0)
+#   provisioned-stopped      -> skip install, just relaunch (SKIP_INSTALL=1)
+#   provisioned-running      -> skip install, still relaunch so code-server
+#                               opens the folder we just rsynced (the previous
+#                               instance may be pointing at a different path)
+SKIP_INSTALL=0
+case "$STATUS" in
+    provisioned-stopped|provisioned-running) SKIP_INSTALL=1 ;;
+esac
+
+if [[ "$STATUS" == "provisioned-running" ]]; then
+    step "Reusing existing code-server on $TARGET, but relaunching it on workspace ~/$SCRIPT_BASE..."
+else
+    step "Bootstrapping code-server + running install.sh on $TARGET..."
+fi
+
+ssh "$TARGET" \
+    "PORT='$PORT' \
+     REMOTE_BASE='$SCRIPT_BASE' \
+     REMOTE_RC_NAME='$REMOTE_RC_NAME' \
+     SKIP_INSTALL='$SKIP_INSTALL' \
+     bash -s" <<'REMOTE'
+set -e
+PORT="${PORT:-8080}"
+SKIP_INSTALL="${SKIP_INSTALL:-0}"
+WORKSPACE="$HOME/$REMOTE_BASE"
+export PATH="$HOME/.local/bin:$PATH"
+LOG_DIR="$HOME/.kiss"
+mkdir -p "$LOG_DIR" "$HOME/.local/bin"
+
+rinfo() { printf '\033[0;36m[%s]\033[0m %s\n' "$(hostname)" "$*"; }
+
+# Load the extracted API keys into THIS shell so install.sh's children —
+# and, crucially, the code-server we launch at the end — inherit
+# ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.  We source the bash-safe
+# ~/.kiss/api_keys.env (pure `export KEY=VAL` lines generated by the local
+# side) instead of the full rc file: a zsh-flavoured .zshrc can abort
+# mid-file under bash and silently skip the export lines.
+if [ -f "$HOME/.kiss/api_keys.env" ]; then
+    set +e
+    # shellcheck disable=SC1090
+    . "$HOME/.kiss/api_keys.env"
+    set -e
+fi
+
+if [ "$SKIP_INSTALL" = "1" ]; then
+    rinfo "code-server + kiss_ai already installed — skipping install.sh, just relaunching code-server."
+else
+    # --- 7a0. Build prerequisites (best-effort) -------------------------
+    # The KISS runtime's `uv sync` may need to compile native wheels
+    # (e.g. pyiceberg has no wheel for the newest CPython), which requires
+    # a C toolchain.  Fresh cloud VMs ship without one.  Install it when
+    # we have passwordless sudo + apt; otherwise just warn and continue.
+    if ! command -v cc &>/dev/null; then
+        if sudo -n true 2>/dev/null && command -v apt-get &>/dev/null; then
+            rinfo "Installing build-essential (C toolchain for native Python wheels)..."
+            sudo apt-get update -qq -y >/dev/null 2>&1 || true
+            sudo apt-get install -qq -y build-essential >/dev/null 2>&1 \
+                || rinfo "WARNING: build-essential install failed; native wheel builds may fail."
+        else
+            rinfo "WARNING: no C compiler and no passwordless sudo/apt — native wheel builds may fail."
+        fi
+    fi
+
+    # --- 7a. code-server (standalone, no sudo) --------------------------
+    if ! command -v code-server &>/dev/null; then
+        rinfo "Installing code-server (standalone, no sudo)..."
+        curl -fsSL https://code-server.dev/install.sh \
+            | sh -s -- --method=standalone --prefix="$HOME/.local"
+    else
+        rinfo "code-server already installed: $(command -v code-server)"
+    fi
+    command -v code-server &>/dev/null || { echo "ERROR: code-server install failed" >&2; exit 1; }
+
+    # --- 7b. `code` shim ------------------------------------------------
+    # Same shim as sorcar-linux: install.sh probes `code` to drop the VSIX
+    # into the editor.  We forward extension subcommands to code-server so
+    # the KISS Sorcar VSIX lands in code-server's extensions dir.  A plain
+    # ``code <dir>`` launch is swallowed — we start code-server ourselves.
+    cat > "$HOME/.local/bin/code" <<'SHIM'
+#!/bin/bash
+case "${1:-}" in
+    --install-extension|--uninstall-extension|--list-extensions|--version|--locate-extension)
+        exec code-server "$@" ;;
+    *)
+        exit 0 ;;
+esac
+SHIM
+    chmod +x "$HOME/.local/bin/code"
+
+    # --- 7c. code-server settings: never block on workspace-trust ------
+    SETTINGS_DIR="$HOME/.local/share/code-server/User"
+    mkdir -p "$SETTINGS_DIR"
+    if [ ! -f "$SETTINGS_DIR/settings.json" ]; then
+        cat > "$SETTINGS_DIR/settings.json" <<'JSON'
+{
+    "security.workspace.trust.enabled": false,
+    "security.workspace.trust.startupPrompt": "never",
+    "security.workspace.trust.banner": "never",
+    "security.workspace.trust.emptyWindow": false
+}
+JSON
+    fi
+
+    # --- 7d. Run install.sh from the copied folder ----------------------
+    # KISS_CODE_CLI=code-server routes find_code_cli() to code-server so
+    # the built VSIX lands in the browser IDE's extensions dir.
+    # KISS_SKIP_LAUNCH=1 stops install.sh from trying to launch a desktop
+    # VS Code — we start code-server ourselves in 7e.
+    [ -d "$WORKSPACE" ] || { echo "ERROR: $WORKSPACE missing on remote (rsync failed?)" >&2; exit 1; }
+    [ -f "$WORKSPACE/install.sh" ] || { echo "ERROR: $WORKSPACE/install.sh missing on remote" >&2; exit 1; }
+    chmod +x "$WORKSPACE/install.sh"
+
+    # The VSIX build's copy-kiss.sh enumerates sources with `git ls-files`,
+    # and other tooling expects a git checkout.  The rsynced folder has no
+    # .git (we exclude it — a worktree's gitdir would point at a laptop
+    # path anyway), so create a throwaway local repo and stage everything.
+    # Without this the extension ships an EMPTY kiss_project and its
+    # `uv sync` fails with "file does not exist: src/kiss/core/_version.py".
+    if [ ! -e "$WORKSPACE/.git" ]; then
+        rinfo "No .git in $WORKSPACE — initializing a local git repo so 'git ls-files' works..."
+        git -C "$WORKSPACE" init -q -b main 2>/dev/null || git -C "$WORKSPACE" init -q
+        git -C "$WORKSPACE" add -A
+        git -C "$WORKSPACE" -c user.email="sorcar-cloud@local" -c user.name="sorcar-cloud" \
+            commit -q -m "sorcar-cloud snapshot" || true
+    else
+        # Keep the staged snapshot in sync with the freshly rsynced tree.
+        git -C "$WORKSPACE" add -A 2>/dev/null || true
+        git -C "$WORKSPACE" -c user.email="sorcar-cloud@local" -c user.name="sorcar-cloud" \
+            commit -q -m "sorcar-cloud snapshot" 2>/dev/null || true
+    fi
+    rinfo "Running install.sh in $WORKSPACE (this can take several minutes)..."
+    KISS_CODE_CLI=code-server KISS_SKIP_LAUNCH=1 bash "$WORKSPACE/install.sh"
+
+    # --- 7e. Make sure the VSIX is loaded into code-server --------------
+    # install.sh already calls ``code --install-extension`` via the shim,
+    # but on a re-run the VSIX might have been rebuilt; make sure the
+    # currently-built one is what code-server ends up loading.
+    VSIX="$WORKSPACE/src/kiss/agents/vscode/kiss-sorcar.vsix"
+    if [ -f "$VSIX" ]; then
+        rinfo "Installing KISS Sorcar VSIX into code-server..."
+        code-server --install-extension "$VSIX" --force || true
+    else
+        rinfo "WARNING: $VSIX not found — install.sh may have failed to build it."
+    fi
+fi  # end SKIP_INSTALL guard
+
+# --- 7e2. API keys for the kiss-web systemd user service --------------
+# The KISS Sorcar extension runs the kiss-web daemon as a systemd *user*
+# service (kiss-web.service, Restart=always).  systemd services do not
+# inherit shell environment, so without help the daemon has NO API keys
+# and every task fails with "No model available".  Ship a systemd-style
+# EnvironmentFile (plain KEY=VAL — no `export`) plus a drop-in override,
+# and restart the service if it is already running.  The drop-in is
+# created even before the unit exists: systemd picks it up whenever the
+# extension later installs the service.
+if [ -f "$HOME/.kiss/api_keys.env" ]; then
+    # Drop shell-environment lines (PATH=...:$PATH etc.): systemd does not
+    # expand $VAR in EnvironmentFile values, so a leaked PATH from the
+    # local rc file would clobber the service PATH and break `git` lookup.
+    sed -E 's/^export +//' "$HOME/.kiss/api_keys.env" \
+        | grep -E '^[A-Z][A-Z0-9_]*=' \
+        | grep -vE '^(PATH|MANPATH|LD_LIBRARY_PATH|PS1|PROMPT|LANG|LC_[A-Z]+)=' \
+        > "$HOME/.kiss/api_keys.systemd.env" || true
+    chmod 600 "$HOME/.kiss/api_keys.systemd.env"
+    mkdir -p "$HOME/.config/systemd/user/kiss-web.service.d"
+    printf '[Service]\nEnvironmentFile=%%h/.kiss/api_keys.systemd.env\n' \
+        > "$HOME/.config/systemd/user/kiss-web.service.d/override.conf"
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl --user daemon-reload 2>/dev/null || true
+        if systemctl --user is-active --quiet kiss-web 2>/dev/null; then
+            rinfo "Restarting kiss-web.service with API keys..."
+            systemctl --user restart kiss-web 2>/dev/null || true
+        fi
+    fi
+fi
+
+# --- 7f. (Re)launch code-server on 127.0.0.1:$PORT --------------------
+pkill -f "code-server.*--bind-addr 127.0.0.1:$PORT" 2>/dev/null || true
+sleep 1
+
+# code-server remembers the last opened folder in coder.json, and its
+# root-URL redirect prefers that memory over the CLI positional argument.
+# Point it at the workspace we are about to serve so http://localhost:PORT
+# opens the folder we just pushed (not a folder from an older install).
+CODER_JSON="$HOME/.local/share/code-server/coder.json"
+mkdir -p "$(dirname "$CODER_JSON")"
+if command -v python3 >/dev/null 2>&1 && [ -f "$CODER_JSON" ]; then
+    WORKSPACE="$WORKSPACE" python3 - "$CODER_JSON" <<'PY' || true
+import json, os, sys
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        data = json.load(f)
+except Exception:
+    data = {}
+query = data.setdefault("query", {})
+query["folder"] = os.environ["WORKSPACE"]
+query.pop("workspace", None)
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+PY
+else
+    printf '{\n  "query": {\n    "folder": "%s"\n  }\n}\n' "$WORKSPACE" > "$CODER_JSON"
+fi
+rinfo "Launching code-server on 127.0.0.1:$PORT (workspace: $WORKSPACE)..."
+# The inner bash re-sources ~/.kiss/api_keys.env explicitly (belt and
+# braces on top of the env it inherits) so the KISS Sorcar extension and
+# the kiss-web daemon it spawns always see the API keys.
+setsid bash -c "[ -f \"\$HOME/.kiss/api_keys.env\" ] && . \"\$HOME/.kiss/api_keys.env\"; exec code-server \
+    --bind-addr 127.0.0.1:$PORT \
+    --auth none \
+    --disable-workspace-trust \
+    --enable-proposed-api ksenxx.kiss-sorcar \
+    '$WORKSPACE'" > "$LOG_DIR/code-server.log" 2>&1 < /dev/null &
+
+for i in $(seq 1 60); do
+    if curl -sf "http://127.0.0.1:$PORT/healthz" -o /dev/null 2>/dev/null \
+       || curl -sf "http://127.0.0.1:$PORT"          -o /dev/null 2>/dev/null; then
+        rinfo "code-server is up on 127.0.0.1:$PORT (log: ~/.kiss/code-server.log)."
+        exit 0
+    fi
+    sleep 1
+done
+echo "ERROR: code-server did not come up on 127.0.0.1:$PORT (see ~/.kiss/code-server.log)" >&2
+exit 1
+REMOTE
+info "Remote KISS Sorcar / code-server is ready."
+
+# ---------------------------------------------------------------------------
+# 8. Open the browser in the background once the tunnel is live.
+# ---------------------------------------------------------------------------
+open_browser() {
+    for _ in $(seq 1 60); do
+        if curl -sf "$URL/healthz" -o /dev/null 2>/dev/null \
+           || curl -sf "$URL"          -o /dev/null 2>/dev/null; then
+            break
+        fi
+        sleep 1
+    done
+    info "KISS Sorcar (code-server) is ready at $URL"
+    case "$(uname -s)" in
+        Darwin) open "$URL" >/dev/null 2>&1 || true ;;
+        Linux)  command -v xdg-open &>/dev/null && (xdg-open "$URL" >/dev/null 2>&1 &) || true ;;
+    esac
+}
+open_browser &
+
+# ---------------------------------------------------------------------------
+# 9. Hold the SSH tunnel in the foreground.  Ctrl+C closes the tunnel
+#    but leaves the remote code-server running for the next connection.
+# ---------------------------------------------------------------------------
+echo ""
+echo "  ┌──────────────────────────────────────────────────┐"
+echo "  │  KISS Sorcar (remote code-server): ${URL}"
+echo "  │  Remote host:  ${TARGET}"
+echo "  │  Remote path:  ~/${SCRIPT_BASE}"
+echo "  │  Stop tunnel:  Ctrl+C (remote code-server keeps running)"
+echo "  │  Remote log:   ~/.kiss/code-server.log on ${TARGET}"
+echo "  └──────────────────────────────────────────────────┘"
+echo ""
+step "Opening SSH tunnel ${URL} -> ${TARGET}:127.0.0.1:${PORT} ..."
+exec ssh -N -L "${PORT}:127.0.0.1:${PORT}" "$TARGET"
