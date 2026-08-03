@@ -220,8 +220,9 @@ function testResumeBranchLeavesInputEmpty(mode) {
   console.log(`  ok - ${mode.name}: resume branch leaves the input empty`);
 }
 
-// Branch 2: no events -> plain new tab.  Nothing to resume, still nothing to
-// put in the input.
+// Branch 2: no events -> plain new tab.  There is nothing to resume, but the
+// row still knows the task text, so it belongs in the read-only task panel —
+// and still never in the input.
 function testFallbackBranchLeavesInputEmpty(mode) {
   const {win, posted} = makeWebview({remote: mode.remote});
   disableWorkspaceFilter(win);
@@ -249,9 +250,9 @@ function testFallbackBranchLeavesInputEmpty(mode) {
   );
   assert.strictEqual(
     taskPanelText(win),
-    '',
-    `${mode.name}: a session that never ran has no task to show, so the ` +
-      `read-only task panel must stay empty too`,
+    'Never ran anything',
+    `${mode.name}: the row still knows the task text, so the read-only task ` +
+      `panel must show it even when there is nothing to resume`,
   );
   assert.strictEqual(
     chatTabs(win).length,
@@ -378,9 +379,168 @@ function testFallbackBranchPreservesTypedDraft(mode) {
     `${mode.name}: a history click on an event-less row must preserve the ` +
       `draft the user already typed — got ${JSON.stringify(input(win).value)}`,
   );
+  assert.strictEqual(
+    taskPanelText(win),
+    'Nothing ran here',
+    `${mode.name}: the read-only task panel still shows the row's task text`,
+  );
 
   win.close();
   console.log(`  ok - ${mode.name}: fallback branch preserves a typed draft`);
+}
+
+// A task row is broadcast as soon as it is inserted, before its first event is
+// persisted, so a *running* row can legitimately arrive with has_events:false
+// (src/kiss/server/server.py).  The server's _replay_session reattaches the
+// live chat in exactly that case, so such a row must resume — not dump the
+// user into an unrelated blank tab.
+function testRunningRowWithoutEventsResumes(mode) {
+  const {win, posted} = makeWebview({remote: mode.remote});
+  disableWorkspaceFilter(win);
+  openSidebar(win);
+
+  const tabsBefore = chatTabs(win).length;
+  const s = session({
+    id: 'chat-running',
+    task_id: 21,
+    has_events: false,
+    is_running: true,
+    title: 'Just started, no events yet',
+    preview: 'Just started, no events yet',
+  });
+  sendHistory(win, posted, [s]);
+  clickOnlyRow(win);
+
+  const resume = lastMessage(posted, 'resumeSession');
+  assert.ok(
+    resume,
+    `${mode.name}: a running row without persisted events must still post ` +
+      `resumeSession so the live chat gets reattached`,
+  );
+  assert.strictEqual(resume.id, 'chat-running');
+  assert.strictEqual(resume.taskId, 21);
+  assert.strictEqual(
+    taskPanelText(win),
+    s.preview,
+    `${mode.name}: the read-only task panel must show the running task`,
+  );
+  assert.strictEqual(
+    input(win).value,
+    '',
+    `${mode.name}: resuming a running row must NOT copy the task text into ` +
+      `the chat input textbox (#task-input) — got ` +
+      `${JSON.stringify(input(win).value)}`,
+  );
+  assert.strictEqual(
+    chatTabs(win).length,
+    tabsBefore + 1,
+    `${mode.name}: resuming a running row must open a new tab`,
+  );
+  assert.ok(!sidebarOpen(win), `${mode.name}: the sidebar must close on click`);
+
+  win.close();
+  console.log(`  ok - ${mode.name}: running row without events resumes`);
+}
+
+function testRunningRowWithoutEventsPreservesTypedDraft(mode) {
+  const {win, posted} = makeWebview({remote: mode.remote});
+  disableWorkspaceFilter(win);
+
+  const draft = 'draft typed while a task is still starting up';
+  input(win).value = draft;
+  input(win).dispatchEvent(new win.Event('input', {bubbles: true}));
+
+  openSidebar(win);
+  sendHistory(win, posted, [
+    session({
+      id: 'chat-running-draft',
+      task_id: 22,
+      has_events: false,
+      is_running: true,
+      title: 'Running with a draft in the composer',
+      preview: 'Running with a draft in the composer',
+    }),
+  ]);
+  clickOnlyRow(win);
+
+  assert.strictEqual(
+    input(win).value,
+    draft,
+    `${mode.name}: resuming a running row must preserve the draft the user ` +
+      `already typed — got ${JSON.stringify(input(win).value)}`,
+  );
+  const resume = lastMessage(posted, 'resumeSession');
+  assert.ok(resume, `${mode.name}: the running row must still resume`);
+  assert.strictEqual(resume.id, 'chat-running-draft');
+  assert.strictEqual(resume.taskId, 22);
+
+  win.close();
+  console.log(`  ok - ${mode.name}: running row keeps a typed draft`);
+}
+
+// `s.preview || s.title || ''`: fall through to the title when the preview is
+// missing, and to the empty string when both are.
+function testTaskTextFallsBackToTitle(mode) {
+  const {win, posted} = makeWebview({remote: mode.remote});
+  disableWorkspaceFilter(win);
+  openSidebar(win);
+
+  sendHistory(win, posted, [
+    session({
+      id: 'chat-title-only',
+      task_id: 31,
+      title: 'Only a title survived',
+      preview: '',
+    }),
+  ]);
+  clickOnlyRow(win);
+
+  assert.strictEqual(
+    taskPanelText(win),
+    'Only a title survived',
+    `${mode.name}: with no preview the task panel must fall back to the title`,
+  );
+  assert.strictEqual(
+    input(win).value,
+    '',
+    `${mode.name}: the title must not reach the chat input textbox — got ` +
+      `${JSON.stringify(input(win).value)}`,
+  );
+
+  win.close();
+  console.log(`  ok - ${mode.name}: task text falls back to the title`);
+}
+
+function testTaskTextEmptyWithoutPreviewOrTitle(mode) {
+  const {win, posted} = makeWebview({remote: mode.remote});
+  disableWorkspaceFilter(win);
+  openSidebar(win);
+
+  sendHistory(win, posted, [
+    session({
+      id: 'chat-no-text',
+      task_id: 32,
+      has_events: false,
+      title: '',
+      preview: '',
+    }),
+  ]);
+  clickOnlyRow(win);
+
+  assert.strictEqual(
+    taskPanelText(win),
+    '',
+    `${mode.name}: a row with neither preview nor title shows no task text`,
+  );
+  assert.strictEqual(
+    input(win).value,
+    '',
+    `${mode.name}: and the chat input textbox stays empty — got ` +
+      `${JSON.stringify(input(win).value)}`,
+  );
+
+  win.close();
+  console.log(`  ok - ${mode.name}: missing preview and title yield no text`);
 }
 
 // The backend's setTaskText message is the legitimate way to show the task —
@@ -416,6 +576,10 @@ const SCENARIOS = [
   testSwitchBranchLeavesInputEmpty,
   testResumeBranchPreservesTypedDraft,
   testFallbackBranchPreservesTypedDraft,
+  testRunningRowWithoutEventsResumes,
+  testRunningRowWithoutEventsPreservesTypedDraft,
+  testTaskTextFallsBackToTitle,
+  testTaskTextEmptyWithoutPreviewOrTitle,
   testSetTaskTextMessageNeverWritesInput,
 ];
 

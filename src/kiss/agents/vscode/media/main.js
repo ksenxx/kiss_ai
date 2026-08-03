@@ -7284,17 +7284,23 @@
           window._startDemoReplay(allHistSessions, s);
           return;
         }
+        // The task text goes to the read-only task panel only.  #task-input
+        // holds the user's own draft for the NEXT prompt and is never written.
+        const taskText = s.preview || s.title || '';
         const existingChatTab = getTabByBackendChatId(s.id);
         if (existingChatTab) {
           switchToTab(existingChatTab.id);
-        } else if (s.has_events && s.id) {
+        } else if (s.id && (s.has_events || s.is_running)) {
+          // A running task is resumable even before its first event is
+          // persisted: the server reattaches the live chat on replay.
           createNewTab();
-          setTaskText(s.preview || s.title || '');
+          setTaskText(taskText);
           api.resumeSession({id: s.id, taskId: s.task_id, tabId: activeTabId});
         } else {
-          // Nothing was ever run in this session, so there is no task to
-          // show and nothing to resume: just open a fresh tab for the user.
+          // Nothing to resume, but the row still knows what the task was, so
+          // show it read-only in the fresh tab.
           createNewTab();
+          setTaskText(taskText);
           inp.focus();
         }
         closeSidebar();
