@@ -27,6 +27,43 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _tab_busy(tab: _RunningAgentState) -> bool:
+    """True when *tab* is owned by somebody and must be left alone.
+
+    A tab is busy while a task is active, a merge review is in
+    progress, or its worker thread is installed but not yet started or
+    still alive.
+
+    The third clause is not redundant.  ``_cmd_run`` installs
+    ``task_thread`` under the state lock and starts it only after
+    releasing that lock, and the worker raises ``is_task_active``
+    later still, so between submitting a task and it actually
+    beginning there is a window in which both flags read False while
+    the task is very much real (S3-05).
+
+    Callers must hold the state lock while reading the result — the
+    function itself only does plain attribute reads and is not
+    internally locked.
+
+    Args:
+        tab: The per-tab state to inspect.
+
+    Returns:
+        True when any lifecycle flag is still raised.
+    """
+    return (
+        tab.is_task_active
+        or tab.is_merging
+        or (
+            tab.task_thread is not None
+            and (
+                tab.task_thread.ident is None
+                or tab.task_thread.is_alive()
+            )
+        )
+    )
+
+
 class _RunningAgentState:
     """Per-tab state holding settings, runtime state, and the live agent (if any).
 

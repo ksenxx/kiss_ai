@@ -49,7 +49,10 @@ from kiss.agents.sorcar.persistence import (
     _search_history,
     _set_task_favorite,
 )
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.agents.sorcar.running_agent_state import (
+    _RunningAgentState,
+    _tab_busy,
+)
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import (
     MODEL_INFO,
@@ -228,40 +231,6 @@ def _live_task_id(tab: _RunningAgentState) -> str | None:
     if live_id is not None:
         return str(live_id)
     return tab.task_history_id
-
-
-def _tab_busy(tab: _RunningAgentState) -> bool:
-    """True when *tab* must not be disposed yet OR have its per-tab
-    state reset.
-
-    A tab is busy while a task is active, a merge review is in
-    progress, or its worker thread is installed but not yet started or
-    still alive.  Shared by the
-    immediate (``_close_tab``) and deferred (``_dispose_if_closed``)
-    disposal paths, AND by :meth:`_replay_session` as the
-    ``not _tab_busy`` gate on resetting ``tab.use_worktree`` /
-    ``tab.use_parallel`` / ``tab.auto_commit_mode`` /
-    ``tab.selected_model`` on a history load.  Callers must hold
-    ``_state_lock`` while reading the result — the function itself
-    only does plain attribute reads and is not internally locked.
-
-    Args:
-        tab: The per-tab state to inspect.
-
-    Returns:
-        True when any lifecycle flag is still raised.
-    """
-    return (
-        tab.is_task_active
-        or tab.is_merging
-        or (
-            tab.task_thread is not None
-            and (
-                tab.task_thread.ident is None
-                or tab.task_thread.is_alive()
-            )
-        )
-    )
 
 
 def broadcast_to_conn(
@@ -967,6 +936,14 @@ class VSCodeServer(
         Caller must have already popped *tab* from
         ``_RunningAgentState.running_agent_states``.
 
+        Retiring the worktree here can strand work — a rejected
+        pre-commit hook leaves the changes in the worktree directory,
+        and a conflicting merge leaves them on the branch — and the
+        agent records where to find them as a pending warning.  Those
+        warnings are flushed before the printer is torn down, because
+        after that there is nothing left to say it on and the user
+        would never learn their work survived.
+
         Args:
             tab_id: The frontend tab identifier being disposed.
             tab: The popped tab state, or ``None`` when the tab was
@@ -980,6 +957,7 @@ class VSCodeServer(
                         wt_agent._preserve_pending_worktree_for_review()
                     else:
                         wt_agent._release_worktree()
+                    wt_agent._flush_warnings(self.printer)
             except Exception:
                 logger.debug("Worktree release on tab close failed", exc_info=True)
         self._printer_cleanup_tab(tab_id)
@@ -1043,6 +1021,14 @@ class VSCodeServer(
         behavior of synthesizing a phantom tab keyed by ``chat_id`` and
         mutating its ``use_worktree`` flag violated per-tab state
         isolation (C2/C3 fix).
+
+        Loading a chat never touches the tab's ``use_worktree`` /
+        ``use_parallel`` / ``auto_commit_mode`` / ``selected_model``:
+        those mirror the toolbar toggles, which are global UI state the
+        user owns.  Clearing them made a history click silently switch
+        auto-commit off, which in turn made the pending-worktree
+        handling below present a diff/merge review the user had opted
+        out of.
 
         Args:
             chat_id: The string chat session identifier to replay.
@@ -1141,11 +1127,6 @@ class VSCodeServer(
             tab = _RunningAgentState.running_agent_states.get(tab_id)
             if tab is not None:
                 tab.chat_id = chat_id
-                if not _tab_busy(tab):
-                    tab.use_worktree = False
-                    tab.use_parallel = False
-                    tab.auto_commit_mode = False
-                    tab.selected_model = self._default_model
                 tab.frontend_closed = False
             if subagent_info is None and chat_id:
                 self._tab_chat_views[tab_id] = chat_id

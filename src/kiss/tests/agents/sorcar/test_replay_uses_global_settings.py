@@ -321,13 +321,23 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         assert second_extra.get("model") == "claude-sonnet-4-5", second_extra
 
 
-    def test_history_load_resets_use_parallel_and_auto_commit(self) -> None:
-        """Symmetric to ``test_followup_task_uses_new_global_settings``
-        for the parallel / auto-commit toggles.  A history load must
-        leave ``tab.use_parallel`` and ``tab.auto_commit_mode`` at the
-        baseline (``False``), so a follow-up run that forgets to pass
-        ``useParallel`` / ``autoCommit`` cannot silently inherit the
-        loaded task's stale ``True``."""
+    def test_history_load_preserves_use_parallel_and_auto_commit(self) -> None:
+        """A history load must leave the tab's toggles exactly as the
+        user set them.
+
+        The toolbar toggles are GLOBAL UI state owned by the frontend —
+        that is the whole premise of this file, whose sibling test
+        proves the backend strips the four global-setting keys from the
+        replayed ``extra`` so the live toggles win.  Resetting the
+        backend's copy therefore desynchronises the two, and clearing
+        ``auto_commit_mode`` in particular made
+        :meth:`_MergeFlowMixin._emit_pending_worktree` present a
+        diff/merge review to a user who had explicitly switched
+        auto-commit on.
+
+        Every ``run`` command carries ``useWorktree`` / ``useParallel``
+        / ``autoCommit`` explicitly (see ``_cmd_run``), so preserving
+        the flags cannot leak stale values into a follow-up task."""
         first_tab = "tab-first-pa"
         _run_and_wait(
             self.server,
@@ -347,6 +357,12 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         self.server._handle_command(
             {"type": "newChat", "tabId": history_tab},
         )
+        # The user flips the toolbar switches on before clicking the
+        # history row; the backend mirror must survive the click.
+        history_state = self.server._get_tab(history_tab)
+        history_state.use_worktree = True
+        history_state.use_parallel = True
+        history_state.auto_commit_mode = True
         self.server._handle_command({
             "type": "resumeSession",
             "id": chat_id,
@@ -355,17 +371,18 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         })
 
         loaded_tab = self.server._get_tab(history_tab)
-        assert not loaded_tab.use_worktree, loaded_tab.use_worktree
-        assert not loaded_tab.use_parallel, loaded_tab.use_parallel
-        assert not loaded_tab.auto_commit_mode, loaded_tab.auto_commit_mode
+        assert loaded_tab.use_worktree, loaded_tab.use_worktree
+        assert loaded_tab.use_parallel, loaded_tab.use_parallel
+        assert loaded_tab.auto_commit_mode, loaded_tab.auto_commit_mode
 
-    def test_history_load_resets_selected_model(self) -> None:
-        """A history load must reset ``tab.selected_model`` to the
-        server's default (the persisted last-picked global model),
-        not leave it at whatever the previous chat in the same tab
-        was using.  Without the reset, ``_get_history``'s
-        running-session sidebar would read the stale per-tab model
-        for any LIVE task in the newly-loaded chat."""
+    def test_history_load_preserves_selected_model(self) -> None:
+        """A history load must not rewrite ``tab.selected_model``.
+
+        The model picker is global UI state like the toggles.  The
+        stale-sidebar concern that once justified a reset cannot arise:
+        ``_attach_live_session_metrics`` only reads ``selected_model``
+        for a tab whose ``_live_task_id`` matches a RUNNING task, and
+        such a tab was already exempt from the reset."""
         first_tab = "tab-first-model"
         _run_and_wait(
             self.server,
@@ -395,10 +412,7 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         })
 
         loaded_tab = self.server._get_tab(history_tab)
-        assert (
-            loaded_tab.selected_model == self.server._default_model
-        ), loaded_tab.selected_model
-        assert loaded_tab.selected_model != stale_model
+        assert loaded_tab.selected_model == stale_model, loaded_tab.selected_model
 
     def test_history_load_preserves_state_during_merge_review(self) -> None:
         """Regression for the round-2 gpt-5.5 review finding: the
@@ -446,8 +460,11 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
             tab.is_merging = False
 
     def test_history_load_preserves_state_when_thread_alive(self) -> None:
-        """Cover the ``task_thread.is_alive()`` arm of the
-        ``_tab_busy`` predicate inside ``_replay_session``."""
+        """A live worker thread does not change the answer either.
+
+        Replay preserves the toolbar toggles unconditionally, so a tab
+        whose worker thread is still alive must come out of a history
+        load exactly as it went in."""
         tab_id = "tab-thread"
         _run_and_wait(
             self.server,
@@ -488,12 +505,13 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
             alive_thread.join(timeout=2)
 
     def test_history_load_preserves_state_during_live_run(self) -> None:
-        """The reset added to ``_replay_session`` is gated by a
-        ``tab_alive`` guard: when the loaded chat is being re-rendered
-        into the SAME tab that owns the live run, the in-flight
-        per-tab fields are the source of truth for
-        ``_get_history``'s sidebar metadata and must not be
-        clobbered.  Reproduce by simulating an active task (set
+        """The strongest case for preservation: a live run.
+
+        When the loaded chat is re-rendered into the SAME tab that owns
+        a live run, the in-flight per-tab fields are the source of
+        truth for ``_get_history``'s sidebar metadata, so rewriting
+        them would make the sidebar describe the wrong task.
+        Reproduce by simulating an active task (set
         ``is_task_active = True``) on the tab BEFORE calling
         ``_replay_session``, then assert the fields are unchanged."""
         tab_id = "tab-live"

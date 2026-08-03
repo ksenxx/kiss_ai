@@ -42,6 +42,7 @@ from kiss.agents.sorcar.persistence import (
     _save_task_result,
 )
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.agents.sorcar.worktree_sorcar_agent import _WorktreeCleanupOutcome
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import get_available_models
 from kiss.core.printer import parse_result_yaml
@@ -239,6 +240,21 @@ def _release_worktree_without_merging(
     committed, removed and pruned.  Either way no artifact is
     orphaned.
 
+    The recovery instructions are only correct when that commit
+    actually happened.  When it did not — ``--no-auto-commit``, or a
+    pre-commit hook rejecting the commit — the preserve step has
+    already recorded exactly where the work was left instead, so that
+    message is kept and merely prefixed with the reason no merge was
+    attempted.  Telling the user to ``git checkout`` a branch that
+    does not carry their work would send them looking in the wrong
+    place.
+
+    Which of the two happened is read from the outcome the preserve
+    step reports, never from the warning slot: a broadcast that failed
+    puts an older warning back there (``_flush_warnings``), and that
+    stale text describes a different worktree entirely.  For the same
+    reason a preserve that found nothing to do reports nothing at all.
+
     Args:
         agent: The tab's worktree agent, known to have ``_wt_pending``.
         has_changes: Whether the worktree contains work worth keeping.
@@ -247,12 +263,25 @@ def _release_worktree_without_merging(
     if not has_changes:
         agent.discard()
         return
-    agent._preserve_pending_worktree_for_review()
-    agent._merge_conflict_warning = (
+    if not agent._preserve_pending_worktree_for_review():
+        # No worktree was pending after all, so there is no branch to
+        # name and nothing was preserved.  Saying anything here would
+        # either invent a branch or recycle a warning left over from an
+        # older worktree.
+        return
+    reason = (
         f"Could not auto-merge branch '{branch}' because another task "
-        "is running on the main working tree. Your work is committed "
-        f"on that branch; recover it with: git checkout {branch}"
+        "is running on the main working tree."
     )
+    if agent._last_preserve_outcome is _WorktreeCleanupOutcome.COMMITTED_AND_REMOVED:
+        agent._set_warnings(merge=(
+            f"{reason} Your work is committed on that branch; recover "
+            f"it with: git checkout {branch}"
+        ))
+        return
+    with agent._warning_lock:
+        stranded = agent._merge_conflict_warning
+    agent._set_warnings(merge=f"{reason} {stranded}" if stranded else reason)
 
 
 _STOP_SENTINEL: object = object()
@@ -300,6 +329,7 @@ class _TaskRunnerMixin:
             tab_id: str = "",
             *,
             internal: bool = False,
+            already_claimed: bool = False,
         ) -> dict[str, Any]: ...
         def _present_pending_worktree(
             self,
@@ -307,7 +337,7 @@ class _TaskRunnerMixin:
             *,
             try_merge_review: bool,
             discard_if_empty: bool = True,
-        ) -> None: ...
+        ) -> bool: ...
         def _get_worktree_changed_files(self, tab_id: str = "") -> list[str]: ...
         def _extract_result_summary(self) -> str: ...
         def _generate_followup_async(

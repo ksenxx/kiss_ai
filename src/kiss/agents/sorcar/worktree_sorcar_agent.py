@@ -114,8 +114,11 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
     Worktrees are not associated with the agent's ``chat_id``: branch
     names use a unique time + random suffix, and there is no
     cross-process state restoration based on chat session.  Any
-    previous worktree owned by this agent instance is auto-merged
-    (or kept on conflict) before the new one is created.
+    previous worktree owned by this agent instance is retired before
+    the new one is created: auto-merged (or kept on conflict) when its
+    task finished, and merely committed to its own branch when the
+    task failed or was stopped.  See
+    :meth:`_retire_previous_worktree`.
 
     Attributes:
         _wt: The current/pending worktree state, or ``None`` when idle.
@@ -133,6 +136,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         self._tab_id: str = ""
         self._task_start_ms: int = 0
         self._pending_review: bool = False
+        self._last_preserve_outcome: _WorktreeCleanupOutcome | None = None
 
 
     @property
@@ -632,7 +636,13 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
           the ``kiss/wt-*`` branch (recoverable via
           ``git checkout <branch>``).
         * Removes the worktree directory and runs ``git worktree
-          prune`` so disk state is clean.
+          prune`` so disk state is clean.  Those first two bullets are
+          the ``COMMITTED_AND_REMOVED`` outcome, and only there does
+          the branch carry the work.  When the commit does not happen
+          — ``--no-auto-commit``, or a hook refusing it — the
+          directory is deliberately **kept** instead, because it is
+          then the only copy of the work; both cases warn the user
+          where it is.
         * Does **not** call :meth:`_do_merge`: the partial work is
           NOT squash-merged into the user's original branch.  Closing
           the chat tab (or the WebSocket all-done close path) can
@@ -642,15 +652,24 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
 
         Idempotent / safe: no-op when no worktree is pending.
 
+        Records the cleanup outcome in ``_last_preserve_outcome`` so a
+        caller can tell whether the work really made it onto the
+        branch.  Reading the warning slot instead would be wrong: a
+        broadcast that failed puts an *older* warning back
+        (:meth:`_flush_warnings`), and that stale text says nothing
+        about this worktree.
+
         Returns:
             True when a pending worktree was preserved (or had no
             uncommitted work to preserve and was just cleaned up).
             False when there was nothing to do.
         """
+        self._last_preserve_outcome = None
         if self._wt is None:
             return False
         wt = self._wt
         outcome, leftover = self._commit_and_clean_worktree(wt)
+        self._last_preserve_outcome = outcome
         if outcome is _WorktreeCleanupOutcome.PRESERVED_NO_AUTOCOMMIT:
             logger.warning(
                 "Auto-commit disabled (--no-auto-commit); "
@@ -658,6 +677,12 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 "changes for manual review at %s",
                 wt.branch, wt.wt_dir,
             )
+            self._set_warnings(merge=(
+                f"Auto-commit is disabled, so the uncommitted changes of "
+                f"branch '{wt.branch}' were left in the worktree directory "
+                f"{wt.wt_dir}. Recover them there, or commit them to the "
+                f"branch yourself; nothing else will clean it up."
+            ))
         elif outcome is _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED:
             logger.warning(
                 "Worktree '%s' has uncommitted changes after "
@@ -666,17 +691,27 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 "git status --porcelain:\n%s",
                 wt.branch, wt.wt_dir, leftover,
             )
+            self._set_warnings(merge=(
+                f"Branch '{wt.branch}' still has uncommitted changes — the "
+                f"commit was refused, most likely by a pre-commit hook. Its "
+                f"worktree directory {wt.wt_dir} was kept so the work is not "
+                f"lost; recover it there. git status --porcelain:\n{leftover}"
+            ))
         self._wt = None
         self._pending_review = False
         return True
 
 
     def new_chat(self) -> None:
-        """Reset to a new chat session, auto-merging any pending worktree.
+        """Reset to a new chat session, retiring any pending worktree.
 
-        If a worktree task is pending from the previous session, it is
-        auto-committed with a detailed LLM message and squash-merged
-        into the original branch before the chat state is reset.
+        If a worktree task is pending from the previous session it is
+        retired through :meth:`_retire_previous_worktree`, so finished
+        work is auto-committed and squash-merged into the original
+        branch while work the user has not accepted yet — a failed or
+        stopped task, flagged by ``_pending_review`` — is only
+        committed to its own ``kiss/wt-*`` branch.  Opening a new chat
+        is not a decision about the old task's work.
 
         When the release fails (merge conflict, checkout failure,
         stash failure, --no-auto-commit with uncommitted changes),
@@ -689,11 +724,45 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         next ``run()``'s flush (``_flush_warnings`` no-ops without a
         ``broadcast``-capable printer).
         """
-        self._release_worktree()
+        self._retire_previous_worktree()
         self._flush_warnings(getattr(self, "printer", None))
-        self._pending_review = False
         super().new_chat()
 
+
+    def _retire_previous_worktree(self) -> str | None:
+        """Clear the way for a new task's worktree, without publishing.
+
+        A new task must not inherit the previous task's branch, so the
+        previous worktree has to go somewhere.  *Where* depends on
+        whether the user has already been told its work is finished:
+
+        * ``_pending_review`` NOT set — the previous task ran to
+          completion, so :meth:`_release_worktree` squash-merges it
+          into the original branch as it always has.
+        * ``_pending_review`` set — the previous task failed or was
+          stopped, and
+          :meth:`_preserve_pending_worktree_for_review` states the
+          contract: incomplete, unverified work is committed to its
+          ``kiss/wt-*`` branch and never merged into the user's branch
+          behind their back.  Releasing here would break that contract
+          on a technicality — the user typed a *new* prompt, which is
+          not a decision about the *old* task's work.
+
+        Returns:
+            The branch the main worktree ends up on after a successful
+            release, or ``None`` when nothing was pending, the release
+            failed, or the work was preserved for review.  The preserve
+            path returns ``None`` because it never checks the original
+            branch out, so its caller must not treat it as the branch
+            the repository is now sitting on.
+        """
+        if self._pending_review:
+            self._preserve_pending_worktree_for_review()
+            self._pending_review = False
+            return None
+        released_branch = self._release_worktree()
+        self._pending_review = False
+        return released_branch
 
     def _try_setup_worktree(
         self,
@@ -731,13 +800,11 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         )
         released_branch: str | None = None
         if cross_repo:
-            released_branch = self._release_worktree()
-            self._pending_review = False
+            released_branch = self._retire_previous_worktree()
 
         with repo_lock(repo):
             if not cross_repo:
-                released_branch = self._release_worktree()
-                self._pending_review = False
+                released_branch = self._retire_previous_worktree()
             original_branch: str | None
             if (
                 released_branch is not None
@@ -918,9 +985,12 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         Creates a new worktree and branch, redirects ``work_dir`` into
         the worktree, and delegates to ``ChatSorcarAgent.run()``.
         Each call starts a fresh worktree; any previously pending
-        branch from an earlier run is auto-committed and squash-merged
-        into its original branch first (kept in git for manual
-        resolution only when that auto-merge fails or conflicts).
+        branch from an earlier run is retired first by
+        :meth:`_retire_previous_worktree` — auto-committed and
+        squash-merged into its original branch (kept in git for manual
+        resolution when that auto-merge fails or conflicts), or, when
+        the earlier run failed or was stopped, committed to its own
+        branch without ever touching the original one.
 
         Falls back to direct execution (no worktree) when:
         - ``use_worktree`` kwarg is explicitly ``False``
