@@ -108,7 +108,6 @@ class TestImportantInstructionsRendering(unittest.TestCase):
         """The real worktree path must appear in IMPORTANT_INSTRUCTIONS."""
         wt = "/Users/x/repo/.kiss-worktrees/kiss_wt-abc-123"
         rendered = IMPORTANT_INSTRUCTIONS.format(
-            step_threshold="98",
             work_dir=wt,
             current_pid="1",
         )

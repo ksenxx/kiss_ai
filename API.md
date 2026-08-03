@@ -63,7 +63,7 @@ ______________________________________________________________________
   - `prompt_template`: Task prompt template with format placeholders.
   - `arguments`: Dictionary of values to fill prompt_template placeholders.
   - `system_prompt`: System-level instructions passed to the underlying LLM via model_config. Defaults to empty string (no system instructions).
-  - `max_steps`: Maximum steps per sub-session. Defaults to 100.
+  - `max_steps`: Maximum steps per sub-session. Defaults to 10000.
   - `max_budget`: Maximum budget in USD. Defaults to 200.0.
   - `model_config`: Optional dictionary of additional model configuration parameters (e.g. temperature, top_p). Defaults to None.
   - `work_dir`: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
@@ -96,7 +96,7 @@ ______________________________________________________________________
   - `arguments`: Dictionary of values to fill prompt_template placeholders.
   - `system_prompt`: system prompt to be appended to the actual system prompt
   - `tools`: List of tools to be added in addition to bash and web tools.
-  - `max_steps`: Maximum steps per sub-session. Defaults to config value.
+  - `max_steps`: Maximum steps per sub-session. Defaults to 10000.
   - `max_budget`: Maximum budget in USD. Defaults to config value.
   - `work_dir`: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
   - `printer`: Printer instance for output display.

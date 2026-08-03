@@ -1073,7 +1073,7 @@ class SorcarAgent(RelentlessAgent):
             arguments: Dictionary of values to fill prompt_template placeholders.
             system_prompt: system prompt to be appended to the actual system prompt
             tools: List of tools to be added in addition to bash and web tools.
-            max_steps: Maximum steps per sub-session. Defaults to config value.
+            max_steps: Maximum steps per sub-session. Defaults to 10000.
             max_budget: Maximum budget in USD. Defaults to config value.
             work_dir: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
             printer: Printer instance for output display.

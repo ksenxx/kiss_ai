@@ -171,7 +171,7 @@ class RelentlessAgent(Base):
         Path(self.work_dir).mkdir(parents=True, exist_ok=True)
 
         self.max_sub_sessions = max_sub_sessions if max_sub_sessions is not None else 10000
-        self.max_steps = max_steps if max_steps is not None else 100
+        self.max_steps = max_steps if max_steps is not None else 10000
         self.max_budget = max_budget if max_budget is not None else 200.0
         self.model_name = model_name if model_name is not None else "claude-opus-4-6"
         self.verbose = verbose
@@ -256,7 +256,6 @@ class RelentlessAgent(Base):
         summaries: list[str] = []
         current_pid = str(os.getpid())
         important_instructions = IMPORTANT_INSTRUCTIONS.format(
-            step_threshold=str(self.max_steps - 2),
             work_dir=self.work_dir,
             current_pid=current_pid,
         )
@@ -507,7 +506,7 @@ class RelentlessAgent(Base):
             arguments: Dictionary of values to fill prompt_template placeholders.
             system_prompt: System-level instructions passed to the underlying LLM
                 via model_config. Defaults to empty string (no system instructions).
-            max_steps: Maximum steps per sub-session. Defaults to 100.
+            max_steps: Maximum steps per sub-session. Defaults to 10000.
             max_budget: Maximum budget in USD. Defaults to 200.0.
             model_config: Optional dictionary of additional model configuration
                 parameters (e.g. temperature, top_p). Defaults to None.
