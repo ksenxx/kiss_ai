@@ -59,9 +59,15 @@ body.remote-chat {
      on a big monitor cannot crush the chat on a smaller window. */
   --chat-min-w: 360px;
 
-  /* Settings drawer width on desktop — as narrow as the VS Code
-     extension's sidebar instead of the 90vw mobile sheet. */
-  --settings-panel-w: 420px;
+  /*
+   * Settings drawer width on desktop — a narrow drawer instead of the
+   * 90vw mobile sheet.  The lower bound is the width the "Tips",
+   * "Git Commit", "Update" and "Reset Server" buttons of the settings
+   * form need to sit on ONE line with none of their labels wrapping:
+   * ~417px of buttons plus the panel's 2 x 16px padding, rounded up so
+   * platforms with wider font metrics (Segoe UI, Roboto) still fit.
+   */
+  --settings-panel-w: 480px;
 
   background: var(--bg);
   color: var(--fg);

@@ -317,13 +317,24 @@ body {
 
 .config-divider { border-top: 1px solid var(--border); margin: 12px 0; }
 
-.config-update-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+/* Tips / Git Commit / Update / Reset Server.  ``flex-wrap`` + the
+   ``white-space: nowrap`` on the buttons below make the row break
+   BETWEEN buttons when it is too narrow, never inside a label. */
+.config-update-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
 
 .config-gitcommit-btn {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 6px;
   padding: 6px 12px;
+  white-space: nowrap;
   background: color-mix(in srgb, var(--fg) 4%, transparent);
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -339,9 +350,11 @@ body {
 
 .config-update-btn {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 6px;
   padding: 6px 12px;
+  white-space: nowrap;
   background: color-mix(in srgb, var(--fg) 4%, transparent);
   border: 1px solid var(--border);
   border-radius: 4px;

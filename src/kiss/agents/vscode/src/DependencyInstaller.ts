@@ -628,9 +628,7 @@ async function ensureDependenciesImpl(): Promise<void> {
 
   if (showRestartNotification) {
     if (apiKeysReady) {
-      showInformationNotification(
-        'KISS Sorcar: Installation complete!',
-      );
+      showInformationNotification('KISS Sorcar: Installation complete!');
     } else {
       showWarningNotification(
         'KISS Sorcar: Installation complete, but at least one of Claude Code, ANTHROPIC_API_KEY, or OPENAI_API_KEY is required. ' +
