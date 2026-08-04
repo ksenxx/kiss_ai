@@ -4,8 +4,8 @@
 # add your name here
 """End-to-end tests for the History panel's "Workspace" filter.
 
-The chip is checked by default and keeps only the tasks that ran in the
-window's own workspace.  Two cases were wrong:
+The chip is unchecked by default; when enabled it keeps only the tasks
+that ran in the window's own workspace.  Two cases were wrong:
 
 * A task that ran in a git worktree of the workspace
   (``<workspace>/.kiss-worktrees/kiss_wt-...``) — which is where the
@@ -146,8 +146,13 @@ def _visible_titles(browser, work_dir: str, sessions: list) -> list[str]:
             "'#history-list .sidebar-item').length === n",
             arg=len(sessions), timeout=5000,
         )
-        assert page.is_checked("#hf-workspace"), \
-            "the Workspace chip must be on by default for this test to mean anything"
+        assert not page.is_checked("#hf-workspace"), \
+            "the Workspace chip must be OFF by default"
+        page.evaluate(
+            "() => { const ws = document.getElementById('hf-workspace');"
+            " ws.checked = true;"
+            " ws.dispatchEvent(new Event('change', {bubbles: true})); }"
+        )
         painted = page.evaluate(
             "() => Array.from(document.querySelectorAll("
             "'#history-list .sidebar-item'))"

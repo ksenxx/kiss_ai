@@ -117,6 +117,12 @@ function makeRow(overrides) {
   );
 }
 
+function enableWorkspaceFilter(win) {
+  const ws = win.document.getElementById('hf-workspace');
+  ws.checked = true;
+  ws.dispatchEvent(new win.Event('change', {bubbles: true}));
+}
+
 function testRunningRowVisibleDespiteResolvedWorkDirVariant() {
   const {win, posted} = makeWebview();
 
@@ -127,6 +133,7 @@ function testRunningRowVisibleDespiteResolvedWorkDirVariant() {
   });
 
   openSidebar(win);
+  enableWorkspaceFilter(win);
   assert.ok(lastGetHistory(posted), 'opening the sidebar must post getHistory');
 
   posted.length = 0;
@@ -181,6 +188,7 @@ function testRunningRowVisibleFromOtherWorkspace() {
     apiKeys: {},
   });
   openSidebar(win);
+  enableWorkspaceFilter(win);
   const fetched = lastGetHistory(posted);
 
   send(win, {
@@ -226,6 +234,7 @@ function testUncheckingRunningStillHidesRunningRow() {
     apiKeys: {},
   });
   openSidebar(win);
+  enableWorkspaceFilter(win);
   const fetched = lastGetHistory(posted);
 
   send(win, {
@@ -291,6 +300,7 @@ function testTrailingSlashNormalizedMatchForCompletedRows() {
     apiKeys: {},
   });
   openSidebar(win);
+  enableWorkspaceFilter(win);
   const fetched = lastGetHistory(posted);
 
   send(win, {
@@ -335,6 +345,7 @@ function testClientTrailingSlashNormalizes() {
     apiKeys: {},
   });
   openSidebar(win);
+  enableWorkspaceFilter(win);
   const fetched = lastGetHistory(posted);
 
   send(win, {
@@ -370,6 +381,7 @@ function testWindowsPathVariantsNormalize() {
     apiKeys: {},
   });
   openSidebar(win);
+  enableWorkspaceFilter(win);
   const fetched = lastGetHistory(posted);
 
   send(win, {

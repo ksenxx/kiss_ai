@@ -265,8 +265,8 @@ _INJECT_PAGE_JS = r"""
 _INJECT_HISTORY_JS = r"""
 (() => {
   // Lay the sidebar out (the desktop remote page auto-docks it, but
-  // be explicit) and disable the Workspace filter: it is on by
-  // default and would display:none a row whose work_dir differs
+  // be explicit) and keep the Workspace filter off (its default):
+  // when on it would display:none a row whose work_dir differs
   // from the client's workspace — the wrap-geometry probes need the
   // row rendered.
   document.getElementById('sidebar').classList.add('open');

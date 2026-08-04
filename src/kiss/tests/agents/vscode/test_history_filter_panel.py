@@ -51,10 +51,13 @@ class TestHistoryFilterPanel(unittest.TestCase):
             "hf-running",
             "hf-errors",
             "hf-completed",
-            "hf-workspace",
         ):
             self.assertIn(f'id="{cid}"', bar)
             self.assertIn("checked", bar.split(f'id="{cid}"', 1)[1][:40])
+        self.assertIn('id="hf-workspace"', bar)
+        self.assertNotIn(
+            "checked", bar.split('id="hf-workspace"', 1)[1][:40]
+        )
         self.assertIn('id="hf-favorite"', bar)
         self.assertLess(
             bar.index('id="hf-workspace"'),

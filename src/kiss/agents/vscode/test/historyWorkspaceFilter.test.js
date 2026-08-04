@@ -140,6 +140,12 @@ const SESSIONS_FIXTURE = [
   },
 ];
 
+function enableWorkspaceFilter(win) {
+  const ws = win.document.getElementById('hf-workspace');
+  ws.checked = true;
+  ws.dispatchEvent(new win.Event('change', {bubbles: true}));
+}
+
 function testCheckboxMarkupAndDefault() {
   const {win} = makeWebview();
   const doc = win.document;
@@ -151,8 +157,8 @@ function testCheckboxMarkupAndDefault() {
   assert.strictEqual(ws.type, 'checkbox');
   assert.strictEqual(
     ws.checked,
-    true,
-    'Workspace checkbox must be CHECKED by default',
+    false,
+    'Workspace checkbox must be UNCHECKED by default',
   );
 
   const bar = doc.querySelector('.history-filter-bar');
@@ -183,6 +189,7 @@ function testWorkspaceFilterHidesNonMatchingRows() {
   });
 
   send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
+  enableWorkspaceFilter(win);
 
   const all = win.document
     .getElementById('history-list')
@@ -227,6 +234,7 @@ function testUncheckingWorkspaceRevealsAllRows() {
     apiKeys: {},
   });
   send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
+  enableWorkspaceFilter(win);
 
   const ws = win.document.getElementById('hf-workspace');
   ws.checked = false;
@@ -257,6 +265,7 @@ function testReconfiguringWorkDirReFiltersInPlace() {
     apiKeys: {},
   });
   send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
+  enableWorkspaceFilter(win);
 
   let visible = visibleRows(win).map(r => r.text).sort();
   assert.deepStrictEqual(visible, [
@@ -292,6 +301,7 @@ function testEmptyClientWorkDirMatchesEmptyRows() {
     apiKeys: {},
   });
   send(win, {type: 'history', sessions: SESSIONS_FIXTURE, offset: 0});
+  enableWorkspaceFilter(win);
 
   const visible = visibleRows(win).map(r => r.text).sort();
   assert.deepStrictEqual(
