@@ -139,7 +139,8 @@ Interact with desktop applications using screenshots, keyboard, and mouse. Do no
 - DO NOT write structural tests which assert on the source code.
 - After modifications, run only the impacted tests.
 - To confirm race conditions: add a random sleep (\<0.1s) before the suspected racing statements.
-- CRITICAL: Before running all tests or tests in a folder, split the set of tests equally by the number of test methods into the number of cores - 2 and run all splits in parallel using the run_parallel tool.
+- MANDATORY (MUST FOLLOW): Reproduce the issue by writing real end-to-end tests with 100% coverage. Then fix the issue. You can use screenshots to validate the implementation.
+- MANDATORY (MUST FOLLOW): Before running all tests or tests in a folder, split the set of tests equally by the number of test methods into the number of cores -2 and run all splits in parallel using the run_parallel tool.
 
 \<pre_finish_verification>
 
