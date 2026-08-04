@@ -784,12 +784,11 @@
     if (statusSteps) statusSteps.textContent = tab.statusStepsText;
     if (welcome) {
       if (tab.welcomeVisible) {
-        welcome.style.display = '';
-        if (!O.contains(welcome)) O.appendChild(welcome);
+        showWelcomeScreen();
       } else {
         welcome.style.display = 'none';
+        refreshWelcomeLayout();
       }
-      refreshWelcomeLayout();
     }
     selectedModel = tab.selectedModel || '';
     agentModel = tab.agentModel || '';
@@ -1956,6 +1955,19 @@
   const statusTokens = document.getElementById('status-tokens');
   const statusBudget = document.getElementById('status-budget');
   const statusSteps = document.getElementById('status-steps');
+
+  // The welcome screen lives inside the scrolling chat container, so
+  // whatever scroll offset the previous content left behind (a finished
+  // conversation is parked at its bottom) would otherwise hide the
+  // greeting and the first suggestions.  Showing the welcome screen
+  // always lands it at the top.
+  function showWelcomeScreen() {
+    if (!welcome) return;
+    welcome.style.display = '';
+    if (!O.contains(welcome)) O.appendChild(welcome);
+    refreshWelcomeLayout();
+    O.scrollTop = 0;
+  }
 
   function refreshWelcomeLayout() {
     if (!document.body.classList.contains('remote-chat')) return;
@@ -5080,11 +5092,7 @@
           if (swTabId === activeTabId) {
             clearOutput();
             resetOutputState();
-            if (welcome) {
-              welcome.style.display = '';
-              O.appendChild(welcome);
-              refreshWelcomeLayout();
-            }
+            showWelcomeScreen();
           } else {
             swTab.outputFragment = null;
             swTab.welcomeVisible = true;
