@@ -2027,6 +2027,7 @@
       if (p.classList.contains('tc-summary')) {
         p.classList.remove('chv-hidden');
         if (!p.classList.contains('user-pinned')) p.classList.add('collapsed');
+        if (p.classList.contains('collapsed')) collapseNestedRunParallel(p);
         continue;
       }
       if (p.closest('.summary-sub')) {
@@ -2039,6 +2040,10 @@
         p.classList.remove('user-pinned');
         collapsePreview(p);
         syncRunParallelPanel(p);
+      } else {
+        // A hidden panel takes any fan-out panel it swallowed off
+        // screen with it, so those sub-agent tabs must close too.
+        collapseNestedRunParallel(p);
       }
     }
   }
@@ -2851,6 +2856,41 @@
     prev.textContent = txt;
   }
 
+  /**
+   * Collapse every run_parallel panel inside *root* and close the
+   * sub-agent tabs those fan-outs own.
+   *
+   * Called with a panel that just collapsed, and with a whole
+   * transcript that is about to be hidden or thrown away.  A collapsed
+   * panel hides its children (``.tc.collapsed > :not(.tc-h,
+   * .panel-copy-btn){display:none}`` in main.css), so a run_parallel
+   * panel that another panel swallowed -- the ``summary`` tool adopts
+   * the event panels preceding it into a ``.summary-sub`` child -- is
+   * just as collapsed as one the user closed by hand. Its chevron is
+   * off screen, so leaving its sub-agent tabs open would strand tabs
+   * that no reachable panel can ever close again.
+   *
+   * @param {Element|DocumentFragment|null} root Panel or transcript
+   *     whose fan-outs are going off screen. Null is a no-op, so a
+   *     transcript that was already discarded needs no guard.
+   */
+  function collapseNestedRunParallel(root) {
+    if (!root) return;
+    const nested = root.querySelectorAll('.tc-run-parallel');
+    for (let i = 0; i < nested.length; i++) {
+      const p = nested[i];
+      // A neighbouring task's replayed transcript owns no tab of this
+      // conversation, so its fan-out panels are left untouched.
+      if (p.closest('.adjacent-task')) continue;
+      if (!p.classList.contains('collapsed')) {
+        p.classList.add('collapsed');
+        p.classList.remove('user-pinned');
+        collapsePreview(p);
+      }
+      syncRunParallelPanel(p);
+    }
+  }
+
   function addCollapse(panelEl, headerEl, ts) {
     panelEl.classList.add('collapsible');
     const chv = mkEl('span', 'collapse-chv');
@@ -2872,6 +2912,8 @@
       }
       collapsePreview(panelEl);
       syncRunParallelPanel(panelEl);
+      if (panelEl.classList.contains('collapsed'))
+        collapseNestedRunParallel(panelEl);
     });
     addCopyButton(panelEl);
     addPanelTimestamp(panelEl, ts);
@@ -2880,6 +2922,45 @@
   const _rpTabPanel = new Map();
   const _rpClosedSubagentTabs = new Set();
   let _rpSyncing = false;
+  // Sub-agent tabs a collapse wants closed while a transcript is being
+  // replayed wait here until the replay is done; see rpCloseSubagentTab.
+  let _rpDeferredCloses = null;
+
+  /**
+   * Close sub-agent tab *tabId* on behalf of its collapsed fan-out
+   * panel, or queue the close when a transcript is being replayed.
+   *
+   * Closing the tab the user is looking at moves them to another tab,
+   * and moving them onto the very chat whose transcript is being
+   * replayed would put that half-written transcript on screen and
+   * detach the rest of the replay into a fragment nobody sees. The
+   * replay finishes first, then the tabs close.
+   *
+   * @param {string} tabId The sub-agent tab to close.
+   */
+  function rpCloseSubagentTab(tabId) {
+    if (_rpDeferredCloses) _rpDeferredCloses.push(tabId);
+    else closeTab(tabId);
+  }
+
+  /**
+   * Close the sub-agent tabs queued during a replay.
+   *
+   * The closes are performed as the collapse they came from, not as a
+   * close the user asked for, so a sub-agent stays reopenable by
+   * expanding its panel again (see rpAfterTabsClosed).
+   */
+  function rpFlushDeferredCloses() {
+    const ids = _rpDeferredCloses;
+    _rpDeferredCloses = null;
+    if (!ids.length) return;
+    _rpSyncing = true;
+    try {
+      for (const id of ids) closeTab(id);
+    } finally {
+      _rpSyncing = false;
+    }
+  }
 
   function rpTaskDomRootForParent(parentId) {
     if (parentId === activeTabId) return O;
@@ -3178,12 +3259,11 @@
       for (const en of entries) {
         const openTab = en.tabId ? getTab(en.tabId) : null;
         if (collapsed && openTab) {
-          const closingId = en.tabId;
-          _rpClosedSubagentTabs.add(closingId);
-          _rpTabPanel.delete(closingId);
-          closeTab(closingId);
-          en.tabId = '';
-          en.userClosed = false;
+          // The tab stays this panel's until the close actually lands:
+          // rpAfterTabsClosed does the bookkeeping, and a tab whose
+          // close is still queued must keep looking owned so another
+          // panel's adoption pass cannot claim it as unowned.
+          rpCloseSubagentTab(en.tabId);
         } else if (collapsed) {
           en.userClosed = false;
         } else if (!openTab && en.taskId !== '' && !en.userClosed) {
@@ -3208,8 +3288,19 @@
     }
   }
 
+  /**
+   * Forget the sub-agent tabs in *closedIds* and, when the user was the
+   * one who closed them, collapse the fan-out panels left with none.
+   *
+   * The bookkeeping runs even while a collapse is closing tabs
+   * (``_rpSyncing``): closing a sub-agent's tab also closes the tabs of
+   * the fan-out that sub-agent ran itself, and a grandchild the client
+   * still believes is owned by a panel from a chat that no longer
+   * exists would be reopened by the next announcement naming it.
+   *
+   * @param {Set<string>|Array<string>} closedIds Tab ids just closed.
+   */
   function rpAfterTabsClosed(closedIds) {
-    if (_rpSyncing) return;
     const panels = new Set();
     for (const id of closedIds) {
       const p = _rpTabPanel.get(id);
@@ -3219,12 +3310,16 @@
         for (const en of p._rpSubagents || []) {
           if (en.tabId === id) {
             en.tabId = '';
-            en.userClosed = true;
+            // Only a close the user asked for keeps this sub-agent shut
+            // while its panel stays expanded; collapsing the panel
+            // reopens every sub-agent when it is expanded again.
+            en.userClosed = !_rpSyncing;
           }
         }
         panels.add(p);
       }
     }
+    if (_rpSyncing) return;
     for (const p of panels) {
       const parentOpen =
         p._rpParentTabId === activeTabId || getTab(p._rpParentTabId);
@@ -3256,6 +3351,7 @@
       p.classList.add('collapsed');
       collapsePreview(p);
       syncRunParallelPanel(p);
+      collapseNestedRunParallel(p);
     }
   }
 
@@ -3272,6 +3368,7 @@
       p.classList.add('collapsed');
       collapsePreview(p);
       syncRunParallelPanel(p);
+      collapseNestedRunParallel(p);
     }
   }
 
@@ -3795,6 +3892,10 @@
             sub.appendChild(adopt[ai]);
           c.appendChild(sub);
           c.classList.add('collapsed');
+          // The adopted panels are now hidden behind this collapsed
+          // summary; a fan-out panel among them must give its
+          // sub-agent tabs up like any other collapsed fan-out.
+          collapseNestedRunParallel(c);
         }
         tState.lastToolCallEl = c;
         stampPanelStart(c);
@@ -5067,10 +5168,15 @@
         }
         const evTabId = ev.tabId;
         if (evTabId === undefined || evTabId === activeTabId) {
+          // The new task replaces this chat's transcript: the fan-out
+          // panels in it are about to stop existing, so they must hand
+          // their sub-agent tabs in first.
+          collapseNestedRunParallel(O);
           clearOutput();
           resetOutputState();
           showSpinner();
         } else if (clearTab) {
+          collapseNestedRunParallel(clearTab.outputFragment);
           clearTab.outputFragment = null;
           clearTab.streamState = null;
           clearTab.streamLlmPanel = null;
@@ -5100,10 +5206,15 @@
           if (ev.model) applyModelPick(swTabId, ev.model, 'restore');
 
           if (swTabId === activeTabId) {
+            // Resetting the chat to the welcome screen discards its
+            // transcript, fan-out panels and all; their sub-agent tabs
+            // must not outlive them.
+            collapseNestedRunParallel(O);
             clearOutput();
             resetOutputState();
             showWelcomeScreen();
           } else {
+            collapseNestedRunParallel(swTab.outputFragment);
             swTab.outputFragment = null;
             swTab.welcomeVisible = true;
           }
@@ -5201,15 +5312,28 @@
             } catch (_e) {}
           }
           const frag = document.createDocumentFragment();
-          replayEventsInto(frag, ev.events || [], {
-            ownerTabId: teTabId,
-            onFollowupClick: function (text) {
-              inp.value = text;
-              syncClearBtn();
-              inp.focus();
-            },
-          });
+          // Hand the tab its new transcript BEFORE replaying into it:
+          // the replay's collapse pass asks this tab which run_parallel
+          // panels it owns, and against the outgoing fragment it would
+          // disown the replacement panel -- leaving that collapsed
+          // panel's sub-agent tabs open with nothing to close them.
+          // A replay that fails hands the old transcript back rather
+          // than leaving the tab showing half a new one.
+          const teOldFrag = teTab.outputFragment;
           teTab.outputFragment = frag;
+          try {
+            replayEventsInto(frag, ev.events || [], {
+              ownerTabId: teTabId,
+              onFollowupClick: function (text) {
+                inp.value = text;
+                syncClearBtn();
+                inp.focus();
+              },
+            });
+          } catch (e) {
+            teTab.outputFragment = teOldFrag;
+            throw e;
+          }
           teTab.welcomeVisible = false;
           const bgSteps = countReplayedSteps(ev.events || []);
           if (bgSteps > 0) teTab.statusStepsText = 'Steps: ' + bgSteps;
@@ -6075,7 +6199,37 @@
     });
   }
 
+  /**
+   * Render *events* into *container*, holding back the sub-agent tab
+   * closes the replay's collapse passes ask for until the whole
+   * transcript exists (see rpCloseSubagentTab).
+   *
+   * A nested replay leaves the outer replay's queue in charge, and a
+   * replay that throws drops its queue instead of applying closes to a
+   * half-written transcript -- either way no close is left queued for
+   * ever, which would silently strand sub-agent tabs of every later
+   * collapse.
+   *
+   * @param {Element|DocumentFragment} container Where to render.
+   * @param {Array<object>} events The transcript to replay.
+   * @param {object} [opts] ownerTabId / onFollowupClick.
+   */
   function replayEventsInto(container, events, opts) {
+    if (_rpDeferredCloses !== null) {
+      renderReplayedEvents(container, events, opts);
+      return;
+    }
+    _rpDeferredCloses = [];
+    try {
+      renderReplayedEvents(container, events, opts);
+    } catch (e) {
+      _rpDeferredCloses = null;
+      throw e;
+    }
+    rpFlushDeferredCloses();
+  }
+
+  function renderReplayedEvents(container, events, opts) {
     const rWorkDir =
       opts && opts.ownerTabId !== undefined
         ? workDirForTab(opts.ownerTabId) || ''
