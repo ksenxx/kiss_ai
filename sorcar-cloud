@@ -50,9 +50,10 @@
 #      code-server instead of a desktop VS Code a headless server lacks.
 #   6. Delete any leftover ``.venv`` in the remote workspace that cannot
 #      run there (its bin/python must execute and bin/kiss-web must exist),
-#      then run the FULL ``install.sh`` with KISS_CODE_CLI=code-server and
-#      KISS_SKIP_LAUNCH=1 — that skips the desktop launch and lets us start
-#      code-server ourselves.
+#      then run the FULL ``install.sh`` with KISS_CODE_CLI=code-server,
+#      KISS_SKIP_LAUNCH=1 (skip the desktop launch — we start code-server
+#      ourselves) and KISS_SKIP_UPDATE=1 (never pull origin/main over the
+#      working directory we just shipped).
 #   7. (Re)launch code-server on 127.0.0.1:$PORT, workspace = the copied
 #      folder.
 #   8. Open SSH tunnels  localhost:$PORT -> remote $PORT  (the IDE) and
@@ -293,7 +294,14 @@ copy_tree() {
         # --exclude='.venv': see the block comment above — a virtualenv is
         # host-bound, and the pattern is unanchored so nested project venvs
         # are skipped too.
-        COPYFILE_DISABLE=1 tar --no-xattrs --exclude='.venv' -C "$src" -czpf - . \
+        # --exclude='.kiss-worktrees': agent task worktrees live in
+        # <repo>/.kiss-worktrees/kiss_wt-*.  They are laptop scratch space —
+        # every one is another full checkout (node_modules included) whose
+        # ``.git`` is a one-line file pointing at an absolute laptop path, so
+        # shipping them multiplies the transfer and drags dead git pointers
+        # into the snapshot commit step 7e makes.  The remote creates its own.
+        COPYFILE_DISABLE=1 tar --no-xattrs --exclude='.venv' \
+            --exclude='.kiss-worktrees' -C "$src" -czpf - . \
             | ssh "$TARGET" "mkdir -p -- '$dst' && tar -C '$dst' -xzpf -"
     else
         # --exclude='.venv': never overwrite the remote's own working
@@ -305,7 +313,10 @@ copy_tree() {
         # replace a non-empty directory with a file and aborts with
         # "unlinkat: Directory not empty" (rc=23), so leave git plumbing
         # alone and let step 7e refresh the snapshot instead.
-        rsync -aHz --numeric-ids --stats --exclude='.git' --exclude='.venv' \
+        # --exclude='.kiss-worktrees': laptop-local agent worktrees, same
+        # reasoning as the tar path above.
+        rsync -aHz --numeric-ids --stats \
+            --exclude='.git' --exclude='.venv' --exclude='.kiss-worktrees' \
             -e ssh "$src/" "$TARGET:$dst/"
     fi
 }
@@ -358,6 +369,12 @@ info "Folder copy complete: $(ssh "$TARGET" "du -sh -- '$REMOTE_DIR' 2>/dev/null
 #                            publishes its own.
 #   cloudflared.pid          a pid from the laptop's process table.
 #   .config.lock             a lock guarding config.json writes.
+#   api_keys*.env            REMOTE-only files that step 6 writes.  They do
+#                            not exist on the laptop, so without this the
+#                            --delete pass would erase the remote's
+#                            credentials — and on a laptop with no
+#                            *API_KEY* rc file step 6 is skipped, so nothing
+#                            would put them back.
 # Everything else — MY_MODELS.json, MY_INJECTION.md, MY_TASK_TEMPLATES.md,
 # MODEL_INFO.json, third_party_agents/ (gmail/slack tokens), models/
 # (Vosk speech models), cli_history/, config.json — does travel.
@@ -382,6 +399,8 @@ if [[ -d "$HOME/.kiss" ]]; then
         --exclude='remote-url.json' \
         --exclude='cloudflared.pid' \
         --exclude='.config.lock' \
+        --exclude='api_keys.env' \
+        --exclude='api_keys.systemd.env' \
         --exclude='.DS_Store' \
         "$HOME/.kiss/" "$TARGET:.kiss/"
 
@@ -736,8 +755,15 @@ fi
 # code-server so the built VSIX lands in the browser IDE's extensions dir.
 # KISS_SKIP_LAUNCH=1 stops install.sh from launching a desktop VS Code (or
 # a second code-server on the same port) — we start code-server in 7h.
+# KISS_SKIP_UPDATE=1 stops its update_repo() from pulling origin/main over
+# the tree we just shipped.  That matters when the laptop checkout is a
+# plain clone (its .git, and therefore its 'origin', travels verbatim): the
+# pull would fast-forward — or on divergence 'reset --hard @{upstream}' —
+# the code away from the working directory this script promises to deploy,
+# and the auto-stash of the uncommitted edits could fail to re-apply.
 rinfo "Running the full install.sh in $WORKSPACE (this can take several minutes)..."
-KISS_CODE_CLI=code-server KISS_SKIP_LAUNCH=1 bash "$WORKSPACE/install.sh"
+KISS_CODE_CLI=code-server KISS_SKIP_LAUNCH=1 KISS_SKIP_UPDATE=1 \
+    bash "$WORKSPACE/install.sh"
 
 # install.sh already calls ``code --install-extension`` through the shim,
 # but make sure the VSIX it just built is the one code-server loads.
@@ -829,9 +855,19 @@ info "Remote KISS Sorcar / code-server is ready."
 # local port a hard error rather than a tunnel that silently forwards nothing
 # — pick_local_web_port() already chose a port nothing is listening on.
 #
-# The tunnel runs *in the background* (ssh -f) so this script can go on to
-# open the browser and then verify the webapp through the tunnel.  Step 11
-# waits on it so Ctrl+C still tears the tunnel down.
+# The tunnel runs *in the background* so this script can go on to open the
+# browser and then verify the webapp through the tunnel.  Step 11 waits on it
+# so Ctrl+C still tears the tunnel down.
+#
+# It is backgrounded by THIS shell (``ssh … &``) rather than by ssh itself
+# (``-f``), because that is the only way to learn its pid for certain: "$!"
+# is exact, whereas a pgrep pattern has to guess how ssh renders its own
+# argv and matches the wrong tunnel when two point at the same host.  An
+# empty pid meant the Ctrl+C trap in step 11 was never installed, so the
+# script returned immediately and left the forward orphaned — which is how
+# local $PORT ends up mysteriously "already in use" on the next run.
+# Backgrounding here also means a closed terminal (SIGHUP) takes the tunnel
+# down with the script instead of leaking it.
 # ---------------------------------------------------------------------------
 if [[ -n "${SORCAR_NO_TUNNEL:-}" ]]; then
     # Lets scripts/CI run the deployment and return without a tunnel.
@@ -840,20 +876,31 @@ if [[ -n "${SORCAR_NO_TUNNEL:-}" ]]; then
     exit 0
 fi
 
-TUNNEL_ARGS=(-N -f -o ExitOnForwardFailure=yes -o ServerAliveInterval=30
+# -n: stdin from /dev/null, so the backgrounded ssh cannot swallow this
+# script's stdin (or stop on SIGTTIN when it tries to read the terminal).
+TUNNEL_ARGS=(-N -n -o ExitOnForwardFailure=yes -o ServerAliveInterval=30
              -L "${LOCAL_PORT}:127.0.0.1:${PORT}")
 if [[ -n "$LOCAL_WEB_PORT" ]]; then
     TUNNEL_ARGS+=(-L "${LOCAL_WEB_PORT}:127.0.0.1:${WEB_PORT}")
 fi
 step "Opening SSH tunnels to ${TARGET} (IDE ${LOCAL_PORT}->${PORT}, webapp ${LOCAL_WEB_PORT:-none}) ..."
-ssh "${TUNNEL_ARGS[@]}" "$TARGET" \
+ssh "${TUNNEL_ARGS[@]}" "$TARGET" &
+TUNNEL_PID=$!
+# Give ssh a few seconds to authenticate and request the forwards, watching
+# for it to give up: ExitOnForwardFailure=yes makes it EXIT when a local bind
+# clashes, so "still running after the grace period" is what proves the
+# tunnel is up.  Deliberately NOT probing the port with nc — a busy port
+# answers a probe no matter who owns it, so a foreign listener (say a stale
+# forward from an earlier run) would look like success while our own ssh was
+# already dying.  The loop breaks the moment ssh exits, so the failure path
+# is still reported immediately.
+for _ in $(seq 1 10); do
+    kill -0 "$TUNNEL_PID" 2>/dev/null || break
+    sleep 0.5
+done
+kill -0 "$TUNNEL_PID" 2>/dev/null \
     || die "Could not open the SSH tunnels (is local port $LOCAL_PORT already in use?)."
-# ssh backgrounds itself for -f and the process then shows its flags in
-# '-f -N' order (the fork reorders them), so match that — a 'ssh -N -f'
-# pattern would never find the pid and TUNNEL_PID would come back empty,
-# leaving the Ctrl+C trap below with nothing to kill.
-TUNNEL_PID="$(pgrep -f "ssh -f -N.*-L ${LOCAL_PORT}:127.0.0.1:${PORT}.*${TARGET}" | head -1 || true)"
-info "Tunnels are up${TUNNEL_PID:+ (ssh pid $TUNNEL_PID)}."
+info "Tunnels are up (ssh pid $TUNNEL_PID)."
 
 # ---------------------------------------------------------------------------
 # 9. Open the browser.  This is what ACTIVATES the extension: code-server
@@ -912,13 +959,12 @@ echo "  │  Stop tunnel:  Ctrl+C (remote code-server keeps running)"
 echo "  │  Remote log:   ~/.kiss/code-server.log on ${TARGET}"
 echo "  └──────────────────────────────────────────────────┘"
 echo ""
-# ``ssh -f`` already detached, so there is no child to wait for: idle here and
-# kill the tunnel on Ctrl+C so the forwarded ports are not left behind.
-if [[ -n "$TUNNEL_PID" ]]; then
-    trap 'echo ""; info "Closing the SSH tunnels..."; kill "$TUNNEL_PID" 2>/dev/null || true; exit 0' INT TERM
-    info "Tunnels held open.  Press Ctrl+C to close them."
-    while kill -0 "$TUNNEL_PID" 2>/dev/null; do
-        sleep 5
-    done
-    warn "The SSH tunnel process exited."
-fi
+# The tunnel is our own background child.  ``wait`` alone would swallow the
+# signal until ssh returns, so poll instead and let the trap kill it, leaving
+# no forwarded port behind.
+trap 'echo ""; info "Closing the SSH tunnels..."; kill "$TUNNEL_PID" 2>/dev/null || true; exit 0' INT TERM
+info "Tunnels held open.  Press Ctrl+C to close them."
+while kill -0 "$TUNNEL_PID" 2>/dev/null; do
+    sleep 5
+done
+warn "The SSH tunnel process exited."
