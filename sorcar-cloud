@@ -29,6 +29,10 @@
 #      ~/.kiss/api_keys.env (sourced by bash) and ~/.kiss/api_keys.systemd.env
 #      (read by the kiss-web service).  Sourcing a zsh rc from bash is
 #      unreliable, hence the distilled copies.
+#   3b. Copy ~/.kiss/sorcar.* (the task database and its WAL/SHM companions)
+#      fresh on every run: the remote copies are deleted first so a stale
+#      ``sorcar.db-wal`` from a previous deploy can never shadow the new
+#      database.  Sockets and other non-regular files are skipped.
 #   4. Copy ~/.ssh/ so the remote can push to git and hop to other hosts as
 #      you.  ``authorized_keys`` is never overwritten — that file is what lets
 #      you SSH *into* the remote.
@@ -201,6 +205,27 @@ awk -v b="$BEGIN" -v e="$END" '
 rm -f "$HOME/.bashrc.sorcar-tmp"
 RCWIRE
 info "API keys installed (~/.kiss/api_keys.env, sourced from ~/.bashrc)."
+
+# ---------------------------------------------------------------------------
+# 3b. Copy ~/.kiss/sorcar.* — always a fresh copy, on every run
+#
+# sorcar.db is the agent's task database; its -wal/-shm companions must travel
+# with it or SQLite sees a torn snapshot.  The remote copies are deleted first
+# so nothing stale (e.g. a -wal file from a previous deploy) survives.  Only
+# regular files are shipped: sorcar.sock is a live UNIX socket.
+# ---------------------------------------------------------------------------
+SORCAR_STATE_FILES=()
+for f in "$HOME"/.kiss/sorcar.*; do
+    [[ -f "$f" && ! -h "$f" ]] && SORCAR_STATE_FILES+=("$f")
+done
+if ((${#SORCAR_STATE_FILES[@]})); then
+    step "Copying ${#SORCAR_STATE_FILES[@]} ~/.kiss/sorcar.* file(s) to $TARGET (fresh copy) ..."
+    ssh "$TARGET" 'rm -f "$HOME"/.kiss/sorcar.*'
+    scp -q "${SORCAR_STATE_FILES[@]}" "$TARGET:.kiss/"
+    info "Fresh copy of sorcar.* placed in $REMOTE_HOME/.kiss."
+else
+    warn "No ~/.kiss/sorcar.* files found locally — skipping."
+fi
 
 # ---------------------------------------------------------------------------
 # 4. Copy ~/.ssh/ — identity only, never authorized_keys
