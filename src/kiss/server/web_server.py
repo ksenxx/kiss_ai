@@ -2530,7 +2530,14 @@ def _build_html() -> str:
         "PANEL_COPY_SRC": _media_url("panelCopy.js"),
         "CTX_MENU_SRC": _media_url("contentContextMenu.js"),
         "MAIN_SRC": _media_url("main.js"),
-        "SHIM_SCRIPT": f"<script>{_WS_SHIM_JS}</script>\n  ",
+        "SHIM_SCRIPT": (
+            "<script>window.__HLJS_THEME_CSS__ = "
+            + json.dumps({
+                "dark": _media_url("highlight-github-dark.min.css"),
+                "light": _media_url("highlight-github-light.min.css"),
+            })
+            + f";</script>\n  <script>{_WS_SHIM_JS}</script>\n  "
+        ),
         "TRICKS_JSON": tricks_json,
         "TIPS_JSON": tips_json,
         "TIPS_SRC": _media_url("tips.js"),

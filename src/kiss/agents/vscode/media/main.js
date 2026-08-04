@@ -839,6 +839,63 @@
     syncAskModalToActiveTab();
   }
 
+  // Light / dark theme toggle for the REMOTE webapp only.  The VS Code
+  // webview always follows the editor theme, so none of this runs there
+  // (the toggle button is only created for body.remote-chat).  The dark
+  // palette is the default; "light" mimics VS Code's Light Modern theme
+  // (see remote-codex.css).  The choice is persisted in localStorage.
+  const REMOTE_THEME_KEY = 'kissRemoteTheme';
+
+  const THEME_SUN_SVG =
+    '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>';
+
+  const THEME_MOON_SVG =
+    '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+
+  function getSavedRemoteTheme() {
+    try {
+      return localStorage.getItem(REMOTE_THEME_KEY) === 'light'
+        ? 'light'
+        : 'dark';
+    } catch (_e) {
+      return 'dark';
+    }
+  }
+
+  // The button shows the theme it switches TO: a sun while in dark
+  // mode, a moon while in light mode.
+  function updateThemeButton(btn) {
+    const light = document.body.classList.contains('light-theme');
+    btn.innerHTML = light ? THEME_MOON_SVG : THEME_SUN_SVG;
+    const label = light ? 'Switch to dark mode' : 'Switch to light mode';
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+  }
+
+  function applyRemoteTheme(theme) {
+    if (!document.body.classList.contains('remote-chat')) return;
+    document.body.classList.toggle('light-theme', theme === 'light');
+    const hljsLink = document.getElementById('hljs-theme');
+    const hljsUrls = window.__HLJS_THEME_CSS__;
+    if (hljsLink && hljsUrls && hljsUrls[theme]) {
+      hljsLink.setAttribute('href', hljsUrls[theme]);
+    }
+    const btn = document.querySelector('#tab-bar .chat-tab-theme');
+    if (btn) updateThemeButton(btn);
+  }
+
+  function toggleRemoteTheme() {
+    const next = document.body.classList.contains('light-theme')
+      ? 'dark'
+      : 'light';
+    try {
+      localStorage.setItem(REMOTE_THEME_KEY, next);
+    } catch (_e) {
+      /* private browsing: theme simply won't persist */
+    }
+    applyRemoteTheme(next);
+  }
+
   function renderTabBar() {
     const tabList = document.getElementById('tab-list');
     const tabBar = document.getElementById('tab-bar');
@@ -927,6 +984,25 @@
         createNewTab();
       });
       tabBar.appendChild(addBtn);
+    }
+
+    if (
+      document.body.classList.contains('remote-chat') &&
+      !tabBar.querySelector('.chat-tab-theme')
+    ) {
+      const themeBtn = document.createElement('div');
+      themeBtn.className = 'chat-tab chat-tab-theme';
+      themeBtn.setAttribute('role', 'button');
+      themeBtn.setAttribute('tabindex', '0');
+      themeBtn.addEventListener('click', toggleRemoteTheme);
+      themeBtn.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          toggleRemoteTheme();
+        }
+      });
+      tabBar.appendChild(themeBtn);
+      updateThemeButton(themeBtn);
     }
 
     const existingSettings = tabBar.querySelector('.chat-tab-settings');
@@ -6444,6 +6520,7 @@
     }
     sidebarClose.addEventListener('click', () => closeSidebar(true));
     sidebarOverlay.addEventListener('click', closeSidebar);
+    applyRemoteTheme(getSavedRemoteTheme());
     if (
       document.body.classList.contains('remote-chat') &&
       typeof window.matchMedia === 'function'
