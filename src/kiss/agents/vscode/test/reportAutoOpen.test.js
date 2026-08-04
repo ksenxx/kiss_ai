@@ -758,6 +758,76 @@ function testSubagentDoneOpensReportInTheBackground() {
   console.log('  ok - subagent report opens in the background on done');
 }
 
+// The daemon addresses one sub-agent's tab by several ids over its life
+// (the live fan-out id, and the deterministic "<parentTab>__sub_<taskId>"
+// id used when the parent's history row is replayed).  The webview keeps
+// the sub-agent on ONE tab by moving it onto the id in use, which must
+// carry the report the sub-agent already wrote with it: the report is
+// stashed per tab id and would otherwise be stranded under the old one.
+function testRetaggedSubagentKeepsItsPendingReport() {
+  const {win, posted} = makeWebview({withMarked: true});
+  const ready = posted.find(m => m.type === 'ready');
+  assert.ok(ready && ready.tabId, 'the webview must post ready with a tabId');
+  const parentId = ready.tabId;
+
+  send(win, {type: 'status', running: true, tabId: parentId});
+  send(win, {
+    type: 'tool_call',
+    name: 'run_parallel',
+    tabId: parentId,
+    extras: {tasks: JSON.stringify(['sub 1'])},
+  });
+  send(win, {
+    type: 'new_tab',
+    task_id: 'sub-task-1',
+    parent_tab_id: parentId,
+    taskId: '',
+  });
+  const resume = posted.find(
+    m => m.type === 'resumeSession' && m.taskId === 'sub-task-1',
+  );
+  assert.ok(resume, 'the fan-out must resume its sub-agent in its own tab');
+  const announce = {
+    type: 'openSubagentTab',
+    tab_id: resume.tabId,
+    parent_tab_id: parentId,
+    description: 'sub 1',
+    task_id: 'sub-task-1',
+    taskIndex: 0,
+  };
+  send(win, announce);
+
+  writeReport(win, 'reports/sub.md', '# from retagged subagent', {
+    tabId: resume.tabId,
+  });
+  assertNoReportTab(win, 'retagged subagent report before subagentDone');
+
+  // The parent's history row is replayed: same sub-agent, new tab id.
+  const replayId = parentId + '__sub_sub-task-1';
+  send(win, Object.assign({}, announce, {tab_id: replayId}));
+  assert.strictEqual(
+    win.document.querySelectorAll('#tab-list .chat-tab.subagent-tab').length,
+    1,
+    'the re-announced sub-agent must keep exactly one tab',
+  );
+
+  send(win, {type: 'subagentDone', tab_id: replayId});
+  const found = contentTabs(win);
+  assert.strictEqual(
+    found.length,
+    1,
+    'BUG — the report written before the sub-agent tab was re-addressed ' +
+      'was lost instead of opening when the sub-agent finished',
+  );
+  found[0].dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
+  assert.ok(
+    /<h1[^>]*>from retagged subagent<\/h1>/.test(activeSrcdoc(win)),
+    'the retagged sub-agent report must render once the user opens it',
+  );
+  win.close();
+  console.log('  ok - a re-addressed sub-agent keeps its pending report');
+}
+
 function testSwitchBackToChatRestoresOutput() {
   const {win} = makeWebview({withMarked: true});
   send(win, {type: 'prompt', text: 'make a report'});
@@ -810,6 +880,7 @@ function main() {
   testReportsSegmentVariants();
   testBackgroundTabReportOpensAtItsTaskDone();
   testSubagentDoneOpensReportInTheBackground();
+  testRetaggedSubagentKeepsItsPendingReport();
   testSwitchBackToChatRestoresOutput();
   console.log('reportAutoOpen.test.js: all tests passed');
 }

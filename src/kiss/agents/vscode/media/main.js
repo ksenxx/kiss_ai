@@ -2916,6 +2916,105 @@
     return entries.some(en => en.tabId && getTab(en.tabId));
   }
 
+  /**
+   * The open sub-agent tab that is running sub-agent task *taskId*, or
+   * null when no tab shows that sub-agent.
+   *
+   * A sub-agent's identity is its TASK id, never a tab id: the daemon
+   * addresses one sub-agent by several tab ids over its life -- the live
+   * fan-out id minted by the parent agent, the deterministic
+   * ``<parentTab>__sub_<taskId>`` id used when the parent's history row
+   * is replayed, and whatever id this client minted when it reopened
+   * the tab after its run_parallel panel was expanded again. Keying
+   * tabs on the tab id alone therefore stacks one tab per id for a
+   * single sub-agent.
+   *
+   * @param {string} taskId Sub-agent task id to look for.
+   * @param {string} exceptTabId Tab id to ignore, or '' for none.
+   * @returns {object|null} The tab object, or null.
+   */
+  function openSubagentTabForTask(taskId, exceptTabId) {
+    if (taskId === undefined || taskId === null || taskId === '') return null;
+    const key = String(taskId);
+    for (const tab of tabs) {
+      if (!tab.isSubagentTab) continue;
+      if (exceptTabId && tab.id === exceptTabId) continue;
+      if (tabTaskId(tab) === key) return tab;
+    }
+    return null;
+  }
+
+  /**
+   * True when the user closed sub-agent task *taskId*'s tab by hand.
+   *
+   * Such a sub-agent stays closed until its run_parallel panel is
+   * collapsed and expanded again, so no later announcement from the
+   * daemon -- under any of the tab ids it addresses that sub-agent by
+   * -- may reopen it.
+   *
+   * @param {Element|null} panelEl The owning run_parallel panel.
+   * @param {string} taskId Sub-agent task id.
+   * @returns {boolean} True when the sub-agent must stay closed.
+   */
+  function rpSubagentHandClosed(panelEl, taskId) {
+    if (!panelEl || taskId === undefined || taskId === null || taskId === '')
+      return false;
+    return (panelEl._rpSubagents || []).some(
+      en =>
+        String(en.taskId) === String(taskId) &&
+        en.userClosed &&
+        !getTab(en.tabId),
+    );
+  }
+
+  /**
+   * Move the already-open sub-agent tab *tab* onto *newTabId*, the tab
+   * id the daemon now addresses that sub-agent by.
+   *
+   * Following the daemon's rename (instead of opening a second tab)
+   * keeps one sub-agent on one tab and keeps both sides in agreement:
+   * every later event for this sub-agent, and every ``closeTab`` this
+   * client sends for it, then names the same id.  The host is told to
+   * release the old id, because the daemon opened the new one as an
+   * additional viewer of the same sub-agent rather than as a rename:
+   * left alone, the retired id would keep host resources (merge
+   * managers, tab ownership, worktree bars) alive for a tab that no
+   * longer exists on this client.
+   *
+   * @param {object} tab The open sub-agent tab to re-id.
+   * @param {string} newTabId The tab id the daemon uses from now on.
+   */
+  function retagSubagentTab(tab, newTabId) {
+    if (!tab || !newTabId || tab.id === newTabId) return;
+    const oldId = tab.id;
+    const panel = _rpTabPanel.get(oldId) || null;
+    tab.id = newTabId;
+    if (panel) {
+      _rpTabPanel.delete(oldId);
+      _rpTabPanel.set(newTabId, panel);
+      for (const en of panel._rpSubagents || []) {
+        if (en.tabId === oldId) en.tabId = newTabId;
+      }
+    }
+    _rpClosedSubagentTabs.delete(newTabId);
+    // report-coverage:start
+    // Reports this sub-agent already wrote are pending under its old
+    // tab id; they must still open when the sub-agent finishes.
+    const oldReports = readyReportsByTab[reportTabKey(oldId)];
+    if (oldReports) {
+      delete readyReportsByTab[reportTabKey(oldId)];
+      readyReportsByTab[reportTabKey(newTabId)] = oldReports;
+    }
+    // report-coverage:end
+    if (activeTabId === oldId) activeTabId = newTabId;
+    // The host is told which CHAT tab is on screen even while a content
+    // tab is active, so the reported id must follow the rename on its
+    // own -- a stale one keeps the host matching merges against a tab
+    // that is gone.
+    if (reportedChatTabId === oldId) reportChatTab(newTabId);
+    api.closeTab({tabId: oldId});
+  }
+
   function rpOwnerTabIdForContainer(container, fallbackTabId) {
     if (fallbackTabId !== undefined && fallbackTabId !== null)
       return fallbackTabId;
@@ -3002,6 +3101,47 @@
       _rpClosedSubagentTabs.delete(tabKey);
       _rpTabPanel.set(tabKey, panelEl);
     }
+    rpMergeDuplicateEntries(panelEl, entry);
+  }
+
+  /**
+   * Fold every other entry of *panelEl* that names *entry*'s sub-agent
+   * task into *entry*.
+   *
+   * One sub-agent must own exactly one entry, or expanding the panel
+   * would open one tab per entry for it. Duplicates appear because an
+   * entry can be created before its task id is known (a tab adopted
+   * from a re-rendered panel) or before its tab exists (a sub-agent
+   * spawned while the panel was collapsed), and the two only turn out
+   * to be the same sub-agent once the daemon names both.
+   *
+   * @param {Element} panelEl The run_parallel panel to clean up.
+   * @param {object} entry The surviving entry.
+   */
+  function rpMergeDuplicateEntries(panelEl, entry) {
+    const key = entry.taskId === undefined ? '' : String(entry.taskId);
+    if (key === '') return;
+    const entries = panelEl._rpSubagents;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const other = entries[i];
+      if (other === entry || String(other.taskId) !== key) continue;
+      // Keep whichever tab is actually open: an entry recorded while
+      // the panel was collapsed carries no tab.
+      if (!entry.tabId || !getTab(entry.tabId)) {
+        if (other.tabId && getTab(other.tabId)) {
+          entry.tabId = other.tabId;
+          _rpTabPanel.set(other.tabId, panelEl);
+        }
+      }
+      if (other.tabId && other.tabId !== entry.tabId) {
+        _rpTabPanel.delete(other.tabId);
+      }
+      // An open tab settles it; otherwise a hand-close recorded on
+      // either entry still holds (the user's close wins).
+      if (entry.tabId && getTab(entry.tabId)) entry.userClosed = false;
+      else entry.userClosed = !!(entry.userClosed || other.userClosed);
+      entries.splice(i, 1);
+    }
   }
 
   function syncRunParallelPanel(panelEl) {
@@ -3025,7 +3165,17 @@
         } else if (collapsed) {
           en.userClosed = false;
         } else if (!openTab && en.taskId !== '' && !en.userClosed) {
+          // This sub-agent may already have a tab under another id
+          // (the daemon renames sub-agent tabs across replays); adopt
+          // it rather than opening a second tab for one sub-agent.
+          const existing = openSubagentTabForTask(en.taskId, '');
+          if (existing) {
+            en.tabId = existing.id;
+            _rpTabPanel.set(existing.id, panelEl);
+            continue;
+          }
           const subTab = createBackgroundSubagentTab(panelEl._rpParentTabId);
+          subTab.currentTaskId = en.taskId;
           en.tabId = subTab.id;
           _rpTabPanel.set(subTab.id, panelEl);
           api.resumeSession({taskId: en.taskId, tabId: subTab.id});
@@ -5426,14 +5576,38 @@
           break;
         if (ev.task_id === undefined || ev.task_id === null) break;
         const parentTabBeforeNew = ev.parent_tab_id || '';
+        // One sub-agent, one tab: a re-delivered spawn for a sub-agent
+        // that already has a tab must not open a second one.
+        const spawned = openSubagentTabForTask(ev.task_id, '');
+        if (spawned) {
+          const spawnPanel = _rpTabPanel.get(spawned.id) || null;
+          if (spawnPanel) {
+            rpRegisterSubagent(
+              spawnPanel,
+              spawnPanel._rpParentTabId || parentTabBeforeNew,
+              ev.task_id,
+              spawned.id,
+            );
+          }
+          break;
+        }
         let subAgentTabId;
         if (parentTabBeforeNew) {
-          const rpPanel = runParallelPanelForParent(parentTabBeforeNew);
-          if (rpPanel && rpPanel.classList.contains('collapsed')) {
+          // Attribute the spawn to the fan-out that owns it, not to the
+          // newest panel: with several run_parallel calls in one task a
+          // late spawn belongs to an earlier call, whose collapsed state
+          // decides whether it may have a tab.
+          const rpPanel = rpPanelForNewSubagent(parentTabBeforeNew, ev.task_id);
+          if (
+            rpPanel &&
+            (rpPanel.classList.contains('collapsed') ||
+              rpSubagentHandClosed(rpPanel, ev.task_id))
+          ) {
             rpRegisterSubagent(rpPanel, parentTabBeforeNew, ev.task_id, '');
             break;
           }
           const subTab = createBackgroundSubagentTab(parentTabBeforeNew);
+          subTab.currentTaskId = ev.task_id;
           subAgentTabId = subTab.id;
           if (rpPanel) {
             rpRegisterSubagent(
@@ -5466,9 +5640,27 @@
           rpPanel = rpPanelForNewSubagent(parentId, subTaskId);
         }
         let subTab = getTab(ev.tab_id);
+        // A sub-agent the user closed by hand stays closed until its
+        // run_parallel panel is collapsed and expanded again -- also
+        // when the daemon re-announces it under a different tab id.
+        if (!subTab && rpSubagentHandClosed(rpPanel, subTaskId)) {
+          _rpClosedSubagentTabs.add(ev.tab_id);
+          break;
+        }
         if (!subTab && _rpClosedSubagentTabs.has(ev.tab_id)) {
           if (rpPanel) rpRegisterSubagent(rpPanel, parentId, subTaskId, '');
           break;
+        }
+        // One sub-agent, one tab: the daemon addresses a sub-agent by
+        // different tab ids across replays, so an announcement for a
+        // sub-agent that already has a tab renames that tab instead of
+        // opening another one for the same conversation.
+        if (!subTab) {
+          const openForTask = openSubagentTabForTask(subTaskId, ev.tab_id);
+          if (openForTask) {
+            retagSubagentTab(openForTask, ev.tab_id);
+            subTab = openForTask;
+          }
         }
         if (rpPanel && rpPanel.classList.contains('collapsed')) {
           rpRegisterSubagent(
@@ -5492,6 +5684,13 @@
           placeSubagentTabAfterParent(subTab, parentId);
         }
         subTab.isSubagentTab = true;
+        // Stamp the sub-agent's task on its tab right away: that task
+        // id is this tab's identity for every later announcement (see
+        // openSubagentTabForTask).
+        if (subTaskId !== '') {
+          subTab.currentTaskId = subTaskId;
+          subTab.pendingTaskId = null;
+        }
         if (parentId && parentId !== subTab.id) {
           subTab.parentTabId = parentId;
         }
