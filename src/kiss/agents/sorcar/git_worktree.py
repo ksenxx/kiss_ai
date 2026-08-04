@@ -254,6 +254,26 @@ _WORKTREE_SLUG_PREFIX = "kiss_wt-"
 _WORKTREE_BRANCH_PREFIX = "kiss/wt-"
 
 
+def _same_path(left: Path, right: Path) -> bool:
+    """Return True when both paths denote the same directory.
+
+    Symlinks (``/var`` -> ``/private/var`` on macOS) and relative
+    components are resolved first; unresolvable paths fall back to a
+    plain comparison so a missing directory never raises.
+
+    Args:
+        left: First path.
+        right: Second path.
+
+    Returns:
+        True when the two paths are the same location.
+    """
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:  # pragma: no cover — unreadable path components
+        return left == right
+
+
 def strip_worktree_suffix(path: str) -> str:
     """Return *path* with the ``.kiss-worktrees/kiss_wt-<slug>[/...]``
     suffix removed, leaving the parent repository path.
@@ -500,6 +520,16 @@ class GitWorktreeOps:
             repo: Git repo root path.
             wt_dir: Worktree directory to remove.
         """
+        if _same_path(wt_dir, repo):
+            # The main working tree is not an agent worktree: git
+            # rightly refuses to remove it, and the ``rmtree`` fallback
+            # below would delete the user's whole project.
+            logger.error(
+                "Refusing to remove %s: it is the main working tree, "
+                "not an agent worktree",
+                wt_dir,
+            )
+            return
         if not wt_dir.exists():
             GitWorktreeOps.prune(repo)
             return
@@ -1655,6 +1685,14 @@ class GitWorktreeOps:
                 return 0
             for wt_dir, branch in GitWorktreeOps.registered_worktrees(repo):
                 if not branch.startswith(_WORKTREE_BRANCH_PREFIX):
+                    continue
+                if _same_path(wt_dir, repo):
+                    # ``git worktree list`` reports the main working
+                    # tree too.  A user checkout that merely sits on a
+                    # branch carrying the agent prefix (e.g. a machine
+                    # provisioned by ./sorcar-cloud from a worktree) is
+                    # not an orphan: reclaiming it would delete the
+                    # project directory.
                     continue
                 if branch in excluded:
                     continue
