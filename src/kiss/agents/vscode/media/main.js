@@ -22,6 +22,17 @@
     return m + 'm ' + sec + 's';
   }
 
+  // Reads a pixel-valued CSS custom property off <body> so layout
+  // bounds live in the stylesheet only.  Returns `fallback` when the
+  // property is missing (VS Code webview, which never loads
+  // remote-codex.css) or is not a positive length.
+  function cssPxVar(name, fallback) {
+    if (typeof window.getComputedStyle !== 'function') return fallback;
+    const style = window.getComputedStyle(document.body);
+    const px = parseFloat(style.getPropertyValue(name));
+    return Number.isFinite(px) && px > 0 ? px : fallback;
+  }
+
   const _activePanels = new Set();
   let _activePanelTickIv = null;
 
@@ -6553,22 +6564,33 @@
     }
     const sidebarResizer = document.getElementById('sidebar-resizer');
     if (document.body.classList.contains('remote-chat') && sidebarResizer) {
-      const SB_MIN = 220;
-      const SB_MAX = 600;
+      // Bounds come from remote-codex.css: the minimum is the width at
+      // which every history filter toggle fits on one line, so neither
+      // a drag nor a stale persisted value can wrap them again.
+      const SB_MIN = cssPxVar('--sidebar-min-w', 520);
+      const SB_MAX = cssPxVar('--sidebar-max-w', 820);
+      const CHAT_MIN = cssPxVar('--chat-min-w', 360);
       const SB_KEY = 'kiss-sidebar-w';
+      // Widest the panel may become on the CURRENT window: a wide
+      // panel dragged on a big monitor must not squeeze the chat into
+      // an unusable sliver after the window shrinks.
+      const sidebarWindowMax = () =>
+        Math.max(SB_MIN, Math.min(SB_MAX, window.innerWidth - CHAT_MIN));
       const sidebarDefaultW = () =>
         Math.max(
           SB_MIN,
-          Math.min(SB_MAX, Math.round(window.innerWidth * 0.25)),
+          Math.min(sidebarWindowMax(), Math.round(window.innerWidth * 0.34)),
         );
       const setSidebarW = px => {
-        const w = Math.max(SB_MIN, Math.min(SB_MAX, Math.round(px)));
+        const max = sidebarWindowMax();
+        const w = Math.max(SB_MIN, Math.min(max, Math.round(px)));
         document.documentElement.style.setProperty('--sidebar-w', w + 'px');
+        sidebarResizer.setAttribute('aria-valuemax', String(max));
         sidebarResizer.setAttribute('aria-valuenow', String(w));
         return w;
       };
       sidebarResizer.setAttribute('aria-valuemin', String(SB_MIN));
-      sidebarResizer.setAttribute('aria-valuemax', String(SB_MAX));
+      sidebarResizer.setAttribute('aria-valuemax', String(sidebarWindowMax()));
       sidebarResizer.setAttribute('aria-valuenow', String(sidebarDefaultW()));
       let sidebarW = sidebarDefaultW();
       let persisted = null;
@@ -6633,6 +6655,13 @@
         e.preventDefault();
         sidebarW = setSidebarW(sidebarW + (e.key === 'ArrowRight' ? 16 : -16));
         persistSidebarW();
+      });
+      // Re-apply the width whenever the window changes size so a wide
+      // panel narrows instead of crushing the chat.  The preferred
+      // width in `sidebarW` is intentionally left untouched.
+      window.addEventListener('resize', () => {
+        if (!document.body.classList.contains('remote-desktop')) return;
+        setSidebarW(sidebarW);
       });
     }
     if (frequentTasksBtn) {

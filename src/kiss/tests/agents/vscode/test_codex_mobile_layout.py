@@ -361,8 +361,10 @@ def test_codex_rounded_panels() -> None:
 
 
 def test_desktop_media_query_docks_sidebar() -> None:
-    """A min-width:900px block docks the history sidebar on the left
-    (transform:none, fixed 300px column, overlay hidden, #app cleared)."""
+    """A min-width:900px block docks the OPEN history sidebar on the
+    left (transform:none, --sidebar-w column, overlay hidden) and clears
+    #app only while the sidebar is open, so the burger really hides it.
+    """
     css = _read_codex_css()
     m = re.search(
         r"@media \((?:min-width: 900px|width >= 900px)\)\s*\{(.*)\}\s*$",
@@ -372,13 +374,17 @@ def test_desktop_media_query_docks_sidebar() -> None:
     assert m, "@media (min-width: 900px) desktop block missing"
     block = m.group(1)
     sidebar = re.search(
-        r"body\.remote-chat\.remote-desktop #sidebar\s*\{([^}]*)\}", block
+        r"body\.remote-chat\.remote-desktop #sidebar\.open\s*\{([^}]*)\}",
+        block,
     )
-    assert sidebar, "docked #sidebar rule missing from desktop block"
+    assert sidebar, "docked #sidebar.open rule missing from desktop block"
     assert "transform: none" in sidebar.group(1)
     assert "width: var(--sidebar-w," in sidebar.group(1), (
         "sidebar width must be driven by the --sidebar-w variable"
     )
+    assert not re.search(
+        r"body\.remote-chat\.remote-desktop #sidebar\s*\{", block
+    ), "the docked rules must require #sidebar.open, else the burger cannot hide it"
     overlay = re.search(
         r"body\.remote-chat\.remote-desktop #sidebar-overlay\s*"
         r"\{([^}]*)\}",
@@ -387,8 +393,16 @@ def test_desktop_media_query_docks_sidebar() -> None:
     assert overlay and "display: none" in overlay.group(1), (
         "the dark overlay must be hidden while docked"
     )
-    app = re.search(
+    hidden_app = re.search(
         r"body\.remote-chat\.remote-desktop #app\s*\{([^}]*)\}", block
+    )
+    assert hidden_app and "margin-left: 0" in hidden_app.group(1), (
+        "#app must reclaim the full width once the sidebar is hidden"
+    )
+    app = re.search(
+        r"body\.remote-chat\.remote-desktop:has\(#sidebar\.open\) #app"
+        r"\s*\{([^}]*)\}",
+        block,
     )
     assert app and "margin-left: var(--sidebar-w," in app.group(1), (
         "#app must clear the docked sidebar via the SAME width variable"
@@ -484,8 +498,8 @@ def test_sidebar_resizer_css() -> None:
     )
     assert m
     desktop = re.search(
-        r"body\.remote-chat\.remote-desktop #sidebar-resizer\s*"
-        r"\{([^}]*)\}",
+        r"body\.remote-chat\.remote-desktop #sidebar\.open #sidebar-resizer"
+        r"\s*\{([^}]*)\}",
         m.group(1),
     )
     assert desktop, "desktop resizer rule missing from the media block"
@@ -507,11 +521,25 @@ def test_main_js_sidebar_resize_wiring() -> None:
 
 
 
-def test_sidebar_defaults_to_quarter_screen() -> None:
-    """The docked sidebar (and #app's margin) defaults to 1/4 of the
-    browser screen: the --sidebar-w fallback is a 25vw-based clamp()
-    bounded by the resize range, identical in BOTH rules."""
+def test_sidebar_default_width_fits_the_filter_toggles() -> None:
+    """The docked sidebar (and #app's margin) share one width fallback,
+    whose floor is wide enough for every history filter toggle to sit on
+    a single line."""
     css = _read_codex_css()
+    variables = re.search(r"body\.remote-chat\s*\{([^}]*)\}", css)
+    assert variables, "body.remote-chat variable block missing"
+    assert "--sidebar-min-w: 520px" in variables.group(1), (
+        "the panel floor must be the width where the five filter "
+        "toggles fit on one line"
+    )
+    assert "--chat-min-w:" in variables.group(1), (
+        "a chat-width floor is needed so a wide panel cannot crush the chat"
+    )
+    assert re.search(
+        r"--sidebar-default-w:\s*clamp\(\s*var\(--sidebar-min-w\),"
+        r"[^;]*var\(--sidebar-max-w\)\)",
+        variables.group(1),
+    ), "the default width must clamp between the shared min/max bounds"
     m = re.search(
         r"@media \((?:min-width: 900px|width >= 900px)\)\s*\{(.*)\}\s*$",
         css,
@@ -519,18 +547,21 @@ def test_sidebar_defaults_to_quarter_screen() -> None:
     )
     assert m, "@media (min-width: 900px) desktop block missing"
     block = m.group(1)
-    fallback = "var(--sidebar-w, clamp(220px, 25vw, 600px))"
+    fallback = "var(--sidebar-w, var(--sidebar-default-w))"
     sidebar = re.search(
-        r"body\.remote-chat\.remote-desktop #sidebar\s*\{([^}]*)\}", block
+        r"body\.remote-chat\.remote-desktop #sidebar\.open\s*\{([^}]*)\}",
+        block,
     )
     assert sidebar and f"width: {fallback}" in sidebar.group(1), (
-        "docked sidebar must default to 25vw (1/4 screen), clamped"
+        "the docked sidebar must size itself from --sidebar-default-w"
     )
     app = re.search(
-        r"body\.remote-chat\.remote-desktop #app\s*\{([^}]*)\}", block
+        r"body\.remote-chat\.remote-desktop:has\(#sidebar\.open\) #app"
+        r"\s*\{([^}]*)\}",
+        block,
     )
     assert app and f"margin-left: {fallback}" in app.group(1), (
-        "#app must clear the sidebar via the SAME 25vw-based fallback"
+        "#app must clear the sidebar via the SAME width fallback"
     )
 
 
@@ -562,13 +593,18 @@ def test_chat_column_spans_full_width() -> None:
     assert "768px" not in composer.group(1)
 
 
-def test_main_js_quarter_screen_default() -> None:
-    """main.js seeds the sidebar resize default from 25% of the window
-    width instead of a fixed 300px."""
+def test_main_js_reads_its_bounds_from_the_stylesheet() -> None:
+    """main.js seeds the resize default from a fraction of the window
+    width and takes its bounds from remote-codex.css, so the one-line
+    filter width lives in exactly one place."""
     js = (MEDIA_DIR / "main.js").read_text(encoding="utf-8")
-    assert "window.innerWidth * 0.25" in js, (
-        "the resize default must be computed as 1/4 of the window width"
+    assert "window.innerWidth * 0.34" in js, (
+        "the resize default must be computed from the window width"
     )
+    for name in ("--sidebar-min-w", "--sidebar-max-w", "--chat-min-w"):
+        assert f"cssPxVar('{name}'" in js, (
+            f"{name} must be read from the stylesheet, not duplicated"
+        )
 
 
 

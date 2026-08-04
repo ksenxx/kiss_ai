@@ -43,6 +43,26 @@ body.remote-chat {
   --favorite: #f5b400;
   --copied: #4caf50;
 
+  /*
+   * Docked task-history panel geometry (desktop mode only).  The
+   * minimum is the width the five status/scope toggle buttons of the
+   * history "Filters" section need to sit on ONE line: ~448px of
+   * chips plus the panel's 2 x 16px padding, rounded up so platforms
+   * with wider font metrics still fit.  main.js reads both bounds so
+   * the resizer can never drag the panel below the one-line width.
+   */
+  --sidebar-min-w: 520px;
+  --sidebar-max-w: 820px;
+  --sidebar-default-w: clamp(var(--sidebar-min-w), 34vw, var(--sidebar-max-w));
+
+  /* Chat width the docked panel may never eat into, so a panel widened
+     on a big monitor cannot crush the chat on a smaller window. */
+  --chat-min-w: 360px;
+
+  /* Settings drawer width on desktop — as narrow as the VS Code
+     extension's sidebar instead of the 90vw mobile sheet. */
+  --settings-panel-w: 420px;
+
   background: var(--bg);
   color: var(--fg);
 }
@@ -494,10 +514,18 @@ body.remote-chat .running-item-ids::before {
   content: " • ";
 }
 
+/*
+ * Desktop mode: the history panel is DOCKED beside the chat instead of
+ * overlaying it as a drawer.  Every docked rule is scoped to
+ * ``#sidebar.open`` so the burger button, which only toggles that
+ * class, really shows and hides the panel: without ``.open`` the
+ * panel falls back to the translated-off-screen drawer rule in
+ * main.css and ``#app`` reclaims the freed width.
+ */
 @media (width >= 900px) {
-  body.remote-chat.remote-desktop #sidebar {
+  body.remote-chat.remote-desktop #sidebar.open {
     transform: none;
-    width: var(--sidebar-w, clamp(220px, 25vw, 600px));
+    width: var(--sidebar-w, var(--sidebar-default-w));
     border-right: 1px solid var(--border-8);
   }
 
@@ -506,10 +534,21 @@ body.remote-chat .running-item-ids::before {
   }
 
   body.remote-chat.remote-desktop #app {
-    margin-left: var(--sidebar-w, clamp(220px, 25vw, 600px));
+    /* Matches the panel's own 0.2s slide in main.css so the chat does
+       not jump ahead of it while the burger shows or hides it. */
+    margin-left: 0;
+    transition: margin-left 0.2s ease;
   }
 
-  body.remote-chat.remote-desktop #sidebar-resizer {
+  body.remote-chat.remote-desktop:has(#sidebar.open) #app {
+    margin-left: var(--sidebar-w, var(--sidebar-default-w));
+  }
+
+  body.remote-chat.remote-desktop #settings-panel {
+    width: min(90vw, var(--settings-panel-w));
+  }
+
+  body.remote-chat.remote-desktop #sidebar.open #sidebar-resizer {
     display: block;
     position: absolute;
     top: 0;
