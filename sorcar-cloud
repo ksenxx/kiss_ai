@@ -16,6 +16,17 @@
 # the last commit on ``main``.
 #
 # Usage:  ./sorcar-cloud [--keep-remote] user@ip-address [PORT]
+#         ./sorcar-cloud --connect     user@ip-address [PORT]
+#
+# ``--connect`` deploys NOTHING: it just opens the IDE that is already
+# running on the host.  It is a shortcut for the companion script
+# ``./sorcar-connect``, which is a single self-contained file that needs only
+# bash and ssh — copy it to any machine that can SSH into the host
+# (``scp user@host:<project>/sorcar-connect .``) and that machine can open the
+# remote IDE too.  This works because step 7 leaves the IDE running as a
+# systemd *user* service with lingering enabled (so it survives logouts and
+# reboots) and records its ports in ~/.kiss/sorcar-cloud.env on the host for
+# any client to read.
 #
 # Flow (every run is a full, from-scratch redeploy):
 #   1. SSH connectivity check.
@@ -54,13 +65,19 @@
 #      KISS_SKIP_LAUNCH=1 (skip the desktop launch — we start code-server
 #      ourselves) and KISS_SKIP_UPDATE=1 (never pull origin/main over the
 #      working directory we just shipped).
-#   7. (Re)launch code-server on 127.0.0.1:$PORT, workspace = the copied
-#      folder.
-#   8. Open SSH tunnels  localhost:$PORT -> remote $PORT  (the IDE) and
-#      a free local port -> remote 8787 (the webapp), open your local
-#      browser at http://localhost:$PORT — which activates the extension
-#      and therefore starts kiss-web — then wait for the webapp to answer
-#      through the tunnel and print its URL.
+#   7. Install code-server as a systemd *user* service bound to
+#      127.0.0.1:$PORT with the copied folder as its workspace, enable
+#      lingering for the remote user, and record the deployment (ports,
+#      workspace, service name) in ~/.kiss/sorcar-cloud.env.  A user service
+#      with Restart=always plus lingering means the IDE comes back by itself
+#      after a crash, a logout or a reboot, and the recorded ports let any
+#      machine discover it — which is what makes step 8 runnable from
+#      anywhere, at any time, without redeploying.
+#   8. Hand over to ``./sorcar-connect``, which forwards the IDE and webapp
+#      ports over SSH, opens your browser at the IDE — which activates the
+#      extension and therefore starts kiss-web — and holds the tunnel until
+#      Ctrl+C.  Nothing about that step is specific to this laptop, so it is
+#      a separate script you can run from any machine with SSH access.
 #
 # ``--keep-remote`` skips step 2's delete and rsyncs in place instead
 # (faster, but the remote keeps files you have since deleted locally).
@@ -70,6 +87,16 @@ set -euo pipefail
 # kiss.server.web_server.main → RemoteAccessServer, host="0.0.0.0").  Reaching
 # it through the SSH tunnel below is what keeps that open bind private.
 WEB_PORT=8787
+
+# The IDE runs as this systemd *user* unit on the remote (see step 7h).  The
+# name is deliberately not "code-server" so we never fight a unit the host's
+# package manager owns.
+IDE_SERVICE=kiss-code-server
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Everything about connecting to an already-deployed host lives in this one
+# self-contained companion script, so any machine with ssh keys can do it.
+CONNECT_SCRIPT="$SCRIPT_DIR/sorcar-connect"
 
 # ---------------------------------------------------------------------------
 # Logging helpers (mirrors sorcar-linux / sorcar-docker)
@@ -83,10 +110,12 @@ die()  { printf '\033[0;31m[ERR]\033[0m  %s\n' "$*" >&2; exit 1; }
 # 1. Parse arguments
 # ---------------------------------------------------------------------------
 WIPE_REMOTE=1
+CONNECT_ONLY=0
 ARGS=()
 for arg in "$@"; do
     case "$arg" in
         --keep-remote) WIPE_REMOTE=0 ;;
+        --connect|--attach) CONNECT_ONLY=1 ;;
         # Accepted for backwards compatibility: every run is already a full
         # reinstall, so --force is now a no-op.
         --force|-f) ;;
@@ -102,72 +131,26 @@ done
 TARGET="${ARGS[0]:-}"
 PORT="${ARGS[1]:-8080}"
 
-[[ -n "$TARGET" ]] || die "Usage: $0 [--keep-remote] user@ip-address [PORT]"
+# --connect: there is nothing to deploy — open the IDE that is already
+# running on the host.  Hand the whole job to sorcar-connect rather than
+# duplicating it here, so the code that other machines run is the same code
+# this one runs (and therefore cannot rot).
+if [[ "$CONNECT_ONLY" == "1" ]]; then
+    [[ -x "$CONNECT_SCRIPT" ]] \
+        || die "$CONNECT_SCRIPT is missing or not executable — it ships next to this script."
+    if [[ -n "${ARGS[1]:-}" ]]; then
+        exec "$CONNECT_SCRIPT" "$TARGET" "${ARGS[1]}"
+    fi
+    exec "$CONNECT_SCRIPT" "$TARGET"
+fi
+
+[[ -n "$TARGET" ]] || die "Usage: $0 [--keep-remote|--connect] user@ip-address [PORT]"
 [[ "$TARGET" == *"@"* ]] || warn "TARGET '$TARGET' has no 'user@' part; using the SSH default user."
 
 # PORT is interpolated into remote shell command strings (and into a pkill
 # pattern), so reject anything that is not a plain TCP port number.
 [[ "$PORT" =~ ^[0-9]+$ ]] && ((PORT >= 1 && PORT <= 65535)) \
     || die "PORT must be a number between 1 and 65535 (got '$PORT')."
-
-# Pick the local end of the IDE tunnel.  $PORT (default 8080) is a busy
-# neighbourhood on a laptop: another sorcar-cloud run, a dev server, or a
-# stale forward left by a crashed session may already hold it.  Because the
-# tunnel below sets ExitOnForwardFailure=yes, a busy LOCAL port makes ssh
-# abort with "Could not request local forwarding" (and the whole deploy
-# dies) rather than silently forwarding nothing.  So probe for a free local
-# port, preferring $PORT itself, exactly like pick_local_web_port() does for
-# the webapp.  Only the laptop end of the forward moves — the remote
-# code-server still binds $PORT.
-pick_local_ide_port() {
-    local candidate
-    for candidate in "$PORT" $((PORT + 10000)) $((PORT + 10001)) $((PORT + 10002)) $((PORT + 10003)); do
-        ((candidate >= 1 && candidate <= 65535)) || continue
-        if ! nc -z 127.0.0.1 "$candidate" >/dev/null 2>&1; then
-            printf '%s' "$candidate"
-            return 0
-        fi
-    done
-    return 1
-}
-if command -v nc >/dev/null 2>&1; then
-    LOCAL_PORT="$(pick_local_ide_port || true)"
-else
-    LOCAL_PORT="$PORT"
-fi
-[[ -n "$LOCAL_PORT" ]] \
-    || die "Local IDE port $PORT and its fallbacks are all busy — free one (e.g. 'lsof -nP -iTCP:$PORT -sTCP:LISTEN') or pass a different PORT."
-[[ "$LOCAL_PORT" == "$PORT" ]] \
-    || info "Local port $PORT is busy — tunneling the remote IDE to local port $LOCAL_PORT instead."
-
-URL="http://localhost:${LOCAL_PORT}"
-
-# Pick the local end of the webapp tunnel.  The laptop usually runs its own
-# kiss-web on 8787, and forwarding onto a busy port would leave
-# https://localhost:8787 pointing at the LOCAL app while we claim it is the
-# remote one.  Probe for a free port, preferring the familiar 8787.
-pick_local_web_port() {
-    local candidate
-    for candidate in "$WEB_PORT" 18787 18788 18789 18790; do
-        if ! nc -z 127.0.0.1 "$candidate" >/dev/null 2>&1; then
-            printf '%s' "$candidate"
-            return 0
-        fi
-    done
-    return 1
-}
-if command -v nc >/dev/null 2>&1; then
-    LOCAL_WEB_PORT="$(pick_local_web_port || true)"
-else
-    LOCAL_WEB_PORT="$WEB_PORT"
-fi
-if [[ -z "$LOCAL_WEB_PORT" ]]; then
-    warn "Ports $WEB_PORT and 18787-18790 are all busy locally; the webapp tunnel will be skipped."
-else
-    [[ "$LOCAL_WEB_PORT" == "$WEB_PORT" ]] \
-        || info "Local port $WEB_PORT is busy — tunneling the remote webapp to $LOCAL_WEB_PORT instead."
-fi
-WEB_URL="https://localhost:${LOCAL_WEB_PORT:-$WEB_PORT}"
 
 # ---------------------------------------------------------------------------
 # 2. Pre-flight checks (local)
@@ -177,8 +160,10 @@ command -v scp   &>/dev/null || die "scp is not installed. Install OpenSSH first
 command -v rsync &>/dev/null || die "rsync is not installed. Install rsync first."
 command -v curl  &>/dev/null || die "curl is not installed. Install curl first."
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 [[ -f "$SCRIPT_DIR/install.sh" ]] || die "install.sh not found in $SCRIPT_DIR — is this really the kiss checkout?"
+# The deploy ends by handing over to it (step 8), so fail now rather than
+# after a 10-minute install.
+[[ -x "$CONNECT_SCRIPT" ]] || die "$CONNECT_SCRIPT not found or not executable — it ships next to this script."
 
 # Determine the *logical* project name for the remote directory.
 # Priority:
@@ -300,9 +285,22 @@ copy_tree() {
         # ``.git`` is a one-line file pointing at an absolute laptop path, so
         # shipping them multiplies the transfer and drags dead git pointers
         # into the snapshot commit step 7e makes.  The remote creates its own.
+        # ``|| true`` plus an explicit PIPESTATUS check instead of letting
+        # ``set -e``/``pipefail`` abort: tar exits 1 for mere WARNINGS, and
+        # the most common one is unavoidable here — "file changed as we read
+        # it", because a live checkout keeps writing (a log under tmp/, an
+        # editor autosave) while we archive it.  Aborting on that threw away
+        # a completed 200 MB transfer and, worse, printed nothing at all,
+        # since set -e exits without a message.  So: 1 = warn and go on,
+        # >=2 = a real tar error, and any nonzero from the receiving ssh is
+        # fatal (that is the half of the pipe that can lose data).
         COPYFILE_DISABLE=1 tar --no-xattrs --exclude='.venv' \
             --exclude='.kiss-worktrees' -C "$src" -czpf - . \
-            | ssh "$TARGET" "mkdir -p -- '$dst' && tar -C '$dst' -xzpf -"
+            | ssh "$TARGET" "mkdir -p -- '$dst' && tar -C '$dst' -xzpf -" || true
+        local tar_rc="${PIPESTATUS[0]}" ssh_rc="${PIPESTATUS[1]}"
+        ((ssh_rc == 0)) || die "The remote refused the copy (ssh/tar exit $ssh_rc)."
+        ((tar_rc <= 1)) || die "Local tar failed with exit $tar_rc — the copy is incomplete."
+        ((tar_rc == 0)) || warn "tar reported warnings (exit 1) — usually a file that changed while being read."
     else
         # --exclude='.venv': never overwrite the remote's own working
         # virtualenv with the laptop's macOS one (and never waste the
@@ -324,10 +322,15 @@ if [[ "$WIPE_REMOTE" == "1" ]]; then
     step "Deleting $TARGET:$REMOTE_DIR (if it exists) ..."
     # Any code-server / kiss-web still running out of the doomed directory
     # would keep rewriting it (and hold deleted inodes open) while we copy.
-    ssh "$TARGET" "REMOTE_DIR='$REMOTE_DIR' bash -s" <<'WIPE'
+    ssh "$TARGET" "REMOTE_DIR='$REMOTE_DIR' IDE_SERVICE='$IDE_SERVICE' bash -s" <<'WIPE'
 set -e
 export PATH="$HOME/.local/bin:$PATH"
+# Stop the IDE through systemd FIRST: its unit is Restart=always, so a bare
+# pkill would only make the user manager start it again — on the directory we
+# are about to delete.  The pkill afterwards catches an IDE started by an
+# older sorcar-cloud (setsid, no unit) or by hand.
 if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user stop "$IDE_SERVICE" 2>/dev/null || true
     systemctl --user stop kiss-web 2>/dev/null || true
 fi
 pkill -f 'code-server' 2>/dev/null || true
@@ -401,6 +404,7 @@ if [[ -d "$HOME/.kiss" ]]; then
         --exclude='.config.lock' \
         --exclude='api_keys.env' \
         --exclude='api_keys.systemd.env' \
+        --exclude='sorcar-cloud.env' \
         --exclude='.DS_Store' \
         "$HOME/.kiss/" "$TARGET:.kiss/"
 
@@ -593,11 +597,13 @@ step "Bootstrapping code-server and running the full install.sh on $TARGET..."
 ssh "$TARGET" \
     "PORT='$PORT' \
      WEB_PORT='$WEB_PORT' \
+     IDE_SERVICE='$IDE_SERVICE' \
      REMOTE_BASE='$SCRIPT_BASE' \
      bash -s" <<'REMOTE'
 set -e
 PORT="${PORT:-8080}"
 WEB_PORT="${WEB_PORT:-8787}"
+IDE_SERVICE="${IDE_SERVICE:-kiss-code-server}"
 WORKSPACE="$HOME/$REMOTE_BASE"
 export PATH="$HOME/.local/bin:$PATH"
 LOG_DIR="$HOME/.kiss"
@@ -775,7 +781,32 @@ else
     rinfo "WARNING: $VSIX not found — install.sh may have failed to build it."
 fi
 
-# --- 7h. (Re)launch code-server on 127.0.0.1:$PORT --------------------
+# --- 7h. Run the IDE as a systemd *user* service ----------------------
+# The IDE must outlive this ssh session by a lot: the whole point is that
+# tomorrow, from a different laptop, ``sorcar-connect user@host`` finds it
+# already listening.  A backgrounded ``setsid code-server`` cannot promise
+# that — it dies with the machine, never comes back after a crash, and is
+# invisible to systemd — so the IDE gets a real user unit:
+#   Restart=always      a crashed or OOM-killed editor comes back by itself;
+#   WantedBy=default.target + lingering (enabled below)
+#                       the user manager starts it AT BOOT, with nobody
+#                       logged in, so a rebooted VM is reachable again;
+#   EnvironmentFile     the API keys, from the same file kiss-web uses (the
+#                       leading '-' keeps a missing file non-fatal, because
+#                       section 6 is skipped when the laptop has no rc with
+#                       API_KEY lines);
+#   append:             both streams land in the log the operator is already
+#                       told to read, ~/.kiss/code-server.log.
+# systemd --user is not optional here: the KISS Sorcar extension manages
+# kiss-web as a user unit too, so a host without it cannot run KISS at all.
+command -v systemctl >/dev/null 2>&1 \
+    || { echo "ERROR: systemd (systemctl --user) is required on the remote host." >&2; exit 1; }
+
+# Take down whatever serves this port right now: the unit from an earlier
+# deploy, and — with pkill — a detached code-server left by an older
+# sorcar-cloud that had no unit.  Stop the unit BEFORE the pkill, or
+# Restart=always simply brings it back.
+systemctl --user stop "$IDE_SERVICE" 2>/dev/null || true
 pkill -f "code-server.*--bind-addr 127.0.0.1:$PORT" 2>/dev/null || true
 sleep 1
 
@@ -806,165 +837,117 @@ else
     printf '{\n  "query": {\n    "folder": "%s"\n  }\n}\n' "$WORKSPACE" > "$CODER_JSON"
 fi
 
-rinfo "Launching code-server on 127.0.0.1:$PORT (workspace: $WORKSPACE)..."
-# The inner bash re-sources ~/.kiss/api_keys.env explicitly (belt and
-# braces on top of the env it inherits) so the KISS Sorcar extension and
-# the kiss-web daemon it spawns always see the API keys.  KISS_PROJECT_PATH
-# tells the extension which checkout to run (kissPaths.ts findKissProject).
-setsid bash -c "[ -f \"\$HOME/.kiss/api_keys.env\" ] && . \"\$HOME/.kiss/api_keys.env\"; \
-    export KISS_PROJECT_PATH='$WORKSPACE'; exec code-server \
-    --bind-addr 127.0.0.1:$PORT \
-    --auth none \
-    --disable-workspace-trust \
-    --enable-proposed-api ksenxx.kiss-sorcar \
-    '$WORKSPACE'" > "$LOG_DIR/code-server.log" 2>&1 < /dev/null &
+rinfo "Installing the $IDE_SERVICE user service (127.0.0.1:$PORT, workspace: $WORKSPACE)..."
+# --bind-addr 127.0.0.1: the editor runs with --auth none, so it must never
+# be reachable except through an SSH tunnel.  KISS_PROJECT_PATH tells the
+# extension which checkout to run (kissPaths.ts findKissProject).  PATH is
+# set explicitly because a systemd service inherits nothing from a shell and
+# uv / code-server / kiss-web all live in ~/.local/bin.
+mkdir -p "$HOME/.config/systemd/user"
+CODE_SERVER_BIN="$(command -v code-server)"
+cat > "$HOME/.config/systemd/user/$IDE_SERVICE.service" <<UNIT
+[Unit]
+Description=KISS Sorcar IDE (code-server) on 127.0.0.1:$PORT
+Documentation=https://github.com/ksenxx/kiss_ai
+After=network-online.target
 
+[Service]
+Type=exec
+EnvironmentFile=-%h/.kiss/api_keys.systemd.env
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment="KISS_PROJECT_PATH=$WORKSPACE"
+WorkingDirectory=$WORKSPACE
+ExecStart=$CODE_SERVER_BIN --bind-addr 127.0.0.1:$PORT --auth none --disable-workspace-trust --enable-proposed-api ksenxx.kiss-sorcar "$WORKSPACE"
+Restart=always
+RestartSec=3
+StandardOutput=append:%h/.kiss/code-server.log
+StandardError=append:%h/.kiss/code-server.log
+
+[Install]
+WantedBy=default.target
+UNIT
+
+# Lingering must be on BEFORE ``enable`` is meaningful: without it the user
+# manager (and every unit in it, kiss-web included) is killed when this ssh
+# session closes and is not started at boot.  The extension enables it too,
+# but only once it activates — long after this connection is gone.
+if command -v loginctl >/dev/null 2>&1; then
+    loginctl enable-linger "$(id -un)" 2>/dev/null || true
+fi
+systemctl --user daemon-reload
+# enable: start at boot.  restart: start now (and replace a running one).
+systemctl --user enable "$IDE_SERVICE" >/dev/null 2>&1 \
+    || rinfo "WARNING: could not enable $IDE_SERVICE at boot."
+# The previous launcher recreated this log on each deploy with a plain '>'
+# redirect; ``append:`` would keep growing across every restart, so start the
+# deploy's log clean here instead.
+: > "$LOG_DIR/code-server.log"
+systemctl --user restart "$IDE_SERVICE"
+
+# /healthz is code-server's own unauthenticated liveness route, so it proves
+# the editor is serving rather than merely holding the port.
 up=0
 for _ in $(seq 1 60); do
-    if curl -sf "http://127.0.0.1:$PORT" -o /dev/null 2>/dev/null; then
+    if curl -sf "http://127.0.0.1:$PORT/healthz" -o /dev/null 2>/dev/null; then
         up=1; break
     fi
     sleep 1
 done
-[ "$up" = "1" ] || { echo "ERROR: code-server did not come up on 127.0.0.1:$PORT (see ~/.kiss/code-server.log)" >&2; exit 1; }
+if [ "$up" != "1" ]; then
+    echo "ERROR: code-server did not come up on 127.0.0.1:$PORT" >&2
+    systemctl --user status "$IDE_SERVICE" --no-pager -l 2>&1 | tail -20 >&2
+    tail -20 "$LOG_DIR/code-server.log" 2>/dev/null >&2 || true
+    exit 1
+fi
 rinfo "code-server is up on 127.0.0.1:$PORT (log: ~/.kiss/code-server.log)."
 
-# --- 7i. Keep the user manager alive after we disconnect --------------
-# kiss-web runs as a systemd *user* service, and without lingering the user
-# manager (and therefore kiss-web) is killed the moment this ssh session
-# closes.  The extension enables lingering too, but only once it activates,
-# which is after this connection is gone.
-if command -v loginctl >/dev/null 2>&1; then
-    loginctl enable-linger "$(id -un)" 2>/dev/null || true
-fi
+# --- 7i. Record the deployment so ANY machine can find it -------------
+# sorcar-connect reads this file over ssh to learn which ports to forward and
+# which service to start.  That indirection is what lets a machine which has
+# never run sorcar-cloud — and therefore knows neither the port nor the
+# workspace path — open this IDE.  It stays on the remote only: the ~/.kiss
+# mirror in section 5a excludes it, so a later deploy from a laptop that has
+# no such file cannot delete it.
+cat > "$HOME/.kiss/sorcar-cloud.env" <<STATE
+# Written by sorcar-cloud (deploy at $(date -u '+%Y-%m-%dT%H:%M:%SZ')).
+# Read by sorcar-connect, possibly running on a different machine.
+# Plain KEY=value shell syntax; no secrets belong here.
+SORCAR_IDE_PORT=$PORT
+SORCAR_WEB_PORT=$WEB_PORT
+SORCAR_WORKSPACE=$WORKSPACE
+SORCAR_IDE_SERVICE=$IDE_SERVICE
+STATE
+chmod 600 "$HOME/.kiss/sorcar-cloud.env"
+
 # NOTE: we deliberately do NOT wait for kiss-web here.  The extension — which
 # installs and starts the kiss-web unit — activates only when a real browser
 # loads the workbench and runs its JavaScript; a curl of the HTML cannot do
-# that.  The wait therefore belongs on the laptop side, after the tunnel is
-# open and the browser has been pointed at the IDE (step 10 below).
+# that.  The wait therefore belongs on the client side, after the tunnel is
+# open and a browser has been pointed at the IDE (sorcar-connect does it).
 exit 0
 REMOTE
 info "Remote KISS Sorcar / code-server is ready."
 
 # ---------------------------------------------------------------------------
-# 8. Open the SSH tunnels.
+# 8. Hand over to sorcar-connect: forward the ports, open the browser, hold.
 #
-# Two forwards: $PORT for the browser IDE, and $LOCAL_WEB_PORT -> remote
-# $WEB_PORT so the remote webapp is reachable over the encrypted channel
-# instead of its public 0.0.0.0 bind.  ExitOnForwardFailure=yes makes a busy
-# local port a hard error rather than a tunnel that silently forwards nothing
-# — pick_local_web_port() already chose a port nothing is listening on.
+# Everything from here on is pure client work — nothing about it depends on
+# this being the machine that deployed.  So it lives in ./sorcar-connect,
+# which is a single self-contained file you can copy to any host with ssh
+# keys.  Running it here (instead of copy-pasting its logic) means the path
+# your other machines take is tested on every deploy.
 #
-# The tunnel runs *in the background* so this script can go on to open the
-# browser and then verify the webapp through the tunnel.  Step 11 waits on it
-# so Ctrl+C still tears the tunnel down.
-#
-# It is backgrounded by THIS shell (``ssh … &``) rather than by ssh itself
-# (``-f``), because that is the only way to learn its pid for certain: "$!"
-# is exact, whereas a pgrep pattern has to guess how ssh renders its own
-# argv and matches the wrong tunnel when two point at the same host.  An
-# empty pid meant the Ctrl+C trap in step 11 was never installed, so the
-# script returned immediately and left the forward orphaned — which is how
-# local $PORT ends up mysteriously "already in use" on the next run.
-# Backgrounding here also means a closed terminal (SIGHUP) takes the tunnel
-# down with the script instead of leaking it.
+# exec, not a call: the connect script becomes this process, so its Ctrl+C
+# trap and the tunnel it owns are not wrapped in a parent that could outlive
+# them.
 # ---------------------------------------------------------------------------
+info "Connect from ANY machine that can ssh into $TARGET:"
+info "    scp $TARGET:$SCRIPT_BASE/sorcar-connect .   # once"
+info "    ./sorcar-connect $TARGET"
 if [[ -n "${SORCAR_NO_TUNNEL:-}" ]]; then
     # Lets scripts/CI run the deployment and return without a tunnel.
-    info "SORCAR_NO_TUNNEL set — skipping the tunnel and the browser.  Run:"
-    info "  ssh -N -L ${LOCAL_PORT}:127.0.0.1:${PORT} -L ${LOCAL_WEB_PORT:-$WEB_PORT}:127.0.0.1:${WEB_PORT} ${TARGET}"
+    info "SORCAR_NO_TUNNEL set — skipping the tunnel and the browser."
+    "$CONNECT_SCRIPT" --print "$TARGET" "$PORT"
     exit 0
 fi
-
-# -n: stdin from /dev/null, so the backgrounded ssh cannot swallow this
-# script's stdin (or stop on SIGTTIN when it tries to read the terminal).
-TUNNEL_ARGS=(-N -n -o ExitOnForwardFailure=yes -o ServerAliveInterval=30
-             -L "${LOCAL_PORT}:127.0.0.1:${PORT}")
-if [[ -n "$LOCAL_WEB_PORT" ]]; then
-    TUNNEL_ARGS+=(-L "${LOCAL_WEB_PORT}:127.0.0.1:${WEB_PORT}")
-fi
-step "Opening SSH tunnels to ${TARGET} (IDE ${LOCAL_PORT}->${PORT}, webapp ${LOCAL_WEB_PORT:-none}) ..."
-ssh "${TUNNEL_ARGS[@]}" "$TARGET" &
-TUNNEL_PID=$!
-# Give ssh a few seconds to authenticate and request the forwards, watching
-# for it to give up: ExitOnForwardFailure=yes makes it EXIT when a local bind
-# clashes, so "still running after the grace period" is what proves the
-# tunnel is up.  Deliberately NOT probing the port with nc — a busy port
-# answers a probe no matter who owns it, so a foreign listener (say a stale
-# forward from an earlier run) would look like success while our own ssh was
-# already dying.  The loop breaks the moment ssh exits, so the failure path
-# is still reported immediately.
-for _ in $(seq 1 10); do
-    kill -0 "$TUNNEL_PID" 2>/dev/null || break
-    sleep 0.5
-done
-kill -0 "$TUNNEL_PID" 2>/dev/null \
-    || die "Could not open the SSH tunnels (is local port $LOCAL_PORT already in use?)."
-info "Tunnels are up (ssh pid $TUNNEL_PID)."
-
-# ---------------------------------------------------------------------------
-# 9. Open the browser.  This is what ACTIVATES the extension: code-server
-#    only loads ksenxx.kiss-sorcar when a real browser runs the workbench
-#    JavaScript, and the extension is what installs and starts the kiss-web
-#    systemd unit.  So the browser must come before the webapp check.
-# ---------------------------------------------------------------------------
-for _ in $(seq 1 60); do
-    curl -sf "$URL" -o /dev/null 2>/dev/null && break
-    sleep 1
-done
-info "KISS Sorcar (code-server) is ready at $URL — opening your browser..."
-case "$(uname -s)" in
-    Darwin) open "$URL" >/dev/null 2>&1 || true ;;
-    Linux)  command -v xdg-open >/dev/null 2>&1 && (xdg-open "$URL" >/dev/null 2>&1 &) || true ;;
-esac
-
-# ---------------------------------------------------------------------------
-# 10. Now that a browser is loading the IDE, the extension activates and
-#     starts kiss-web on the remote.  Poll it *through the tunnel*.
-# ---------------------------------------------------------------------------
-if [[ -n "$LOCAL_WEB_PORT" ]]; then
-    step "Waiting for the remote webapp to come up at ${WEB_URL} ..."
-    web_up=0
-    for _ in $(seq 1 90); do
-        # kiss-web serves HTTPS with a self-signed cert (hence -k) and has no
-        # /healthz route, so probe the document root.
-        if curl -skf "$WEB_URL/" -o /dev/null 2>/dev/null; then
-            web_up=1; break
-        fi
-        sleep 2
-    done
-    if [[ "$web_up" == "1" ]]; then
-        info "Remote webapp (kiss-web) is live at ${WEB_URL}"
-    else
-        warn "The remote webapp did not answer within 3 minutes."
-        warn "  It starts when the KISS Sorcar extension activates — keep the"
-        warn "  IDE tab open, then check on ${TARGET}:"
-        warn "    systemctl --user status kiss-web ; tail ~/.kiss/kiss-web-stderr.log"
-    fi
-fi
-
-# ---------------------------------------------------------------------------
-# 11. Hold the tunnels.  Ctrl+C closes them but leaves the remote
-#     code-server and kiss-web running for the next connection.
-# ---------------------------------------------------------------------------
-echo ""
-echo "  ┌──────────────────────────────────────────────────┐"
-echo "  │  KISS Sorcar (remote code-server): ${URL}"
-if [[ -n "$LOCAL_WEB_PORT" ]]; then
-echo "  │  Remote webapp (kiss-web):         ${WEB_URL}"
-fi
-echo "  │  Remote host:  ${TARGET}"
-echo "  │  Remote path:  ${REMOTE_DIR}"
-echo "  │  Stop tunnel:  Ctrl+C (remote code-server keeps running)"
-echo "  │  Remote log:   ~/.kiss/code-server.log on ${TARGET}"
-echo "  └──────────────────────────────────────────────────┘"
-echo ""
-# The tunnel is our own background child.  ``wait`` alone would swallow the
-# signal until ssh returns, so poll instead and let the trap kill it, leaving
-# no forwarded port behind.
-trap 'echo ""; info "Closing the SSH tunnels..."; kill "$TUNNEL_PID" 2>/dev/null || true; exit 0' INT TERM
-info "Tunnels held open.  Press Ctrl+C to close them."
-while kill -0 "$TUNNEL_PID" 2>/dev/null; do
-    sleep 5
-done
-warn "The SSH tunnel process exited."
+exec "$CONNECT_SCRIPT" "$TARGET" "$PORT"
