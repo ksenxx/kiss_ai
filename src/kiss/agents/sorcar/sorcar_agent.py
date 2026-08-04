@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import functools
 import json
 import logging
 import os
@@ -28,7 +27,6 @@ from kiss.agents.sorcar.cli_helpers import (
 from kiss.agents.sorcar.cli_helpers import (
     cli_ask_user_question as cli_ask_user_question,
 )
-from kiss.agents.sorcar.code_graph import intercept_grep_hint
 from kiss.agents.sorcar.persistence import _load_last_model
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.agents.sorcar.skills import make_skill_tool
@@ -515,41 +513,6 @@ def _attachment_parts(attachments: list[Attachment]) -> list[str]:
     return parts
 
 
-def _make_plain_bash_tool(
-    agent: SorcarAgent, useful_tools: UsefulTools,
-) -> Callable[..., str]:
-    """Build the non-Docker ``Bash`` tool with query-before-grep interception.
-
-    The returned function answers grep-like commands from the built code
-    graph (via :func:`intercept_grep_hint`, at most once per distinct
-    hint) and otherwise delegates to :meth:`UsefulTools.Bash`.
-
-    Args:
-        agent: The owning agent (``agent.work_dir`` locates the graph).
-        useful_tools: The tool collection executing real commands.
-
-    Returns:
-        The ``Bash`` tool function to register with the model.
-    """
-    hints_seen: set[str] = set()
-
-    @functools.wraps(useful_tools.Bash)
-    def Bash(  # noqa: N802
-        command: str,
-        description: str,
-        timeout_seconds: float = 300,
-        max_output_chars: int = 50000,
-    ) -> str:
-        hint = intercept_grep_hint(command, agent.work_dir, hints_seen)
-        if hint is not None:
-            return hint
-        return useful_tools.Bash(
-            command, description, timeout_seconds, max_output_chars,
-        )
-
-    return Bash
-
-
 class SorcarAgent(RelentlessAgent):
     """Agent with both coding tools and browser automation for web + code tasks."""
 
@@ -749,15 +712,9 @@ class SorcarAgent(RelentlessAgent):
             from kiss.agents.sorcar.docker_tools import DockerTools
 
             docker_tools = DockerTools(self._docker_bash)
-            code_graph_hints_seen: set[str] = set()
 
             def Bash(command: str, description: str) -> str:  # noqa: N802
-                """Run a command in Docker, preferring a code-graph answer."""
-                hint = intercept_grep_hint(
-                    command, self.work_dir, code_graph_hints_seen,
-                )
-                if hint is not None:
-                    return hint
+                """Run a command in the task's Docker container."""
                 return self._docker_bash(command, description)
 
             tools: list = [
@@ -770,7 +727,7 @@ class SorcarAgent(RelentlessAgent):
                 work_dir=self.work_dir,
             )
             tools = [
-                _make_plain_bash_tool(self, useful_tools),
+                useful_tools.Bash,
                 useful_tools.Read, useful_tools.Edit, useful_tools.Write,
             ]
         if self._use_web_tools and self.web_use_tool is None:
@@ -966,14 +923,6 @@ class SorcarAgent(RelentlessAgent):
         skill_tool = make_skill_tool(self.work_dir or ".")
         if skill_tool is not None:
             tools.append(skill_tool)
-        try:
-            from kiss.agents.sorcar.code_graph import make_code_graph_tool
-
-            code_graph_tool = make_code_graph_tool(self.work_dir or ".")
-            if code_graph_tool is not None:
-                tools.append(code_graph_tool)
-        except Exception:
-            logger.warning("code_graph tool setup failed", exc_info=True)
         try:
             from kiss.agents.sorcar.mcp_servers import make_mcp_tools
 

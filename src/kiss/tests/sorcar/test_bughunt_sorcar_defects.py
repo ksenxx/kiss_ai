@@ -7,18 +7,6 @@
 Each test class reproduces one real defect found in
 ``src/kiss/agents/sorcar/`` (see ``tmp/findings-sorcar.md``):
 
-* D1 — ``code_graph._extract_file`` misattributed the callee of a
-  CHAINED call: for ``Application().start()`` the callee text
-  ``Application().start`` was truncated at the FIRST ``(`` before the
-  last dotted segment was taken, so the call was recorded as
-  ``main -> Application`` and the ``main -> start`` edge never
-  existed — across every supported language (same shape in JS:
-  ``getApp().f()``).
-* D2 — ``code_graph._grep_pattern`` ignored the POSIX ``--``
-  end-of-options marker (``grep -- -pat file`` returned ``file``) and
-  treated the argument AFTER a ``-f patterns.txt`` pattern-file flag
-  as the search pattern, so ``grep_hint`` could intercept (and
-  suppress) a legitimate grep based on its TARGET path.
 * D3 — ``persistence._is_failed_result`` did not classify the
   ``"Task interrupted"`` result (persisted by
   ``ChatSorcarAgent.run``'s ``BaseException`` handler for user Stop /
@@ -31,112 +19,16 @@ Each test class reproduces one real defect found in
   block (``---\\n---\\n``), so the two literal ``---`` lines leaked
   into the skill/command body and the derived description.
 
-No mocks, patches, or fakes: real tree-sitter parsing over real files
-on disk, and the real production helpers.
+No mocks, patches, or fakes: the real production helpers over real
+files on disk.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from kiss.agents.sorcar.persistence import _is_failed_result
 from kiss.agents.sorcar.skills import parse_frontmatter
-
-pytest.importorskip("tree_sitter_language_pack")
-
-from kiss.agents.sorcar.code_graph import (  # noqa: E402
-    _grep_pattern,
-    build_graph,
-    grep_hint,
-)
-
-
-def _call_edges(graph) -> set[tuple[str, str]]:
-    """Return the graph's ``calls`` edges as (caller_label, callee_label)."""
-    return {
-        (graph.nodes[e["source"]]["label"], graph.nodes[e["target"]]["label"])
-        for e in graph.edges
-        if e["relation"] == "calls"
-    }
-
-
-class TestChainedCallCallee:
-    """``x().y()`` must record a call to ``y``, not a second call to ``x``."""
-
-    def test_python_chained_method_call(self, tmp_path: Path) -> None:
-        (tmp_path / "m.py").write_text(
-            "class Application:\n"
-            "    def start(self):\n"
-            "        pass\n"
-            "\n"
-            "def main():\n"
-            "    Application().start()\n"
-        )
-        graph = build_graph(str(tmp_path), incremental=False)
-        edges = _call_edges(graph)
-        assert ("main", "Application") in edges
-        assert ("main", "start") in edges
-
-    def test_javascript_chained_call(self, tmp_path: Path) -> None:
-        (tmp_path / "j.js").write_text(
-            "function f() {}\n"
-            "function g2() { getApp().f(); }\n"
-        )
-        graph = build_graph(str(tmp_path), incremental=False)
-        assert ("g2", "f") in _call_edges(graph)
-
-    def test_plain_attribute_call_still_resolves(self, tmp_path: Path) -> None:
-        """Regression guard: ``w.draw()`` / ``pkg.mod.fn()`` keep working."""
-        (tmp_path / "m.py").write_text(
-            "class Widget:\n"
-            "    def draw(self):\n"
-            "        pass\n"
-            "\n"
-            "def main():\n"
-            "    w = Widget()\n"
-            "    w.draw()\n"
-        )
-        graph = build_graph(str(tmp_path), incremental=False)
-        assert ("main", "draw") in _call_edges(graph)
-
-
-
-class TestGrepPatternParsing:
-    def test_double_dash_marks_next_token_as_pattern(self) -> None:
-        assert _grep_pattern("grep -- -literal file") == "-literal"
-        assert _grep_pattern("grep -rn -- TODO src/") == "TODO"
-        assert _grep_pattern("grep --") is None
-
-    def test_pattern_file_flag_means_no_inline_pattern(self) -> None:
-        assert _grep_pattern("grep -f pats.txt src/") is None
-        assert _grep_pattern("rg --file pats.txt src/") is None
-        assert _grep_pattern("rg --file=pats.txt src/") is None
-
-    def test_existing_shapes_unchanged(self) -> None:
-        assert _grep_pattern("grep -e foo file") == "foo"
-        assert _grep_pattern("grep --regexp=foo file") == "foo"
-        assert _grep_pattern("grep -A3 foo file") == "foo"
-        assert _grep_pattern("grep -A 3 foo file") == "foo"
-        assert _grep_pattern("rg -i --glob '*.py' MyClass") == "MyClass"
-        assert _grep_pattern("ls -l") is None
-
-    def test_grep_hint_not_triggered_by_search_target(
-        self, tmp_path: Path
-    ) -> None:
-        """A ``-f pattern-file`` grep must never be answered by the graph.
-
-        The graph knows ``util_fn``; the grep searches patterns from a
-        file INSIDE a path that happens to be named ``util_fn``.  The
-        old parser took ``util_fn`` as the pattern and suppressed the
-        real grep with a graph answer.
-        """
-        (tmp_path / "helpers.py").write_text("def util_fn():\n    return 1\n")
-        build_graph(str(tmp_path), incremental=False)
-        assert grep_hint("grep util_fn helpers.py", str(tmp_path)) is not None
-        assert grep_hint("grep -f pats.txt util_fn", str(tmp_path)) is None
-
 
 
 class TestInterruptedResultClassification:

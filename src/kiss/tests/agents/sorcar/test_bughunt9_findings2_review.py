@@ -9,10 +9,6 @@ review found in the first round of fixes:
 
 * G2-R01 — a batch that fails every write attempt must be preserved in
   a durable sidecar journal, not silently acknowledged and lost.
-* G2-R02 — concurrent post-commit hook installs must not crash on a
-  shared temp file or lose the user's hook body.
-* G2-R03 — a ``build_graph`` that cannot get the update lock must not
-  build unserialized; it returns the existing graph or raises.
 * G2-R04 — ``mcp_servers`` must work where ``fcntl`` does not exist
   (Windows), exercised in a real subprocess with ``fcntl`` blocked.
 * G2-R06 — OAuth token files for names differing only by case must not
@@ -35,22 +31,13 @@ import stat
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-import kiss.agents.sorcar.code_graph as cg
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.code_graph import (
-    _HOOK_BEGIN,
-    build_graph,
-    graph_dir,
-    install_post_commit_hook,
-    load_graph,
-)
 from kiss.agents.sorcar.mcp_servers import (
     FileTokenStorage,
     MCPManager,
@@ -122,101 +109,6 @@ class TestFailedBatchJournal(_TempDbTestBase):
             "SELECT COUNT(*) AS n FROM events WHERE task_id = ?", (task_id,),
         ).fetchone()["n"]
         assert count == 1
-
-
-class TestConcurrentHookInstall:
-    """G2-R02: hook RMW is serialized and temp files are unique."""
-
-    def test_two_thread_install_never_crashes_or_loses_body(
-        self, tmp_path: Path,
-    ) -> None:
-        repo = tmp_path / "repo"
-        repo.mkdir()
-        subprocess.run(
-            ["git", "init", "-q", str(repo)], check=True, capture_output=True,
-        )
-        hook = repo / ".git" / "hooks" / "post-commit"
-        hook.parent.mkdir(parents=True, exist_ok=True)
-        errors: list[str] = []
-
-        def install(barrier: threading.Barrier) -> None:
-            try:
-                barrier.wait(timeout=10)
-                time.sleep(0.001 * (os.getpid() % 3))
-                install_post_commit_hook(str(repo))
-            except BaseException as exc:  # noqa: BLE001 — recorded for assert
-                errors.append(repr(exc))
-
-        for _ in range(30):
-            hook.write_text("#!/bin/sh\necho user body\n")
-            hook.chmod(0o755)
-            barrier = threading.Barrier(2)
-            threads = [
-                threading.Thread(target=install, args=(barrier,))
-                for _ in range(2)
-            ]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
-            assert not errors, f"concurrent install crashed: {errors}"
-            text = hook.read_text()
-            assert text.count(_HOOK_BEGIN) == 1, "hook section lost/duplicated"
-            assert "echo user body" in text, "user hook body lost"
-
-
-class TestBuildLockTimeoutIsSafe:
-    """G2-R03: a busy update lock never leads to an unserialized build."""
-
-    def setup_method(self) -> None:
-        self.saved_timeout = cg._BUILD_LOCK_TIMEOUT_S
-        cg._BUILD_LOCK_TIMEOUT_S = 0.3
-
-    def teardown_method(self) -> None:
-        cg._BUILD_LOCK_TIMEOUT_S = self.saved_timeout
-
-    def _hold_lock(self, work_dir: Path) -> Path:
-        storage = graph_dir(str(work_dir))
-        storage.mkdir(parents=True, exist_ok=True)
-        lock = storage / ".update.lock"
-        # Our own live PID: _pid_is_running() is true, so the lock is
-        # genuinely held from build_graph's perspective.
-        lock.write_text(f"{os.getpid()}\n")
-        return lock
-
-    def test_timeout_returns_existing_graph_unmodified(
-        self, tmp_path: Path,
-    ) -> None:
-        (tmp_path / "a.py").write_text("def before():\n    pass\n")
-        build_graph(str(tmp_path))
-        (tmp_path / "a.py").write_text("def after():\n    pass\n")
-        lock = self._hold_lock(tmp_path)
-        try:
-            graph = build_graph(str(tmp_path))
-        finally:
-            lock.unlink()
-        labels = {n["label"] for n in graph.nodes.values()}
-        assert "before" in labels and "after" not in labels, (
-            "build proceeded (or rebuilt) despite a held update lock"
-        )
-        on_disk = load_graph(str(tmp_path))
-        assert on_disk is not None
-        disk_labels = {n["label"] for n in on_disk.nodes.values()}
-        assert "after" not in disk_labels, "unserialized build overwrote cache"
-
-    def test_timeout_without_existing_graph_raises(
-        self, tmp_path: Path,
-    ) -> None:
-        (tmp_path / "a.py").write_text("def f():\n    pass\n")
-        lock = self._hold_lock(tmp_path)
-        try:
-            with pytest.raises(RuntimeError, match="lock"):
-                build_graph(str(tmp_path))
-        finally:
-            lock.unlink()
-        # After the lock is released the build works normally.
-        graph = build_graph(str(tmp_path))
-        assert any(n["label"] == "f" for n in graph.nodes.values())
 
 
 class TestWindowsCompatibility:

@@ -2,14 +2,10 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Bug-hunt 9 (findings-2 audit): code_graph, mcp_servers, web_use_tool.
+"""Bug-hunt 9 (findings-2 audit): mcp_servers, web_use_tool.
 
 End-to-end tests (no mocks/patches/fakes) covering:
 
-* S2-10 — concurrent ``build_graph`` calls must not lose updates.
-* S2-11 — the post-commit hook section must be reachable even when the
-  pre-existing hook exits early.
-* S2-12 — two same-named definitions on one line get distinct nodes.
 * S2-13 — two servers sharing a name must have isolated connections.
 * S2-14 — distinct server names must never share a token file.
 * S2-15 — colliding sanitized tool names must be disambiguated.
@@ -24,19 +20,12 @@ import json
 import os
 import pty
 import sys
-import threading
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from kiss.agents.sorcar.code_graph import (
-    _HOOK_BEGIN,
-    build_graph,
-    install_post_commit_hook,
-    load_graph,
-)
 from kiss.agents.sorcar.mcp_servers import (
     FileTokenStorage,
     MCPManager,
@@ -46,78 +35,6 @@ from kiss.agents.sorcar.mcp_servers import (
     make_mcp_tools,
 )
 from kiss.agents.sorcar.web_use_tool import WebUseTool
-
-
-class TestCodeGraph:
-    """S2-10 / S2-11 / S2-12."""
-
-    def test_concurrent_only_files_builds_lose_no_update(
-        self, tmp_path: Path,
-    ) -> None:
-        (tmp_path / "a.py").write_text("def old_a():\n    pass\n")
-        (tmp_path / "b.py").write_text("def old_b():\n    pass\n")
-        build_graph(str(tmp_path))
-
-        (tmp_path / "a.py").write_text("def new_a():\n    pass\n")
-        (tmp_path / "b.py").write_text("def new_b():\n    pass\n")
-
-        threads = [
-            threading.Thread(
-                target=build_graph, args=(str(tmp_path),),
-                kwargs={"only_files": [name]},
-            )
-            for name in ("a.py", "b.py")
-        ]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        graph = load_graph(str(tmp_path))
-        assert graph is not None
-        labels = {n["label"] for n in graph.nodes.values()}
-        assert "new_a" in labels and "new_b" in labels, (
-            f"lost update: labels={sorted(labels)}"
-        )
-
-    def test_hook_section_reachable_despite_early_exit(
-        self, tmp_path: Path,
-    ) -> None:
-        import subprocess
-
-        subprocess.run(
-            ["git", "init", "-q", str(tmp_path)], check=True, capture_output=True,
-        )
-        hook = tmp_path / ".git" / "hooks" / "post-commit"
-        hook.parent.mkdir(parents=True, exist_ok=True)
-        hook.write_text("#!/bin/sh\nexit 0\n")
-        hook.chmod(0o755)
-
-        msg = install_post_commit_hook(str(tmp_path))
-
-        assert "installed" in msg
-        text = hook.read_text()
-        assert _HOOK_BEGIN in text
-        assert text.index(_HOOK_BEGIN) < text.index("exit 0"), (
-            "graph section appended after an unconditional exit is unreachable"
-        )
-        # The original hook body must be preserved.
-        assert text.startswith("#!/bin/sh\n")
-        assert "exit 0" in text
-
-    def test_two_same_named_defs_on_one_line_get_two_nodes(
-        self, tmp_path: Path,
-    ) -> None:
-        (tmp_path / "x.js").write_text("function same(){} function same(){}\n")
-        graph = build_graph(str(tmp_path))
-        def_nodes = [
-            n for n in graph.nodes.values()
-            if n["kind"] != "file" and n["label"] == "same"
-        ]
-        assert len(def_nodes) == 2, (
-            f"expected 2 nodes for two definitions, got {len(def_nodes)}"
-        )
-
 
 _SERVER_TEMPLATE = '''
 from mcp.server.fastmcp import FastMCP
