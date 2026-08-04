@@ -26,6 +26,12 @@ from pathlib import Path
 from typing import Any, Union, get_args, get_origin
 
 from kiss.core.kiss_error import KISSError
+from kiss.core.models.heif import (
+    HEIF_MIME_TYPES,
+    HEIF_SUFFIXES,
+    heif_to_jpeg,
+    is_heif,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +221,33 @@ class Attachment:
     mime_type: str
 
     @staticmethod
+    def from_bytes(data: bytes, mime_type: str) -> "Attachment":
+        """Create an Attachment from raw bytes, transcoding HEIF photos.
+
+        iPhone camera photos arrive as HEIC, which the OpenAI and Anthropic
+        vision APIs reject.  Such bytes are transcoded to JPEG here so that
+        every model sees a format it understands; the declared MIME type is
+        ignored in favour of the file header, because iOS and the browsers
+        disagree about (and sometimes omit) it.
+
+        Args:
+            data: Raw file bytes.
+            mime_type: MIME type reported by the sender, if any.
+
+        Returns:
+            An Attachment holding either the original bytes or, for a HEIF
+            photo on a host with a HEIF decoder, its JPEG rendition.
+        """
+        if not is_heif(data):
+            return Attachment(data=data, mime_type=mime_type)
+        jpeg = heif_to_jpeg(data)
+        if jpeg is not None:
+            return Attachment(data=jpeg, mime_type="image/jpeg")
+        # Without a decoder the photo still reaches Gemini, the one provider
+        # that accepts HEIF natively; a correct label beats a wrong one.
+        return Attachment(data=data, mime_type="image/heic")
+
+    @staticmethod
     def from_file(path: str) -> "Attachment":
         """Create an Attachment from a file path.
 
@@ -222,7 +255,8 @@ class Attachment:
             path: Path to the file to attach.
 
         Returns:
-            An Attachment with the file's bytes and detected MIME type.
+            An Attachment with the file's bytes and detected MIME type; a
+            HEIF/HEIC photo is transcoded to JPEG (see :meth:`from_bytes`).
 
         Raises:
             ValueError: If the MIME type is not supported.
@@ -238,6 +272,9 @@ class Attachment:
                 ".png": "image/png",
                 ".gif": "image/gif",
                 ".webp": "image/webp",
+                ".heic": "image/heic",
+                ".heif": "image/heif",
+                ".hif": "image/heif",
                 ".pdf": "application/pdf",
                 ".mp3": "audio/mpeg",
                 ".wav": "audio/wav",
@@ -251,12 +288,15 @@ class Attachment:
                 ".mov": "video/quicktime",
             }
             mime_type = mime_map.get(suffix, "")
-        if mime_type not in SUPPORTED_MIME_TYPES:
+        heif = (
+            mime_type in HEIF_MIME_TYPES or file_path.suffix.lower() in HEIF_SUFFIXES
+        )
+        if not heif and mime_type not in SUPPORTED_MIME_TYPES:
             raise ValueError(
                 f"Unsupported MIME type '{mime_type}' for file '{path}'. "
                 f"Supported: {sorted(SUPPORTED_MIME_TYPES)}"
             )
-        return Attachment(data=file_path.read_bytes(), mime_type=mime_type)
+        return Attachment.from_bytes(file_path.read_bytes(), mime_type)
 
     def to_base64(self) -> str:
         """Return the file data as a base64-encoded string."""
@@ -272,7 +312,9 @@ BINARY_ATTACHMENT_OPEN_RE = re.compile(
 )
 BINARY_ATTACHMENT_CLOSE = "<</KISS_BINARY_ATTACHMENT>>"
 
-READ_TOOL_BINARY_MIME_TYPES = set(SUPPORTED_MIME_TYPES)
+# The Read tool may also embed a HEIF photo: parse_binary_attachments() runs
+# it through Attachment.from_bytes(), which transcodes it to JPEG.
+READ_TOOL_BINARY_MIME_TYPES = set(SUPPORTED_MIME_TYPES) | set(HEIF_MIME_TYPES)
 
 
 def encode_binary_attachment(mime_type: str, data: bytes) -> str:
@@ -328,7 +370,7 @@ def parse_binary_attachments(text: str) -> tuple[str, list[Attachment]]:
             continue
         out_parts.append(text[cursor:open_start])
         out_parts.append(f"[attached {mime_type}, {len(data)} bytes]")
-        attachments.append(Attachment(data=data, mime_type=mime_type))
+        attachments.append(Attachment.from_bytes(data, mime_type))
         cursor = close_idx + len(BINARY_ATTACHMENT_CLOSE)
     out_parts.append(text[cursor:])
     return "".join(out_parts), attachments

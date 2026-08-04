@@ -445,6 +445,13 @@
   let allModels = [];
   let modelDDIdx = -1;
   let attachments = [];
+  // Human-readable reasons why a picked file could not be attached (an
+  // undecodable HEIC on a browser without HEIC support, an unreadable file).
+  // Rendered next to the file chips so a failed attachment is never silent.
+  let attachErrors = [];
+  // Set while a send is parked waiting for an attachment to finish converting,
+  // so repeated Enter presses cannot submit the same prompt twice.
+  let awaitingAttachments = false;
   let _deferHighlight = false;
   let acIdx = -1;
 
@@ -517,6 +524,7 @@
       selectedModel: selectedModel,
       agentModel: '',
       attachments: [],
+      attachErrors: [],
       inputValue: '',
       isMerging: false,
       worktreeBarEl: null,
@@ -677,6 +685,7 @@
     tab.selectedModel = selectedModel;
     tab.agentModel = agentModel;
     tab.attachments = attachments;
+    tab.attachErrors = attachErrors;
     tab.inputValue = inp.value;
     tab.isMerging = isMerging;
     tab.isRunning = isActiveTabRunning();
@@ -794,6 +803,7 @@
     agentModel = tab.agentModel || '';
     refreshModelLabel();
     attachments = tab.attachments || [];
+    attachErrors = tab.attachErrors || [];
     renderFileChips();
     inp.value = tab.inputValue || '';
     syncClearBtn();
@@ -5809,7 +5819,9 @@
   function updateInputDisabled() {
     const blocked = isMerging;
     inp.disabled = blocked;
-    sendBtn.disabled = blocked;
+    // A photo still being converted must not be raced by a send: block the
+    // button until every attachment slot holds real bytes.
+    sendBtn.disabled = blocked || hasPendingAttachments();
     if (blocked) {
       clearGhost();
       hideAC();
@@ -6671,7 +6683,10 @@
       const input = document.createElement('input');
       input.type = 'file';
       input.multiple = true;
-      input.accept = 'image/*,application/pdf';
+      // The explicit HEIC/HEIF extensions matter for the iOS "Browse" path,
+      // which filters by extension rather than by MIME type.  Whichever way
+      // the photo arrives, prepareAttachment() converts it to JPEG.
+      input.accept = 'image/*,.heic,.heif,application/pdf';
       input.onchange = handleFileSelect;
       input.click();
     });
@@ -7208,13 +7223,13 @@
       if (!items) return;
       for (let i = 0; i < items.length; i++) {
         const item = items[i];
-        if (
-          item.kind === 'file' &&
-          (item.type.startsWith('image/') || item.type === 'application/pdf')
-        ) {
+        if (item.kind !== 'file') continue;
+        const file = item.getAsFile();
+        // The pasted item's own `type` is authoritative here, but Safari
+        // leaves it empty for some pictures, so the file name decides too.
+        if (file && isAttachableFile(file)) {
           e.preventDefault();
-          const file = item.getAsFile();
-          if (file) readFileAsAttachment(file);
+          readFileAsAttachment(file);
         }
       }
     });
@@ -7248,12 +7263,7 @@
         const files = e.dataTransfer && e.dataTransfer.files;
         if (!files) return;
         Array.from(files).forEach(file => {
-          if (
-            file.type.startsWith('image/') ||
-            file.type === 'application/pdf'
-          ) {
-            readFileAsAttachment(file);
-          }
+          if (isAttachableFile(file)) readFileAsAttachment(file);
         });
       });
     }
@@ -7281,22 +7291,336 @@
     // tableak-coverage:end
   }
 
-  function readFileAsAttachment(file) {
-    const reader = new FileReader();
-    reader.onload = function (event) {
-      attachments.push({
-        name: file.name,
-        type: file.type,
-        data: event.target.result.split(',')[1],
-      });
-      renderFileChips();
-    };
-    reader.readAsDataURL(file);
+  // ---------------------------------------------------------------------
+  // Attachment intake
+  //
+  // An iPhone whose Settings > Camera > Formats is "High Efficiency" (the
+  // factory default since the iPhone 7) stores every photo as HEIC.  WebKit
+  // transcodes a picked file only when the picker's `accept` list does not
+  // already admit the file's own type, so a list containing `image/*` leaves
+  // the HEIC alone and `file.type` arrives as "image/heic".  The OpenAI and
+  // Anthropic vision APIs reject that MIME type outright (of the providers
+  // used here only Gemini accepts it), so the photo used to be dropped
+  // further down the pipeline with no user-visible error.  Safari 17+ (macOS
+  // and iOS) decodes HEIC natively, so the photo is re-encoded to JPEG here,
+  // in the browser, with no extra dependency.  Huge photos are downscaled in
+  // the same pass.
+  // ---------------------------------------------------------------------
+
+  // Anthropic downsizes anything longer than 1568px on its long edge before
+  // the model sees it, and that is well inside what the other providers
+  // accept, so it is the target for every attachment.
+  const ATTACH_MAX_EDGE = 1568;
+  const ATTACH_JPEG_QUALITY = 0.82;
+  // Above this size an image is re-encoded even if its format is already
+  // supported: base64 inflates payloads by a third and iPhone captures run to
+  // several megabytes.
+  const ATTACH_MAX_BYTES = 1500 * 1024;
+  // A valid JPEG of any real photo is far bigger than this; mobile Safari has
+  // been seen returning byte-stub blobs instead of an encoded image.
+  const ATTACH_MIN_JPEG_BYTES = 256;
+  // Image formats every supported vision API understands.
+  const MODEL_IMAGE_MIME_TYPES = [
+    'image/jpeg',
+    'image/png',
+    'image/webp',
+    'image/gif',
+  ];
+  // ISO base media file format major brands (bytes 8..12) used by HEIF
+  // containers, including the burst/Live-Photo variants.
+  const HEIF_BRANDS = [
+    'heic',
+    'heix',
+    'heim',
+    'heis',
+    'hevc',
+    'hevx',
+    'hevm',
+    'hevs',
+    'mif1',
+    'msf1',
+  ];
+  const ATTACH_EXT_MIME = {
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    png: 'image/png',
+    gif: 'image/gif',
+    webp: 'image/webp',
+    heic: 'image/heic',
+    heif: 'image/heif',
+    hif: 'image/heif',
+    pdf: 'application/pdf',
+  };
+
+  function attachMimeFromName(name) {
+    const m = /\.([A-Za-z0-9]+)$/.exec(name || '');
+    return (m && ATTACH_EXT_MIME[m[1].toLowerCase()]) || '';
   }
 
-  function sendMessage() {
-    const prompt = inp.value.trim();
+  /** Best guess at a picked file's MIME type; iOS often reports none. */
+  function attachMimeOf(file) {
+    return (file.type || attachMimeFromName(file.name) || '').toLowerCase();
+  }
+
+  /**
+   * True for files the chat accepts: images (whatever the camera called them)
+   * and PDFs.  Used by the paste and drag-and-drop handlers, which see files
+   * whose `type` iOS and macOS sometimes leave empty.
+   */
+  function isAttachableFile(file) {
+    const mime = attachMimeOf(file);
+    return mime.startsWith('image/') || mime === 'application/pdf';
+  }
+
+  /** True when `data`'s ISO-BMFF header identifies a HEIF/HEIC container. */
+  function isHeifHeader(head) {
+    if (head.length < 12) return false;
+    let brand = '';
+    for (let i = 4; i < 12; i++) brand += String.fromCharCode(head[i]);
+    if (brand.slice(0, 4) !== 'ftyp') return false;
+    return HEIF_BRANDS.indexOf(brand.slice(4).toLowerCase()) >= 0;
+  }
+
+  async function isHeifFile(file) {
+    if (attachMimeOf(file).indexOf('heic') >= 0) return true;
+    if (attachMimeOf(file).indexOf('heif') >= 0) return true;
+    if (typeof file.slice !== 'function') return false;
+    try {
+      const head = await file.slice(0, 12).arrayBuffer();
+      return isHeifHeader(new Uint8Array(head));
+    } catch (_e) {
+      return false;
+    }
+  }
+
+  /**
+   * Decode `file` and re-encode it as a downscaled JPEG Blob.
+   *
+   * Args:
+   *   file: The picked File/Blob, in any format the browser can decode.
+   *
+   * Returns:
+   *   A promise for an `image/jpeg` Blob at most ATTACH_MAX_EDGE px per edge,
+   *   with EXIF rotation baked into the pixels.
+   *
+   * Throws:
+   *   Error if the browser cannot decode the format (every engine except
+   *   Safari 17+ for HEIC) or cannot encode a JPEG.
+   */
+  async function encodeAsJpeg(file) {
+    if (typeof window.createImageBitmap !== 'function') {
+      throw new Error('this browser cannot convert the image');
+    }
+    let bitmap;
+    try {
+      // 'from-image' bakes in the EXIF rotation, which every vision API
+      // ignores.  The option name only landed in Safari 16, hence the retry.
+      bitmap = await window.createImageBitmap(file, {
+        imageOrientation: 'from-image',
+      });
+    } catch (_e) {
+      bitmap = await window.createImageBitmap(file);
+    }
+    const scale = Math.min(
+      1,
+      ATTACH_MAX_EDGE / Math.max(bitmap.width, bitmap.height),
+    );
+    const w = Math.max(1, Math.round(bitmap.width * scale));
+    const h = Math.max(1, Math.round(bitmap.height * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    try {
+      const ctx = canvas.getContext('2d', {alpha: false});
+      if (!ctx) throw new Error('this browser cannot convert the image');
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(bitmap, 0, 0, w, h);
+      return await canvasToJpeg(canvas);
+    } finally {
+      if (typeof bitmap.close === 'function') bitmap.close();
+      // Release the decoded pixels: mobile Safari kills tabs that hold on to
+      // multi-megapixel canvas backing stores.
+      canvas.width = 1;
+      canvas.height = 1;
+    }
+  }
+
+  function canvasToJpeg(canvas) {
+    return new Promise((resolve, reject) => {
+      if (typeof canvas.toBlob !== 'function') {
+        reject(new Error('this browser cannot convert the image'));
+        return;
+      }
+      canvas.toBlob(
+        blob => {
+          if (!blob || blob.size < ATTACH_MIN_JPEG_BYTES) {
+            reject(new Error('the converted image came back empty'));
+          } else {
+            resolve(blob);
+          }
+        },
+        'image/jpeg',
+        ATTACH_JPEG_QUALITY,
+      );
+    });
+  }
+
+  function jpegNameFor(name) {
+    const base = String(name || 'photo').replace(/\.[^./\\]*$/, '');
+    return (base || 'photo') + '.jpg';
+  }
+
+  function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const url = String(reader.result || '');
+        const comma = url.indexOf(',');
+        if (comma < 0) reject(new Error('the file could not be read'));
+        else resolve(url.slice(comma + 1));
+      };
+      reader.onerror = () => {
+        reject(reader.error || new Error('the file could not be read'));
+      };
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  /**
+   * Turn a picked file into the payload the daemon should receive, converting
+   * formats no vision API accepts and shrinking oversized photos.
+   */
+  async function prepareAttachment(file) {
+    const mime = attachMimeOf(file);
+    const heif =
+      mime.startsWith('image/') || !mime ? await isHeifFile(file) : false;
+    const reencode =
+      heif ||
+      (mime.startsWith('image/') &&
+        // An unknown image codec (HEIF, AVIF, TIFF...) has to be converted;
+        // a supported one only when it is too big to ship as base64.  GIFs
+        // are left alone because re-encoding would drop the animation.
+        (MODEL_IMAGE_MIME_TYPES.indexOf(mime) < 0 ||
+          (mime !== 'image/gif' && file.size > ATTACH_MAX_BYTES)));
+    if (!reencode) {
+      return {
+        name: file.name || 'attachment',
+        type: mime || 'application/octet-stream',
+        data: await blobToBase64(file),
+      };
+    }
+    const jpeg = await encodeAsJpeg(file);
+    return {
+      name: jpegNameFor(file.name),
+      type: 'image/jpeg',
+      data: await blobToBase64(jpeg),
+    };
+  }
+
+  /**
+   * Fill `slot` with the bytes of `file`, or drop it and explain why.
+   *
+   * The tab's own lists are captured up front: the user may switch tabs while
+   * a photo is being converted, and the outcome belongs to the tab that
+   * picked the file, not to whichever tab is on screen when it lands.
+   *
+   * Returns:
+   *   A promise for whether the slot now holds a usable attachment.
+   */
+  async function fillAttachmentSlot(file, slot) {
+    const ownerFiles = attachments;
+    const ownerErrors = attachErrors;
+    try {
+      const ready = await prepareAttachment(file);
+      slot.name = ready.name;
+      slot.type = ready.type;
+      slot.data = ready.data;
+      return true;
+    } catch (err) {
+      const idx = ownerFiles.indexOf(slot);
+      if (idx >= 0) ownerFiles.splice(idx, 1);
+      const why = (err && err.message) || 'it could not be attached';
+      ownerErrors.push((file.name || 'attachment') + ': ' + why);
+      return false;
+    } finally {
+      slot.pending = false;
+      updateInputDisabled();
+      renderFileChips();
+    }
+  }
+
+  /**
+   * Add `file` to the pending attachments of the active chat tab.
+   *
+   * A placeholder chip appears immediately and keeps the slot's position
+   * while the file is read (and, for a camera HEIC, converted); the send
+   * button stays disabled until every slot is filled.
+   *
+   * Args:
+   *   file: A File from the picker, a paste or a drop.
+   *
+   * Returns:
+   *   A promise that settles once the slot is filled or has been dropped.
+   */
+  function readFileAsAttachment(file) {
+    const slot = {
+      name: file.name || 'attachment',
+      type: attachMimeOf(file),
+      data: '',
+      pending: true,
+    };
+    attachments.push(slot);
+    slot.promise = fillAttachmentSlot(file, slot);
+    updateInputDisabled();
+    renderFileChips();
+    return slot.promise;
+  }
+
+  function hasPendingAttachments() {
+    return attachments.some(a => a.pending);
+  }
+
+  /**
+   * Wait for every in-flight attachment of the active tab.
+   *
+   * Returns:
+   *   A promise for whether all of them arrived intact.
+   */
+  async function attachmentsReady() {
+    const results = await Promise.all(
+      attachments.filter(a => a.pending).map(a => a.promise),
+    );
+    return results.every(ok => ok);
+  }
+
+  async function sendMessage() {
+    let prompt = inp.value.trim();
     if (!prompt) return;
+
+    // Enter and the voice trigger bypass the disabled send button, so a photo
+    // that is still being converted has to be waited for rather than lost.
+    // With nothing to wait for, no await runs and the send stays synchronous:
+    // callers rely on the message being posted before they return.
+    if (hasPendingAttachments()) {
+      // Only the first waiting caller may proceed, or a burst of Enters would
+      // submit the same prompt several times.
+      if (awaitingAttachments) return;
+      const tabAtEntry = activeTabId;
+      awaitingAttachments = true;
+      let ready = false;
+      try {
+        ready = await attachmentsReady();
+      } finally {
+        awaitingAttachments = false;
+      }
+      // A conversion that failed leaves its error chip in place: sending the
+      // prompt without the photo is exactly the silent loss to avoid.  A tab
+      // switch means this submission no longer matches what the user sees.
+      if (!ready || activeTabId !== tabAtEntry) return;
+      // The composer may have been edited during the wait.
+      prompt = inp.value.trim();
+      if (!prompt) return;
+    }
 
     if (histCache[0] !== prompt) {
       histCache.unshift(prompt);
@@ -7308,6 +7632,8 @@
       inp.value = '';
       inp.style.height = 'auto';
       attachments = [];
+      attachErrors = [];
+      updateInputDisabled();
       renderFileChips();
       clearGhost();
       histIdx = -1;
@@ -7320,9 +7646,11 @@
       prompt: prompt,
       model: selectedModel,
       tabId: activeTabId,
-      attachments: attachments.map(a => {
-        return {name: a.name, mimeType: a.type, data: a.data};
-      }),
+      attachments: attachments
+        .filter(a => a.data)
+        .map(a => {
+          return {name: a.name, mimeType: a.type, data: a.data};
+        }),
       useWorktree: !!(worktreeToggleBtn && worktreeToggleBtn.checked),
       useParallel: true,
       autoCommit: !!(autocommitToggleBtn && autocommitToggleBtn.checked),
@@ -7344,6 +7672,8 @@
     inp.value = '';
     inp.style.height = 'auto';
     attachments = [];
+    attachErrors = [];
+    updateInputDisabled();
     renderFileChips();
     clearGhost();
     histIdx = -1;
@@ -7497,12 +7827,14 @@
     fileChips.innerHTML = '';
     attachments.forEach((att, idx) => {
       const chip = document.createElement('div');
-      chip.className = 'file-chip';
-      const isImage = att.type.startsWith('image/');
+      chip.className = 'file-chip' + (att.pending ? ' pending' : '');
+      const isImage = !att.pending && (att.type || '').startsWith('image/');
       chip.innerHTML =
         (isImage
           ? '<img src="data:' + att.type + ';base64,' + att.data + '">'
-          : '<span class="fc-icon">\uD83D\uDCC4</span>') +
+          : '<span class="fc-icon">' +
+            (att.pending ? '\u22EF' : '\uD83D\uDCC4') +
+            '</span>') +
         '<span>' +
         esc(att.name) +
         '</span>' +
@@ -7511,6 +7843,20 @@
         '">&times;</span>';
       chip.querySelector('.fc-rm').addEventListener('click', () => {
         attachments.splice(idx, 1);
+        updateInputDisabled();
+        renderFileChips();
+      });
+      fileChips.appendChild(chip);
+    });
+    attachErrors.forEach((msg, idx) => {
+      const chip = document.createElement('div');
+      chip.className = 'file-chip error';
+      chip.innerHTML =
+        '<span class="fc-icon">\u26A0</span><span>' +
+        esc(msg) +
+        '</span><span class="fc-rm">&times;</span>';
+      chip.querySelector('.fc-rm').addEventListener('click', () => {
+        attachErrors.splice(idx, 1);
         renderFileChips();
       });
       fileChips.appendChild(chip);

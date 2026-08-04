@@ -200,6 +200,41 @@ def coerce_budget_override(raw: object) -> float | None:
     return value
 
 
+def decode_attachments(raw: object) -> list[Attachment] | None:
+    """Decode the ``attachments`` field of a submit command.
+
+    Each entry carries base64 ``data`` and the ``mimeType`` the browser
+    reported.  :meth:`Attachment.from_bytes` transcodes an iPhone camera HEIC
+    into JPEG on the way through: the webapp already does that in the browser,
+    but a client whose engine cannot decode HEIC still uploads the raw photo,
+    and the OpenAI and Anthropic vision APIs reject ``image/heic``.
+
+    Args:
+        raw: The command's ``attachments`` value, normally a list of dicts.
+
+    Returns:
+        The decoded attachments, or ``None`` when there are none to send.
+    """
+    if not isinstance(raw, list):
+        logger.warning(
+            "Ignoring malformed attachments field of type %s",
+            type(raw).__name__,
+        )
+        return None
+    if not raw:
+        return None
+    out: list[Attachment] = []
+    for att in raw:
+        try:
+            data = base64.b64decode(att.get("data", ""))
+            mime = att.get("mimeType", "application/octet-stream")
+        except Exception:
+            logger.warning("Skipping malformed attachment", exc_info=True)
+            continue
+        out.append(Attachment.from_bytes(data, mime))
+    return out
+
+
 def parse_task_tags(text: str) -> list[str]:
     """Parse ``<task>...</task>`` tags from *text* and return individual tasks.
 
@@ -611,30 +646,8 @@ class _TaskRunnerMixin:
         prompt = cmd.get("prompt", "")
         work_dir = cmd.get("workDir") or self.work_dir
         active_file = cmd.get("activeFile")
-        raw_attachments = cmd.get("attachments", [])
-        if not isinstance(raw_attachments, list):
-            logger.warning(
-                "Ignoring malformed attachments field of type %s",
-                type(raw_attachments).__name__,
-            )
-            raw_attachments = []
+        attachments = decode_attachments(cmd.get("attachments", []))
         start_ms = int(cmd.get("_start_ms") or 0)
-
-        attachments: list[Attachment] | None = None
-        if raw_attachments:
-            attachments = []
-            for att in raw_attachments:
-                try:
-                    data_b64 = att.get("data", "")
-                    mime = att.get("mimeType", "application/octet-stream")
-                    data = base64.b64decode(data_b64)
-                except Exception:
-                    logger.warning(
-                        "Skipping malformed attachment",
-                        exc_info=True,
-                    )
-                    continue
-                attachments.append(Attachment(data=data, mime_type=mime))
 
         tab_id = cmd.get("tabId", "")
         tab = self._get_tab(tab_id)

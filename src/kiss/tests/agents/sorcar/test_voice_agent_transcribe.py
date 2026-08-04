@@ -435,6 +435,7 @@ class TestListenerSpeechLanguage(unittest.TestCase):
                 tail_seconds=2.5,
             )
             transcripts = []
+            payloads: list[dict[str, str]] = []
             for _ in range(_LISTENER_ATTEMPTS):
                 proc = _run_listener(wav)
                 self.assertEqual(proc.returncode, 0, proc.stderr)

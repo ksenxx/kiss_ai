@@ -373,6 +373,16 @@ body.remote-chat .file-chip {
   color: var(--fg);
 }
 
+/* This selector has to repeat the mobile chip shape: the plain
+   `.file-chip.error` rule in main.css is less specific than the one above and
+   would otherwise lose to it, leaving a failed photo looking like a normal
+   attachment. */
+body.remote-chat .file-chip.error {
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  border-color: color-mix(in srgb, var(--red) 32%, transparent);
+  color: var(--red);
+}
+
 body.remote-chat .suggestion-chip {
   background: transparent;
   border: 1px solid var(--border-12);

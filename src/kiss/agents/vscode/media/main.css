@@ -1096,6 +1096,17 @@ body.remote-chat #welcome-config { display: none !important; }
 }
 .file-chip .fc-rm:hover { color: var(--red); }
 
+/* A camera photo is decoded and re-encoded before it can be sent; the chip
+   stays in place, greyed out, until its bytes are ready. */
+.file-chip.pending { opacity: 0.6; }
+
+/* A file the browser could not decode (a HEIC outside Safari) is reported
+   here instead of vanishing. */
+.file-chip.error {
+  background: color-mix(in srgb, var(--red) 10%, transparent); border-color: color-mix(in srgb, var(--red) 30%, transparent);
+  color: color-mix(in srgb, var(--red) 91%, transparent);
+}
+
 #input-container {
   background: var(--input-bg); border: 1px solid var(--border);
   border-radius: 10px; padding: 8px 10px; transition: border-color 0.2s;
