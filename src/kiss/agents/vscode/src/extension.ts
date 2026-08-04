@@ -83,11 +83,12 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       const filePath = vscode.workspace.asRelativePath(editor.document.uri);
       const startLine = sel.start.line + 1;
-      const startCol = sel.start.character + 1;
       const endLine = sel.end.line + 1;
-      const endCol = sel.end.character + 1;
-      const hunkRef = `text from (line, col)=(${startLine},${startCol}) to (line, col)=(${endLine},${endCol}) in ./${filePath}`;
-      void sidebarView!.appendToInput(hunkRef);
+      const lang = editor.document.languageId || '';
+      const snippet =
+        `text from ./${filePath} (lines ${startLine}-${endLine}):\n` +
+        `\`\`\`${lang}\n${text}\n\`\`\``;
+      void sidebarView!.appendToInput(snippet);
     }),
   );
 
