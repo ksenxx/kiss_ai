@@ -7687,6 +7687,11 @@
     const onlyFavorite = hfFavorite && hfFavorite.checked;
     const onlyWorkspace = hfWorkspace && hfWorkspace.checked;
     const normClientWorkDir = normalizeHistoryWorkDir(configWorkDir || '');
+    // "/Users/me/proj" -> "/Users/me/proj/", but "/" stays "/", so that
+    // subdirectory matching below never looks for a doubled separator.
+    const clientWorkDirPrefix = normClientWorkDir.endsWith('/')
+      ? normClientWorkDir
+      : normClientWorkDir + '/';
     let fromTs = -Infinity;
     let toTs = Infinity;
     if (hfFrom && hfFrom.value) {
@@ -7709,12 +7714,15 @@
       const dateOk = ts >= fromTs && ts <= toTs;
       const favOk = !onlyFavorite || row.dataset.favorite === '1';
       const rowWorkDir = normalizeHistoryWorkDir(row.dataset.workDir || '');
+      // A task that ran in a git worktree (".kiss-worktrees/kiss_wt-...")
+      // or any other subdirectory still belongs to this workspace.
       const wsOk =
         !onlyWorkspace ||
         cat === 'running' ||
         rowWorkDir === '' ||
         normClientWorkDir === '' ||
-        rowWorkDir === normClientWorkDir;
+        rowWorkDir === normClientWorkDir ||
+        rowWorkDir.startsWith(clientWorkDirPrefix);
       if (catOk && dateOk && favOk && wsOk) {
         row.style.display = '';
         visible++;
