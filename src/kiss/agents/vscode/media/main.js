@@ -1722,6 +1722,9 @@
   }
 
   function createNewTab() {
+    // Opening a chat is the user taking over: the launch is over, and no
+    // backend event may move them off the tab they just asked for.
+    closeLaunchSwitch();
     const pendingText = inp.value || '';
     saveCurrentTab();
     const tab = makeTab('new chat');
@@ -1784,6 +1787,8 @@
       chatId: activeTabId,
       taskDrawerCollapsed: taskDrawerCollapsed,
       inputDrawerCollapsed: inputDrawerCollapsed,
+      taskDrawerUserSet: taskDrawerUserSet,
+      inputDrawerUserSet: inputDrawerUserSet,
       drawersVersion: DRAWERS_VERSION,
     });
   }
@@ -1800,21 +1805,37 @@
     return /Macintosh/i.test(ua) && navigator.maxTouchPoints > 1;
   }
 
-  const DRAWERS_VERSION = 2;
-  const mobileDrawerDefault = isMobileRemoteWebApp();
-  let taskDrawerCollapsed = mobileDrawerDefault;
-  let inputDrawerCollapsed = mobileDrawerDefault;
+  const DRAWERS_VERSION = 3;
+  const isMobileRemote = isMobileRemoteWebApp();
+  // The static task panel opens collapsed in every chat webview -- the
+  // extension sidebar and the remote web app, phone or desktop. It is a
+  // header, not content: the transcript deserves the room. Only a click on
+  // #task-panel-drawer-btn may expand it, so an expanded panel is restored
+  // only when the persisted blob says a click put it there. `*UserSet`
+  // records that click; without it the defaults below always win, which is
+  // what keeps a reload, a reconnect or a new task from re-expanding a
+  // panel the user never opened.
+  let taskDrawerCollapsed = true;
+  let taskDrawerUserSet = false;
+  // The composer stays reachable by default. On a phone it folds away while
+  // a task is running (see syncMobileInputDrawer) because the transcript
+  // needs the whole screen, but with nothing running the textbox and its
+  // buttons are the only thing worth showing.
+  let inputDrawerCollapsed = false;
+  let inputDrawerUserSet = false;
   {
     const _saved = vscode.getState();
     const _drawersTrusted =
       _saved &&
       typeof _saved === 'object' &&
-      (!mobileDrawerDefault || _saved.drawersVersion >= DRAWERS_VERSION);
-    if (_drawersTrusted && 'taskDrawerCollapsed' in _saved) {
+      _saved.drawersVersion >= DRAWERS_VERSION;
+    if (_drawersTrusted && _saved.taskDrawerUserSet) {
       taskDrawerCollapsed = !!_saved.taskDrawerCollapsed;
+      taskDrawerUserSet = true;
     }
-    if (_drawersTrusted && 'inputDrawerCollapsed' in _saved) {
+    if (_drawersTrusted && _saved.inputDrawerUserSet) {
       inputDrawerCollapsed = !!_saved.inputDrawerCollapsed;
+      inputDrawerUserSet = true;
     }
   }
   // drawer-coverage:end
@@ -2033,6 +2054,7 @@
     taskPanelDrawerBtn.addEventListener('click', e => {
       e.stopPropagation();
       taskDrawerCollapsed = !taskDrawerCollapsed;
+      taskDrawerUserSet = true;
       applyDrawerState();
       persistTabState();
     });
@@ -2041,12 +2063,124 @@
     inputDrawerBtn.addEventListener('click', e => {
       e.stopPropagation();
       inputDrawerCollapsed = !inputDrawerCollapsed;
+      inputDrawerUserSet = true;
       applyDrawerState();
       persistTabState();
     });
   }
   applyDrawerState();
+
+  // A phone screen holds either the transcript or the composer, not both.
+  // While a task runs the transcript wins; the moment nothing is running the
+  // input textbox and its buttons come back so the user can start the next
+  // task. Once the user works the handle themselves that choice is final.
+  function syncMobileInputDrawer() {
+    if (!isMobileRemote || inputDrawerUserSet) return;
+    const wantCollapsed = tabs.some(isLaunchRunning);
+    if (inputDrawerCollapsed === wantCollapsed) return;
+    inputDrawerCollapsed = wantCollapsed;
+    applyDrawerState();
+    persistTabState();
+  }
   // drawer-coverage:end
+
+  // launchswitch-coverage:start
+  // A chat window is often opened while agents are still working: the
+  // extension host replays a `status` for every tab it restored and the
+  // remote web app is handed an `openRunningTasks` snapshot. What the user
+  // wants to see then is the task that started last, not whichever tab
+  // happened to be active when the window was last closed.
+  //
+  // The window this permission lives in closes at the first real gesture --
+  // a tap or a keystroke -- so a snapshot that arrives while the user is
+  // already working can never yank them off the transcript they are reading.
+  // The wall-clock bound closes it for a window that is simply left alone, so
+  // a task started much later cannot steal a tab either.
+  const LAUNCH_SWITCH_WINDOW_MS = 15000;
+  let launchStartedAt = 0;
+  let launchSwitchDone = false;
+  let launchNewsSeen = false;
+
+  // Start timestamp, keyed by backend chat id, of every task the backend
+  // reported as running in the launch snapshot. The snapshot is only used to
+  // choose the launch tab -- a tab's own running state always comes from its
+  // event replay.
+  const launchRunningStartTs = new Map();
+
+  // A launch begins when the backend becomes live, which is not the moment the
+  // page loads: until then the chat is hidden behind the "KISS Sorcar Server
+  // is starting ..." overlay, so nothing the user did to it counted and the
+  // wall-clock bound would be measuring the wait rather than the launch.
+  //
+  // Every such transition restarts the launch, because every one of them ends
+  // a spell with the chat off screen. That is what carries the remote web app
+  // through its password prompt: the socket shim reports a live backend once
+  // to reveal the prompt (the modal lives inside #app) and again once the
+  // password is accepted -- and only then does it let `ready`, and the
+  // running-task news it triggers, through. Without the restart the keystrokes
+  // spent on the prompt would spend the launch they precede.
+  //
+  // Once news HAS arrived the launch has had its chance, and a later hiccup --
+  // a daemon that dies and comes back mid-session -- must not hand it a second
+  // one: by then the user has picked the tab they want to be on.
+  function beginLaunch() {
+    if (launchNewsSeen) return;
+    launchStartedAt = Date.now();
+    launchSwitchDone = false;
+  }
+
+  function closeLaunchSwitch() {
+    // A tap on the loading overlay or the password prompt is not the user
+    // taking over the chat -- the chat is not even on screen yet.
+    if (!launchStartedAt) return;
+    launchSwitchDone = true;
+    // Launch-only data: from here on a tab's own replayed state is the truth.
+    launchRunningStartTs.clear();
+  }
+
+  function launchSwitchAllowed() {
+    if (launchSwitchDone || !launchStartedAt) return false;
+    if (Date.now() - launchStartedAt > LAUNCH_SWITCH_WINDOW_MS) {
+      closeLaunchSwitch();
+      return false;
+    }
+    return true;
+  }
+
+  function launchStartTsFor(tab) {
+    const snapshot = tab.backendChatId
+      ? launchRunningStartTs.get(tab.backendChatId)
+      : 0;
+    const own = tab.isRunning ? Number(tab.t0) || 0 : 0;
+    return Math.max(Number(snapshot) || 0, own);
+  }
+
+  function isLaunchRunning(tab) {
+    if (tab.isContentTab || tab.isSubagentTab) return false;
+    if (tab.isRunning) return true;
+    return !!tab.backendChatId && launchRunningStartTs.has(tab.backendChatId);
+  }
+
+  // Ties -- two tasks whose start timestamp is missing, so both read 0 --
+  // resolve to the later tab, because the backend hands out its running
+  // tasks oldest first and they are opened in that order.
+  function switchToLatestRunningTab() {
+    if (!launchSwitchAllowed()) return;
+    launchNewsSeen = true;
+    let best = null;
+    let bestTs = -1;
+    for (let i = 0; i < tabs.length; i++) {
+      const tab = tabs[i];
+      if (!isLaunchRunning(tab)) continue;
+      const ts = launchStartTsFor(tab);
+      if (ts >= bestTs) {
+        bestTs = ts;
+        best = tab;
+      }
+    }
+    if (best && best.id !== activeTabId) switchToTab(best.id);
+  }
+  // launchswitch-coverage:end
 
   function fallbackCopyText(text) {
     const ta = document.createElement('textarea');
@@ -4539,6 +4673,10 @@
       case 'daemonStatus':
         setServerLoading(!ev.connected);
         if (ev.connected) {
+          // The backend is live, so this window's `ready` is on its way and
+          // the running-task news it triggers is about to arrive: the launch
+          // starts here (see beginLaunch).
+          beginLaunch();
           // modelpick-coverage:start
           // While the daemon was away this window may have missed both a
           // task ending and its picker hand-back, so no agent override
@@ -4605,8 +4743,16 @@
           }
           if (ev.running) applyChevronState(currentTaskName);
         }
+        if (!ev.running && evTab && evTab.backendChatId) {
+          launchRunningStartTs.delete(evTab.backendChatId);
+        }
         renderTabBar();
         refreshHistory();
+        syncMobileInputDrawer();
+        // Only news of a task that IS running may move the user. A task
+        // finishing must not: the launch already brought them to it, and the
+        // result they were brought to see is the last thing to pull them off.
+        if (ev.running) switchToLatestRunningTab();
         break;
       }
       case 'models':
@@ -4988,9 +5134,11 @@
         runningTasks.forEach(rt => {
           if (!rt || !rt.chatId) return;
           const rtChatId = String(rt.chatId);
+          launchRunningStartTs.set(rtChatId, Number(rt.startTs) || 0);
           if (getTabByBackendChatId(rtChatId)) return;
-          // A task that is still running gets a reachable tab, but the user
-          // stays on whatever tab they are looking at.
+          // Every running task gets a tab of its own, opened in the
+          // background. Which of them the user lands on is decided once, by
+          // switchToLatestRunningTab, after the whole snapshot is in.
           const rtTab = createBackgroundChatTab('new chat');
           rtTab.backendChatId = rtChatId;
           setTabTitle(rtTab, String(rt.title || ''));
@@ -5001,6 +5149,10 @@
           });
         });
         persistTabState();
+        if (runningTasks.length > 0) {
+          syncMobileInputDrawer();
+          switchToLatestRunningTab();
+        }
         break;
       }
 
@@ -6191,6 +6343,11 @@
 
   function setupEventListeners() {
     sendBtn.addEventListener('click', sendMessage);
+    // The first gesture ends the launch: from here on the user drives which
+    // tab is on screen. Capture phase, because a handler further down may
+    // stop the event from bubbling back up.
+    document.addEventListener('pointerdown', closeLaunchSwitch, true);
+    document.addEventListener('keydown', closeLaunchSwitch, true);
     window.addEventListener('focus', () => {
       api.webviewFocusChanged({focused: true});
     });
@@ -8435,15 +8592,18 @@
 
   // Everything above lives inside this IIFE, so the end-to-end webview tests
   // (jsdom and Playwright) have no other way to drive a real conversation.
-  // These four entry points are the whole surface they need: which tab is on
-  // screen, open another one, feed it a backend event, and get the welcome
-  // screen out of the way.
+  // These few entry points are the whole surface they need: which tab is on
+  // screen, open another one, feed it a backend event, end the launch, and
+  // get the welcome screen out of the way.
   window._testApi = {
     getActiveTabId: function () {
       return activeTabId;
     },
     createNewTab: createNewTab,
     processEvent: processOutputEvent,
+    // Stands in for the first tap or keystroke: after this the window is no
+    // longer launching, so no backend event may switch tabs on its own.
+    endLaunch: closeLaunchSwitch,
     hideWelcome: function () {
       if (welcome) {
         welcome.style.display = 'none';

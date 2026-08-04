@@ -176,10 +176,9 @@ function testExpandTaskPanelShowsEntireTask(remote) {
   const panel = d.getElementById('task-panel');
   const btn = d.getElementById('task-panel-drawer-btn');
 
-  click(win, 'task-panel-drawer-btn');
   assert.ok(
     panel.classList.contains('drawer-collapsed'),
-    'clicking the toggle must collapse the task drawer',
+    'the task drawer opens collapsed',
   );
   assert.strictEqual(
     btn.getAttribute('aria-label'),
@@ -211,15 +210,30 @@ function testExpandTaskPanelShowsEntireTask(remote) {
   win.close();
 }
 
-function testDefaultExpandedPanelShowsEntireTask() {
+// The panel opens collapsed, so the whole task is in the DOM but clamped to
+// one line. One click on the chevron and all of it is on screen.
+function testCollapsedPanelKeepsTheWholeTaskOneClickAway() {
   const {win, posted} = makeWebview();
   showTaskPanel(win, posted, LONG_TASK);
+  const text = win.document.getElementById('task-panel-text');
   assert.strictEqual(
-    win.document.getElementById('task-panel-text').textContent,
+    text.textContent,
     LONG_TASK,
-    'the default expanded panel must hold the entire task text',
+    'the collapsed panel must still hold the entire task text',
   );
-  assertFullTextPanel(win, 'default expanded state');
+  assert.strictEqual(
+    cs(win, 'task-panel-text').textOverflow,
+    'ellipsis',
+    'the collapsed panel ellipsizes what does not fit on its one line',
+  );
+
+  click(win, 'task-panel-drawer-btn');
+  assert.strictEqual(
+    text.textContent,
+    LONG_TASK,
+    'expanding must hold the entire task text',
+  );
+  assertFullTextPanel(win, 'expanded from the default collapsed state');
   win.close();
 }
 
@@ -364,7 +378,7 @@ function runTests() {
     () => testCollapseChatsButtonGone(true),
     () => testExpandTaskPanelShowsEntireTask(false),
     () => testExpandTaskPanelShowsEntireTask(true),
-    testDefaultExpandedPanelShowsEntireTask,
+    testCollapsedPanelKeepsTheWholeTaskOneClickAway,
     testChevronPassWorksWithoutButton,
   ];
   const names = [
@@ -372,7 +386,7 @@ function runTests() {
     'testCollapseChatsButtonGone(remote)',
     'testExpandTaskPanelShowsEntireTask(vscode)',
     'testExpandTaskPanelShowsEntireTask(remote)',
-    'testDefaultExpandedPanelShowsEntireTask',
+    'testCollapsedPanelKeepsTheWholeTaskOneClickAway',
     'testChevronPassWorksWithoutButton',
   ];
   for (let i = 0; i < tests.length; i++) {

@@ -4,9 +4,13 @@
 // add your name here
 
 // End-to-end test for the remote-webapp reconnect path. The server pushes an
-// `openRunningTasks` event to every client that says `ready`, so simply
-// reloading or reconnecting a browser must not drag the user onto a task that
-// is still running. Restored tasks must get reachable background tabs.
+// `openRunningTasks` event to every client that says `ready` -- including the
+// `ready` a dropped WebSocket sends when it comes back. Once the user is
+// working in the page, that reconnect must not drag them onto a task that is
+// still running: restored tasks get reachable background tabs and nothing
+// else. (Landing on the newest running task is a launch-time affair, and
+// lives in launchTabSwitch.test.js.) Every test here therefore ends the
+// launch first, the way a real tap or keystroke would.
 
 'use strict';
 
@@ -91,11 +95,22 @@ function resumeCalls(win) {
   return win._sentMessages.filter(m => m && m.type === 'resumeSession');
 }
 
+// A launched window with a live backend, in which the user has since touched
+// the page: exactly the state a mid-session snapshot arrives in.
+// `daemonStatus connected` is what both clients send once the backend is
+// reachable -- without it the window would still be sitting behind the "server
+// is starting" overlay and no gesture could mean anything.
+function endLaunch(win) {
+  send(win, {type: 'daemonStatus', connected: true});
+  win._testApi.endLaunch();
+}
+
 // A reconnect that restores one running task must leave the user where they
 // were, and must resume that task into its own (background) tab.
 function testRestoredRunningTaskDoesNotStealFocus() {
   const win = makeWebview();
   const api = win._testApi;
+  endLaunch(win);
   const userTab = api.getActiveTabId();
   const before = tabIds(win);
 
@@ -149,6 +164,7 @@ function testRestoredRunningTaskDoesNotStealFocus() {
 function testManyRestoredTasksEachGetTheirOwnTab() {
   const win = makeWebview();
   const api = win._testApi;
+  endLaunch(win);
   const userTab = api.getActiveTabId();
 
   send(win, {
@@ -193,6 +209,7 @@ function testManyRestoredTasksEachGetTheirOwnTab() {
 function testAlreadyOpenTaskIsNeitherDuplicatedNorFocused() {
   const win = makeWebview();
   const api = win._testApi;
+  endLaunch(win);
 
   send(win, {
     type: 'openRunningTasks',
@@ -236,6 +253,7 @@ function testAlreadyOpenTaskIsNeitherDuplicatedNorFocused() {
 function testMalformedTasksAreIgnored() {
   const win = makeWebview();
   const api = win._testApi;
+  endLaunch(win);
   const userTab = api.getActiveTabId();
   const before = tabIds(win);
 

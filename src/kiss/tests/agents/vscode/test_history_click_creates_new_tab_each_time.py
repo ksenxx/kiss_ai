@@ -125,6 +125,8 @@ class TestHistoryClickAlwaysCreatesNewTab(unittest.TestCase):
             function clearGhost() {}
             function hideAC() {}
             function closeModelDD() {}
+            // Opening a chat ends the launch tab switch; irrelevant here.
+            function closeLaunchSwitch() {}
             function startTimer() {}
             function stopTimer() {}
             function removeSpinner() {}
