@@ -310,26 +310,65 @@ def test_codex_page_palette() -> None:
     assert "#ececec" in css, "Codex primary text #ececec missing"
 
 
+def _dark_palette_block() -> str:
+    """The ``body.remote-chat { ... }`` dark-theme palette block."""
+    css = re.sub(r"/\*.*?\*/", "", _read_codex_css(), flags=re.S)
+    m = re.search(r"body\.remote-chat\s*\{([^}]*)\}", css)
+    assert m, "body.remote-chat dark palette block missing"
+    return m.group(1)
+
+
 def test_codex_composer_card() -> None:
-    """Composer = #212121 card, 28px radius, inset white edge."""
-    css = _read_codex_css()
-    assert "#212121" in css, "composer surface #212121 missing"
-    assert "28px" in css, "28px composer radius missing"
+    """Composer = --surface2 (#212121 in dark) card at 28px radius with
+    an inset edge drawn via --ring (translucent white in dark)."""
+    dark = _dark_palette_block()
+    assert re.search(r"--surface2:\s*#212121\b", dark), (
+        "composer surface --surface2: #212121 missing from dark palette"
+    )
     assert re.search(
-        r"inset 0 0 1px rgba?\(255[,\s]+255[,\s]+255", css
-    ), "inset white edge shadow missing"
+        r"--ring:\s*rgba?\(255[,\s]+255[,\s]+255", dark
+    ), "--ring must be a translucent white in the dark palette"
+    css = _read_codex_css()
+    m = re.search(
+        r"body\.remote-chat #input-container\s*\{([^}]*)\}", css
+    )
+    assert m, "composer #input-container rule missing"
+    composer = m.group(1)
+    assert "background: var(--surface2)" in composer, (
+        "composer surface must be themed via var(--surface2)"
+    )
+    assert "border-radius: 28px" in composer, (
+        "28px composer radius missing"
+    )
+    assert "inset 0 0 1px var(--ring)" in composer, (
+        "inset edge shadow must be themed via var(--ring)"
+    )
 
 
 def test_codex_circular_composer_controls() -> None:
-    """Composer controls are 36px circles; send is a white circle."""
+    """Composer controls are 36px circles; send is a --send-bg circle
+    (white in dark theme, near-black in light theme)."""
+    dark = _dark_palette_block()
+    assert re.search(r"--send-bg:\s*#fff\b", dark), (
+        "--send-bg must be white in the dark palette"
+    )
     css = _read_codex_css()
-    assert re.search(
-        r"body\.remote-chat #send-btn[^{]*\{[^}]*background:\s*#fff",
-        css,
-    ), "send button must be a white circle"
-    assert "36px" in css, "36px circular control size missing"
+    light = re.search(
+        r"body\.remote-chat\.light-theme\s*\{([^}]*)\}", css
+    )
+    assert light and re.search(
+        r"--send-bg:\s*#1f1f1f\b", light.group(1)
+    ), "--send-bg must be near-black in the light palette"
     m = re.search(r"body\.remote-chat #send-btn[^{]*\{([^}]*)\}", css)
-    assert m and "border-radius: 50%" in m.group(1)
+    assert m, "#send-btn rule missing"
+    send = m.group(1)
+    assert "background: var(--send-bg)" in send, (
+        "send button must be themed via var(--send-bg)"
+    )
+    assert "border-radius: 50%" in send
+    assert "width: 36px" in send and "height: 36px" in send, (
+        "36px circular send button size missing"
+    )
 
 
 def test_codex_pill_tabs_and_status() -> None:
@@ -410,19 +449,28 @@ def test_desktop_media_query_docks_sidebar() -> None:
 
 
 def test_no_decorative_color_tokens_in_codex_css() -> None:
-    """remote-codex.css must stay neutral: none of main.css's
-    decorative color variables may appear (red stays in main.css for
-    errors and is intentionally NOT overridden here)."""
-    css = _read_codex_css()
-    for token in (
+    """remote-codex.css must stay neutral: main.css's decorative color
+    variables may not COLOR anything.  They may appear only on the
+    right-hand side of a custom-property definition (the light-theme
+    palette derives --orange from --yellow/--red), never as the value
+    of a normal CSS property (red stays in main.css for errors and is
+    intentionally NOT overridden here)."""
+    css = re.sub(r"/\*.*?\*/", "", _read_codex_css(), flags=re.S)
+    tokens = (
         "var(--orange)",
         "var(--purple)",
         "var(--green)",
         "var(--yellow)",
         "var(--cyan)",
         "var(--accent)",
-    ):
-        assert token not in css, f"decorative token {token} leaked in"
+    )
+    for prop, value in re.findall(r"([\w-]+)\s*:\s*([^;{}]*)", css):
+        if prop.startswith("--"):
+            continue  # palette definitions may reference each other
+        for token in tokens:
+            assert token not in value, (
+                f"decorative token {token} colors '{prop}'"
+            )
 
 
 def test_error_panels_keep_red() -> None:
