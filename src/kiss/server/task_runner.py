@@ -38,6 +38,7 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.agents.sorcar.persistence import (
     _append_chat_event,
+    _load_last_model,
     _save_task_extra,
     _save_task_result,
 )
@@ -294,6 +295,7 @@ class _TaskRunnerMixin:
         printer: JsonPrinter
         work_dir: str
         _state_lock: threading.RLock
+        _default_model: str
         _tab_chat_views: dict[str, str]
         _tab_opened_task_ids: dict[str, str]
         _pending_user_answer_tasks: dict[int, str]
@@ -430,12 +432,36 @@ class _TaskRunnerMixin:
                     if client_task_id:
                         status_end["taskId"] = client_task_id
                     self.printer.broadcast(status_end)
+                    self._restore_user_model_pick(tab_id)
             self._broadcast_status_end_to_viewers(
                 task_id_for_end,
                 tab_id,
                 client_task_id=client_task_id,
             )
             self._dispose_if_closed(tab_id)
+
+    def _restore_user_model_pick(self, tab_id: str) -> None:
+        """Put the user's own model back in *tab_id*'s picker.
+
+        A finished agent's ``set_model`` override is display-only, so
+        the moment the task stops the picker must show the user's own
+        choice again — otherwise the next task they launch would
+        silently inherit whatever model the agent happened to end on.
+
+        The model is the one selected in *that* tab: the picker is
+        per-tab, so a pick made in another window is none of this tab's
+        business.  Nothing is emitted unless an agent actually took the
+        picker over.
+
+        Args:
+            tab_id: The tab whose picker should be restored.
+        """
+        with self._state_lock:
+            state = _RunningAgentState.running_agent_states.get(tab_id)
+            model = (state.selected_model if state is not None else "") or (
+                _load_last_model() or self._default_model
+            )
+        self.printer.restore_model_pick(model, tab_id)
 
     def _broadcast_status_end_to_viewers(
         self,
@@ -496,6 +522,7 @@ class _TaskRunnerMixin:
             if client_task_id:
                 payload["taskId"] = client_task_id
             self.printer.broadcast(payload)
+            self._restore_user_model_pick(viewer_tab_id)
 
     @staticmethod
     def _capture_pre_snapshot(

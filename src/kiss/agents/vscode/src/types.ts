@@ -284,6 +284,15 @@ type ToWebviewMessageBody =
     }
   | {type: 'subagentDone'; tab_id?: string; success?: boolean}
   | {
+      // Transient picker label update: 'agent' is the model a running
+      // agent switched itself to, 'restore' the end-of-task revert to
+      // the model the user picked in that tab.
+      type: 'modelPick';
+      model: string;
+      source: 'agent' | 'restore';
+      tabId: string;
+    }
+  | {
       type: 'new_tab';
       task_id: string | number;
       parent_tab_id?: string;

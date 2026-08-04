@@ -187,12 +187,41 @@ class _EventDispatcher:
         self.models_q: queue.Queue[dict[str, Any]] = queue.Queue()
         self.commit_q: queue.Queue[dict[str, Any]] = queue.Queue()
         self.chat_id: str = ""
+        # The model the user last picked; it is what a run is launched
+        # with.  ``agent_model`` is the display-only model a running
+        # agent switched itself to, cleared when the task ends.
         self.current_model: str = ""
+        self.agent_model: str = ""
         self.task_active = threading.Event()
         self.task_started = threading.Event()
         self.current_task_id: str = ""
         self.task_id_lock = threading.Lock()
         self.ask_user_q: queue.Queue[str] = queue.Queue()
+
+    @property
+    def display_model(self) -> str:
+        """The model to show the user: an agent's override, else their pick."""
+        return self.agent_model or self.current_model
+
+    def _apply_model_pick(self, event: dict[str, Any]) -> None:
+        """Track a ``modelPick`` event from the daemon.
+
+        ``source`` says what the model means: ``"agent"`` is the
+        display-only model a running agent switched itself to, and
+        ``"restore"`` ends that override when the task finishes, handing
+        the picker back to the model this client chose.
+
+        Args:
+            event: The ``modelPick`` event.
+        """
+        model = event.get("model")
+        if not isinstance(model, str) or not model:
+            return
+        if event.get("source") == "agent":
+            self.agent_model = model
+            return
+        self.agent_model = ""
+        self.current_model = model
 
     def dispatch(self, event: dict[str, Any]) -> None:
         """Route one event to the appropriate handler."""
@@ -210,6 +239,9 @@ class _EventDispatcher:
             if isinstance(selected, str) and selected:
                 self.current_model = selected
             self.models_q.put(event)
+            return
+        if et == "modelPick":
+            self._apply_model_pick(event)
             return
         if et == "commitMessage":
             self.commit_q.put(event)
@@ -232,6 +264,10 @@ class _EventDispatcher:
                 self.task_active.set()
             else:
                 self.task_active.clear()
+                # Belt and braces for the daemon's "restore" pick: a task
+                # that dies without one must not leave the agent's model
+                # showing as if the user had chosen it.
+                self.agent_model = ""
             if current:
                 self.task_started.set()
             return
@@ -905,7 +941,7 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
     if cmd == "/model":
         if arg == "list":
             _request_models(client)
-            _print_model_list(client.dispatcher.current_model)
+            _print_model_list(client.dispatcher.display_model)
             return False
         if not arg:
             reply = _request_cli_info(client, "modelCurrent")
@@ -913,10 +949,11 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
             if text:
                 print(f"\n{text}\n")
             else:
-                print(f"\nCurrent model: {client.dispatcher.current_model}\n")
+                print(f"\nCurrent model: {client.dispatcher.display_model}\n")
             return False
         client.send({"type": "selectModel", "model": arg})
         client.dispatcher.current_model = arg
+        client.dispatcher.agent_model = ""
         print(f"Model switched to {arg} for subsequent tasks.\n")
         return False
     if cmd == "/autocommit":

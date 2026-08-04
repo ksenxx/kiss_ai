@@ -424,7 +424,13 @@
   }
 
   let isRunning = false;
+  // The model the user last picked in the picker. It is what a submit
+  // runs with and what the picker shows, EXCEPT while a running agent
+  // has switched models on itself -- that transient override lives in
+  // `agentModel` and is dropped the moment the task ends, so the user's
+  // own choice is never silently replaced by the agent's.
   let selectedModel = '';
+  let agentModel = '';
   let allModels = [];
   let modelDDIdx = -1;
   let attachments = [];
@@ -498,6 +504,7 @@
       statusStepsText: '',
       welcomeVisible: true,
       selectedModel: selectedModel,
+      agentModel: '',
       attachments: [],
       inputValue: '',
       isMerging: false,
@@ -524,6 +531,57 @@
   function getTab(id) {
     return tabs.find(t => t.id === id) || null;
   }
+
+  // modelpick-coverage:start
+  /** Repaint the picker label from the active tab's model state. */
+  function refreshModelLabel() {
+    if (modelName) modelName.textContent = agentModel || selectedModel;
+  }
+
+  /**
+   * Apply a `modelPick` event to `tabId`.
+   *
+   * `source` says what the model means:
+   *   'agent'   - a running agent switched models; show it while the
+   *               task lasts without touching the user's own pick.
+   *   'restore' - the task ended: drop the override and show the pick
+   *               the user made in that tab again.
+   */
+  function applyModelPick(tabId, model, source) {
+    if (!model || !tabId) return;
+    const isAgent = source === 'agent';
+    const t = getTab(tabId);
+    if (t) {
+      if (isAgent) {
+        t.agentModel = model;
+      } else {
+        t.agentModel = '';
+        t.selectedModel = model;
+      }
+    }
+    if (tabId !== activeTabId) return;
+    if (isAgent) {
+      agentModel = model;
+    } else {
+      agentModel = '';
+      selectedModel = model;
+    }
+    refreshModelLabel();
+    if (modelDropdown && modelDropdown.classList.contains('open')) {
+      renderModelList(modelSearch ? modelSearch.value : '');
+    }
+  }
+
+  /** Drop *tab*'s agent override; its picker shows the user's pick again. */
+  function clearAgentModel(tabId) {
+    const t = getTab(tabId);
+    if (t) t.agentModel = '';
+    if (tabId === activeTabId && agentModel) {
+      agentModel = '';
+      refreshModelLabel();
+    }
+  }
+  // modelpick-coverage:end
 
   function getTabByBackendChatId(chatId) {
     if (chatId === undefined || chatId === null || chatId === '') return null;
@@ -606,6 +664,7 @@
     tab.statusBudgetText = statusBudget ? statusBudget.textContent : '';
     tab.statusStepsText = statusSteps ? statusSteps.textContent : '';
     tab.selectedModel = selectedModel;
+    tab.agentModel = agentModel;
     tab.attachments = attachments;
     tab.inputValue = inp.value;
     tab.isMerging = isMerging;
@@ -722,7 +781,8 @@
       refreshWelcomeLayout();
     }
     selectedModel = tab.selectedModel || '';
-    if (modelName) modelName.textContent = selectedModel;
+    agentModel = tab.agentModel || '';
+    refreshModelLabel();
     attachments = tab.attachments || [];
     renderFileChips();
     inp.value = tab.inputValue || '';
@@ -4392,6 +4452,14 @@
       case 'daemonStatus':
         setServerLoading(!ev.connected);
         if (ev.connected) {
+          // modelpick-coverage:start
+          // While the daemon was away this window may have missed both a
+          // task ending and its picker hand-back, so no agent override
+          // can be trusted any more. The user's own pick is the honest
+          // thing to show; an agent still running re-announces its model
+          // to any tab that re-joins its task.
+          tabs.forEach(t => clearAgentModel(t.id));
+          // modelpick-coverage:end
           refreshHistory();
         }
         return;
@@ -4423,6 +4491,13 @@
         const evTab = findTabByEvt(ev);
         if (evTab) {
           evTab.isRunning = !!ev.running;
+          // modelpick-coverage:start
+          // Belt and braces for the daemon's `modelPick` restore: a task
+          // that stops without one (a killed daemon, a submit refused at
+          // shutdown) must still not strand the picker on the model the
+          // agent happened to end on.
+          if (!ev.running) clearAgentModel(evTab.id);
+          // modelpick-coverage:end
         }
         if (ev.running && typeof ev.startTs === 'number' && ev.startTs > 0) {
           if (evTab) {
@@ -4450,18 +4525,28 @@
       case 'models':
         allModels = ev.models || [];
         if (ev.selected) {
+          // `selected` is the daemon-wide default, so it may only adopt
+          // tabs that were still tracking it -- a tab the user gave its
+          // own model keeps it. It must also not blank the override of
+          // a tab whose agent is still running, hence refreshModelLabel
+          // rather than writing the label directly.
           const _prevSelected = selectedModel;
-          selectedModel = ev.selected;
-          modelName.textContent = ev.selected;
           tabs.forEach(t => {
             const cur = t.selectedModel || '';
             if (cur === '' || cur === 'No model' || cur === _prevSelected) {
               t.selectedModel = ev.selected;
             }
           });
+          selectedModel = ev.selected;
+          refreshModelLabel();
         }
         renderModelList('');
         break;
+      // modelpick-coverage:start
+      case 'modelPick':
+        applyModelPick(ev.tabId || '', ev.model, ev.source);
+        break;
+      // modelpick-coverage:end
       case 'configData':
         populateConfigForm(ev.config || {}, ev.apiKeys || {});
         break;
@@ -4607,13 +4692,8 @@
         const swTabId = ev.tabId || activeTabId;
         const swTab = getTab(swTabId);
         if (swTab) {
-          if (ev.model) {
-            swTab.selectedModel = ev.model;
-            if (swTabId === activeTabId) {
-              selectedModel = ev.model;
-              if (modelName) modelName.textContent = ev.model;
-            }
-          }
+          if (ev.model) applyModelPick(swTabId, ev.model, 'restore');
+
           if (swTabId === activeTabId) {
             clearOutput();
             resetOutputState();
@@ -7022,7 +7102,16 @@
 
   function selectModel(name) {
     selectedModel = name;
-    modelName.textContent = name;
+    agentModel = '';
+    // Record it on the tab straight away rather than waiting for the
+    // next saveCurrentTab: a `models` refresh arriving in between reads
+    // the tab's value to decide whether the tab has its own pick.
+    const picked = getTab(activeTabId);
+    if (picked) {
+      picked.selectedModel = name;
+      picked.agentModel = '';
+    }
+    refreshModelLabel();
     closeModelDD();
     renderModelList('');
     api.selectModel({model: name, tabId: activeTabId});

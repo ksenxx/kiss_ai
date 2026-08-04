@@ -749,7 +749,9 @@ class ChatSorcarAgent(SorcarAgent):
                             viewer_ids = fanout(sub_task_id)
                         if sub_tab_id not in viewer_ids:
                             viewer_ids.append(sub_tab_id)
-                        _broadcast_subagent_done(printer, viewer_ids)
+                        _broadcast_subagent_done(
+                            printer, viewer_ids, model or "",
+                        )
                     except Exception:
                         pass
                 _RunningAgentState.unregister(sub_tab_id, sub_state)

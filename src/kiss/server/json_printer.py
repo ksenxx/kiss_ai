@@ -166,6 +166,11 @@ class JsonPrinter(Printer):
         self._persist_agents: dict[str, Any] = {}
         self._subscribers: dict[str, set[str]] = {}
         self._subscriber_expiry: dict[str, float] = {}
+        # Tabs whose picker currently shows a running agent's model
+        # instead of their user's pick, and the model each running task
+        # switched itself to (see broadcast_agent_model_pick).
+        self._model_override_tabs: set[str] = set()
+        self._task_model_override: dict[str, str] = {}
 
     @staticmethod
     def _coerce_task_id(value: Any) -> str:
@@ -212,6 +217,14 @@ class JsonPrinter(Printer):
                 viewers = set()
                 self._subscribers[key] = viewers
             viewers.add(tab_id)
+            # A tab joining a task whose agent already switched models
+            # missed that one-shot event, and would otherwise sit on the
+            # wrong label until the task ended.
+            catch_up = self._task_model_override.get(key, "")
+            if catch_up:
+                self._model_override_tabs.add(tab_id)
+        if catch_up:
+            self.broadcast_model_pick(catch_up, "agent", tab_id)
 
     def _fanout_targets(self, task_id: Any) -> list[str]:
         """Return a snapshot of subscriber tab ids for *task_id*.
@@ -233,6 +246,84 @@ class JsonPrinter(Printer):
             if not viewers:
                 return []
             return list(viewers)
+
+    def broadcast_model_pick(
+        self,
+        model: str,
+        source: str,
+        tab_id: str,
+    ) -> None:
+        """Show *model* in the model picker of *tab_id*.
+
+        ``modelPick`` carries an explicit ``tabId`` so it is routed as a
+        transient system event: delivered verbatim to every connected
+        client (which filters on ``tabId``) and never recorded into the
+        task's event log, so replaying a finished conversation cannot
+        resurrect a stale picker label.
+
+        Args:
+            model: Model name to display.
+            source: ``"agent"`` for the display-only model a running
+                agent switched itself to, or ``"restore"`` for the
+                user's own pick coming back when the task ends.
+            tab_id: The tab whose picker to update.
+        """
+        if not model or not tab_id:
+            return
+        self.broadcast(
+            {
+                "type": "modelPick",
+                "model": model,
+                "source": source,
+                "tabId": tab_id,
+            },
+        )
+
+    def broadcast_agent_model_pick(self, model: str, tab_id: str) -> None:
+        """Show a running agent's *model* in every tab watching its task.
+
+        The launching tab plus every viewer subscribed to the agent's
+        task (history-resume tabs, chat viewers) get the override, so
+        each window watching the agent sees what it is actually
+        running.  Every other tab keeps showing its own user's pick.
+
+        Each target is remembered so the picker can be handed back
+        when the task ends — and only then, which is why a task whose
+        agent never switched models costs nothing.
+
+        Args:
+            model: The model the agent just switched to.
+            tab_id: The tab the agent's task was launched in (``""``
+                when the agent runs outside a tab, e.g. from the CLI).
+        """
+        if not model:
+            return
+        task_key = self._task_key()
+        targets = set(self._fanout_targets(task_key))
+        if tab_id:
+            targets.add(tab_id)
+        with self._lock:
+            self._model_override_tabs |= targets
+            if task_key:
+                self._task_model_override[task_key] = model
+        for target in sorted(targets):
+            self.broadcast_model_pick(model, "agent", target)
+
+    def restore_model_pick(self, model: str, tab_id: str) -> None:
+        """Put *tab_id*'s own picker back to *model*, if an agent took it.
+
+        A no-op for a tab that never showed an override, so an ordinary
+        task ends without putting anything extra on the wire.
+
+        Args:
+            model: The model the user picked for this tab.
+            tab_id: The tab whose picker to hand back.
+        """
+        with self._lock:
+            if tab_id not in self._model_override_tabs:
+                return
+            self._model_override_tabs.discard(tab_id)
+        self.broadcast_model_pick(model, "restore", tab_id)
 
     def _inject_task_id(self, event: dict[str, Any]) -> dict[str, Any]:
         """Return *event* with ``taskId`` injected from thread-local storage.
@@ -309,7 +400,7 @@ class JsonPrinter(Printer):
         self._steps_offsets[self._task_key()] = value
 
     def cleanup_tab(self, tab_id: str) -> None:
-        """Remove *tab_id* from every subscriber set.
+        """Remove *tab_id* from every subscriber set and override set.
 
         Should be called when a frontend tab is closed.  The
         underlying per-task state (recording, bash buffer, offsets)
@@ -325,6 +416,7 @@ class JsonPrinter(Printer):
         if not tab_id:
             return
         with self._lock:
+            self._model_override_tabs.discard(tab_id)
             self._sweep_expired_subscribers()
             for task_key in list(self._subscribers.keys()):
                 viewers = self._subscribers[task_key]
@@ -387,6 +479,7 @@ class JsonPrinter(Printer):
                 pass
         with self._lock:
             self._recordings.pop(key, None)
+            self._task_model_override.pop(key, None)
             self._tokens_offsets.pop(key, None)
             self._budget_offsets.pop(key, None)
             self._steps_offsets.pop(key, None)

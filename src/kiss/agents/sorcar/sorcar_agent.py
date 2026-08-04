@@ -229,16 +229,32 @@ def _agent_usage(agent: Any) -> tuple[float, int, int]:
     )
 
 
-def _broadcast_subagent_done(printer: Any, tab_ids: list[str]) -> None:
+def _broadcast_subagent_done(
+    printer: Any, tab_ids: list[str], model: str = "",
+) -> None:
     """Broadcast ``subagentDone`` for each tab id so the frontend can
-    stop the running indicator on the sub-agent tab.  Errors are
-    swallowed (the broadcast is best-effort UI signalling)."""
+    stop the running indicator on the sub-agent tab.
+
+    A sub-agent that switched models with ``set_model`` also has to hand
+    its tab's model picker back to *model* — the model the task was
+    launched with — for the same reason a top-level task does.  Errors
+    are swallowed (the broadcast is best-effort UI signalling).
+
+    Args:
+        printer: The printer to broadcast through.
+        tab_ids: The sub-agent's tab plus any tabs viewing it.
+        model: The model the sub-agent was launched with, restored into
+            those tabs' pickers.
+    """
     broadcast = getattr(printer, "broadcast", None)
     if broadcast is None:
         return
+    restore = getattr(printer, "restore_model_pick", None)
     for vid in tab_ids:
         try:
             broadcast({"type": "subagentDone", "tab_id": vid, "tabId": ""})
+            if callable(restore) and model:
+                restore(model, vid)
         except Exception:
             pass
 
@@ -799,9 +815,12 @@ class SorcarAgent(RelentlessAgent):
         def set_model(model_name: str) -> str:
             """Change only this running agent's LLM model dynamically.
 
-            This does not persist ``last_model`` and therefore cannot
-            change the user-facing model picker default.  Only an
-            explicit picker selection should update that preference.
+            The tabs watching this task show the new model in their
+            picker for as long as the task runs, then revert to the
+            user's own choice.  The switch is display-only: it never
+            persists ``last_model``, so the user's picker preference
+            survives untouched — only an explicit picker selection
+            updates that.
 
             Args:
                 model_name: New LLM model name (for example
@@ -817,6 +836,7 @@ class SorcarAgent(RelentlessAgent):
             old_model = getattr(target, "model", None)
             if old_model is None:
                 self.model_name = model_name
+                self._show_model_in_picker(model_name)
                 return (
                     f"Model deferred-changed to {model_name} "
                     "(no live model yet)."
@@ -918,6 +938,7 @@ class SorcarAgent(RelentlessAgent):
                 target._cached_tools_schema = new_model._build_openai_tools_schema(  # type: ignore[attr-defined, union-attr]
                     target.function_map,
                 )
+            self._show_model_in_picker(model_name)
             return f"Model changed from {previous_name} to {model_name}."
 
         skill_tool = make_skill_tool(self.work_dir or ".")
@@ -936,6 +957,27 @@ class SorcarAgent(RelentlessAgent):
             tools.append(run_parallel)
             tools.append(number_of_cores)
         return tools
+
+    def _show_model_in_picker(self, model_name: str) -> None:
+        """Display *model_name* in the picker of every tab watching this task.
+
+        The override lasts only while the task runs — the daemon puts
+        the user's own pick back when the task ends — so this is purely
+        a live view of what the agent is running right now.  Purely
+        cosmetic, hence best-effort: printers without the capability
+        (plain console runs) and transport errors are ignored rather
+        than allowed to fail the ``set_model`` tool call.
+
+        Args:
+            model_name: The model the agent just switched to.
+        """
+        show = getattr(self.printer, "broadcast_agent_model_pick", None)
+        if not callable(show):
+            return
+        try:
+            show(model_name, getattr(self, "_tab_id", "") or "")
+        except Exception:
+            logger.warning("model picker update failed", exc_info=True)
 
     def perform_task(
         self,
@@ -1381,7 +1423,9 @@ def run_tasks_parallel(
             sub_usage[idx] = _live_agent_usage(agent)
             if printer is not None and parent_key:
                 _broadcast_subagent_done(
-                    printer, [f"task-{parent_key}__sub_{idx}"],
+                    printer,
+                    [f"task-{parent_key}__sub_{idx}"],
+                    model_name or "",
                 )
 
     try:

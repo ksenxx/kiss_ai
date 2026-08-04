@@ -510,6 +510,45 @@ class TestEventDispatcherRouting(unittest.TestCase):
         self.disp.dispatch({"type": "clear", "chat_id": "abc123"})
         self.assertEqual(self.disp.chat_id, "abc123")
 
+    def test_running_agent_model_is_shown_but_not_run_with(self) -> None:
+        """The agent borrows the picker; the model this client chose is
+        still what launches the next task."""
+        self.disp.dispatch({"type": "models", "selected": "claude-opus-5"})
+        self.disp.dispatch(
+            {"type": "modelPick", "model": "gpt-5.6-sol", "source": "agent"},
+        )
+        self.assertEqual(self.disp.display_model, "gpt-5.6-sol")
+        self.assertEqual(self.disp.current_model, "claude-opus-5")
+
+    def test_finished_task_hands_the_picker_back(self) -> None:
+        self.disp.dispatch(
+            {"type": "modelPick", "model": "gpt-5.6-sol", "source": "agent"},
+        )
+        self.disp.dispatch(
+            {
+                "type": "modelPick",
+                "model": "claude-opus-5",
+                "source": "restore",
+            },
+        )
+        self.assertEqual(self.disp.display_model, "claude-opus-5")
+        self.assertEqual(self.disp.current_model, "claude-opus-5")
+
+    def test_task_that_dies_without_a_restore_hands_the_picker_back(
+        self,
+    ) -> None:
+        self.disp.dispatch({"type": "models", "selected": "claude-opus-5"})
+        self.disp.dispatch(
+            {"type": "modelPick", "model": "gpt-5.6-sol", "source": "agent"},
+        )
+        self.disp.dispatch({"type": "status", "running": False})
+        self.assertEqual(self.disp.display_model, "claude-opus-5")
+
+    def test_model_pick_without_a_model_is_ignored(self) -> None:
+        self.disp.dispatch({"type": "models", "selected": "claude-opus-5"})
+        self.disp.dispatch({"type": "modelPick", "source": "agent"})
+        self.assertEqual(self.disp.display_model, "claude-opus-5")
+
     def test_ask_user_enqueues_question(self) -> None:
         self.disp.dispatch(
             {"type": "askUser", "question": "Continue?"},
