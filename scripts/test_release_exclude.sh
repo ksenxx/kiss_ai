@@ -177,6 +177,13 @@ if OUT=$(filtered_tree HEAD 2>&1); then
 fi
 pass "paths containing newlines are rejected"
 
+# --- Test 16b: path containing a tab is rejected (leak reports are tab-framed) ---
+printf '["a\\tb"]' > scripts/exclude.json
+if OUT=$(filtered_tree HEAD 2>&1); then
+    fail "tab-containing path not rejected"
+fi
+pass "paths containing tabs are rejected"
+
 # --- Test 17b: absolute and '..' paths are rejected ---
 echo '["/etc/passwd"]' > scripts/exclude.json
 if OUT=$(filtered_tree HEAD 2>&1); then fail "absolute path not rejected"; fi

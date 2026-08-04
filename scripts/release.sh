@@ -10,19 +10,23 @@
 #
 # Workflow:
 # 1. Stash any uncommitted changes
-# 2. Check if origin is ahead of kiss_ai repo
-# 3. If ahead, bump version in _version.py, README.md, SYSTEM.md, package.json, package-lock.json
-# 4. Download official Claude Code skills (bundled into the extension)
-# 5. Build VS Code extension (.vsix) so it's included in the commit
-# 6. Commit changes with "Version bumped" (includes vsix)
-# 7. Push to origin
-# 8. Push to kiss_ai repo (excluding paths listed in scripts/exclude.json)
+# 2. Purge paths listed in scripts/exclude.json from every branch and tag of the
+#    kiss_ai repo's existing history (drops commits whose only content was
+#    excluded paths, re-points tags, pushes atomically under a lease per ref);
+#    a no-op when that history is already clean
+# 3. Check if origin is ahead of kiss_ai repo
+# 4. If ahead, bump version in _version.py, README.md, SYSTEM.md, package.json, package-lock.json
+# 5. Download official Claude Code skills (bundled into the extension)
+# 6. Build VS Code extension (.vsix) so it's included in the commit
+# 7. Commit changes with "Version bumped" (includes vsix)
+# 8. Push to origin
+# 9. Push to kiss_ai repo (excluding paths listed in scripts/exclude.json)
 #    and tag with version
-# 9. Create GitHub release and upload VSIX asset
-# 10. Publish to PyPI
-# 11. Publish VS Code extension to marketplace
-# 12. Install extension into local VS Code and Cursor IDE (if installed)
-# 13. Restore stashed changes
+# 10. Create GitHub release and upload VSIX asset
+# 11. Publish to PyPI
+# 12. Publish VS Code extension to marketplace
+# 13. Install extension into local VS Code and Cursor IDE (if installed)
+# 14. Restore stashed changes
 
 set -e  # Exit on error
 
@@ -46,7 +50,21 @@ VSCODE_EXT_DIR="src/kiss/agents/vscode"
 # NOT be pushed to the public kiss_ai repo. Everything listed here is stripped
 # from the snapshot pushed to $PUBLIC_REPO_URL while remaining tracked in
 # origin. The file is required; use [] to exclude nothing.
+# Purging the public repo's existing history (see purge_public_history) matches
+# these paths literally too and does not follow renames, so a file that was
+# published under an earlier path must list that old path as well.
 EXCLUDE_FILE="scripts/exclude.json"
+# Local ref namespaces mirroring the public repo's branches and tags. They are
+# fetched here instead of into refs/tags/* (and instead of relying on
+# refs/remotes/$PUBLIC_REMOTE/*, whose symbolic HEAD entry would shadow a branch
+# literally named HEAD) so the exact set of published refs is known and cannot be
+# confused with branches or tags that exist only in origin.
+PUBLIC_BRANCH_NS="refs/kiss-public-branches"
+PUBLIC_TAG_NS="refs/kiss-public-tags"
+# Parent of the scratch ref namespaces used to inspect public refs that are
+# neither branches nor tags (GitHub's read-only refs/pull/*). Each run fetches
+# into its own child namespace and deletes it again once scanned.
+PUBLIC_OTHER_NS="refs/kiss-public-other"
 
 # Colors for output
 RED='\033[0;31m'
@@ -218,6 +236,61 @@ ensure_remote() {
     fi
 }
 
+# Mirror the public repo's branches into $PUBLIC_BRANCH_NS/* and its tags into
+# $PUBLIC_TAG_NS/*, pruning refs that no longer exist there. The usual
+# refs/remotes/$PUBLIC_REMOTE/* mirror is kept up to date as well so that
+# "git log public/main" keeps working, but the purge reads the namespaces above.
+fetch_public_refs() {
+    git fetch --prune --no-tags --quiet "$PUBLIC_REMOTE" \
+        "+refs/heads/*:${PUBLIC_BRANCH_NS}/*" \
+        "+refs/tags/*:${PUBLIC_TAG_NS}/*" \
+        "+refs/heads/*:refs/remotes/${PUBLIC_REMOTE}/*"
+}
+
+# Print "<branch> <object-id>" for every branch of the public repo, as mirrored
+# by fetch_public_refs. The object id is what that branch pointed at when it was
+# fetched, which is the lease the purge pushes against.
+public_branches() {
+    git for-each-ref --format='%(refname:lstrip=2) %(objectname)' "$PUBLIC_BRANCH_NS"
+}
+
+# Print "<tag> <object-id>" for every tag of the public repo. For annotated tags
+# the object id is the tag object, which is what the remote advertises.
+public_tags() {
+    git for-each-ref --format='%(refname:lstrip=2) %(objectname)' "$PUBLIC_TAG_NS"
+}
+
+# Print the local ref of every public branch and tag mirrored by
+# fetch_public_refs, one per line.
+public_mirror_refs() {
+    git for-each-ref --format='%(refname)' "$PUBLIC_BRANCH_NS" "$PUBLIC_TAG_NS"
+}
+
+# Print "<host>/<owner>/<repo>" for a git URL so that the ssh and https spellings
+# of one repository compare equal. Local paths are returned unchanged apart from
+# a trailing "/" or ".git".
+normalize_repo_url() {
+    printf '%s\n' "$1" | sed -e 's#^[a-zA-Z0-9+.-]*://##' -e 's#^[^/@]*@##' \
+        -e 's#:#/#' -e 's#/*$##' -e 's#\.git$##'
+}
+
+# Print the push URL of $PUBLIC_REMOTE, but only after confirming it really is
+# the public repo. purge_public_history force-updates and deletes refs there, so
+# a stale, mistyped or repurposed remote must never be rewritten by accident.
+public_push_url() {
+    local url expected
+    url=$(git remote get-url --push "$PUBLIC_REMOTE") || return 1
+    for expected in "$PUBLIC_REPO_URL" "$PUBLIC_REPO_SSH"; do
+        if [[ "$(normalize_repo_url "$url")" == "$(normalize_repo_url "$expected")" ]]; then
+            printf '%s\n' "$url"
+            return 0
+        fi
+    done
+    print_error "Remote '$PUBLIC_REMOTE' pushes to $url, not $PUBLIC_REPO_URL" >&2
+    print_error "Refusing to rewrite an unexpected repository" >&2
+    return 1
+}
+
 # Print the paths listed in $EXCLUDE_FILE, one per line. The file must contain
 # a JSON list of strings, e.g. ["secrets/", "notes.md"]. Each entry is treated
 # as a LITERAL file or folder path relative to the repo root (no globs).
@@ -237,8 +310,8 @@ with open(sys.argv[1]) as f:
 if not isinstance(data, list) or not all(isinstance(p, str) for p in data):
     sys.exit(f"{sys.argv[1]} must contain a JSON list of path strings")
 for path in data:
-    if "\n" in path or "\r" in path or "\x00" in path:
-        sys.exit(f"{sys.argv[1]}: path {path!r} must not contain newlines or NUL")
+    if any(c in path for c in "\n\r\t\x00"):
+        sys.exit(f"{sys.argv[1]}: path {path!r} must not contain newlines, tabs or NUL")
     if path.startswith("/") or any(part == ".." for part in path.split("/")):
         sys.exit(f"{sys.argv[1]}: path {path!r} must be repo-relative without '..'")
     path = path.rstrip("/")
@@ -324,6 +397,340 @@ verify_no_excluded_paths() {
         fi
     done <<< "$paths"
     print_info "Verified: no excluded paths present in public commit"
+}
+
+# Print "<commit>:<path>" for every commit that is reachable from the given
+# rev-list arguments (run inside <repo>) and whose tree still contains a path
+# listed in $EXCLUDE_FILE. Prints nothing when that history is already clean.
+# One batched cat-file pass over the commit x excluded-path cross product keeps
+# this fast enough to run on every release: an object that resolves means the
+# path is still in that commit's tree, "missing" means it is not.
+excluded_paths_in_history() {
+    local repo="$1"
+    shift
+    local paths commits queries checked
+    if ! paths=$(read_exclude_paths); then
+        print_error "Failed to read $EXCLUDE_FILE - aborting" >&2
+        return 1
+    fi
+    if [[ -z "$paths" ]]; then
+        return 0
+    fi
+    # Every git step is checked separately: piping straight into the final grep
+    # would hide a failing rev-list or cat-file behind grep's exit status and
+    # report a leaking history as clean.
+    if ! commits=$(git -C "$repo" rev-list "$@"); then
+        print_error "Failed to list commits of $* in $repo" >&2
+        return 1
+    fi
+    if [[ -z "$commits" ]]; then
+        return 0
+    fi
+    queries=$(printf '%s\n' "$commits" \
+        | KISS_EXCLUDE_PATHS="$paths" awk '
+            BEGIN { n = split(ENVIRON["KISS_EXCLUDE_PATHS"], excluded, "\n") }
+            { for (i = 1; i <= n; i++) print $0 ":" excluded[i] }')
+    if ! checked=$(printf '%s\n' "$queries" | git -C "$repo" cat-file --batch-check); then
+        print_error "Failed to inspect the trees of $repo" >&2
+        return 1
+    fi
+    # cat-file answers one line per query in order but echoes the query only for
+    # objects it could not find, so pair the two lists back up: a verdict of
+    # "<query> missing" means the path is absent from that commit's tree, any
+    # other verdict ("<oid> <type> <size>") means the path is still there.
+    paste -d'\t' <(printf '%s\n' "$queries") <(printf '%s\n' "$checked") \
+        | { grep -v ' missing$' || true; } | cut -f1
+}
+
+# Set FILTER_REPO_CMD to a command that runs git-filter-repo, the tool the git
+# project recommends for history rewrites (git-filter-branch is deprecated and
+# ~20x slower here). Prefers an installed copy and otherwise runs the PyPI
+# package through uv, which the release already depends on for build/publish.
+resolve_filter_repo() {
+    if git filter-repo --version >/dev/null 2>&1; then
+        FILTER_REPO_CMD=(git filter-repo)
+    elif python3 -m git_filter_repo --version >/dev/null 2>&1; then
+        FILTER_REPO_CMD=(python3 -m git_filter_repo)
+    elif command -v uvx >/dev/null 2>&1 &&
+        uvx --from git-filter-repo git-filter-repo --version >/dev/null 2>&1; then
+        FILTER_REPO_CMD=(uvx --from git-filter-repo git-filter-repo)
+    else
+        return 1
+    fi
+}
+
+# Split the refs staged in <purge-repo> into force-push refspecs for the ones
+# the rewrite kept (UPDATE_REFSPECS) and delete refspecs for the ones it removed
+# (DELETE_REFSPECS), naming the latter in PURGE_GONE_REFS. A ref the rewrite
+# dropped must be deleted on the public repo: left alone it would still point at
+# an unpurged commit.
+classify_purged_refs() {
+    local purge_repo="$1"
+    shift
+    UPDATE_REFSPECS=()
+    DELETE_REFSPECS=()
+    PURGE_GONE_REFS=""
+    local ref
+    for ref in "$@"; do
+        if git -C "$purge_repo" rev-parse --verify --quiet "$ref" >/dev/null; then
+            UPDATE_REFSPECS+=("${ref}:${ref}")
+        else
+            DELETE_REFSPECS+=(":${ref}")
+            PURGE_GONE_REFS+="${ref}"$'\n'
+        fi
+    done
+}
+
+# Rewrite the public repo's history so that no commit reachable from any of its
+# branches or tags contains a path listed in $EXCLUDE_FILE: the paths are
+# stripped from every such commit, commits whose only content was excluded paths
+# disappear entirely, surviving commits keep their non-excluded changes, and tags
+# are re-pointed at the rewritten commits. The result is pushed under a lease per
+# ref and atomically, so a concurrent push to kiss_ai aborts the purge instead of
+# being overwritten. Refs that GitHub does not let anyone rewrite (refs/pull/*)
+# are reported by warn_unrewritable_public_refs rather than silently ignored.
+# Cheap no-op when the public history is already clean, so a release pays for
+# the rewrite only after $EXCLUDE_FILE gains a path that was published earlier.
+purge_public_history() {
+    local paths leaks commit_count public_url purge_dir purge_repo
+    if ! paths=$(read_exclude_paths); then
+        print_error "Failed to read $EXCLUDE_FILE - aborting"
+        return 1
+    fi
+    if [[ -z "$paths" ]]; then
+        return 0
+    fi
+
+    if ! public_url=$(public_push_url); then
+        return 1
+    fi
+
+    # source_refs: where the published refs are mirrored locally.
+    # staged_refs: the same refs under their real names in the throwaway repo.
+    # leases: what each public ref pointed at when it was fetched, so the final
+    # force-push refuses to clobber anything pushed to kiss_ai meanwhile.
+    local source_refs=() staged_refs=() stage_refspecs=() leases=() name oid
+    while IFS=' ' read -r name oid; do
+        [[ -n "$name" ]] || continue
+        source_refs+=("${PUBLIC_BRANCH_NS}/${name}")
+        staged_refs+=("refs/heads/${name}")
+        stage_refspecs+=("+${PUBLIC_BRANCH_NS}/${name}:refs/heads/${name}")
+        leases+=("--force-with-lease=refs/heads/${name}:${oid}")
+    done < <(public_branches)
+    while IFS=' ' read -r name oid; do
+        [[ -n "$name" ]] || continue
+        source_refs+=("${PUBLIC_TAG_NS}/${name}")
+        staged_refs+=("refs/tags/${name}")
+        stage_refspecs+=("+${PUBLIC_TAG_NS}/${name}:refs/tags/${name}")
+        leases+=("--force-with-lease=refs/tags/${name}:${oid}")
+    done < <(public_tags)
+    if [[ ${#source_refs[@]} -eq 0 ]]; then
+        print_info "Public repo has no branches or tags yet - no history to purge"
+        return 0
+    fi
+
+    if ! leaks=$(excluded_paths_in_history "$(pwd)" "${source_refs[@]}"); then
+        return 1
+    fi
+    if [[ -z "$leaks" ]]; then
+        print_info "Verified: no excluded paths in any kiss_ai branch or tag"
+        warn_unrewritable_public_refs "$public_url"
+        return 0
+    fi
+    commit_count=$(printf '%s\n' "$leaks" | cut -d: -f1 | sort -u | wc -l | tr -d ' ')
+    print_step "Purging $commit_count commit(s) carrying excluded paths from kiss_ai history..."
+
+    if ! resolve_filter_repo; then
+        print_error "git-filter-repo is required to purge kiss_ai history but was not found"
+        print_info "Install it with: uv tool install git-filter-repo (or brew install git-filter-repo)"
+        return 1
+    fi
+
+    purge_dir=$(mktemp -d)
+    purge_repo="$purge_dir/kiss_ai.git"
+    # Rewrite a throwaway bare repo that holds exactly the public refs: origin
+    # keeps the excluded paths, and git-filter-repo (which deletes remotes and
+    # expires reflogs of the repo it rewrites) never touches this checkout.
+    if ! git init --quiet --bare "$purge_repo" ||
+        ! git push --quiet "$purge_repo" "${stage_refspecs[@]}"; then
+        print_error "Failed to stage kiss_ai history for purging"
+        rm -rf "$purge_dir"
+        return 1
+    fi
+
+    # --invert-paths keeps everything except the listed paths; --prune-empty auto
+    # drops commits left with no changes (a commit that only committed excluded
+    # paths), re-parenting its children on its nearest surviving ancestor.
+    local filter_args=(--force --invert-paths --prune-empty auto)
+    while IFS= read -r name; do
+        filter_args+=(--path "$name")
+    done <<< "$paths"
+    if ! (cd "$purge_repo" && "${FILTER_REPO_CMD[@]}" "${filter_args[@]}"); then
+        print_error "git-filter-repo failed to purge kiss_ai history"
+        rm -rf "$purge_dir"
+        return 1
+    fi
+
+    if ! leaks=$(excluded_paths_in_history "$purge_repo" --all); then
+        rm -rf "$purge_dir"
+        return 1
+    fi
+    if [[ -n "$leaks" ]]; then
+        print_error "Purge left excluded paths in the rewritten history - not pushing:"
+        printf '%s\n' "$leaks" | head -20
+        rm -rf "$purge_dir"
+        return 1
+    fi
+
+    classify_purged_refs "$purge_repo" "${staged_refs[@]}"
+    if [[ -n "$PURGE_GONE_REFS" ]]; then
+        # Deleting main is refused by every server (it is the default branch), so
+        # say why instead of pushing something that cannot succeed.
+        if printf '%s' "$PURGE_GONE_REFS" | grep -qx "refs/heads/main"; then
+            print_error "Every commit of kiss_ai's main branch consists of excluded paths only"
+            print_error "Nothing would be left to publish - shorten $EXCLUDE_FILE"
+            rm -rf "$purge_dir"
+            return 1
+        fi
+        print_warn "The rewrite removed these public refs entirely; deleting them:"
+        printf '%s' "$PURGE_GONE_REFS"
+    fi
+
+    # One push updates the rewritten branches/tags and drops the vanished ones:
+    # --atomic so a single rejected ref cannot leave kiss_ai half rewritten, and
+    # a lease per ref (instead of a blanket --force) so anything pushed to
+    # kiss_ai since fetch_public_refs is refused rather than silently discarded.
+    # --mirror is deliberately avoided: it fails on GitHub's read-only
+    # refs/pull/* refs and would delete refs this script never staged.
+    if ! git -C "$purge_repo" push --atomic --quiet "$public_url" \
+        "${leases[@]}" "${UPDATE_REFSPECS[@]}" "${DELETE_REFSPECS[@]}"; then
+        print_error "Failed to push purged history to $public_url - nothing was changed"
+        print_info "A rejected lease means kiss_ai moved since this release started; rerun the release"
+        rm -rf "$purge_dir"
+        return 1
+    fi
+    rm -rf "$purge_dir"
+
+    # Re-mirror so callers see the rewritten tip instead of the purged one, and
+    # re-scan: a branch or tag created on kiss_ai while the rewrite ran is not
+    # covered by the leases above and could still carry excluded paths.
+    verify_public_history_clean || return 1
+
+    print_info "Purged excluded paths from kiss_ai history (${#UPDATE_REFSPECS[@]} ref(s) rewritten)"
+    print_warn "History was rewritten: the purged commits remain reachable by sha on GitHub"
+    print_warn "until it garbage-collects, and source archives of re-pointed tags now differ"
+    warn_unrewritable_public_refs "$public_url"
+}
+
+# Delete every ref under <namespace>. Used to clear scratch refs both before and
+# after they are needed, so a failed fetch cannot leave any behind.
+delete_refs_under() {
+    local namespace="$1" ref
+    while IFS= read -r ref; do
+        [[ -n "$ref" ]] || continue
+        git update-ref -d "$ref"
+    done < <(git for-each-ref --format='%(refname)' "$namespace")
+}
+
+# Re-mirror the public repo and fail if any of its branches or tags still reaches
+# a path listed in $EXCLUDE_FILE. Run after every push to the public repo: a ref
+# created there concurrently cannot be covered by a push lease, so this is the
+# only way to know that what is published is actually clean.
+verify_public_history_clean() {
+    local refs=() ref leaks
+    fetch_public_refs
+    while IFS= read -r ref; do
+        [[ -n "$ref" ]] || continue
+        refs+=("$ref")
+    done < <(public_mirror_refs)
+    if [[ ${#refs[@]} -eq 0 ]]; then
+        return 0
+    fi
+    if ! leaks=$(excluded_paths_in_history "$(pwd)" "${refs[@]}"); then
+        return 1
+    fi
+    if [[ -n "$leaks" ]]; then
+        print_error "kiss_ai has excluded paths in its history (refs changed meanwhile?):"
+        printf '%s\n' "$leaks" | head -20
+        return 1
+    fi
+    print_info "Verified: no excluded paths in any kiss_ai branch or tag"
+}
+
+# Publish <commit> as the public repo's main branch and <tag> as its tag in one
+# atomic push, leased on main still being at <expected-main> ("" when the public
+# repo has no main yet) and on <tag> not existing yet. Anything pushed to the
+# public repo since fetch_public_refs therefore aborts the release instead of
+# being silently overwritten, and a rejected ref leaves the repo untouched.
+push_public_snapshot() {
+    local commit="$1" tag="$2" expected_main="$3" public_url
+    if ! public_url=$(public_push_url); then
+        return 1
+    fi
+    # An empty <expect> in a lease means "this ref must not exist yet".
+    if ! git push --atomic "$public_url" \
+        "--force-with-lease=refs/heads/main:${expected_main}" \
+        "--force-with-lease=refs/tags/${tag}:" \
+        "${commit}:refs/heads/main" "refs/tags/${tag}:refs/tags/${tag}"; then
+        print_error "Failed to publish $tag to $public_url - nothing was changed"
+        print_info "A rejected lease means kiss_ai moved since this release started; rerun the release"
+        # Nothing was published, so the tag must not linger locally either: it
+        # would otherwise block a retry of this very version.
+        git tag -d "$tag" > /dev/null 2>&1 || true
+        return 1
+    fi
+    verify_public_history_clean
+}
+
+# Warn when the public repo advertises refs that this script cannot rewrite and
+# that still contain excluded paths. GitHub keeps refs/pull/* read-only, so a
+# pull request opened against a commit with excluded content keeps that content
+# fetchable (and unreachable objects alive) no matter how often branches and tags
+# are purged; only closing those pull requests and asking GitHub Support to run a
+# server-side garbage collection removes them.
+warn_unrewritable_public_refs() {
+    local public_url="$1"
+    # A namespace of its own per run: it may be deleted wholesale afterwards
+    # without touching refs that existed before, even if the fetch below only
+    # partially succeeds.
+    local scan_ns="${PUBLIC_OTHER_NS}/$$"
+    local sha ref fetch_refspecs=() scan_refs=() leaks
+    # Drop anything an interrupted earlier run left in this namespace first, so
+    # nothing stale survives even when there is nothing to scan this time.
+    delete_refs_under "$scan_ns"
+    while IFS=$'\t' read -r sha ref; do
+        case "$ref" in
+            refs/heads/* | refs/tags/* | HEAD | '') continue ;;
+        esac
+        fetch_refspecs+=("+${ref}:${scan_ns}/${ref#refs/}")
+        scan_refs+=("${scan_ns}/${ref#refs/}")
+    done < <(git ls-remote "$public_url" 2>/dev/null)
+    if [[ ${#scan_refs[@]} -eq 0 ]]; then
+        return 0
+    fi
+    if ! git fetch --quiet --no-tags "$public_url" "${fetch_refspecs[@]}"; then
+        print_warn "Could not inspect ${#scan_refs[@]} non-branch ref(s) of kiss_ai for excluded paths"
+        delete_refs_under "$scan_ns"
+        return 0
+    fi
+    # Scanned one ref at a time so the warning can name the offending ref.
+    local leaking=""
+    for ref in "${scan_refs[@]}"; do
+        if ! leaks=$(excluded_paths_in_history "$(pwd)" "$ref"); then
+            print_warn "Could not scan ${ref} of kiss_ai for excluded paths"
+        elif [[ -n "$leaks" ]]; then
+            leaking+="  refs/${ref#"${scan_ns}"/} contains: "
+            leaking+="$(printf '%s\n' "$leaks" | cut -d: -f2- | sort -u | tr '\n' ' ')"$'\n'
+        fi
+    done
+    delete_refs_under "$scan_ns"
+    if [[ -z "$leaking" ]]; then
+        return 0
+    fi
+    print_warn "Excluded paths stay reachable through refs this script cannot rewrite:"
+    printf '%s' "$leaking"
+    print_warn "GitHub keeps pull-request refs read-only: close and delete the pull requests"
+    print_warn "that reference them, then ask GitHub Support to garbage-collect the repo."
 }
 
 publish_to_pypi() {
@@ -491,7 +898,7 @@ main() {
     fi
     read_exclude_paths > /dev/null
 
-    # Step 1: Stash uncommitted changes, sync with origin, then check against public
+    # Step 1: Stash uncommitted changes and sync with origin
     print_step "Syncing with origin and checking kiss_ai repo..."
     STASHED=false
     if ! git diff --quiet || ! git diff --cached --quiet || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
@@ -501,11 +908,18 @@ main() {
     fi
     trap 'if [[ "$STASHED" == true ]]; then print_warn "Restoring stashed changes after failure..."; git stash pop; fi' EXIT
     git fetch origin
-    git fetch "$PUBLIC_REMOTE"
+    fetch_public_refs
     git pull --rebase origin "$CURRENT_BRANCH"
 
+    # Step 2: Strip excluded paths from the public repo's existing history before
+    # doing anything else: filtering new snapshots is not enough once
+    # $EXCLUDE_FILE gains a path that an earlier release already published, and
+    # this must run even when there is nothing new to release (step 3 may exit).
+    purge_public_history
+
+    # Step 3: Check whether origin is ahead of the kiss_ai repo
     ORIGIN_HEAD=$(git rev-parse HEAD)
-    PUBLIC_HEAD=$(git rev-parse "$PUBLIC_REMOTE/main" 2>/dev/null || echo "")
+    PUBLIC_HEAD=$(git rev-parse --verify --quiet "${PUBLIC_BRANCH_NS}/main" || echo "")
 
     # Compute the filtered tree up front so a broken exclude.json aborts the
     # release here, before any side effects (set -e catches the failure; a
@@ -521,16 +935,9 @@ main() {
         exit 0
     else
         print_info "Origin differs from kiss_ai - proceeding with release"
-        # Filtering only affects snapshots pushed from now on: if an excluded
-        # path was already published in an earlier release, it remains in the
-        # public repo's old commits until that history is purged manually.
-        if ! verify_no_excluded_paths "$PUBLIC_HEAD" > /dev/null 2>&1; then
-            print_warn "Some excluded paths exist in kiss_ai's current history;"
-            print_warn "they are removed from new snapshots, but purge old public history manually if needed"
-        fi
     fi
 
-    # Step 2: Bump version in _version.py and README.md
+    # Step 4: Bump version in _version.py and README.md
     CURRENT_VERSION=$(get_version)
     VERSION=$(bump_version "$CURRENT_VERSION")
     TAG_NAME="v$VERSION"
@@ -545,7 +952,7 @@ main() {
     update_vscode_package_version "$VERSION"
     update_vscode_package_lock_version "$VERSION"
 
-    # Step 3: Download official Claude Code skills (before building extension)
+    # Step 5: Download official Claude Code skills (before building extension)
     print_step "Downloading official Claude Code skills..."
     CLAUDE_SKILLS_DIR="$(pwd)/src/kiss/agents/claude_skills"
     if [ -d "$CLAUDE_SKILLS_DIR" ] && [ "$(ls -d "$CLAUDE_SKILLS_DIR"/*/ 2>/dev/null)" ]; then
@@ -573,7 +980,7 @@ main() {
         rm -rf "$SKILLS_TMP"
     fi
 
-    # Step 4: Build VS Code extension (before commit so vsix is included)
+    # Step 6: Build VS Code extension (before commit so vsix is included)
     build_vscode_extension
 
     # Clean up source claude_skills now that they are bundled in the extension
@@ -582,13 +989,13 @@ main() {
         print_info "Cleaned up $CLAUDE_SKILLS_DIR (bundled in extension)"
     fi
 
-    # Step 5: Commit changes (includes version bump + fresh vsix)
+    # Step 7: Commit changes (includes version bump + fresh vsix)
     print_step "Committing version bump..."
     git add -A
     git commit -m "Version bumped to $VERSION"
     print_info "Committed version bump"
 
-    # Step 6: Pull latest from origin (rebase), then push (with retry)
+    # Step 8: Pull latest from origin (rebase), then push (with retry)
     print_step "Syncing with origin..."
     for attempt in 1 2 3; do
         git pull --rebase origin "$CURRENT_BRANCH"
@@ -604,22 +1011,18 @@ main() {
     done
     print_info "Pushed to origin"
 
-    # Step 7: Push filtered snapshot to kiss_ai repo. The pushed commit is
+    # Step 9: Push filtered snapshot to kiss_ai repo. The pushed commit is
     # parented on the public repo's current main (not on origin's history),
     # so paths listed in scripts/exclude.json are never reachable from any
     # commit in the public repo.
     print_step "Pushing to kiss_ai repo (excluding paths listed in $EXCLUDE_FILE)..."
     create_public_commit "$(git rev-parse HEAD)" "$VERSION" "$PUBLIC_HEAD"
     verify_no_excluded_paths "$PUBLIC_COMMIT"
-    git push "$PUBLIC_REMOTE" "$PUBLIC_COMMIT:refs/heads/main" --force
-    print_info "Pushed filtered commit to kiss_ai repo"
-
-    print_step "Creating and pushing tag..."
     git tag -a "$TAG_NAME" -m "Release $VERSION" "$PUBLIC_COMMIT"
-    git push "$PUBLIC_REMOTE" "$TAG_NAME"
-    print_info "Created and pushed tag: $TAG_NAME"
+    push_public_snapshot "$PUBLIC_COMMIT" "$TAG_NAME" "$PUBLIC_HEAD"
+    print_info "Pushed filtered commit and tag $TAG_NAME to kiss_ai repo"
 
-    # Step 8: Create GitHub release and upload VSIX
+    # Step 10: Create GitHub release and upload VSIX
     print_step "Creating GitHub release..."
     gh release create "$TAG_NAME" \
         --repo ksenxx/kiss_ai \
@@ -634,17 +1037,17 @@ main() {
         print_info "VSIX uploaded to release"
     fi
 
-    # Step 9: Publish to PyPI
+    # Step 11: Publish to PyPI
     print_step "Publishing to PyPI..."
     publish_to_pypi "$VERSION"
 
-    # Step 10: Publish VS Code extension (already built in step 4)
+    # Step 12: Publish VS Code extension (already built in step 6)
     publish_vscode_extension "$VERSION"
 
-    # Step 11: Install extension into local VS Code and Cursor IDE if available
+    # Step 13: Install extension into local VS Code and Cursor IDE if available
     install_local_extension
 
-    # Restore stashed changes
+    # Step 14: Restore stashed changes
     trap - EXIT
     if [[ "$STASHED" == true ]]; then
         print_step "Restoring stashed changes..."
