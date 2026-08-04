@@ -57,6 +57,27 @@ def _find_rule(css: str, selector: str) -> str:
     return "\n".join(bodies)
 
 
+def _tab_bar_rule_pos(css: str, selector: str) -> int:
+    """Return where the ``#tab-bar`` rule styling *selector* starts.
+
+    The selector may head a grouped selector list (``.chat-tab-settings``
+    shares its rule with the theme-toggle button ``.chat-tab-theme``), so
+    it is matched up to the following ``,`` or ``{`` instead of assuming
+    the rule opens right after it.
+
+    Args:
+        css: Full text of ``remote-codex.css``.
+        selector: Class selector to locate, e.g. ``.chat-tab``.
+
+    Returns:
+        Character offset of the matching ``body.remote-chat #tab-bar``
+        rule, or ``-1`` when no such rule exists.
+    """
+    pattern = r"body\.remote-chat #tab-bar " + re.escape(selector) + r"\s*[,{]"
+    m = re.search(pattern, css)
+    return -1 if m is None else m.start()
+
+
 
 def test_remote_codex_defines_chat_tab_settings_pill() -> None:
     """remote-codex.css must define an explicit .chat-tab-settings
@@ -96,8 +117,8 @@ def test_remote_codex_settings_rule_comes_after_generic_chat_tab() -> None:
     the cascade (equal specificity across id + 2 classes) resolves in
     the settings rule's favor."""
     css = CODEX_CSS.read_text(encoding="utf-8")
-    generic = css.find("body.remote-chat #tab-bar .chat-tab {")
-    settings = css.find("body.remote-chat #tab-bar .chat-tab-settings {")
+    generic = _tab_bar_rule_pos(css, ".chat-tab")
+    settings = _tab_bar_rule_pos(css, ".chat-tab-settings")
     assert generic != -1, "generic .chat-tab pill rule missing"
     assert settings != -1, ".chat-tab-settings pill rule missing"
     assert generic < settings, (

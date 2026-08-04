@@ -53,13 +53,56 @@ MAIN_JS = MEDIA_DIR / "main.js"
 WEB_SERVER_PY = Path(__file__).resolve().parents[3] / "server" / "web_server.py"
 
 
+def _dark_palette(css: str) -> dict[str, str]:
+    """Return the custom properties declared on ``body.remote-chat``.
+
+    That block holds the remote page's DEFAULT (dark) palette; the
+    light theme re-declares the same names under
+    ``body.remote-chat.light-theme``.
+
+    Args:
+        css: Full text of ``remote-codex.css``.
+
+    Returns:
+        Mapping of custom-property name (e.g. ``--fg``) to its declared
+        value (e.g. ``#ececec``) in the dark theme.
+    """
+    m = re.search(r"\nbody\.remote-chat\s*\{(.*?)\n\}", css, re.DOTALL)
+    assert m, "body.remote-chat palette block missing from remote-codex.css"
+    return dict(re.findall(r"(--[\w-]+):\s*([^;]+);", m.group(1)))
+
+
+def _resolve_palette_vars(decls: str, palette: dict[str, str]) -> str:
+    """Substitute every themed ``var(--name)`` in *decls* with its value.
+
+    Colors in ``remote-codex.css`` are routed through the palette
+    custom properties so the light theme can re-theme the page, so the
+    static assertions below have to compare resolved values instead of
+    literal declarations. ``var()`` references to properties outside
+    the palette (e.g. the per-chat ``--task-color`` written by main.js)
+    are left untouched.
+
+    Args:
+        decls: CSS declarations to expand.
+        palette: Custom properties as returned by :func:`_dark_palette`.
+
+    Returns:
+        *decls* with palette ``var()`` references replaced by their
+        dark-theme values.
+    """
+    for name, value in palette.items():
+        decls = re.sub(rf"var\({re.escape(name)}\s*(?:,[^()]*)?\)", value, decls)
+    return decls
+
+
 def _find_rule(css: str, selector: str) -> str:
     """Return the union of declaration bodies of every
-    ``body.remote-chat``-scoped rule for *selector*, or fail."""
+    ``body.remote-chat``-scoped rule for *selector*, with palette
+    ``var()`` references resolved to their dark-theme values, or fail."""
     pattern = r"body\.remote-chat[^{,]*" + re.escape(selector) + r"\s*(?:,[^{]*)?\{([^}]*)\}"
-    bodies = re.findall(pattern, CODEX_CSS.read_text(encoding="utf-8"))
+    bodies = re.findall(pattern, css)
     assert bodies, f"body.remote-chat scoped rule for {selector!r} missing"
-    return "\n".join(bodies)
+    return _resolve_palette_vars("\n".join(bodies), _dark_palette(css))
 
 
 def test_remote_page_font_size_vars_match_task_panel() -> None:

@@ -82,6 +82,25 @@ function _walk(root, fn) {
   }
 }
 
+function makeClassList(el) {
+  // DOMTokenList shim kept in sync with ``el.className`` (which
+  // ``_matches`` above reads).
+  return {
+    contains(name) {
+      return (el.className || '').split(/\s+/).filter(Boolean)
+        .includes(name);
+    },
+    add(name) {
+      if (!this.contains(name))
+        el.className = ((el.className || '') + ' ' + name).trim();
+    },
+    remove(name) {
+      el.className = (el.className || '').split(/\s+/)
+        .filter(c => c && c !== name).join(' ');
+    },
+  };
+}
+
 function makeElement(tag) {
   const el = {
     tagName: String(tag).toUpperCase(),
@@ -133,13 +152,20 @@ function makeElement(tag) {
       return this._innerHTML || '';
     },
   };
+  el.classList = makeClassList(el);
   return el;
 }
 
 const tabListEl = makeElement('div');
 const tabBarEl = makeElement('div');
+// renderTabBar reads document.body's classes to decide whether to
+// append the remote webapp's theme-toggle button.  An unclassed body
+// models the VS Code webview, the surface whose main.css indicator
+// styling these tests pin.
+const bodyEl = makeElement('body');
 
 global.document = {
+  body: bodyEl,
   getElementById(id) {
     if (id === 'tab-list') return tabListEl;
     if (id === 'tab-bar') return tabBarEl;

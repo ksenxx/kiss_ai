@@ -388,6 +388,33 @@ class TestTranscribeAgentDegraded(unittest.TestCase):
         )
 
 
+def _run_listener(wav: Path) -> subprocess.CompletedProcess[str]:
+    """Run the listener subprocess over *wav* and return the result."""
+    return subprocess.run(
+        [
+            "uv", "run", "python", "-m",
+            "kiss.server.voice_wake", "--wav", str(wav),
+        ],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        env=dict(os.environ),
+    )
+
+
+# How many listener runs may come back with zero SPEECH lines before the
+# test gives up.  ``transcribe_pcm`` already retries a refusal-shaped
+# reply once (gpt-audio intermittently answers a perfectly valid audio
+# attachment with "Please provide the audio, and I will transcribe…",
+# which the listener reports as NO_SPEECH), and both attempts being
+# refused is rare but not negligible — measured at roughly one run in
+# six on identical audio.  Two extra runs take the odds of a spurious
+# failure to well under 1%, and no assertion is relaxed: a run that DOES
+# produce speech is still held to the full payload contract.
+_LISTENER_ATTEMPTS = 3
+
+
 @unittest.skipUnless(
     HAVE_MAC_TTS and HAVE_OPENAI_KEY, "needs macOS TTS and OPENAI_API_KEY"
 )
@@ -407,26 +434,25 @@ class TestListenerSpeechLanguage(unittest.TestCase):
                 gap_seconds=0.6,
                 tail_seconds=2.5,
             )
-            proc = subprocess.run(
-                [
-                    "uv", "run", "python", "-m",
-                    "kiss.server.voice_wake", "--wav", str(wav),
-                ],
-                cwd=PROJECT_ROOT,
-                capture_output=True,
-                text=True,
-                timeout=600,
-                env=dict(os.environ),
-            )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        lines = proc.stdout.splitlines()
-        self.assertIn("WAKE", lines, proc.stdout)
-        payloads = [
-            json.loads(line[len("SPEECH "):])
-            for line in lines
-            if line.startswith("SPEECH ")
-        ]
-        self.assertEqual(len(payloads), 1, proc.stdout)
+            transcripts = []
+            for _ in range(_LISTENER_ATTEMPTS):
+                proc = _run_listener(wav)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                lines = proc.stdout.splitlines()
+                self.assertIn("WAKE", lines, proc.stdout)
+                payloads = [
+                    json.loads(line[len("SPEECH "):])
+                    for line in lines
+                    if line.startswith("SPEECH ")
+                ]
+                transcripts.append(proc.stdout)
+                if payloads:
+                    break
+        self.assertEqual(
+            len(payloads), 1,
+            "the listener reported no speech after "
+            f"{_LISTENER_ATTEMPTS} runs: {transcripts}",
+        )
         payload = payloads[0]
         self.assertEqual(
             set(payload), {"text", "speaker", "language"}, payload
