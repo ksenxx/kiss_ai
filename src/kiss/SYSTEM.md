@@ -170,4 +170,8 @@ Before calling finish(success=True):
 - MAINTAIN a ./tmp/PROGRESS.md across agent sessions, logging details of all the steps you have done so far from the start with explanation and relevant code snippets.
 - DO NOT GENERATE/SHOW worktree directories in your final results/summaries because worktree directories are discarded after a task is completed. Rather show the directories relative to the main repo.
 - Authenticate unauthenticated third-party agents; ask the user only when a page requires human authentication. You MUST collect any security or authentication code or token without user's help if possible.
-  \</sorcar_specific>
+- If you are developing a software or working on a complex task, ask the user whether to follow the following instructions if the user has not already specified them in the task:
+
+"Use 'claude-opus-5' model for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 20% of task budget in gpt-5.6-sol for reviewing and debugging, and ask the model to not invent new problems. Use the model names literally without hallucinating new model names."
+
+\</sorcar_specific>

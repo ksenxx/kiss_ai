@@ -255,6 +255,87 @@ class TestEnsureHtml:
         assert parsed["summary"] == "<p>42</p>"
 
 
+class TestEscapedHtmlSummaryIsUnescaped:
+    """Reproduces the bug where an agent emitted entity-escaped HTML
+    (``&lt;h3&gt;`` instead of ``<h3>``) in ``summary_in_html``, so the
+    summary reached the client as inert text and rendered as tag soup.
+
+    ``ensure_html`` must detect summaries that BEGIN with an
+    entity-escaped HTML tag, unescape them (even when escaped more than
+    once), and return real HTML.
+    """
+
+    ESCAPED = (
+        "&lt;h3&gt;Page created: &lt;code&gt;reports/log.html&lt;/code&gt;&lt;/h3&gt;"
+        "&lt;p&gt;A single &lt;strong&gt;self-contained&lt;/strong&gt; page.&lt;/p&gt;"
+        "&lt;ul&gt;&lt;li&gt;byte-for-byte answers&lt;/li&gt;&lt;/ul&gt;"
+    )
+    UNESCAPED = (
+        "<h3>Page created: <code>reports/log.html</code></h3>"
+        "<p>A single <strong>self-contained</strong> page.</p>"
+        "<ul><li>byte-for-byte answers</li></ul>"
+    )
+
+    def test_escaped_html_is_unescaped(self) -> None:
+        assert ensure_html(self.ESCAPED) == self.UNESCAPED
+
+    def test_escaped_html_with_leading_whitespace_is_unescaped(self) -> None:
+        assert ensure_html("\n  " + self.ESCAPED) == "\n  " + self.UNESCAPED
+
+    def test_doubly_escaped_html_is_unescaped(self) -> None:
+        doubly = self.ESCAPED.replace("&", "&amp;")
+        assert ensure_html(doubly) == self.UNESCAPED
+
+    def test_escaped_doctype_document_is_unescaped(self) -> None:
+        doc = "&lt;!DOCTYPE html&gt;&lt;html&gt;&lt;body&gt;hi&lt;/body&gt;&lt;/html&gt;"
+        assert ensure_html(doc) == "<!DOCTYPE html><html><body>hi</body></html>"
+
+    def test_finish_unescapes_escaped_summary(self) -> None:
+        parsed = yaml.safe_load(finish(True, False, self.ESCAPED))
+        assert parsed["summary"] == self.UNESCAPED
+        assert "&lt;h3&gt;" not in parsed["summary"]
+
+    def test_plain_text_with_entities_is_still_markdown_converted(self) -> None:
+        """``a &lt; b`` unescapes to no tag — must stay on the Markdown path."""
+        out = ensure_html("prove that a &lt; b holds")
+        assert out == "<p>prove that a &lt; b holds</p>"
+
+    def test_escaped_tag_example_mid_text_is_not_unescaped(self) -> None:
+        """Prose *about* HTML (escaped example not at the start) must keep
+        its escaped entities so the example still displays literally."""
+        out = ensure_html("Type the six characters &lt;h3&gt; to open a heading.")
+        assert "&lt;h3&gt;" in out
+        assert "<h3>" not in out
+
+    def test_deeply_escaped_non_html_falls_back_to_markdown(self) -> None:
+        """Text that keeps unescaping without ever yielding a tag must not
+        loop forever and must fall back to Markdown conversion."""
+        out = ensure_html("&amp;amp;amp;amp;lt; not html")
+        assert out.startswith("<p>")
+        assert "not html" in out
+
+    def test_real_html_containing_escaped_entities_is_untouched(self) -> None:
+        html = "<p>keep &lt;h3&gt; literal</p>"
+        assert ensure_html(html) == html
+
+    def test_end_to_end_agent_escaped_summary_is_html_in_result(self) -> None:
+        """A real agent run over the wire: the LLM calls finish with an
+        entity-escaped summary; the emitted result must hold real HTML."""
+        resp = _make_tool_call_response(
+            "finish",
+            {"success": True, "is_continue": False, "summary_in_html": self.ESCAPED},
+        )
+        printer = RecordingPrinter()
+        result, _ = _run_agent([resp], printer=printer)
+        parsed = yaml.safe_load(result)
+        assert parsed["success"] is True
+        assert parsed["summary"] == self.UNESCAPED
+        (event_content, _kw) = printer.result_events()[-1]
+        event_payload = yaml.safe_load(str(event_content))
+        assert event_payload["summary"] == self.UNESCAPED
+        assert "&lt;h3&gt;" not in event_payload["summary"]
+
+
 class TestEndToEndAgentSummaryIsHtml:
     """A real agent run over the wire must produce an HTML summary."""
 

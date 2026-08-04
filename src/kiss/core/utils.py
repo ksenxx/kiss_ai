@@ -93,11 +93,44 @@ _HTML_TAG_RE = re.compile(
 )
 
 
+def _unescape_escaped_html(text: str) -> str | None:
+    """Recover HTML from text whose tags were entity-escaped by mistake.
+
+    Some LLMs emit ``summary_in_html`` with every tag pre-escaped
+    (``&lt;h3&gt;`` instead of ``<h3>``), sometimes escaped more than once
+    (``&amp;lt;h3&amp;gt;``).  Such a summary contains no real tags, so it
+    would otherwise be rendered as plain text and reach the user as
+    literal tag soup.  The double-escaping signature is that the text
+    *begins* with an entity-escaped HTML tag; escaped entities elsewhere
+    (e.g. prose showing ``&lt;h3&gt;`` as an example) are intentional and
+    must be preserved.
+
+    Args:
+        text: Candidate summary text containing no real HTML tags.
+
+    Returns:
+        The fully unescaped HTML if *text* starts (modulo whitespace) with
+        an entity-escaped known HTML tag or DOCTYPE, otherwise ``None``.
+    """
+    candidate = text
+    for _ in range(3):
+        unescaped = html_module.unescape(candidate)
+        if unescaped == candidate:
+            return None
+        candidate = unescaped
+        stripped = candidate.lstrip()
+        if stripped[:9].lower() == "<!doctype" or _HTML_TAG_RE.match(stripped):
+            return candidate
+    return None
+
+
 def ensure_html(text: str) -> str:
     """Return *text* as HTML, converting from Markdown/plain text if needed.
 
     Text that already contains HTML markup (a known HTML tag or a full
-    document) is passed through unchanged.  Anything else is treated as
+    document) is passed through unchanged.  Text that is HTML with every
+    tag entity-escaped (``&lt;h3&gt;`` instead of ``<h3>``, a known LLM
+    mistake) is unescaped back to real HTML.  Anything else is treated as
     Markdown and rendered to HTML, which also HTML-escapes special
     characters in plain text.
 
@@ -114,6 +147,9 @@ def ensure_html(text: str) -> str:
         return text
     if text.lstrip()[:9].lower() == "<!doctype" or _HTML_TAG_RE.search(text):
         return text
+    unescaped = _unescape_escaped_html(text)
+    if unescaped is not None:
+        return unescaped
     try:
         from markdown_it import MarkdownIt
     except ImportError:
