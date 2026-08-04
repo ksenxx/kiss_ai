@@ -178,7 +178,7 @@ if (scenario.tap) {
 
 // The agent's ``talk`` broadcasts arrive over the WebSocket long
 // after any tap — NOT inside any user-gesture handler.
-const tabId = win._demoApi.getActiveTabId();
+const tabId = win._testApi.getActiveTabId();
 for (const ev of scenario.events) {
   win.dispatchEvent(new win.MessageEvent('message', {data: Object.assign(
       {type: 'talk', emotion: '', tabId: tabId}, ev)}));

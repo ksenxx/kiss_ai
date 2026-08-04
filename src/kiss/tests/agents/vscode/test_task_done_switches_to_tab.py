@@ -178,7 +178,7 @@ def _open_page(_browser, width: int = 800, height: int = 900):
 
 def _make_two_tabs(page) -> tuple[str, str]:
     """Allocate two chat tabs and return ``(tab_a, tab_b)`` ids."""
-    page.evaluate("() => window._demoApi.createNewTab()")
+    page.evaluate("() => window._testApi.createNewTab()")
     page.wait_for_function(
         "document.querySelectorAll("
         "'#tab-list .chat-tab[data-tab-id]'"
@@ -207,7 +207,7 @@ def _switch_to_tab(page, tab_id: str) -> None:
         tab_id,
     )
     page.wait_for_function(
-        "id => window._demoApi.getActiveTabId() === id",
+        "id => window._testApi.getActiveTabId() === id",
         arg=tab_id,
         timeout=5000,
     )
@@ -262,7 +262,7 @@ def _post_terminal_event(
 
 
 def _active_tab_id(page) -> str:
-    result = page.evaluate("() => window._demoApi.getActiveTabId()")
+    result = page.evaluate("() => window._testApi.getActiveTabId()")
     assert isinstance(result, str)
     return result
 
@@ -306,7 +306,7 @@ def test_task_done_switches_to_target_tab(_browser) -> None:
 
         _post_task_done(page, tab_b)
         page.wait_for_function(
-            "id => window._demoApi.getActiveTabId() === id",
+            "id => window._testApi.getActiveTabId() === id",
             arg=tab_b,
             timeout=5000,
         )
@@ -345,7 +345,7 @@ def test_terminal_event_switches_to_target_tab(_browser, ev_type) -> None:
 
         _post_terminal_event(page, ev_type, tab_b)
         page.wait_for_function(
-            "id => window._demoApi.getActiveTabId() === id",
+            "id => window._testApi.getActiveTabId() === id",
             arg=tab_b,
             timeout=5000,
         )

@@ -91,7 +91,6 @@ class TestBuildHtml(unittest.TestCase):
         self.assertIn("/media/highlight.min.js", html)
         self.assertIn("/media/marked.min.js", html)
         self.assertIn("/media/main.js", html)
-        self.assertIn("/media/demo.js", html)
 
     def test_html_has_no_vscode_csp(self) -> None:
         """The standalone HTML does not contain VS Code CSP nonce directives."""

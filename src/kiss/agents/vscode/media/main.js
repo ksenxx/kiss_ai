@@ -437,8 +437,6 @@
   let ghostTimer = null;
   let currentGhost = '';
 
-  let demoMode = false;
-  let _demoActive = false;
   let allHistSessions = [];
 
   let historyOffset = 0;
@@ -893,7 +891,6 @@
     if (tabId === activeTabId) return;
     const tab = getTab(tabId);
     if (!tab) return;
-    clearDemoEndedUi();
     saveCurrentTab();
     if (tab.isContentTab) {
       activeTabId = tabId;
@@ -1025,7 +1022,6 @@
   }
 
   function activateAdjacentTab(newTab) {
-    clearDemoEndedUi();
     if (newTab.isContentTab) {
       activeTabId = newTab.id;
       showContentTab(newTab);
@@ -1380,7 +1376,7 @@
   function confirmReadyReport(tState, ev) {
     const rep = tState.pendingReport;
     tState.pendingReport = null;
-    if (!rep || tState.suppressReportOpen || _demoActive) return;
+    if (!rep || tState.suppressReportOpen) return;
     if (ev.tool_name !== 'Write') return;
     if (ev.path && ev.path !== rep.path) return;
     const rc = String(ev.content || '');
@@ -1405,7 +1401,7 @@
     const key = reportTabKey(evTabId);
     const reps = readyReportsByTab[key];
     delete readyReportsByTab[key];
-    if (!reps || _demoActive) return;
+    if (!reps) return;
     reps.forEach(rep => {
       handleFileContent(
         {
@@ -1579,7 +1575,6 @@
   }
 
   function createNewTab() {
-    clearDemoEndedUi();
     const pendingText = inp.value || '';
     saveCurrentTab();
     const tab = makeTab('new chat');
@@ -1730,7 +1725,6 @@
   const inp = document.getElementById('task-input');
   const sendBtn = document.getElementById('send-btn');
   const stopBtn = document.getElementById('stop-btn');
-  const demoPauseBtn = document.getElementById('demo-pause-btn');
   const uploadBtn = document.getElementById('upload-btn');
 
   const modelBtn = document.getElementById('model-btn');
@@ -1773,7 +1767,6 @@
   const inputContainer = document.getElementById('input-container');
   const inputClearBtn = document.getElementById('input-clear-btn');
   const worktreeToggleBtn = document.getElementById('cfg-use-worktree');
-  const demoToggleBtn = document.getElementById('cfg-demo-mode');
   const updateBtn = document.getElementById('cfg-update-btn');
   const serverResetBtn = document.getElementById('cfg-server-reset-btn');
   const serverResetConfirmModal = document.getElementById(
@@ -2815,7 +2808,6 @@
 
   function collapseOlderPanels() {
     if (!isRunning) return;
-    if (_demoActive) return;
     const panels = O.querySelectorAll(':scope > .collapsible');
     for (let i = 0; i < panels.length - 1; i++) {
       const p = panels[i];
@@ -3641,7 +3633,7 @@
     // autoscroll-coverage:start
     autoScrollLatestEventPanel(autoScrollPanel);
     // autoscroll-coverage:end
-    if (!_demoActive) applyChevronState(currentTaskName);
+    applyChevronState(currentTaskName);
   }
 
   function processOutputEventForBgTab(ev, tab) {
@@ -4150,23 +4142,17 @@
 
   const talkQueue = [];
   let talkQueueBusy = false;
-  let talkQueueCurrentDiscard = null;
-  let talkQueueGeneration = 0;
 
   function pumpTalkQueue() {
     if (talkQueueBusy) return;
     const job = talkQueue.shift();
     if (!job) return;
     talkQueueBusy = true;
-    talkQueueCurrentDiscard = job._onDiscard || null;
-    const generation = talkQueueGeneration;
     let finished = false;
     job(() => {
       if (finished) return;
       finished = true;
-      if (generation !== talkQueueGeneration) return;
       talkQueueBusy = false;
-      talkQueueCurrentDiscard = null;
       pumpTalkQueue();
     });
   }
@@ -4176,110 +4162,14 @@
     pumpTalkQueue();
   }
 
-  function playTalkEventSound(ev, finish) {
-    if (ev.audioB64 && playTalkAudio(ev, finish)) return;
-    finish();
-  }
-
-  function isDemoPlaybackPaused() {
-    try {
-      return (
-        typeof window._isDemoPaused === 'function' && window._isDemoPaused()
-      );
-    } catch (_e) {
-      return false;
-    }
-  }
-
-  function waitForDemoPlaybackResume(isDiscarded, setRelease) {
-    if (!isDemoPlaybackPaused() || (isDiscarded && isDiscarded())) {
-      return Promise.resolve();
-    }
-    return new Promise(resolve => {
-      let done = false;
-      const finish = function () {
-        if (done) return;
-        done = true;
-        window.removeEventListener('kiss-demo-pause-change', onChange);
-        resolve();
-      };
-      const onChange = function () {
-        if (!isDemoPlaybackPaused() || (isDiscarded && isDiscarded())) {
-          finish();
-        }
-      };
-      window.addEventListener('kiss-demo-pause-change', onChange);
-      if (typeof setRelease === 'function') setRelease(finish);
-      onChange();
-    });
-  }
-
-  function enqueueDemoSpeech(ev, resolve) {
-    let discarded = false;
-    let releasePausedWait = null;
-    const job = function (finish) {
-      const done = function () {
-        finish();
-        resolve();
-      };
-      const startPlayback = function (clip) {
-        if (discarded) return;
-        const clipEv = {
-          text: ev.text || '',
-          language: ev.language,
-          emotion: ev.emotion,
-        };
-        if (clip && clip.audioB64) {
-          clipEv.audioB64 = clip.audioB64;
-          clipEv.audioMime = clip.audioMime;
-        }
-        playTalkEventSound(clipEv, done);
-      };
-      const playClip = function (clip) {
-        if (discarded) return;
-        waitForDemoPlaybackResume(
-          () => discarded,
-          release => {
-            releasePausedWait = release;
-          },
-        ).then(() => {
-          releasePausedWait = null;
-          if (discarded) return;
-          if (isDemoPlaybackPaused()) {
-            playClip(clip);
-            return;
-          }
-          startPlayback(clip);
-        });
-      };
-      playClip(
-        ev.audioB64 ? {audioB64: ev.audioB64, audioMime: ev.audioMime} : null,
-      );
-    };
-    job._onDiscard = function () {
-      discarded = true;
-      if (typeof releasePausedWait === 'function') releasePausedWait();
-      releasePausedWait = null;
-      resolve();
-    };
-    enqueueTalkPlayback(job);
-  }
-
-  let currentTalkAudio = null;
-
   function playTalkAudio(ev, onDone) {
-    const rawDone = typeof onDone === 'function' ? onDone : function () {};
+    const done = typeof onDone === 'function' ? onDone : function () {};
     let player = null;
     try {
       if (typeof window.Audio !== 'function') return false;
       const mime = ev.audioMime || 'audio/mpeg';
       player = new window.Audio('data:' + mime + ';base64,' + ev.audioB64);
       player.muted = !!ev.muted;
-      currentTalkAudio = player;
-      const done = function () {
-        if (currentTalkAudio === player) currentTalkAudio = null;
-        rawDone();
-      };
       player.onended = done;
       player.onerror = done;
       player.onabort = done;
@@ -4289,8 +4179,7 @@
           player.onended = null;
           player.onerror = null;
           player.onabort = null;
-          if (currentTalkAudio === player) currentTalkAudio = null;
-          rawDone();
+          done();
         });
       }
       return true;
@@ -4300,7 +4189,6 @@
         player.onerror = null;
         player.onabort = null;
       }
-      if (player && currentTalkAudio === player) currentTalkAudio = null;
       return false;
     }
   }
@@ -4631,7 +4519,7 @@
           }
         }
         enqueueTalkPlayback(finish => {
-          playTalkEventSound(ev, finish);
+          if (!ev.audioB64 || !playTalkAudio(ev, finish)) finish();
         });
         break;
       }
@@ -4880,11 +4768,7 @@
             }
           } catch (_e) {}
         }
-        if (_demoActive && window._demoApi && window._demoApi.resolveEvents) {
-          window._demoApi.resolveEvents(ev.events || [], ev);
-        } else {
-          replayTaskEvents(ev.events || []);
-        }
+        replayTaskEvents(ev.events || []);
         break;
       }
       case 'adjacent_task_events':
@@ -5403,36 +5287,6 @@
     if (blocked) {
       clearGhost();
       hideAC();
-    }
-  }
-
-  function setDemoUiState(state) {
-    const playing = state === true;
-    const ended = state === 'ended';
-    document.body.classList.toggle('demo-playing', playing);
-    document.body.classList.toggle('demo-ended', ended);
-    if (!demoPauseBtn) return;
-    if (playing || ended) {
-      const pauseIcon = demoPauseBtn.querySelector('.icon-pause');
-      const playIcon = demoPauseBtn.querySelector('.icon-play');
-      if (pauseIcon) pauseIcon.style.display = playing ? '' : 'none';
-      if (playIcon) playIcon.style.display = playing ? 'none' : '';
-      demoPauseBtn.setAttribute(
-        'data-tooltip',
-        playing ? 'Pause demo' : 'Restart demo',
-      );
-      demoPauseBtn.style.display = 'flex';
-    } else {
-      demoPauseBtn.style.display = 'none';
-    }
-  }
-
-  function clearDemoEndedUi() {
-    if (!document.body.classList.contains('demo-ended')) return;
-    if (typeof window._clearDemoReplay === 'function') {
-      window._clearDemoReplay();
-    } else {
-      setDemoUiState(false);
     }
   }
 
@@ -6280,41 +6134,8 @@
       e.preventDefault();
     });
     stopBtn.addEventListener('click', () => {
-      if (_demoActive) {
-        if (typeof window._cancelDemoReplay === 'function')
-          window._cancelDemoReplay();
-        _demoActive = false;
-        return;
-      }
       api.stop({tabId: activeTabId});
     });
-    if (demoPauseBtn) {
-      demoPauseBtn.addEventListener('click', () => {
-        if (!_demoActive) {
-          if (
-            document.body.classList.contains('demo-ended') &&
-            typeof window._restartDemoReplay === 'function'
-          ) {
-            window._restartDemoReplay();
-          }
-          return;
-        }
-        const paused = !(
-          typeof window._isDemoPaused === 'function' && window._isDemoPaused()
-        );
-        if (typeof window._setDemoPaused === 'function') {
-          window._setDemoPaused(paused);
-        }
-        const pauseIcon = demoPauseBtn.querySelector('.icon-pause');
-        const playIcon = demoPauseBtn.querySelector('.icon-play');
-        if (pauseIcon) pauseIcon.style.display = paused ? 'none' : '';
-        if (playIcon) playIcon.style.display = paused ? '' : 'none';
-        demoPauseBtn.setAttribute(
-          'data-tooltip',
-          paused ? 'Resume demo' : 'Pause demo',
-        );
-      });
-    }
     uploadBtn.addEventListener('click', () => {
       const input = document.createElement('input');
       input.type = 'file';
@@ -6369,22 +6190,6 @@
           _flushPw();
           settingsPwInp.blur();
         }
-      });
-    }
-
-    if (demoToggleBtn) {
-      demoToggleBtn.addEventListener('change', () => {
-        if (_demoActive && !demoToggleBtn.checked) {
-          if (typeof window._cancelDemoReplay === 'function')
-            window._cancelDemoReplay({restoreUi: true});
-          demoMode = false;
-          _demoActive = false;
-          return;
-        }
-        if (!demoToggleBtn.checked) {
-          clearDemoEndedUi();
-        }
-        demoMode = demoToggleBtn.checked;
       });
     }
 
@@ -7608,13 +7413,6 @@
       div.appendChild(info);
 
       div.addEventListener('click', () => {
-        if (demoMode && typeof window._startDemoReplay === 'function') {
-          if (_demoActive) return;
-          closeSidebar();
-          createNewTab();
-          window._startDemoReplay(allHistSessions, s);
-          return;
-        }
         // The task text goes to the read-only task panel only.  #task-input
         // holds the user's own draft for the NEXT prompt and is never written.
         const taskText = s.preview || s.title || '';
@@ -8180,8 +7978,6 @@
     el('cfg-custom-endpoint').value = cfg.custom_endpoint || '';
     el('cfg-custom-api-key').value = cfg.custom_api_key || '';
     el('cfg-custom-headers').value = cfg.custom_headers || '';
-    el('cfg-demo-mode').checked = !!cfg.demo_mode || demoMode;
-    demoMode = el('cfg-demo-mode').checked;
     el('cfg-remote-password').value = cfg.remote_password || '';
     const welcomePw = el('welcome-cfg-remote-password');
     if (welcomePw) welcomePw.value = cfg.remote_password || '';
@@ -8206,7 +8002,6 @@
       custom_endpoint: el('cfg-custom-endpoint').value.trim(),
       custom_api_key: el('cfg-custom-api-key').value.trim(),
       custom_headers: el('cfg-custom-headers').value.trim(),
-      demo_mode: el('cfg-demo-mode').checked,
       remote_password: el('cfg-remote-password').value.trim(),
     };
     const wdInp = el('cfg-work-dir');
@@ -8435,111 +8230,22 @@
     );
   }
 
-  window._demoApi = {
-    get active() {
-      return _demoActive;
+  // Everything above lives inside this IIFE, so the end-to-end webview tests
+  // (jsdom and Playwright) have no other way to drive a real conversation.
+  // These four entry points are the whole surface they need: which tab is on
+  // screen, open another one, feed it a backend event, and get the welcome
+  // screen out of the way.
+  window._testApi = {
+    getActiveTabId: function () {
+      return activeTabId;
     },
-    set active(v) {
-      _demoActive = !!v;
-    },
-    resolveEvents: null,
-    kissSanitize: kissSanitize,
-    resultSummaryHtml: resultSummaryHtml,
     createNewTab: createNewTab,
-    setInput: function (text) {
-      inp.value = text;
-      syncClearBtn();
-    },
-    clearInput: function () {
-      inp.value = '';
-      syncClearBtn();
-    },
-    clearForReplay: function () {
-      clearOutput();
-      resetOutputState();
-      clearUsageMetrics();
-    },
-    resetOutputState: function () {
-      resetOutputState();
-    },
     processEvent: processOutputEvent,
-    setTaskText: setTaskText,
-    updateTabTitle: updateActiveTabTitle,
     hideWelcome: function () {
       if (welcome) {
         welcome.style.display = 'none';
         refreshWelcomeLayout();
       }
-    },
-    getActiveTabId: function () {
-      return activeTabId;
-    },
-    // tableak-coverage:start
-    // The demo replay types a Result panel across many awaits, so it must be
-    // able to keep writing into the conversation it started in even after the
-    // user switches away. #output is a singleton whose children are moved
-    // into the outgoing tab's fragment, so the replay cannot hold onto an
-    // element: it has to re-ask for its own tab's live root before every
-    // append. Returns null once that tab is gone, which stops the replay from
-    // resurrecting a closed conversation.
-    outputRootForTab: function (tabId) {
-      if (!tabId) return null;
-      return rpTaskDomRootForParent(tabId);
-    },
-    // tableak-coverage:end
-    sendMessage: function (msg) {
-      api.send(msg);
-    },
-    collapsePanels: function () {
-      collapseAllExceptResult(O, activeTabId);
-    },
-    setRunningState: setRunningState,
-    showSpinner: showSpinner,
-    removeSpinner: removeSpinner,
-    setDemoUi: setDemoUiState,
-    pauseSpeech: function () {
-      try {
-        if (currentTalkAudio) currentTalkAudio.pause();
-      } catch (_e) {}
-    },
-    resumeSpeech: function () {
-      try {
-        if (currentTalkAudio) {
-          const p = currentTalkAudio.play();
-          if (p && typeof p.catch === 'function') {
-            p.catch(() => {});
-          }
-        }
-      } catch (_e) {}
-    },
-    speakText: function (text, language) {
-      return new Promise(resolve => {
-        enqueueDemoSpeech({text: text, language: language || ''}, resolve);
-      });
-    },
-    playTalkEvent: function (ev) {
-      return new Promise(resolve => {
-        enqueueDemoSpeech(ev, resolve);
-      });
-    },
-    openSubagentTab: function (ev) {
-      handleEvent(ev);
-    },
-    stopSpeech: function () {
-      for (const queued of talkQueue) {
-        if (typeof queued._onDiscard === 'function') queued._onDiscard();
-      }
-      talkQueue.length = 0;
-      if (typeof talkQueueCurrentDiscard === 'function') {
-        talkQueueCurrentDiscard();
-      }
-      talkQueueCurrentDiscard = null;
-      talkQueueGeneration++;
-      talkQueueBusy = false;
-      try {
-        if (currentTalkAudio) currentTalkAudio.pause();
-      } catch (_e) {}
-      currentTalkAudio = null;
     },
   };
 

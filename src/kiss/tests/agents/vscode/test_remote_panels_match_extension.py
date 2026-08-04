@@ -203,7 +203,6 @@ def _build_extension_html() -> str:
         "API_SRC": "api.js",
         "PANEL_COPY_SRC": "panelCopy.js",
         "MAIN_SRC": "main.js",
-        "DEMO_SRC": "demo.js",
         "SHIM_SCRIPT": shim,
         "TRICKS_JSON": "[]",
         "TIPS_JSON": json.dumps({"tips": [], "show": False}),
@@ -245,7 +244,7 @@ class _ExtensionPageHandler(http.server.SimpleHTTPRequestHandler):
 # Renders one instance of every event-panel type plus the pinned task
 # panel, exactly like a live transcript would.  Everything main.js can
 # render from an output event goes through the PRODUCTION renderer
-# (window._demoApi.processEvent -> handleOutputEvent): the summary
+# (window._testApi.processEvent -> handleOutputEvent): the summary
 # panel, the warning/error tool-result variants, the autocommit
 # ok/err worktree lines, and the result card.  The remaining panels
 # (thinking, markdown text, bash tool call, nested-agent panel,
@@ -265,11 +264,11 @@ _INJECT_PAGE_JS = r"""
     'Fix the flux capacitor so the DeLorean can time travel again.';
   document.getElementById('task-panel').classList.add('visible');
 
-  if (!window._demoApi || typeof window._demoApi.processEvent !== 'function') {
+  if (!window._testApi || typeof window._testApi.processEvent !== 'function') {
     throw new Error('production output renderer is unavailable');
   }
   // Rendered FIRST so the summary panel adopts no earlier siblings.
-  window._demoApi.processEvent({
+  window._testApi.processEvent({
     type: 'tool_call',
     name: 'summary',
     description: 'Recap of the last few steps.',
@@ -336,15 +335,15 @@ _INJECT_PAGE_JS = r"""
 
   // Production-rendered variants: warning / error tool results,
   // autocommit ok + err worktree lines, and the result card.
-  window._demoApi.processEvent({type: 'warning', message: 'low disk'});
-  window._demoApi.processEvent({type: 'error', text: 'boom'});
-  window._demoApi.processEvent({
+  window._testApi.processEvent({type: 'warning', message: 'low disk'});
+  window._testApi.processEvent({type: 'error', text: 'boom'});
+  window._testApi.processEvent({
     type: 'autocommit_done', success: true, message: 'Committed 2 files.',
   });
-  window._demoApi.processEvent({
+  window._testApi.processEvent({
     type: 'autocommit_done', success: false, message: 'Commit failed.',
   });
-  window._demoApi.processEvent({
+  window._testApi.processEvent({
     type: 'result',
     success: false,
     is_continue: true,

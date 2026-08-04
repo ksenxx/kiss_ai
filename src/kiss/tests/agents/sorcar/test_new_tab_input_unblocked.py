@@ -123,7 +123,6 @@ class TestCreateNewTabDoesNotBlockInput(unittest.TestCase):
             function syncClearBtn() {}
             function updateChevronIcon() {}
             function applyChevronState() {}
-            function clearDemoEndedUi() {}
 
             // Mirror main.js exactly:
             function updateInputDisabled() {

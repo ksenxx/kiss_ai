@@ -140,7 +140,7 @@ function lastReport(win) {
 
 // The one assertion this whole file exists for.
 function assertHostIsUpToDate(win, why) {
-  const active = win._demoApi.getActiveTabId();
+  const active = win._testApi.getActiveTabId();
   const reported = lastReport(win);
   assert.ok(
     tabIds(win).indexOf(reported) >= 0,
@@ -184,30 +184,30 @@ function testInitialLoadReportsTheActiveTab() {
 // to leave the host pointing at the previous chat.
 function testNewTabButtonReportsTheNewTab() {
   const win = makeWebview();
-  const first = win._demoApi.getActiveTabId();
+  const first = win._testApi.getActiveTabId();
 
   clickNewTabButton(win);
 
-  const second = win._demoApi.getActiveTabId();
+  const second = win._testApi.getActiveTabId();
   assert.notStrictEqual(second, first, 'the + button must open a new tab');
   assertHostIsUpToDate(win, 'after clicking the + button');
   win.close();
   console.log('  ok - the + button reports the newly created tab');
 }
 
-// The programmatic entry point behind the button, used by the demo driver.
+// The programmatic entry point behind the button.
 function testCreateNewTabApiReportsTheNewTab() {
   const win = makeWebview();
-  const first = win._demoApi.getActiveTabId();
+  const first = win._testApi.getActiveTabId();
 
-  win._demoApi.createNewTab();
-  assertHostIsUpToDate(win, 'after _demoApi.createNewTab()');
+  win._testApi.createNewTab();
+  assertHostIsUpToDate(win, 'after _testApi.createNewTab()');
 
-  win._demoApi.createNewTab();
-  const third = win._demoApi.getActiveTabId();
+  win._testApi.createNewTab();
+  const third = win._testApi.getActiveTabId();
   assert.strictEqual(tabIds(win).length, 3, 'three chat tabs must exist');
   assert.notStrictEqual(third, first);
-  assertHostIsUpToDate(win, 'after a second _demoApi.createNewTab()');
+  assertHostIsUpToDate(win, 'after a second _testApi.createNewTab()');
   win.close();
   console.log('  ok - createNewTab() reports every tab it opens');
 }
@@ -216,9 +216,9 @@ function testCreateNewTabApiReportsTheNewTab() {
 // and must not spam the host with duplicates.
 function testClickingTabsReportsEachActivationOnce() {
   const win = makeWebview();
-  const first = win._demoApi.getActiveTabId();
-  win._demoApi.createNewTab();
-  const second = win._demoApi.getActiveTabId();
+  const first = win._testApi.getActiveTabId();
+  win._testApi.createNewTab();
+  const second = win._testApi.getActiveTabId();
 
   const before = reports(win).length;
   clickTab(win, first);
@@ -245,14 +245,14 @@ function testClickingTabsReportsEachActivationOnce() {
 // Closing the active tab used to leave the host naming a deleted tab.
 function testClosingTheActiveTabReportsItsReplacement() {
   const win = makeWebview();
-  const first = win._demoApi.getActiveTabId();
-  win._demoApi.createNewTab();
-  const second = win._demoApi.getActiveTabId();
+  const first = win._testApi.getActiveTabId();
+  win._testApi.createNewTab();
+  const second = win._testApi.getActiveTabId();
 
   closeTabByButton(win, second);
 
   assert.strictEqual(
-    win._demoApi.getActiveTabId(),
+    win._testApi.getActiveTabId(),
     first,
     'closing the active tab must fall back to its neighbour',
   );
@@ -266,15 +266,15 @@ function testClosingTheActiveTabReportsItsReplacement() {
 // the host either.
 function testClosingABackgroundTabKeepsTheReport() {
   const win = makeWebview();
-  const first = win._demoApi.getActiveTabId();
-  win._demoApi.createNewTab();
-  const second = win._demoApi.getActiveTabId();
+  const first = win._testApi.getActiveTabId();
+  win._testApi.createNewTab();
+  const second = win._testApi.getActiveTabId();
 
   const before = reports(win).length;
   closeTabByButton(win, first);
 
   assert.strictEqual(
-    win._demoApi.getActiveTabId(),
+    win._testApi.getActiveTabId(),
     second,
     'closing a background tab must not switch tabs',
   );
@@ -292,11 +292,11 @@ function testClosingABackgroundTabKeepsTheReport() {
 // about that fresh tab, not about the tab that was just destroyed.
 function testClosingTheLastTabReportsTheReplacementTab() {
   const win = makeWebview();
-  const only = win._demoApi.getActiveTabId();
+  const only = win._testApi.getActiveTabId();
 
   closeTabByButton(win, only);
 
-  const now = win._demoApi.getActiveTabId();
+  const now = win._testApi.getActiveTabId();
   assert.notStrictEqual(now, only, 'a replacement tab must be created');
   assert.deepStrictEqual(tabIds(win), [now]);
   assertHostIsUpToDate(win, 'after closing the last remaining tab');
@@ -308,10 +308,10 @@ function testClosingTheLastTabReportsTheReplacementTab() {
 // the host must keep pointing at the chat tab underneath.
 function testContentTabDoesNotOverwriteTheChatTab() {
   const win = makeWebview();
-  const chat = win._demoApi.getActiveTabId();
+  const chat = win._testApi.getActiveTabId();
 
   openContentTab(win, 'report.html');
-  const content = win._demoApi.getActiveTabId();
+  const content = win._testApi.getActiveTabId();
   assert.notStrictEqual(content, chat, 'the file must open in its own tab');
   assertHostKeepsChatTab(win, chat, 'while a content tab is on screen');
 
@@ -325,15 +325,15 @@ function testContentTabDoesNotOverwriteTheChatTab() {
 // chat tab the host must be told; the reported id must always be alive.
 function testClosingAContentTabReportsTheChatTabItFallsBackTo() {
   const win = makeWebview();
-  const chat = win._demoApi.getActiveTabId();
+  const chat = win._testApi.getActiveTabId();
 
   openContentTab(win, 'report.html');
-  const content = win._demoApi.getActiveTabId();
+  const content = win._testApi.getActiveTabId();
 
   closeTabByButton(win, content);
 
   assert.strictEqual(
-    win._demoApi.getActiveTabId(),
+    win._testApi.getActiveTabId(),
     chat,
     'closing the content tab must fall back to the chat tab',
   );
@@ -348,16 +348,16 @@ function testClosingAContentTabReportsTheChatTabItFallsBackTo() {
 // was just deleted.
 function testClosingAContentTabNextToAnotherContentTab() {
   const win = makeWebview();
-  const chat = win._demoApi.getActiveTabId();
+  const chat = win._testApi.getActiveTabId();
 
   openContentTab(win, 'one.html');
   openContentTab(win, 'two.html');
-  const second = win._demoApi.getActiveTabId();
+  const second = win._testApi.getActiveTabId();
 
   closeTabByButton(win, second);
 
   assert.notStrictEqual(
-    win._demoApi.getActiveTabId(),
+    win._testApi.getActiveTabId(),
     second,
     'the closed content tab must not stay active',
   );
@@ -370,16 +370,16 @@ function testClosingAContentTabNextToAnotherContentTab() {
 // chat tab; the host must be told about that chat tab.
 function testClosingTheLastContentTabReportsTheNewChatTab() {
   const win = makeWebview();
-  const chat = win._demoApi.getActiveTabId();
+  const chat = win._testApi.getActiveTabId();
 
   openContentTab(win, 'solo.html');
-  const content = win._demoApi.getActiveTabId();
+  const content = win._testApi.getActiveTabId();
   closeTabByButton(win, chat);
   assert.deepStrictEqual(tabIds(win), [content], 'only the file tab is left');
 
   closeTabByButton(win, content);
 
-  const fresh = win._demoApi.getActiveTabId();
+  const fresh = win._testApi.getActiveTabId();
   assert.notStrictEqual(fresh, content);
   assert.notStrictEqual(fresh, chat);
   assert.deepStrictEqual(tabIds(win), [fresh]);
@@ -395,16 +395,16 @@ function testClosingTheLastContentTabReportsTheNewChatTab() {
 // reported as usual.
 function testClosingTheOnlyChatTabClearsTheHostsChatTab() {
   const win = makeWebview();
-  const chat = win._demoApi.getActiveTabId();
+  const chat = win._testApi.getActiveTabId();
 
   openContentTab(win, 'solo.html');
-  const content = win._demoApi.getActiveTabId();
+  const content = win._testApi.getActiveTabId();
 
   closeTabByButton(win, chat);
 
   assert.deepStrictEqual(tabIds(win), [content], 'only the file tab is left');
   assert.strictEqual(
-    win._demoApi.getActiveTabId(),
+    win._testApi.getActiveTabId(),
     content,
     'the file tab must stay on screen',
   );
@@ -421,7 +421,7 @@ function testClosingTheOnlyChatTabClearsTheHostsChatTab() {
   // A new chat must reach the host even though the previous report was the
   // empty string.
   clickNewTabButton(win);
-  const fresh = win._demoApi.getActiveTabId();
+  const fresh = win._testApi.getActiveTabId();
   assert.notStrictEqual(fresh, chat);
   assertHostIsUpToDate(win, 'after opening a chat tab again');
   win.close();
@@ -432,7 +432,7 @@ function testClosingTheOnlyChatTabClearsTheHostsChatTab() {
 // of the on-screen chat tab must never name a tab that has been deleted.
 function testTheHostNeverNamesADeadTabDuringAMixedSession() {
   const win = makeWebview();
-  const first = win._demoApi.getActiveTabId();
+  const first = win._testApi.getActiveTabId();
 
   const alive = () => {
     assert.ok(
@@ -443,10 +443,10 @@ function testTheHostNeverNamesADeadTabDuringAMixedSession() {
 
   clickNewTabButton(win);
   alive();
-  const second = win._demoApi.getActiveTabId();
+  const second = win._testApi.getActiveTabId();
   openContentTab(win, 'mixed.html');
   alive();
-  const content = win._demoApi.getActiveTabId();
+  const content = win._testApi.getActiveTabId();
   clickTab(win, first);
   alive();
   assertHostIsUpToDate(win, 'mixed session: back on the first tab');
@@ -461,7 +461,7 @@ function testTheHostNeverNamesADeadTabDuringAMixedSession() {
   // The content tab is what lands on screen, so the host must fall back to
   // the surviving chat tab rather than keep naming the tab just deleted.
   assert.strictEqual(
-    win._demoApi.getActiveTabId(),
+    win._testApi.getActiveTabId(),
     content,
     'closing the second tab must leave the file tab on screen',
   );
@@ -469,7 +469,7 @@ function testTheHostNeverNamesADeadTabDuringAMixedSession() {
   closeTabByButton(win, content);
   alive();
   assertHostIsUpToDate(win, 'mixed session: back on the surviving chat tab');
-  closeTabByButton(win, win._demoApi.getActiveTabId());
+  closeTabByButton(win, win._testApi.getActiveTabId());
   alive();
   assertHostIsUpToDate(win, 'mixed session: after closing everything');
 

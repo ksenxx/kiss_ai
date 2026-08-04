@@ -246,10 +246,10 @@ _INJECT_PAGE_JS = r"""
     <div class="ev wt-result-ok">Committed 2 files.</div>`);
 
   // Result card through the PRODUCTION renderer.
-  if (!window._demoApi || typeof window._demoApi.processEvent !== 'function') {
+  if (!window._testApi || typeof window._testApi.processEvent !== 'function') {
     throw new Error('production output renderer is unavailable');
   }
-  window._demoApi.processEvent({
+  window._testApi.processEvent({
     type: 'result',
     success: false,
     is_continue: true,

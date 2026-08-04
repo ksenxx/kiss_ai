@@ -388,8 +388,8 @@ async function testWebviewSide() {
       'a discard result with a warning must still be printed',
     );
 
-    const api = win._demoApi;
-    assert.ok(api, '_demoApi must be exposed by main.js');
+    const api = win._testApi;
+    assert.ok(api, '_testApi must be exposed by main.js');
     const tab1 = api.getActiveTabId();
     api.createNewTab();
     const tab2 = api.getActiveTabId();

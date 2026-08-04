@@ -95,7 +95,7 @@ const TERMINAL_EVENTS = [
 function testActiveTabAskClearedOnEachTerminalEvent() {
   for (const type of TERMINAL_EVENTS) {
     const win = makeWebview();
-    const api = win._demoApi;
+    const api = win._testApi;
     const tabId = api.getActiveTabId();
 
     send(win, {type: 'askUser', question: 'Which branch?', tabId: tabId});
@@ -127,7 +127,7 @@ function testActiveTabAskClearedOnEachTerminalEvent() {
 function testBackgroundAskClearedOnEachTerminalEvent() {
   for (const type of TERMINAL_EVENTS) {
     const win = makeWebview();
-    const api = win._demoApi;
+    const api = win._testApi;
     const askTab = api.getActiveTabId();
     api.createNewTab();
     const userTab = api.getActiveTabId();
@@ -173,7 +173,7 @@ function testBackgroundAskClearedOnEachTerminalEvent() {
 // waiting on.
 function testUnrelatedTabKeepsItsQuestion() {
   const win = makeWebview();
-  const api = win._demoApi;
+  const api = win._testApi;
   const askTab = api.getActiveTabId();
   api.createNewTab();
   const otherTab = api.getActiveTabId();
@@ -218,7 +218,7 @@ function testUnrelatedTabKeepsItsQuestion() {
 // backend is still blocked on it.
 function testSameChatIdSiblingKeepsItsQuestion() {
   const win = makeWebview();
-  const api = win._demoApi;
+  const api = win._testApi;
   const doneTab = api.getActiveTabId();
   send(win, {type: 'clear', chat_id: 'shared-chat-id', tabId: doneTab});
   api.createNewTab();
@@ -274,7 +274,7 @@ function testSameChatIdSiblingKeepsItsQuestion() {
 // it must still retire the prompt in every tab bound to that chat.
 function testSubmittingAnswerStillClearsSameChatIdSiblings() {
   const win = makeWebview();
-  const api = win._demoApi;
+  const api = win._testApi;
   const firstTab = api.getActiveTabId();
   send(win, {type: 'clear', chat_id: 'shared-chat-id', tabId: firstTab});
   api.createNewTab();
@@ -307,7 +307,7 @@ function testSubmittingAnswerStillClearsSameChatIdSiblings() {
 // A terminal event for a tab with no outstanding question changes nothing.
 function testTerminalEventWithoutQuestionIsHarmless() {
   const win = makeWebview();
-  const api = win._demoApi;
+  const api = win._testApi;
   const askTab = api.getActiveTabId();
   api.createNewTab();
   const userTab = api.getActiveTabId();

@@ -1130,34 +1130,6 @@ body.remote-chat #welcome-config { display: none !important; }
 #stop-btn svg { width: 15px; height: 15px; }
 #stop-btn:hover { background: color-mix(in srgb, var(--red) 20%, transparent); box-shadow: 0 0 12px color-mix(in srgb, var(--red) 15%, transparent); }
 
-#demo-pause-btn {
-  background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); border: none;
-  border-radius: 50%; width: 34px; height: 34px; cursor: pointer; transition: all 0.2s; display: none;
-  align-items: center; justify-content: center; flex-shrink: 0;
-}
-#demo-pause-btn svg { width: 15px; height: 15px; }
-#demo-pause-btn:hover { background: color-mix(in srgb, var(--accent) 35%, transparent); color: var(--fg); box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 20%, transparent); }
-
-body.demo-playing #input-text-wrap,
-body.demo-playing #menu-btn,
-body.demo-playing #model-btn,
-body.demo-playing #upload-btn,
-body.demo-playing #tricks-btn,
-body.demo-playing #voice-btn,
-body.demo-playing #send-btn { display: none !important; }
-body.demo-playing #stop-btn { display: flex !important; }
-body.demo-playing #demo-pause-btn { display: flex !important; }
-
-body.demo-ended #input-text-wrap,
-body.demo-ended #menu-btn,
-body.demo-ended #model-btn,
-body.demo-ended #upload-btn,
-body.demo-ended #tricks-btn,
-body.demo-ended #voice-btn,
-body.demo-ended #send-btn,
-body.demo-ended #stop-btn { display: none !important; }
-body.demo-ended #demo-pause-btn { display: flex !important; }
-
 #input-footer {
   display: flex; justify-content: space-between; align-items: center;
   margin-top: 5px; padding-top: 5px; border-top: 1px solid color-mix(in srgb, var(--fg) 5%, transparent);

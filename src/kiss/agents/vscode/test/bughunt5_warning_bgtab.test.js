@@ -60,8 +60,8 @@ function send(win, data) {
 
 function testBackgroundTabWarningSurvivesTabSwitch() {
   const {win} = makeWebview();
-  const api = win._demoApi;
-  assert.ok(api, '_demoApi must be exposed by main.js');
+  const api = win._testApi;
+  assert.ok(api, '_testApi must be exposed by main.js');
 
   const tab1 = api.getActiveTabId();
   assert.ok(tab1, 'initial tab id must exist');

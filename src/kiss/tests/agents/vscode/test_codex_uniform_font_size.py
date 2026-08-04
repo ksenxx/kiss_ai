@@ -12,10 +12,9 @@ main.css type scale verbatim (pinned end to end by
 the class-based status-line contract that made any stylesheet control
 possible in the first place:
 
-* ``main.js``'s ``createResultPanel`` and ``demo.js``'s demo-replay
-  result renderer must not emit inline ``font-size`` styles (inline
-  styles beat every stylesheet); they use ``.rc-status`` /
-  ``.rc-status-fail`` classes instead.
+* ``main.js``'s ``createResultPanel`` must not emit inline
+  ``font-size`` styles (inline styles beat every stylesheet); it uses
+  ``.rc-status`` / ``.rc-status-fail`` classes instead.
 * ``main.css`` styles ``.rc-status`` exactly like the old inline
   declarations so the VS Code webview keeps its former look.
 * ``remote-codex.css`` must not re-introduce panel body-text size
@@ -33,7 +32,6 @@ MEDIA_DIR = (
 CODEX_CSS = MEDIA_DIR / "remote-codex.css"
 MAIN_CSS = MEDIA_DIR / "main.css"
 MAIN_JS = MEDIA_DIR / "main.js"
-DEMO_JS = MEDIA_DIR / "demo.js"
 
 
 def _read_codex_css() -> str:
@@ -65,24 +63,6 @@ def test_main_js_result_status_uses_class_not_inline_style() -> None:
     )
     assert 'class="rc-status rc-status-fail"' in js, (
         "the FAILED status line must carry class rc-status rc-status-fail"
-    )
-
-
-def test_demo_js_result_status_uses_class_not_inline_style() -> None:
-    """demo.js (demo-replay result renderer, loaded by the remote page
-    via {{DEMO_SRC}}) must use the same .rc-status classes — its old
-    inline style.cssText font-size also beat every stylesheet rule."""
-    js = DEMO_JS.read_text(encoding="utf-8")
-    assert "font-size:var(--fs-xl)" not in js, (
-        "demo.js must not emit an inline font-size:var(--fs-xl) "
-        "status line; use the .rc-status class instead"
-    )
-    assert "'rc-status'" in js, (
-        "demo.js Continue status line must carry class rc-status"
-    )
-    assert "'rc-status rc-status-fail'" in js, (
-        "demo.js FAILED status line must carry class "
-        "rc-status rc-status-fail"
     )
 
 

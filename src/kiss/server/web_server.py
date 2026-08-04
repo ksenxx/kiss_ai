@@ -2530,7 +2530,6 @@ def _build_html() -> str:
         "PANEL_COPY_SRC": _media_url("panelCopy.js"),
         "CTX_MENU_SRC": _media_url("contentContextMenu.js"),
         "MAIN_SRC": _media_url("main.js"),
-        "DEMO_SRC": _media_url("demo.js"),
         "SHIM_SCRIPT": f"<script>{_WS_SHIM_JS}</script>\n  ",
         "TRICKS_JSON": tricks_json,
         "TIPS_JSON": tips_json,

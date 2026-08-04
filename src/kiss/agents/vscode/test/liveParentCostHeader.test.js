@@ -73,8 +73,8 @@ function switchToTab(win, api, tabId) {
 
 function testParentHeaderTracksLiveAggregateUsage() {
   const {win} = makeWebview();
-  const api = win._demoApi;
-  assert.ok(api, '_demoApi must be exposed by main.js');
+  const api = win._testApi;
+  assert.ok(api, '_testApi must be exposed by main.js');
   const parentTab = api.getActiveTabId();
 
   send(win, {

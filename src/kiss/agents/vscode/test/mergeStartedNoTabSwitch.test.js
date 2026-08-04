@@ -69,7 +69,7 @@ function mergeToolbar(win) {
 
 function testBackgroundMergeDoesNotSwitchTabs() {
   const win = makeWebview();
-  const api = win._demoApi;
+  const api = win._testApi;
   const mergeTab = api.getActiveTabId();
 
   api.createNewTab();
@@ -113,7 +113,7 @@ function testBackgroundMergeDoesNotSwitchTabs() {
 
 function testActiveTabMergeShowsToolbarImmediately() {
   const win = makeWebview();
-  const api = win._demoApi;
+  const api = win._testApi;
   const activeTab = api.getActiveTabId();
 
   send(win, {type: 'merge_started', tabId: activeTab});
@@ -141,7 +141,7 @@ function testActiveTabMergeShowsToolbarImmediately() {
 
 function testBackgroundMergeEndedClearsPendingToolbar() {
   const win = makeWebview();
-  const api = win._demoApi;
+  const api = win._testApi;
   const mergeTab = api.getActiveTabId();
   api.createNewTab();
   const userTab = api.getActiveTabId();

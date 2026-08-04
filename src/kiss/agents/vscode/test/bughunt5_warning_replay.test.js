@@ -132,29 +132,29 @@ function testReplayWarningMatchesLiveRendering() {
   console.log('  ok - replayed warning renders identically to live');
 }
 
-function testDemoProcessEventRendersWarning() {
+function testProcessEventRendersWarning() {
   const {win} = makeWebview();
-  const api = win._demoApi;
+  const api = win._testApi;
   assert.ok(
     api && typeof api.processEvent === 'function',
-    '_demoApi.processEvent must be exposed by main.js',
+    '_testApi.processEvent must be exposed by main.js',
   );
 
   api.processEvent({type: 'text_delta', text: 'thinking...'});
   api.processEvent({
     type: 'warning',
-    message: 'demo-replay stash warning XYZZY',
+    message: 'replayed stash warning XYZZY',
   });
 
   const output = win.document.getElementById('output');
   const text = output ? output.textContent : '';
   assert.ok(
-    text.includes('demo-replay stash warning XYZZY'),
-    'BUG: a persisted warning event is dropped during demo replay ' +
+    text.includes('replayed stash warning XYZZY'),
+    'BUG: a persisted warning event is dropped when replayed ' +
       '(processOutputEvent → handleOutputEvent has no warning case)',
   );
   win.close();
-  console.log('  ok - demo replay renders persisted warning');
+  console.log('  ok - replaying a persisted warning renders it');
 }
 
 function testLiveWarningNotDoubleRendered() {
@@ -173,7 +173,7 @@ function testLiveWarningNotDoubleRendered() {
 function runTests() {
   testReplayRendersPersistedWarning();
   testReplayWarningMatchesLiveRendering();
-  testDemoProcessEventRendersWarning();
+  testProcessEventRendersWarning();
   testLiveWarningNotDoubleRendered();
 }
 

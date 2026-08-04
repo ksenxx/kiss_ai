@@ -92,7 +92,6 @@ def _render_chat_html() -> str:
         "MARKED_SRC": "about:blank",
         "PANEL_COPY_SRC": "about:blank",
         "MAIN_SRC": "about:blank",
-        "DEMO_SRC": "about:blank",
         "SHIM_SCRIPT": "",
         "TRICKS_JSON": "[]",
     }

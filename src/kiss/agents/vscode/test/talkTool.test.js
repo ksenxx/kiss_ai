@@ -86,7 +86,7 @@ function testAudiolessTalkIsSilentAndQueueAdvances() {
   const {win} = makeWebview();
   const spoken = installSpeech(win);
   const created = installAudio(win);
-  const activeTab = win._demoApi.getActiveTabId();
+  const activeTab = win._testApi.getActiveTabId();
 
   send(win, {type: 'talk', language: 'es', text: 'hola usuario',
              talkId: 'tt-noaudio', tabId: activeTab});

@@ -251,9 +251,9 @@ def _run_sorcar(prompt: str, chat_id: str) -> tuple[str, str]:
     """Run a Sorcar task and return ``(slack_text, chat_id)``.
 
     Uses :class:`WorktreeSorcarAgent` so that ``update_settings`` calls
-    for ``is_worktree``, ``auto_commit``, and ``demo_mode`` have real
-    effects (git worktree isolation, actual git commits, persisted
-    config) even without a UI.
+    for ``is_worktree`` and ``auto_commit`` have real effects (git
+    worktree isolation, actual git commits, persisted config) even
+    without a UI.
 
     Args:
         prompt: The user's Slack message text.

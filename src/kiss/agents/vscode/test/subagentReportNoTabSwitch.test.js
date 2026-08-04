@@ -133,7 +133,7 @@ function visibleSrcdoc(win) {
 }
 
 function activeTabId(win) {
-  return win._demoApi.getActiveTabId();
+  return win._testApi.getActiveTabId();
 }
 
 function clickTab(win, tabEl) {

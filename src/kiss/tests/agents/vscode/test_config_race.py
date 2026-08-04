@@ -38,7 +38,6 @@ _DISTINCT_WRITES: dict[str, Any] = {
     "remote_password": "race-password",
     "work_dir": "/race/work/dir",
     "last_model": "race-model",
-    "demo_mode": True,
     "auto_commit_mode": False,
     "is_parallel": False,
     "is_worktree": False,

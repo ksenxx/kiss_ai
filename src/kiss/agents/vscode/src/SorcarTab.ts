@@ -250,7 +250,6 @@ export function buildChatHtml(
     PANEL_COPY_SRC: u('panelCopy.js'),
     CTX_MENU_SRC: u('contentContextMenu.js'),
     MAIN_SRC: u('main.js'),
-    DEMO_SRC: u('demo.js'),
     SHIM_SCRIPT: '',
     TRICKS_JSON: tricksJson,
     TIPS_JSON: tipsJson,

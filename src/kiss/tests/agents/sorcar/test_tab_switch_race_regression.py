@@ -958,7 +958,6 @@ class TestPerTabT0(unittest.TestCase):
             function removeSpinner() {}
             function applyChevronState() {}
             function focusInputWithRetry() {}
-            function clearDemoEndedUi() {}
             """
             + switch_src
             + r"""

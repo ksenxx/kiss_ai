@@ -74,8 +74,8 @@ function visibleAskText(win) {
 
 function testAnswerClearsSiblingTabsWithSameBackendChatId() {
   const {win, posted} = makeWebview();
-  const api = win._demoApi;
-  assert.ok(api, '_demoApi must be exposed by main.js');
+  const api = win._testApi;
+  assert.ok(api, '_testApi must be exposed by main.js');
 
   const firstTab = api.getActiveTabId();
   assert.ok(firstTab, 'initial tab id must exist');
@@ -153,7 +153,7 @@ function testAnswerClearsSiblingTabsWithSameBackendChatId() {
 
 function testAnswerKeepsDifferentBackendChatIdPromptOpen() {
   const {win} = makeWebview();
-  const api = win._demoApi;
+  const api = win._testApi;
   const firstTab = api.getActiveTabId();
 
   send(win, {type: 'clear', chat_id: 'chat-a', tabId: firstTab});

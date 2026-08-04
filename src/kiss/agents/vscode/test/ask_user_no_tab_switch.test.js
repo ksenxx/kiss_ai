@@ -83,8 +83,8 @@ function attentionGlyph(win, tabId) {
 
 function testBackgroundAskDoesNotSwitchTabs() {
   const {win, posted} = makeWebview();
-  const api = win._demoApi;
-  assert.ok(api, '_demoApi must be exposed by main.js');
+  const api = win._testApi;
+  assert.ok(api, '_testApi must be exposed by main.js');
 
   const questionTab = api.getActiveTabId();
   assert.ok(questionTab, 'initial tab id must exist');
@@ -169,7 +169,7 @@ function testBackgroundAskDoesNotSwitchTabs() {
 
 function testActiveTabAskShowsModalImmediately() {
   const {win} = makeWebview();
-  const api = win._demoApi;
+  const api = win._testApi;
   const activeTab = api.getActiveTabId();
 
   send(win, {
@@ -205,7 +205,7 @@ function testActiveTabAskShowsModalImmediately() {
 
 function testAnsweringClearsBackgroundIndicator() {
   const {win} = makeWebview();
-  const api = win._demoApi;
+  const api = win._testApi;
   const questionTab = api.getActiveTabId();
   api.createNewTab();
 
@@ -233,7 +233,7 @@ function testAnsweringClearsBackgroundIndicator() {
 
 function testAskUserForUnknownTabIsIgnored() {
   const {win} = makeWebview();
-  const api = win._demoApi;
+  const api = win._testApi;
   const activeBefore = api.getActiveTabId();
 
   send(win, {

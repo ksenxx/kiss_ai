@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+import kiss.core.vscode_config as vscode_config
 from kiss.core.vscode_config import (
     API_KEY_ENV_VARS,
     DEFAULTS,
@@ -838,3 +839,76 @@ class TestSaveConfigAtomicity:
         cfg = load_config()
         assert cfg["remote_password"] == "sensca95"
         assert cfg["max_budget"] == 25
+
+
+class TestRetiredKeys:
+    """A setting that no longer exists must be forgotten, not preserved.
+
+    ``config.json`` is written by every previous release, so removing a
+    key from :data:`DEFAULTS` cannot be the whole job: ``load_config``
+    overlays whatever the file holds, ``sanitize_config`` deliberately
+    lets unknown keys through so genuine extension-owned keys survive,
+    and ``save_config`` rewrites the file from its own former contents.
+    """
+
+    def _write_legacy_config(self) -> Path:
+        """Write a config file as an older release would have left it."""
+        path = Path(vscode_config.CONFIG_PATH)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({
+                "demo_mode": True,
+                "max_budget": 42,
+                "tunnel_token": "keep-me",
+                "email": "someone@example.com",
+            }),
+            encoding="utf-8",
+        )
+        return path
+
+    def test_demo_mode_is_retired(self) -> None:
+        assert "demo_mode" in vscode_config.RETIRED_KEYS
+        assert "demo_mode" not in DEFAULTS
+
+    def test_load_config_drops_a_retired_key(self) -> None:
+        self._write_legacy_config()
+        cfg = load_config()
+        assert "demo_mode" not in cfg
+        assert cfg["max_budget"] == 42
+        assert cfg["tunnel_token"] == "keep-me"
+
+    def test_save_config_purges_a_retired_key_from_disk(self) -> None:
+        path = self._write_legacy_config()
+        save_config({"max_budget": 7})
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        assert "demo_mode" not in stored, (
+            "a retired setting must be purged from config.json, not "
+            f"rewritten forever: {stored}"
+        )
+        assert stored["max_budget"] == 7
+        assert stored["tunnel_token"] == "keep-me"
+        assert stored["email"] == "someone@example.com"
+
+    def test_save_config_ignores_an_incoming_retired_key(self) -> None:
+        save_config({"demo_mode": True, "max_budget": 9})
+        path = Path(vscode_config.CONFIG_PATH)
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        assert "demo_mode" not in stored
+        assert "demo_mode" not in load_config()
+
+    def test_config_data_reply_omits_a_retired_key(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The config the daemon sends every client must not carry it."""
+        self._write_legacy_config()
+        server, captured = _make_server_with_recorder(monkeypatch)
+        server._handle_command({"type": "getConfig"})
+        server._handle_command({
+            "type": "saveConfig", "config": {"max_budget": 11},
+        })
+        replies = [e for e in captured.events if e["type"] == "configData"]
+        assert replies, f"no configData event was broadcast: {captured.events}"
+        for reply in replies:
+            assert "demo_mode" not in reply["config"], (
+                f"configData still advertises a retired setting: {reply}"
+            )

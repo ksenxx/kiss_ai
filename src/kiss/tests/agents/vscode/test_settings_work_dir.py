@@ -117,7 +117,6 @@ const posted = [];
 const vscode = {{postMessage: m => posted.push(m)}};
 {api_src}
 const api = createSorcarApi(m => vscode.postMessage(m));
-let demoMode = false;
 let configFormPopulated = false;
 // Module-scope declaration (main.js line 165) that the extracted
 // populateConfigForm/getCurrentWorkDir bodies assign to and read.

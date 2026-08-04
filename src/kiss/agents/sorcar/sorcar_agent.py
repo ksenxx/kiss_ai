@@ -742,15 +742,6 @@ class SorcarAgent(RelentlessAgent):
             _attribute_tts_usage(self, tts_usage)
             if synthesized:
                 payload["audioB64"], payload["audioMime"] = synthesized
-                attach = getattr(self.printer, "attach_talk_audio", None)
-                if callable(attach):
-                    try:
-                        attach(payload["audioB64"], payload["audioMime"])
-                    except Exception:
-                        logger.exception(
-                            "failed to attach talk audio to the recorded"
-                            " tool_call event"
-                        )
             broadcast(payload)
             return f"Spoke to the user in language {language!r}."
 

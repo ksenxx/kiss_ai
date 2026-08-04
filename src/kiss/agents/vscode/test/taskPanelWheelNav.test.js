@@ -88,7 +88,7 @@ function panelText(win) {
 function setupWithHistoryTask() {
   const {win, posted} = makeWebview();
   const tabId = posted.find((m) => m.type === 'ready').tabId;
-  win._demoApi.hideWelcome();
+  win._testApi.hideWelcome();
   const O = win.document.getElementById('output');
   installLayout(win, O);
   send(win, {
@@ -471,7 +471,7 @@ function testEmptyChatIsNoop() {
 function testUnknownAnchorIdNeverRequested() {
   const {win, posted} = makeWebview();
   const tabId = posted.find((m) => m.type === 'ready').tabId;
-  win._demoApi.hideWelcome();
+  win._testApi.hideWelcome();
   const O = win.document.getElementById('output');
   installLayout(win, O);
   send(win, {
@@ -626,7 +626,7 @@ function testShortPrevTaskNavigation() {
 function testHiddenFirstMainChild() {
   const {win, posted} = makeWebview();
   const tabId = posted.find((m) => m.type === 'ready').tabId;
-  win._demoApi.hideWelcome();
+  win._testApi.hideWelcome();
   const O = win.document.getElementById('output');
   installLayout(win, O);
   send(win, {

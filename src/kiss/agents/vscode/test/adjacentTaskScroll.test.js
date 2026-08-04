@@ -66,7 +66,7 @@ function wheel(win, O, deltaY, n) {
 function setupWithHistoryTask() {
   const {win, posted} = makeWebview();
   const tabId = posted.find((m) => m.type === 'ready').tabId;
-  win._demoApi.hideWelcome();
+  win._testApi.hideWelcome();
   const O = win.document.getElementById('output');
   fakeGeometry(O);
   send(win, {
@@ -90,7 +90,7 @@ function getAdjacent(posted) {
 function testEarlyPromptPoisoning() {
   const {win, posted} = makeWebview();
   const tabId = posted.find((m) => m.type === 'ready').tabId;
-  win._demoApi.hideWelcome();
+  win._testApi.hideWelcome();
   const O = win.document.getElementById('output');
   fakeGeometry(O);
   send(win, {type: 'setTaskText', text: 'My new task', tabId});
@@ -124,7 +124,7 @@ function testEarlyPromptPoisoning() {
 function testNoEmptyTaskIdRequest() {
   const {win, posted} = makeWebview();
   const tabId = posted.find((m) => m.type === 'ready').tabId;
-  win._demoApi.hideWelcome();
+  win._testApi.hideWelcome();
   const O = win.document.getElementById('output');
   fakeGeometry(O);
   send(win, {type: 'setTaskText', text: 'My new task', tabId});
@@ -149,7 +149,7 @@ function testNoEmptyTaskIdRequest() {
 function testTaskEventsWithoutTitle() {
   const {win, posted} = makeWebview();
   const tabId = posted.find((m) => m.type === 'ready').tabId;
-  win._demoApi.hideWelcome();
+  win._testApi.hideWelcome();
   const O = win.document.getElementById('output');
   fakeGeometry(O);
   send(win, {

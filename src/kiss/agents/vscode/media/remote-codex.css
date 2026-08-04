@@ -222,12 +222,6 @@ body.remote-chat #stop-btn {
   border: none;
 }
 
-body.remote-chat #demo-pause-btn {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-}
-
 body.remote-chat #model-dropdown {
   background: #212121;
   border: 1px solid rgb(255 255 255 / 10%);

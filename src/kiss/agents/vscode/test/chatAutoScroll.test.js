@@ -129,7 +129,7 @@ function userScroll(win, el, top) {
 function startRunningTask(win, posted) {
   const ready = posted.find(m => m.type === 'ready');
   assert.ok(ready && ready.tabId, 'webview must post ready with a tabId');
-  win._demoApi.hideWelcome();
+  win._testApi.hideWelcome();
   send(win, {
     type: 'status',
     running: true,
@@ -499,7 +499,7 @@ async function testReplayLandsAtEnd(remote) {
   const geoO = {sh: 4000, ch: 500};
   fakeGeometry(O, geoO);
   const ready = posted.find(m => m.type === 'ready');
-  win._demoApi.hideWelcome();
+  win._testApi.hideWelcome();
   userScroll(win, O, 33);
   send(win, {
     type: 'task_events',
@@ -1013,7 +1013,7 @@ async function testIdleScrollDoesNotLock(remote) {
   const geo = {sh: 3000, ch: 500};
   fakeGeometry(O, geo);
   const ready = posted.find(m => m.type === 'ready');
-  win._demoApi.hideWelcome();
+  win._testApi.hideWelcome();
 
   // The user browses history while the chat is idle.
   userScroll(win, O, 30);

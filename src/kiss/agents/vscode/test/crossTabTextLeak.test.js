@@ -135,8 +135,8 @@ function toastText(win) {
 
 // Open a second chat tab and hand back both ids, with `second` on screen.
 function twoTabs(win) {
-  const api = win._demoApi;
-  assert.ok(api, '_demoApi must be exposed by main.js');
+  const api = win._testApi;
+  assert.ok(api, '_testApi must be exposed by main.js');
   const first = api.getActiveTabId();
   api.createNewTab();
   const second = api.getActiveTabId();
@@ -274,7 +274,7 @@ test('an @-mention file list for one tab never opens over another tab', () => {
     win.document.getElementById('output').ownerDocument,
     null,
   );
-  assert.strictEqual(second, win._demoApi.getActiveTabId());
+  assert.strictEqual(second, win._testApi.getActiveTabId());
 
   win.close();
 });
@@ -359,7 +359,7 @@ test('a fileContent reply for a background tab never steals the view', () => {
   });
 
   assert.strictEqual(
-    win._demoApi.getActiveTabId(),
+    win._testApi.getActiveTabId(),
     second,
     'a file opened for a background task must not pull the user away ' +
       'from the tab they are reading',
@@ -1279,7 +1279,7 @@ test('voice fails closed when the webview publishes no owner', () => {
 // Give both tabs the same backend chat and, optionally, a task each.
 // Returns the two tab ids with the first tab left on screen.
 function twoChatSiblings(win, chatId, firstTask, secondTask) {
-  const api = win._demoApi;
+  const api = win._testApi;
   const first = api.getActiveTabId();
   send(win, {type: 'clear', chat_id: chatId, tabId: first});
   api.createNewTab();
@@ -1490,7 +1490,7 @@ test('clearChat still opens a new conversation', () => {
   const {first, second} = twoTabs(win);
   send(win, {type: 'clear', chat_id: 'chat-QK75', tabId: second});
   send(win, {type: 'clearChat'});
-  const now = win._demoApi.getActiveTabId();
+  const now = win._testApi.getActiveTabId();
   assert.ok(
     now !== first && now !== second,
     'the New Conversation command must still create a tab',
@@ -1730,72 +1730,6 @@ test('the visible tab id is published for voice', () => {
     win.kissActiveTabId(),
     second,
     'voice.js reads the conversation on screen through this accessor',
-  );
-
-  win.close();
-});
-
-// ---------------------------------------------------------------------------
-// Leak 8: a long-running demo replay keeps writing into its own conversation
-//
-// The demo replay types a Result panel across dozens of awaits, so it cannot
-// hold onto #output: that element is a singleton whose children move into the
-// outgoing tab's fragment on a switch. It asks for its own tab's live root
-// before every append instead, which is what these three answers guarantee.
-// ---------------------------------------------------------------------------
-
-test('the visible conversation resolves to the live output surface', () => {
-  const {win} = makeWebview();
-  const {api, second} = twoTabs(win);
-
-  assert.strictEqual(
-    api.outputRootForTab(second),
-    win.document.getElementById('output'),
-    'a replay owning the on-screen tab must append straight to #output',
-  );
-
-  win.close();
-});
-
-test('a hidden conversation resolves to its own detached surface', () => {
-  const {win} = makeWebview();
-  const {api, first, second} = twoTabs(win);
-
-  clickTab(win, first);
-  send(win, {type: 'system_output', text: 'own_text_QK96', tabId: first});
-  clickTab(win, second);
-
-  const hidden = api.outputRootForTab(first);
-  assert.notStrictEqual(
-    hidden,
-    win.document.getElementById('output'),
-    'a hidden tab must never resolve to the surface another tab is showing',
-  );
-  assert.ok(
-    hidden && String(hidden.textContent).includes('own_text_QK96'),
-    'it must resolve to the fragment holding that tab\u2019s own transcript',
-  );
-  assert.ok(
-    !visibleText(win).includes('own_text_QK96'),
-    'and the visible conversation must be untouched by it',
-  );
-
-  win.close();
-});
-
-test('a conversation that is gone resolves to nothing at all', () => {
-  const {win} = makeWebview();
-  const {api} = twoTabs(win);
-
-  assert.strictEqual(
-    api.outputRootForTab(''),
-    null,
-    'no tab id means there is nothing to append to',
-  );
-  assert.strictEqual(
-    api.outputRootForTab('closed-tab-QK97'),
-    null,
-    'a replay must not resurrect a conversation the user closed',
   );
 
   win.close();

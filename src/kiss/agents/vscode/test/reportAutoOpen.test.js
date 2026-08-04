@@ -496,28 +496,6 @@ function testClearDiscardsQueuedReport() {
   console.log('  ok - a clear (new task) discards the queued report');
 }
 
-function testDemoModeDoesNotOpen() {
-  const {win} = makeWebview({withMarked: true});
-  assert.ok(win._demoApi, 'expected the demo API hook on window');
-  win._demoApi.active = true;
-  writeReport(win, 'reports/demo.md', '# demo replay report');
-  finishTask(win);
-  assertNoReportTab(win, 'demo mode');
-  win._demoApi.active = false;
-  // A live-confirmed report whose task_done arrives while a demo replay
-  // is active must not open either (open-time demo guard).
-  writeReport(win, 'reports/mid.md', '# confirmed before demo');
-  win._demoApi.active = true;
-  finishTask(win);
-  assertNoReportTab(win, 'task_done during demo');
-  win._demoApi.active = false;
-  writeReport(win, 'reports/live.md', '# live report');
-  finishTask(win);
-  assertReportTabActive(win, 'live report after demo ends');
-  win.close();
-  console.log('  ok - demo-mode replays do not auto-open report tabs');
-}
-
 function testTraversalPathsDoNotOpen() {
   const {win} = makeWebview({withMarked: true});
   writeReport(win, 'reports/../escape.md', '# escaped');
@@ -822,7 +800,6 @@ function main() {
   testTaskFailureStillOpensReport();
   testCloseTabDiscardsQueuedReport();
   testClearDiscardsQueuedReport();
-  testDemoModeDoesNotOpen();
   testTraversalPathsDoNotOpen();
   testRemoteWebAppMdReport();
   testNonReportPathsDoNotOpen();

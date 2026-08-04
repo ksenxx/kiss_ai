@@ -228,7 +228,7 @@ function testChevronPassWorksWithoutButton() {
   const d = win.document;
   const ready = posted.find(m => m.type === 'ready');
   const parentId = ready.tabId;
-  win._demoApi.hideWelcome();
+  win._testApi.hideWelcome();
   send(win, {type: 'status', running: true, tabId: parentId, startTs: 1});
   send(win, {type: 'setTaskText', text: 'live task', tabId: parentId});
 

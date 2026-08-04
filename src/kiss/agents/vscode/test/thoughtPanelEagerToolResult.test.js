@@ -327,7 +327,7 @@ async function testTextDeltaFillsEagerPanel() {
 async function testEagerPanelBackgroundTab() {
   const wv = makeWebview();
   const win = wv.win;
-  const api = win._demoApi;
+  const api = win._testApi;
   const tab1 = api.getActiveTabId();
 
   api.createNewTab();
@@ -392,7 +392,7 @@ async function testEagerPanelBackgroundTab() {
 async function testEagerPanelSurvivesTabSwitch() {
   const wv = makeWebview();
   const win = wv.win;
-  const api = win._demoApi;
+  const api = win._testApi;
   const tab1 = api.getActiveTabId();
   const output = win.document.getElementById('output');
 
@@ -430,7 +430,7 @@ async function testEagerPanelSurvivesTabSwitch() {
 async function testEagerPanelFooterTicksAfterTabRestore() {
   const wv = makeWebview();
   const win = wv.win;
-  const api = win._demoApi;
+  const api = win._testApi;
   const tab1 = api.getActiveTabId();
 
   send(win, {type: 'clear', chat_id: 'chat-tick-restore', tabId: tab1});
@@ -514,7 +514,7 @@ async function testProvisionalPanelDiscardedOnTaskStop() {
 async function testTaskEndFreezesFilledPanelAndCleansBgTab() {
   const wv = makeWebview();
   const win = wv.win;
-  const api = win._demoApi;
+  const api = win._testApi;
   const tab1 = api.getActiveTabId();
   const output = win.document.getElementById('output');
 

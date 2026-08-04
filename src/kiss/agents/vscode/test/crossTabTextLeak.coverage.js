@@ -33,7 +33,7 @@ const TARGETS = [
   {
     file: path.join(__dirname, '..', 'media', 'main.js'),
     sourceUrl: 'tableak-main.js',
-    regions: 25,
+    regions: 24,
   },
   {
     file: path.join(__dirname, '..', 'media', 'voice.js'),

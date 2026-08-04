@@ -94,10 +94,6 @@
             <button id="send-btn" data-tooltip="Send message">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
             </button>
-            <button id="demo-pause-btn" data-tooltip="Pause demo" style="display:none;">
-              <svg class="icon-pause" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
-              <svg class="icon-play" style="display:none;" viewBox="0 0 24 24" fill="currentColor"><polygon points="7 4 20 12 7 20 7 4"/></svg>
-            </button>
             <button id="stop-btn" data-tooltip="Stop agent" style="display:none;">
               <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
             </button>
@@ -202,10 +198,6 @@
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-use-worktree" checked>
             Use worktree
-          </label>
-          <label class="config-label config-checkbox">
-            <input type="checkbox" id="cfg-demo-mode">
-            Demo mode
           </label>
           <label class="config-label">Auto submit spoken task
             <select id="cfg-voice-auto-submit">
@@ -316,6 +308,5 @@
   <script{{NONCE_ATTR}} src="{{MAIN_SRC}}"></script>
   <script{{NONCE_ATTR}}>window.__VOICE__ = {{VOICE_CONFIG}};</script>
   <script{{NONCE_ATTR}} src="{{VOICE_SRC}}"></script>
-  <script{{NONCE_ATTR}} src="{{DEMO_SRC}}"></script>
 </body>
 </html>

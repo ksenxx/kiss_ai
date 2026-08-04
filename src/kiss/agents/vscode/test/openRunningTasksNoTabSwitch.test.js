@@ -95,7 +95,7 @@ function resumeCalls(win) {
 // were, and must resume that task into its own (background) tab.
 function testRestoredRunningTaskDoesNotStealFocus() {
   const win = makeWebview();
-  const api = win._demoApi;
+  const api = win._testApi;
   const userTab = api.getActiveTabId();
   const before = tabIds(win);
 
@@ -148,7 +148,7 @@ function testRestoredRunningTaskDoesNotStealFocus() {
 // Several restored tasks must each get their own tab, none of them active.
 function testManyRestoredTasksEachGetTheirOwnTab() {
   const win = makeWebview();
-  const api = win._demoApi;
+  const api = win._testApi;
   const userTab = api.getActiveTabId();
 
   send(win, {
@@ -192,7 +192,7 @@ function testManyRestoredTasksEachGetTheirOwnTab() {
 // switched to either.
 function testAlreadyOpenTaskIsNeitherDuplicatedNorFocused() {
   const win = makeWebview();
-  const api = win._demoApi;
+  const api = win._testApi;
 
   send(win, {
     type: 'openRunningTasks',
@@ -235,7 +235,7 @@ function testAlreadyOpenTaskIsNeitherDuplicatedNorFocused() {
 // Junk entries must be ignored without disturbing the tab bar.
 function testMalformedTasksAreIgnored() {
   const win = makeWebview();
-  const api = win._demoApi;
+  const api = win._testApi;
   const userTab = api.getActiveTabId();
   const before = tabIds(win);
 

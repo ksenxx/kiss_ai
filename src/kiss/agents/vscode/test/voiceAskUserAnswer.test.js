@@ -112,7 +112,7 @@ test('the ask-user panel shows a mic button along with question/input/submit', (
 test('speech while a question is pending is sent as the userAnswer', () => {
   const {win, posted} = makeWebview();
   send(win, {type: 'askUser', question: 'Which color?'});
-  const tabId = win._demoApi.getActiveTabId();
+  const tabId = win._testApi.getActiveTabId();
   posted.length = 0;
   send(win, {type: 'voiceWake'});
   send(win, {type: 'voiceSpeech', text: 'blue', speaker: 1, language: 'fr'});

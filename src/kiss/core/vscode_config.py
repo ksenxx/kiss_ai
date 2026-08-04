@@ -67,10 +67,22 @@ DEFAULTS: dict[str, Any] = {
     "auto_commit_mode": True,
     "is_parallel": True,
     "is_worktree": True,
-    "demo_mode": False,
     "work_dir": "",
     "last_model": "",
 }
+
+RETIRED_KEYS: frozenset[str] = frozenset({"demo_mode"})
+"""Settings that used to exist and must be forgotten on sight.
+
+``config.json`` is written by every previous release, so dropping a key
+from :data:`DEFAULTS` is not enough: :func:`load_config` overlays whatever
+the file holds, :func:`sanitize_config` passes unknown keys through (that
+is how genuine extension-owned keys such as ``email`` and ``tunnel_token``
+survive), and :func:`save_config` rewrites the file from its own previous
+contents.  A retired key would therefore be read back, echoed to every
+client in ``configData``, and re-persisted forever.  Listing it here
+purges it from both the value read and the file written.
+"""
 
 API_KEY_ENV_VARS: frozenset[str] = frozenset({
     "GEMINI_API_KEY",
@@ -119,7 +131,8 @@ def sanitize_config(data: dict[str, Any]) -> dict[str, Any]:
     ``1.0``/``0.0``; strings keep only
     genuine ``str`` values (falling back to the default otherwise).
     Non-DEFAULTS keys (e.g. ``tunnel_token``, ``email``) pass through
-    untouched.
+    untouched, except the retired ones listed in :data:`RETIRED_KEYS`,
+    which are dropped.
 
     Args:
         data: Raw configuration dict.
@@ -127,7 +140,7 @@ def sanitize_config(data: dict[str, Any]) -> dict[str, Any]:
     Returns:
         A new dict with sanitized values; *data* is not modified.
     """
-    result = dict(data)
+    result = {k: v for k, v in data.items() if k not in RETIRED_KEYS}
     for key, default in DEFAULTS.items():
         if key not in result:
             continue
@@ -225,6 +238,8 @@ def save_config(data: dict[str, Any]) -> None:
             for k in DEFAULTS:
                 if k in data:
                     existing[k] = data[k]
+            for k in RETIRED_KEYS:
+                existing.pop(k, None)
             serialized = json.dumps(existing, indent=2)
             fd, tmp = tempfile.mkstemp(
                 prefix=".kiss-config-", dir=str(cfg_dir),

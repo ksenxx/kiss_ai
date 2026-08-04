@@ -122,7 +122,7 @@ function tabEl(win, tabId) {
 }
 
 function activeTabId(win) {
-  return win._demoApi.getActiveTabId();
+  return win._testApi.getActiveTabId();
 }
 
 function clickTab(win, el) {
