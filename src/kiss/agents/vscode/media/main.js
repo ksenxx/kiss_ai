@@ -669,19 +669,48 @@
     const tab = getTab(activeTabId);
     if (!tab) return;
     if (tab.isContentTab) return;
+    // visibletask-coverage:start
+    // The panel and the status row may be describing a neighbouring task
+    // the reader scrolled into. That is a viewing position, not the tab's
+    // identity, so a tab is always saved under its own task. This has to
+    // be read before the transcript is detached below, while #output
+    // still has the geometry the reader was looking at.
+    const shownRegion = visibleRegion();
+    const neighbour = shownRegion && regionNeighbour(shownRegion);
+    // visibletask-coverage:end
     tab.welcomeVisible = welcome ? welcome.style.display !== 'none' : true;
     if (welcome && welcome.parentNode === O) O.removeChild(welcome);
     tab.outputFragment = document.createDocumentFragment();
     while (O.firstChild) tab.outputFragment.appendChild(O.firstChild);
-    tab.taskPanelHTML = taskPanelText ? taskPanelText.textContent : '';
-    tab.taskPanelVisible = taskPanel
-      ? taskPanel.classList.contains('visible')
-      : false;
+    // visibletask-coverage:start
+    tab.taskPanelHTML = neighbour
+      ? currentTaskName
+      : taskPanelText
+        ? taskPanelText.textContent
+        : '';
+    tab.taskPanelVisible = neighbour
+      ? !!currentTaskName
+      : taskPanel
+        ? taskPanel.classList.contains('visible')
+        : false;
     tab.statusTextContent = statusText ? statusText.textContent : 'Ready';
     tab.statusTextColor = statusText ? statusText.style.color : 'var(--green)';
-    tab.statusTokensText = statusTokens ? statusTokens.textContent : '';
-    tab.statusBudgetText = statusBudget ? statusBudget.textContent : '';
-    tab.statusStepsText = statusSteps ? statusSteps.textContent : '';
+    tab.statusTokensText = neighbour
+      ? currentTaskMetrics.tokens
+      : statusTokens
+        ? statusTokens.textContent
+        : '';
+    tab.statusBudgetText = neighbour
+      ? currentTaskMetrics.budget
+      : statusBudget
+        ? statusBudget.textContent
+        : '';
+    tab.statusStepsText = neighbour
+      ? currentTaskMetrics.steps
+      : statusSteps
+        ? statusSteps.textContent
+        : '';
+    // visibletask-coverage:end
     tab.selectedModel = selectedModel;
     tab.agentModel = agentModel;
     tab.attachments = attachments;
@@ -791,6 +820,15 @@
     if (statusTokens) statusTokens.textContent = tab.statusTokensText;
     if (statusBudget) statusBudget.textContent = tab.statusBudgetText;
     if (statusSteps) statusSteps.textContent = tab.statusStepsText;
+    // visibletask-coverage:start
+    // The restored numbers are this tab's own: they are what the status
+    // row must come back to after the reader visits a neighbour.
+    currentTaskMetrics = {
+      tokens: tab.statusTokensText || '',
+      budget: tab.statusBudgetText || '',
+      steps: tab.statusStepsText || '',
+    };
+    // visibletask-coverage:end
     if (welcome) {
       if (tab.welcomeVisible) {
         showWelcomeScreen();
@@ -857,6 +895,12 @@
     updateInputDisabled();
     resetAdjacentState();
     syncAskModalToActiveTab();
+    // visibletask-coverage:start
+    // The transcript comes back where the reader left it, which may well
+    // be inside a neighbouring task, so the panel is derived from the
+    // restored transcript rather than from the tab's own name.
+    updateVisibleTask();
+    // visibletask-coverage:end
   }
 
   // Light / dark theme toggle for the REMOTE webapp only.  The VS Code
@@ -2372,6 +2416,15 @@
     const savedTokens = statusTokens ? statusTokens.textContent : '';
     const savedBudget = statusBudget ? statusBudget.textContent : '';
     const savedSteps = statusSteps ? statusSteps.textContent : '';
+    // visibletask-coverage:start
+    // The replay below renders a neighbour's transcript through the very
+    // renderers the live stream uses, so it walks the live task's step
+    // counter and metrics along with it. They are put back afterwards.
+    const savedMetrics = currentTaskMetrics;
+    const savedStepCount = stepCount;
+    const savedVisibleTab = activeTabId;
+    currentTaskMetrics = {tokens: '', budget: '', steps: ''};
+    // visibletask-coverage:end
     if (events && events.length > 0) {
       // tableak-coverage:start
       replayEventsInto(container, events, {
@@ -2394,6 +2447,14 @@
     if (statusTokens) statusTokens.textContent = savedTokens;
     if (statusBudget) statusBudget.textContent = savedBudget;
     if (statusSteps) statusSteps.textContent = savedSteps;
+    // visibletask-coverage:start
+    // Same rule as everywhere else: if the replay swapped the tab on
+    // screen, its numbers are already up and must be left alone.
+    if (activeTabId === savedVisibleTab) {
+      currentTaskMetrics = savedMetrics;
+      stepCount = savedStepCount;
+    }
+    // visibletask-coverage:end
 
     if (direction === 'prev') {
       const prevScrollHeight = O.scrollHeight;
@@ -2414,6 +2475,10 @@
         last: container,
       });
     // taskwheel-coverage:end
+    // Splicing the transcript changes what is on screen even when nothing
+    // scrolls — a short transcript cannot scroll at all — so the panel is
+    // re-derived here rather than waiting for a scroll that may never come.
+    updateVisibleTask();
   }
 
   function clearOutput() {
@@ -4102,11 +4167,24 @@
 
   function updateStepCount(count) {
     stepCount = count;
+    // visibletask-coverage:start
+    // Remembered as well as painted: the status row is lent out to the
+    // neighbouring tasks the reader scrolls through, and this is the
+    // number it has to come back to.
+    currentTaskMetrics.steps = 'Steps: ' + count;
+    // visibletask-coverage:end
     if (statusSteps) statusSteps.textContent = 'Steps: ' + count;
   }
 
   function processOutputEvent(ev) {
     normalizeEventTs(ev);
+    // visibletask-coverage:start
+    // A live event reads and rewrites the status row, so the row must be
+    // showing the live task's own numbers while it is handled — the
+    // reader may have left it on a neighbouring task. updateVisibleTask()
+    // at the end of this function hands it back.
+    showLiveMetrics();
+    // visibletask-coverage:end
     const t = ev.type;
     if (t === 'tool_call') {
       lastToolName = ev.name || '';
@@ -4188,6 +4266,12 @@
     autoScrollLatestEventPanel(autoScrollPanel);
     // autoscroll-coverage:end
     applyChevronState(currentTaskName);
+    // visibletask-coverage:start
+    // The event may have changed the transcript's shape as well as the
+    // status row, so both the panel and the row are re-derived from what
+    // is actually on screen.
+    updateVisibleTask();
+    // visibletask-coverage:end
   }
 
   function processOutputEventForBgTab(ev, tab) {
@@ -4263,6 +4347,14 @@
       const prevTokensText = statusTokens ? statusTokens.textContent : '';
       const prevBudgetText = statusBudget ? statusBudget.textContent : '';
       const prevStepsText = statusSteps ? statusSteps.textContent : '';
+      // visibletask-coverage:start
+      // A hidden tab's event runs through the same renderers, so it also
+      // moves the visible tab's remembered numbers unless they are put
+      // back with the status row below.
+      const prevMetrics = currentTaskMetrics;
+      const prevVisibleTab = activeTabId;
+      currentTaskMetrics = {tokens: '', budget: '', steps: ''};
+      // visibletask-coverage:end
 
       handleOutputEvent(
         ev,
@@ -4276,6 +4368,12 @@
       if (statusTokens) statusTokens.textContent = prevTokensText;
       if (statusBudget) statusBudget.textContent = prevBudgetText;
       if (statusSteps) statusSteps.textContent = prevStepsText;
+      // visibletask-coverage:start
+      // Collapsing a finished run_parallel panel closes its sub-agent
+      // tabs, so this event may have swapped the tab on screen; the
+      // borrowed numbers only go back to the tab they came from.
+      if (activeTabId === prevVisibleTab) currentTaskMetrics = prevMetrics;
+      // visibletask-coverage:end
 
       if (t === 'tool_result' && bgLastToolName !== 'finish' && !bgLlmPanel) {
         bgLlmPanel = mkThoughtsPanel(ev.ts);
@@ -4424,76 +4522,13 @@
     {passive: true},
   );
 
-  function updateVisibleTask() {
-    const adjacentTasks = O.querySelectorAll('.adjacent-task[data-task]');
-    if (!adjacentTasks.length) return;
-    let visibleTask = currentTaskName;
-    let visibleContainer = null;
-    // taskwheel-coverage:start
-    const pinned = wheelPinnedTarget();
-    if (pinned) {
-      if (pinned.el.classList.contains('adjacent-task')) {
-        visibleTask = pinned.el.dataset.task || currentTaskName;
-        visibleContainer = pinned.el;
-      }
-    } else {
-      // taskwheel-coverage:end
-      const outputRect = O.getBoundingClientRect();
-      const checkY = outputRect.top + outputRect.height * 0.3;
-      for (let i = 0; i < adjacentTasks.length; i++) {
-        const rect = adjacentTasks[i].getBoundingClientRect();
-        if (rect.top <= checkY && rect.bottom > checkY) {
-          visibleTask = adjacentTasks[i].dataset.task;
-          visibleContainer = adjacentTasks[i];
-          break;
-        }
-      }
-      // taskwheel-coverage:start
-    }
-    // taskwheel-coverage:end
-    setTaskText(visibleTask);
-    if (visibleContainer) {
-      if (statusTokens)
-        statusTokens.textContent = visibleContainer.dataset.metricTokens || '';
-      if (statusBudget)
-        statusBudget.textContent = visibleContainer.dataset.metricBudget || '';
-      if (statusSteps)
-        statusSteps.textContent = visibleContainer.dataset.metricSteps || '';
-    } else {
-      if (statusTokens) statusTokens.textContent = currentTaskMetrics.tokens;
-      if (statusBudget) statusBudget.textContent = currentTaskMetrics.budget;
-      if (statusSteps) statusSteps.textContent = currentTaskMetrics.steps;
-    }
-  }
-
-  O.addEventListener('scroll', () => {
-    // autoscroll-coverage:start
-    updateUserScrollLock();
-    // autoscroll-coverage:end
-    updateVisibleTask();
-  });
-
-  const TASK_WHEEL_STEP = 60;
-  // taskwheel-coverage:start
-  let taskWheelAccum = 0;
-  let taskWheelDir = '';
-  let taskWheelTimer = null;
-  let taskWheelPendingDir = '';
-  let taskWheelLastTarget = null;
-
-  function wheelPinnedTarget() {
-    if (!taskWheelLastTarget) return null;
-    if (O.scrollTop !== taskWheelLastTarget.scrollTop) {
-      taskWheelLastTarget = null;
-      return null;
-    }
-    if (!O.contains(taskWheelLastTarget.el)) {
-      taskWheelLastTarget = null;
-      return null;
-    }
-    return taskWheelLastTarget;
-  }
-
+  // visibletask-coverage:start
+  /**
+   * Split #output into task regions, top to bottom.
+   *
+   * Every spliced-in neighbour is one `.adjacent-task` container; each run
+   * of plain children between them belongs to the task this tab is on.
+   */
   function getTaskRegions() {
     const regions = [];
     let mainFirst = null;
@@ -4524,20 +4559,121 @@
     return regions;
   }
 
+  /**
+   * Index of the region the reader is looking at: the one owning the most
+   * visible pixels, ties going to the upper region.
+   *
+   * Visible height, rather than a fixed probe line, is what keeps the
+   * first and the last region selectable. The scroller clamps at both
+   * ends, so a task shorter than the probe offset can never be moved onto
+   * that line even when its events are the only ones worth reading.
+   *
+   * The overlap is deliberately left signed: for a viewport that sits off
+   * the transcript entirely it degrades into "the nearest region", which
+   * is the first one above the content and the last one below it.
+   */
   function getVisibleRegionIndex(regions) {
     const pinned = wheelPinnedTarget();
     if (pinned)
       for (let i = 0; i < regions.length; i++)
         if (regions[i].first === pinned.el) return i;
     const outputRect = O.getBoundingClientRect();
-    const checkY = outputRect.top + outputRect.height * 0.3;
+    let bestIdx = 0;
+    let bestVisible = -Infinity;
     for (let i = 0; i < regions.length; i++) {
       const top = regions[i].first.getBoundingClientRect().top;
       const bottom = regions[i].last.getBoundingClientRect().bottom;
-      if (top <= checkY && bottom > checkY) return i;
+      const visible =
+        Math.min(bottom, outputRect.bottom) - Math.max(top, outputRect.top);
+      if (visible > bestVisible) {
+        bestVisible = visible;
+        bestIdx = i;
+      }
     }
-    if (regions[0].first.getBoundingClientRect().top > checkY) return 0;
-    return regions.length - 1;
+    return bestIdx;
+  }
+
+  /**
+   * The task region the reader is looking at, or null when the transcript
+   * holds nothing but this tab's own task.
+   *
+   * With no neighbour spliced in there is nothing to disambiguate, and the
+   * panel may be showing a read-only history preview that has no region of
+   * its own, so callers must leave the panel alone.
+   */
+  function visibleRegion() {
+    if (!O.querySelector('.adjacent-task[data-task]')) return null;
+    const regions = getTaskRegions();
+    return regions[getVisibleRegionIndex(regions)];
+  }
+
+  /** The `.adjacent-task` container of a region, null for the tab's own. */
+  function regionNeighbour(region) {
+    return region.first.classList.contains('adjacent-task')
+      ? region.first
+      : null;
+  }
+
+  /**
+   * Put the live task's own numbers back into the shared status row.
+   *
+   * The row is lent to whichever neighbouring task the reader scrolls
+   * into, so anything that works with the live task's numbers has to
+   * reclaim it first.
+   */
+  function showLiveMetrics() {
+    if (!O.querySelector('.adjacent-task[data-task]')) return;
+    if (statusTokens) statusTokens.textContent = currentTaskMetrics.tokens;
+    if (statusBudget) statusBudget.textContent = currentTaskMetrics.budget;
+    if (statusSteps) statusSteps.textContent = currentTaskMetrics.steps;
+  }
+
+  function updateVisibleTask() {
+    const region = visibleRegion();
+    if (!region) return;
+    const container = regionNeighbour(region);
+    setTaskText(region.task || currentTaskName);
+    if (container) {
+      if (statusTokens)
+        statusTokens.textContent = container.dataset.metricTokens || '';
+      if (statusBudget)
+        statusBudget.textContent = container.dataset.metricBudget || '';
+      if (statusSteps)
+        statusSteps.textContent = container.dataset.metricSteps || '';
+    } else {
+      if (statusTokens) statusTokens.textContent = currentTaskMetrics.tokens;
+      if (statusBudget) statusBudget.textContent = currentTaskMetrics.budget;
+      if (statusSteps) statusSteps.textContent = currentTaskMetrics.steps;
+    }
+  }
+  // visibletask-coverage:end
+
+  O.addEventListener('scroll', () => {
+    // autoscroll-coverage:start
+    updateUserScrollLock();
+    // autoscroll-coverage:end
+    updateVisibleTask();
+  });
+
+  const TASK_WHEEL_STEP = 60;
+  // taskwheel-coverage:start
+  let taskWheelAccum = 0;
+  let taskWheelDir = '';
+  let taskWheelTimer = null;
+  let taskWheelPendingDir = '';
+  let taskWheelLastTarget = null;
+
+  function wheelPinnedTarget() {
+    if (!taskWheelLastTarget) return null;
+    if (O.scrollTop !== taskWheelLastTarget.scrollTop) {
+      taskWheelLastTarget = null;
+      return null;
+    }
+    if (!O.contains(taskWheelLastTarget.el)) {
+      taskWheelLastTarget = null;
+      return null;
+    }
+    return taskWheelLastTarget;
   }
 
   function scrollTaskRegionToTop(region) {
@@ -5321,6 +5457,19 @@
           // than leaving the tab showing half a new one.
           const teOldFrag = teTab.outputFragment;
           teTab.outputFragment = frag;
+          // visibletask-coverage:start
+          // This transcript belongs to a hidden tab, but it renders
+          // through the same renderers as the live stream: the visible
+          // tab's status row, step counter and remembered numbers are
+          // put back exactly as they were found.
+          const teMetrics = currentTaskMetrics;
+          const teStepCount = stepCount;
+          const teTokens = statusTokens ? statusTokens.textContent : '';
+          const teBudget = statusBudget ? statusBudget.textContent : '';
+          const teSteps = statusSteps ? statusSteps.textContent : '';
+          const teVisibleTab = activeTabId;
+          currentTaskMetrics = {tokens: '', budget: '', steps: ''};
+          // visibletask-coverage:end
           try {
             replayEventsInto(frag, ev.events || [], {
               ownerTabId: teTabId,
@@ -5333,6 +5482,21 @@
           } catch (e) {
             teTab.outputFragment = teOldFrag;
             throw e;
+          } finally {
+            // visibletask-coverage:start
+            // The replay can close the tab that was on screen — a
+            // finished run_parallel panel takes its sub-agent tabs with
+            // it — and the tab that takes its place has already put its
+            // own numbers up. Only give the borrowed ones back to the tab
+            // they were borrowed from.
+            if (activeTabId === teVisibleTab) {
+              currentTaskMetrics = teMetrics;
+              stepCount = teStepCount;
+              if (statusTokens) statusTokens.textContent = teTokens;
+              if (statusBudget) statusBudget.textContent = teBudget;
+              if (statusSteps) statusSteps.textContent = teSteps;
+            }
+            // visibletask-coverage:end
           }
           teTab.welcomeVisible = false;
           const bgSteps = countReplayedSteps(ev.events || []);
