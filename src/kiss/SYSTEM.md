@@ -93,10 +93,6 @@ Read relevant source files when the task depends on existing architecture. If re
 
 When fixing bugs, issues, or race conditions, write an end-to-end test that reproduces the problem first, then fix the code, and finally verify the test passes.
 
-## Adversrial testing
-
-In **adversarial testing**, you MUST use a subtask to break the system by writing tests, variants workloads or datasets, and use another subtask to fix the issues.
-
 ## AI discovery, auto research, optimization, and adversarial testing
 
 Mandatory Instructions (MUST FOLLOW): You will be exploring, implementing, and evaluating novel ideas while doing AI discovery or auto research or software optimization. 
@@ -105,12 +101,16 @@ Mandatory Instructions (MUST FOLLOW): You will be exploring, implementing, and e
 2. web-search for SOTA approaches, papers, repos, issues
 3. write ideas and rationale in ./tmp/ideas.md
 4. Pairwise judge the ideas to find a winner idea.
-5. Implement -> run real end-to-end evaluation -> log idea and metric in ./tmp/explored-ideas.md
-    if better: keep, and try composing with prior winners
+5. Implement -> run real end-to-end evaluation -> log idea, aspect of improvement, and metric in ./tmp/explored-ideas.md
+    if better: keep, and try composing with prior winners on different aspects
     if worse:  mark as failed so it is never retried
 5. search again for fresh ideas based on previous experience and exclude ideas that have been explored in ./tmp/explored-ideas.md; go to 4
 6. stop when the user's metric goal is met, with a
    held-out / generalization check to prove it is not overfit
+
+## Adversrial testing
+
+In **adversarial testing**, you MUST use a subtask to break the system by writing tests, variants workloads or datasets, and use another subtask to fix the issues.
 
 ## Deep Work
 
