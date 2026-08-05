@@ -14,9 +14,17 @@
 # directories to keep the History panel's "Workspace" chip working (see
 # below); without them the tasks arrive but that chip hides them.
 #
-# The whole list appears remotely only if the whole database arrives and the
-# panel is willing to show it.  Four things get in the way, and all four are
-# handled here:
+# When the remote already has a task database, only the *difference* travels:
+# src/kiss/scripts/sync_db.py merges the missing task and event rows into the
+# remote database in one transaction, while the remote web app keeps running
+# and tasks that ran only on the remote are preserved.  The full upload below
+# happens only when there is no usable remote database yet (first deploy) or
+# when the delta sync cannot proceed (say, the two schemas have drifted
+# apart) -- replacing the database wholesale is the fallback, not the rule.
+#
+# For the full-upload fallback, the whole list appears remotely only if the
+# whole database arrives and the panel is willing to show it.  Four things
+# get in the way, and all four are handled here:
 #
 #   * The live database is a trio — sorcar.db plus its -wal (pages committed
 #     but not yet folded into the main file) and -shm (an ephemeral,
@@ -55,6 +63,9 @@ LOCAL_DIR="${2:-}"
 REMOTE_DIR="${3:-}"
 [[ -n "$TARGET" ]] \
     || die "Usage: $0 user@ip-address [local-project-dir remote-project-dir]"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SYNC_DB="$(dirname "$SCRIPT_DIR")/src/kiss/scripts/sync_db.py"
 
 DB="${KISS_HOME:-$HOME/.kiss}/sorcar.db"
 if [[ ! -f "$DB" ]]; then
@@ -148,7 +159,52 @@ con.close()' "$SNAPSHOT" "$LOCAL_DIR" "$REMOTE_DIR")" \
 fi
 
 # ---------------------------------------------------------------------------
-# Swap the database in while nothing on the remote has it open
+# Preferred path: delta-sync into the remote database, in place
+#
+# sync_db.py asks the remote what it already has, ships only the missing
+# task and event rows, and merges them in one transaction -- so a repeated
+# deploy moves kilobytes instead of gigabytes, the remote web app never has
+# to stop, and tasks that ran only on the remote survive.  It needs an
+# existing remote database with the two synced tables, so probe first; a
+# missing or unreadable database (first deploy, torn earlier upload) or a
+# failed sync (schemas drifted apart) falls through to the full upload.
+# ---------------------------------------------------------------------------
+REMOTE_DB_STATE="$(ssh "$TARGET" 'python3 -' <<'PY' 2>/dev/null || echo unknown
+import os
+import sqlite3
+
+path = os.path.expanduser("~/.kiss/sorcar.db")
+if not os.path.isfile(path):
+    print("missing")
+    raise SystemExit
+try:
+    con = sqlite3.connect("file:" + path + "?mode=ro", uri=True)
+    tables = {row[0] for row in con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    con.close()
+except sqlite3.Error:
+    print("unreadable")
+    raise SystemExit
+print("ok" if {"task_history", "events"} <= tables else "incompatible")
+PY
+)"
+
+if [[ ! -f "$SYNC_DB" ]]; then
+    warn "$SYNC_DB is missing — uploading the database in full instead."
+elif [[ "$REMOTE_DB_STATE" == "ok" ]]; then
+    step "Delta-syncing $TASKS tasks into $TARGET:~/.kiss/sorcar.db ..."
+    if python3 "$SYNC_DB" "$SNAPSHOT" "$TARGET:~/.kiss/sorcar.db"; then
+        info "Task database synced on $TARGET."
+        exit 0
+    fi
+    warn "Delta sync failed — replacing the remote database wholesale instead" \
+         "(tasks that ran only on $TARGET will be lost)."
+else
+    info "No usable task database on $TARGET yet ($REMOTE_DB_STATE) — uploading in full."
+fi
+
+# ---------------------------------------------------------------------------
+# Fallback: swap the database in while nothing on the remote has it open
 #
 # The web app is brought back on the way out — including when the upload
 # fails — so a deployment is never left without one.  ``pkill`` is anchored

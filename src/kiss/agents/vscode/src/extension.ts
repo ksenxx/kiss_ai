@@ -81,14 +81,7 @@ export function activate(context: vscode.ExtensionContext): void {
         showInformationNotification('No text selected');
         return;
       }
-      const filePath = vscode.workspace.asRelativePath(editor.document.uri);
-      const startLine = sel.start.line + 1;
-      const endLine = sel.end.line + 1;
-      const lang = editor.document.languageId || '';
-      const snippet =
-        `text from ./${filePath} (lines ${startLine}-${endLine}):\n` +
-        `\`\`\`${lang}\n${text}\n\`\`\``;
-      void sidebarView!.appendToInput(snippet);
+      void sidebarView!.appendToInput(text);
     }),
   );
 

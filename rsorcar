@@ -29,12 +29,15 @@
 #      ~/.kiss/api_keys.env (sourced by bash) and ~/.kiss/api_keys.systemd.env
 #      (read by the kiss-web service).  Sourcing a zsh rc from bash is
 #      unreliable, hence the distilled copies.
-#   3b. Ship the task database (~/.kiss/sorcar.db) fresh on every run, so the
+#   3b. Sync the task database (~/.kiss/sorcar.db) on every run, so the
 #      remote web app's History panel lists every task this machine ever ran,
 #      with the tasks that ran in this checkout re-pointed at the remote one
 #      (the panel hides tasks from other workspaces by default).
-#      scripts/ship-task-db.sh does the work and explains why a plain copy of
-#      ~/.kiss/sorcar.* loses tasks; it stops the remote web app for the swap
+#      scripts/ship-task-db.sh does the work: when the remote already has a
+#      database it delta-syncs only the missing rows into it in place via
+#      src/kiss/scripts/sync_db.py (the web app keeps running and remote-only
+#      tasks survive); only a first deploy — or a sync the schemas refuse —
+#      falls back to a full copy, which stops the remote web app for the swap
 #      and starts it again before returning.
 #   4. Copy ~/.ssh/ so the remote can push to git and hop to other hosts as
 #      you.  ``authorized_keys`` is never overwritten — that file is what lets
@@ -210,12 +213,14 @@ RCWIRE
 info "API keys installed (~/.kiss/api_keys.env, sourced from ~/.bashrc)."
 
 # ---------------------------------------------------------------------------
-# 3b. Ship the task database, so the remote History panel lists every task
-#     this machine ever ran.  scripts/ship-task-db.sh explains why a plain
-#     copy of ~/.kiss/sorcar.* loses tasks; it stops the remote web app for
-#     the swap and starts it again before returning.
+# 3b. Sync the task database, so the remote History panel lists every task
+#     this machine ever ran.  scripts/ship-task-db.sh delta-syncs only the
+#     missing rows into an existing remote database in place (via
+#     src/kiss/scripts/sync_db.py, web app left running, remote-only tasks
+#     kept) and falls back to a full copy only when the remote has no usable
+#     database yet or the sync is refused.
 # ---------------------------------------------------------------------------
-step "Shipping the task database to $TARGET ..."
+step "Syncing the task database to $TARGET ..."
 bash "$SCRIPT_DIR/scripts/ship-task-db.sh" "$TARGET" "$MAIN_REPO" "$REMOTE_DIR"
 
 # ---------------------------------------------------------------------------
@@ -372,7 +377,22 @@ rinfo "Repository ready: $(git log -1 --format='%h %s' 2>/dev/null || echo 'no c
 # On a headless server there is no desktop VS Code.  code-server ships the
 # same extension CLI, so a shim forwards the extension subcommands to it and
 # swallows editor launches (this script owns what runs).
-if ! command -v code >/dev/null 2>&1; then
+#
+# Two different editors can attach to this host, and each reads its own
+# extensions directory:
+#   * code-server (the browser IDE) .... ~/.local/share/code-server/extensions
+#   * VS Code Remote - SSH ............. ~/.vscode-server/extensions
+# Installing only into code-server leaves Remote-SSH windows without the
+# KISS Sorcar panel, so ``--install-extension``/``--uninstall-extension``
+# target both.  ~/.vscode-server is populated with the Remote-SSH server's own
+# CLI when someone has already connected; before that first connection,
+# code-server's compatible CLI pointed at that directory pre-seeds it, so the
+# extension is there the moment Remote-SSH first connects.
+#
+# The shim is rewritten (not only created) on every deploy so existing
+# deployments pick up fixes; a real ``code`` binary is never overwritten.
+CODE_PATH="$(command -v code 2>/dev/null || true)"
+if [ -z "$CODE_PATH" ] || grep -q 'kiss-sorcar code shim' "$CODE_PATH" 2>/dev/null; then
     if ! command -v code-server >/dev/null 2>&1; then
         rinfo "Installing code-server (standalone, no sudo)..."
         curl -fsSL https://code-server.dev/install.sh \
@@ -381,8 +401,23 @@ if ! command -v code >/dev/null 2>&1; then
     mkdir -p "$HOME/.local/bin"
     cat > "$HOME/.local/bin/code" <<'SHIM'
 #!/bin/bash
+# kiss-sorcar code shim — stands in for the VS Code CLI on a headless server.
+# Newest CLI shipped by a VS Code Remote-SSH server connection, if any.
+vscode_server_cli() {
+    ls -t "$HOME"/.vscode-server/cli/servers/*/server/bin/code-server \
+          "$HOME"/.vscode-server/bin/*/bin/code-server 2>/dev/null | head -1
+}
 case "${1:-}" in
-    --install-extension|--uninstall-extension|--list-extensions|--version|--locate-extension)
+    --install-extension|--uninstall-extension)
+        code-server "$@"
+        status=$?
+        cli="$(vscode_server_cli)"
+        [ -n "$cli" ] || cli="$(command -v code-server)"
+        mkdir -p "$HOME/.vscode-server/extensions"
+        "$cli" --extensions-dir "$HOME/.vscode-server/extensions" "$@" || status=$?
+        exit $status
+        ;;
+    --list-extensions|--version|--locate-extension)
         exec code-server "$@" ;;
     *) exit 0 ;;
 esac
