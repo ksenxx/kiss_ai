@@ -2,42 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression test for the "KISS Sorcar Server is starting ..."
-// overlay shown in the secondary-sidebar webview until the kiss-web
-// daemon UDS socket is connected.
-//
-// Bug being locked in:
-//
-//   When VS Code launches, the kiss-web daemon is not yet running and
-//   the secondary-sidebar webview used to show its tab bar and welcome
-//   page immediately.  Because AgentClient could not reach the daemon,
-//   every action the user could try (selecting a model, typing a task,
-//   opening history, etc.) failed silently or hung, giving the
-//   appearance of a broken UI.
-//
-//   The fix:
-//     - ``media/chat.html`` ships a ``#kiss-server-loading`` overlay
-//       and ``#app`` starts with ``display:none``, so the OVERLAY is
-//       what the user sees on first paint.
-//     - ``SorcarSidebarView.ts`` posts a ``daemonStatus`` message to
-//       the webview reflecting the live UDS connection state:
-//         * on ``ready`` (webview script just attached its listener),
-//           it posts the *current* status,
-//         * on ``connect`` it posts ``connected: true``,
-//         * on ``disconnect`` it posts ``connected: false`` so a
-//           daemon restart re-shows the overlay until reconnect.
-//     - ``media/main.js`` switches on ``daemonStatus`` and toggles
-//       ``#kiss-server-loading`` / ``#app`` display.
-//
-// This test exercises the real compiled ``SorcarSidebarView.js`` and
-// ``AgentClient.js`` and the real ``media/chat.html`` template — only
-// the ``vscode`` module is stubbed and the daemon UDS endpoint is a
-// real in-process socket server we can start / stop on demand.
-//
-// Run with:
-//
-//     node src/kiss/agents/vscode/test/serverLoadingOverlay.test.js
 
 'use strict';
 
@@ -47,10 +11,6 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
-
-// ---------------------------------------------------------------------------
-// Stub ``vscode`` before any project source loads it.
-// ---------------------------------------------------------------------------
 
 class StubEventEmitter {
   constructor() {
@@ -116,15 +76,7 @@ Module._resolveFilename = function (request, parent, ...rest) {
   return origResolve.call(this, request, parent, ...rest);
 };
 
-// ``_vscode-stub.js`` is a git-tracked fixture shared by tests running
-// in parallel; it already re-exports ``global.__kissVscodeStub`` — never
-// rewrite or delete it here (writeFileSync truncates first, racing a
-// concurrent ``require('vscode')`` in sibling test processes).
 global.__kissVscodeStub = vscodeStub;
-
-// ---------------------------------------------------------------------------
-// Redirect HOME so AgentClient connects to our test UDS socket.
-// ---------------------------------------------------------------------------
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-srvload-'));
 process.env.HOME = tmpHome;
@@ -145,7 +97,6 @@ function startServer() {
   return new Promise((resolve, reject) => {
     server = net.createServer((sock) => {
       lastServerSock = sock;
-      // Drain client writes so the kernel buffer never fills.
       sock.on('data', () => {});
       sock.on('error', () => {});
     });
@@ -195,10 +146,6 @@ function waitFor(predicate, opts = {}) {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Build a fake VS Code WebviewView the sidebar provider can resolve.
-// ---------------------------------------------------------------------------
-
 function makeStubWebviewView(extensionUri) {
   const posted = [];
   const messageListeners = [];
@@ -237,13 +184,7 @@ function makeStubWebviewView(extensionUri) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 async function runTests() {
-  // Locate the project root containing the ``media/`` and ``out/``
-  // folders so SorcarTab.buildChatHtml can read chat.html.
   const projectRoot = path.resolve(__dirname, '..');
   const extensionUri = {fsPath: projectRoot, scheme: 'file'};
 
@@ -267,11 +208,6 @@ async function runTests() {
     console.log('  ok -', msg);
   };
 
-  // ------------------------------------------------------------------
-  // Test 1 — The chat.html template must hide #app and show the
-  // loading overlay on first paint, so the user never sees the tab
-  // bar / welcome page before the daemon is ready.
-  // ------------------------------------------------------------------
   const wsA = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-ws-overlay-'));
   workspaceFolders = [{uri: {fsPath: wsA, scheme: 'file'}}];
 
@@ -302,11 +238,6 @@ async function runTests() {
     fail('chat.html initial overlay assertions', err);
   }
 
-  // ------------------------------------------------------------------
-  // Test 2 — While the daemon is NOT running, the 'ready' message
-  // from the webview must trigger a ``daemonStatus connected:false``
-  // post so the overlay stays up.
-  // ------------------------------------------------------------------
   stub.posted.length = 0;
   stub.fireMessage({type: 'ready', tabId: 't1'});
 
@@ -323,11 +254,6 @@ async function runTests() {
     fail('ready -> daemonStatus(false) while daemon down', err);
   }
 
-  // ------------------------------------------------------------------
-  // Test 3 — Start the daemon socket; AgentClient's auto-reconnect
-  // must fire ``connect`` and we must see a
-  // ``daemonStatus connected:true`` posted to the webview.
-  // ------------------------------------------------------------------
   await startServer();
 
   try {
@@ -346,12 +272,6 @@ async function runTests() {
     fail('connect -> daemonStatus(true)', err);
   }
 
-  // ------------------------------------------------------------------
-  // Test 4 — Drop the socket; ``disconnect`` must post
-  // ``daemonStatus connected:false`` so the overlay reappears.
-  // ------------------------------------------------------------------
-  // Discard all status messages received so far so we can detect a
-  // *new* connected:false unambiguously.
   stub.posted.length = 0;
   if (lastServerSock) {
     lastServerSock.destroy();
@@ -371,11 +291,6 @@ async function runTests() {
     fail('disconnect -> daemonStatus(false)', err);
   }
 
-  // ------------------------------------------------------------------
-  // Test 5 — Auto-reconnect: while the daemon is back up,
-  // AgentClient's reconnect loop must reconnect and post
-  // ``daemonStatus connected:true`` again.
-  // ------------------------------------------------------------------
   stub.posted.length = 0;
 
   try {
@@ -394,9 +309,6 @@ async function runTests() {
     fail('reconnect -> daemonStatus(true)', err);
   }
 
-  // ------------------------------------------------------------------
-  // Cleanup
-  // ------------------------------------------------------------------
   if (typeof view.dispose === 'function') view.dispose();
   await stopServer();
   fs.rmSync(wsA, {recursive: true, force: true});

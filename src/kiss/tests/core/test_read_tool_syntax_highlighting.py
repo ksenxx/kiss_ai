@@ -52,10 +52,6 @@ from typing import Any
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.print_to_console import ConsolePrinter
 
-# A terminal wide enough that no source-code line we render in these
-# tests gets wrapped onto a second visual line by Rich (which would
-# put the line-number gutter only on the first visual line and break
-# the "every Nth line has ` N ` in it" check).
 _WIDE = 200
 
 
@@ -124,8 +120,6 @@ class TestReadSyntaxHighlightingInvariant(unittest.TestCase):
     """The core invariant: Read output gets a syntax-highlighting
     gutter, everything else (Bash, sentinels) does not."""
 
-    # ---- positive cases ---------------------------------------------
-
     def test_read_python_file_has_line_gutter(self) -> None:
         p, buf = _make_printer()
         p.print(
@@ -145,7 +139,6 @@ class TestReadSyntaxHighlightingInvariant(unittest.TestCase):
             "syntax-highlighting line-number gutter (invariant "
             f"violated).\n\nResult-panel body:\n{body}"
         )
-        # And the file content itself must be visible.
         assert "def foo" in body, body
         assert "return 42" in body, body
 
@@ -252,14 +245,10 @@ class TestReadSyntaxHighlightingInvariant(unittest.TestCase):
             tool_input={"file_path": "/tmp/x.py", "start_line": 10},
         )
         body = _between_result_rules(buf.getvalue())
-        # ``10`` must appear at the start of a body line (the
-        # gutter), and the body content is still present.
         assert any(
             re.match(r"^\s*10(?:\s|$)", line) for line in body.splitlines()
         ), body
         assert "line ten" in body, body
-
-    # ---- negative cases ---------------------------------------------
 
     def test_bash_tool_result_has_no_line_gutter(self) -> None:
         """``Bash`` output is plain command-line text — it must NOT
@@ -270,10 +259,6 @@ class TestReadSyntaxHighlightingInvariant(unittest.TestCase):
             type="tool_call",
             tool_input={"command": "echo hi"},
         )
-        # NOTE: not going through the ``bash_stream`` path here so
-        # the captured-content branch of ``_print_tool_result`` is
-        # exercised — that's the path that used to plain-write *all*
-        # tool results regardless of tool name.
         p.print(
             "first line\nsecond line\n",
             type="tool_result",
@@ -330,8 +315,6 @@ class TestReadSyntaxHighlightingInvariant(unittest.TestCase):
             type="tool_call",
             tool_input={"file_path": "/tmp/x.png"},
         )
-        # After ``truncate_result`` strips the base64 attachment the
-        # printer sees only the leading header line.
         header = (
             "Read binary file /tmp/x.png as image/png "
             "(123 bytes); content attached below.\n"
@@ -387,8 +370,6 @@ class TestReadSyntaxHighlightingInvariant(unittest.TestCase):
         assert not _has_line_gutter(body), body
 
 
-# ---- Agent-flow end-to-end tests ----------------------------------------
-
 
 class _RecordingPrinter:
     """Minimal stub printer that records every ``print`` call."""
@@ -410,9 +391,6 @@ class TestAgentForwardsToolInputOnReadResult(unittest.TestCase):
     def test_execute_tool_emits_tool_input_on_read_result(self) -> None:
         printer = _RecordingPrinter()
 
-        # Bypass ``KISSAgent.__init__`` (which expects a full
-        # ModelConfig / API key chain) and inject only the
-        # collaborators ``_execute_tool`` actually uses.
         agent = KISSAgent.__new__(KISSAgent)
         agent.name = "test"
         agent.printer = printer  # type: ignore[assignment]
@@ -470,8 +448,6 @@ class TestAgentExceptionPathDoesNotHighlight(unittest.TestCase):
             f"tool call.\n\nOutput:\n{out}"
         )
         assert "Failed to call Read" in out, out
-        # The exception diagnostic must NOT be mis-rendered as
-        # syntax-highlighted Python source.
         body = _between_result_rules(out)
         assert not _has_line_gutter(body), (
             "Agent exception path mis-rendered the 'Failed to call …' "

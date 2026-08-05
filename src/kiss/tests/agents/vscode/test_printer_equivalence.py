@@ -36,9 +36,6 @@ from kiss.core.print_to_console import ConsolePrinter
 from kiss.server.json_printer import JsonPrinter
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-# Box-drawing characters that Rich uses for Panel borders; we strip
-# these so substring checks for short strings like "Done" do not get
-# tripped up by adjacent corner characters.
 _BOX_CHARS = (
     "─━│┃┌┍┎┏┐┑┒┓└┕┖┗┘┙┚┛├┝┞┟┠┡┢┣┤┥┦┧┨┩┪┫┬┭┮┯┰┱┲┳┴┵┶┷┸┹┺┻"
     "┼┽┾┿╀╁╂╃╄╅╆╇╈╉╊╋╭╮╯╰╱╲╳╴╵╶╷╸╹╺╻╼╽╾╿"
@@ -143,8 +140,6 @@ def _make_pair() -> _Pair:
     """
     buf = io.StringIO()
     console_printer = ConsolePrinter(file=buf)
-    # Force a wide, non-colour console so Rich Panels don't wrap our
-    # test fragments and ANSI codes don't appear in the buffer.
     console_printer._console = Console(
         file=buf, highlight=False, width=240, force_terminal=False, no_color=True,
     )
@@ -196,8 +191,6 @@ class PrinterEquivalenceTest(unittest.TestCase):
         chunk2 = "Done compiling\n"
         pair.both_print(chunk1, type="bash_stream")
         pair.both_print(chunk2, type="bash_stream")
-        # Browser may have buffered the second chunk behind a timer;
-        # force a synchronous flush so we can inspect the payload.
         pair.browser._flush_bash()
         cons = pair.console_buf.getvalue()
         self.assertIn(chunk1, cons)
@@ -271,7 +264,6 @@ class PrinterEquivalenceTest(unittest.TestCase):
         pair.both_print(content, type="result", cost="$0.0042", total_tokens=12345)
         cons = pair.console_text()
         self.assertIn(content, cons)
-        # Console formats tokens with a thousands separator.
         self.assertTrue("12,345" in cons or "12345" in cons,
                         f"expected tokens in console; got: {cons}")
         self.assertIn("0.0042", cons)
@@ -296,7 +288,6 @@ class PrinterEquivalenceTest(unittest.TestCase):
         i_start = types.index("thinking_start")
         self.assertEqual(types[i_start + 1], "thinking_delta")
         self.assertEqual(types[i_start + 2], "thinking_end")
-        # After thinking_end the next token must route to text_delta:
         tail = pair.browser.events[i_start + 3:]
         self.assertTrue(
             any(ev.get("type") == "text_delta" and ev.get("text") == "answer"
@@ -415,12 +406,6 @@ class PrinterEquivalenceTest(unittest.TestCase):
         self.assertEqual(len(tool_results), 1)
         self.assertIs(tool_results[0]["is_error"], False)
         self.assertIn(block_text, tool_results[0]["content"])
-
-    # ------------------------------------------------------------------
-    # Previously-known divergences — now fixed.  These tests assert
-    # that the content reaches both sinks.  They retain their previous
-    # names so blame/history is preserved.
-    # ------------------------------------------------------------------
 
     def test_known_divergence_non_error_tool_result(self) -> None:
         """``tool_result`` with ``is_error=False`` for a core tool

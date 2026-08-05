@@ -114,12 +114,10 @@ class _FrontendSimPrinter(JsonPrinter):
             return
         if ev.get("task_id") is None:
             return
-        # createBackgroundSubagentTab: random frontend id.
         frontend_tab_id = "fe-" + uuid.uuid4().hex[:12]
         self.tabs.append(
             {"id": frontend_tab_id, "parentTabId": parent_tab_id},
         )
-        # resumeSession → server _cmd_resume_session → subscribe_tab.
         self.subscribe_tab(ev.get("task_id"), frontend_tab_id)
 
 
@@ -196,8 +194,6 @@ class TestNestedRunParallelOpensTabs:
 
         parent = ChatSorcarAgent("nested-tabs-parent")
         parent.printer = printer  # type: ignore[assignment]
-        # The VS Code server registers the top-level agent under the
-        # REAL frontend tab id before running it.
         parent_state = _RunningAgentState(ROOT_TAB_ID, "test-model")
         parent_state.agent = parent  # type: ignore[assignment]
         _RunningAgentState.register(ROOT_TAB_ID, parent_state)
@@ -214,7 +210,6 @@ class TestNestedRunParallelOpensTabs:
 
         assert "success" in result
 
-        # --- Level 1: the direct child of the root run_parallel. ---
         mid_tabs = [
             t for t in printer.tabs if t["parentTabId"] == ROOT_TAB_ID
         ]
@@ -225,7 +220,6 @@ class TestNestedRunParallelOpensTabs:
         )
         mid_tab_id = mid_tabs[0]["id"]
 
-        # --- Level 2: the nested run_parallel children (THE BUG). ---
         inner_tabs = [
             t for t in printer.tabs if t["parentTabId"] == mid_tab_id
         ]
@@ -237,7 +231,6 @@ class TestNestedRunParallelOpensTabs:
             f"rejected their parent_tab_id): {printer.dropped_new_tabs!r}"
         )
 
-        # No new_tab broadcast may be dropped by the frontend guard.
         assert printer.dropped_new_tabs == [], (
             "new_tab events were dropped because their parent_tab_id "
             "matches no frontend tab: "
@@ -269,7 +262,6 @@ class TestNestedRunParallelOpensTabs:
         new_tab_events = [
             e for e in printer.events if e.get("type") == "new_tab"
         ]
-        # 1 (level-1 child) + 2 (level-2 nested children).
         assert len(new_tab_events) == 3, (
             f"Expected 3 new_tab broadcasts, got {new_tab_events!r}"
         )

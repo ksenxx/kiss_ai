@@ -164,8 +164,6 @@ class TestRestoredTabDeferredClose(IsolatedAsyncioTestCase):
         """
         ws1 = await self._connect_ok()
         await ws1.send(json.dumps({"type": "ready", "tabId": "tab-x"}))
-        # Wait until the server has processed the command (its tabId
-        # lands in the connection's tabs_seen) before dropping.
         await asyncio.sleep(0.5)
         await ws1.close()
         self.assertTrue(

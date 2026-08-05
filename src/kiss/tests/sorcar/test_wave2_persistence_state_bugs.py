@@ -58,6 +58,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 import kiss.agents.sorcar.persistence as th
 import kiss.core.vscode_config as vc
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
@@ -141,10 +143,8 @@ class TestA4GetDbGenerationRace(_DBSandbox):
             t = threading.Thread(target=worker)
             t.start()
             assert started.wait(5)
-            # Give the worker time to open its connection and block on
-            # the DDL lock we are holding.
             time.sleep(0.3)
-            th._close_db()  # bumps _db_generation while worker is mid-creation
+            th._close_db()
         t.join(10)
         assert not t.is_alive()
         assert results["same"] is False, (
@@ -167,6 +167,7 @@ class TestA10SaveLastModelLostUpdate:
         vc.CONFIG_DIR, vc.CONFIG_PATH = self.saved
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    @pytest.mark.slow
     def test_concurrent_work_dir_update_survives_save_last_model(self) -> None:
         """A ``work_dir`` write racing ``_save_last_model`` must never be lost.
 
@@ -176,9 +177,6 @@ class TestA10SaveLastModelLostUpdate:
         read-modify-write window so the buggy full-dict overlay loses
         the marker within a few seconds of attempts.
         """
-        # Big non-DEFAULTS payload: passes through load/save untouched
-        # but makes each JSON read/write measurably slower, widening
-        # the race window without any artificial hooks.
         vc.CONFIG_PATH.write_text(json.dumps({"padding": "x" * 500_000}))
 
         stop = threading.Event()
@@ -210,9 +208,7 @@ class TestA10SaveLastModelLostUpdate:
             f"work_dir marker {lost!r} was clobbered by a concurrent "
             "_save_last_model full-config overlay"
         )
-        # The hammered preference itself must have been persisted.
         assert str(vc.load_config()["last_model"]).startswith("model-")
-        # And the unrelated pass-through key must still be intact.
         raw = json.loads(vc.CONFIG_PATH.read_text())
         assert len(raw["padding"]) == 500_000
 
@@ -267,7 +263,6 @@ class TestC2RegisterOverwriteWarning:
             _RunningAgentState.register(self._TAB, s1)
             assert self._warnings(caplog) == []
             _RunningAgentState.register(self._TAB, s2)
-        # Semantics unchanged: last registration wins.
         assert _RunningAgentState.running_agent_states[self._TAB] is s2
         warnings = self._warnings(caplog)
         assert warnings, "overwriting register() emitted no WARNING"
@@ -307,12 +302,6 @@ class TestWalSwitchLockRace(_DBSandbox):
 
     def test_wal_pragma_survives_concurrent_reserved_writer(self) -> None:
         """``_get_db()`` retries the WAL switch instead of raising."""
-        # A peer (standing in for a parallel sub-agent thread mid-DDL or
-        # another process such as the kiss-web daemon) creates the fresh
-        # database file and holds a RESERVED lock via an uncommitted
-        # write transaction.  A RESERVED peer makes the WAL transition
-        # fail with an IMMEDIATE "database is locked" (busy handler
-        # bypassed), which is exactly the field failure.
         peer = sqlite3.connect(str(th._DB_PATH), check_same_thread=False)
         peer.execute("BEGIN IMMEDIATE")
         peer.execute("CREATE TABLE _peer_probe (x INTEGER)")
@@ -328,8 +317,6 @@ class TestWalSwitchLockRace(_DBSandbox):
                 results["journal"] = str(
                     conn.execute("PRAGMA journal_mode").fetchone()[0]
                 )
-                # The schema must have been created despite the initial
-                # lock collision.
                 conn.execute("SELECT COUNT(*) FROM task_history").fetchone()
             except BaseException as exc:  # noqa: BLE001 — recorded for assert
                 errors.append(exc)
@@ -338,9 +325,6 @@ class TestWalSwitchLockRace(_DBSandbox):
         try:
             thread.start()
             assert started.wait(5), "worker thread never started"
-            # Keep the RESERVED lock held long enough that the worker's
-            # WAL switch definitely collides with it (the buggy code
-            # raised instantly here; the fixed code retries).
             time.sleep(0.5)
         finally:
             peer.execute("ROLLBACK")

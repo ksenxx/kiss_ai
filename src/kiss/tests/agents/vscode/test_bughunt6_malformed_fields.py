@@ -75,9 +75,6 @@ def _isolate_db(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
         pm, "_DB_PATH", type(pm._DB_PATH)(os.path.join(tmpdir, "sorcar.db")),
     )
     cfg_path = os.path.join(tmpdir, "config.json")
-    # ``CONFIG_DIR``/``CONFIG_PATH`` are PEP 562 lazy attributes;
-    # ``setattr`` would pin the computed (stale tmp) Path at teardown.
-    # ``setitem`` deletes the pin instead, restoring lazy resolution.
     monkeypatch.setitem(vars(vc), "CONFIG_DIR", Path(tmpdir))
     monkeypatch.setitem(vars(vc), "CONFIG_PATH", Path(cfg_path))
     yield
@@ -135,8 +132,6 @@ class TestMalformedFields(unittest.TestCase):
         ]
         for p in payloads:
             self.server._handle_command(dict(p))
-        # No phantom registry entries may have been minted for the
-        # malformed ids either.
         for key in _RunningAgentState.running_agent_states:
             assert isinstance(key, str), f"non-string registry key {key!r}"
 
@@ -191,13 +186,7 @@ class TestMalformedFields(unittest.TestCase):
         assert histories, "getHistory must still reply with a history event"
 
     def test_malformed_complete_query_does_not_kill_worker(self) -> None:
-        # A dict query (>= 2 keys so it passes the len() < 2 guard)
-        # previously killed the singleton autocomplete worker thread;
-        # ghost text then never worked again for the whole daemon.
         with _ThreadCrashRecorder() as rec:
-            # Distinct connIds: the per-connection staleness check must
-            # not skip the malformed item (a same-connection follow-up
-            # would mark it stale before the worker dequeues it).
             self.server._handle_command(
                 {
                     "type": "complete",

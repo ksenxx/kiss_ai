@@ -54,7 +54,6 @@ class TestSubmoduleMergeReview(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-bughunt8-sub-")
         base = Path(self.tmpdir)
 
-        # Build the submodule's upstream repo with one commit.
         self.sub_upstream = base / "sub-upstream"
         self.sub_upstream.mkdir()
         _git(self.sub_upstream, "init", "-q")
@@ -64,7 +63,6 @@ class TestSubmoduleMergeReview(unittest.TestCase):
         _git(self.sub_upstream, "add", "-A")
         _git(self.sub_upstream, "commit", "-qm", "one")
 
-        # Parent repo containing the submodule plus a normal file.
         self.repo = base / "repo"
         self.repo.mkdir()
         _git(self.repo, "init", "-q")

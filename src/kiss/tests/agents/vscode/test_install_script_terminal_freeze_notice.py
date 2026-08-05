@@ -59,14 +59,8 @@ _END_MARKER = "# END: kiss-step-5-5-terminal-freeze"
 
 _COMPLETE_LINE = "=== Source bootstrap complete ==="
 _CODE_STUB_DONE = "Extension 'kiss-sorcar.vsix' was successfully installed."
-# Final echo of the extracted block — used to detect the end of the run
-# without waiting for PTY EOF (the surviving dummy daemon keeps the PTY
-# open, so EOF never comes).
 _LAST_BLOCK_LINE = "remote access auth, and kiss-web."
 
-# The user-facing heads-up that must precede the disruptive extension
-# install.  Matched loosely so wording can be polished without breaking
-# the test, but the load-bearing concept must be present.
 _NOTICE_SNIPPET = "NOT stuck"
 
 
@@ -93,8 +87,6 @@ def _build_sandbox(tmp_path: Path) -> tuple[Path, Path]:
     """
     home = tmp_path / "home"
     (home / ".kiss").mkdir(parents=True)
-    # Pre-existing UDS socket file of the running daemon: the block must
-    # leave it alone (the old code ``rm -f``-ed it).
     (home / ".kiss" / "sorcar.sock").write_bytes(b"")
     stubs = tmp_path / "stubs"
     stubs.mkdir()
@@ -106,7 +98,6 @@ def _build_sandbox(tmp_path: Path) -> tuple[Path, Path]:
     dummy_pidfile = tmp_path / "dummy-daemon.pid"
     supervisor_log = tmp_path / "supervisor-calls.log"
 
-    # Stub VS Code CLI: mimics `code --install-extension <vsix> --force`.
     code_cli = stubs / "code-stub"
     code_cli.write_text(
         textwrap.dedent(
@@ -120,11 +111,6 @@ def _build_sandbox(tmp_path: Path) -> tuple[Path, Path]:
     )
     code_cli.chmod(0o755)
 
-    # Stub lsof: reports the dummy daemon's PID while it is alive, exactly
-    # like `lsof -ti :8787` reports the real kiss-web daemon.  The block
-    # must never consult it, but if a regression reintroduces the old
-    # kill-by-port logic the dummy daemon would really be SIGTERMed and
-    # the never-touches-kiss-web test below would fail.
     (stubs / "lsof").write_text(
         textwrap.dedent(
             f"""\
@@ -141,9 +127,6 @@ def _build_sandbox(tmp_path: Path) -> tuple[Path, Path]:
     )
     (stubs / "lsof").chmod(0o755)
 
-    # Stub the service supervisors: they log every invocation (so the
-    # tests can assert none happened) and keep the REAL kiss-web daemon
-    # on this machine safe from kickstart/restart.
     for supervisor in ("launchctl", "systemctl"):
         (stubs / supervisor).write_text(
             f'#!/bin/bash\necho "{supervisor} $*" >> {supervisor_log.as_posix()!r}\nexit 0\n',
@@ -151,9 +134,6 @@ def _build_sandbox(tmp_path: Path) -> tuple[Path, Path]:
         )
         (stubs / supervisor).chmod(0o755)
 
-    # Supervisor configs pointing at an existing, executable daemon binary
-    # — i.e. a restart WOULD be possible right now.  The block must still
-    # not touch the daemon.
     daemon_bin = stubs / "kiss-web-daemon-stub"
     daemon_bin.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
     daemon_bin.chmod(0o755)
@@ -252,7 +232,7 @@ def _read_until(master: int, needle: bytes, timeout: float = 30.0) -> bytes:
         try:
             chunk = os.read(master, 4096)
         except OSError as exc:
-            if exc.errno == errno.EIO:  # writer side gone
+            if exc.errno == errno.EIO:
                 break
             raise
         if not chunk:
@@ -328,8 +308,6 @@ def test_freeze_notice_printed_before_disruptive_extension_install(
         "the terminal); printing it later means a disposed terminal "
         "never shows it."
     )
-    # The notice must point the user at the log file so they can follow
-    # the detached install after the terminal dies.
     assert str(log) in text, (
         "the freeze notice must mention the install log path so the "
         "user can follow the detached install after the terminal dies."
@@ -357,8 +335,6 @@ def test_install_completes_when_terminal_dies_mid_step_5_5(
             + out.decode("utf-8", errors="replace")
         )
     finally:
-        # Simulate VS Code disposing the integrated terminal: the PTY
-        # master goes away while the install is still mid-step.
         os.close(master)
 
     try:
@@ -373,7 +349,6 @@ def test_install_completes_when_terminal_dies_mid_step_5_5(
             )
 
         assert rc == 0, f"step [5/5] harness exited rc={rc} after PTY close"
-        # tee keeps writing the log even though its terminal fd is dead.
         _wait_for_line(log, _COMPLETE_LINE)
         home = tmp_path / "home"
         marker = home / ".kiss" / ".extension-updated"
@@ -381,7 +356,6 @@ def test_install_completes_when_terminal_dies_mid_step_5_5(
             "the .extension-updated marker was not written after the "
             "terminal died — the extension reload would never be triggered."
         )
-        # The daemon must still be alive — install.sh never touches it.
         os.kill(_dummy_daemon_pid(tmp_path), 0)
     finally:
         _kill_dummy_daemon(tmp_path)
@@ -403,15 +377,12 @@ def test_step_5_5_never_touches_kiss_web(tmp_path: Path) -> None:
         rc = proc.wait(timeout=30)
         text = out.decode("utf-8", errors="replace")
         assert rc == 0, f"step [5/5] harness failed rc={rc}:\n{text}"
-        # The old daemon must still be alive.
         os.kill(_dummy_daemon_pid(tmp_path), 0)
-        # Its UDS socket file must not have been removed.
         sock = tmp_path / "home" / ".kiss" / "sorcar.sock"
         assert sock.exists(), (
             "install.sh removed ~/.kiss/sorcar.sock — it must leave the "
             "daemon's socket alone."
         )
-        # No supervisor (launchctl/systemctl) may have been invoked.
         supervisor_log = tmp_path / "supervisor-calls.log"
         assert not supervisor_log.exists(), (
             "install.sh invoked a service supervisor:\n"

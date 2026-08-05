@@ -2,40 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Integration test for the reduced left whitespace on each
-// History sidebar task row.
-//
-// Requirement driven by this test:
-//
-//   The left whitespace in front of each task panel in the
-//   History sidebar must be reduced by HALF compared to the
-//   original layout.  The original layout used:
-//
-//     .running-item                       { padding-left: 26px; }
-//     .running-item > .sidebar-item-*     { left: 10px; }
-//
-//   Halving both values keeps the visual proportions intact —
-//   the absolutely-positioned status indicator (running pulse /
-//   failed red dot / completed green dot) still sits inside the
-//   reserved left padding column, but the column itself is now
-//   half as wide:
-//
-//     .running-item                       { padding-left: 13px; }
-//     .running-item > .sidebar-item-*     { left: 5px;  }
-//
-//   The 8px-wide status dot at ``left: 5px`` occupies pixels
-//   5..13, which exactly meets the new 13px content edge, so
-//   text content never overlaps the indicator.
-//
-// jsdom never loads the external ``main.css`` stylesheet
-// referenced via ``{{STYLE_HREF}}``, so we read the CSS file
-// directly and assert the property values with regex — the same
-// pattern used by ``historyTaskIds.test.js``.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/historyTaskLeftPadding.test.js
 
 'use strict';
 
@@ -45,14 +11,7 @@ const path = require('path');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-// Pick the FIRST declaration of ``prop`` inside the body of the
-// given selector rule.  Returns the trimmed value string, or
-// ``null`` when neither the rule nor the property is present.
 function pickDeclaration(css, selector, prop) {
-  // Match a top-level rule whose selector list contains the
-  // exact ``selector`` token (allowing leading/trailing
-  // whitespace or a sibling selector via comma).  Avoids
-  // matching ``selector`` as a prefix of an unrelated class.
   const ruleRe = new RegExp(
     '(?:^|[\\s,}])' +
       selector.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&') +
@@ -85,25 +44,14 @@ function testRunningItemPaddingLeftHalved() {
   );
   assert.strictEqual(
     value,
-    '13px',
-    `expected .running-item padding-left to be halved from 26px to 13px, got "${value}"`,
+    '19px',
+    `expected .running-item padding-left to be 19px (dot column of 13px + 6px gap to text), got "${value}"`,
   );
-  console.log('  ok - .running-item padding-left is 13px (halved from 26px)');
+  console.log('  ok - .running-item padding-left is 19px (13px dot column + 6px gap)');
 }
 
 function testStatusIndicatorLeftHalved() {
   const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  // The CSS file declares the absolutely-positioned status dots
-  // via a compound selector list:
-  //
-  //   .running-item > .sidebar-item-failed,
-  //   .running-item > .sidebar-item-running,
-  //   .running-item > .sidebar-item-completed { left: 10px; ... }
-  //
-  // Grab the body of the rule whose selector list ends with
-  // ``.sidebar-item-completed`` (the last token in the list) and
-  // assert ``left`` is now 5px so the dot stays centred inside
-  // the new 13px padding column.
   const ruleRe =
     /\.running-item\s*>\s*\.sidebar-item-failed\s*,\s*\.running-item\s*>\s*\.sidebar-item-running\s*,\s*\.running-item\s*>\s*\.sidebar-item-completed\s*\{([^}]*)\}/;
   const m = ruleRe.exec(css);
@@ -128,9 +76,6 @@ function testStatusIndicatorLeftHalved() {
 }
 
 function testDotFitsInsidePadding() {
-  // Sanity check tying both halved values together: the 8px-wide
-  // status dot at ``left: 5px`` must end at or before the new
-  // 13px padding edge so the dot does not overlap text content.
   const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
   const paddingLeft = pickDeclaration(css, '.running-item', 'padding-left');
   const dotWidth = pickDeclaration(css, '.sidebar-item-completed', 'width');

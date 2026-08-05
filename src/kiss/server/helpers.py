@@ -9,11 +9,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-# The commit-message helpers moved to
-# ``kiss.agents.sorcar.commit_message`` (sorcar's auto-commit path is
-# their primary consumer and sorcar must not depend on the server
-# layer); they are re-exported here for this module's historical
-# importers.
 from kiss.agents.sorcar.commit_message import (  # noqa: F401 — re-exported
     _append_task_result,
     _append_user_prompt,
@@ -27,19 +22,42 @@ from kiss.server.json_printer import JsonPrinter
 logger = logging.getLogger(__name__)
 
 
+def tab_busy_with_other_task(tab: Any, task_key: str) -> bool:
+    """Return whether *tab* is actively running a task other than *task_key*.
+
+    ``JsonPrinter.cleanup_task`` intentionally preserves the subscriber
+    sets of FINISHED tasks so post-task events still reach every viewer.
+    A tab that co-subscribed to an old task may therefore have moved on
+    and be running a brand-new, unrelated one — anything derived from
+    the shared subscription (its answer queue, its merge/auto-commit
+    UI) belongs to THAT task now and must not be reused for
+    *task_key*.
+
+    Args:
+        tab: The ``_RunningAgentState`` to inspect.
+        task_key: The coerced task id being served.
+
+    Returns:
+        True when the tab has moved on to a different live task.
+    """
+    agent = getattr(tab, "agent", None)
+    agent_task = (
+        JsonPrinter._coerce_task_id(getattr(agent, "_last_task_id", None))
+        if agent is not None
+        else ""
+    )
+    return bool(tab.is_task_active and agent_task and agent_task != task_key)
+
+
 def tab_owns_answer_queue(tab: Any, task_key: str) -> bool:
     """Return whether *tab*'s live answer queue belongs to *task_key*.
 
     Task-ownership filter (BUG-TR2-2) shared by
     ``commands._resolve_user_answer_queue`` and
-    ``task_runner._resolve_task_answer_queue``:
-    ``JsonPrinter.cleanup_task`` intentionally preserves subscriber
-    sets of FINISHED tasks, so a tab that co-subscribed to an old,
-    finished task may now be running a brand-new UNRELATED task — its
-    live ``user_answer_queue`` belongs to THAT task.  Delivering a
-    stale answer there would answer the wrong question and dismiss the
-    wrong task's askUser modal.  A tab is disqualified only when its
-    live agent is actively running a task other than *task_key*.
+    ``task_runner._resolve_task_answer_queue``: a tab that has moved on
+    to an unrelated task holds a live ``user_answer_queue`` belonging
+    to THAT task, and delivering a stale answer there would answer the
+    wrong question and dismiss the wrong task's askUser modal.
 
     Args:
         tab: The ``_RunningAgentState`` whose queue is a candidate.
@@ -48,13 +66,7 @@ def tab_owns_answer_queue(tab: Any, task_key: str) -> bool:
     Returns:
         True when the tab's queue may serve *task_key*.
     """
-    agent = getattr(tab, "agent", None)
-    agent_task = (
-        JsonPrinter._coerce_task_id(getattr(agent, "_last_task_id", None))
-        if agent is not None
-        else ""
-    )
-    return not (tab.is_task_active and agent_task and agent_task != task_key)
+    return not tab_busy_with_other_task(tab, task_key)
 
 
 def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
@@ -168,11 +180,6 @@ def generate_followup_text(task: str, result: str, model: str) -> str:
     )
 
 
-# Maximum number of dropdown suggestion items emitted to the webview
-# per request.  Single-sourced here and shared by the @-mention file
-# picker (:func:`rank_file_suggestions`) and the fast-complete
-# dropdown (``autocomplete``) so the two pickers stay scrollable
-# without UI tuning differences between them.
 SUGGESTION_LIMIT = 20
 
 

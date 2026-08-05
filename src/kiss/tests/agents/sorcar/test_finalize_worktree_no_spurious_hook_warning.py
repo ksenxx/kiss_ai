@@ -84,8 +84,6 @@ def test_finalize_worktree_no_spurious_hook_warning(
     with tempfile.TemporaryDirectory() as tmp:
         repo, wt_dir, branch = _make_repo_with_worktree(Path(tmp))
 
-        # Agent's actual output: a real change present before the
-        # auto-commit kicks off.
         (wt_dir / "agent_report.txt").write_text("agent's output\n")
 
         def racing_message_fn(
@@ -102,11 +100,6 @@ def test_finalize_worktree_no_spurious_hook_warning(
             (commit_dir / "late_arriver.txt").write_text("race write\n")
             return "test: agent work"
 
-        # The seam: ``auto_commit_changes`` looks up
-        # ``worktree_sorcar_agent._generate_commit_message`` at call
-        # time via the module's globals (re-exported for exactly this
-        # purpose — see the import comment in
-        # ``worktree_sorcar_agent``).
         monkeypatch.setattr(  # type: ignore[attr-defined]
             wta_mod, "_generate_commit_message", racing_message_fn,
         )
@@ -131,7 +124,6 @@ def test_finalize_worktree_no_spurious_hook_warning(
             "(or by the late-arriver retry inside _finalize_worktree)."
         )
 
-        # The whole point of this test: no misleading hook hint.
         for record in caplog.records:  # type: ignore[attr-defined]
             assert "pre-commit hook may have rejected" not in record.message, (
                 "_finalize_worktree emitted the misleading "
@@ -141,10 +133,8 @@ def test_finalize_worktree_no_spurious_hook_warning(
                 "prevent."
             )
 
-        # Worktree directory must have been removed on success.
         assert not wt_dir.exists()
 
-        # Both files must be in HEAD of the task branch.
         ls = subprocess.run(
             ["git", "-C", str(repo), "ls-tree", "--name-only",
              "-r", branch],
@@ -171,11 +161,6 @@ def test_finalize_worktree_warning_includes_porcelain_when_truly_stuck(
         repo, wt_dir, branch = _make_repo_with_worktree(Path(tmp))
         (wt_dir / "agent_report.txt").write_text("agent's output\n")
 
-        # Install a real pre-commit hook in the worktree's shared git
-        # dir that rejects every commit.  This is the only reliable
-        # way to force a "truly stuck" state without racing the
-        # filesystem.
-        # Worktrees share ``.git/hooks`` with the main repo.
         hooks_dir = repo / ".git" / "hooks"
         hooks_dir.mkdir(parents=True, exist_ok=True)
         hook = hooks_dir / "pre-commit"
@@ -218,9 +203,6 @@ def test_finalize_worktree_warning_includes_porcelain_when_truly_stuck(
             "files (git status --porcelain) so the operator can "
             "diagnose without sshing in."
         )
-        # Confirm the broader phrasing also landed (race vs hook vs
-        # commit failure are all named as candidates).
         assert "concurrent write" in joined or "pre-commit hook" in joined
-        # Sanity: status_porcelain output is in the log.
         leftover = GitWorktreeOps.status_porcelain(wt_dir)
-        assert leftover  # non-empty
+        assert leftover

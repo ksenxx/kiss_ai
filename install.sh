@@ -861,6 +861,15 @@ update_repo() {
     # Pull the latest kiss_ai sources before building.  If the working tree is
     # dirty, stash the changes first (so ``git pull`` applies cleanly), then
     # pop them back via the EXIT trap once the install finishes.
+    #
+    # KISS_SKIP_UPDATE exists for callers that deliberately install a checkout
+    # they already control, byte for byte — ``sorcar-cloud`` ships the laptop's
+    # working directory (uncommitted edits included) to a remote host, and a
+    # pull would swap that code for whatever is on origin/main instead.
+    if [ -n "${KISS_SKIP_UPDATE:-}" ]; then
+        echo "   KISS_SKIP_UPDATE set — installing this checkout as-is, no pull."
+        return 0
+    fi
     if ! git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree &>/dev/null; then
         echo "   Not a git checkout — skipping pull."
         return 0

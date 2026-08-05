@@ -62,7 +62,6 @@ class TestScrollHunkIntoView(unittest.TestCase):
         """Must walk ``parentElement`` and stop at an overflow-y auto/scroll node."""
         self.assertIn("parentElement", self.body)
         self.assertIn("getComputedStyle", self.body)
-        # Accepts both 'auto' and 'scroll' overflow modes.
         self.assertRegex(self.body, r"overflowY|oy")
         self.assertIn("'auto'", self.body)
         self.assertIn("'scroll'", self.body)
@@ -74,8 +73,6 @@ class TestScrollHunkIntoView(unittest.TestCase):
 
     def test_centres_hunk_in_container(self) -> None:
         """Computes target scrollTop centring the hunk inside the container."""
-        # The target is derived from the hunk/container bounding rects and
-        # the container's current scrollTop.
         self.assertIn("getBoundingClientRect", self.body)
         self.assertIn("scrollTop", self.body)
 
@@ -87,8 +84,6 @@ class TestScrollHunkIntoView(unittest.TestCase):
         fragments still work).
         """
         self.assertIn("container.scrollTo", self.body)
-        # There must be a fallback to native scrollIntoView for the
-        # detached / no-ancestor case.
         self.assertIn("scrollIntoView", self.body)
 
     def test_smooth_behaviour(self) -> None:
@@ -107,13 +102,11 @@ class TestScrollHunkIntoViewCallSites(unittest.TestCase):
     def test_called_on_initial_merge_data(self) -> None:
         """Initial render scrolls the first hunk into view."""
         js = _read_js()
-        # In the merge_data case branch, scrollHunkIntoView(mdEl, 0, 0).
         self.assertRegex(js, r"scrollHunkIntoView\(mdEl,\s*0,\s*0\)")
 
     def test_called_on_every_merge_nav(self) -> None:
         """Every prev/next/accept/reject response scrolls to the new hunk."""
         js = _read_js()
-        # merge_nav handler scrolls using ev.cur.fi/ev.cur.hi.
         self.assertIn(
             "scrollHunkIntoView(mergePanel, ev.cur.fi, ev.cur.hi)", js,
         )

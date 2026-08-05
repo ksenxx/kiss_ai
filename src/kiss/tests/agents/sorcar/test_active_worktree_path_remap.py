@@ -40,7 +40,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
-from kiss.core.useful_tools import UsefulTools
+from kiss.agents.sorcar.useful_tools import UsefulTools
 
 
 def _run(*args: str, cwd: Path) -> None:
@@ -77,8 +77,6 @@ def repo_with_worktree(tmp_path: Path) -> tuple[Path, Path]:
     (repo / "src" / "app.py").write_text("# main app\n")
     _run("git", "add", "-A", cwd=repo)
     _run("git", "commit", "-m", "init", cwd=repo)
-    # Mirror the real framework: ``.kiss-worktrees/`` is never tracked,
-    # so it must not pollute the main repo's ``git status``.
     GitWorktreeOps.ensure_excluded(repo)
 
     wt_dir = repo / ".kiss-worktrees" / "kiss_wt-test-deadbeef"
@@ -105,9 +103,7 @@ def test_edit_via_main_repo_path_lands_in_worktree(repo_with_worktree) -> None:
     out = tools.Edit(str(repo / "README.md"), "MAIN README v1", "EDITED v2")
 
     assert "Successfully replaced" in out, out
-    # The worktree's README must have changed.
     assert (wt_dir / "README.md").read_text() == "EDITED v2\n"
-    # The main repo's README must NOT have changed.
     assert (repo / "README.md").read_text() == "MAIN README v1\n"
 
 
@@ -139,7 +135,6 @@ def test_read_via_main_repo_path_returns_worktree_content(
     work.
     """
     repo, wt_dir = repo_with_worktree
-    # Diverge the two copies so the test can tell them apart.
     (wt_dir / "README.md").write_text("WT README v9\n")
     tools = UsefulTools(work_dir=str(wt_dir))
 
@@ -227,6 +222,5 @@ def test_remap_keeps_auto_commit_working(repo_with_worktree) -> None:
 
     tools.Edit(str(repo / "README.md"), "MAIN README v1", "DONE\n")
 
-    # The worktree now has uncommitted changes; the main repo does not.
     assert GitWorktreeOps.has_uncommitted_changes(wt_dir)
     assert not GitWorktreeOps.has_uncommitted_changes(repo)

@@ -40,9 +40,6 @@ def test_positional_only_inside_shell_injection_appends_args() -> None:
     """$1 inside !`...` is not a template placeholder; args must be appended."""
     with tempfile.TemporaryDirectory() as wd:
         out = expand_command(_cmd("Out: !`echo start $1 end`"), "world", wd)
-    # The shell alternative wins the single-pass match, so $1 reaches
-    # /bin/sh (where it expands to nothing) and is never replaced with
-    # the user's argument.  The argument must therefore be appended.
     assert "world" in out, f"argument silently dropped: {out!r}"
     assert out == "Out: start end\n\nworld"
 

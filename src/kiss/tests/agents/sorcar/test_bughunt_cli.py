@@ -124,13 +124,10 @@ sys.stdout.flush()
 
     out = ""
     try:
-        # Wait for the agent's run() to start inside the steering session.
         deadline = time.time() + 30.0
         while time.time() < deadline and not started.exists():
             out += _drain(fd, 0.2)
         assert started.exists(), f"agent never started; output: {out!r}"
-        # The main thread is now in the steering select loop: send a real
-        # Ctrl+C through the PTY (ISIG is kept on, so SIGINT is raised).
         os.write(fd, b"\x03")
         out += _drain(fd, 20.0, stop=re.compile(r"WORKER\[\w+\]"))
     finally:

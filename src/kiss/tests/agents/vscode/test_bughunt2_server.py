@@ -106,21 +106,11 @@ class TestNoRowReplayRegistersChatViewer(_ReplayNoRowBase):
         chat_id = "chat-norow-viewer"
         self._make_running_tab("launcher", chat_id, "task-1")
 
-        # The user reopens the chat in a fresh tab before the task's
-        # DB row exists: _replay_session finds no persisted row and
-        # takes the no-row branch (rebinding to the live task-1).
         self.server._replay_session(chat_id=chat_id, tab_id="viewer")
 
-        # Sanity: the no-row branch did rebind the viewer (status +
-        # empty task_events replay).
         viewer_events = self._events_for_tab("viewer")
         assert any(e.get("type") == "status" for e in viewer_events)
 
-        # task-1 ends; a NEW task (task-2) later starts on the same
-        # chat from the launcher tab.  _subscribe_chat_viewers (the
-        # real fan-out hook invoked via _on_task_id_allocated) must
-        # subscribe every tab that has the chat open — including the
-        # race-window viewer.
         with self._events_lock:
             self.events.clear()
         self.server._subscribe_chat_viewers(
@@ -148,17 +138,12 @@ class TestNoRowReplayClearsFrontendClosed(_ReplayNoRowBase):
         chat_id = "chat-norow-reopen"
         tab = self._make_running_tab("t1", chat_id, "task-9")
 
-        # The frontend closes the busy tab: deferred-dispose is armed.
         self.server._close_tab("t1")
         assert tab.frontend_closed is True
         assert "t1" in _RunningAgentState.running_agent_states
 
-        # VS Code reload restores the tab and replays resumeSession
-        # for it — before the task row hits the DB (no-row branch).
-        # The user is actively viewing the tab again.
         self.server._replay_session(chat_id=chat_id, tab_id="t1")
 
-        # The task ends; the runner's lifecycle hook fires.
         tab.is_task_active = False
         self.server._dispose_if_closed("t1")
 
@@ -176,9 +161,6 @@ class TestNoRowReplayAssociatesChatId(_ReplayNoRowBase):
 
     def test_chat_id_reassociated(self) -> None:
         chat_id = "chat-norow-continue"
-        # A registry entry exists for the tab (it previously ran a
-        # task whose chat was since deleted), and the user now resumes
-        # a different chat whose row is not yet written.
         tab = self.server._get_tab("t2")
         tab.chat_id = "old-finished-chat"
 

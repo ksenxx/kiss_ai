@@ -69,6 +69,7 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 from websockets.asyncio.client import connect
+from websockets.exceptions import ConnectionClosed
 
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server.web_server import (
@@ -164,7 +165,7 @@ class TestRemoteWebappAlwaysPrompts(IsolatedAsyncioTestCase):
         probe — well past :data:`_AUTH_FAIL_MAX` — must still be answered
         with ``auth_required`` so the password modal appears.
         """
-        loads = _AUTH_FAIL_MAX * 3  # comfortably past the lockout threshold
+        loads = _AUTH_FAIL_MAX * 3
         for i in range(loads):
             reply = await self._probe("")
             self.assertEqual(
@@ -205,7 +206,6 @@ class TestRemoteWebappAlwaysPrompts(IsolatedAsyncioTestCase):
         password is never examined), not an endless supply of
         ``auth_required`` prompts.
         """
-        # The first few wrong guesses are answered with auth_required.
         first = await self._probe("wrong-guess-0")
         self.assertEqual(
             first,
@@ -240,7 +240,6 @@ class TestRemoteWebappAlwaysPrompts(IsolatedAsyncioTestCase):
                 self.assertEqual(json.loads(raw).get("type"), "auth_required")
         except Exception:  # pragma: no cover - defensive
             self.fail("non-string password should elicit auth_required")
-        # And it must not have consumed the lockout budget.
         self.assertEqual(await self._probe(_PASSWORD), "auth_ok")
 
     async def test_two_wrong_attempts_end_in_error_and_close(self) -> None:
@@ -264,8 +263,7 @@ class TestRemoteWebappAlwaysPrompts(IsolatedAsyncioTestCase):
                 "The second failed attempt must yield a terminal error "
                 "frame before the socket is closed.",
             )
-            # The server closes right after the error frame.
-            with self.assertRaises(Exception):
+            with self.assertRaises(ConnectionClosed):
                 await asyncio.wait_for(ws.recv(), timeout=5)
 
     async def test_malformed_first_frame_closes_socket(self) -> None:
@@ -277,9 +275,8 @@ class TestRemoteWebappAlwaysPrompts(IsolatedAsyncioTestCase):
         """
         async with await self._ws_connect() as ws:
             await ws.send("this is not json")
-            with self.assertRaises(Exception):
+            with self.assertRaises(ConnectionClosed):
                 await asyncio.wait_for(ws.recv(), timeout=5)
-        # The malformed frame must not have locked the IP.
         self.assertEqual(await self._probe(""), "auth_required")
 
     async def test_connect_while_locked_gets_auth_locked_then_close(self) -> None:
@@ -296,18 +293,18 @@ class TestRemoteWebappAlwaysPrompts(IsolatedAsyncioTestCase):
         re-prompt once it expires.  The lockout itself (no password on
         this socket is ever examined) is deliberately preserved.
         """
-        for i in range(_AUTH_FAIL_MAX):
+        for i in range(_AUTH_FAIL_MAX - 1):
             self.assertEqual(
                 await self._probe(f"brute-{i}"),
                 "auth_required",
                 f"Setup guess #{i} must be processed (auth_required) so the "
                 "lockout is driven by genuine recorded non-empty failures.",
             )
-        # The IP is now locked: the next connection is refused, but no
-        # longer silently — it must carry the auth_locked explanation.
-        # The server sends it and closes without ever reading from the
-        # socket, so our auth frame may fail to send (the CORRECT
-        # password below is deliberately never examined).
+        self.assertEqual(
+            await self._probe("brute-threshold"),
+            "auth_locked",
+            "The threshold-crossing guess must engage the lock immediately.",
+        )
         async with await self._ws_connect() as ws:
             with contextlib.suppress(Exception):
                 await ws.send(
@@ -325,9 +322,7 @@ class TestRemoteWebappAlwaysPrompts(IsolatedAsyncioTestCase):
             self.assertIsInstance(retry_after, int)
             self.assertGreater(retry_after, 0)
             self.assertLessEqual(retry_after, int(_AUTH_LOCKOUT))
-            # Even the CORRECT password sent on a locked socket is never
-            # examined: the server closes right after auth_locked.
-            with self.assertRaises(Exception):
+            with self.assertRaises(ConnectionClosed):
                 await asyncio.wait_for(ws.recv(), timeout=5)
 
     async def test_non_auth_first_message_closes_without_penalty(self) -> None:
@@ -338,13 +333,11 @@ class TestRemoteWebappAlwaysPrompts(IsolatedAsyncioTestCase):
         failure, so it cannot contribute to the lockout that hides the
         prompt.  A subsequent empty probe must still get auth_required.
         """
-        # Send many non-auth first frames.
         for _ in range(_AUTH_FAIL_MAX * 2):
             try:
                 async with await self._ws_connect() as ws:
                     await ws.send(json.dumps({"type": "ready", "tabId": "t"}))
-                    # Server closes without replying; recv raises.
-                    with self.assertRaises(Exception):
+                    with self.assertRaises(ConnectionClosed):
                         await asyncio.wait_for(ws.recv(), timeout=5)
             except Exception:
                 pass

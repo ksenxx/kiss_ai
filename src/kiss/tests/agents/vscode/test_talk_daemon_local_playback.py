@@ -40,8 +40,6 @@ import kiss.agents.sorcar.persistence as th
 from kiss.server.web_server import RemoteAccessServer
 from kiss.ui.cli import cli_talk
 
-# A tiny-but-real MP3-looking byte string; the fake player only copies
-# bytes, so any payload works — what matters is byte-exact delivery.
 MP3_BYTES = b"ID3\x03\x00fake-mp3-frames-" + bytes(range(64))
 MP3_B64 = base64.b64encode(MP3_BYTES).decode("ascii")
 
@@ -268,8 +266,6 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
         remote_tab = "remote-webtab-" + uuid.uuid4().hex[:8]
         web_reader, web_writer = await self._connect(web_tab)
         self.server._printer.subscribe_tab(self.task_id, web_tab)
-        # Deliberately subscribe the remote tab WITHOUT a UDS
-        # connection: this models a remote WSS browser tab.
         self.server._printer.subscribe_tab(self.task_id, remote_tab)
         await asyncio.sleep(0.05)
 
@@ -318,8 +314,6 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
         """Only remote tabs subscribed → daemon speakers stay silent."""
         remote_tab = "remote-webtab-" + uuid.uuid4().hex[:8]
         probe_tab = "probe-" + uuid.uuid4().hex[:8]
-        # A UDS probe connection NOT subscribed to the task observes
-        # the fanned-out copies without being a local player itself.
         probe_reader, probe_writer = await self._connect(probe_tab)
         self.server._printer.subscribe_tab(self.task_id, remote_tab)
         await asyncio.sleep(0.05)

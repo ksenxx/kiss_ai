@@ -44,10 +44,6 @@ def _make_server() -> tuple[VSCodeServer, _CapturePrinter]:
     return VSCodeServer(printer=printer), printer
 
 
-# ---------------------------------------------------------------------------
-# _extra_for_replay (server.py S1)
-# ---------------------------------------------------------------------------
-
 
 def test_extra_for_replay_non_str_and_empty() -> None:
     assert _extra_for_replay(None) == ""
@@ -85,10 +81,6 @@ def test_extra_for_replay_strips_global_setting_keys() -> None:
     assert json.loads(result) == {"startTs": 1, "endTs": 2, "tokens": 3}
 
 
-# ---------------------------------------------------------------------------
-# commands._parse_int
-# ---------------------------------------------------------------------------
-
 
 def test_parse_int() -> None:
     assert _parse_int("5") == 5
@@ -99,10 +91,6 @@ def test_parse_int() -> None:
     assert _parse_int("abc") is None
     assert _parse_int([1]) is None
 
-
-# ---------------------------------------------------------------------------
-# Unknown-command routing (server.py S3 site in _handle_command)
-# ---------------------------------------------------------------------------
 
 
 def test_unknown_command_reply_stamped_with_conn_id() -> None:
@@ -137,31 +125,19 @@ def test_unknown_command_non_string_type_routed_to_error() -> None:
     assert printer.events[0]["connId"] == "c2"
 
 
-# ---------------------------------------------------------------------------
-# taskId guards in command handlers (commands.py C1)
-# ---------------------------------------------------------------------------
-
 
 def test_bad_task_ids_are_ignored_without_broadcast() -> None:
     server, printer = _make_server()
     printer.events.clear()
-    # Non-string taskId: deleteTask must be a no-op.
-    server._handle_command({"type": "deleteTask", "taskId": 123})
-    # Empty taskId: setFavorite must be a no-op.
     server._handle_command(
         {"type": "setFavorite", "taskId": "", "isFavorite": True}
     )
-    # No chatId and no (string) taskId: resumeSession must be a no-op.
     server._handle_command(
         {"type": "resumeSession", "chatId": "", "taskId": None, "tabId": "t1"}
     )
     assert printer.events == []
     assert printer.cleaned_tabs == []
 
-
-# ---------------------------------------------------------------------------
-# connId stamping on reply events (server.py S3)
-# ---------------------------------------------------------------------------
 
 
 def test_get_frequent_tasks_conn_id_stamping() -> None:
@@ -200,17 +176,12 @@ def test_get_models_conn_id_stamping() -> None:
     assert isinstance(models_events[0]["models"], list)
 
 
-# ---------------------------------------------------------------------------
-# cleanup_tab guard (server.py S4) via _replay_session no-result branch
-# ---------------------------------------------------------------------------
-
 
 def test_replay_session_missing_chat_cleans_tab() -> None:
     server, printer = _make_server()
     printer.events.clear()
     server._replay_session("no-such-chat-" + uuid.uuid4().hex, tab_id="tabX")
     assert printer.cleaned_tabs == ["tabX"]
-    # No running agent to rebind → no status/task_events broadcast.
     assert printer.events == []
 
 
@@ -236,8 +207,6 @@ def test_replay_session_with_plain_printer_lacking_cleanup_tab() -> None:
 
     printer = _MinimalPrinter()
     if hasattr(JsonPrinter, "cleanup_tab"):
-        # Base class provides it; the guard is exercised elsewhere.
-        # Still run the call to assert no crash.
         pass
     server = VSCodeServer(printer=printer)
     printer.events.clear()
@@ -245,21 +214,12 @@ def test_replay_session_with_plain_printer_lacking_cleanup_tab() -> None:
     assert printer.events == []
 
 
-# ---------------------------------------------------------------------------
-# int/str task-id coercion (server.py S2) via _get_history end-to-end
-# ---------------------------------------------------------------------------
-
 
 def test_get_history_coerces_legacy_int_row_ids() -> None:
     tag = uuid.uuid4().hex
     tid_str, _chat1 = persistence._add_task(f"task-str-{tag}", "")
     tid_int, _chat2 = persistence._add_task(f"task-int-{tag}", "")
     int_id = int(str(uuid.uuid4().int)[:12])
-    # Rewrite the row id through the persistence layer's own connection.
-    # A raw ``sqlite3.connect(_current_db_path())`` can silently create a
-    # brand-new empty database file (→ "no such table: task_history")
-    # when an earlier test swapped or deleted the DB file while the
-    # thread-local connection stayed cached, so it is order-dependent.
     db = persistence._get_db()
     with persistence._rw_lock.write_lock():
         db.execute(
@@ -276,7 +236,5 @@ def test_get_history_coerces_legacy_int_row_ids() -> None:
     by_title = {s["title"]: s for s in event["sessions"]}
     str_session = by_title[f"task-str-{tag}"]
     int_session = by_title[f"task-int-{tag}"]
-    # String ids pass through unchanged.
     assert str_session["task_id"] == tid_str
-    # Legacy int row ids are coerced to strings.
     assert int_session["task_id"] == str(int_id)

@@ -236,23 +236,13 @@ class TestCliPersistsEventsForChatWebview:
             work_dir=self.tmpdir,
             base_url=self.url,
         )
-        # The recording printer is injected by the UI-layer entry point
-        # (``kiss.ui.cli.sorcar_cli.main``) exactly like this — the
-        # sorcar-layer helper must not import the UI layer itself.
         run_kwargs = _build_run_kwargs(
             args, printer_factory=RecordingConsolePrinter,
         )
-        # ``model_config`` is built from ``--endpoint`` / ``--header``
-        # by ``_build_run_kwargs``; the fake server expects a non-empty
-        # api_key so add it without touching the CLI helper itself.
         run_kwargs["model_config"]["api_key"] = "test-key"
-        # CLI runs do not pre-subscribe a tab (the chat webview, if
-        # any, subscribes on its own when the user opens the session).
         agent = ChatSorcarAgent("CLI Sorcar Agent")
         agent.run(**run_kwargs)
         assert agent._last_task_id is not None
-        # Ensure asynchronously queued events are flushed to disk
-        # before the test reads them.
         th._flush_chat_events()
         return str(agent._last_task_id)
 
@@ -275,28 +265,17 @@ class TestCliPersistsEventsForChatWebview:
         events: list[dict[str, Any]] = session["events"]  # type: ignore[assignment]
         event_types = [e.get("type") for e in events]
 
-        # The user's prompt must be persisted (this works pre-fix too,
-        # but only because ``_persist_replay_events_if_missing``
-        # synthesises it after the run ends).
         assert "prompt" in event_types, (
             f"prompt event missing from persisted stream: {event_types}"
         )
-        # The final result event must be present — likewise.
         assert "result" in event_types, (
             f"result event missing from persisted stream: {event_types}"
         )
-        # The intermediate ``tool_call`` event for the model's
-        # ``finish(...)`` invocation must also be persisted.  This is
-        # the bug under test: a plain ConsolePrinter never queues this
-        # event, and the fallback synthesiser only emits prompt +
-        # result, so before the fix the assertion below fails.
         assert "tool_call" in event_types, (
             "tool_call event for finish() was NOT persisted — "
             f"the chat webview cannot render the live tool call. "
             f"persisted event types: {event_types}"
         )
-        # The persisted tool_call must name the finish tool so the
-        # chat webview renders it identically to a live VS Code run.
         finish_calls = [
             e for e in events
             if e.get("type") == "tool_call" and "finish" in str(e).lower()

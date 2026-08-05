@@ -48,10 +48,6 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.server.json_printer import JsonPrinter
 
-# ---------------------------------------------------------------------------
-# Fake OpenAI server that returns run_parallel → finish
-# ---------------------------------------------------------------------------
-
 _CALL_COUNTER: dict[str, int] = {}
 _CALL_LOCK = threading.Lock()
 
@@ -172,7 +168,6 @@ def _summary_response() -> dict:
 
 def _sse_wrap(resp: dict) -> bytes:
     """Wrap a non-streaming response as SSE chunks for streaming mode."""
-    # Emit the full response as a single SSE data line, then [DONE].
     payload = json.dumps(resp)
     return (
         f"data: {payload}\n\n"
@@ -189,7 +184,6 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         cl = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(cl) if cl else b""
-        # Parse the request to figure out which agent is calling
         try:
             req = json.loads(raw)
         except Exception:
@@ -198,25 +192,13 @@ class _Handler(BaseHTTPRequestHandler):
         is_stream = req.get("stream", False)
         messages = req.get("messages", [])
 
-        # Detect whether this is a sub-agent or the parent.  Sub-agent
-        # requests are identified by their TASK prompt (a user-role
-        # message containing "Compute").  Only user-role content is
-        # inspected: sub-agents inherit the parent's ``model_config``
-        # (budget-distribution fix), so their system prompt — which
-        # mentions run_parallel — also reaches this server, and a
-        # whole-conversation heuristic would misroute them into
-        # infinite nested run_parallel spawning.
         user_text = " ".join(
             str(m.get("content", "")) for m in messages if m.get("role") == "user"
         )
         is_sub = "Compute" in user_text
-        # Also detect if run_parallel tool result is already present
         has_rp_result = any(
             m.get("role") == "tool" for m in messages
         )
-        # The every-5-steps summary gate: when the pre-step hook just
-        # demanded a summary (it appends a user message ending the
-        # conversation), the ONLY accepted tool call is ``summary``.
         last = messages[-1] if messages else {}
         summary_due = (
             last.get("role") == "user"
@@ -228,17 +210,13 @@ class _Handler(BaseHTTPRequestHandler):
         elif is_sub:
             resp = _finish_response("sub-agent-result")
         elif has_rp_result:
-            # Parent's second call (after run_parallel returns)
             resp = _finish_response("parent-result")
         else:
-            # Parent's first call
             resp = _run_parallel_response()
 
         if is_stream:
-            # Convert to streaming SSE format
             choice = resp["choices"][0]
             msg = choice["message"]
-            # First chunk: role
             c1 = {
                 "id": resp["id"],
                 "object": "chat.completion.chunk",
@@ -249,7 +227,6 @@ class _Handler(BaseHTTPRequestHandler):
                     "finish_reason": None,
                 }],
             }
-            # Second chunk: tool_calls or content
             delta2: dict[str, Any] = {}
             if msg.get("tool_calls"):
                 delta2["tool_calls"] = msg["tool_calls"]
@@ -265,7 +242,6 @@ class _Handler(BaseHTTPRequestHandler):
                     "finish_reason": choice["finish_reason"],
                 }],
             }
-            # Usage chunk
             c3 = {
                 "id": resp["id"],
                 "object": "chat.completion.chunk",
@@ -308,10 +284,6 @@ def _start_server() -> tuple[ThreadingHTTPServer, str]:
     return srv, f"http://127.0.0.1:{srv.server_port}/v1"
 
 
-# ---------------------------------------------------------------------------
-# Capturing printer
-# ---------------------------------------------------------------------------
-
 
 class _CapturePrinter(JsonPrinter):
     """Records every broadcast event with its injected taskId."""
@@ -325,15 +297,10 @@ class _CapturePrinter(JsonPrinter):
         event = self._inject_task_id(event)
         with self._cap_lock:
             self.all_events.append(dict(event))
-        # Delegate to parent for recording + persistence side effects
         with self._lock:
             self._record_event(event)
         self._persist_event(event)
 
-
-# ---------------------------------------------------------------------------
-# DB redirect helpers
-# ---------------------------------------------------------------------------
 
 
 def _redirect(tmpdir: str) -> tuple:
@@ -349,10 +316,6 @@ def _redirect(tmpdir: str) -> tuple:
 def _restore(saved: tuple) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved
 
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 
 class TestSubagentResultNotInParent:
@@ -398,26 +361,21 @@ class TestSubagentResultNotInParent:
         parent_task_id = parent._last_task_id
         assert parent_task_id is not None
 
-        # Load the parent's persisted events from the DB
         loaded = _load_chat_events_by_task_id(parent_task_id)
         assert loaded is not None
         raw_events = loaded.get("events") or []  # type: ignore[union-attr]
         parent_events: list[Any] = list(raw_events)  # type: ignore[call-overload]
 
-        # Count result events in the parent's persisted events
         parent_result_events = [
             e for e in parent_events if isinstance(e, dict) and e.get("type") == "result"
         ]
 
-        # The parent should have exactly ONE result event (its own).
-        # If sub-agent results leaked, there would be 4 (1 parent + 3 subs).
         assert len(parent_result_events) == 1, (
             f"Expected exactly 1 result event in parent's persisted events, "
             f"got {len(parent_result_events)}.  Result events: "
             f"{parent_result_events}"
         )
 
-        # The parent's result must contain "parent-result"
         parent_result = parent_result_events[0]
         summary = parent_result.get("summary", "") or parent_result.get("text", "")
         assert "parent-result" in summary, (
@@ -453,18 +411,15 @@ class TestSubagentResultNotInParent:
         assert parent_task_id is not None
         parent_task_key = str(parent_task_id)
 
-        # Collect all result events from broadcasts
         result_events = [
             e for e in printer.all_events if e.get("type") == "result"
         ]
 
-        # There should be 4 result events total: 1 parent + 3 sub-agents
         assert len(result_events) >= 4, (
             f"Expected at least 4 result events (1 parent + 3 subs), "
             f"got {len(result_events)}"
         )
 
-        # Exactly one result should have the parent's taskId
         parent_results = [
             e for e in result_events
             if e.get("taskId") == parent_task_key
@@ -474,7 +429,6 @@ class TestSubagentResultNotInParent:
             f"got {len(parent_results)}"
         )
 
-        # The remaining results should all have DIFFERENT taskIds
         sub_results = [
             e for e in result_events
             if e.get("taskId") != parent_task_key
@@ -508,8 +462,6 @@ class TestSubagentResultNotInParent:
         printer = _CapturePrinter()
 
         parent = ChatSorcarAgent("parent")
-        # Simulate the VS Code server subscribing the parent tab to the
-        # parent's task.  We do this by passing ``_subscribe_tab_id``.
         parent_tab_id = "parent-tab-XYZ"
         parent.run(
             prompt_template=(
@@ -527,23 +479,19 @@ class TestSubagentResultNotInParent:
         assert parent_task_id is not None
         parent_task_key = str(parent_task_id)
 
-        # Collect all result events
         result_events = [
             e for e in printer.all_events if e.get("type") == "result"
         ]
 
-        # Check fan-out targets for each result event
         for ev in result_events:
             task_id = ev.get("taskId", "")
             if task_id == parent_task_key:
-                # Parent result: fan-out should include parent tab
                 targets = printer._fanout_targets(task_id)
                 assert parent_tab_id in targets, (
                     f"Parent result should fan out to parent tab "
                     f"{parent_tab_id}, got targets={targets}"
                 )
             else:
-                # Sub-agent result: fan-out should NOT include parent tab
                 targets = printer._fanout_targets(task_id)
                 assert parent_tab_id not in targets, (
                     f"Sub-agent result (taskId={task_id}) should NOT "
@@ -577,9 +525,7 @@ class TestSubagentResultNotInParent:
         parent_task_id = parent._last_task_id
         assert parent_task_id is not None
 
-        # Find sub-agent rows in the DB
         import time
-        # Give async persistence a moment to flush
         time.sleep(0.5)
         th._flush_chat_events()
 
@@ -594,7 +540,6 @@ class TestSubagentResultNotInParent:
             f"Expected 3 sub-agent rows, got {len(sub_rows)}"
         )
 
-        # Each sub-agent row should have a result event
         for row in sub_rows:
             loaded = _load_chat_events_by_task_id(row["id"])
             assert loaded is not None

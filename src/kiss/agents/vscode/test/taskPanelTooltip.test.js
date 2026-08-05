@@ -2,33 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test: hovering over the task text (#task-panel-text) in
-// the fixed task panel of the chat webview shows a tooltip containing
-// the ENTIRE task text, rendered at the SAME font size as the task
-// text in the panel.
-//
-// Locked-in behaviour:
-//   * setTaskText stamps the full trimmed task text into the
-//     data-tooltip attribute of #task-panel-text (and removes the
-//     attribute when the task text is cleared);
-//   * the tab-restore path (restoreTab) keeps data-tooltip in sync
-//     when switching tabs — no stale tooltip from another tab;
-//   * hovering #task-panel-text pops the shared #custom-tooltip with
-//     the entire task text and the .task-panel-tooltip class, whose
-//     main.css rule pins font-size to var(--vscode-editor-font-size)
-//     — the exact declaration #task-panel itself uses, so the tooltip
-//     font size always equals the task text font size (both in the
-//     VS Code webview and on the remote web app, which serves the
-//     same main.css);
-//   * hovering any OTHER [data-tooltip] element drops the
-//     .task-panel-tooltip class so ordinary tooltips keep --fs-sm;
-//   * mouseout hides the tooltip again.
-//
-// Exercises the real ``media/chat.html`` + ``media/main.js`` in jsdom
-// (same harness as taskPanelExpandFullText.test.js).  Run directly:
-//
-//     node src/kiss/agents/vscode/test/taskPanelTooltip.test.js
 
 'use strict';
 
@@ -39,7 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-// A long multi-line task: the tooltip must carry ALL of it.
 const LONG_TASK =
   'Refactor the payment pipeline to support multi-currency ' +
   'settlement.\nStep 1: normalize every ledger entry to minor ' +
@@ -49,16 +21,10 @@ const LONG_TASK =
   'x'.repeat(600) +
   '\nFinally run the full reconciliation suite and attach the report.';
 
-/**
- * Build a jsdom window running the real chat webview (chat.html +
- * panelCopy.js + main.js), mirroring the production extension.
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
   html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  // Strip the production <script> tags — we eval the source files
-  // ourselves below so they pick up the jsdom globals.
   html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
 
   const dom = new JSDOM(html, {
@@ -85,28 +51,25 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   return {win, posted};
 }
 
-/** Dispatch a backend→webview event exactly like the extension does. */
 function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** Real-time sleep — the tooltip uses a 400 ms show delay. */
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-/** Fire a bubbling mouse event of *type* on *el*. */
 function mouse(win, el, type) {
   el.dispatchEvent(new win.MouseEvent(type, {bubbles: true}));
 }
 
-// ---------------------------------------------------------------------------
-// 1. setTaskText stamps (and clears) the full task text as data-tooltip.
-// ---------------------------------------------------------------------------
 function testSetTaskTextStampsDataTooltip() {
   const {win} = makeWebview();
   send(win, {type: 'setTaskText', text: '  ' + LONG_TASK + '\n'});
@@ -124,7 +87,6 @@ function testSetTaskTextStampsDataTooltip() {
     'tooltip text must equal the task text shown in the panel',
   );
 
-  // Clearing the task must also clear the tooltip.
   send(win, {type: 'setTaskText', text: ''});
   assert.strictEqual(
     txt.getAttribute('data-tooltip'),
@@ -135,10 +97,6 @@ function testSetTaskTextStampsDataTooltip() {
   console.log('  ok - setTaskText stamps/clears data-tooltip');
 }
 
-// ---------------------------------------------------------------------------
-// 2. Hover shows the entire task text in the shared custom tooltip,
-//    with the .task-panel-tooltip font-size marker; mouseout hides it.
-// ---------------------------------------------------------------------------
 async function testHoverShowsFullTaskTooltip() {
   const {win} = makeWebview();
   send(win, {type: 'setTaskText', text: LONG_TASK});
@@ -149,7 +107,7 @@ async function testHoverShowsFullTaskTooltip() {
   assert.ok(!tip.classList.contains('visible'), 'tooltip must start hidden');
 
   mouse(win, txt, 'mouseover');
-  await sleep(500); // show delay is 400 ms
+  await sleep(500);
   assert.ok(
     tip.classList.contains('visible'),
     'hovering the task text must show the tooltip',
@@ -174,11 +132,6 @@ async function testHoverShowsFullTaskTooltip() {
   console.log('  ok - hover shows entire task text; mouseout hides');
 }
 
-// ---------------------------------------------------------------------------
-// 3. Hovering an ordinary [data-tooltip] control (the task drawer
-//    button) keeps its own text and DROPS the .task-panel-tooltip
-//    class, so normal tooltips keep the small --fs-sm font.
-// ---------------------------------------------------------------------------
 async function testOtherTooltipsKeepSmallFont() {
   const {win} = makeWebview();
   send(win, {type: 'setTaskText', text: LONG_TASK});
@@ -186,28 +139,39 @@ async function testOtherTooltipsKeepSmallFont() {
   const txt = win.document.getElementById('task-panel-text');
   const tip = win.document.getElementById('custom-tooltip');
 
-  // First hover the task text so the class is set...
   mouse(win, txt, 'mouseover');
   await sleep(500);
   assert.ok(tip.classList.contains('task-panel-tooltip'));
   mouse(win, txt, 'mouseout');
 
-  // ...then hover the drawer button: class must be removed.
   const drawerBtn = win.document.getElementById('task-panel-drawer-btn');
-  assert.ok(
+  assert.strictEqual(
     drawerBtn.getAttribute('data-tooltip'),
-    'drawer button must keep its own data-tooltip',
+    null,
+    'drawer button must NOT have a data-tooltip',
   );
   mouse(win, drawerBtn, 'mouseover');
   await sleep(500);
   assert.ok(
+    !tip.classList.contains('visible'),
+    'hovering the drawer button must not show a tooltip',
+  );
+
+  const modelBtn = win.document.getElementById('model-btn');
+  assert.ok(
+    modelBtn.getAttribute('data-tooltip'),
+    'model button must keep its own data-tooltip',
+  );
+  mouse(win, modelBtn, 'mouseover');
+  await sleep(500);
+  assert.ok(
     tip.classList.contains('visible'),
-    'drawer button tooltip must still work',
+    'model button tooltip must still work',
   );
   assert.strictEqual(
     tip.textContent,
-    drawerBtn.getAttribute('data-tooltip'),
-    'drawer button keeps its own tooltip text',
+    modelBtn.getAttribute('data-tooltip'),
+    'model button keeps its own tooltip text',
   );
   assert.ok(
     !tip.classList.contains('task-panel-tooltip'),
@@ -217,11 +181,6 @@ async function testOtherTooltipsKeepSmallFont() {
   console.log('  ok - other tooltips keep the small font class-free');
 }
 
-// ---------------------------------------------------------------------------
-// 4. Tab switch (restoreTab path) keeps data-tooltip in sync: each
-//    tab restores ITS OWN task tooltip (sub tab → its description,
-//    fresh "+" tab → none, parent → the full task again).
-// ---------------------------------------------------------------------------
 function testTabRestoreKeepsTooltipInSync() {
   const {win, posted} = makeWebview();
   const ready = posted.find(m => m.type === 'ready');
@@ -232,8 +191,6 @@ function testTabRestoreKeepsTooltipInSync() {
   const txt = win.document.getElementById('task-panel-text');
   assert.strictEqual(txt.getAttribute('data-tooltip'), LONG_TASK);
 
-  // Spawn a sub-agent tab (backend replay sequence: new_tab →
-  // resumeSession → openSubagentTab) — it opens in the BACKGROUND.
   const before = posted.length;
   send(win, {
     type: 'new_tab',
@@ -254,9 +211,6 @@ function testTabRestoreKeepsTooltipInSync() {
     taskIndex: 0,
   });
 
-  // Sub tabs open in the background: click the sub tab in the tab
-  // bar to switch to it (saveCurrentTab + restoreTab round trip).
-  // Its panel restores its OWN task ('sub 1') — never the parent's.
   const subEl = win.document.querySelector('#tab-list .chat-tab.subagent-tab');
   assert.ok(subEl, 'sub-agent tab element must exist in the tab bar');
   subEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
@@ -271,8 +225,6 @@ function testTabRestoreKeepsTooltipInSync() {
     'sub tab tooltip must be ITS task, not the stale parent task',
   );
 
-  // Open a brand-new empty chat tab (the "+" button): its task panel
-  // restores to nothing, covering the tooltip-removal branch.
   const addBtn = win.document.querySelector('#tab-bar .chat-tab-add');
   assert.ok(addBtn, 'the "+" new-chat tab button must exist');
   addBtn.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
@@ -287,8 +239,6 @@ function testTabRestoreKeepsTooltipInSync() {
     'a fresh chat tab must not keep any stale tooltip',
   );
 
-  // Switch back to the parent tab via its tab-bar button: restoreTab
-  // must restore BOTH the text and the tooltip.
   const tabEls = win.document.querySelectorAll('#tab-list .chat-tab');
   const parentEl = Array.from(tabEls).find(el => {
     return !el.classList.contains('subagent-tab');
@@ -310,11 +260,6 @@ function testTabRestoreKeepsTooltipInSync() {
   console.log('  ok - tab restore keeps data-tooltip in sync');
 }
 
-// ---------------------------------------------------------------------------
-// 5. main.css pins the task tooltip font size to the task panel's own
-//    declaration — var(--vscode-editor-font-size) — for BOTH the
-//    extension webview and the remote web app (same stylesheet).
-// ---------------------------------------------------------------------------
 function testCssPinsTooltipFontSizeToTaskPanel() {
   const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
 

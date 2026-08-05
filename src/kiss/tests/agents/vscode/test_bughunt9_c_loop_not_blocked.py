@@ -95,7 +95,6 @@ class TestWatchdogIpCheckAcceptsPrefetchedIps(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 srv = _make_server(tmp)
                 srv._last_ips = frozenset({"192.0.2.1"})
-                # Baseline unchanged: no restart, no inline discovery.
                 self.assertFalse(
                     srv._watchdog_check_ip_change(frozenset({"192.0.2.1"})),
                 )
@@ -111,7 +110,6 @@ class TestWatchdogIpCheckAcceptsPrefetchedIps(unittest.TestCase):
                 srv = _make_server(tmp)
                 srv._last_ips = frozenset()
                 self.assertFalse(srv._watchdog_check_ip_change())
-                # First non-empty discovery becomes the baseline.
                 self.assertEqual(srv._last_ips, frozenset({"192.0.2.7"}))
         finally:
             ws._get_local_ips = old

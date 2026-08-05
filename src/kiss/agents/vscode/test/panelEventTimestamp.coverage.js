@@ -2,20 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Coverage gate for the per-panel event-timestamp feature code:
-// re-runs ``panelEventTimestamp.test.js`` under V8's built-in
-// coverage (``NODE_V8_COVERAGE``) and FAILS unless every non-blank
-// line between the ``// panelts-coverage:start`` /
-// ``// panelts-coverage:end`` markers of ``media/panelCopy.js``
-// (formatEventTs + addPanelTimestamp) and ``media/main.js``
-// (normalizeEventTs) was executed.  The test evals both files with
-// ``//# sourceURL=panelts-*.js`` pragmas, which is how their coverage
-// JSON entries are identified here.
-//
-// Run with:
-//
-//     node src/kiss/agents/vscode/test/panelEventTimestamp.coverage.js
 
 'use strict';
 
@@ -30,16 +16,11 @@ const TEST_FILE = path.join(__dirname, 'panelEventTimestamp.test.js');
 const START_MARK = '// panelts-coverage:start';
 const END_MARK = '// panelts-coverage:end';
 
-// The gated sources and the sourceURL pragma each is eval'd under.
 const TARGETS = [
   {file: path.join(MEDIA, 'panelCopy.js'), url: 'panelts-panelCopy.js'},
   {file: path.join(MEDIA, 'main.js'), url: 'panelts-main.js'},
 ];
 
-/**
- * Return the [startLine, endLine] (1-based, exclusive of the marker
- * lines themselves) of every panelts-coverage region in *lines*.
- */
 function findRegions(lines, file) {
   const regions = [];
   let start = -1;
@@ -50,7 +31,7 @@ function findRegions(lines, file) {
       start = i + 1;
     } else if (t === END_MARK) {
       assert.ok(start >= 0, `panelts-coverage:end without start (${file})`);
-      regions.push([start + 1, i]); // exclusive of both marker lines
+      regions.push([start + 1, i]);
       start = -1;
     }
   }
@@ -59,10 +40,6 @@ function findRegions(lines, file) {
   return regions;
 }
 
-// Paint one eval-instance's char coverage from its V8 ranges.  Ranges
-// nest; applying them sorted by (startOffset asc, endOffset desc)
-// paints outer ranges first so inner ranges override, matching V8
-// block-coverage semantics.
 function paintInstance(functions, length) {
   const painted = new Uint8Array(length);
   const ranges = [];
@@ -78,19 +55,11 @@ function paintInstance(functions, length) {
   return painted;
 }
 
-/**
- * Enforce 100% line coverage of every panelts region of one target.
- * Returns {hit, total, missed} for the summary line.
- */
 function gateTarget(target, reports) {
   const src = fs.readFileSync(target.file, 'utf-8');
   const lines = src.split('\n');
   const regions = findRegions(lines, target.file);
 
-  // A char is covered if ANY eval instance executed it.  The eval'd
-  // source carries the appended sourceURL pragma line; coverage
-  // offsets index that eval text, whose first src.length chars match
-  // the file exactly.
   const covered = new Uint8Array(src.length);
   let instances = 0;
   for (const report of reports) {
@@ -107,8 +76,6 @@ function gateTarget(target, reports) {
       'eval-ing with the sourceURL pragma?',
   );
 
-  // Line gate: every non-blank line inside every panelts-coverage
-  // region must have at least one covered non-whitespace character.
   let offset = 0;
   const lineStart = new Array(lines.length);
   for (let n = 0; n < lines.length; n++) {

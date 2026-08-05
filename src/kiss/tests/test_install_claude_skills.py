@@ -83,10 +83,10 @@ class TestReleaseShClaudeSkillsStep(unittest.TestCase):
         )
 
     def test_claude_skills_downloaded_before_extension_build(self) -> None:
-        """Claude skills step (3) must come before Build VS Code extension (4)."""
+        """Claude skills step (5) must come before Build VS Code extension (6)."""
         text = RELEASE_SH.read_text()
-        skills_pos = text.index("Step 3: Download official Claude Code skills")
-        build_pos = text.index("Step 4: Build VS Code extension")
+        skills_pos = text.index("Step 5: Download official Claude Code skills")
+        build_pos = text.index("Step 6: Build VS Code extension")
         self.assertLess(
             skills_pos,
             build_pos,
@@ -94,11 +94,11 @@ class TestReleaseShClaudeSkillsStep(unittest.TestCase):
         )
 
     def test_claude_skills_deleted_after_build_before_commit(self) -> None:
-        """Skills dir must be deleted after build (4), before commit (5)."""
+        """Skills dir must be deleted after build (6), before commit (7)."""
         text = RELEASE_SH.read_text()
-        build_pos = text.index("Step 4: Build VS Code extension")
+        build_pos = text.index("Step 6: Build VS Code extension")
         cleanup_pos = text.index("Cleaned up $CLAUDE_SKILLS_DIR (bundled in extension)")
-        commit_pos = text.index("Step 5: Commit")
+        commit_pos = text.index("Step 7: Commit")
         self.assertLess(
             build_pos,
             cleanup_pos,
@@ -119,7 +119,7 @@ class TestReleaseShClaudeSkillsStep(unittest.TestCase):
         """Header workflow comment must list the Claude skills step."""
         text = RELEASE_SH.read_text()
         self.assertIn(
-            "# 4. Download official Claude Code skills",
+            "# 5. Download official Claude Code skills",
             text,
             "release.sh workflow comment must include Claude skills step",
         )
@@ -127,9 +127,6 @@ class TestReleaseShClaudeSkillsStep(unittest.TestCase):
     def test_release_sh_claude_skills_dir_is_absolute(self) -> None:
         """CLAUDE_SKILLS_DIR must be an absolute path so cp works after cd."""
         text = RELEASE_SH.read_text()
-        # The assignment must use $(pwd) or similar to make the path absolute;
-        # a bare relative path like CLAUDE_SKILLS_DIR="src/..." would break
-        # after cd into the sparse-checkout temp directory.
         import re
 
         match = re.search(r'CLAUDE_SKILLS_DIR="([^"]*)"', text)
@@ -140,13 +137,13 @@ class TestReleaseShClaudeSkillsStep(unittest.TestCase):
             f"CLAUDE_SKILLS_DIR must be absolute, got: {value}",
         )
 
-    def test_release_sh_workflow_has_13_steps(self) -> None:
-        """Header workflow comment must have 13 steps after adding Claude skills."""
+    def test_release_sh_workflow_has_14_steps(self) -> None:
+        """Header workflow comment must have 14 steps after adding the history purge."""
         text = RELEASE_SH.read_text()
         self.assertIn(
-            "# 13. Restore stashed changes",
+            "# 14. Restore stashed changes",
             text,
-            "release.sh workflow must have 13 steps",
+            "release.sh workflow must have 14 steps",
         )
 
 

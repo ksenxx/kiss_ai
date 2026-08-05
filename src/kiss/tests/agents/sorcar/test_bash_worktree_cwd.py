@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.core.useful_tools import UsefulTools, _clean_env
+from kiss.agents.sorcar.useful_tools import UsefulTools, _clean_env
 
 
 def _init_git_repo(path: Path) -> None:
@@ -62,7 +62,6 @@ def test_bash_runs_in_work_dir_sync(tmp_path: Path):
     work.mkdir()
     tools = UsefulTools(work_dir=str(work))
     output = tools.Bash("pwd && echo KISS_WORKDIR=$KISS_WORKDIR", "probe")
-    # On macOS /private/tmp -> /tmp symlink; resolve both for comparison.
     pwd_line, env_line = output.strip().splitlines()
     assert Path(pwd_line).resolve() == work.resolve()
     assert env_line == f"KISS_WORKDIR={work}"
@@ -78,7 +77,6 @@ def test_bash_runs_in_work_dir_streaming(tmp_path: Path):
     pwd_line, env_line = output.strip().splitlines()
     assert Path(pwd_line).resolve() == work.resolve()
     assert env_line == f"KISS_WORKDIR={work}"
-    # streaming sink must have received the same content
     streamed_joined = "".join(streamed)
     assert str(work) in streamed_joined or str(work.resolve()) in streamed_joined
 
@@ -104,7 +102,6 @@ def test_update_models_style_script_writes_into_worktree(tmp_path: Path):
         ["git", "-C", str(repo), "commit", "-q", "-m", "add target"], check=True
     )
 
-    # Create a worktree at a sibling path.
     wt = tmp_path / "wt"
     subprocess.run(
         ["git", "-C", str(repo), "worktree", "add", "-q", str(wt), "-b", "feature"],
@@ -112,16 +109,10 @@ def test_update_models_style_script_writes_into_worktree(tmp_path: Path):
     )
     wt_target = wt / target_rel
 
-    # Simulate the agent process: it was launched with KISS_WORKDIR
-    # pointing at the *main* repo (this is what the VS Code extension
-    # injects). The worktree agent sets ``self.work_dir`` to the
-    # worktree, and UsefulTools must propagate that to subprocesses.
     old_kiss_workdir = os.environ.get("KISS_WORKDIR")
     os.environ["KISS_WORKDIR"] = str(repo)
     try:
         tools = UsefulTools(work_dir=str(wt))
-        # Mini script that mirrors update_models.py's _find_project_root
-        # (KISS_WORKDIR first, then cwd/.git, then __file__ fallback).
         script = (
             "python3 -c \""
             "import os, pathlib;"
@@ -138,7 +129,6 @@ def test_update_models_style_script_writes_into_worktree(tmp_path: Path):
         else:
             os.environ["KISS_WORKDIR"] = old_kiss_workdir
 
-    # The bug: write landed in main repo. The fix: write lands in worktree.
     assert wt_target.read_text() == "# UPDATED by script\n", (
         "worktree file was NOT updated — write leaked outside the worktree"
     )

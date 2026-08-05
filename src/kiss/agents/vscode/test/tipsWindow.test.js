@@ -2,49 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test for the fresh-install Tips window.
-//
-// Contract locked in here:
-//
-//   * ``getTips()`` (compiled ``out/SorcarTab.js``) parses the bundled
-//     ``src/kiss/TIPS.md``: every line starting with ``# Tip`` starts a
-//     new tip whose body is the markdown text up to the next such line
-//     (or EOF), trimmed.  Empty bodies are skipped.  A missing or
-//     unreadable file yields ``[]``.  The ``KISS_TIPS_PATH`` env var
-//     overrides the bundled file location for testability.
-//   * ``consumeTipsFirstRun()`` returns ``true`` exactly once per
-//     installation: the first call creates the ``~/.kiss/TIPS_SHOWN``
-//     marker (honouring ``KISS_HOME``) and returns ``true``; every
-//     later call returns ``false``.  When the marker cannot be
-//     written it returns ``false`` (never spam the user).
-//   * ``buildChatHtml`` injects ``window.__TIPS__ = {tips, show}``
-//     into the chat webview HTML and loads ``media/tips.js`` with a
-//     content-hash cache-buster.  No ``{{TIPS...}}`` placeholder may
-//     survive substitution.
-//   * ``media/tips.js`` defines the ``<kiss-tips-panel>`` web
-//     component: a centered overlay panel that renders the current
-//     tip's markdown as HTML (via ``window.marked``), with Previous /
-//     Next / Close buttons following the usual semantics (Previous
-//     disabled on the first tip, Next disabled on the last, Close
-//     removes the panel).  It auto-mounts only when
-//     ``window.__TIPS__.show`` is true and at least one tip exists.
-//   * The panel has a fixed size (``min(560px, 90vw)`` wide by
-//     ``min(520px, 82vh)`` tall), is centered both horizontally and
-//     vertically, and the tip body scrolls when content overflows.
-//   * Tip markdown is rendered with the Rosé Pine Moon palette
-//     (#232136 background, #e0def4 text, #c4a7e7 headings, #9ccfd8
-//     links, #f6c177 inline code, #ea9a97 accents, #3e8fb0 buttons).
-//   * Every fenced ``` code block rendered from a tip gets a Copy
-//     button that copies the code to the clipboard —
-//     ``navigator.clipboard.writeText`` with a hidden-textarea
-//     ``document.execCommand('copy')`` fallback — and flashes
-//     "Copied!" / "Failed" feedback before resetting to "Copy".
-//
-// Runs against the compiled extension under ``out/`` and the real
-// ``media/tips.js`` + ``media/marked.min.js`` in a jsdom DOM:
-//
-//     tsc -p . && node test/tipsWindow.test.js
 
 'use strict';
 
@@ -56,14 +13,6 @@ const Module = require('module');
 
 const projectRoot = path.resolve(__dirname, '..');
 
-// ---------------------------------------------------------------------------
-// Stub ``vscode`` before the compiled extension loads it.
-// ---------------------------------------------------------------------------
-
-// ``_vscode-stub.js`` is a git-tracked fixture shared by tests running
-// in parallel; it already re-exports ``global.__kissVscodeStub || {}`` —
-// never rewrite or delete it here (writeFileSync truncates first, racing
-// a concurrent ``require('vscode')`` in sibling test processes).
 global.__kissVscodeStub = {
   Uri: {
     joinPath(base, ...parts) {
@@ -117,10 +66,6 @@ function mkTmp(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
-/**
- * Run ``fn`` with KISS_HOME and KISS_TIPS_PATH pointing at fresh temp
- * locations.  ``setTips(content)`` writes the tips markdown file.
- */
 function withSandbox(fn) {
   const kissHome = path.join(mkTmp('kiss-tips-home-'), 'kisshome');
   const tipsFile = path.join(mkTmp('kiss-tips-md-'), 'TIPS.md');
@@ -142,10 +87,6 @@ function withSandbox(fn) {
     else process.env.KISS_PROJECT_PATH = prevProject;
   }
 }
-
-// ---------------------------------------------------------------------------
-// getTips — TIPS.md parsing
-// ---------------------------------------------------------------------------
 
 test('getTips parses the body after every "# Tip" line', () => {
   withSandbox(({setTips}) => {
@@ -209,8 +150,6 @@ test('getTips reads <kissRoot>/src/kiss/TIPS.md without the env override', () =>
 });
 
 test('getTips returns [] when no KISS project root can be found', () => {
-  // Only meaningful when no embedded kiss_project/ directory exists
-  // next to the extension sources (true for dev checkouts).
   if (fs.existsSync(path.join(projectRoot, 'kiss_project'))) return;
   withSandbox(() => {
     delete process.env.KISS_TIPS_PATH;
@@ -234,10 +173,6 @@ test('the bundled src/kiss/TIPS.md yields at least one non-empty tip', () => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// consumeTipsFirstRun — fresh-install marker
-// ---------------------------------------------------------------------------
-
 test('consumeTipsFirstRun is true exactly once per installation', () => {
   withSandbox(({kissHome}) => {
     assert.strictEqual(consumeTipsFirstRun(), true);
@@ -252,17 +187,12 @@ test('consumeTipsFirstRun is true exactly once per installation', () => {
 
 test('consumeTipsFirstRun is false when the marker cannot be written', () => {
   withSandbox(() => {
-    // Point KISS_HOME *inside a regular file* so mkdir/write must fail.
     const blocker = path.join(mkTmp('kiss-tips-blocked-'), 'file');
     fs.writeFileSync(blocker, 'not a directory');
     process.env.KISS_HOME = path.join(blocker, 'kiss');
     assert.strictEqual(consumeTipsFirstRun(), false);
   });
 });
-
-// ---------------------------------------------------------------------------
-// buildChatHtml — webview injection
-// ---------------------------------------------------------------------------
 
 function renderChatHtml() {
   const extensionUri = {fsPath: projectRoot};
@@ -338,16 +268,8 @@ test('buildChatHtml escapes </script> inside tip bodies', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// <kiss-tips-panel> — web component in a real DOM (jsdom)
-// ---------------------------------------------------------------------------
-
 const {JSDOM} = require(path.join(projectRoot, 'node_modules', 'jsdom'));
 
-/**
- * Load marked.min.js (optionally) + media/tips.js into a fresh jsdom
- * window with ``window.__TIPS__`` set to ``cfg`` and return the window.
- */
 function loadTipsDom(cfg, {withMarked = true, withConfig = true} = {}) {
   const dom = new JSDOM('<!DOCTYPE html><html><body></body></html>', {
     runScripts: 'outside-only',
@@ -415,7 +337,7 @@ test('next/previous navigate tips with the usual boundary semantics', () => {
   assert.ok(body.innerHTML.includes('<code>code</code>'));
   assert.strictEqual(next.disabled, true, 'Next disabled on last tip');
 
-  next.click(); // no-op past the end
+  next.click();
   assert.strictEqual(counter.textContent, '3 / 3');
 
   prev.click();
@@ -423,7 +345,7 @@ test('next/previous navigate tips with the usual boundary semantics', () => {
   prev.click();
   assert.strictEqual(counter.textContent, '1 / 3');
   assert.strictEqual(prev.disabled, true);
-  prev.click(); // no-op before the start
+  prev.click();
   assert.strictEqual(counter.textContent, '1 / 3');
 });
 
@@ -473,10 +395,6 @@ test('tips fall back to plain text when marked is unavailable', () => {
   );
 });
 
-// ---------------------------------------------------------------------------
-// <kiss-tips-panel> — fixed size, palette, and code-block copy buttons
-// ---------------------------------------------------------------------------
-
 const CODE_TIP =
   'Run this:\n\n```\nnpm install\nnpm test\n```\n\nAnd `inline` code.';
 const TWO_CODE_TIP =
@@ -523,13 +441,13 @@ test('tips panel uses the Rosé Pine Moon palette', () => {
   const {root} = panelParts(win);
   const css = root.querySelector('style').textContent;
   const palette = [
-    '#232136', // panel background
-    '#e0def4', // body text
-    '#c4a7e7', // headings / title
-    '#9ccfd8', // links / button hover
-    '#f6c177', // inline code
-    '#ea9a97', // strong / blockquote accent
-    '#3e8fb0', // buttons
+    '#232136',
+    '#e0def4',
+    '#c4a7e7',
+    '#9ccfd8',
+    '#f6c177',
+    '#ea9a97',
+    '#3e8fb0',
   ];
   for (const color of palette) {
     assert.ok(css.includes(color), `palette color ${color} must be used`);
@@ -591,22 +509,16 @@ test('navigation re-creates copy buttons for each tip', () => {
   assert.strictEqual(copyButtons(body).length, 1);
 });
 
-// ---------------------------------------------------------------------------
-// Copy-to-clipboard behavior (async)
-// ---------------------------------------------------------------------------
-
 const asyncTests = [];
 
 function asyncTest(name, fn) {
   asyncTests.push({name, fn});
 }
 
-/** Flush pending microtasks and 0ms macrotasks. */
 function tickAsync() {
   return new Promise(resolve => setTimeout(resolve, 0));
 }
 
-/** Replace win.setTimeout with a capture queue; returns the queue. */
 function captureTimers(win) {
   const timers = [];
   win.setTimeout = fn => {
@@ -773,8 +685,6 @@ asyncTest('copy shows Failed when execCommand throws', async () => {
     'helper textarea must be removed even when execCommand throws',
   );
 });
-
-// ---------------------------------------------------------------------------
 
 (async () => {
   for (const t of asyncTests) {

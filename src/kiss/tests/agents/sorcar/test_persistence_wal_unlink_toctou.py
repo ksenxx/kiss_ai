@@ -123,9 +123,6 @@ class TestWalUnlinkToctou:
         th._KISS_DIR = shared_kiss_dir
         assert not problems, problems[0]
 
-        # A brand-new thread (fresh per-thread connection) must still be
-        # able to use the shared database — before the fix this raised
-        # ``sqlite3.OperationalError: disk I/O error`` permanently.
         health: list[str] = []
 
         def probe() -> None:

@@ -67,7 +67,6 @@ class TestOpenAIGpt56CacheWritePricing:
         assert (info.cache_write_price_per_1M or 0.0) == 0.0
 
     def test_gpt56_short_context_cost_matches_published_rates(self):
-        # gpt-5.6-sol short context: $5 in, $30 out, $0.50 cached, $6.25 cache write.
         cost = calculate_cost("gpt-5.6-sol", 100_000, 10_000, 20_000, 30_000)
         expected = (100_000 * 5.0 + 10_000 * 30.0 + 20_000 * 0.50 + 30_000 * 6.25) / 1e6
         assert cost == pytest.approx(expected)
@@ -75,7 +74,6 @@ class TestOpenAIGpt56CacheWritePricing:
 
 class TestOpenAIGpt56LongContextPricing:
     def test_gpt56_terra_long_context_cost(self):
-        # >272k prompt tokens: $5 in, $22.50 out, $0.50 cached, $6.25 cache write.
         cost = calculate_cost("gpt-5.6-terra", 300_000, 10_000, 50_000, 40_000)
         expected = (
             300_000 * 5.0 + 10_000 * 22.50 + 50_000 * 0.50 + 40_000 * 6.25
@@ -97,17 +95,12 @@ class TestOpenAIGpt56LongContextPricing:
         )
 
     def test_gpt55_long_context_cache_writes_stay_free(self):
-        # gpt-5.5 has no cache-write fee even in the long-context tier.
         cost = calculate_cost("gpt-5.5", 300_000, 5_000, 0, 40_000)
         assert cost == pytest.approx((300_000 * 10.0 + 5_000 * 45.0) / 1e6)
 
     def test_openai_threshold_is_272k_not_200k(self):
-        # Official model pages: "Prompts with >272K input tokens are
-        # priced at 2x input and 1.5x output".  A 250k prompt (between
-        # the old 200k threshold and 272k) must stay at SHORT rates.
         cost = calculate_cost("gpt-5.6-sol", 250_000, 5_000)
         assert cost == pytest.approx((250_000 * 5.0 + 5_000 * 30.0) / 1e6)
-        # 272k exactly is still short; 272,001 crosses into long.
         assert calculate_cost("gpt-5.5", 272_000, 0) == pytest.approx(
             272_000 * 5.0 / 1e6
         )
@@ -118,7 +111,6 @@ class TestOpenAIGpt56LongContextPricing:
 
 class TestGeminiLongContextPricing:
     def test_gemini31_pro_long_context_cost(self):
-        # >200k prompts: $4 in, $18 out, $0.40 cached.
         cost = calculate_cost("gemini-3.1-pro-preview", 250_000, 10_000, 20_000, 0)
         expected = (250_000 * 4.0 + 10_000 * 18.0 + 20_000 * 0.40) / 1e6
         assert cost == pytest.approx(expected)
@@ -152,7 +144,6 @@ class TestGeminiToolUsePromptTokens:
             )
         )
         usage = self._model().extract_input_output_token_counts_from_response(response)
-        # input = (1000 - 300 cached) + 400 tool-use; output = 200 + 50 thoughts.
         assert usage == (1_100, 250, 300, 0)
 
     def test_missing_tool_use_field_defaults_to_zero(self):
@@ -180,8 +171,6 @@ class TestDirectMoonshotCachePricing:
             assert info.cache_read_price_per_1M == pytest.approx(hit), name
             assert info.input_price_per_1M == pytest.approx(miss), name
             assert info.output_price_per_1M == pytest.approx(out), name
-            # Must be EXACTLY 0.0 (not None): a None cache-write price
-            # falls back to the full input price in calculate_cost.
             assert info.cache_write_price_per_1M == 0.0, name
             assert calculate_cost(name, 0, 0, 0, 1_000_000) == 0.0, name
 
@@ -194,7 +183,6 @@ class TestDirectMoonshotCachePricing:
         assert info.cache_write_price_per_1M == 0.0
 
     def test_kimi_k25_cache_hit_cost(self):
-        # kimi-k2.5: $0.60 miss / $0.10 hit / $3.00 out per MTok.
         cost = calculate_cost("kimi-k2.5", 100_000, 0, 1_000_000, 0)
         assert cost == pytest.approx((100_000 * 0.60 + 1_000_000 * 0.10) / 1e6)
 
@@ -204,35 +192,27 @@ class TestDirectMoonshotCachePricing:
         assert cost == pytest.approx(expected)
 
     def test_openrouter_kimi_k3_cache_read_not_overcharged(self):
-        # openrouter.ai lists Moonshot's kimi-k3 cache read at $0.30 (0.1x),
-        # so the generic 0.25x OpenRouter-Moonshot rule must not apply.
         info = MODEL_INFO["openrouter/moonshotai/kimi-k3"]
         assert info.cache_read_price_per_1M == pytest.approx(0.30)
 
 
 class TestLongContextTierUsesPromptTokens:
     def test_large_output_does_not_trigger_long_context_tier(self):
-        # 250k prompt + 100k output stays in the short-context tier even
-        # though the total exceeds 272k (tiers key off prompt size).
         cost = calculate_cost("gpt-5.6-sol", 250_000, 100_000)
         assert cost == pytest.approx((250_000 * 5.0 + 100_000 * 30.0) / 1e6)
 
     def test_prompt_side_cache_tokens_count_toward_tier(self):
-        # 250k fresh input + 60k cache reads = 310k prompt -> long tier.
         cost = calculate_cost("gpt-5.6-sol", 250_000, 1_000, 60_000, 0)
         expected = (250_000 * 10.0 + 1_000 * 45.0 + 60_000 * 1.00) / 1e6
         assert cost == pytest.approx(expected)
 
     def test_gemini_output_excluded_from_tier_decision(self):
-        # 150k prompt + 100k output: total 250k > 200k, but the Gemini
-        # tier keys off the prompt, so short rates apply.
         cost = calculate_cost("gemini-2.5-pro", 150_000, 100_000)
         assert cost == pytest.approx((150_000 * 1.25 + 100_000 * 10.0) / 1e6)
 
 
 class TestGlmCachePricing:
     def test_glm_models_carry_published_cached_input_prices(self):
-        # docs.z.ai/guides/overview/pricing (cached-input $ per MTok).
         expected = {
             "glm-4.5": 0.11,
             "glm-4.5-air": 0.03,

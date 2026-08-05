@@ -100,19 +100,12 @@ class TestA1WriteLockInterruptLeak:
             assert reader_in.wait(5)
             tw = threading.Thread(target=try_write, daemon=True)
             tw.start()
-            # Wait until the writer is registered as pending (it is about
-            # to block — or already blocked — in cond.wait()).
             deadline = time.monotonic() + 10
             while lock._pending_writers != 1 and time.monotonic() < deadline:
                 time.sleep(0.005)
             assert lock._pending_writers == 1
-            time.sleep(0.1)  # let it enter cond.wait()
+            time.sleep(0.1)
             assert tw.ident is not None
-            # Pass the raw int thread id with an explicit C signature.
-            # Thread ids are unsigned longs; wrapping in ctypes.c_long
-            # breaks on Python 3.14 (and whenever another module has
-            # already set argtypes=[c_ulong, py_object] on this cached
-            # function object, as task_runner.py does at import time).
             set_async_exc = ctypes.pythonapi.PyThreadState_SetAsyncExc
             set_async_exc.argtypes = [ctypes.c_ulong, ctypes.py_object]
             set_async_exc.restype = ctypes.c_int
@@ -200,12 +193,6 @@ class TestA3SeqCacheClearRace(_DBSandbox):
         tids = [_add_task(f"a3 task {i}")[0] for i in range(n_tasks)]
         _flush_chat_events()
         db1 = str(th._DB_PATH)
-        # A second (never-created) DB path used purely to drive
-        # ``_maybe_reset_caches`` — the real cache-clear trigger that a
-        # concurrent ``_get_db()`` fires after a ``_DB_PATH`` swap.
-        # ``_DB_PATH`` itself is never changed, so no event can ever be
-        # legitimately dropped by the origin-path filter: every missing
-        # event is a genuine bug drop.
         db2 = str(Path(self.tmpdir) / ".kiss2" / "sorcar.db")
         expected = 0
 
@@ -224,13 +211,10 @@ class TestA3SeqCacheClearRace(_DBSandbox):
             tr = threading.Thread(target=hold_read, daemon=True)
             tr.start()
             assert reader_in.wait(5)
-            # Enqueue one event per task while _DB_PATH is stable (db1) so
-            # the whole batch passes the origin-path filter, then wedges on
-            # the write lock held (shared) by the reader.
             for i, tid in enumerate(tids):
                 _queue_chat_event({"type": "e", "r": rnd, "i": i}, tid, db1)
             expected += n_tasks
-            time.sleep(0.08)  # batch collected; writer blocked at write_lock
+            time.sleep(0.08)
 
             stop_flip = threading.Event()
 
@@ -242,7 +226,7 @@ class TestA3SeqCacheClearRace(_DBSandbox):
             tf = threading.Thread(target=flipper, daemon=True)
             tf.start()
             time.sleep(0.02)
-            release.set()  # writer seeds/consumes seq cache while flips run
+            release.set()
             time.sleep(0.15)
             stop_flip.set()
             tf.join(10)

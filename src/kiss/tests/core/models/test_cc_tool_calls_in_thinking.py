@@ -259,16 +259,11 @@ class TestCCToolCallsInsideThinking:
             _make_events_tool_call_only_in_thinking()
         )
 
-        # The visible content has nothing — tool call lives in thinking.
         assert content == ""
-        # The agent received the tool call from the thinking-block fallback.
         assert len(function_calls) == 1
         assert function_calls[0]["name"] == "Bash"
         assert function_calls[0]["arguments"] == {"command": "ls"}
-        # The captured thinking buffer must include the JSON.
         assert "tool_calls" in m._last_thinking_content
-        # And the conversation's last assistant message has been upgraded
-        # with tool_calls so subsequent turns reference it correctly.
         last = m.conversation[-1]
         assert last["role"] == "assistant"
         assert "tool_calls" in last
@@ -289,7 +284,6 @@ class TestCCToolCallsInsideThinking:
             _make_events_tool_call_in_text_and_thinking()
         )
 
-        # Both tool calls are extracted (different args → no dedup)
         assert len(function_calls) == 2
         commands = {fc["arguments"]["command"] for fc in function_calls}
         assert "ls" in commands
@@ -303,6 +297,4 @@ class TestCCToolCallsInsideThinking:
 
         assert function_calls == []
         assert content == "Hello, world."
-        # The last assistant message must remain a plain message (no
-        # ``tool_calls`` upgrade) since none were parsed.
         assert m.conversation[-1].get("tool_calls") is None

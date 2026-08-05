@@ -92,19 +92,15 @@ def _extract_fn_body(src: str, fn_name: str) -> str:
     return src[start:i]
 
 
-# ---------- Backend: task_runner broadcasts startTs / endTs ----------
-
 
 def test_task_runner_broadcasts_start_ts_on_status_running():
     """``_run_task`` must include ``startTs`` (agent's true start time,
     ms since epoch) on the ``status: running=True`` broadcast so the
     frontend can anchor its timer to the agent clock."""
     src = _read(TASK_RUNNER)
-    # Find the body of ``_run_task``.
     m = re.search(r"def _run_task\(self, cmd: dict\[str, Any\]\) -> None:",
                   src)
     assert m, "_run_task not found"
-    # Slice forward to the next top-level def (4-space indent).
     rest = src[m.end():]
     next_def = re.search(r"\n    def\s", rest)
     body = rest[: next_def.start()] if next_def else rest
@@ -122,11 +118,9 @@ def test_task_runner_broadcasts_end_ts_on_task_end():
     ``endTs`` so the frontend can compute the duration without
     relying on its own wall clock."""
     src = _read(TASK_RUNNER)
-    # Find the broadcast site that spreads task_end_event.
     assert "**task_end_event" in src, (
         "expected broadcast({**task_end_event, ...}) site"
     )
-    # All spreads must include both startTs and endTs.
     for m in re.finditer(
         r"\.broadcast\(\{\*\*task_end_event[^}]*\}\)", src,
     ):
@@ -164,17 +158,12 @@ def test_task_runner_persists_start_end_ts_to_extra():
     assert payload["endTs"] == 456, "payload must carry endTs"
 
 
-# ---------- Backend: server._get_history surfaces startTs/endTs ----------
-
 
 def test_get_history_emits_start_ts_per_session():
     """Every history row must carry ``startTs`` (from the row's
     ``timestamp`` column converted to ms) and ``endTs`` (from the
     persisted ``extra.endTs`` or 0 if still running)."""
     src = _read(SERVER_PY)
-    # Slice the body of _get_history.  ``\s*`` tolerates the
-    # multi-line signature (``conn_id`` pushed the params onto
-    # their own lines).
     m = re.search(r"def _get_history\(\s*self,", src)
     assert m, "_get_history not found"
     rest = src[m.end():]
@@ -188,8 +177,6 @@ def test_get_history_emits_start_ts_per_session():
     )
 
 
-# ---------- Frontend: status handler anchors t0 to ev.startTs ----------
-
 
 def test_status_handler_anchors_t0_to_ev_start_ts():
     """The ``case 'status':`` handler must seed ``t0`` (and
@@ -200,33 +187,34 @@ def test_status_handler_anchors_t0_to_ev_start_ts():
     assert "ev.startTs" in body, (
         "case 'status' handler must consume ev.startTs"
     )
-    # ``t0`` is assigned from the agent's startTs (not Date.now()).
     assert re.search(r"t0\s*=\s*ev\.startTs", body), (
         "case 'status' must set t0 = ev.startTs"
     )
 
-
-# ---------- Frontend: timer tick flips Running → Done at endTs ----------
 
 
 def test_timer_tick_flips_to_done_when_now_exceeds_end_ts():
     """``_renderTimerTick`` must check the agent's recorded end
     timestamp and switch the label to ``Done (Xm Ys)`` (computed
     from ``endTs - t0``) as soon as ``Date.now() >= endTs``."""
-    body = _extract_fn_body(_read(MAIN_JS), "_renderTimerTick")
+    src = _read(MAIN_JS)
+    body = _extract_fn_body(src, "_renderTimerTick")
     assert "endTs" in body, (
         "_renderTimerTick must consult the agent's endTs"
     )
-    assert "Done" in body, (
+    assert "Done" in body or "doneLabelFor" in body, (
         "_renderTimerTick must emit a 'Done (…)' label when "
         "Date.now() >= endTs"
     )
+    if "doneLabelFor" in body:
+        helper = _extract_fn_body(src, "doneLabelFor")
+        assert "'Done ('" in helper, (
+            "doneLabelFor must format the 'Done (…)' label"
+        )
     assert "Date.now()" in body and ">=" in body, (
         "_renderTimerTick must compare Date.now() >= endTs"
     )
 
-
-# ---------- Frontend: task_done uses ev.endTs - ev.startTs ----------
 
 
 def test_task_done_uses_event_start_and_end_ts():
@@ -237,16 +225,11 @@ def test_task_done_uses_event_start_and_end_ts():
     assert "ev.endTs" in body and "ev.startTs" in body, (
         "task_done must compute elapsed from ev.endTs - ev.startTs"
     )
-    # Reject the old anchor on Date.now() - doneT0 as the sole path:
-    # the new code may still fall back to it, but only when the agent
-    # timestamps are missing.  Assert that a guarded ev.endTs path exists.
     assert re.search(
         r"ev\.endTs\s*-\s*ev\.startTs|ev\.startTs\s*&&\s*ev\.endTs",
         body,
     ), "task_done must subtract ev.startTs from ev.endTs"
 
-
-# ---------- Sanity: built HTML still loads ----------
 
 
 def test_built_html_loads_main_js():

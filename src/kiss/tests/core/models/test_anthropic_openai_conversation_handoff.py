@@ -31,9 +31,6 @@ from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.model_info import model
 from kiss.tests.conftest import requires_anthropic_api_key
 
-# An OpenAI-format conversation exactly as OpenAICompatibleModel stores it:
-# a system message, an assistant message with a tool_calls array, and the
-# tool result as a role="tool" message.
 _OPENAI_STYLE_CONVERSATION: list[dict[str, Any]] = [
     {"role": "system", "content": "You are a concise assistant."},
     {"role": "user", "content": "Use the add tool to compute 2 + 3, then report the sum."},

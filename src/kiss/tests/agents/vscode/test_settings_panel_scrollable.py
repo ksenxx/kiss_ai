@@ -88,7 +88,6 @@ def _build_test_page() -> str:
     """
     css = _CSS.read_text(encoding="utf-8")
     panel = _extract_settings_panel_markup()
-    # Render the {{VERSION_SUFFIX}} placeholder so the page is valid.
     panel = panel.replace("{{VERSION_SUFFIX}}", "")
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -158,7 +157,6 @@ def _measure_settings_panel(_browser, viewport_height: int) -> dict:
     try:
         page = context.new_page()
         page.set_content(_build_test_page(), wait_until="load")
-        # Give the browser a tick to finish layout/paint.
         page.wait_for_function(
             "document.getElementById('settings-panel') !== null",
             timeout=5000,

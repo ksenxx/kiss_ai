@@ -97,6 +97,31 @@ def _owner_task_id(state: _RunningAgentState) -> str:
     return task_id if isinstance(task_id, str) else ""
 
 
+def _task_accepts_input(state: _RunningAgentState | None) -> bool:
+    """True when *state* has a live task that can drain queued input.
+
+    The worker thread raises ``is_task_active`` only AFTER
+    ``_cmd_run`` installs and starts ``task_thread``, so a follow-up
+    typed during that startup window used to be silently dropped
+    (S3-05).  Treating an alive worker thread as live closes the
+    window; the same predicate is used by the reattachment logic in
+    ``server.py``.  MUST be called while holding
+    :attr:`_RunningAgentState._registry_lock`.
+
+    Args:
+        state: The per-tab state to inspect (``None`` accepted).
+
+    Returns:
+        True when the tab's task is active or its worker thread is
+        still alive.
+    """
+    if state is None:
+        return False
+    if state.is_task_active:
+        return True
+    return state.task_thread is not None and state.task_thread.is_alive()
+
+
 def _restart_kiss_web_daemon() -> bool:
     """Restart the ``kiss-web`` daemon so it picks up config changes.
 
@@ -193,10 +218,6 @@ def _opt_str(value: Any) -> str | None:
 class _CommandsMixin:
     """Methods that implement frontend command handlers."""
 
-    # W2-F13: serialises the read-modify-write in ``_cmd_save_config``
-    # (``load_config`` → ``save_config`` → ``apply_config_to_env`` →
-    # password-change decision) across concurrent ``saveConfig``
-    # commands.  Class-level because the config file is process-global.
     _save_config_lock = threading.Lock()
 
     if TYPE_CHECKING:
@@ -207,7 +228,7 @@ class _CommandsMixin:
         _complete_seq: int
         _complete_seq_latest: dict[str, int]
         _complete_queue: (
-            queue.Queue[tuple[str, int, str, str, str, str]] | None
+            queue.Queue[tuple[str, int, str, str, str, str, str]] | None
         )
         _last_active_file: dict[str, str]
         _last_active_content: dict[str, str]
@@ -233,13 +254,18 @@ class _CommandsMixin:
             self, limit: int = 50, conn_id: str = "",
         ) -> None: ...
         def _get_files(
-            self, prefix: str, work_dir: str = "", conn_id: str = "",
+            self,
+            prefix: str,
+            work_dir: str = "",
+            conn_id: str = "",
+            tab_id: str = "",
         ) -> None: ...
         def _refresh_file_cache(
             self,
             then_emit_for_prefix: str | None = None,
             work_dir: str = "",
             conn_id: str = "",
+            tab_id: str = "",
         ) -> None: ...
         def _replay_session(
             self, chat_id: str, tab_id: str = "", task_id: str | None = None,
@@ -259,12 +285,12 @@ class _CommandsMixin:
             self, tab_id: str = "", *, work_dir: str = "",
         ) -> None: ...
         def _handle_worktree_action(
-            self, action: str, tab_id: str = "", *, internal: bool = False,
+            self, action: str, tab_id: str = "", *,
+            internal: bool = False, already_claimed: bool = False,
         ) -> dict[str, Any]: ...
         def _handle_autocommit_action(
             self, action: str, tab_id: str = "", *, work_dir: str = "",
         ) -> None: ...
-        def _handle_delete_task(self, task_id: str) -> None: ...
         def _handle_delete_frequent_task(self, task: str) -> None: ...
         def _handle_set_favorite(
             self, task_id: str, is_favorite: bool,
@@ -286,11 +312,6 @@ class _CommandsMixin:
         """
         tab_id = cmd.get("tabId", "")
         if not tab_id:
-            # An empty tab id would mint a phantom registry entry (and
-            # start a real task thread) that no other code path can
-            # ever address: ``_stop_task``, ``_cmd_close_tab`` and
-            # ``_dispose_if_closed`` all treat an empty id as "no tab",
-            # so the task would be unstoppable and undisposable.
             logger.debug("Ignoring run command without tabId")
             return
         inject_prompt: str | None = None
@@ -303,113 +324,22 @@ class _CommandsMixin:
                 tab = _RunningAgentState(tab_id, self._default_model)
                 _RunningAgentState.running_agent_states[tab_id] = tab
             if tab.task_thread is not None:
-                # A task is already running — or has been created and is
-                # about to start — for this tab.  We must NOT start a
-                # second task here.  Checking ``is_alive()`` would be
-                # racy: the winning submit assigns ``task_thread`` under
-                # the lock but calls ``thread.start()`` only after
-                # releasing it (and after the ``clear`` broadcast —
-                # network I/O), so a concurrent submit could observe a
-                # created-but-unstarted thread (``is_alive() == False``),
-                # pass the guard, and clobber ``stop_event`` /
-                # ``user_answer_queue`` / ``task_thread`` — leaving two
-                # tasks running on one tab with the first unstoppable.
-                # ``_run_task``'s outer finally always resets
-                # ``task_thread`` to None, so non-None ⇔ task in flight.
-                #
-                # The user's text must NOT be silently dropped, though.
-                # A ``run`` that arrives while a task is in flight is
-                # routed into the live agent as a follow-up user message
-                # — identical to ``appendUserMessage``.  This is the root
-                # cause of "input ignored during the task" after a
-                # close+reopen: a re-opened webview can momentarily still
-                # believe the task is idle (before the resume's
-                # ``status running:true`` arrives) and therefore send the
-                # typed text as a ``submit`` (→ ``run``) rather than an
-                # ``appendUserMessage``.  The daemon is the source of
-                # truth for whether a task is live, so it must inject the
-                # prompt here instead of discarding it.  A tab that
-                # started a task then behaves exactly like a tab that
-                # loaded one: typed input never vanishes.
-                # ``is_task_active`` is only set once the worker
-                # thread has begun executing ``_run_task`` — but the
-                # winning submit calls ``thread.start()`` only after
-                # the ``clear`` broadcast (network I/O), so a second
-                # submit landing in that wide start window observes
-                # ``task_thread is not None`` with ``is_task_active
-                # == False``.  Requiring ``is_task_active`` alone
-                # silently dropped such a prompt (neither queued nor
-                # echoed, no new task) — a fast double-submit lost the
-                # second message.  A created-but-unstarted thread has
-                # ``is_alive() == False``; queue the prompt in that
-                # case too — the worker drains
-                # ``pending_user_messages`` before its first model
-                # call, so the message is injected exactly like any
-                # other follow-up.  When the thread IS alive but
-                # ``is_task_active`` is False the task is in teardown
-                # (its ``finally`` is about to clear the queue), so
-                # queueing would fake-echo a message no agent will
-                # ever see; keep dropping only in that narrow case.
                 prompt = cmd.get("prompt", "")
-                if (
-                    isinstance(prompt, str)
-                    and prompt.strip()
-                    and (
-                        tab.is_task_active
-                        or not tab.task_thread.is_alive()
-                    )
-                ):
+                # S3-05: queue the prompt whenever a task thread is
+                # installed.  The worker sets ``is_task_active`` only
+                # AFTER the thread starts, so gating on the flag (or on
+                # thread death) silently dropped a second ``run``
+                # submitted during the startup window in which the
+                # thread was alive but the flag not yet raised.
+                if isinstance(prompt, str) and prompt.strip():
                     tab.pending_user_messages.append(prompt)
                     inject_prompt = prompt
                     inject_task = _owner_task_id(tab)
                     if not inject_task:
-                        # Task row not allocated yet (the created-but-
-                        # unstarted double-submit window): the echo
-                        # below is transient (no ``taskId`` stamp), so
-                        # ALSO queue the prompt for the drain hook,
-                        # which records + persists a durable copy once
-                        # the consuming task's id is known.
                         tab.unattributed_prompt_echoes.append(prompt)
             else:
                 tab.stop_event = threading.Event()
                 tab.user_answer_queue = queue.Queue(maxsize=1)
-                # Establish the canonical chat id for this run.  When
-                # :meth:`_replay_session` has already populated
-                # ``tab.chat_id`` with the chat id of a resumed history
-                # row, preserve it — otherwise the follow-up task would
-                # be cut off from the prior chat context
-                # (``ChatSorcarAgent.build_chat_prompt`` would query
-                # history for the tab id, find nothing, and send the LLM
-                # an empty preamble).
-                #
-                # If ``tab.chat_id`` is empty, this may be a tab that
-                # ``_replay_session`` associated with a chat AFTER a
-                # daemon cold-start (e.g. VS Code was closed and
-                # relaunched — the extension's ``ready`` handler replays
-                # ``resumeSession`` for every restored tab).  In that
-                # cold-start case no ``_RunningAgentState`` existed for
-                # the tab at the time ``_replay_session`` ran, so the
-                # chat id was only recorded in ``_tab_chat_views``
-                # (which is populated unconditionally, even when the
-                # per-tab state has not been allocated yet).  Consult
-                # that fallback here so the follow-up task continues
-                # the SAME chat_id the user was viewing rather than
-                # minting a fresh session and orphaning the prior
-                # conversation.
-                #
-                # An explicit ``chatId`` on the ``run`` command (sent
-                # by API clients such as ``kiss.server.sorcar.run`` to
-                # continue an existing chat from a fresh tab) takes
-                # precedence over both fallbacks below — the caller
-                # named the exact chat to continue, so neither a stale
-                # ``_tab_chat_views`` entry nor a fresh mint may
-                # override it.  A tab that already has ``tab.chat_id``
-                # set (resumed via ``_replay_session``) keeps it.
-                #
-                # Otherwise allocate a fresh chat id.  ``tab_id`` (the
-                # frontend routing key) and ``chat_id`` (the persistence
-                # key) are kept orthogonal: every run gets its own chat
-                # id, regardless of which tab launched it.
                 if not tab.chat_id:
                     requested_chat_id = cmd.get("chatId", "")
                     resumed_chat_id = self._tab_chat_views.get(tab_id, "")
@@ -420,51 +350,17 @@ class _CommandsMixin:
                     else:
                         tab.chat_id = uuid.uuid4().hex
                 chat_id = tab.chat_id
-                # The launching tab views this chat: record it so a later
-                # task started on the same chat from ANOTHER tab (in any
-                # window) streams its live events here too (see
-                # ``_subscribe_chat_viewers``).
                 self._tab_chat_views[tab_id] = chat_id
                 thread = threading.Thread(
                     target=self._run_task, args=(cmd,), daemon=True
                 )
                 tab.task_thread = thread
         if thread is None:
-            # Busy tab: the run was routed into the running agent (or
-            # ignored as blank).  Echo the injected follow-up so the user
-            # sees their queued message in the chat surface, mirroring
-            # ``_cmd_append_user_message`` — including the owning task
-            # id stamp (captured under the lock at queueing time) so
-            # the echoed prompt is recorded/persisted into the task's
-            # trajectory rather than vanishing on the next replay.
-            # When the task id is not known yet the echo is transient
-            # (no stamp) and a durable copy was deferred to the drain
-            # hook above.  Broadcast OUTSIDE the lock (network I/O)
-            # and never start a second task.
             if inject_prompt is not None:
                 self._echo_injected_prompt(
                     tab_id, inject_prompt, inject_task,
                 )
             return
-        # Emit ``clear`` synchronously (outside the state lock) so the
-        # extension layer's chat_id → tab_id index is populated before
-        # this command returns.  Without this, a ``resumeSession``
-        # racing the worker thread's first broadcast would not find
-        # the live task process and live events would never reach the
-        # newly-opened tab.
-        #
-        # Roll back the in-flight markers when either the ``clear``
-        # broadcast (transport subclass error) or ``thread.start()``
-        # (``RuntimeError: can't start new thread`` under thread
-        # exhaustion) raises.  ``tab.task_thread`` was assigned under
-        # ``_state_lock`` above and only ``_run_task``'s outer
-        # ``finally`` resets it — but the worker never ran, so that
-        # ``finally`` will never execute.  Without the rollback the tab
-        # is wedged forever: every subsequent ``run`` observes
-        # ``task_thread is not None`` and queues the prompt as a
-        # follow-up that no agent will ever drain.  The identity guard
-        # keeps the rollback scoped to THIS submit in case a concurrent
-        # flow already re-armed the tab.
         try:
             self.printer.broadcast({
                 "type": "clear",
@@ -500,11 +396,6 @@ class _CommandsMixin:
         tab_id = cmd.get("tabId", "")
         model = cmd.get("model", "")
         if not isinstance(model, str):
-            # A non-string model (malformed payload) must neither
-            # corrupt ``tab.selected_model`` / ``self._default_model``
-            # nor raise ``sqlite3.ProgrammingError`` out of
-            # ``_record_model_usage`` (which would kill the client
-            # connection).  Treat it as "no model supplied".
             model = ""
         with self._state_lock:
             if tab_id:
@@ -515,26 +406,12 @@ class _CommandsMixin:
             if not model:
                 return
             self._default_model = model
-            # Persist the user's pick under the SAME critical section
-            # that updates ``self._default_model``.  A concurrent
-            # ``_get_models`` reads ``_load_last_model()`` (the
-            # persisted ``last_model`` from ``config.json``) inside
-            # ``_state_lock`` and applies it to ``self._default_model``
-            # — if the disk write happens AFTER releasing the lock,
-            # the racing refresh would observe the OLD on-disk value
-            # and clobber the just-picked in-memory selection.
-            # Persisting inside the lock guarantees that any
-            # ``_get_models`` that subsequently acquires the lock sees
-            # the new value on disk.
             _record_model_usage(model)
 
     def _cmd_get_history(self, cmd: dict[str, Any]) -> None:
         """Send conversation history to the requesting connection only."""
         query = cmd.get("query")
         if not isinstance(query, str):
-            # A non-string query raises AttributeError inside
-            # ``_search_history``'s LIKE escaping and kills the
-            # connection; treat it as "no filter".
             query = None
         offset = _parse_int(cmd.get("offset", 0))
         generation = _parse_int(cmd.get("generation", 0))
@@ -551,12 +428,6 @@ class _CommandsMixin:
         self._get_frequent_tasks(
             50 if limit is None else limit, cmd.get("connId", ""),
         )
-
-    def _cmd_delete_task(self, cmd: dict[str, Any]) -> None:
-        """Delete a task from the database and refresh history."""
-        task_id = _opt_str(cmd.get("taskId"))
-        if task_id is not None:
-            self._handle_delete_task(task_id)
 
     def _cmd_delete_frequent_task(self, cmd: dict[str, Any]) -> None:
         """Delete a row from the ``frequent_tasks`` table by task text."""
@@ -584,18 +455,19 @@ class _CommandsMixin:
 
         The resulting ``files`` events are routed only to the
         requesting connection (via ``connId``) so typing ``@`` in one
-        VS Code window never pops the file picker in another window.
+        VS Code window never pops the file picker in another window,
+        and are stamped with the requesting ``tabId`` so within that
+        window they pop only in the chat tab that typed ``@`` — the
+        picker element is shared by every tab.
         """
         prefix = cmd.get("prefix", "")
         if not isinstance(prefix, str):
-            # A non-string prefix crashes the background refresh
-            # thread (TypeError in ``rank_file_suggestions``) and the
-            # file picker never receives its reply.
             prefix = ""
         self._get_files(
             prefix,
             cmd.get("workDir", ""),
             cmd.get("connId", ""),
+            cmd.get("tabId", ""),
         )
 
     def _cmd_record_file_usage(self, cmd: dict[str, Any]) -> None:
@@ -610,8 +482,6 @@ class _CommandsMixin:
         """
         path = cmd.get("path", "")
         if isinstance(path, str) and path:
-            # A non-string path would raise sqlite3.ProgrammingError
-            # from the parameter binding and kill the connection.
             _record_file_usage(path)
 
     def _cmd_user_answer(self, cmd: dict[str, Any]) -> None:
@@ -640,9 +510,6 @@ class _CommandsMixin:
                     break
             answer = cmd.get("answer", "")
             if not isinstance(answer, str):
-                # A non-string answer (e.g. null from a malformed
-                # client) must not leak through the ``Queue[str]`` into
-                # the agent — ``ask_user_question`` promises ``str``.
                 answer = "" if answer is None else str(answer)
             try:
                 q.put_nowait(answer)
@@ -730,10 +597,6 @@ class _CommandsMixin:
         ans_state = _RunningAgentState.running_agent_states.get(ans_tab)
         if ans_state is not None and ans_state.user_answer_queue is not None:
             return ans_state.user_answer_queue
-        # Multi-viewer fallback: find a co-subscriber tab whose
-        # ``user_answer_queue`` is live.  ``_subscribers`` is keyed by
-        # task id; ``ans_tab`` and the owner tab share at least one
-        # task id when the viewer is observing the owner's task.
         printer_lock = getattr(self.printer, "_lock", None)
         subs_map = getattr(self.printer, "_subscribers", {})
         if printer_lock is None:
@@ -751,11 +614,6 @@ class _CommandsMixin:
             state = _RunningAgentState.running_agent_states.get(tab_id)
             if state is None or state.user_answer_queue is None:
                 continue
-            # Task-ownership filter (BUG-TR2-2), shared with
-            # ``task_runner._resolve_task_answer_queue`` — see
-            # :func:`kiss.server.helpers.tab_owns_answer_queue`.
-            # Skip peers whose live agent is actively running a task
-            # other than the shared one.
             if not tab_owns_answer_queue(state, task_key):
                 continue
             return state.user_answer_queue
@@ -846,19 +704,10 @@ class _CommandsMixin:
             return
         with self._state_lock:
             tab = _RunningAgentState.running_agent_states.get(tab_id)
-            if tab is not None and tab.is_task_active:
+            if _task_accepts_input(tab) and tab is not None:
                 tab.pending_user_messages.append(prompt)
                 owner = tab
             else:
-                # Viewer-tab fallback: a tab opened from the history
-                # sidebar while a task runs in ANOTHER tab carries no
-                # live ``_RunningAgentState`` of its own — the live
-                # agent (and its ``pending_user_messages`` queue) lives
-                # on the source tab the viewer was subscribed to via
-                # ``_reattach_running_chat`` /
-                # ``_subscribe_chat_viewers``.  Resolve the source tab
-                # through the printer's per-task subscriber map and
-                # route the prompt there instead of dropping it.
                 source_tab_id = self._find_source_tab_for_viewer(tab_id)
                 if not source_tab_id:
                     logger.debug(
@@ -870,7 +719,7 @@ class _CommandsMixin:
                 source = _RunningAgentState.running_agent_states.get(
                     source_tab_id,
                 )
-                if source is None or not source.is_task_active:
+                if not _task_accepts_input(source) or source is None:
                     logger.debug(
                         "appendUserMessage dropped: viewer tab %s "
                         "source tab %s has no live task",
@@ -881,16 +730,7 @@ class _CommandsMixin:
                 owner = source
             owner_task = _owner_task_id(owner)
             if not owner_task:
-                # Task row not allocated yet (fast follow-up during
-                # ``run()`` startup): the echo below is transient
-                # (no ``taskId`` stamp), so ALSO queue the prompt for
-                # the drain hook, which records + persists a durable
-                # copy once the consuming task's id is known.
                 owner.unattributed_prompt_echoes.append(prompt)
-        # Echo on the originating tab id — that's the tab whose
-        # transcript the user is looking at, so the prompt panel must
-        # appear there even when the live agent is owned by a peer.
-        # Broadcast OUTSIDE the lock (network I/O).
         self._echo_injected_prompt(tab_id, prompt, owner_task)
 
     def _cmd_resume_session(self, cmd: dict[str, Any]) -> None:
@@ -907,6 +747,36 @@ class _CommandsMixin:
                 chat_id, cmd.get("tabId", ""), task_id=task_id,
             )
 
+    def _resolve_ui_owner(
+        self, cmd: dict[str, Any], open_event: str,
+    ) -> tuple[str, str]:
+        """Return the tab and folder owning the UI *cmd* acts on.
+
+        A merge review, an auto-commit prompt or a worktree strip is
+        shown on every tab viewing the task, but only ONE tab owns it:
+        the on-disk merge artifacts, the hunk cursor and the repository
+        all hang off that tab.  A command produced by any other client
+        carries that client's own ``tabId`` (and its own ``workDir``,
+        which for a shared daemon may name a different folder
+        entirely), so both are resolved back to the owner before the
+        action is applied.
+
+        Args:
+            cmd: The inbound command, with ``tabId`` and ``workDir``.
+            open_event: The event type that put the acted-on UI on
+                screen, so a tab mirroring two chats at once resolves
+                to the owner actually showing this UI.
+
+        Returns:
+            The owner tab id and the folder to act in.
+        """
+        tab_id = cmd.get("tabId", "")
+        work_dir = cmd.get("workDir", "")
+        owner_tab_id = self.printer.ui_mirror_owner(tab_id, open_event)
+        if owner_tab_id != tab_id:
+            work_dir = self.printer.ui_mirror_work_dir(owner_tab_id) or work_dir
+        return owner_tab_id, work_dir
+
     def _cmd_merge_action(self, cmd: dict[str, Any]) -> None:
         """Handle merge accept/reject from the extension.
 
@@ -915,9 +785,10 @@ class _CommandsMixin:
         only needs to know when the entire merge session is finished.
         """
         if cmd.get("action", "") == "all-done":
-            self._finish_merge(
-                cmd.get("tabId", ""), work_dir=cmd.get("workDir", ""),
+            owner_tab_id, work_dir = self._resolve_ui_owner(
+                cmd, "merge_data",
             )
+            self._finish_merge(owner_tab_id, work_dir=work_dir)
 
     def _cmd_close_tab(self, cmd: dict[str, Any]) -> None:
         """Clean up backend state for a closed frontend tab."""
@@ -946,21 +817,9 @@ class _CommandsMixin:
         """
         query = cmd.get("query", "")
         if not isinstance(query, str):
-            # A non-string query queued to the singleton autocomplete
-            # worker killed the worker thread (AttributeError inside
-            # ``_prefix_match_tasks``); the worker is never restarted,
-            # so ghost text would die for the daemon's whole lifetime.
             query = ""
         active_file = cmd.get("activeFile")
         active_content = cmd.get("activeFileContent")
-        # A junk (non-string) value means "not supplied", i.e. ``None``.
-        # Coercing junk ``activeFileContent`` to ``""`` instead would
-        # pass the ``is not None`` storage guard below (which exists so
-        # a genuinely empty file can be snapshotted) and CLOBBER the
-        # connection's last-known content snapshot — pairing the
-        # retained ``_last_active_file`` with empty content, so ghost
-        # text completes against an empty active file until the editor
-        # regains focus.
         if not isinstance(active_file, str):
             active_file = None
         if not isinstance(active_content, str):
@@ -968,24 +827,6 @@ class _CommandsMixin:
         conn_id = cmd.get("connId", "")
         tab_id = cmd.get("tabId", "")
         with self._state_lock:
-            # Resolve the chat id for this tab under the state lock so
-            # ``_tab_chat_views`` (written by ``_replay_session`` /
-            # ``_cmd_run`` / ``_new_chat``) cannot mutate mid-read.
-            #
-            # A pure-viewer tab or a tab restored after a daemon
-            # cold-start deliberately has NO ``_RunningAgentState``
-            # entry until the user submits — only a
-            # ``_tab_chat_views[tab_id]`` association written by the
-            # ``resumeSession`` replay.  Reading ``chat_id`` off the
-            # registry alone would return ``""`` in that window,
-            # dropping the chat-context signal that lets
-            # ``_active_file_completions`` harvest identifiers from
-            # prior tasks in the same conversation — autocomplete
-            # would then behave as if the chat had never happened
-            # until the next task started.  Consult the chat-viewer
-            # map as a fallback so ghost text stays chat-aware across
-            # a VS Code close/relaunch cycle and across
-            # history-sidebar-opened viewer tabs.
             chat_id = ""
             if tab_id:
                 tab = _RunningAgentState.running_agent_states.get(tab_id)
@@ -1005,7 +846,10 @@ class _CommandsMixin:
         if query:
             self._ensure_complete_worker()
             self._complete_queue.put(  # type: ignore[union-attr]
-                (query, seq, snapshot_file, snapshot_content, chat_id, conn_id),
+                (
+                    query, seq, snapshot_file, snapshot_content, chat_id,
+                    conn_id, tab_id,
+                ),
             )
 
     def _cmd_get_input_history(self, cmd: dict[str, Any]) -> None:
@@ -1072,19 +916,23 @@ class _CommandsMixin:
     def _cmd_worktree_action(self, cmd: dict[str, Any]) -> None:
         """Execute a worktree merge/discard action."""
         action = cmd.get("action", "")
-        wt_tab_id = cmd.get("tabId", "")
+        wt_tab_id, _ = self._resolve_ui_owner(cmd, "worktree_done")
         try:
             result = self._handle_worktree_action(action, wt_tab_id)
         except Exception as e:
             logger.debug("Worktree action error", exc_info=True)
             result = {"success": False, "message": str(e)}
-        self.printer.broadcast({"type": "worktree_result", "tabId": wt_tab_id, **result})
+        self.printer.broadcast_tab_ui(
+            {"type": "worktree_result", "tabId": wt_tab_id, **result},
+        )
 
     def _cmd_autocommit_action(self, cmd: dict[str, Any]) -> None:
         """Process the user's reply to an autocommit prompt."""
+        owner_tab_id, work_dir = self._resolve_ui_owner(
+            cmd, "autocommit_prompt",
+        )
         self._handle_autocommit_action(
-            cmd.get("action", ""), cmd.get("tabId", ""),
-            work_dir=cmd.get("workDir", ""),
+            cmd.get("action", ""), owner_tab_id, work_dir=work_dir,
         )
 
     def _cmd_get_config(self, cmd: dict[str, Any]) -> None:
@@ -1112,9 +960,6 @@ class _CommandsMixin:
         }
         conn_id = cmd.get("connId", "")
         if conn_id:
-            # Reply only to the requesting window: another window may
-            # have its settings form open with unsaved edits, which an
-            # unsolicited configData repaint would clobber.
             event["connId"] = conn_id
         self.printer.broadcast(event)
 
@@ -1151,33 +996,14 @@ class _CommandsMixin:
 
         cfg = cmd.get("config", {})
         if not isinstance(cfg, dict):
-            # A non-dict config (malformed payload) raises
-            # AttributeError below and kills the connection.
             cfg = {}
-        # Coerce junk-typed values BEFORE any decision is made on them:
-        # a non-string ``work_dir`` must not corrupt ``self.work_dir``
-        # and a truthy non-string ``remote_password`` must not count as
-        # a genuine password change (which restarts the kiss-web
-        # daemon, killing every in-flight task).
         cfg = sanitize_config(cfg)
         with _CommandsMixin._save_config_lock:
             prev_password = load_config().get("remote_password", "")
-            # Guard: never overwrite a non-empty remote_password with an
-            # empty one from the frontend.  An empty value typically comes
-            # from a race condition (config sidebar closed before the async
-            # getConfig response populated the form fields).
             if not cfg.get("remote_password") and prev_password:
                 cfg.pop("remote_password", None)
             save_config(cfg)
-            # Apply the MERGED on-disk config, not the raw payload: a
-            # partial payload (any client saving a single setting) lacks
-            # ``max_budget``, and applying the payload directly would
-            # silently reset the live budget to DEFAULTS[...] while
-            # config.json (which ``save_config`` merges) still holds the
-            # user's configured value.
             apply_config_to_env(load_config())
-            # Decide the restart INSIDE the lock so exactly one of two
-            # racing saves of the same new password observes a change.
             new_password = cfg.get("remote_password", "")
             password_changed = bool(
                 new_password and new_password != prev_password,
@@ -1185,32 +1011,6 @@ class _CommandsMixin:
 
             new_work_dir = cfg.get("work_dir", "")
             if new_work_dir:
-                # W2-F13: mirror ``_cmd_set_work_dir``'s discipline for
-                # the SAME attribute: mutate ``self.work_dir`` under
-                # ``_state_lock`` and drop the ``@``-mention file cache
-                # (stale suggestions from the previous folder), then
-                # sync the printer's ``work_dir`` so global
-                # ``configData`` events report the active folder.
-                # Previously this path wrote ``self.work_dir`` lock-free
-                # and left both the cache and the printer stale.
-                #
-                # W3: the whole propagation stays INSIDE
-                # ``_save_config_lock``.  Two racing saves with
-                # different folders are serialised on disk by the lock,
-                # but propagating outside it let the attribute writes
-                # interleave in the OPPOSITE order — leaving the live
-                # server (and the printer) pointed at a folder that
-                # does not match the persisted config.  Lock order
-                # ``_save_config_lock`` → ``_state_lock`` is nested
-                # nowhere else (this is the lock's only use site), so
-                # no inversion is possible.
-                # The printer sync also stays INSIDE ``_state_lock``:
-                # ``_cmd_set_work_dir`` does not take
-                # ``_save_config_lock``, so a racing ``setWorkDir``
-                # could otherwise interleave its printer write with
-                # this one in the opposite order of the ``work_dir``
-                # writes, desyncing ``printer.work_dir`` from
-                # ``self.work_dir``.
                 with self._state_lock:
                     if self.work_dir != new_work_dir:
                         self.work_dir = new_work_dir
@@ -1218,12 +1018,24 @@ class _CommandsMixin:
                     if hasattr(self.printer, "work_dir"):
                         setattr(self.printer, "work_dir", new_work_dir)
 
-        api_keys = cmd.get("apiKeys", {})
-        if not isinstance(api_keys, dict):
-            api_keys = {}
-        for key_name, key_value in api_keys.items():
-            if isinstance(key_name, str) and isinstance(key_value, str) and key_value:
-                save_api_key_to_shell(key_name, key_value)
+            # Persist API keys INSIDE ``_save_config_lock``.  Each
+            # ``save_api_key_to_shell`` does an unlocked
+            # read-modify-atomic-replace of the same shell RC file, so two
+            # concurrent ``saveConfig`` calls saving different keys could
+            # both read the old file and then replace it independently,
+            # silently losing the first key.  Serializing the writes under
+            # the same lock that already guards config.json closes the
+            # lost-update window.
+            api_keys = cmd.get("apiKeys", {})
+            if not isinstance(api_keys, dict):
+                api_keys = {}
+            for key_name, key_value in api_keys.items():
+                if (
+                    isinstance(key_name, str)
+                    and isinstance(key_value, str)
+                    and key_value
+                ):
+                    save_api_key_to_shell(key_name, key_value)
 
         conn_id = cmd.get("connId", "")
         self._get_models(conn_id)
@@ -1234,10 +1046,6 @@ class _CommandsMixin:
             event["connId"] = conn_id
         self.printer.broadcast(event)
 
-        # Restart only on a genuine password change.  A daemon restart
-        # kills every in-flight agent task, and the frontend re-posts
-        # the unchanged password on passive UI events (panel close,
-        # input blur), so an unconditional restart here is destructive.
         if password_changed:
             _restart_kiss_web_daemon()
 
@@ -1274,10 +1082,6 @@ class _CommandsMixin:
                 "text": text,
                 "tabId": tab_id,
             }
-            # Echo the originating ``requestId`` so the CLI client can
-            # filter stale replies that race with newer requests
-            # (review #14).  Empty string means "no id supplied" which
-            # the client treats as a wildcard match for back-compat.
             if request_id:
                 event["requestId"] = request_id
             if conn_id:
@@ -1322,15 +1126,11 @@ class _CommandsMixin:
         work_dir = cmd.get("workDir", "") or self.work_dir or "."
         conn_id = cmd.get("connId", "")
         tab_id = cmd.get("tabId", "")
-        # Per-request id so the CLI client can drop stale replies that
-        # race with newer requests (review #14).
         request_id = str(cmd.get("requestId", "") or "")
         text = ""
         extra: dict[str, Any] = {}
 
         if subtype == "help":
-            # Single-sourced with the standalone REPL's ``/help`` (see
-            # ``build_help_text``) so the two surfaces can never drift.
             text = build_help_text(work_dir)
         elif subtype == "commands":
             try:
@@ -1355,13 +1155,6 @@ class _CommandsMixin:
             if name:
                 found = skills.get(name)
                 if found is None:
-                    # Tag missing-skill replies as errors so the CLI
-                    # client can render them with the ✗ marker rather
-                    # than as a normal info line (review #27).  Use
-                    # ``error`` (bool) for the flag and
-                    # ``errorMessage`` (string) for the human-readable
-                    # text — disambiguating the previously-overloaded
-                    # ``error`` field (review A5/B4 round 2).
                     text = f"Unknown skill: {name}. /skills lists them."
                     extra["error"] = True
                     extra["errorMessage"] = text
@@ -1375,48 +1168,19 @@ class _CommandsMixin:
             else:
                 text = format_skill_listing(skills)
         elif subtype == "mcp":
-            # ``format_mcp_listing(connect=True)`` opens a stdio
-            # subprocess per configured MCP server and waits for
-            # ``initialize`` — each one can take seconds and a wedged
-            # server hangs the whole command-dispatcher thread.
-            # Spawn a worker thread that broadcasts the ``cliInfo``
-            # reply when ready so the dispatcher returns immediately
-            # and the CLI's other inbound events (streamed tokens,
-            # status, askUser) keep flowing.  The CLI client blocks
-            # on its own ``cli_info_q`` waiter just as for any other
-            # subtype, so this is fully transparent to the client.
             self._dispatch_mcp_listing(
                 work_dir=work_dir, conn_id=conn_id, tab_id=tab_id,
                 request_id=request_id,
             )
             return
         elif subtype == "cost":
-            # Budget / token counters live on the **agent**, not on the
-            # ``_RunningAgentState`` (whose ``__slots__`` carries
-            # ``agent`` but not ``budget_used`` / ``total_tokens_used``).
-            # The earlier port read directly off the tab and so always
-            # reported $0 / 0 tokens — review #1.
             tab = _RunningAgentState.running_agent_states.get(tab_id)
             agent_obj = getattr(tab, "agent", None) if tab is not None else None
             budget = float(getattr(agent_obj, "budget_used", 0.0) or 0.0)
             tokens = int(getattr(agent_obj, "total_tokens_used", 0) or 0)
-            # ``tab.chat_id`` wins over ``agent.chat_id`` because the
-            # latter is bound at agent-construction time and goes stale
-            # the moment the user issues ``/clear`` (which resets
-            # ``tab.chat_id`` to ""); the agent reference may still
-            # carry the OLD id (review A1.a round 3).
             chat_id = (tab.chat_id or "") if tab is not None else ""
             if not chat_id and agent_obj is not None:
                 chat_id = getattr(agent_obj, "chat_id", "") or ""
-            # Cold-start / viewer-tab fallback: a tab restored after
-            # a daemon relaunch (or opened as a pure viewer from the
-            # history sidebar) has NO ``_RunningAgentState`` entry
-            # yet — only ``_tab_chat_views[tab_id]`` records the chat
-            # it is displaying.  Without this fallback ``/cost``
-            # reports "(new)" and ``$0.0000`` for a tab the user
-            # actively considers "the resumed X chat", masking the
-            # real chat id (and preventing them from copying it out
-            # or using it in follow-up scripts).
             if not chat_id and tab_id:
                 chat_id = self._tab_chat_views.get(tab_id, "")
             text = (
@@ -1444,11 +1208,6 @@ class _CommandsMixin:
             if found_cmd is None:
                 text = ""
                 extra["found"] = False
-                # Disambiguate ``error`` (bool flag) from
-                # ``errorMessage`` (human-readable string).  The
-                # round-2 commit overloaded ``error`` with both shapes
-                # which made the client print the literal "True" when
-                # a timeout / disconnect set ``error=True`` (no string).
                 extra["error"] = True
                 extra["errorMessage"] = f"Unknown command: /{name}"
             else:
@@ -1493,9 +1252,10 @@ class _CommandsMixin:
 
         Note that ``self.work_dir`` is only the last-resort fallback:
         each connection (one per VS Code window) keeps its own
-        work_dir in ``RemoteAccessServer._dispatch_client_command``,
-        which stamps it onto every command from that connection that
-        lacks an explicit ``workDir``.  Two windows sharing this
+        work_dir in the server API dispatcher
+        (:meth:`kiss.server.sorcar.ServerApi.dispatch`), which stamps
+        it onto every command from that connection that lacks an
+        explicit ``workDir``.  Two windows sharing this
         daemon therefore never resolve to each other's folder even
         though both of their ``setWorkDir`` commands also land here.
 
@@ -1509,37 +1269,12 @@ class _CommandsMixin:
             return
         conn_id = cmd.get("connId", "")
         with self._state_lock:
-            # The calling window switched folders: its last-reported
-            # active editor file belongs to the previous workspace and
-            # must not feed that window's autocomplete any more.  Only
-            # the caller's own snapshot is dropped — other windows'
-            # snapshots stay valid (their folders did not change).
             self._last_active_file.pop(conn_id, None)
             self._last_active_content.pop(conn_id, None)
             if self.work_dir == new_dir:
                 return
             self.work_dir = new_dir
-            # Stale cache from the previous folder must not bleed
-            # into the new folder's autocomplete results.  The cache
-            # is keyed per work_dir so distinct keys would not actually
-            # cross-contaminate, but switching the daemon-wide folder
-            # is a clear signal that any in-memory file lists are
-            # potentially stale (files may have been added/removed
-            # while the daemon was pointed elsewhere), so wipe them
-            # all and let subsequent ``getFiles`` rebuild lazily.
             self._file_cache = {}
-            # Keep the printer's work_dir in sync so global
-            # ``configData`` events report the active folder (the
-            # ``WebPrinter`` used by the remote server fills
-            # ``cfg["work_dir"]`` from its own ``work_dir`` attribute;
-            # without this it would keep reporting the folder the
-            # daemon was launched with).  The sync stays INSIDE
-            # ``_state_lock`` together with the ``self.work_dir``
-            # write: propagating outside the lock let two racing
-            # ``setWorkDir`` commands (or ``setWorkDir`` vs
-            # ``saveConfig``) interleave the printer writes in the
-            # OPPOSITE order of the server writes, leaving
-            # ``printer.work_dir != self.work_dir`` permanently.
             if hasattr(self.printer, "work_dir"):
                 setattr(self.printer, "work_dir", new_dir)
 
@@ -1550,7 +1285,6 @@ class _CommandsMixin:
         "selectModel": _cmd_select_model,
         "getHistory": _cmd_get_history,
         "getFrequentTasks": _cmd_get_frequent_tasks,
-        "deleteTask": _cmd_delete_task,
         "deleteFrequentTask": _cmd_delete_frequent_task,
         "setFavorite": _cmd_set_favorite,
         "getFiles": _cmd_get_files,

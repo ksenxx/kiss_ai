@@ -91,7 +91,6 @@ class TestListRecentChatsExposesTaskAndParentIds(_TempDbTestBase):
         assert isinstance(tasks, list)
         assert len(tasks) == 1
         only = tasks[0]
-        # New required keys.
         assert "task_id" in only, (
             f"task entry missing 'task_id': {only!r}"
         )
@@ -99,7 +98,6 @@ class TestListRecentChatsExposesTaskAndParentIds(_TempDbTestBase):
             f"task entry missing 'parent_task_id': {only!r}"
         )
         assert only["task_id"] == task_id
-        # Top-level tasks have no parent.
         assert only["parent_task_id"] == ""
 
     def test_multiple_chats_each_carry_task_ids(self) -> None:
@@ -111,7 +109,6 @@ class TestListRecentChatsExposesTaskAndParentIds(_TempDbTestBase):
 
         chats = _list_recent_chats(limit=20)
 
-        # Most recent first.
         assert [c["chat_id"] for c in chats] == [second_chat, first_chat]
         for entry in chats:
             tasks = entry["tasks"]
@@ -122,10 +119,7 @@ class TestListRecentChatsExposesTaskAndParentIds(_TempDbTestBase):
                 assert _HEX32.fullmatch(str(t["task_id"])), (
                     f"task_id is not a 32-hex uuid: {t['task_id']!r}"
                 )
-                # Listed tasks are real (non-subagent), so parent
-                # must be the empty string.
                 assert t["parent_task_id"] == ""
-        # Sanity: id wiring matches what _add_task returned.
         first_entry = next(c for c in chats if c["chat_id"] == first_chat)
         first_tasks: list[dict[str, object]] = first_entry["tasks"]  # type: ignore[assignment]
         assert first_tasks[0]["task_id"] == first_id
@@ -147,8 +141,6 @@ class TestResumePrintsLatest20Chats(_TempDbTestBase):
         chat_ids: list[str] = []
         for i in range(n):
             tid, cid = _add_task(f"task in chat {i}")
-            # Space timestamps a full second apart so the recency
-            # ordering is unambiguous even on coarse clocks.
             self._set_timestamp(tid, base - (n - i) * 1.0)
             chat_ids.append(cid)
         return chat_ids
@@ -161,16 +153,13 @@ class TestResumePrintsLatest20Chats(_TempDbTestBase):
         _print_recent_chats()
         out = capsys.readouterr().out
 
-        # Count distinct "Chat ID:" header lines actually printed.
         printed_chat_ids = re.findall(r"Chat ID:\s+([0-9a-f]{32})", out)
         assert len(printed_chat_ids) == 20, (
             f"expected 20 chats printed, got {len(printed_chat_ids)}: "
             f"{printed_chat_ids!r}"
         )
-        # The 20 newest chats must be exactly the last 20 created.
         expected_newest_20 = set(chat_ids[-20:])
         assert set(printed_chat_ids) == expected_newest_20
-        # The 5 oldest chats must NOT appear.
         for old_cid in chat_ids[:5]:
             assert old_cid not in printed_chat_ids
 
@@ -200,10 +189,8 @@ class TestPrintShowsTaskIdAndParentTaskId(_TempDbTestBase):
         out = capsys.readouterr().out
 
         assert f"Chat ID: {chat_id}" in out
-        # Both labels must appear in the output.
         assert "Task ID:" in out
         assert "Parent Task ID:" in out
-        # The actual task_id value must appear under the chat block.
         assert task_id in out
 
     def test_print_shows_empty_parent_for_top_level_task(
@@ -215,10 +202,6 @@ class TestPrintShowsTaskIdAndParentTaskId(_TempDbTestBase):
         _print_recent_chats()
         out = capsys.readouterr().out
 
-        # The Parent Task ID line must be present even when empty.
-        # We don't pin the exact placeholder string, but the label
-        # must appear and the value must be recognizable as "no
-        # parent" — i.e. empty / dash / "(none)".
         m = re.search(r"Parent Task ID:\s*(\S*)", out)
         assert m is not None, (
             f"no 'Parent Task ID:' line in output:\n{out}"
@@ -234,7 +217,6 @@ class TestPrintShowsTaskIdAndParentTaskId(_TempDbTestBase):
         _print_recent_chats()
         out = capsys.readouterr().out
         assert "No chat sessions found." in out
-        # And no chat / task id labels are emitted.
         assert "Chat ID:" not in out
         assert "Task ID:" not in out
         assert "Parent Task ID:" not in out
@@ -256,12 +238,9 @@ class TestPrintHandlesMultipleTasksInOneChat(_TempDbTestBase):
         _print_recent_chats()
         out = capsys.readouterr().out
 
-        # All three task ids must appear in the printed block.
         assert first_id in out
         assert second_id in out
         assert third_id in out
-        # And there should be three "Task ID:" lines (not counting
-        # the "Parent Task ID:" lines, which share the substring).
         task_id_lines = re.findall(r"(?m)^\s+Task ID:\s+\S+", out)
         parent_lines = re.findall(r"(?m)^\s+Parent Task ID:\s+\S+", out)
         assert len(task_id_lines) == 3

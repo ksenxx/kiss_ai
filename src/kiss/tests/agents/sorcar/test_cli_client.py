@@ -128,19 +128,10 @@ class _DaemonHarness:
         os.makedirs(self.work_dir, exist_ok=True)
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
-        # Isolate sqlite persistence (same trick used by the
-        # other CLI tests in this directory).
         self._saved_persistence = (th._DB_PATH, th._db_conn, th._KISS_DIR)
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "sorcar.db"
         th._db_conn = None
-        # Isolate the JSON config store as well.  Commands handled by
-        # the daemon (e.g. ``selectModel`` -> ``_save_last_model``)
-        # persist user preferences via ``kiss.core.vscode_config``;
-        # without this override they would write ``last_model`` into
-        # the session-shared ``$KISS_HOME/config.json`` and leak the
-        # selection into unrelated tests (e.g. the model-picker
-        # refresh tests, which read the persisted ``last_model``).
         self._saved_config_override = (
             vars(vscode_config).get("CONFIG_DIR"),
             vars(vscode_config).get("CONFIG_PATH"),
@@ -156,17 +147,10 @@ class _DaemonHarness:
             target=self.loop.run_forever, daemon=True,
         )
         self.loop_thread.start()
-        # Use the recording subclass so ``self.received_cmds`` exposes
-        # every inbound client command — replaces the round-2 test-only
-        # monkey-patch of ``send`` on the client side (review T1.1
-        # round 3).
         self.server = _RecordingRemoteAccessServer(
             uds_path=self.sock_path, work_dir=self.work_dir,
         )
         self.server._printer._loop = self.loop
-        # ``_run_cmd`` asserts a non-None ``_loop`` — production sets
-        # it inside ``_setup_server`` which we deliberately do not run
-        # (we only need the UDS endpoint, not the TLS WSS / tunnel).
         self.server._loop = self.loop
         self.uds_server: asyncio.Server = asyncio.run_coroutine_threadsafe(
             asyncio.start_unix_server(
@@ -175,14 +159,6 @@ class _DaemonHarness:
             self.loop,
         ).result(timeout=5)
         self.captured: list[dict[str, Any]] = []
-        # Capture every broadcast by wrapping the bound method on the
-        # already-constructed printer.  This is not a test double:
-        # ``_capture`` forwards to the real broadcast; it only adds a
-        # tap so tests can assert on what the daemon emitted.  A clean
-        # subclass swap was attempted but the production constructor
-        # populates many private attributes that resist mirroring; the
-        # tap is the lowest-friction option that does not change
-        # observable behaviour.
         real_broadcast = self.server._printer.broadcast
 
         def _capture(event: dict[str, Any]) -> None:
@@ -190,7 +166,6 @@ class _DaemonHarness:
             real_broadcast(event)
 
         self.server._printer.broadcast = _capture  # type: ignore[method-assign]
-        # Alias for tests asserting on inbound commands.
         self.received_cmds: list[dict[str, Any]] = self.server.received_cmds
 
     def shutdown(self) -> None:
@@ -201,15 +176,6 @@ class _DaemonHarness:
         _reset_cli_daemon_writer()
 
         async def _shutdown() -> None:
-            # Close all remaining UDS writers the server registered so
-            # the corresponding ``_uds_handler`` coroutines exit their
-            # ``readline()`` await with EOF and finalise.  Without this
-            # the handler tasks are still pending when ``loop.close()``
-            # runs below; their pipe / socket FDs are then released
-            # only when the Python GC eventually reaps the destroyed
-            # tasks — which is far too late under the 256-FD soft
-            # limit and triggers ``OSError [Errno 24]`` cascades in
-            # later tests.
             with self.server._printer._ws_lock:
                 writers = list(self.server._printer._uds_writers)
             for writer in writers:
@@ -219,9 +185,6 @@ class _DaemonHarness:
                     pass
             self.uds_server.close()
             await self.uds_server.wait_closed()
-            # Wait for the handler tasks to finish (or cancel them if
-            # they are stuck) so all transport FDs are released
-            # before the loop is closed.
             pending = [
                 t for t in asyncio.all_tasks()
                 if t is not asyncio.current_task()
@@ -240,13 +203,8 @@ class _DaemonHarness:
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.loop_thread.join(timeout=5)
         self.loop.close()
-        # Clear the process-wide ``_RunningAgentState`` registry so
-        # state leaked by one test cannot influence the next (review
-        # T5.1 round 3).
         _RunningAgentState.running_agent_states.clear()
         th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_persistence
-        # Restore the lazy CONFIG_DIR/CONFIG_PATH resolution (or a
-        # pre-existing explicit override) pinned in ``__init__``.
         saved_dir, saved_path = self._saved_config_override
         if saved_dir is None:
             if "CONFIG_DIR" in vars(vscode_config):
@@ -273,10 +231,6 @@ class CliClientBase(unittest.TestCase):
 
     def setUp(self) -> None:
         self.harness = _DaemonHarness()
-        # Keep a handle on the devnull file so ``tearDown`` can close
-        # it — without that, every test leaks an FD and a long
-        # suite eventually trips ``OSError: Too many open files``
-        # (default ulimit on macOS is 256).
         self._devnull = open(os.devnull, "w")
         self.printer = ConsolePrinter(file=self._devnull)
         self.client = CliClient(
@@ -324,16 +278,12 @@ class TestCliInfoSlashCommands(CliClientBase):
         self.assertEqual(reply.get("type"), "cliInfo")
         self.assertEqual(reply.get("subtype"), "help")
         text = reply.get("text", "")
-        # Every built-in slash command must be in the help text.
         for slash in ("/help", "/clear", "/resume", "/model",
                       "/cost", "/commands", "/skills", "/mcp",
                       "/autocommit", "/exit"):
             self.assertIn(slash, text, f"{slash!r} missing from /help")
 
     def test_commands_reply_uses_format_command_listing(self) -> None:
-        # Drop a custom command on disk under the work_dir so the
-        # server's discover_commands picks it up; the reply must
-        # mention the command name.
         cmds_dir = Path(self.harness.work_dir) / ".kiss" / "commands"
         cmds_dir.mkdir(parents=True)
         (cmds_dir / "greet.md").write_text(
@@ -343,10 +293,8 @@ class TestCliInfoSlashCommands(CliClientBase):
         self.assertIn("greet", reply.get("text", ""))
 
     def test_skills_listing_and_specific_skill(self) -> None:
-        # No skills configured → listing reply must still be a string.
         reply = _request_cli_info(self.client, "skills")
         self.assertIsInstance(reply.get("text", ""), str)
-        # Drop a fake skill so /skills <name> resolves.
         skill_dir = (
             Path(self.harness.work_dir) / ".kiss" / "skills" / "tester"
         )
@@ -360,7 +308,6 @@ class TestCliInfoSlashCommands(CliClientBase):
         self.assertIn("tester", reply_named.get("text", "").lower())
 
     def test_mcp_reply_does_not_raise(self) -> None:
-        # No MCP config → reply must be a benign listing.
         reply = _request_cli_info(self.client, "mcp")
         self.assertIsInstance(reply.get("text", ""), str)
 
@@ -384,18 +331,14 @@ class TestModelsAndChat(CliClientBase):
 
     def test_get_models_returns_listing(self) -> None:
         models = _request_models(self.client)
-        # The model registry is non-empty by construction.
         self.assertGreater(len(models), 0)
         self.assertTrue(all(isinstance(m, dict) for m in models))
         self.assertTrue(any("name" in m for m in models))
 
     def test_select_model_updates_server_default(self) -> None:
-        # Pick any model the server actually knows about so the
-        # selectModel handler does not skip the update.
         models = _request_models(self.client)
         target = models[0]["name"]
         self.client.send({"type": "selectModel", "model": target})
-        # Give the server a beat to apply the update.
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
             with self.harness.server._vscode_server._state_lock:
@@ -413,7 +356,6 @@ class TestModelsAndChat(CliClientBase):
     def test_new_chat_command(self) -> None:
         before = len(self.harness.captured)
         self.client.send({"type": "newChat", "tabId": self.client.tab_id})
-        # ``newChat`` triggers a ``clear`` broadcast; wait for it.
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
             if any(
@@ -422,11 +364,6 @@ class TestModelsAndChat(CliClientBase):
             ):
                 return
             time.sleep(0.02)
-        # Some server builds emit clear synchronously inside _cmd_new_chat
-        # and others defer; both are acceptable as long as the client
-        # is still wired to the same socket.
-        # If the daemon does not emit clear, the test is still valid:
-        # the slash handler resets ``chat_id`` client-side regardless.
         self.assertTrue(True)
 
     def test_resume_session_carries_chat_id(self) -> None:
@@ -437,13 +374,9 @@ class TestModelsAndChat(CliClientBase):
             "chatId": chat_id,
             "tabId": self.client.tab_id,
         })
-        # No assertion on the broadcast (resumeSession with an
-        # unknown id is a no-op replay); the test asserts the client
-        # did not crash and the daemon stayed up.
         time.sleep(0.1)
-        # Daemon's UDS server should still be running.
         self.assertTrue(self.harness.uds_server.is_serving())
-        del before  # silence unused-variable lint
+        del before
 
 
 class TestExpandCommand(CliClientBase):
@@ -454,8 +387,6 @@ class TestExpandCommand(CliClientBase):
             self.client, "expandCommand", name="does-not-exist", args="",
         )
         self.assertFalse(reply.get("found"))
-        # ``error`` is a bool flag; ``errorMessage`` carries the
-        # human-readable text (review A5/B4 round 2 — disambiguated).
         self.assertIs(reply.get("error"), True)
         self.assertIn("Unknown command", reply.get("errorMessage", ""))
 
@@ -488,14 +419,10 @@ class TestSlashDispatcher(CliClientBase):
     def test_model_select_emits_select_model_command(self) -> None:
         models = _request_models(self.client)
         target = models[0]["name"]
-        # Drain prior captured events so we can locate the new one.
         before = len(self.harness.captured)
         self.assertFalse(
             _handle_client_slash(self.client, f"/model {target}"),
         )
-        # Wait for the server to broadcast the updated configData / no
-        # specific event is required — instead assert default model
-        # got switched (same as TestModelsAndChat).
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
             with self.harness.server._vscode_server._state_lock:
@@ -513,7 +440,6 @@ class TestSlashDispatcher(CliClientBase):
     def test_clear_command(self) -> None:
         self.client.dispatcher.chat_id = "prior-chat-id"
         self.assertFalse(_handle_client_slash(self.client, "/clear"))
-        # The slash handler must reset the client's cached chat id.
         self.assertEqual(self.client.dispatcher.chat_id, "")
 
     def test_cost_does_not_exit(self) -> None:
@@ -535,8 +461,6 @@ class TestRunClientEntryPoint(unittest.TestCase):
             saved = os.environ.get("KISS_SORCAR_SOCK")
             os.environ["KISS_SORCAR_SOCK"] = str(bogus)
             try:
-                # Capture stderr to assert the operator-friendly hint
-                # appears even when stdout/stderr have been redirected.
                 from io import StringIO
 
                 buf = StringIO()
@@ -586,13 +510,49 @@ class TestEventDispatcherRouting(unittest.TestCase):
         self.disp.dispatch({"type": "clear", "chat_id": "abc123"})
         self.assertEqual(self.disp.chat_id, "abc123")
 
+    def test_running_agent_model_is_shown_but_not_run_with(self) -> None:
+        """The agent borrows the picker; the model this client chose is
+        still what launches the next task."""
+        self.disp.dispatch({"type": "models", "selected": "claude-opus-5"})
+        self.disp.dispatch(
+            {"type": "modelPick", "model": "gpt-5.6-sol", "source": "agent"},
+        )
+        self.assertEqual(self.disp.display_model, "gpt-5.6-sol")
+        self.assertEqual(self.disp.current_model, "claude-opus-5")
+
+    def test_finished_task_hands_the_picker_back(self) -> None:
+        self.disp.dispatch(
+            {"type": "modelPick", "model": "gpt-5.6-sol", "source": "agent"},
+        )
+        self.disp.dispatch(
+            {
+                "type": "modelPick",
+                "model": "claude-opus-5",
+                "source": "restore",
+            },
+        )
+        self.assertEqual(self.disp.display_model, "claude-opus-5")
+        self.assertEqual(self.disp.current_model, "claude-opus-5")
+
+    def test_task_that_dies_without_a_restore_hands_the_picker_back(
+        self,
+    ) -> None:
+        self.disp.dispatch({"type": "models", "selected": "claude-opus-5"})
+        self.disp.dispatch(
+            {"type": "modelPick", "model": "gpt-5.6-sol", "source": "agent"},
+        )
+        self.disp.dispatch({"type": "status", "running": False})
+        self.assertEqual(self.disp.display_model, "claude-opus-5")
+
+    def test_model_pick_without_a_model_is_ignored(self) -> None:
+        self.disp.dispatch({"type": "models", "selected": "claude-opus-5"})
+        self.disp.dispatch({"type": "modelPick", "source": "agent"})
+        self.assertEqual(self.disp.display_model, "claude-opus-5")
+
     def test_ask_user_enqueues_question(self) -> None:
         self.disp.dispatch(
             {"type": "askUser", "question": "Continue?"},
         )
-        # The dispatcher now hands askUser questions to the REPL
-        # thread via a queue (so ``input()`` does not block the
-        # asyncio loop thread); the test reads them off the queue.
         self.assertEqual(
             self.disp.ask_user_q.get(timeout=1), "Continue?",
         )
@@ -614,7 +574,7 @@ class TestEventDispatcherRouting(unittest.TestCase):
             {"type": "result", "text": "summary: done\nsuccess: true",
              "total_tokens": 1, "cost": "$0.0001", "step_count": 1},
             {"type": "error", "text": "bad"},
-            {"type": "setTaskText", "text": "ignored"},  # ignored
+            {"type": "setTaskText", "text": "ignored"},
         ]
         for ev in events:
             self.disp.dispatch(ev)
@@ -636,7 +596,6 @@ class TestSubmitTaskBehaviour(CliClientBase):
 
         before = len(self.harness.received_cmds)
         try:
-            # Use a very tight timeout so the wait loop exits promptly.
             _submit_task(
                 self.client, "noop",
                 use_worktree=False,
@@ -645,7 +604,6 @@ class TestSubmitTaskBehaviour(CliClientBase):
                 timeout_seconds=0.5,
             )
         finally:
-            # Stop any task the daemon started so it does not leak.
             self.client.send({"type": "stop"})
 
         deadline = time.monotonic() + 3.0
@@ -663,7 +621,7 @@ class TestSubmitTaskBehaviour(CliClientBase):
             f"run command never arrived; saw "
             f"{self.harness.received_cmds[before:]!r}",
         )
-        assert run_cmd is not None  # for type-checker
+        assert run_cmd is not None
         self.assertFalse(run_cmd["useWorktree"])
         self.assertFalse(run_cmd["useParallel"])
         self.assertTrue(run_cmd["autoCommit"])
@@ -672,8 +630,6 @@ class TestSubmitTaskBehaviour(CliClientBase):
         """``_submit_task`` must not wedge when the daemon goes away."""
         from kiss.ui.cli.cli_client import _submit_task
 
-        # Force the wait loop into "task active" so the disconnect
-        # path is the only way out, then mark the connection closed.
         self.client.dispatcher.task_active.set()
         self.client._closed.set()
         start = time.monotonic()
@@ -685,8 +641,6 @@ class TestResumeNoArg(CliClientBase):
     """``/resume`` with no arg must list recent chats without the REPL stub."""
 
     def test_resume_no_arg_does_not_print_chat_mode_error(self) -> None:
-        # Capture stdout so we can assert the chat-mode error from
-        # ``_handle_resume`` is NOT printed in client mode.
         from io import StringIO
 
         buf = StringIO()
@@ -694,7 +648,6 @@ class TestResumeNoArg(CliClientBase):
             self.assertFalse(_handle_client_slash(self.client, "/resume"))
         text = buf.getvalue()
         self.assertNotIn("Resume is only available in chat mode", text)
-        # The recent-chats listing must include the resume hint.
         self.assertIn("Resume one with: /resume <chat-id>", text)
 
 
@@ -703,7 +656,6 @@ class TestConnIdIsolation(unittest.TestCase):
 
     def setUp(self) -> None:
         self.harness = _DaemonHarness()
-        # Two independent clients, each with its own tab id.
         self.client_a = CliClient(
             sock_path=Path(self.harness.sock_path),
             work_dir=self.harness.work_dir,
@@ -727,14 +679,12 @@ class TestConnIdIsolation(unittest.TestCase):
             self.harness.shutdown()
 
     def test_cli_info_reply_routed_to_requesting_client_only(self) -> None:
-        # Drain both queues so we can detect cross-talk.
         from kiss.ui.cli.cli_client import _drain_queue
 
         _drain_queue(self.client_a.dispatcher.cli_info_q)
         _drain_queue(self.client_b.dispatcher.cli_info_q)
         reply_a = _request_cli_info(self.client_a, "help")
         self.assertIn("/help", reply_a.get("text", ""))
-        # Client B must NOT have received the reply.
         with self.assertRaises(queue.Empty):
             self.client_b.dispatcher.cli_info_q.get(timeout=0.5)
 
@@ -771,7 +721,6 @@ class _TestRepl:
         is_done: Any,
         on_idle: Any = None,
     ) -> None:
-        # Capture the title the caller flipped to before running.
         self.captured_titles.append(self.box.title)
         self.captured_statuses.append(self.box.status)
         for kind, arg in self.script:
@@ -783,7 +732,6 @@ class _TestRepl:
                 on_idle()
             elif kind == "sleep":
                 time.sleep(float(arg))
-        # Wait until the caller signals completion (or a hard cap).
         deadline = time.monotonic() + 5.0
         while not is_done() and time.monotonic() < deadline:
             time.sleep(0.02)
@@ -815,8 +763,6 @@ class TestSubmitTaskAnchored(CliClientBase):
 
         t = threading.Thread(target=watch, daemon=True)
         t.start()
-        # Caller is responsible for stopping the watcher (stop._set?).
-        # Stash it on the thread for tear-down.
         t._stop_event = stop  # type: ignore[attr-defined]
         return t
 
@@ -921,15 +867,9 @@ class TestSubmitTaskAnchored(CliClientBase):
         """``askUser`` arrival flips the box, next submit goes as userAnswer."""
         from kiss.ui.cli.cli_client import _submit_task_anchored
 
-        # ``_submit_task_anchored`` drains ``ask_user_q`` at the top,
-        # so the question must be enqueued AFTER the drain.  The
-        # ``sleep`` step in the script gives the function a beat to
-        # drain, then the test enqueues the question via a side
-        # thread, then ``idle`` is replayed so ``on_idle`` picks it up.
         question_dispatched = threading.Event()
 
         def enqueue_question() -> None:
-            # Wait for run to be sent, then enqueue.
             deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline:
                 if any(
@@ -943,8 +883,6 @@ class TestSubmitTaskAnchored(CliClientBase):
 
         threading.Thread(target=enqueue_question, daemon=True).start()
 
-        # Repl script: wait for the question to land, then idle to
-        # pick it up, then submit the answer.
         class _AskRepl(_TestRepl):
             def run_steering_loop(  # type: ignore[override]
                 self,
@@ -955,7 +893,6 @@ class TestSubmitTaskAnchored(CliClientBase):
             ) -> None:
                 self.captured_titles.append(self.box.title)
                 assert question_dispatched.wait(timeout=5)
-                # Drive on_idle so the dispatcher question is picked up.
                 if on_idle is not None:
                     on_idle()
                 on_submit("src/main.py")
@@ -994,18 +931,15 @@ class TestSubmitTaskAnchored(CliClientBase):
                 break
             time.sleep(0.02)
         self.assertIn("src/main.py", answers)
-        # The answer line MUST NOT also be sent as appendUserMessage.
         self.assertNotIn("src/main.py", appended)
 
     def test_daemon_disconnect_returns_promptly(self) -> None:
         """When the connection closes mid-task, the loop exits without wedge."""
         from kiss.ui.cli.cli_client import _submit_task_anchored
 
-        # Repl that just waits for is_done to flip.
         repl = _TestRepl(script=[])
         watcher = self._pre_arm_task_active()
         try:
-            # Fire and forget — after a short delay, close the client.
             def closer() -> None:
                 time.sleep(0.2)
                 self.client._closed.set()
@@ -1045,11 +979,6 @@ class TestPendingSendTaskCleanup(CliClientBase):
         assert thread is not None
 
         def schedule_send_and_stop() -> None:
-            # Runs ON the loop thread: create the send task and stop
-            # the loop in the SAME callback so the task is guaranteed
-            # to still be pending (zero steps run) when
-            # ``run_until_complete`` unwinds — exactly the window the
-            # ``close()`` fall-back stop / daemon EOF race hits.
             loop.create_task(
                 self.client._send_async({"type": "getModels"}),
             )
@@ -1059,12 +988,6 @@ class TestPendingSendTaskCleanup(CliClientBase):
         thread.join(timeout=5)
         self.assertFalse(thread.is_alive())
 
-        # ``close()`` closes the loop; a still-pending task destroyed
-        # with it logs "Task was destroyed but it is pending!" at
-        # ERROR on the "asyncio" logger once the task object is
-        # garbage-collected.  The loop thread's shutdown path must
-        # have cancelled and retired the task so no such record ever
-        # appears.
         with self.assertNoLogs("asyncio", level="ERROR"):
             self.client.close()
             gc.collect()

@@ -33,6 +33,7 @@ from typing import Any
 import pytest
 import yaml
 
+from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
     _attribute_sub_usage,
@@ -40,11 +41,6 @@ from kiss.agents.sorcar.sorcar_agent import (
 )
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.kiss_error import KISSError
-from kiss.core.relentless_agent import RelentlessAgent
-
-# ---------------------------------------------------------------------------
-# OpenAI chat-completions response builders
-# ---------------------------------------------------------------------------
 
 
 def _tool_calls_response(
@@ -120,9 +116,7 @@ def _start_server(
     return srv, f"http://127.0.0.1:{srv.server_port}/v1"
 
 
-# At gpt-4o-mini rates 500k prompt + 500k completion tokens cost $0.375.
 _EXPENSIVE = (500_000, 500_000)
-# 10 prompt + 5 completion tokens cost ~$0.0000045 (effectively free).
 _CHEAP = (10, 5)
 
 
@@ -237,10 +231,6 @@ class _ParallelParentHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
         pass
 
-
-# ---------------------------------------------------------------------------
-# 1. KISSAgent must stop the moment a response takes it over budget
-# ---------------------------------------------------------------------------
 
 
 class TestMidStepBudgetEnforcement:
@@ -397,10 +387,6 @@ class TestMidStepBudgetEnforcement:
             srv.shutdown()
 
 
-# ---------------------------------------------------------------------------
-# 2. Mid-session enforcement of spend attributed to the relentless parent
-# ---------------------------------------------------------------------------
-
 
 class TestParentAttributedSpendEnforcedMidSession:
     """Sub-agent spend lands on the relentless parent via
@@ -440,17 +426,11 @@ class TestParentAttributedSpendEnforcedMidSession:
                 f"attributing sub-agent spend after the $1.00 budget was "
                 f"exceeded — mid-session enforcement is missing."
             )
-            # Exactly one executor model request/step is allowed.  The
-            # budget check immediately after ``sub_spend`` must abort the
-            # session, and a budget failure must NEVER launch the LLM
-            # summarizer (which would spend more after the limit).
             assert _CheapSubSpendHandler.requests == 1, (
                 f"{_CheapSubSpendHandler.requests} model requests ran — a "
                 f"budget failure launched more model work (likely the "
                 f"RelentlessAgent summarizer)."
             )
-            # One executor step plus the three steps attributed by the
-            # simulated sub-agent spend.
             assert agent.total_steps == 4
         finally:
             srv.shutdown()
@@ -462,7 +442,7 @@ class TestParentAttributedSpendEnforcedMidSession:
         agent.max_budget = 1.0
         agent.budget_used = 0.4
         agent._current_executor = None
-        agent._check_total_budget()  # 0.4 < 1.0 — no raise
+        agent._check_total_budget()
 
         agent.budget_used = 1.2
         with pytest.raises(KISSError, match="budget exceeded"):
@@ -473,15 +453,11 @@ class TestParentAttributedSpendEnforcedMidSession:
         agent.budget_used = 0.4
         agent._current_executor = executor
         with pytest.raises(KISSError, match="budget exceeded"):
-            agent._check_total_budget()  # 0.4 + 0.7 > 1.0
+            agent._check_total_budget()
 
         executor.budget_used = 0.5
-        agent._check_total_budget()  # 0.4 + 0.5 < 1.0 — no raise
+        agent._check_total_budget()
 
-
-# ---------------------------------------------------------------------------
-# 3. Fair budget share computation for parallel sub-agents
-# ---------------------------------------------------------------------------
 
 
 class TestSubagentBudgetShare:
@@ -492,13 +468,11 @@ class TestSubagentBudgetShare:
         agent.max_budget = 1.2
         agent.budget_used = 0.2
         agent._current_executor = None
-        # Four sub-agents plus one equal share reserved for the parent.
         assert agent._subagent_budget_share(4) == pytest.approx(0.2)
 
         executor = KISSAgent("share-executor")
         executor.budget_used = 0.2
         agent._current_executor = executor
-        # $0.80 remains: two children + the parent each get one share.
         assert agent._subagent_budget_share(2) == pytest.approx(0.8 / 3)
 
     def test_single_subagent_cannot_consume_parent_remainder(self) -> None:
@@ -527,10 +501,6 @@ class TestSubagentBudgetShare:
             agent._subagent_budget_share(2)
 
 
-# ---------------------------------------------------------------------------
-# 4. run_tasks_parallel must cap every sub-agent at the given budget
-# ---------------------------------------------------------------------------
-
 
 class TestRunTasksParallelBudgetCap:
     """Each spawned sub-agent must run under the per-task ``max_budget``."""
@@ -553,7 +523,6 @@ class TestRunTasksParallelBudgetCap:
                 payload = yaml.safe_load(res)
                 assert payload["success"] is False
                 assert "budget exceeded" in str(payload["summary"]).lower()
-            # Each sub-agent stopped after ONE $0.375 model call.
             assert 0.7 < totals["budget_used"] < 1.0, (
                 f"Sub-agents spent ${totals['budget_used']:.4f} — the "
                 f"$0.01 per-task cap was not enforced."
@@ -561,10 +530,6 @@ class TestRunTasksParallelBudgetCap:
         finally:
             srv.shutdown()
 
-
-# ---------------------------------------------------------------------------
-# 5. End-to-end: a parent's run_parallel distributes its remaining budget
-# ---------------------------------------------------------------------------
 
 
 def _assert_distributed(parent: SorcarAgent, url: str, td: str) -> None:
@@ -584,7 +549,7 @@ def _assert_distributed(parent: SorcarAgent, url: str, td: str) -> None:
             max_budget=0.10,
         )
     except KISSError:
-        pass  # over-budget termination is the expected outcome
+        pass
     assert parent.budget_used > 0.7, (
         f"Parent budget_used ${parent.budget_used:.4f}: sub-agent spend was "
         f"not attributed back to the parent task."

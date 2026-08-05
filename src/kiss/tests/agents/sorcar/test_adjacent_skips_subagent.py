@@ -114,13 +114,7 @@ class TestAdjacentSkipsSubagent:
         sub2_id, _ = th._add_task("sub 2", chat_id=chat_id)
         self._mark_subagent(sub2_id, parent_task_id=a_id)
 
-        # next from the parent must return None — only sub-agents exist
-        # after it.
         assert th._get_adjacent_task_by_chat_id(chat_id, a_id, "next") is None
-        # prev from sub2 (a sub-agent row itself) must also skip the
-        # sub-agent row before it and land on parent A.  Even though
-        # the reference row is a sub-agent, the candidates returned
-        # must never be sub-agents.
         prev = th._get_adjacent_task_by_chat_id(chat_id, sub2_id, "prev")
         assert prev is not None
         assert prev["task_id"] == a_id
@@ -136,8 +130,6 @@ class TestAdjacentSkipsSubagent:
         row = db.execute(
             "SELECT parent_task_id FROM task_history WHERE id = ?", (sub_id,)
         ).fetchone()
-        # Sub-agent rows now carry the parent's UUID in the
-        # ``parent_task_id`` column (flat-column schema).
         assert row["parent_task_id"] == a_id
         synth = th._row_to_extra_json(
             db.execute(

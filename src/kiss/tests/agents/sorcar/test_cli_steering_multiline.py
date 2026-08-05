@@ -34,10 +34,6 @@ def _make_box() -> _InputBox:
     return _InputBox(threading.RLock(), io.StringIO())
 
 
-# ---------------------------------------------------------------------------
-# Bare CR vs bare LF
-# ---------------------------------------------------------------------------
-
 
 class TestBareEnterVsBareLf:
     def test_bare_cr_submits_single_line(self) -> None:
@@ -64,14 +60,9 @@ class TestBareEnterVsBareLf:
         assert box.buf == ""
 
 
-# ---------------------------------------------------------------------------
-# ESC-prefixed Alt+Enter variants
-# ---------------------------------------------------------------------------
-
 
 class TestEscPrefixedAltEnter:
     def test_esc_cr_portable_alt_enter_inserts_newline(self) -> None:
-        # xterm-style Alt+Enter: ESC followed by CR.
         box = _make_box()
         submitted: list[str] = []
         box.feed(b"a\x1b\rb\r", submitted.append, lambda: None)
@@ -79,7 +70,6 @@ class TestEscPrefixedAltEnter:
         assert box.buf == ""
 
     def test_esc_lf_tmux_m_enter_inserts_newline(self) -> None:
-        # tmux M-Enter / some terminals' Alt+Enter: ESC + LF.
         box = _make_box()
         submitted: list[str] = []
         box.feed(b"x\x1b\ny\r", submitted.append, lambda: None)
@@ -94,14 +84,7 @@ class TestEscPrefixedAltEnter:
         assert box.buf == "alpha\nbeta"
 
 
-# ---------------------------------------------------------------------------
-# Modifier matrix for the two CSI encodings
-# ---------------------------------------------------------------------------
 
-
-# All modifier codes 2..16 must insert a newline. The encodings are:
-#   modifyOtherKeys=2 form: ESC [ 27 ; <m> ; 13 ~
-#   CSI-u (kitty) form:     ESC [ 13 ; <m> u
 _ALL_MODIFIERS = list(range(2, 17))
 
 
@@ -147,15 +130,9 @@ class TestCsiUForm:
         assert box.buf == "\n"
 
 
-# ---------------------------------------------------------------------------
-# Multi-line build + submit
-# ---------------------------------------------------------------------------
-
 
 class TestMultiLineBuildSubmit:
     def test_three_line_build_via_alt_enter_then_submit(self) -> None:
-        # Mirror what a real user types in iTerm2: Alt+Enter (ESC\r)
-        # between each of three lines, then a plain Enter to submit.
         box = _make_box()
         submitted: list[str] = []
         box.feed(
@@ -176,17 +153,15 @@ class TestMultiLineBuildSubmit:
         assert box.buf == ""
 
     def test_mixed_modifier_variants_all_insert_newline(self) -> None:
-        # Alt+Enter, Shift+Enter (modifyOtherKeys=2 with mod=2),
-        # Ctrl+Enter (CSI-u with mod=5), then submit.
         box = _make_box()
         submitted: list[str] = []
         box.feed(
             b"a"
-            b"\x1b\r"  # Alt+Enter
+            b"\x1b\r"
             b"b"
-            b"\x1b[27;2;13~"  # Shift+Enter modifyOtherKeys
+            b"\x1b[27;2;13~"
             b"c"
-            b"\x1b[13;5u"  # Ctrl+Enter CSI-u
+            b"\x1b[13;5u"
             b"d"
             b"\r",
             submitted.append,
@@ -195,18 +170,12 @@ class TestMultiLineBuildSubmit:
         assert submitted == ["a\nb\nc\nd"]
 
 
-# ---------------------------------------------------------------------------
-# Split-mid-sequence: bytes arrive across read() boundaries
-# ---------------------------------------------------------------------------
-
 
 class TestSplitMidSequence:
     def test_esc_then_cr_split_across_chunks_inserts_newline(self) -> None:
         box = _make_box()
         submitted: list[str] = []
         box.feed(b"a\x1b", submitted.append, lambda: None)
-        # The pending ESC must be buffered, not interpreted as bare
-        # ESC + CR submit on the next chunk.
         assert submitted == []
         box.feed(b"\rb\r", submitted.append, lambda: None)
         assert submitted == ["a\nb"]
@@ -220,7 +189,6 @@ class TestSplitMidSequence:
         assert submitted == ["x\ny"]
 
     def test_esc_then_csi_split_mid_sequence_inserts_newline(self) -> None:
-        # The whole modifyOtherKeys sequence arrives in fragments.
         box = _make_box()
         submitted: list[str] = []
         box.feed(b"p\x1b[27;", submitted.append, lambda: None)
@@ -237,10 +205,6 @@ class TestSplitMidSequence:
         assert submitted == ["u\nv"]
 
 
-# ---------------------------------------------------------------------------
-# Module-scope table sanity
-# ---------------------------------------------------------------------------
-
 
 class TestNewlineAfterEscTable:
     def test_table_contains_every_modifier_for_both_forms(self) -> None:
@@ -249,23 +213,15 @@ class TestNewlineAfterEscTable:
             assert f"[13;{mod}u" in _NEWLINE_AFTER_ESC
 
     def test_table_contains_bare_cr_and_lf_at_end(self) -> None:
-        # The bare-byte variants must come AFTER the multi-byte CSI
-        # forms so a startswith() match on a CSI prefix isn't
-        # short-circuited by a bare CR / LF check.
         assert "\r" in _NEWLINE_AFTER_ESC
         assert "\n" in _NEWLINE_AFTER_ESC
         cr_idx = _NEWLINE_AFTER_ESC.index("\r")
         lf_idx = _NEWLINE_AFTER_ESC.index("\n")
-        # Every multi-byte CSI entry precedes both single-byte entries.
         for entry in _NEWLINE_AFTER_ESC:
             if len(entry) > 1:
                 assert _NEWLINE_AFTER_ESC.index(entry) < cr_idx
                 assert _NEWLINE_AFTER_ESC.index(entry) < lf_idx
 
-
-# ---------------------------------------------------------------------------
-# termios raw-mode setup must clear ICRNL and INLCR
-# ---------------------------------------------------------------------------
 
 
 class TestStartDisablesIcrnlAndInlcr:
@@ -284,8 +240,6 @@ class TestStartDisablesIcrnlAndInlcr:
         out = io.StringIO()
         box = _InputBox(threading.RLock(), out)
         try:
-            # Confirm the PTY starts with ICRNL set (the default) — if
-            # not, this test is vacuous and we want to know.
             pre = termios.tcgetattr(slave)
             assert pre[0] & termios.ICRNL, (
                 "PTY default did not have ICRNL set; the test cannot "

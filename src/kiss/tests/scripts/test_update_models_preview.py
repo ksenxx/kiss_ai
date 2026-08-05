@@ -146,7 +146,6 @@ def test_codex_candidates_added_from_codex_models_json():
         "codex/gpt-5.4-mini",
     ):
         assert expected in names
-    # Unsupported models like gpt-5.5-pro should NOT appear
     assert "codex/gpt-5.5-pro" not in names
     for nm in new_models:
         if nm["name"].startswith("codex/"):
@@ -191,7 +190,6 @@ def test_codex_candidate_only_adds_supported_slugs():
 def test_codex_candidate_skips_unsupported_models():
     """Models not in the Codex models.json must not get codex/ entries."""
     current: dict[str, dict] = {}
-    # Empty slug set means no codex models should be added
     codex_slugs: set[str] = set()
     new_models: list[dict] = []
     _add_codex_candidates(codex_slugs, current, {}, new_models)
@@ -254,12 +252,9 @@ def test_find_deprecated_codex_entries_with_slugs():
         current, {}, {}, {}, openai, codex_slugs=codex_slugs
     )
     names = {d["name"] for d in deprecated}
-    # codex/default is always kept
     assert "codex/default" not in names
-    # Supported slugs are kept
     assert "codex/gpt-5.5" not in names
     assert "codex/gpt-5.4" not in names
-    # Unsupported slug is deprecated
     assert "codex/gpt-5.5-pro" in names
 
 

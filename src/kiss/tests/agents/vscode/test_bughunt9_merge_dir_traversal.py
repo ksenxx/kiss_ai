@@ -70,16 +70,12 @@ class TestMergeDataDirTraversal(unittest.TestCase):
         )
 
     def test_cleanup_with_hostile_tab_id_spares_outside_dirs(self) -> None:
-        # A victim directory OUTSIDE merge_dir (sibling, under the
-        # artifact root) that a traversal tab id used to rmtree.
         artifact_root = config_module._artifact_root()
         victim = artifact_root / f"victim-{uuid.uuid4().hex[:8]}"
         victim.mkdir(parents=True, exist_ok=True)
         marker = victim / "precious.txt"
         marker.write_text("do not delete")
         try:
-            # Exactly what _finish_merge / _close_tab do with the
-            # wire-supplied tab id.
             _cleanup_merge_data(str(_merge_data_dir(f"../{victim.name}")))
             self.assertTrue(
                 marker.is_file(),

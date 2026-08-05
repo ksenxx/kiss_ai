@@ -56,16 +56,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Indicator texts shown (red; blinking once the wake word fires) while
-# voice capture runs.
 LISTENING_TEXT = "Listening ..."
 TRANSCRIBING_TEXT = "Transcribing ..."
-# Raw bytes that cancel PLAIN (fallback) voice capture: Esc, Ctrl+C,
-# Ctrl+D, Enter (CR or LF).  Any of them anywhere in an input chunk
-# exits voice mode.  The anchored REPL keeps the keyboard fully usable
-# instead — ``/voice`` toggles voice mode off there.
 _CANCEL_BYTES = b"\x1b\x03\x04\r\n"
-# Environment variable overriding the listener command (shlex-parsed).
 _CMD_ENV = "KISS_SORCAR_VOICE_CMD"
 _KILL_SIGNAL = int(getattr(signal, "SIGKILL", signal.SIGTERM))
 
@@ -87,15 +80,8 @@ def listener_command() -> list[str]:
     return [sys.executable, "-m", "kiss.server.voice_wake"]
 
 
-# How long a dead-listener final flush waits for the daemon reader
-# thread to queue the child's last SPEECH line before giving up.  One
-# shared constant for every flush site (the pump thread and the plain
-# capture loop) so the two paths handle the same race identically.
 _FINAL_FLUSH_TIMEOUT = 0.2
 
-# User-visible message printed when the wake-word listener child dies
-# unexpectedly — shared by the modal capture loop and the anchored
-# pump's ``on_dead`` so the two voice modes can never diverge.
 _LISTENER_DIED_MSG = (
     "✗ voice: the wake-word listener exited "
     "unexpectedly — leaving voice mode."
@@ -158,9 +144,6 @@ class VoiceListener:
             stderr=subprocess.DEVNULL,
             text=True,
             bufsize=1,
-            # Put POSIX listeners in their own process group so stop()
-            # can kill wrapper + microphone child together (matching the
-            # VS Code wake-word supervisor's leak fix for uv wrappers).
             start_new_session=os.name == "posix",
         )
         self._thread = threading.Thread(
@@ -169,8 +152,6 @@ class VoiceListener:
         try:
             self._thread.start()
         except BaseException:
-            # If thread creation fails after Popen succeeded, do not
-            # leave a microphone listener running with nobody draining it.
             self.stop()
             raise
 
@@ -240,10 +221,6 @@ class VoiceListener:
                 except subprocess.TimeoutExpired:
                     logger.warning("voice listener did not die on kill")
         else:
-            # The direct wrapper may already have exited while leaving
-            # its microphone-owning child in the process group.  Signal
-            # the group once anyway; ProcessLookupError is harmless when
-            # the group is already empty.
             self._signal_listener(int(signal.SIGTERM))
         if proc.stdout is not None:
             try:
@@ -333,8 +310,6 @@ class VoicePump(threading.Thread):
             )
             if result is not _NO_LINE_RESULT:
                 self._on_speech(str(result))
-                # The listener resumes waiting for the next wake word;
-                # reflect that with the steady pre-wake indicator.
                 self._show(LISTENING_TEXT, False)
 
     def stop(self) -> None:
@@ -372,9 +347,6 @@ class VoiceSession:
         self._reader = reader
         self.pump = pump
         self.active = True
-        # Optional teardown hook run by :meth:`close` after the pump
-        # stopped — the anchored session uses it to clear the header
-        # indicator so ``Listening ...`` never outlives voice mode.
         self.on_close: Callable[[], None] | None = None
 
     @property
@@ -464,19 +436,12 @@ def _handle_protocol_line(
             show_listening()
             return _NO_LINE_RESULT
         if isinstance(payload, str):
-            # Legacy payload shape accepted by the VS Code wake-word
-            # service: the JSON value itself is the translated text
-            # (no speaker information, so no prefix).
             text = speaker_prefixed_text(payload, None, None)
             if text:
                 return text
             show_listening()
             return _NO_LINE_RESULT
         if isinstance(payload, dict) and isinstance(payload.get("text"), str):
-            # Shared with the chat webview (media/voice.js
-            # insertSpeech): the submitted line carries the
-            # "Speaker #N" prefix when the listener identified the
-            # speaker, and blank speech is never submitted.
             text = speaker_prefixed_text(
                 payload.get("text"),
                 payload.get("speaker"),
@@ -487,11 +452,7 @@ def _handle_protocol_line(
             show_listening()
             return _NO_LINE_RESULT
         logger.debug("malformed SPEECH payload: %r", line)
-        # A SPEECH line is terminal for a wake round.  Treat unusable
-        # payloads like NO_SPEECH so the indicator cannot stay stuck in
-        # Transcribing ... forever while the listener has resumed.
         show_listening()
-    # READY and unknown lines are ignored.
     return _NO_LINE_RESULT
 
 
@@ -586,10 +547,6 @@ def _capture_utterance(
         except InterruptedError:  # pragma: no cover - transient
             continue
         except (OSError, ValueError):
-            # Some fallback environments (notably non-POSIX consoles or
-            # replaced stdin objects) cannot be selected.  Keep polling
-            # the listener so speech still works; only raw-key cancel is
-            # unavailable until a SIGINT arrives.
             fd = None
             continue
         if not ready:
@@ -604,8 +561,6 @@ def _capture_utterance(
             fd = None
             continue
         if not data or any(key in data for key in _CANCEL_BYTES):
-            # Stdin EOF behaves like Ctrl+D; any cancel key exits voice
-            # mode.  Other keys are ignored while listening.
             return None
 
 
@@ -649,10 +604,6 @@ def start_voice_anchored(box: _InputBox) -> VoiceSession | None:
         session.active = False
 
     def on_close() -> None:
-        # Discard any utterance the pump injected while voice mode was
-        # shutting down — a stale spoken line must never submit as a
-        # task after the user turned voice off — then clear the header
-        # indicator.  Runs after the pump thread has been joined.
         box.drain_injected()
         show("", False)
 

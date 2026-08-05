@@ -134,8 +134,6 @@ class TestReplayEventsOutsideWebview:
         events = loaded.get("events")
         assert isinstance(events, list)
         types = [str(e.get("type")) for e in events]
-        # A run with no recording printer must still have a replayable
-        # prompt + result so the chat webview renders the exchange.
         assert "prompt" in types, types
         assert "result" in types, types
 
@@ -155,8 +153,6 @@ class TestReplayEventsOutsideWebview:
             work_dir=str(self.tmpdir),
         )
         _flush_chat_events()
-        # The webview's post-restart ``resumeSession`` loads a chat by
-        # its chat_id; it must find the synthesized events.
         loaded = _load_latest_chat_events_by_chat_id(agent.chat_id)
         assert loaded is not None
         events = loaded.get("events")
@@ -182,18 +178,12 @@ class TestReplayEventsOutsideWebview:
         assert loaded is not None
         events = loaded.get("events")
         assert isinstance(events, list)
-        # The recording printer already persisted exactly one result
-        # event; the finally-block synthesis must NOT add a second
-        # result (and must NOT add a synthesized prompt either).
         result_count = sum(1 for e in events if e.get("type") == "result")
         assert result_count == 1, events
         prompt_count = sum(1 for e in events if e.get("type") == "prompt")
         assert prompt_count == 0, events
 
     def test_persist_replay_events_is_idempotent(self) -> None:
-        # Directly exercise the helper (shared by WorktreeSorcarAgent
-        # via inheritance) against a real DB: a second call must not
-        # duplicate the events once the task already has some.
         agent = WorktreeSorcarAgent("wt")
         agent.total_tokens_used = 5
         agent.budget_used = 0.25

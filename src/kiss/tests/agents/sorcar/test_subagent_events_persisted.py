@@ -73,21 +73,11 @@ class _StubAgent(ChatSorcarAgent):
         self.budget_used = 0.0
 
     def run(self, prompt_template: str = "", **kwargs: Any) -> str:  # type: ignore[override]
-        # Run the real chat-session bookkeeping (which calls _add_task
-        # to allocate ``_last_task_id`` for this sub-agent) but skip
-        # the actual model invocation.
         printer = kwargs.get("printer")
         from kiss.agents.sorcar.persistence import _add_task, _save_task_extra, _save_task_result
 
         task_id, self._chat_id = _add_task(prompt_template, chat_id=self._chat_id)
         self._last_task_id = task_id
-        # Mirror what the real ``ChatSorcarAgent.run`` does so the
-        # printer can route events to this sub-agent's task row:
-        # tag this worker thread with the new ``task_id`` and
-        # register ``self`` in the printer's ``_persist_agents`` map
-        # under the same key.  Without this plumbing
-        # ``_inject_task_id`` would emit no ``taskId`` and
-        # ``_persist_event`` would drop the event.
         task_key = str(task_id)
         if printer is not None:
             tl = getattr(printer, "_thread_local", None)
@@ -96,10 +86,6 @@ class _StubAgent(ChatSorcarAgent):
             persist_map = getattr(printer, "_persist_agents", None)
             if persist_map is not None:
                 persist_map[task_key] = self
-        # Emit one display event through the printer's broadcast path.
-        # Because we registered ourselves in ``_persist_agents`` keyed
-        # by our own ``task_id``, this should land in the events table
-        # under THIS sub-agent's ``task_id``.
         if printer is not None:
             printer.broadcast({
                 "type": "text_delta",
@@ -159,31 +145,18 @@ class TestSubagentEventsPersisted:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_subagent_rows_have_persisted_events(self) -> None:
-        # Patch ChatSorcarAgent to be the stub so _run_tasks_parallel
-        # creates stub sub-agents instead of real ones.
         import kiss.agents.sorcar.chat_sorcar_agent as csa_mod
 
         real_cls = csa_mod.ChatSorcarAgent
         csa_mod.ChatSorcarAgent = _StubAgent  # type: ignore[misc]
         try:
             printer = _RecordingPrinter()
-            # Parent has a tab_id so sub-tab ids are deterministic.
             printer._thread_local.task_id = "tab-parent"
-            # ``persist_agents`` must contain the parent registration
-            # to mirror the production task_runner setup, but it's
-            # NOT what we're testing — we're testing sub-agent rows.
             parent = real_cls("parent")
             parent.printer = printer
             parent.model_name = "stub"
             parent.work_dir = "/tmp"
             parent._chat_id = "chat-parent-shared"
-            # ``_run_tasks_parallel`` reads ``parent._last_task_id``
-            # to stamp the ``parent_task_id`` column on each sub-agent
-            # row.  In production the parent's run() sets this very
-            # early; here we set it explicitly so the assertion below
-            # finds the sub-agent rows by parent_task_id.
-            # Must be a 32-char lowercase-hex string to satisfy the
-            # persistence ``_coerce_parent_task_id`` contract.
             parent._last_task_id = "aaaaaaaabbbbccccddddeeeeffff0000"
             printer._persist_agents["tab-parent"] = parent
 
@@ -191,18 +164,8 @@ class TestSubagentEventsPersisted:
             results = parent._run_tasks_parallel(tasks, max_workers=1)
             assert len(results) == 3
 
-            # Persistence goes through the async event-writer thread;
-            # under heavy parallel test load the sub-agent rows/events
-            # may not have been flushed to SQLite by the time
-            # ``_run_tasks_parallel`` returns.  Drain the queue before
-            # querying so the assertions below are deterministic.
             th._flush_chat_events()
 
-            # Each sub-agent's row must have has_events=1 AND its
-            # events table must contain the emitted text_delta.
-            # Note: _load_history filters out sub-agent rows via
-            # _HISTORY_NOT_SUBAGENT, so we query the DB directly here
-            # to find them.
             db = th._get_db()
             rows = db.execute(
                 "SELECT id, parent_task_id, has_events FROM task_history "
@@ -231,13 +194,6 @@ class TestSubagentEventsPersisted:
                     for e in evs
                 ), f"events table for task {row_id} missing subagent event: {evs}"
 
-            # Only the parent's entry should remain in
-            # ``_persist_agents`` after ``_run_tasks_parallel`` returns;
-            # the sub-agents' entries (keyed by their own ``task_id``)
-            # are tied to per-task lifecycle and are cleaned by the
-            # task runner via ``cleanup_task``.  We assert the keys
-            # for the sub-agents — if any — are sub-task ids, NOT the
-            # legacy ``tab-parent__sub_N`` sub-tab-id form.
             assert "tab-parent__sub_0" not in printer._persist_agents
             assert "tab-parent__sub_1" not in printer._persist_agents
             assert "tab-parent__sub_2" not in printer._persist_agents

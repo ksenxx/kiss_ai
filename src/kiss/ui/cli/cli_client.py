@@ -182,102 +182,66 @@ class _EventDispatcher:
         self, printer: ConsolePrinter, tab_id: str = "",
     ) -> None:
         self.printer = printer
-        # The CLI client's own tab id.  Every task event the daemon
-        # fans out is stamped with the *recipient* tab's id (the
-        # subscribed tab id in ``WebPrinter.broadcast``) and then
-        # broadcast verbatim to ALL connected clients — both WSS
-        # clients and UDS clients in lockstep.  The chat webview
-        # filters incoming events client-side by ``tabId`` so one
-        # window only renders panels for its own tab; pre-fix the
-        # CLI did NOT filter and therefore rendered every other
-        # client's task panels (VS Code extension webview, remote
-        # browser tab, parallel sorcar CLI instance) on the local
-        # terminal.  Set the recipient tab id here so ``dispatch``
-        # can drop foreign-tab events before they reach the printer
-        # or mutate per-task state (``task_active``, ``chat_id``,
-        # waiting queues).  Empty string preserves backwards-compat
-        # behaviour (no filtering) so tests / callers that construct
-        # a dispatcher without a tab id keep working.
         self.tab_id = tab_id
-        # Synchronous waiters used by ``CliClient`` slash commands.
         self.cli_info_q: queue.Queue[dict[str, Any]] = queue.Queue()
         self.models_q: queue.Queue[dict[str, Any]] = queue.Queue()
         self.commit_q: queue.Queue[dict[str, Any]] = queue.Queue()
-        # Latest in-flight task / chat metadata mirrored from server.
         self.chat_id: str = ""
+        # The model the user last picked; it is what a run is launched
+        # with.  ``agent_model`` is the display-only model a running
+        # agent switched itself to, cleared when the task ends.
         self.current_model: str = ""
+        self.agent_model: str = ""
         self.task_active = threading.Event()
-        # Latched (never cleared by the loop thread) companion to
-        # ``task_active``: set as soon as ANY ``status`` event for the
-        # armed task is observed.  ``task_active`` is level-triggered —
-        # a task that starts AND finishes between two of the
-        # submitter's 50 ms polls flips it set→clear invisibly, which
-        # used to wedge :func:`_start_task` until its full
-        # ``timeout_seconds`` (an hour by default).  Submitters clear
-        # this latch before sending ``run`` and wait on it instead.
         self.task_started = threading.Event()
-        # Per-submission task id used to filter ``status`` events.
-        # Stale ``status:false`` events from a prior task (or from a
-        # peer subscriber on the same tab) carry a different
-        # ``taskId`` and are ignored here — review #3 / #4.
         self.current_task_id: str = ""
-        # Guards the ``current_task_id`` handoff between the REPL
-        # thread (which arms/resets it around each submission) and
-        # the loop thread (which reads it in the ``status`` filter).
-        # CPython's GIL makes the bare str swap atomic today, but the
-        # invariant was fragile and undocumented without an explicit
-        # lock (w2 F17).
         self.task_id_lock = threading.Lock()
-        # Queue of pending askUser questions forwarded from the loop
-        # thread to the REPL thread.  Bouncing the prompt off the loop
-        # thread is mandatory: ``input()`` on the asyncio loop thread
-        # would block every other event (streamed tokens, ``status``,
-        # ``result``) for the duration of the user's typing.
         self.ask_user_q: queue.Queue[str] = queue.Queue()
+
+    @property
+    def display_model(self) -> str:
+        """The model to show the user: an agent's override, else their pick."""
+        return self.agent_model or self.current_model
+
+    def _apply_model_pick(self, event: dict[str, Any]) -> None:
+        """Track a ``modelPick`` event from the daemon.
+
+        ``source`` says what the model means: ``"agent"`` is the
+        display-only model a running agent switched itself to, and
+        ``"restore"`` ends that override when the task finishes, handing
+        the picker back to the model this client chose.
+
+        Args:
+            event: The ``modelPick`` event.
+        """
+        model = event.get("model")
+        if not isinstance(model, str) or not model:
+            return
+        if event.get("source") == "agent":
+            self.agent_model = model
+            return
+        self.agent_model = ""
+        self.current_model = model
 
     def dispatch(self, event: dict[str, Any]) -> None:
         """Route one event to the appropriate handler."""
         et = event.get("type", "")
-        # Drop events that target a different client's tab BEFORE any
-        # rendering or per-task state mutation happens.  The daemon
-        # fans out task events to every connected client (WSS +
-        # UDS) — see :meth:`WebPrinter.broadcast` — and stamps each
-        # copy with the *recipient* tab id.  Without this filter the
-        # CLI silently rendered another window's ``text_delta`` /
-        # ``tool_call`` / ``tool_result`` / ``result`` panels as soon
-        # as that other client started a task, and corrupted its own
-        # cached ``chat_id`` / ``task_active`` / waiter queues from
-        # broadcasts targeted at other tabs.  An empty ``self.tab_id``
-        # (back-compat construction without a tab id) disables the
-        # filter so existing callers keep working.  Events with no
-        # ``tabId`` are global (``configData`` / ``models`` from
-        # ``ready`` fanout, server-reset notifications, etc.) and
-        # always pass through.
         ev_tab = event.get("tabId", "")
         if self.tab_id and ev_tab and ev_tab != self.tab_id:
             return
-        # Capture ``taskId`` BEFORE we pop it so status filtering can
-        # match against the dispatcher's currently armed task id
-        # (review #3).  Routing metadata is then stripped so consumers
-        # downstream do not see server-internal fields.
         task_id = event.get("taskId", "")
         event.pop("taskId", None)
         if et == "cliInfo":
             self.cli_info_q.put(event)
             return
         if et == "models":
-            # The daemon stamps every ``models`` reply with
-            # ``selected`` — its canonical current model (see
-            # ``server._get_models``).  Mirror it into
-            # ``current_model`` so ``/model list`` (and any other
-            # ``getModels`` round-trip) refreshes the client's view of
-            # the model that will be sent with the next ``run``; the
-            # old code dropped the field and the comment in
-            # ``/model list`` claimed a refresh that never happened.
             selected = event.get("selected")
             if isinstance(selected, str) and selected:
                 self.current_model = selected
             self.models_q.put(event)
+            return
+        if et == "modelPick":
+            self._apply_model_pick(event)
             return
         if et == "commitMessage":
             self.commit_q.put(event)
@@ -291,81 +255,33 @@ class _EventDispatcher:
                 self.current_model = cfg.get("model", "") or self.current_model
             return
         if et == "status":
-            # Filter on ``taskId``: stale ``status:false`` events from
-            # a prior task that finished after the new task was sent
-            # would otherwise clear ``task_active`` immediately and
-            # silently terminate the wait (review #3).  When the
-            # dispatcher is not armed (``current_task_id`` empty) we
-            # accept every status — preserves the existing behaviour
-            # for non-task-driven status broadcasts.
             with self.task_id_lock:
                 current = self.current_task_id
             if current and task_id != current:
-                # Armed: only status events tagged with the EXACT
-                # armed task id may touch ``task_active`` or the
-                # ``task_started`` latch.  The daemon symmetrically
-                # echoes the CLI-supplied ``taskId`` on both the
-                # ``status:true`` and ``status:false`` broadcasts of a
-                # CLI-run task (task_runner.py ``status_start`` /
-                # ``status_end``), so an exact match is always observed
-                # for our own submission.  UNTAGGED status events do
-                # exist (webview-launched tasks on the same chat
-                # ending, viewer-fanout ``status`` broadcasts) and must
-                # be dropped while armed: a stray untagged
-                # ``running:false`` landing between the submitter's
-                # ``task_started.clear()`` and the daemon's first
-                # echoed status would otherwise set the latch with
-                # ``task_active`` clear — ``_start_task`` would report
-                # the task acknowledged, ``_submit_task`` would skip
-                # its wait loop, and the freshly submitted task would
-                # keep running in the daemon silently orphaned (w3 F1).
                 return
             running = bool(event.get("running", False))
             if running:
                 self.task_active.set()
             else:
                 self.task_active.clear()
+                # Belt and braces for the daemon's "restore" pick: a task
+                # that dies without one must not leave the agent's model
+                # showing as if the user had chosen it.
+                self.agent_model = ""
             if current:
-                # Latch that a status for the (possibly already
-                # finished) armed task was observed, AFTER the level
-                # toggle above so a waiter woken by the latch sees the
-                # final level.  This closes the race where a
-                # fast-finishing task's ``status:true`` →
-                # ``status:false`` pair lands entirely inside one of
-                # the submitter's 50 ms poll gaps.  Only exact-match
-                # events reach this point while armed (see above), so
-                # a stray untagged status can never satisfy the latch.
                 self.task_started.set()
             return
         if et == "askUser":
-            # Forward the question to the REPL thread; the loop
-            # thread MUST NOT call ``input()`` itself because that
-            # would block every other inbound event for the duration
-            # of the user's typing.  ``event.get("question", "")``
-            # only falls back when the key is absent — ``question:
-            # null`` still yields ``None`` and the REPL would show
-            # the literal question "None" (the review #36 coercion
-            # hardening missed this branch).
             self.ask_user_q.put(str(event.get("question") or ""))
             return
         if et == "error":
-            # ``event.get("text", "")`` only falls back when the key
-            # is absent — ``text: null`` still yields ``None`` and the
-            # terminal printed the literal "None" (the ``_render``
-            # branches were hardened by review #36; this branch was
-            # missed).  Coerce explicitly.
             self.printer.print(
                 f"[red]✗ {event.get('text') or ''}[/red]", type="text",
             )
             return
-        # Streamed display events: route to ConsolePrinter.
         self._render(event)
 
     def _render(self, event: dict[str, Any]) -> None:
-        # ``event.get(key, default)`` only falls back when the key is
-        # absent — ``text: null`` still returns ``None``.  Defensively
-        # coerce ``None`` to the empty string / empty dict so a daemon
-        # version drift cannot crash the loop thread (review #36).
         et = event.get("type", "")
         if et in ("text_delta", "thinking_delta"):
             self.printer.token_callback(event.get("text") or "")
@@ -374,15 +290,9 @@ class _EventDispatcher:
             self.printer.thinking_callback(et == "thinking_start")
             return
         if et == "text_end":
-            # Force a newline so the next panel starts on its own row.
             self.printer.flush_newline()
             return
         if et in ("prompt", "system_prompt") and event.get("early"):
-            # Optimistic submit-time panels meant for the chat WEBVIEW
-            # (see ``task_runner._broadcast_early_prompts``): the
-            # authoritative events follow once the agent starts, so
-            # printing the early copies here would show every prompt
-            # twice in the CLI.
             return
         if et == "prompt":
             self.printer.print(event.get("text") or "", type="prompt")
@@ -391,23 +301,8 @@ class _EventDispatcher:
             self.printer.print(event.get("text") or "", type="system_prompt")
             return
         if et == "tool_call":
-            # The daemon (``JsonPrinter._format_tool_call``) broadcasts
-            # a *flat* event whose argument fields sit at the top level
-            # (``path`` / ``lang`` / ``command`` / ``content`` /
-            # ``description`` / ``old_string`` / ``new_string`` /
-            # ``extras``).  It never emits an ``input`` key, so a naive
-            # ``event.get("input")`` lookup yields ``None`` and the
-            # console panel rendered ``(no arguments)`` for every tool
-            # call.  Rebuild the ``tool_input`` dict the shared
-            # :class:`ConsolePrinter` formatter expects.
             tool_input: dict[str, Any] = {}
             if path := event.get("path"):
-                # Use ``file_path`` so :func:`extract_path_and_lang`
-                # picks it up exactly like the in-process printer.
-                # The daemon's ``lang`` field is intentionally dropped —
-                # ``ConsolePrinter._format_tool_call`` recomputes it from
-                # the same path via ``lang_for_path``, so forwarding it
-                # would be redundant.
                 tool_input["file_path"] = str(path)
             for key in (
                 "description", "command", "content",
@@ -417,13 +312,6 @@ class _EventDispatcher:
                     tool_input[key] = str(val)
             extras = event.get("extras") or {}
             if isinstance(extras, dict):
-                # ``extras`` keys are by definition not in ``KNOWN_KEYS``
-                # so merging them in straight is safe — they will be
-                # picked up by :func:`extract_extras` for display.
-                # EXCEPT the synthesized ``talk`` clip persisted for
-                # demo replays (see ``attach_talk_audio``): the base64
-                # blob is audio data, not a tool argument — printing
-                # it would flood the terminal panel.
                 for k, v in extras.items():
                     if k in ("audioB64", "audioMime"):
                         continue
@@ -435,14 +323,6 @@ class _EventDispatcher:
             )
             return
         if et == "tool_result":
-            # Reconstruct the minimal ``tool_input`` slice the
-            # ConsolePrinter needs to syntax-highlight the body of a
-            # ``Read`` result (the only tool whose return value is a
-            # raw source-file body).  When the daemon-side broadcast
-            # carries a ``path``/``start_line`` we forward it so the
-            # local Rich ``Syntax`` widget picks the right lexer and
-            # gutter offset; otherwise we omit ``tool_input`` and
-            # fall back to the plain-write panel.
             result_tool_input: dict[str, Any] | None = None
             path = event.get("path")
             if path:
@@ -462,10 +342,6 @@ class _EventDispatcher:
             self.printer.print(event.get("text") or "", type="bash_stream")
             return
         if et == "usage_info":
-            # ``or``-coerce the numeric/cost fields too: ``total_tokens:
-            # null`` yields ``None`` from ``event.get(..., 0)`` and the
-            # printer's offset arithmetic raises ``TypeError`` — the
-            # loop thread swallows it and the panel silently vanishes.
             self.printer.print(
                 event.get("text") or "",
                 type="usage_info",
@@ -475,9 +351,6 @@ class _EventDispatcher:
             )
             return
         if et == "result":
-            # Same null-coercion as ``usage_info`` above: a ``result``
-            # with ``total_tokens: null`` used to raise inside the
-            # printer, silently dropping the user's final Result panel.
             self.printer.print(
                 event.get("text") or "(no result)",
                 type="result",
@@ -487,12 +360,6 @@ class _EventDispatcher:
             )
             return
         if et == "notification":
-            # Webview-style toast notifications (auto-commit
-            # life-cycle, server-reset, etc.).  Pre-fix these were
-            # dropped into the "frontend-only" silent-ignore branch
-            # below, so a sorcar CLI user saw none of the toasts a
-            # chat webview user saw.  Route to the printer so the
-            # operator at the terminal sees the same information.
             self.printer.print(
                 event.get("message") or "",
                 type="notification",
@@ -501,19 +368,8 @@ class _EventDispatcher:
             )
             return
         if et == "talk":
-            # Agent-initiated text-to-speech (the ``talk`` tool).  In
-            # the interactive REPL the agent runs in the ``sorcar web``
-            # daemon, so the ``talk`` event arrives here over the UDS
-            # connection like any other display event; the terminal
-            # machine plays it on its default speakers exactly as a
-            # chat webview would (``media/main.js`` case 'talk').
-            # Foreign-tab copies were already dropped by ``dispatch``'s
-            # tab filter, and the shared player's talkId dedupe keeps
-            # any duplicate fan-out copies to one playback per device.
             cli_talk.shared_player().play(event)
             return
-        # Silently ignore frontend-only / merge / setTaskText / focus
-        # events that have no useful CLI rendering.
 
 
 def _retire_pending_tasks(loop: asyncio.AbstractEventLoop) -> None:
@@ -539,16 +395,8 @@ def _retire_pending_tasks(loop: asyncio.AbstractEventLoop) -> None:
         loop: The client's private event loop; stopped but not yet
             closed, and owned by the calling (loop) thread.
     """
-    # A concurrent ``loop.stop()`` kick from ``close()`` can abort a
-    # ``run_until_complete`` below with ``RuntimeError: Event loop
-    # stopped before Future completed`` — at most one such kick is
-    # ever queued, so a single retry absorbs it.
     for _ in range(2):
         try:
-            # Flush ready callbacks so ``run_coroutine_threadsafe``
-            # calls that raced with shutdown become real tasks and are
-            # visible to ``asyncio.all_tasks`` (their coroutines would
-            # otherwise be dropped un-awaited by ``loop.close()``).
             loop.run_until_complete(asyncio.sleep(0))
             pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
             if not pending:
@@ -636,20 +484,11 @@ class CliClient:
                 _retire_pending_tasks(self._loop)
         except BaseException as exc:  # noqa: BLE001 - record startup error
             self._connect_error = exc
-            self._connected.set()  # unblock start()
+            self._connected.set()
         finally:
             self._closed.set()
 
     async def _main(self) -> None:
-        # The daemon emits very large single-line JSON events at the
-        # start of every task — most notably ``system_prompt``, which
-        # carries the full ``SYSTEM.md`` plus injections and easily
-        # exceeds 64 KiB.  ``asyncio.open_unix_connection`` defaults
-        # ``StreamReader``'s buffer to 64 KiB, so an oversize line
-        # would raise :class:`asyncio.LimitOverrunError` from
-        # :meth:`StreamReader.readline` and tear down the connection,
-        # which the user sees as ``Daemon connection lost``.  Use a
-        # 16 MiB buffer to accommodate any realistic single event.
         try:
             self._reader, self._writer = await asyncio.open_unix_connection(
                 str(self.sock_path),
@@ -662,13 +501,6 @@ class CliClient:
         await self._send_async({"type": "setWorkDir", "workDir": self.work_dir})
         await self._send_async({"type": "ready", "tabId": self.tab_id,
                                 "workDir": self.work_dir})
-        # Identify this tab as a CLI terminal player.  The daemon
-        # arbitrates ``talk`` playback per device: CLI REPL tabs share
-        # the daemon machine's speakers with any local webview, so the
-        # daemon mutes this tab's talk copies whenever a local webview
-        # tab is also subscribed (the webview plays), and lets exactly
-        # one CLI tab play otherwise.  Without this hello the daemon cannot
-        # tell a CLI tab from a webview tab (both send ``ready``).
         await self._send_async({"type": "cliTabHello", "tabId": self.tab_id})
         self._connected.set()
         try:
@@ -676,12 +508,6 @@ class CliClient:
                 try:
                     line = await self._reader.readline()
                 except asyncio.LimitOverrunError:
-                    # Defence in depth: an event larger than even the
-                    # 16 MiB buffer would normally tear down the UDS
-                    # silently.  Log loudly and return so the caller's
-                    # ``finally`` marks the client as closed — the
-                    # symptom (``Daemon connection lost``) is now
-                    # accompanied by an actionable log line.
                     logger.error(
                         "daemon emitted oversize event "
                         "(exceeds StreamReader buffer); UDS closed",
@@ -753,9 +579,6 @@ class CliClient:
             logger.debug("closeTab on shutdown failed", exc_info=True)
         loop = self._loop
         if loop is not None and loop.is_running():
-            # Close the writer from the loop thread; this unblocks
-            # ``readline()`` in ``_main`` with EOF and causes
-            # ``run_until_complete`` to return cleanly.
             async def _close_writer() -> None:
                 writer = self._writer
                 if writer is None:
@@ -771,7 +594,6 @@ class CliClient:
                 fut.result(timeout=2)
             except Exception:
                 logger.debug("writer-close future failed", exc_info=True)
-            # Fall-back kick in case ``_main`` is still parked.
             try:
                 loop.call_soon_threadsafe(loop.stop)
             except Exception:
@@ -869,10 +691,6 @@ def _poll_reply(
     """
     deadline = time.monotonic() + timeout
     while True:
-        # Keep the original loops' ordering: disconnect wins when it was
-        # already visible at the top of an iteration; otherwise an expired
-        # deadline is reported as a timeout even if the daemon drops a
-        # moment later.
         if client._closed.is_set():
             return None, True
         remaining = deadline - time.monotonic()
@@ -928,13 +746,6 @@ def _start_task(
         "autoCommit": auto_commit,
         "taskId": task_id,
     })
-    # Wait on the LATCHED ``task_started`` event, not the
-    # level-triggered ``task_active``: a task that starts and finishes
-    # between two polls flips ``task_active`` set→clear invisibly and
-    # would wedge this loop until ``armed_deadline`` (an hour by
-    # default) even though the task ran to completion.  The latch is
-    # set by the dispatcher on every status event for this task, so a
-    # fast set→clear transition is never missed.
     armed_deadline = time.monotonic() + timeout_seconds
     while (
         not client.dispatcher.task_started.is_set()
@@ -946,9 +757,6 @@ def _start_task(
         _print_daemon_lost(client.dispatcher.printer)
         return False
     if not client.dispatcher.task_started.is_set():
-        # The daemon never acknowledged the task within the user's
-        # timeout budget; surface a clear error instead of pretending
-        # the task ran.
         client.dispatcher.printer.print(
             f"[yellow]⏹  Daemon did not acknowledge the task within "
             f"{int(timeout_seconds)}s.[/yellow]",
@@ -980,29 +788,16 @@ def _request_cli_info(
         "requestId": request_id,
     }
     cmd.update(extra)
-    # Disconnect / timeout sentinels use disjoint fields for the
-    # bool flag (``error``) and the human-readable string
-    # (``errorMessage``) — review A5/B4 round 2.  The old code put a
-    # bool into the same ``error`` field the server uses for an error
-    # string, which made the custom-command branch literally print
-    # "True" on disconnect.
     disc_msg = "Daemon connection lost — type /exit to quit"
     disc_reply: dict[str, Any] = {
         "type": "cliInfo", "subtype": subtype, "text": f"✗ {disc_msg}",
         "error": True, "errorMessage": disc_msg,
     }
-    # Early-fail when the daemon is already gone so the caller does
-    # not block on a queue that no producer can write to.
     if client._closed.is_set():
         return disc_reply
     client.send(cmd)
 
     def matches_request(ev: dict[str, Any]) -> bool:
-        # Filter on requestId so stale replies from prior requests do
-        # not get routed to the current waiter.  Replies without an id
-        # are accepted as wildcard matches for backwards compat (the
-        # server may be older than the client during a rolling upgrade),
-        # but only when the subtype matches.
         ev_rid = ev.get("requestId", "")
         if ev_rid:
             return bool(ev_rid == request_id)
@@ -1042,11 +837,6 @@ def _request_models(client: CliClient) -> list[dict[str, Any]]:
     return list(raw) if isinstance(raw, list) else []
 
 
-# Information-panel slash commands answered by one server-side
-# ``cliInfo`` round-trip whose reply text is printed verbatim; maps
-# command -> ``cliInfo`` subtype.  ``/skills`` additionally forwards
-# its argument as the ``name`` field.  ``/help`` is NOT here because
-# it falls back to the local :func:`_print_help` on an empty reply.
 _INFO_SUBTYPES: dict[str, str] = {
     "/commands": "commands",
     "/skills": "skills",
@@ -1093,12 +883,6 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
     arg = parts[1].strip() if len(parts) > 1 else ""
 
     if cmd in ("/exit", "/quit"):
-        # If a task is in flight, send ``stop`` so the daemon does
-        # not keep running it after the CLI client disconnects — the
-        # old code only sent ``closeTab`` from the outer ``finally``,
-        # leaking a long-running task whenever the user typed
-        # ``/exit`` mid-task (review #20 round 1, still present in
-        # round 2).
         if client.dispatcher.task_active.is_set():
             try:
                 client.send({"type": "stop", "tabId": client.tab_id})
@@ -1131,11 +915,6 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
             print(f"Invalid /resume argument: {exc}\n")
             return False
         if task_id:
-            # Resolve the task's owning chat from the shared kiss DB
-            # the daemon also writes to (the daemon's resumeSession
-            # path resolves it the same way server-side, but the CLI
-            # needs the chat id locally so the next ``run`` continues
-            # the right chat).
             row = _load_chat_events_by_task_id(task_id)
             if row is None:
                 print(f"No task found with id {task_id}.\n")
@@ -1153,9 +932,6 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
             client.dispatcher.chat_id = chat_id
             print(f"Resumed chat {chat_id}.\n")
         else:
-            # List recent chats from the shared kiss DB the daemon
-            # also writes to (there is no in-process agent in client
-            # mode), via :func:`_print_recent_chats` directly.
             _print_recent_chats(limit=limit)
             print(
                 "\nResume one with: /resume <chat-id>  "
@@ -1164,18 +940,8 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
         return False
     if cmd == "/model":
         if arg == "list":
-            # The original REPL's local listing reads
-            # ``get_generation_model_listing()`` which returns
-            # ``(name, provider, configured)`` triples — including the
-            # ``configured`` (API-key-present) flag the daemon does
-            # NOT emit on its ``models`` event (which only carries
-            # ``{name, vendor, inp, out, uses}``).  Falling through to
-            # the local helper preserves the green check / red cross
-            # column from the standalone REPL.  The daemon's models
-            # event is still requested (and consumed) so the side
-            # effect of refreshing ``current_model`` is preserved.
             _request_models(client)
-            _print_model_list(client.dispatcher.current_model)
+            _print_model_list(client.dispatcher.display_model)
             return False
         if not arg:
             reply = _request_cli_info(client, "modelCurrent")
@@ -1183,22 +949,17 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
             if text:
                 print(f"\n{text}\n")
             else:
-                print(f"\nCurrent model: {client.dispatcher.current_model}\n")
+                print(f"\nCurrent model: {client.dispatcher.display_model}\n")
             return False
         client.send({"type": "selectModel", "model": arg})
         client.dispatcher.current_model = arg
+        client.dispatcher.agent_model = ""
         print(f"Model switched to {arg} for subsequent tasks.\n")
         return False
     if cmd == "/autocommit":
-        # Drive the same flow the webview kicks off: request a
-        # generated commit message, then dispatch the autocommit
-        # action so the daemon stages + commits.
         _drain_queue(client.dispatcher.commit_q)
         client.send({"type": "generateCommitMessage",
                      "workDir": client.work_dir})
-        # Poll for the reply but honour ``client._closed`` so a
-        # daemon disconnect mid-commit does NOT freeze the REPL for
-        # the full 30 s budget (review A3 round 2).
         ev, disconnected = _poll_reply(
             client, client.dispatcher.commit_q, 30.0,
         )
@@ -1215,9 +976,6 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
             return False
         msg = ev.get("message", "")
         if not msg:
-            # Prefer ``errorMessage`` (string) over the bool ``error``
-            # field so a daemon that sets ``error=True`` does not make
-            # the CLI print the literal "True" (review M1 round 3).
             err = ev.get("errorMessage") or ev.get("error") or "no message"
             print(f"\n✗ Auto-commit: {err}\n")
             return False
@@ -1229,7 +987,6 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
         })
         print(f"\n✓ Auto-commit dispatched: {msg.splitlines()[0]}\n")
         return False
-    # Try custom command via server expansion.
     name = cmd.lstrip("/")
     reply = _request_cli_info(
         client, "expandCommand", name=name, args=arg,
@@ -1244,9 +1001,6 @@ def _handle_client_slash(  # noqa: PLR0911,PLR0912 - branchy by design
         else:
             _submit_task(client, prompt)
         return False
-    # ``errorMessage`` (string) carries the human text; ``error``
-    # is a bool flag.  Old code conflated them and printed the
-    # literal "True" on disconnect (review A5/B4 round 2).
     err = reply.get("errorMessage") or (
         f"Unknown command: {cmd}. Type /help for the list of commands."
     )
@@ -1282,9 +1036,6 @@ def _submit_task(
         timeout_seconds: Hard cap on the wait loop so a wedged daemon
             does not pin the REPL forever.
     """
-    # The arm/reset dance (mint task id, clear latches, drain stale
-    # ``askUser`` entries, always reset in ``finally``) lives in
-    # :func:`_armed_submission`, shared with the anchored variant.
     with _armed_submission(client) as new_task_id:
         if not _start_task(
             client, prompt, new_task_id,
@@ -1304,8 +1055,6 @@ def _submit_task(
                     type="text",
                 )
                 return
-            # Drain pending askUser questions on the REPL thread so the
-            # user's input() blocks here, never on the asyncio loop.
             try:
                 question = client.dispatcher.ask_user_q.get(timeout=0.1)
             except queue.Empty:
@@ -1317,21 +1066,6 @@ def _submit_task(
             try:
                 ans = input("> ")
             except (EOFError, KeyboardInterrupt):
-                # Ctrl+C (KeyboardInterrupt) and Ctrl+D / closed
-                # stdin (EOFError) at the question prompt are both
-                # cancellation gestures, not answers.  The old code
-                # fabricated the literal reply "done" on EOF, which
-                # the agent treated as a genuine user answer —
-                # inconsistent with the anchored path and with the
-                # surrounding loop's Ctrl+C semantics.  There is
-                # also a signal-vs-EOF race under load: when a
-                # parent process delivers SIGINT and closes the
-                # child's stdin nearly simultaneously (as
-                # ``subprocess.communicate()`` does), the EOF may
-                # win the race and ``input()`` raises EOFError
-                # instead of KeyboardInterrupt.  Treat both
-                # identically: forward ``stop`` to the daemon and
-                # keep waiting for the task to wind down.
                 client.send({"type": "stop"})
                 client.dispatcher.printer.print(
                     "[yellow]⏹  Sent stop to daemon.[/yellow]",
@@ -1377,12 +1111,6 @@ def _submit_task_anchored(
     """
     queued = [0]
     pending_question = [False]
-    # The task timeout must use a monotonic deadline (comparing
-    # ``time.monotonic()`` against a ``time.time()`` anchor never
-    # fires); the elapsed-time display is handled by
-    # :func:`_armed_submission`.  Start the deadline only after arming,
-    # exactly as before the extraction: lock contention or stale-queue
-    # draining must not consume the task's runtime budget.
     with _armed_submission(client) as new_task_id:
         deadline = time.monotonic() + timeout_seconds
         if not _start_task(
@@ -1507,13 +1235,11 @@ def _run_repl_loop(
     try:
         while True:
             if voice is not None and voice.background and not voice.active:
-                # The background listener died; its pump already told
-                # the user.  Drop the session so /voice can restart it.
                 voice.close()
                 voice = None
             if voice is not None and not voice.background:
                 line = voice.read()
-                if line is None:  # cancelled or listener failed
+                if line is None:
                     voice.close()
                     voice = None
                     continue
@@ -1525,15 +1251,13 @@ def _run_repl_loop(
                         print("\nGoodbye.")
                         break
                     interrupt_armed = True
-                    # If a task is running, stop it; otherwise just arm
-                    # the second Ctrl-C to exit (matches REPL behaviour).
                     if client.dispatcher.task_active.is_set():
                         client.send({"type": "stop"})
                         print("\n⏹  Sent stop to daemon.")
                     else:
                         print("\n(Press Ctrl+C again or type /exit to quit)")
                     continue
-                if line is None:  # EOF / Ctrl+D
+                if line is None:
                     print("\nGoodbye.")
                     break
             interrupt_armed = False
@@ -1544,8 +1268,6 @@ def _run_repl_loop(
                 break
             if text == "/voice":
                 if voice is not None:
-                    # /voice toggles: typed or spoken while voice is on,
-                    # it turns voice mode off and reaps the listener.
                     voice.close()
                     voice = None
                     print(f"{YELLOW}🎤 Voice mode off.{RESET}")
@@ -1571,8 +1293,6 @@ def _run_repl_loop(
                 client.send({"type": "stop"})
                 print("\n⏹  Task interrupted.\n")
     finally:
-        # Never leak the listener child — REPL exit, exit words and
-        # exceptions all land here while a voice session is active.
         if voice is not None:
             voice.close()
 
@@ -1657,11 +1377,6 @@ def _print_elapsed(client: CliClient, start: float) -> None:
     """
     elapsed = time.time() - start
     client.dispatcher.printer.flush_newline()
-    # Route through the same ``ConsolePrinter`` the dispatcher uses so
-    # tests that capture the printer's configured ``file=`` see the
-    # elapsed line, and so downstream redirection (file logging,
-    # captured-output panels) does not split it from the streamed
-    # output (review #34).
     client.dispatcher.printer.print(f"Time: {elapsed:.1f}s", type="text")
 
 
@@ -1719,23 +1434,8 @@ def run_client(
 
     client.dispatcher.current_model = model_name
 
-    # Wipe the terminal so the interactive session starts on a clean
-    # canvas (no leftover shell prompt / prior command output above
-    # the welcome banner).  No-op when stdout is not a TTY so pytest
-    # capture and piped output stay clean.
     _clear_terminal()
 
-    # When the terminal supports the steering box (POSIX TTY with
-    # termios) and is tall enough, run the REPL with the input bar
-    # pinned to the bottom of the screen for both idle reads and
-    # task execution — matching Claude Code's fullscreen TUI
-    # behaviour where the rectangular input box stays visible while
-    # the agent works.  Lines submitted into the box during a task
-    # are sent to the daemon as ``appendUserMessage`` (the same
-    # command the VS Code extension and the remote browser webapp
-    # use to queue follow-ups).  Off-TTY (pytest, pipes), Windows,
-    # or tiny terminals fall back to the inline readline /
-    # prompt_toolkit path below.
     rows, _ = _term_size()
     if supports_steering() and rows >= _MIN_ROWS:
         try:

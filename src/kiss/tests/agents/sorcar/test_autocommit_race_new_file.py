@@ -79,7 +79,6 @@ def test_auto_commit_picks_up_file_appearing_during_message_generation(
     """
     with tempfile.TemporaryDirectory() as tmp:
         repo = _make_repo(Path(tmp) / "repo")
-        # Pre-existing change the agent made before the auto-commit.
         (repo / "agent_report.txt").write_text("agent's output\n")
 
         def racing_message_fn(
@@ -103,15 +102,12 @@ def test_auto_commit_picks_up_file_appearing_during_message_generation(
         )
 
         assert committed is True
-        # The regression: ``has_uncommitted_changes`` must be False;
-        # before the fix, ``late_arriver.txt`` was left untracked.
         assert not GitWorktreeOps.has_uncommitted_changes(repo), (
             "auto_commit_changes left files uncommitted after a write "
             "during message generation — _finalize_worktree would log "
             "the spurious 'pre-commit hook may have rejected' warning "
             "and abort the auto-merge."
         )
-        # Both the original AND the racing file must be in HEAD.
         ls = subprocess.run(
             ["git", "-C", str(repo), "ls-tree", "--name-only",
              "-r", "HEAD"],
@@ -161,7 +157,6 @@ def test_auto_commit_picks_up_file_appearing_when_message_fn_raises(
         tracked = set(ls.stdout.splitlines())
         assert "agent_report.txt" in tracked
         assert "late_arriver.txt" in tracked
-        # User-prompt traceability is preserved on the fallback path.
         head_msg = subprocess.run(
             ["git", "-C", str(repo), "log", "-1", "--format=%B", "HEAD"],
             capture_output=True, text=True, check=True,

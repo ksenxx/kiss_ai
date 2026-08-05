@@ -29,15 +29,10 @@
         });
     }
 
-    // Unique ID creation requires a high quality random # generator. In the browser we therefore
-    // require the crypto API and do not support built-in fallback to lower quality random number
-    // generators (like Math.random()).
     let getRandomValues;
     const rnds8 = new Uint8Array(16);
     function rng() {
-      // lazy load so that environments that need to polyfill have a chance to do so
       if (!getRandomValues) {
-        // getRandomValues needs to be invoked in a context where "this" is a Crypto implementation.
         getRandomValues = typeof crypto !== 'undefined' && crypto.getRandomValues && crypto.getRandomValues.bind(crypto);
 
         if (!getRandomValues) {
@@ -54,11 +49,6 @@
       return typeof uuid === 'string' && REGEX.test(uuid);
     }
 
-    /**
-     * Convert array of 16 byte values to UUID string format of the form:
-     * XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
-     */
-
     const byteToHex = [];
 
     for (let i = 0; i < 256; ++i) {
@@ -66,8 +56,6 @@
     }
 
     function unsafeStringify(arr, offset = 0) {
-      // Note: Be careful editing this code!  It's been tuned for performance
-      // and works in ways you may not expect. See https://github.com/uuidjs/uuid/pull/434
       return (byteToHex[arr[offset + 0]] + byteToHex[arr[offset + 1]] + byteToHex[arr[offset + 2]] + byteToHex[arr[offset + 3]] + '-' + byteToHex[arr[offset + 4]] + byteToHex[arr[offset + 5]] + '-' + byteToHex[arr[offset + 6]] + byteToHex[arr[offset + 7]] + '-' + byteToHex[arr[offset + 8]] + byteToHex[arr[offset + 9]] + '-' + byteToHex[arr[offset + 10]] + byteToHex[arr[offset + 11]] + byteToHex[arr[offset + 12]] + byteToHex[arr[offset + 13]] + byteToHex[arr[offset + 14]] + byteToHex[arr[offset + 15]]).toLowerCase();
     }
 
@@ -77,22 +65,21 @@
       }
 
       let v;
-      const arr = new Uint8Array(16); // Parse ########-....-....-....-............
+      const arr = new Uint8Array(16);
 
       arr[0] = (v = parseInt(uuid.slice(0, 8), 16)) >>> 24;
       arr[1] = v >>> 16 & 0xff;
       arr[2] = v >>> 8 & 0xff;
-      arr[3] = v & 0xff; // Parse ........-####-....-....-............
+      arr[3] = v & 0xff;
 
       arr[4] = (v = parseInt(uuid.slice(9, 13), 16)) >>> 8;
-      arr[5] = v & 0xff; // Parse ........-....-####-....-............
+      arr[5] = v & 0xff;
 
       arr[6] = (v = parseInt(uuid.slice(14, 18), 16)) >>> 8;
-      arr[7] = v & 0xff; // Parse ........-....-....-####-............
+      arr[7] = v & 0xff;
 
       arr[8] = (v = parseInt(uuid.slice(19, 23), 16)) >>> 8;
-      arr[9] = v & 0xff; // Parse ........-....-....-....-############
-      // (Use "/" to avoid 32-bit truncation when bit-shifting high-order bytes)
+      arr[9] = v & 0xff;
 
       arr[10] = (v = parseInt(uuid.slice(24, 36), 16)) / 0x10000000000 & 0xff;
       arr[11] = v / 0x100000000 & 0xff;
@@ -104,7 +91,7 @@
     }
 
     function stringToBytes(str) {
-      str = unescape(encodeURIComponent(str)); // UTF8 escape
+      str = unescape(encodeURIComponent(str));
 
       const bytes = [];
 
@@ -131,9 +118,7 @@
 
         if (((_namespace = namespace) === null || _namespace === void 0 ? void 0 : _namespace.length) !== 16) {
           throw TypeError('Namespace must be array-like (16 iterable integer values, 0-255)');
-        } // Compute hash of namespace and value, Per 4.3
-        // Future: Use spread syntax when supported on all platforms, e.g. `bytes =
-        // hashfunc([...namespace, ... value])`
+        }
 
 
         let bytes = new Uint8Array(16 + value.length);
@@ -154,12 +139,12 @@
         }
 
         return unsafeStringify(bytes);
-      } // Function#name is not settable on some platforms (#270)
+      }
 
 
       try {
         generateUUID.name = name; // eslint-disable-next-line no-empty
-      } catch (err) {} // For CommonJS default export support
+      } catch (err) {}
 
 
       generateUUID.DNS = DNS;
@@ -167,29 +152,9 @@
       return generateUUID;
     }
 
-    /*
-     * Browser-compatible JavaScript MD5
-     *
-     * Modification of JavaScript MD5
-     * https://github.com/blueimp/JavaScript-MD5
-     *
-     * Copyright 2011, Sebastian Tschan
-     * https://blueimp.net
-     *
-     * Licensed under the MIT license:
-     * https://opensource.org/licenses/MIT
-     *
-     * Based on
-     * A JavaScript implementation of the RSA Data Security, Inc. MD5 Message
-     * Digest Algorithm, as defined in RFC 1321.
-     * Version 2.2 Copyright (C) Paul Johnston 1999 - 2009
-     * Other contributors: Greg Holt, Andrew Kepert, Ydnar, Lostinet
-     * Distributed under the BSD License
-     * See http://pajhome.org.uk/crypt/md5 for more info.
-     */
     function md5(bytes) {
       if (typeof bytes === 'string') {
-        const msg = unescape(encodeURIComponent(bytes)); // UTF8 escape
+        const msg = unescape(encodeURIComponent(bytes));
 
         bytes = new Uint8Array(msg.length);
 
@@ -200,9 +165,6 @@
 
       return md5ToHexEncodedArray(wordsToMd5(bytesToWords(bytes), bytes.length * 8));
     }
-    /*
-     * Convert an array of little-endian words to an array of bytes
-     */
 
 
     function md5ToHexEncodedArray(input) {
@@ -218,21 +180,14 @@
 
       return output;
     }
-    /**
-     * Calculate output length with padding and bit length
-     */
 
 
     function getOutputLength(inputLength8) {
       return (inputLength8 + 64 >>> 9 << 4) + 14 + 1;
     }
-    /*
-     * Calculate the MD5 of an array of little-endian words, and a bit length.
-     */
 
 
     function wordsToMd5(x, len) {
-      /* append padding */
       x[len >> 5] |= 0x80 << len % 32;
       x[getOutputLength(len) - 1] = len;
       let a = 1732584193;
@@ -317,10 +272,6 @@
 
       return [a, b, c, d];
     }
-    /*
-     * Convert an array bytes to an array of little-endian words
-     * Characters >255 have their high-byte silently ignored.
-     */
 
 
     function bytesToWords(input) {
@@ -337,10 +288,6 @@
 
       return output;
     }
-    /*
-     * Add integers, wrapping at 2^32. This uses 16-bit operations internally
-     * to work around bugs in some JS interpreters.
-     */
 
 
     function safeAdd(x, y) {
@@ -348,17 +295,11 @@
       const msw = (x >> 16) + (y >> 16) + (lsw >> 16);
       return msw << 16 | lsw & 0xffff;
     }
-    /*
-     * Bitwise rotate a 32-bit number to the left.
-     */
 
 
     function bitRotateLeft(num, cnt) {
       return num << cnt | num >>> 32 - cnt;
     }
-    /*
-     * These functions implement the four basic operations the algorithm uses.
-     */
 
 
     function md5cmn(q, a, b, x, s, t) {
@@ -394,10 +335,10 @@
       }
 
       options = options || {};
-      const rnds = options.random || (options.rng || rng)(); // Per 4.4, set bits for version and `clock_seq_hi_and_reserved`
+      const rnds = options.random || (options.rng || rng)();
 
       rnds[6] = rnds[6] & 0x0f | 0x40;
-      rnds[8] = rnds[8] & 0x3f | 0x80; // Copy bytes to buffer, if provided
+      rnds[8] = rnds[8] & 0x3f | 0x80;
 
       if (buf) {
         offset = offset || 0;
@@ -412,8 +353,6 @@
       return unsafeStringify(rnds);
     }
 
-    // Adapted from Chris Veness' SHA1 code at
-    // http://www.movable-type.co.uk/scripts/sha1.html
     function f(s, x, y, z) {
       switch (s) {
         case 0:
@@ -439,7 +378,7 @@
       const H = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0];
 
       if (typeof bytes === 'string') {
-        const msg = unescape(encodeURIComponent(bytes)); // UTF8 escape
+        const msg = unescape(encodeURIComponent(bytes));
 
         bytes = [];
 
@@ -447,7 +386,6 @@
           bytes.push(msg.charCodeAt(i));
         }
       } else if (!Array.isArray(bytes)) {
-        // Convert Array-like to Array
         bytes = Array.prototype.slice.call(bytes);
       }
 
@@ -722,9 +660,6 @@
         unregisterRecognizer(recognizerId) {
             this.recognizers.delete(recognizerId);
         }
-        /**
-         * KaldiRecognizer anonymous class
-         */
         get KaldiRecognizer() {
             const model = this;
             return class extends EventTarget {
@@ -762,9 +697,6 @@
                     this.acceptWaveformFloat(buffer.getChannelData(0), buffer.sampleRate);
                 }
                 acceptWaveformFloat(buffer, sampleRate) {
-                    // AudioBuffer samples are represented as floating point numbers between -1.0 and 1.0 whilst
-                    // Kaldi expects them to be between -32768 and 32767 (the range of a signed int16)
-                    // Should this be handled by the library (better in the C codebase) or left to the end-user to decide?
                     const data = buffer.map((value) => value * 0x8000);
                     if (!(data instanceof Float32Array)) {
                         throw new Error(`Channel data is not a Float32Array as expected: ${data}`);

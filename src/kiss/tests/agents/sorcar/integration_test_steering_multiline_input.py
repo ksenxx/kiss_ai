@@ -69,14 +69,6 @@ import pytest
 
 from kiss.tests.agents.sorcar._pty_helper import pty_spawn
 
-# Sentinel-bearing child program.  Run with the parent's interpreter
-# (``sys.executable``) so the same venv / dependency tree is in scope.
-# The child wires up exactly the production
-# ``pre_step_hook = self._drain_pending_user_messages`` path
-# :class:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent.run` uses, but
-# without calling a real model — it just polls until the drain
-# delivers at least one queued line, then dumps the resulting
-# conversation to ``$KISS_TEST_OUT`` and returns.
 _CHILD_SCRIPT = textwrap.dedent(
     """
     import json
@@ -181,8 +173,6 @@ def _make_env(tmp_path: Path) -> dict[str, str]:
         "PYTHONUNBUFFERED": "1",
         "LINES": "30",
         "COLUMNS": "80",
-        # Isolate the child's KISS home so the test never reads or
-        # writes the developer's real persistence state.
         "KISS_HOME": str(tmp_path / ".kiss"),
     }
     for key in ("VIRTUAL_ENV", "PYTHONPATH", "LC_ALL", "LANG"):
@@ -309,18 +299,8 @@ def test_shift_enter_multiline_steering_grows_box_and_reaches_agent(
     drainer = _Drainer(fd)
     drainer.start()
     try:
-        # Pin the PTY winsize to (rows=30, cols=80) so the steering
-        # box rendering math (panel_cols, _term_size) sees a stable
-        # terminal size regardless of platform defaults.  Without this
-        # macOS' default PTY winsize of (0, 0) makes shutil fall back
-        # to (24, 80) — close enough to work but brittle.
         fcntl.ioctl(fd, TIOCSWINSZ, struct.pack("HHHH", 30, 80, 0, 0))
 
-        # Give the child a healthy startup window: ``run_with_steering``
-        # has to import the agent stack, register the running-state, set
-        # raw-mode, anchor the scroll region and paint the initial box.
-        # Wait until the bottom border glyph appears so we know the box
-        # is fully painted before typing.
         assert _wait_until(
             lambda: "╯" in _strip_ansi(drainer.snapshot()),
             timeout=20.0,
@@ -329,12 +309,6 @@ def test_shift_enter_multiline_steering_grows_box_and_reaches_agent(
             f"{_strip_ansi(drainer.snapshot())[:2000]!r}"
         )
 
-        # Type the three-line follow-up.  ``CSI 13;2u`` is the kitty /
-        # xterm modifyOtherKeys encoding of Shift+Enter that
-        # ``_InputBox.feed`` recognises.  Short sleeps between segments
-        # let the box redraw between keystrokes so the captured frames
-        # include intermediate states (helpful for diagnostics on
-        # failure).
         os.write(fd, b"line one")
         time.sleep(0.15)
         os.write(fd, b"\x1b[13;2u")
@@ -346,20 +320,11 @@ def test_shift_enter_multiline_steering_grows_box_and_reaches_agent(
         os.write(fd, b"line three")
         time.sleep(0.4)
 
-        # Snapshot the painted output BEFORE submitting.  This is the
-        # frame the user would see with their three-line follow-up
-        # filled into the grown box.
         rendered_before_submit_raw = drainer.snapshot()
         rendered_before_submit = _strip_ansi(rendered_before_submit_raw)
 
-        # Submit with plain Enter.  The session's ``_on_submit`` will
-        # then queue the line into ``state.pending_user_messages``,
-        # which the child's pre_step_hook drains on the next poll.
         os.write(fd, b"\r")
 
-        # The child writes ``$KISS_TEST_OUT`` immediately after the
-        # first non-empty drain and returns, which makes
-        # ``run_with_steering`` unwind the box and exit the process.
         assert _wait_until(out_path.exists, timeout=20.0), (
             "agent never drained the multi-line follow-up; child "
             "output:\n"
@@ -378,11 +343,6 @@ def test_shift_enter_multiline_steering_grows_box_and_reaches_agent(
         except ChildProcessError:
             pass
 
-    # --- Assertions on the painted output ---------------------------------
-    # All three typed lines must appear in the painted box on their own
-    # rows.  A regression that collapses ``\n`` to ``⏎`` would still
-    # contain the literal text "line one"/"two"/"three" but would also
-    # leak a ``⏎`` glyph between them — the second check catches that.
     assert "line one" in rendered_before_submit, (
         f"'line one' missing from rendered output:\n"
         f"{rendered_before_submit[-2000:]!r}"
@@ -399,13 +359,6 @@ def test_shift_enter_multiline_steering_grows_box_and_reaches_agent(
         "Shift+Enter newlines must split into separate body rows, not "
         "collapse into a single row with ⏎ glyphs"
     )
-    # The box must have grown to three body rows.  Each body row is
-    # bordered by ``│`` on the left and right, so three body rows
-    # contribute six ``│`` characters per redraw.  The drainer
-    # accumulates redraws, so we expect AT LEAST six bars — and the
-    # final frame must have rendered at least three vertical bars on
-    # the left edge alone.  Counting six is a strong necessary
-    # condition.
     bars = rendered_before_submit.count("│")
     assert bars >= 6, (
         f"steering box did not grow vertically; only {bars} '│' bars "
@@ -413,12 +366,6 @@ def test_shift_enter_multiline_steering_grows_box_and_reaches_agent(
         f"Rendered tail:\n{rendered_before_submit[-2000:]!r}"
     )
 
-    # --- Assertions on the drained agent conversation ----------------------
-    # The whole point of the integration test: the box must have queued
-    # the multi-line text intact, and ``_drain_pending_user_messages``
-    # must have injected it as ONE ``user`` message containing the
-    # newlines — not three messages, not a single line with ``\n``
-    # escaped, not a stripped/joined version.
     payload = json.loads(out_path.read_text())
     assert payload == [
         {
@@ -435,10 +382,6 @@ def test_shift_enter_multiline_steering_grows_box_and_reaches_agent(
     )
 
 
-# Imported lazily at the bottom so the module imports cleanly on
-# platforms where ``termios`` is unavailable (Windows): the test itself
-# is skipped automatically by the PTY helper there, but importing this
-# module must not blow up the collection phase.
 try:
     import termios as _termios
 

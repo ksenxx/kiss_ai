@@ -23,11 +23,11 @@ from types import SimpleNamespace
 import pytest
 
 from kiss.agents.sorcar import persistence as th
+from kiss.agents.sorcar.useful_tools import (
+    UsefulTools,
+)
 from kiss.agents.sorcar.web_use_tool import (
     WebUseTool,
-)
-from kiss.core.useful_tools import (
-    UsefulTools,
 )
 from kiss.server.json_printer import (
     JsonPrinter,
@@ -194,7 +194,6 @@ class TestVSCodeServerBranches:
         t.start()
         server._get_tab("0").task_thread = t
         server._handle_command({"type": "run", "prompt": "test", "tabId": "0"})
-        # No error, no status broadcast — silent drop.
         assert not any(e.get("type") == "error" for e in events)
         t.join(timeout=0.1)
 

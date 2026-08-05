@@ -42,19 +42,8 @@ class _WebMergeState:
     """
 
     def __init__(self, merge_data: dict[str, Any]) -> None:
-        # Full ``data`` payload of the opening ``merge_data`` event,
-        # kept so an in-flight review can be replayed verbatim to a
-        # client that reconnects mid-review (browser reload).  The
-        # ``hunks`` dicts inside are shared (not copied): reject
-        # actions adjust their ``cs`` offsets in place, so a replay
-        # always reflects the current on-disk line numbers.
         self.data: dict[str, Any] = merge_data
         self.files: list[dict[str, Any]] = merge_data.get("files", [])
-        # The tab's repository (or worktree) directory, stamped by the
-        # backend ``_start_merge_session``.  Echoed back on the
-        # ``all-done`` ``mergeAction`` so the post-merge autocommit scan
-        # runs against the tab's own repo rather than the daemon-wide
-        # ``self.work_dir`` (which may be a different, non-git folder).
         self.work_dir: str = merge_data.get("work_dir", "")
         self._all_hunks: list[tuple[int, int]] = [
             (fi, hi)
@@ -62,9 +51,6 @@ class _WebMergeState:
             for hi in range(len(f.get("hunks", [])))
         ]
         self._pos = 0
-        # Maps (file_idx, hunk_idx) -> resolution status ("accepted" or
-        # "rejected"); used so the browser can render accepted hunks
-        # dimmed and rejected hunks struck-through.
         self._resolved: dict[tuple[int, int], str] = {}
 
     @property
@@ -90,14 +76,6 @@ class _WebMergeState:
         if self._pos >= len(self._all_hunks):
             self._pos = len(self._all_hunks) - 1
         if self.is_resolved(*self._all_hunks[self._pos]):
-            # A partial ``reject-all``/``reject-file`` failure resolves
-            # whole files without ever calling ``advance()``, so
-            # ``_pos`` can be left on a RESOLVED hunk.  Returning it
-            # would highlight a resolved hunk as current and let a
-            # follow-up accept/reject re-act on it (flipping its
-            # recorded status while the disk content disagrees).  Seek
-            # to the next unresolved hunk instead — one is guaranteed
-            # to exist because ``remaining > 0`` here.
             self._seek(1)
         return self._all_hunks[self._pos]
 
@@ -217,12 +195,31 @@ def _exec_flag(file_data: dict[str, Any]) -> bool | None:
     return val if isinstance(val, bool) else None
 
 
+def _remove_created_path(write_to: str) -> None:
+    """Remove an agent-created path so a full reject restores absence.
+
+    Used for manifest entries flagged ``created`` (F4-25): their base
+    is a synthetic empty file that never existed before the task, so
+    rejecting the creation must delete the path — an empty leftover
+    file would stay untracked and could still affect package/import/
+    build semantics.  Handles regular files and symlinks (including
+    broken ones); a missing path is a no-op.
+
+    Args:
+        write_to: Real workspace path to remove.
+    """
+    dest = Path(write_to)
+    if dest.is_symlink() or dest.exists():
+        dest.unlink()
+
+
 def _restore_base_bytes(
     base_path: str,
     write_to: str,
     link_target: str | None = None,
     *,
     make_executable: bool | None = None,
+    base_missing: bool = False,
 ) -> None:
     """Restore *write_to* to the exact bytes of *base_path*.
 
@@ -249,7 +246,16 @@ def _restore_base_bytes(
             bit the agent added is cleared), ``None`` when unknown
             (the on-disk mode is left untouched).
     """
+    if base_missing:
+        _remove_created_path(write_to)
+        return
     dest = Path(write_to)
+    if dest.is_dir() and not dest.is_symlink():
+        # The agent replaced the file with a directory (F4-26): an
+        # EMPTY leftover directory is removed so the base file can be
+        # restored; a non-empty one raises OSError to the caller's
+        # reject-failure handler (descendants must be rejected first).
+        dest.rmdir()
     dest.parent.mkdir(parents=True, exist_ok=True)
     if link_target is not None:
         if dest.is_symlink() or dest.exists():
@@ -260,9 +266,6 @@ def _restore_base_bytes(
         data = Path(base_path).read_bytes()
     except OSError:
         data = b""
-    # Never write THROUGH a symlink: git tracks the link itself, not
-    # its target, and the target may be a precious file (possibly
-    # outside the repo) whose truncation would be silent data loss.
     if dest.is_symlink():
         dest.unlink()
     dest.write_bytes(data)
@@ -279,6 +282,7 @@ def _reject_hunk_in_file(
     binary: bool = False,
     link_target: str | None = None,
     make_executable: bool | None = None,
+    base_missing: bool = False,
 ) -> None:
     """Revert a single hunk in the current file to the base version.
 
@@ -320,15 +324,18 @@ def _reject_hunk_in_file(
             bit, ``False`` clears it, ``None`` leaves the mode alone.
     """
     write_to = target_path or current_path
+    if base_missing:
+        # Agent-created file (F4-25): the base never existed, so the
+        # reject restores ABSENCE.  Created entries always carry a
+        # single whole-file hunk, so this is a full rejection.
+        _remove_created_path(write_to)
+        return
     if binary or link_target is not None:
         _restore_base_bytes(
             base_path, write_to, link_target,
             make_executable=make_executable,
         )
         return
-    # Read from *write_to* (the real workspace target) when it exists
-    # so that successive partial rejections accumulate against the
-    # restored content rather than the (now-stale) placeholder.
     cur_lines: list[str] = []
     try:
         try:
@@ -340,10 +347,6 @@ def _reject_hunk_in_file(
                 cur_lines = []
         base_lines = _read_lines_preserved(base_path)
     except UnicodeDecodeError:
-        # Undecodable content that slipped past the binary sniff
-        # (e.g. UTF-16 / latin-1 without NUL bytes in the first 8 KiB).
-        # Restoring the base bytes wholesale beats crashing the merge
-        # action with an exception.
         _restore_base_bytes(
             base_path, write_to, make_executable=make_executable,
         )
@@ -357,10 +360,12 @@ def _reject_hunk_in_file(
         + cur_lines[hunk["cs"] + hunk["cc"] :]
     )
     dest = Path(write_to)
+    if dest.is_dir() and not dest.is_symlink():
+        # File replaced by a directory (F4-26): see
+        # _restore_base_bytes — remove an empty leftover directory so
+        # the open() below can restore the file.
+        dest.rmdir()
     dest.parent.mkdir(parents=True, exist_ok=True)
-    # Replace a symlink instead of writing THROUGH it — writing through
-    # would clobber the pointed-to file (which may live outside the
-    # repo) while leaving the rejected link itself untouched.
     if dest.is_symlink():
         dest.unlink()
     with open(write_to, "w", encoding="utf-8", newline="") as f:
@@ -442,16 +447,13 @@ def _reject_all_hunks_in_file(
     if hunk_indices is None:
         hunk_indices = list(range(len(hunks)))
     if file_data.get("binary"):
-        # Binary entries carry a single whole-file pseudo-hunk; restore
-        # the base bytes wholesale (line splicing does not apply).
-        # ``link_target`` marks a symlink-base entry whose reject must
-        # recreate the link itself.
         if hunk_indices:
             _restore_base_bytes(
                 file_data["base"],
                 file_data.get("target") or file_data["current"],
                 file_data.get("link_target"),
                 make_executable=_exec_flag(file_data),
+                base_missing=bool(file_data.get("created")),
             )
         return
     pending = set(hunk_indices)
@@ -461,6 +463,7 @@ def _reject_all_hunks_in_file(
             file_data["current"], file_data["base"], hunk,
             file_data.get("target"),
             make_executable=_exec_flag(file_data),
+            base_missing=bool(file_data.get("created")),
         )
         pending.discard(hi)
         _record_hunk_rejected(hunks, hi, pending.__contains__)

@@ -195,8 +195,6 @@ class TestStaleStateAfterClientAllDone(IsolatedAsyncioTestCase):
         self._open_review(tab_id)
 
         reader, writer = await self._connect_uds()
-        # The TS MergeManager finished its editor-managed review: only
-        # this single all-done ever reaches the backend.
         await self._send(writer, {
             "type": "mergeAction",
             "action": "all-done",
@@ -217,8 +215,6 @@ class TestStaleStateAfterClientAllDone(IsolatedAsyncioTestCase):
                 "all-done — it leaks and later replays a zombie review",
             )
 
-        # A webview reload after the finished review must NOT resurrect
-        # the merge UI.
         await self._send(writer, {
             "type": "ready", "tabId": tab_id, "restoredTabs": [],
         })
@@ -232,7 +228,6 @@ class TestStaleStateAfterClientAllDone(IsolatedAsyncioTestCase):
         """Control: the server-driven (web) review path is unaffected."""
         tab_id = "tab-web-review"
         self._open_review(tab_id)
-        # Resolve both hunks through the real web action handler.
         for _ in range(2):
             await self.server._handle_web_merge_action(
                 {"type": "mergeAction", "action": "accept", "tabId": tab_id},

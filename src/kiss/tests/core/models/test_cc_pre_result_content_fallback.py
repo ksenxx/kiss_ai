@@ -126,8 +126,6 @@ class TestPreResultContentFallback:
 
         function_calls, content, m = _run_with_events(events)
 
-        # Early stop truncates content to the first tool_calls block; the
-        # result event is never reached.
         assert content == tool_json
         assert len(function_calls) == 1
         assert function_calls[0]["name"] == "go_to_url"
@@ -156,14 +154,12 @@ class TestPreResultContentFallback:
                 "delta": {"type": "text_delta", "text": full_text},
             }},
             {"type": "stream_event", "event": {"type": "content_block_stop"}},
-            # Result event has only the prose, tool_calls JSON was stripped
             {"type": "result", "result": "I will list the files.",
              "usage": {"input_tokens": 10, "output_tokens": 10}},
         ]
 
         function_calls, content, m = _run_with_events(events)
 
-        # Content is truncated to end of tool_calls block
         assert content == full_text
         assert len(function_calls) == 1
         assert function_calls[0]["name"] == "Bash"
@@ -213,7 +209,6 @@ class TestPreResultContentFallback:
                 "delta": {"type": "text_delta", "text": tool_json},
             }},
             {"type": "stream_event", "event": {"type": "content_block_stop"}},
-            # No result event
         ]
 
         function_calls, content, m = _run_with_events(events)
@@ -288,7 +283,6 @@ class TestPreResultContentFallback:
 
         function_calls, content, m = _run_with_events(events)
 
-        # Both tool calls are extracted: go_to_url from text + Bash from thinking
         names = {fc["name"] for fc in function_calls}
         assert len(function_calls) == 2
         assert "go_to_url" in names

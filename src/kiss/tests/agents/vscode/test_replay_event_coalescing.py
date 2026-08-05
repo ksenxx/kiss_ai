@@ -66,9 +66,6 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
     return server, events
 
 
-# The raw per-token stream a finished task would have persisted: three
-# thinking tokens, three text tokens, a tool call boundary, two more
-# text tokens, and the result.
 _RAW_STREAM: list[dict] = [
     {"type": "prompt", "text": "do the thing"},
     {"type": "thinking_start"},
@@ -86,8 +83,6 @@ _RAW_STREAM: list[dict] = [
     {"type": "result", "text": "done", "step_count": 1},
 ]
 
-# What the webview must receive: consecutive same-type deltas merged,
-# every boundary event preserved in order.
 _COALESCED_TYPES: list[str] = [
     "prompt",
     "thinking_start",
@@ -116,8 +111,6 @@ def _assert_coalesced(events: list[dict]) -> None:
     assert deltas[0]["text"] == "thinking"
     texts = [e["text"] for e in events if e.get("type") == "text_delta"]
     assert texts == ["hello", "world"]
-    # The merged event keeps the metadata of the first fragment,
-    # including the injected ``_timestamp``.
     assert "_timestamp" in deltas[0]
 
 
@@ -174,9 +167,6 @@ class TestReplayCoalescing:
         adj = [e for e in events if e.get("type") == "adjacent_task_events"]
         assert len(adj) == 1
         assert adj[0]["events"] == []
-        # Genuine "no adjacent row" contract: the frontend distinguishes
-        # end-of-chat (task '' AND task_id None) from a real row with an
-        # empty trajectory (real task_id, events []).
         assert adj[0]["task"] == ""
         assert adj[0]["task_id"] is None
 
@@ -188,7 +178,6 @@ class TestReplayCoalescing:
         latching noPrevTask/noNextTask on them."""
         chat_id = "chat-empty-traj"
         first_id, _ = th._add_task("short empty task", chat_id=chat_id)
-        # No events persisted for first_id — empty trajectory.
         time.sleep(0.01)
         second_id, _ = th._add_task("current task", chat_id=chat_id)
         _persist_stream(second_id, _RAW_STREAM)
@@ -320,10 +309,6 @@ class TestFanoutSingleSerialization:
                 (json.loads(line) for line in received),
                 key=lambda d: str(d.get("tabId")),
             )
-            # ``broadcast`` stamps the event's emission time (``ts``,
-            # ms since epoch — see ``stamp_event_ts``) once, BEFORE
-            # serialization, so both fan-out copies must carry the
-            # identical stamp.
             ts_a = decoded[0].pop("ts")
             ts_b = decoded[1].pop("ts")
             assert isinstance(ts_a, int) and ts_a > 0
@@ -337,9 +322,6 @@ class TestFanoutSingleSerialization:
             assert decoded[1] == {**expected_base, "tabId": "tab-B"}
         finally:
             async def _shutdown() -> None:
-                # Close the client first so the handler's ``readline``
-                # sees EOF and the handler task exits cleanly before
-                # the loop stops.
                 if writer is not None:
                     writer.close()
                     await writer.wait_closed()

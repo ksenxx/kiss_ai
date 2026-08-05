@@ -46,9 +46,6 @@ class TestStaleUserAnswer(unittest.TestCase):
 
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
-        # A running task owned by ``owner-tab`` with a second viewer
-        # (``viewer-tab``) subscribed to the same task — the exact
-        # multi-viewer setup ``_resolve_user_answer_queue`` documents.
         self.task_key = "4242"
         self.owner_tab = "owner-tab"
         self.viewer_tab = "viewer-tab"
@@ -89,7 +86,6 @@ class TestStaleUserAnswer(unittest.TestCase):
     def test_late_duplicate_answer_does_not_answer_next_question(
         self,
     ) -> None:
-        # Question 1: viewer A answers; the agent consumes it.
         t1, answers1, done1 = self._ask_on_worker("Q1: proceed?")
         self._wait_for_ask_user(count=1)
         self.server._cmd_user_answer({
@@ -99,15 +95,11 @@ class TestStaleUserAnswer(unittest.TestCase):
         t1.join(timeout=10)
         assert answers1 == ["yes"]
 
-        # Viewer B's modal for Q1 is still open (nothing closed it).
-        # B submits its answer late — AFTER the agent already consumed
-        # A's answer.  It lands in the owner tab's queue.
         self.server._cmd_user_answer({
             "type": "userAnswer", "tabId": self.viewer_tab,
             "answer": "stale-answer-for-Q1",
         })
 
-        # Question 2 must NOT be answered by B's stale Q1 answer.
         t2, answers2, done2 = self._ask_on_worker("Q2: which file?")
         self._wait_for_ask_user(count=2)
         finished_instantly = done2.wait(timeout=1.0)
@@ -117,7 +109,6 @@ class TestStaleUserAnswer(unittest.TestCase):
                 "answer submitted for the PREVIOUS question — the user "
                 f"never saw Q2 (got {answers2!r})"
             )
-        # The agent is (correctly) still waiting: deliver a real answer.
         self.server._cmd_user_answer({
             "type": "userAnswer", "tabId": self.owner_tab,
             "answer": "fresh-answer-for-Q2",

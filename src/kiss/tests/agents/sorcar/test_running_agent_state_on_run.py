@@ -35,10 +35,6 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
-# ---------------------------------------------------------------------------
-# Fake OpenAI server (always returns a ``finish`` tool call)
-# ---------------------------------------------------------------------------
-
 
 def _finish_body() -> bytes:
     return json.dumps(
@@ -95,10 +91,6 @@ def _start_server() -> tuple[ThreadingHTTPServer, str]:
     return srv, f"http://127.0.0.1:{srv.server_port}/v1"
 
 
-# ---------------------------------------------------------------------------
-# DB redirect helpers
-# ---------------------------------------------------------------------------
-
 
 def _redirect(tmpdir: str) -> tuple[Any, Any, Any]:
     old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
@@ -114,17 +106,12 @@ def _restore(saved: tuple[Any, Any, Any]) -> None:
     (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
 
 class TestRunningStatePopulatedOnRun:
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect(self.tmpdir)
         self.srv, self.url = _start_server()
-        # Ensure a clean class-attribute slate; the dict is process-wide.
         _RunningAgentState.running_agent_states.clear()
 
     def teardown_method(self) -> None:
@@ -141,16 +128,12 @@ class TestRunningStatePopulatedOnRun:
         cfg = {"base_url": self.url, "api_key": "test-key"}
         agent = WorktreeSorcarAgent("standalone")
 
-        # Capture the state mid-run by hooking the upstream finish tool's
-        # bookkeeping isn't trivial; instead, just check the post-run
-        # invariant and add a real mid-run check via an inner agent run.
         agent.run(
             prompt_template="hello",
             model_name="gpt-4o-mini",
             model_config=cfg,
             work_dir=self.tmpdir,
         )
-        # After run() returns, the entry must be gone again.
         assert agent.chat_id not in _RunningAgentState.running_agent_states
 
     def test_state_is_live_during_run(self) -> None:
@@ -163,7 +146,6 @@ class TestRunningStatePopulatedOnRun:
         """
         cfg = {"base_url": self.url, "api_key": "test-key"}
         agent = WorktreeSorcarAgent("live-check")
-        # Pre-set chat_id so we know the key in advance.
         agent.resume_chat_by_id("live-chat-id")
 
         observed: dict[str, Any] = {}
@@ -172,7 +154,6 @@ class TestRunningStatePopulatedOnRun:
 
         def observer() -> None:
             started.wait(timeout=5)
-            # Snapshot the dict membership while the worker is mid-run.
             state = _RunningAgentState.running_agent_states.get("live-chat-id")
             observed["state"] = state
             observed["agent_is_self"] = state is not None and state.agent is agent
@@ -180,13 +161,6 @@ class TestRunningStatePopulatedOnRun:
             finished.set()
 
         def worker() -> None:
-            # Wrap to flip ``started`` AFTER state is registered.
-            # We rely on the fact that registration happens before
-            # ``super().run()`` is called.  To synchronize, we use a
-            # callback in finish handler — but simpler: just toggle
-            # started right before run() and rely on observer to
-            # see the live state because the HTTP round-trip takes
-            # a measurable time.
             started.set()
             agent.run(
                 prompt_template="hello live",
@@ -195,10 +169,9 @@ class TestRunningStatePopulatedOnRun:
                 work_dir=self.tmpdir,
             )
 
-        # Slightly more robust: observer polls until state appears.
         def observer_poll() -> None:
             started.wait(timeout=5)
-            for _ in range(2000):  # up to ~2s
+            for _ in range(2000):
                 state = _RunningAgentState.running_agent_states.get("live-chat-id")
                 if state is not None:
                     observed["state"] = state
@@ -220,7 +193,6 @@ class TestRunningStatePopulatedOnRun:
         assert observed["agent_is_self"], "state.agent must be the running agent itself"
         assert observed["is_task_active"], "is_task_active should be True mid-run"
 
-        # And the entry is gone after run() returns.
         assert "live-chat-id" not in _RunningAgentState.running_agent_states
 
     def test_run_does_not_clobber_preexisting_state(self) -> None:
@@ -229,12 +201,6 @@ class TestRunningStatePopulatedOnRun:
         agent = WorktreeSorcarAgent("vscode-emulated")
         agent.resume_chat_by_id("pre-existing-id")
 
-        # Pre-populate as the VS Code server would: a fresh
-        # ``_RunningAgentState`` whose internal agent is the standard
-        # ``WorktreeSorcarAgent("Sorcar VS Code")`` (NOT *agent*) and
-        # whose ``chat_id`` matches the agent's chat id so the
-        # standalone agent's ``_register_running_state`` detects the
-        # pre-existing entry and skips re-registration.
         preexisting = _RunningAgentState("pre-existing-id", "gpt-4o-mini")
         preexisting.chat_id = "pre-existing-id"
         _RunningAgentState.running_agent_states["pre-existing-id"] = preexisting
@@ -246,6 +212,5 @@ class TestRunningStatePopulatedOnRun:
             work_dir=self.tmpdir,
         )
 
-        # The pre-existing entry must still be there, unchanged.
         assert _RunningAgentState.running_agent_states.get("pre-existing-id") is preexisting
         assert preexisting.agent is not agent

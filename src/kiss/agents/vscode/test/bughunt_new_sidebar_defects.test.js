@@ -2,39 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Bug-hunt regression tests for three SorcarSidebarView defects
-// (harness mirrors autocommitProgressSticky.test.js: real compiled
-// SorcarSidebarView + AgentClient against a real UDS daemon stub; only
-// the ``vscode`` module is stubbed).
-//
-// Defect 1 — superseded action-progress toast never closes.
-//   ``_showActionProgress`` blindly overwrote the pending resolver in
-//   ``_worktreeActionResolves`` when a second action arrived for the
-//   same tab.  The safety timeout of the FIRST dialog checks map
-//   identity (``resolveMap.get(tabId) === resolve``) before resolving,
-//   so once overwritten neither the completion event nor the timeout
-//   could ever close the first toast — it stayed on screen forever.
-//
-// Defect 2 — commit-message generations cross-talk between tabs.
-//   ``_onCommitMessage`` events carried no tabId, so
-//   ``generateCommitMessage(token, tabId)`` resolved its promise on ANY
-//   commitMessage reply — a reply for tab A settled tab B's pending
-//   generation and deleted tab B's ``_commitPendingTabs`` entry while
-//   its generation was still in flight (breaking the documented
-//   per-tab independence, and letting a chat-tab commit message reach
-//   the extension's SCM-input-box handler).
-//
-// Defect 3 — ntfy URL never reaches the webview when the topic file
-//   appears after the first ``remote_url`` send.  The dedup key in
-//   ``_tryReadAndSendUrl`` covered only ``tunnelActive|url``; when the
-//   daemon wrote ``~/.kiss/ntfy_topic`` later (its usual startup
-//   order), the watcher saw an unchanged URL, deduped, and the webview
-//   never learned the ntfy link until a full webview reload.
-//
-// Run directly with ``node`` (after ``npm run compile``):
-//
-//     node src/kiss/agents/vscode/test/bughunt_new_sidebar_defects.test.js
 
 'use strict';
 
@@ -117,7 +84,6 @@ Module._resolveFilename = function (request, parent, ...rest) {
   if (request === 'vscode') return require.resolve('./_vscode-stub.js');
   return origResolve.call(this, request, parent, ...rest);
 };
-// ``_vscode-stub.js`` is a shared git-tracked fixture — never rewrite it.
 global.__kissVscodeStub = vscodeStub;
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-bh-new-'));
@@ -150,7 +116,6 @@ const server = net.createServer(sock => {
       try {
         daemonReceived.push(JSON.parse(line));
       } catch {
-        /* ignore */
       }
     }
   });
@@ -233,7 +198,6 @@ async function runTests() {
   wv.fireMessage({type: 'ready', tabId: 'tab-main', restoredTabs: []});
   await waitForClient();
 
-  // ----- Defect 1: superseded worktree progress toast must close -------
   const W = 'tab-worktree';
   const before1 = notifications(wv.posted).length;
   wv.fireMessage({type: 'worktreeAction', action: 'merge', tabId: W});
@@ -245,7 +209,6 @@ async function runTests() {
     'first worktree progress toast was not posted',
   );
   const firstId = first.id;
-  // Second action for the SAME tab supersedes the first dialog.
   const before2 = notifications(wv.posted).length;
   wv.fireMessage({type: 'worktreeAction', action: 'merge', tabId: W});
   const second = await waitFor(
@@ -261,7 +224,6 @@ async function runTests() {
     'second worktree progress toast was not posted',
   );
   const secondId = second.id;
-  // The daemon completes (only) the CURRENT action.
   await daemonSend({
     type: 'worktree_result',
     success: true,
@@ -286,7 +248,6 @@ async function runTests() {
   );
   console.log('  ok - superseded worktree progress toast is closed');
 
-  // ----- Defect 2: per-tab commit-message generations must not cross-talk
   view._ownTabs.add('tabA');
   view._ownTabs.add('tabB');
   let aResolved = false;
@@ -299,11 +260,9 @@ async function runTests() {
   });
   assert.ok(view._commitPendingTabs.has('tabA'), 'tabA generation pending');
   assert.ok(view._commitPendingTabs.has('tabB'), 'tabB generation pending');
-  // Reply for tabA only.
   await daemonSend({type: 'commitMessage', message: 'feat: a', tabId: 'tabA'});
   await pA;
   assert.ok(aResolved, 'tabA generation must resolve on its own reply');
-  // Give any (buggy) cross-talk resolution a chance to land.
   await new Promise(r => setTimeout(r, 150));
   assert.strictEqual(
     bResolved,
@@ -320,18 +279,13 @@ async function runTests() {
   assert.ok(!view._commitPendingTabs.has('tabB'), 'tabB no longer pending');
   console.log('  ok - commit-message generations are scoped per tab');
 
-  // ----- Defect 3: ntfy topic appearing later must reach the webview ----
   const urlFile = path.join(tmpHome, '.kiss', 'remote-url.json');
-  // The ``ready`` above already produced the initial remote_url send
-  // (missing file ⇒ empty url).  Now the daemon writes the ntfy topic
-  // AFTER that first send, with the URL file unchanged.
   await waitFor(
     () => wv.posted.some(m => m && m.type === 'remote_url'),
     'initial remote_url message was not posted',
   );
   fs.writeFileSync(path.join(tmpHome, '.kiss', 'ntfy_topic'), 'kiss-topic-1\n');
   const beforeNtfy = wv.posted.length;
-  // Simulate the 10 s watcher tick (its interval is impractical to wait).
   view._tryReadAndSendUrl(urlFile);
   const ntfyMsg = wv.posted
     .slice(beforeNtfy)
@@ -346,7 +300,6 @@ async function runTests() {
     'https://ntfy.sh/kiss-topic-1',
     'resent remote_url must carry the new ntfy URL',
   );
-  // And an unchanged state must still dedup (no spam every 10 s).
   const beforeDedup = wv.posted.length;
   view._tryReadAndSendUrl(urlFile);
   assert.strictEqual(

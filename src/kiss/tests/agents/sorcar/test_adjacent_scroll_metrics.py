@@ -143,10 +143,20 @@ class TestAdjacentScrollMetrics(unittest.TestCase):
         self.assertIsNotNone(m, "Could not find updateVisibleTask body")
         assert m is not None
         body = m.group(1)
+        # The container reference is captured via the regionNeighbour()
+        # helper (formerly an inline `visibleContainer` lookup) and its
+        # dataset is what the metric reads below depend on.
         self.assertIn(
-            "visibleContainer",
+            "regionNeighbour(",
             body,
-            "updateVisibleTask does not capture visibleContainer",
+            "updateVisibleTask does not capture the visible adjacent-task "
+            "container via regionNeighbour()",
+        )
+        self.assertRegex(
+            body,
+            r"(const|let|var)\s+\w+\s*=\s*regionNeighbour\(",
+            "updateVisibleTask must store the container reference so it "
+            "can read per-task dataset attributes",
         )
 
 

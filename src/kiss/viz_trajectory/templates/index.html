@@ -40,7 +40,6 @@ add your name here
         .hidden { display: none !important; }
         .container { display: flex; height: 100vh; }
 
-        /* Sidebars */
         .jobs-sidebar, .trajectories-sidebar {
             background: var(--panel);
             border-right: 1px solid var(--border);
@@ -67,7 +66,6 @@ add your name here
 
         .sidebar-list { padding: 10px; overflow: auto; flex: 1; }
 
-        /* List items */
         .list-item {
             background: rgba(255,255,255,0.02);
             border: 1px solid var(--border);
@@ -86,7 +84,6 @@ add your name here
         .list-item-subtitle { font-size: 11px; color: var(--muted); margin-top: 4px; }
         .list-item-meta { display: flex; gap: 10px; flex-wrap: wrap; color: var(--muted); font-size: 11px; margin-top: 4px; }
 
-        /* Main content */
         .main-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 
         .content-header {
@@ -106,7 +103,6 @@ add your name here
 
         .messages-container { flex: 1; overflow: auto; padding: 18px; }
 
-        /* Messages */
         .message { margin-bottom: 14px; }
         .message-role {
             display: inline-block;
@@ -133,7 +129,6 @@ add your name here
             line-height: 1.55;
         }
 
-        /* Markdown styles */
         .message-content h1, .message-content h2, .message-content h3 { margin: 16px 0 8px; }
         .message-content h1 { font-size: 20px; color: var(--accent); }
         .message-content h2 { font-size: 17px; color: var(--accent-2); }
@@ -214,10 +209,8 @@ add your name here
     </div>
 
     <script>
-        // State
         const state = { jobs: [], selectedJob: null, trajectories: [] };
 
-        // Utilities
         const $ = id => document.getElementById(id);
         const escapeHtml = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
         const plural = (n, one, many) => n === 1 ? one : many;
@@ -225,7 +218,6 @@ add your name here
         const formatTimestamp = ts => ts ? new Date(ts * 1000).toLocaleString() : '—';
         const formatMoney = (v, d = 4) => Number.isFinite(Number(v)) ? `$${Number(v).toFixed(d)}` : '—';
 
-        // Markdown setup
         const renderer = new marked.Renderer();
         renderer.html = html => escapeHtml(html);
         renderer.code = (code, lang) => {
@@ -236,7 +228,6 @@ add your name here
         };
         marked.setOptions({ breaks: true, gfm: true, headerIds: false, renderer });
 
-        // Sanitize links
         marked.use({
             walkTokens: token => {
                 if (token?.type === 'link' || token?.type === 'image') {
@@ -254,14 +245,12 @@ add your name here
             }
         });
 
-        // API
         async function fetchJSON(url) {
             const res = await fetch(url);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             return res.json();
         }
 
-        // Render functions
         function renderJobsList() {
             const container = $('jobs-list');
             if (!state.jobs.length) {
@@ -333,12 +322,10 @@ add your name here
             });
         }
 
-        // Selection handlers
         async function selectJob(name) {
             state.selectedJob = name;
             state.trajectories = [];
 
-            // Update active state in jobs list
             $('jobs-list').querySelectorAll('.list-item').forEach(el => {
                 el.classList.toggle('active', el.dataset.job === name);
             });
@@ -360,12 +347,10 @@ add your name here
             const traj = state.trajectories[index];
             if (!traj) return;
 
-            // Update active state in trajectories list
             $('trajectories-list').querySelectorAll('.list-item').forEach((el, i) => {
                 el.classList.toggle('active', i === index);
             });
 
-            // Update header
             $('content-header').classList.remove('hidden');
             $('trajectory-title').textContent = traj.name || 'Unnamed';
             $('trajectory-command').textContent = traj.command || '';
@@ -383,7 +368,6 @@ add your name here
             renderMessages(traj.messages);
         }
 
-        // Event handlers
         $('jobs-list').addEventListener('click', e => {
             const item = e.target.closest('.list-item');
             if (item?.dataset.job) selectJob(item.dataset.job);
@@ -394,7 +378,6 @@ add your name here
             if (item?.dataset.index != null) selectTrajectory(Number(item.dataset.index));
         });
 
-        // Initialize
         (async () => {
             try {
                 state.jobs = await fetchJSON('/api/jobs');

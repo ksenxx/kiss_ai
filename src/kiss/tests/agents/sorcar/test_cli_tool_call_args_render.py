@@ -42,8 +42,6 @@ def _make_dispatcher() -> tuple[_EventDispatcher, io.StringIO]:
     """Wire a real ConsolePrinter to a wide non-terminal StringIO buffer."""
     buf = io.StringIO()
     printer = ConsolePrinter(file=buf)
-    # Force a wide non-terminal Console so Rich does not wrap long
-    # command / path strings and the assertions below stay simple.
     printer._console = Console(  # noqa: SLF001 — test wiring
         highlight=False, file=buf, width=200, force_terminal=False, color_system=None,
     )
@@ -155,6 +153,5 @@ def test_tool_call_with_non_dict_extras_does_not_crash() -> None:
         },
     )
     assert "BadExtrasTool" in out
-    # Malformed extras dropped → no arguments survive → placeholder body.
     assert "(no arguments)" in out
     assert "not-a-dict" not in out

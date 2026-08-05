@@ -23,11 +23,11 @@ from typing import Any
 
 import yaml
 
+from kiss.agents.sorcar.relentless_agent import SUMMARIZER_PROMPT
+from kiss.agents.sorcar.relentless_agent import finish as relentless_finish
+from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.printer import parse_result_yaml
-from kiss.core.relentless_agent import SUMMARIZER_PROMPT
-from kiss.core.relentless_agent import finish as relentless_finish
-from kiss.core.useful_tools import UsefulTools
 from kiss.core.utils import finish as utils_finish
 
 
@@ -47,7 +47,7 @@ def _build_summarizer_registry() -> KISSAgent:
     shell_tools = UsefulTools()
     tools: list[Callable[..., Any]] = [shell_tools.Read, shell_tools.Bash]
     tool_names = {getattr(tool, "__name__", None) for tool in tools}
-    if "finish" not in tool_names:  # same fallback as KISSAgent._setup_tools
+    if "finish" not in tool_names:
         tools.append(agent.finish)
     agent._add_functions(tools)
     return agent
@@ -78,8 +78,6 @@ class SummarizerFinishContract(unittest.TestCase):
         )
         self.assertEqual(name, "finish")
         self.assertEqual(response, "detailed summary of work done so far")
-        # relentless_agent parses the summarizer result via yaml.safe_load and
-        # uses it verbatim when it is not a dict — a plain string round-trips.
         parsed = yaml.safe_load(response)
         self.assertNotIsInstance(parsed, dict)
 
@@ -104,7 +102,7 @@ class UtilsFinishContract(unittest.TestCase):
         assert parsed is not None
         self.assertEqual(
             parsed,
-            {"success": True, "is_continue": False, "summary": "the final code"},
+            {"success": True, "is_continue": False, "summary": "<p>the final code</p>"},
         )
 
 
@@ -112,7 +110,7 @@ class FreshImportContract(unittest.TestCase):
     def test_relentless_agent_imports_in_fresh_interpreter(self) -> None:
         """Direct core import must not cycle through sorcar.__init__."""
         completed = subprocess.run(
-            [sys.executable, "-c", "import kiss.core.relentless_agent"],
+            [sys.executable, "-c", "import kiss.agents.sorcar.relentless_agent"],
             capture_output=True,
             text=True,
             check=False,

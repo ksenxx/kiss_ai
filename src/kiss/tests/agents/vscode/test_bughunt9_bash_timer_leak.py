@@ -35,25 +35,18 @@ class TestBashTimerStateResurrection(unittest.TestCase):
         p = MemoryPrinter()
         p._thread_local.task_id = "task-9"
         p.subscribe_tab("task-9", "tab-9")
-        # First bash_stream print flushes immediately (last_flush == 0).
         p.print("first chunk\n", type="bash_stream")
-        # Second print inside the 0.1s window arms the flush timer.
         p.print("second chunk\n", type="bash_stream")
         self.assertIn("task-9", p._bash_states)
-        # Task ends: the runner frees all per-task state.
         p.cleanup_task("task-9")
         self.assertNotIn("task-9", p._bash_states)
         emitted_before = len(p.emitted)
-        # A timer that already fired before cancel() runs exactly this
-        # callback on its worker thread.
         worker = threading.Thread(
             target=p._timer_flush_for_task, args=("task-9",),
         )
         worker.start()
         worker.join(timeout=5)
         self.assertFalse(worker.is_alive())
-        # The popped per-task state must NOT be resurrected (leak), and
-        # no stale system_output may be broadcast for the dead task.
         self.assertNotIn("task-9", p._bash_states)
         self.assertEqual(len(p.emitted), emitted_before)
 
@@ -61,12 +54,11 @@ class TestBashTimerStateResurrection(unittest.TestCase):
         """Timing variant: cleanup racing the real 0.1s timer thread."""
         p = MemoryPrinter()
         p._thread_local.task_id = "task-10"
-        p.print("a\n", type="bash_stream")  # immediate flush
-        p.print("b\n", type="bash_stream")  # arms the real timer
-        # Sleep close to the timer deadline so cancel() races the fire.
+        p.print("a\n", type="bash_stream")
+        p.print("b\n", type="bash_stream")
         time.sleep(0.09)
         p.cleanup_task("task-10")
-        time.sleep(0.3)  # let any straggler callback finish
+        time.sleep(0.3)
         self.assertNotIn("task-10", p._bash_states)
 
     def test_active_task_bash_streaming_still_works(self) -> None:
@@ -74,9 +66,9 @@ class TestBashTimerStateResurrection(unittest.TestCase):
         p = MemoryPrinter()
         p._thread_local.task_id = "task-11"
         p.subscribe_tab("task-11", "tab-11")
-        p.print("hello ", type="bash_stream")  # immediate flush
-        p.print("world\n", type="bash_stream")  # buffered, timer armed
-        time.sleep(0.3)  # timer fires and flushes the buffer
+        p.print("hello ", type="bash_stream")
+        p.print("world\n", type="bash_stream")
+        time.sleep(0.3)
         texts = [
             e.get("text", "")
             for e in p.emitted

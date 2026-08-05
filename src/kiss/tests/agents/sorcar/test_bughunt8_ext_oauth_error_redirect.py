@@ -36,13 +36,11 @@ def test_error_redirect_fails_fast_with_reason() -> None:
             "?error=access_denied&error_description=User+denied+access"
         )
         with urllib.request.urlopen(url, timeout=10) as resp:
-            # The browser must get a real page, not a 404.
             assert resp.status == 200
         start = time.monotonic()
         with pytest.raises(Exception) as excinfo:
             server.wait(timeout=5)
         elapsed = time.monotonic() - start
-        # Fail fast — not by exhausting the timeout.
         assert elapsed < 2, f"wait() blocked for {elapsed:.1f}s on a denial"
         assert "access_denied" in str(excinfo.value)
     finally:

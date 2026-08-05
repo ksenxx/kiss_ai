@@ -2,28 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end tests: a sub-agent tab must CLOSE as soon as its
-// sub-agent finishes (the backend broadcasts ``subagentDone``).
-//
-// Behavior under test (``case 'subagentDone':`` in ``media/main.js``):
-//
-//   1. When one sub-agent of a fan-out finishes, ONLY its tab closes;
-//      the still-running sibling tabs stay open and the owning
-//      run_parallel panel stays uncollapsed.
-//   2. When the LAST sub-agent finishes, its tab closes and the owning
-//      run_parallel panel collapses (no open sub-agent tab remains).
-//   3. When the finished sub-agent tab is the ACTIVE tab, the webview
-//      switches to an adjacent tab instead of showing a dead view.
-//   4. A ``subagentDone`` for an unknown tab id is a no-op.
-//
-// The tests drive the real ``media/main.js`` against the real
-// ``media/chat.html`` markup in jsdom — the exact production webview
-// code — mirroring the harness of ``runParallelPanelTabsSync.test.js``.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/subagentTabAutoCloseOnDone.test.js
 
 'use strict';
 
@@ -34,12 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom window running the production chat webview: the real
- * ``chat.html`` body (placeholders blanked), ``panelCopy.js`` and
- * ``main.js`` evaluated in the window, and a recording
- * ``acquireVsCodeApi`` stub (the only host API the webview has).
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -70,17 +42,18 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
 
-/** Dispatch a backend→webview event exactly like the extension does. */
 function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** The run_parallel tool-call panel element in the active chat DOM. */
 function runParallelPanel(win) {
   const headers = win.document.querySelectorAll('#output .ev.tc .tc-h');
   for (const h of headers) {
@@ -90,25 +63,16 @@ function runParallelPanel(win) {
   return null;
 }
 
-/** All sub-agent tabs currently rendered in the tab bar. */
 function subagentTabEls(win) {
   return Array.from(
     win.document.querySelectorAll('#tab-list .chat-tab.subagent-tab'),
   );
 }
 
-/** The currently active tab element in the tab bar. */
 function activeTabEl(win) {
   return win.document.querySelector('#tab-list .chat-tab.active');
 }
 
-/**
- * Boot a webview with a running parent task whose agent called
- * ``run_parallel`` and spawned *n* sub-agents.  Replays the exact
- * backend broadcast sequence: ``status running`` → ``tool_call
- * run_parallel`` → per sub-agent ``new_tab`` (which makes the webview
- * post ``resumeSession``) → ``openSubagentTab``.
- */
 function bootParallelRun(n) {
   const {win, posted} = makeWebview();
   const ready = posted.find(m => m.type === 'ready');
@@ -149,7 +113,6 @@ function bootParallelRun(n) {
       .find(m => m.type === 'resumeSession' && m.taskId === taskId);
     assert.ok(resume, 'new_tab must make the webview post resumeSession');
     subTabIds.push(resume.tabId);
-    // The server replays the sub-agent row and converts the tab.
     send(win, {
       type: 'openSubagentTab',
       tab_id: resume.tabId,
@@ -167,9 +130,6 @@ function bootParallelRun(n) {
   return {win, posted, parentId, panel, taskIds, subTabIds};
 }
 
-// ---------------------------------------------------------------------------
-// 1. subagentDone closes ONLY the finished sub-agent's tab.
-// ---------------------------------------------------------------------------
 function testDoneClosesOnlyFinishedTab() {
   const {win, posted, panel, subTabIds} = bootParallelRun(2);
 
@@ -200,9 +160,6 @@ function testDoneClosesOnlyFinishedTab() {
   console.log('  ok - subagentDone closes only the finished tab');
 }
 
-// ---------------------------------------------------------------------------
-// 2. The LAST subagentDone closes its tab and collapses the panel.
-// ---------------------------------------------------------------------------
 function testLastDoneClosesTabAndCollapsesPanel() {
   const {win, posted, panel, subTabIds} = bootParallelRun(2);
 
@@ -229,13 +186,9 @@ function testLastDoneClosesTabAndCollapsesPanel() {
   console.log('  ok - last subagentDone closes its tab and collapses panel');
 }
 
-// ---------------------------------------------------------------------------
-// 3. Finishing the ACTIVE sub-agent tab switches to an adjacent tab.
-// ---------------------------------------------------------------------------
 function testDoneOnActiveTabSwitchesAway() {
   const {win, parentId, subTabIds} = bootParallelRun(2);
 
-  // Activate the first sub-agent tab exactly like a user click.
   const subEl = subagentTabEls(win).find(
     el => el.dataset.tabId === subTabIds[0],
   );
@@ -269,9 +222,6 @@ function testDoneOnActiveTabSwitchesAway() {
   console.log('  ok - subagentDone on the active tab switches away');
 }
 
-// ---------------------------------------------------------------------------
-// 4. subagentDone for an unknown tab id is a no-op.
-// ---------------------------------------------------------------------------
 function testDoneUnknownTabIsNoop() {
   const {win, posted, subTabIds} = bootParallelRun(2);
 

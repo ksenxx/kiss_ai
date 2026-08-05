@@ -19,57 +19,19 @@ import shutil
 import unicodedata
 
 _ESC = "\x1b"
-# ANSI styling shared by every panel render.
 CYAN = f"{_ESC}[36m"
 DIM = f"{_ESC}[2m"
 BOLD = f"{_ESC}[1m"
-# 256-color "DarkOrange" (xterm-256 index 208 ≈ #FF8700) — the closest
-# universal-terminal match to Claude Code's "coral" brand orange used
-# for its completion / prompt-bar highlight.
 ORANGE = f"{_ESC}[38;5;208m"
 RESET = f"{_ESC}[0m"
-# Red (optionally blinking) — used by the ``/voice`` ``Listening ...``
-# / ``Transcribing ...`` indicator at the beginning of the panel's top
-# border; it blinks only after the sorcar wake word is detected.
 BLINK = f"{_ESC}[5m"
 RED = f"{_ESC}[31m"
-# Yellow — used for CLI notification-style messages (all notifications
-# render yellow).
 YELLOW = f"{_ESC}[33m"
-# Cursor marker shown before the editable text inside the panel body.
 PROMPT_MARKER = "› "
-# Extended-keyboard-protocol enable / disable pairs shared by the idle
-# prompt (:mod:`kiss.ui.cli.cli_prompt`) and the mid-task
-# steering box (:mod:`kiss.ui.cli.cli_steering`) so both input
-# paths behave identically on every terminal:
-#
-# * ``ESC[>4;2m`` — xterm ``modifyOtherKeys`` level 2.  Makes
-#   Shift/Ctrl/Alt+Enter emit ``ESC[27;<m>;13~``.
-# * ``ESC[>1u``   — Kitty keyboard protocol, push flag 1 (disambiguate
-#   escape codes).  Makes Shift+Enter emit ``ESC[13;<m>u``.
-#
-# The disable pair restores ``modifyOtherKeys`` level 0 (``ESC[>4;0m``)
-# and pops the pushed Kitty flag entry (``ESC[<u``).
 KEYBOARD_PROTO_ENABLE = f"{_ESC}[>4;2m{_ESC}[>1u"
 KEYBOARD_PROTO_DISABLE = f"{_ESC}[>4;0m{_ESC}[<u"
-# Modifier+Enter escape sequences emitted by terminals for every
-# modifier value ``<m> = 2..16`` (per kitty / xterm conventions the
-# modifier code is ``1 + bits`` with bit 0 = Shift, bit 1 = Alt,
-# bit 2 = Ctrl, bit 3 = Cmd/Meta — so 2 = Shift+Enter, 3 = Alt+Enter,
-# 5 = Ctrl+Enter, 9 = Cmd/Meta+Enter, … 16 = Cmd+Ctrl+Alt+Shift+Enter).
-# Both input paths (cli_prompt key bindings and cli_steering's
-# ``_NEWLINE_AFTER_ESC``) derive their tables from these canonical
-# tuples so the two paths can never drift apart.
-#
-# ``MODIFY_OTHER_KEYS_ENTER`` is the xterm modifyOtherKeys=2 form
-# (``ESC[27;<m>;13~``); ``CSI_U_ENTER`` is the kitty / CSI-u form
-# (``ESC[13;<m>u``).
 MODIFY_OTHER_KEYS_ENTER = tuple(f"{_ESC}[27;{_m};13~" for _m in range(2, 17))
 CSI_U_ENTER = tuple(f"{_ESC}[13;{_m}u" for _m in range(2, 17))
-# Titles shown in the panel's top border for each input mode.  A
-# short hint advertises TAB autocompletion and the multi-line entry
-# chords (Alt+Enter / Shift+Enter insert a newline instead of
-# submitting).
 IDLE_TITLE = (
     "KISS Sorcar · type a task, Enter to submit · "
     "Tab to autocomplete · Alt+Enter/Shift+Enter for newline · "
@@ -80,16 +42,10 @@ STEER_TITLE = (
     "Tab to autocomplete · Alt+Enter/Shift+Enter for newline · "
     "Ctrl+C to abort "
 )
-# Shared user-visible literals for the ``ask_user_question`` flow and
-# the queued-instruction feedback, used by both the in-process steering
-# session (:mod:`kiss.ui.cli.cli_steering`) and the daemon
-# client (:mod:`kiss.ui.cli.cli_client`) so the two modes can
-# never diverge in wording or styling.
 ASK_TITLE = " answer the question above, then Enter "
 QUESTION_FMT = f"\n{YELLOW}? {{question}}{RESET}\n"
 QUEUED_FMT = f"{DIM}▸ queued: {{text}}{RESET}\n"
 QUEUED_STATUS_FMT = " queued: {n} "
-# Dim placeholder shown in the panel body when the edit buffer is empty.
 PLACEHOLDER = "Add an instruction for the agent while it works to steer…"
 
 
@@ -221,9 +177,6 @@ def voice_panel_top(
     """
     top = panel_top(indicator + title, cols)
     ind = _clip_to_width(indicator, max(cols - 4, 0))
-    # ``top`` is "╭─" + clipped(indicator + title) + fill + "╮"; the
-    # first ``len(ind)`` characters after the corner are exactly the
-    # (possibly clipped) indicator, so slicing splits it from the rest.
     rest = top[2 + len(ind):]
     style = (BLINK + RED) if blink else RED
     return f"{CYAN}╭─{RESET}{style}{ind}{RESET}{CYAN}{rest}{RESET}"
@@ -262,10 +215,6 @@ def clip_buf(buf: str, cols: int) -> str:
         The portion of *buf* that fits on the body row (possibly the
         whole buffer, or its tail when it would overflow).
     """
-    # With the cursor parked at the end of the buffer,
-    # :func:`visible_line_window` reduces exactly to the tail-clip
-    # behaviour this function guarantees (see its docstring), so the
-    # windowing logic lives in one place.
     shown, _ = visible_line_window(buf, cols, len(buf))
     return shown
 
@@ -297,16 +246,12 @@ def visible_line_window(
         of the visible text before the caret — i.e. the caret's column
         offset from the start of the body text.
     """
-    # Tabs render as a space; the mapping is 1:1 per character so
-    # cursor offsets into *line* stay aligned with *shown*.
     shown = line.replace("\n", "⏎").replace("\t", " ")
-    inner_w = cols - 4  # room between "│ " and " │"
+    inner_w = cols - 4
     avail = inner_w - display_width(PROMPT_MARKER)
     cursor = max(0, min(cursor, len(shown)))
     if display_width(shown) <= avail:
         return shown, display_width(shown[:cursor])
-    # Tail-clip the text before the cursor so the caret is always in
-    # view, then fill the remaining width with the text after it.
     w = 0
     start = cursor
     for k in range(cursor - 1, -1, -1):
@@ -325,19 +270,8 @@ def visible_line_window(
     return shown[start:end], display_width(shown[start:cursor])
 
 
-# Continuation indent shown on every body row past the first when the
-# edit buffer contains embedded newlines (Shift+Enter inserts a real
-# ``\n``).  Two spaces aligns continuation text under the ``› `` chevron
-# on the opening row so a multi-line input visually reads as one
-# block.
 _CONT_INDENT = "  "
 
-# Minimum number of body rows the input panel always shows.  The framed
-# dialog reserves three lines of vertical space (chevron / placeholder
-# row + two padding rows) even when the buffer is empty or a single
-# line, so the user has an obvious 3-row "text area" to type into.
-# Above three lines the panel dynamically grows with the buffer (see
-# :func:`panel_body`).
 MIN_BODY_ROWS = 3
 
 
@@ -390,7 +324,7 @@ def panel_body(
         is ``True`` when the empty-buffer placeholder is shown on the
         first row (so callers can dim the text after the chevron).
     """
-    inner_w = cols - 4  # room between "│ " and " │"
+    inner_w = cols - 4
     rows: list[str]
     is_placeholder = False
     if not buf:
@@ -407,11 +341,6 @@ def panel_body(
         rows = []
         for i, line in enumerate(lines):
             prefix = PROMPT_MARKER if i == 0 else _CONT_INDENT
-            # The cursor's row scrolls horizontally to keep the caret
-            # in view; every other row tail-clips via ``clip_buf`` so
-            # a long line always shows its end.  After splitting on
-            # ``\n`` the ``\n`` → ``⏎`` substitution in ``clip_buf``
-            # never fires.
             if i == cur_line:
                 shown, _ = visible_line_window(line, cols, cur_off)
             else:
@@ -445,13 +374,7 @@ def menu_row(text: str, selected: bool, cols: int) -> str:
         ``│`` border glyphs, ready to be written after an absolute
         cursor positioning escape.
     """
-    inner_w = cols - 4  # room between "│ " and " │"
-    # Sanitise the candidate text: newlines/tabs render as ⏎/space, all
-    # other control characters (C0 \\x00-\\x1f including ESC, DEL \\x7f
-    # and C1 \\x80-\\x9f — notably U+009B which is the one-character
-    # CSI introducer) are stripped.  Without this an attacker- or
-    # bug-generated candidate could inject ANSI styling that leaks past
-    # the right border and corrupts the rest of the screen.
+    inner_w = cols - 4
     raw = text.replace("\n", "⏎").replace("\t", " ")
     shown = "".join(
         ch for ch in raw if ch >= " " and not ("\x7f" <= ch <= "\x9f")
@@ -501,10 +424,6 @@ def body_cursor_col(
     line_end = buf.find("\n", cursor)
     if line_end < 0:
         line_end = len(buf)
-    # The continuation indent is exactly as wide as the chevron, so
-    # ``visible_line_window`` (which subtracts the chevron's width
-    # from the available room) reports the right caret offset for both
-    # the first row and any continuation row.
     _, caret_w = visible_line_window(
         buf[line_start:line_end], cols, cursor - line_start,
     )

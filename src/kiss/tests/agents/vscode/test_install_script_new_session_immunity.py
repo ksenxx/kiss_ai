@@ -237,7 +237,6 @@ def test_install_sh_reexecs_in_new_session_via_perl() -> None:
     """
     src = _read_install_sh()
 
-    # The guard must exist and appear before ``set -eo pipefail``.
     assert _GUARD_PREFIX in src, (
         f"install.sh missing the {_GUARD_PREFIX!r} guard; the new-session "
         "re-exec block must be present at the top of the script so a "
@@ -253,13 +252,11 @@ def test_install_sh_reexecs_in_new_session_via_perl() -> None:
 
     block = _extract_reexec_block()
 
-    # Guard against infinite re-exec.
     assert "_KISS_NEW_SESSION" in block, (
         "the re-exec block must export and check `_KISS_NEW_SESSION` to "
         "prevent the re-execd child from forking again."
     )
 
-    # The block must use perl and POSIX::setsid in the child.
     assert "perl" in block, (
         "the re-exec block must invoke perl (the only universally "
         "available helper that exposes setsid(2) via POSIX::setsid)."
@@ -269,24 +266,17 @@ def test_install_sh_reexecs_in_new_session_via_perl() -> None:
         "session with no controlling TTY."
     )
 
-    # The block must fork — calling setsid without forking would EPERM
-    # because bash on install.sh is its own process-group leader.
     assert "fork()" in block, (
         "perl must fork before calling setsid (a process-group leader "
         "cannot call setsid; we must fork to escape that restriction)."
     )
 
-    # The block must `exec` perl to replace bash, so stray signals to the
-    # original PTY's process group never reach a bash that would default-
-    # terminate on them.
     assert re.search(r"\bexec\s+/usr/bin/env\s+perl\b", block), (
         "the block must `exec /usr/bin/env perl …` so the bash process "
         "is REPLACED by perl; otherwise a stray SIGINT to the original "
         "pgrp would default-terminate bash even before fork()."
     )
 
-    # The parent perl must IGNORE INT/TERM/HUP so a stray Ctrl-C cannot
-    # take down the wait loop and leave the child orphaned.
     assert re.search(r'\$SIG\{INT\}\s*=\s*"IGNORE"', block), (
         'parent perl must set $SIG{INT} = "IGNORE" to absorb stray '
         "SIGINTs from the original terminal."
@@ -313,9 +303,6 @@ def test_install_sh_perl_reexec_creates_new_session_id_for_child(
     the install body.
     """
     if shutil.which("perl") is None:
-        # If perl is missing the re-exec block falls through; the
-        # post-reexec body still runs but in the SAME session as the
-        # harness, so this test would be a no-op.  Skip it.
         pytest.skip("perl not available; new-session detachment cannot run")
 
     child_pid_file = tmp_path / "child.pid"
@@ -343,7 +330,6 @@ def test_install_sh_perl_reexec_creates_new_session_id_for_child(
 
     proc = _spawn_harness(harness)
     try:
-        # Poll for the child PID file with a tight bound.
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline and not child_pid_file.exists():
             time.sleep(0.05)
@@ -353,7 +339,6 @@ def test_install_sh_perl_reexec_creates_new_session_id_for_child(
         )
         child_pid = int(child_pid_file.read_text().strip())
 
-        # Parent perl ended up at proc.pid (we exec'd bash → perl).
         parent_sid = os.getsid(proc.pid)
         child_sid = os.getsid(child_pid)
 
@@ -364,7 +349,6 @@ def test_install_sh_perl_reexec_creates_new_session_id_for_child(
             "shares the original VS Code PTY's controlling terminal and "
             "every stray SIGINT/SIGHUP/SIGTERM kills it."
         )
-        # Furthermore, the child should be its own session leader.
         assert child_sid == child_pid, (
             "the re-exec'd child should be the leader of the new session "
             f"(child_pid={child_pid}, child_sid={child_sid})"
@@ -388,8 +372,6 @@ def _run_signal_immunity_test(
 
     proc = _spawn_harness(harness)
     try:
-        # Let the harness reach the post-re-exec sleep.  The fork+setsid
-        # path completes in well under 100 ms; 1 s is a generous warm-up.
         time.sleep(1.0)
         _kill_pgrp_repeatedly(proc, sig, count=3)
         try:
@@ -487,9 +469,6 @@ def test_install_sh_perl_fallback_when_unavailable(tmp_path: Path) -> None:
     harness.write_text(
         "#!/bin/bash\n"
         "set -eo pipefail\n"
-        # Restrict PATH to a directory with NO commands at all.  bash's
-        # builtins (`command`, `export`, `[`, etc.) still work, but
-        # `command -v perl` returns nothing and the if-guard fails.
         f'export PATH={empty_dir.as_posix()!r}\n'
         + block
         + textwrap.dedent(

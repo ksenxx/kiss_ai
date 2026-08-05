@@ -22,7 +22,6 @@ import unittest
 
 from kiss.server.web_server import MEDIA_DIR, _build_html
 
-#: Every settings-panel input that holds an API key and must be masked.
 API_KEY_INPUT_IDS = [
     "cfg-key-GEMINI_API_KEY",
     "cfg-key-OPENAI_API_KEY",

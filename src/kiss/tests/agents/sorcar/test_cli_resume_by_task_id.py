@@ -100,9 +100,6 @@ class TestResumeByTaskId(CliClientBase):
         return None
 
     def test_resume_by_task_id_sends_task_and_chat_ids(self) -> None:
-        # Seed the (isolated) persistence DB with a real chat: two
-        # tasks in one chat so opening by task id is distinguishable
-        # from opening the latest task of the chat.
         first_task_id, chat_id = _add_task("first task")
         _save_task_result("first result", task_id=first_task_id)
         second_task_id, _ = _add_task("second task", chat_id=chat_id)
@@ -118,17 +115,14 @@ class TestResumeByTaskId(CliClientBase):
         text = buf.getvalue()
         self.assertIn(f"Resumed task {first_task_id}", text)
         self.assertIn(chat_id, text)
-        # The client must now target the resolved chat for follow-ups.
         self.assertEqual(self.client.dispatcher.chat_id, chat_id)
-        # The daemon must receive resumeSession with BOTH ids so its
-        # _replay_session opens the specific task, not the latest one.
         cmd = self._wait_for_cmd("resumeSession", before)
         self.assertIsNotNone(
             cmd,
             f"resumeSession never arrived; saw "
             f"{self.harness.received_cmds[before:]!r}",
         )
-        assert cmd is not None  # for the type-checker
+        assert cmd is not None
         self.assertEqual(cmd.get("taskId"), first_task_id)
         self.assertEqual(cmd.get("chatId"), chat_id)
 
@@ -144,8 +138,6 @@ class TestResumeByTaskId(CliClientBase):
             "No task found with id 0123456789abcdef", buf.getvalue(),
         )
         self.assertEqual(self.client.dispatcher.chat_id, "")
-        # Give any (erroneous) send a moment to arrive, then assert
-        # no resumeSession was dispatched.
         time.sleep(0.2)
         self.assertIsNone(self._wait_for_cmd("resumeSession", before, 0.1))
 

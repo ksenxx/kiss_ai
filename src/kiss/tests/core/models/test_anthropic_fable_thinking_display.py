@@ -336,7 +336,6 @@ class TestFable5ThinkingEndToEnd:
             {}, tools_schema=[_OPENAI_FINISH_TOOL]
         )
 
-        # The wire request must reveal thinking and must not force tool use.
         assert len(_CAPTURED_REQUESTS) == 1
         request = _CAPTURED_REQUESTS[0]
         assert request.get("thinking") == {
@@ -345,13 +344,11 @@ class TestFable5ThinkingEndToEnd:
         }, request.get("thinking")
         assert "tool_choice" not in request, request.get("tool_choice")
 
-        # Thinking tokens must be revealed through the callbacks.
         assert thinking_events == [True, False], thinking_events
         streamed = "".join(tokens)
         assert "I'm calculating 27 times 31." in streamed, streamed
         assert "The answer is 837." in streamed, streamed
 
-        # The tool call must still be extracted for the agent loop.
         assert len(tool_calls) == 1
         assert tool_calls[0]["name"] == "finish"
 

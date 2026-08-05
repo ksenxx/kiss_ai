@@ -47,13 +47,8 @@ from pathlib import Path
 
 import pytest
 
+from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import _number_interactive_elements
-from kiss.core.useful_tools import UsefulTools
-
-# ---------------------------------------------------------------------------
-# Bug 1 — vanished worktree: Read/Write/Edit/Bash-guard must fall back to
-# the parent repo, consistent with UsefulTools._spawn.
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
@@ -63,7 +58,6 @@ def stale_worktree_setup(tmp_path):
     repo.mkdir()
     (repo / "f.txt").write_text("hello parent\n")
     stale_wt = repo / ".kiss-worktrees" / "kiss_wt-gone"
-    # NOTE: stale_wt is intentionally never created (worktree torn down).
     tools = UsefulTools(work_dir=str(stale_wt))
     return repo, stale_wt, tools
 
@@ -120,22 +114,14 @@ class TestVanishedWorktreeFallback:
         wt.mkdir(parents=True)
         (wt / "f.txt").write_text("worktree content\n")
         tools = UsefulTools(work_dir=str(wt))
-        # Read of the parent-repo path must observe the worktree copy.
         assert tools.Read(str(repo / "f.txt")) == "worktree content\n"
-        # Write via parent path must land in the worktree.
         tools.Write(str(repo / "n.txt"), "x")
         assert (wt / "n.txt").exists()
         assert not (repo / "n.txt").exists()
-        # Bash referencing the parent-repo path must still be refused.
         out = tools.Bash(f"echo hi > {repo}/f.txt", "write file")
         assert "parent-repo path" in out, out
         assert (repo / "f.txt").read_text() == "main content\n"
 
-
-# ---------------------------------------------------------------------------
-# Bug 2 — aria snapshot name extraction: escaped quotes/backslashes and
-# single-quote-wrapped YAML keys.
-# ---------------------------------------------------------------------------
 
 
 class TestAriaSnapshotNameExtraction:
@@ -196,8 +182,6 @@ class TestAriaSnapshotNameExtraction:
                     '<button onclick="this.textContent=\'done\'">'
                     'Say "hi" now</button>'
                 )
-                # Wire the tool to the live page without launching its
-                # own browser (still exercises the real logic layer).
                 tool._playwright = p
                 tool._browser = browser
                 tool._context = page.context

@@ -158,6 +158,37 @@ class TestTalkPlaybackArbitration(IsolatedAsyncioTestCase):
         extra = await self._collect_talks(reader, 1, timeout=quiet)
         return not extra
 
+    async def _wait_registered(
+        self,
+        *,
+        local_tabs: set[str] = frozenset(),  # type: ignore[assignment]
+        cli_tabs: set[str] = frozenset(),  # type: ignore[assignment]
+        timeout: float = 5.0,
+    ) -> None:
+        """Wait until the daemon has processed the tabs' hello commands.
+
+        ``_connect`` only WRITES the ``ready`` / ``cliTabHello`` lines
+        to the UDS socket; the server processes them asynchronously.
+        A fixed sleep is racy under load, so poll the printer's real
+        registration maps (the exact state ``_fanout_talk`` consults)
+        until every expected tab is registered.
+        """
+        printer = self.server._printer
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            with printer._ws_lock:
+                registered = (
+                    set(local_tabs) <= set(printer._local_uds_tab_counts)
+                    and set(cli_tabs) <= set(printer._cli_tab_counts)
+                )
+            if registered:
+                return
+            await asyncio.sleep(0.01)
+        self.fail(
+            "daemon never registered the expected tabs: "
+            f"local={sorted(local_tabs)} cli={sorted(cli_tabs)}"
+        )
+
     async def test_cli_origin_talk_muted_for_all_uds_peers(self) -> None:
         """THE REGRESSION: a CLI-played talk must not replay locally.
 
@@ -202,7 +233,9 @@ class TestTalkPlaybackArbitration(IsolatedAsyncioTestCase):
         cli_reader, cli_writer = await self._connect(cli_tab, cli=True)
         self.server._printer.subscribe_tab(self.task_id, web_tab)
         self.server._printer.subscribe_tab(self.task_id, cli_tab)
-        await asyncio.sleep(0.05)
+        await self._wait_registered(
+            local_tabs={web_tab}, cli_tabs={cli_tab}
+        )
 
         self.server._printer.broadcast(
             _talk_event(self.task_id, "talk-repl-1")
@@ -229,13 +262,9 @@ class TestTalkPlaybackArbitration(IsolatedAsyncioTestCase):
         remote_web_tab = "remote-webtab-" + uuid.uuid4().hex[:8]
         cli_tab = "clitab-" + uuid.uuid4().hex[:8]
         cli_reader, cli_writer = await self._connect(cli_tab, cli=True)
-        # Deliberately subscribe the web tab WITHOUT a UDS connection:
-        # this models a remote WSS browser tab.  It should receive a
-        # playable copy on that remote device, but it must not suppress
-        # the local terminal player's copy.
         self.server._printer.subscribe_tab(self.task_id, remote_web_tab)
         self.server._printer.subscribe_tab(self.task_id, cli_tab)
-        await asyncio.sleep(0.05)
+        await self._wait_registered(cli_tabs={cli_tab})
 
         self.server._printer.broadcast(
             _talk_event(self.task_id, "talk-remote-web-plus-cli")
@@ -260,7 +289,7 @@ class TestTalkPlaybackArbitration(IsolatedAsyncioTestCase):
         cli_tab = "clitab-" + uuid.uuid4().hex[:8]
         cli_reader, cli_writer = await self._connect(cli_tab, cli=True)
         self.server._printer.subscribe_tab(self.task_id, cli_tab)
-        await asyncio.sleep(0.05)
+        await self._wait_registered(cli_tabs={cli_tab})
 
         self.server._printer.broadcast(
             _talk_event(self.task_id, "talk-repl-solo")
@@ -283,7 +312,7 @@ class TestTalkPlaybackArbitration(IsolatedAsyncioTestCase):
         reader_b, writer_b = await self._connect(tab_b, cli=True)
         self.server._printer.subscribe_tab(self.task_id, tab_a)
         self.server._printer.subscribe_tab(self.task_id, tab_b)
-        await asyncio.sleep(0.05)
+        await self._wait_registered(cli_tabs={tab_a, tab_b})
 
         self.server._printer.broadcast(
             _talk_event(self.task_id, "talk-two-repls")
@@ -375,8 +404,6 @@ class TestTalkPlayerHonoursMuted(IsolatedAsyncioTestCase):
                     [],
                     "a muted talk copy must never reach the player/TTS",
                 )
-                # The muted copy must not poison the dedupe set: a
-                # later playable copy of the same talkId still plays.
                 player.play(
                     {
                         "type": "talk",

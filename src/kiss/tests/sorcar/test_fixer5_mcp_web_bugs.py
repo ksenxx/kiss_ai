@@ -41,7 +41,11 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.mcp_servers import MCPManager, MCPServerConfig
+from kiss.agents.sorcar.mcp_servers import (
+    MCPManager,
+    MCPServerConfig,
+    _connection_key,
+)
 from kiss.agents.sorcar.skills import discover_skills, load_skill_content
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.ui.cli.mcp_cli import _OAuthCallbackServer
@@ -106,9 +110,6 @@ def real_stdin(
         os.close(master_fd)
 
 
-# ---------------------------------------------------------------------------
-# Finding #1: stop signal racing the connection task's start
-
 
 def test_disconnect_racing_connection_start_stops_task(
     tmp_path: Path, real_stdin: None,
@@ -124,20 +125,20 @@ def test_disconnect_racing_connection_start_stops_task(
     manager = MCPManager()
     try:
         cfg = _stdio_config(tmp_path)
-        # Stall the loop thread so the just-scheduled coroutine cannot
-        # start before disconnect_all runs (deterministic race window).
         manager._loop.call_soon_threadsafe(time.sleep, 1.0)
 
         connect_thread = threading.Thread(
             target=manager.connect, args=(cfg,), daemon=True,
         )
         connect_thread.start()
-        # Wait for connect() to register the connection record.
+        # Connections are keyed by name + config digest (so same-named
+        # servers of different agents stay isolated).
+        key = _connection_key(cfg)
         deadline = time.monotonic() + 5
-        while cfg.name not in manager._connections:
+        while key not in manager._connections:
             assert time.monotonic() < deadline, "connect never registered"
             time.sleep(0.01)
-        conn = manager._connections[cfg.name]
+        conn = manager._connections[key]
 
         start = time.monotonic()
         manager.disconnect_all()
@@ -145,9 +146,6 @@ def test_disconnect_racing_connection_start_stops_task(
         connect_thread.join(timeout=30)
         assert not connect_thread.is_alive()
 
-        # Pre-fix: stop was None when disconnect_all checked it, the
-        # signal was dropped, the task parked forever, and
-        # disconnect_all swallowed a 10 s TimeoutError.
         deadline = time.monotonic() + 15
         while not conn.task.done():
             assert time.monotonic() < deadline, (
@@ -159,9 +157,6 @@ def test_disconnect_racing_connection_start_stops_task(
     finally:
         manager.shutdown()
 
-
-# ---------------------------------------------------------------------------
-# Finding #4: shutdown poisons the singleton
 
 
 def test_shutdown_resets_singleton_and_reconnect_is_prompt(
@@ -175,7 +170,6 @@ def test_shutdown_resets_singleton_and_reconnect_is_prompt(
     """
     m1 = MCPManager.instance()
     m1.shutdown()
-    # Idempotent: a second shutdown is an immediate no-op.
     start = time.monotonic()
     m1.shutdown()
     assert time.monotonic() - start < 1
@@ -194,9 +188,6 @@ def test_shutdown_resets_singleton_and_reconnect_is_prompt(
     finally:
         m2.shutdown()
 
-
-# ---------------------------------------------------------------------------
-# Findings #5 and #6: web tool (real headless Chromium)
 
 
 def test_accounts_google_blocked_in_non_persistent_context() -> None:
@@ -225,25 +216,15 @@ def test_renderer_crash_on_tab_switched_page_recovers() -> None:
     try:
         first = tool.go_to_url("data:text/html,<title>one</title><h1>one</h1>")
         assert not first.startswith("Error"), first
-        # Open a second real tab in the same context and switch to it
-        # through the public tab-switch path under test.
         page2 = tool._context.new_page()
         page2.goto("data:text/html,<title>two</title><h1>two</h1>")
         switched = tool.go_to_url("tab:1")
         assert not switched.startswith("Error"), switched
         assert tool._page is page2
 
-        # Crash the adopted tab's renderer for real.
         crash = tool.go_to_url("chrome://crash")
         assert crash.startswith("Error navigating to"), crash
 
-        # The sync Playwright API only delivers the pending crash event
-        # during a later Playwright call, so the first retry may still
-        # error while the handler fires; with the fix the tool then
-        # tears down the dead page and recovers within a few calls.
-        # Pre-fix the handler never fires (`_page` keeps pointing at the
-        # crashed-but-open page, which `_is_alive` reports live), so
-        # every retry fails with "Page crashed" forever.
         out = ""
         recovered = False
         for _ in range(5):
@@ -256,9 +237,6 @@ def test_renderer_crash_on_tab_switched_page_recovers() -> None:
     finally:
         tool.close()
 
-
-# ---------------------------------------------------------------------------
-# Finding #9: auth teardown stalled by a blocked callback wait
 
 
 def test_oauth_callback_close_unblocks_pending_wait() -> None:
@@ -297,15 +275,12 @@ def test_auth_style_event_loop_teardown_not_stalled() -> None:
 
     async def failing_flow() -> None:
         loop = asyncio.get_running_loop()
-        # The OAuth provider's callback_handler: a blocked executor wait.
         pending = loop.run_in_executor(None, callback.wait, 300.0)
         await asyncio.sleep(0.2)
         try:
             raise RuntimeError("connection failed before the redirect")
         finally:
             callback.close()
-            # Keep a reference alive like the real flow does; never
-            # awaited because the flow already failed.
             del pending
 
     start = time.monotonic()
@@ -314,9 +289,6 @@ def test_auth_style_event_loop_teardown_not_stalled() -> None:
     elapsed = time.monotonic() - start
     assert elapsed < 30, f"event-loop teardown stalled {elapsed:.1f}s"
 
-
-# ---------------------------------------------------------------------------
-# Finding #11: skill name escaping in load_skill_content
 
 
 def test_skill_name_xml_escaped_in_content(tmp_path: Path) -> None:

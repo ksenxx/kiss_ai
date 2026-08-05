@@ -207,8 +207,6 @@ def _load_shim_page(browser):
 
     page.on("framenavigated", _on_nav)
     page.set_content(_build_test_page(), wait_until="load")
-    # Drop the navigations from the initial set_content so the
-    # test sees only post-shim-driven reloads.
     nav_counter[0] = 0
     return context, page, nav_counter
 
@@ -225,41 +223,27 @@ def test_reconnect_after_server_restart_triggers_page_reload(_browser):
     """
     context, page, navs = _load_shim_page(_browser)
     try:
-        # 1) First connect + auth.
         page.evaluate("window.__fireOpen()")
         page.evaluate("window.__fireAuthOk()")
         page.wait_for_timeout(100)
-        # First auth: NO reload (otherwise we'd loop forever on
-        # every fresh page load).
         assert navs[0] == 0, (
             f"shim must NOT reload on the very first successful auth; "
             f"saw {navs[0]} extra navigation(s)"
         )
 
-        # 2) Server restart: close the live socket.  The shim's
-        # ``setTimeout(connect, 3000)`` is patched to run inline so a
-        # fresh mock socket is created immediately.
         page.evaluate("window.__fireClose()")
 
-        # The shim should have opened a new socket already.
         socket_count = page.evaluate("window.__sockets.length")
         assert socket_count == 2, (
             f"shim must reconnect after onclose; got {socket_count} sockets"
         )
 
-        # 3) The new socket completes its handshake.  Wrap the
-        # evaluate calls in a try/except: the second ``auth_ok`` is
-        # expected to trigger ``window.location.reload()`` which
-        # destroys the JS execution context Playwright is talking
-        # to, so the second ``evaluate`` may raise — that itself is
-        # an additional positive signal that reload happened.
         try:
             page.evaluate("window.__fireOpen()")
             page.evaluate("window.__fireAuthOk()")
         except Exception:
             pass
 
-        # Give Playwright a moment to deliver the navigation event.
         page.wait_for_timeout(500)
 
         assert navs[0] >= 1, (
@@ -283,13 +267,10 @@ def test_first_auth_alone_does_not_reload(_browser):
     try:
         page.evaluate("window.__fireOpen()")
         page.evaluate("window.__fireAuthOk()")
-        # Give any spurious reload time to happen.
         page.wait_for_timeout(300)
         assert navs[0] == 0, (
             f"first auth_ok must NOT reload; saw {navs[0]} navigation(s)"
         )
-        # And the overlay-hide event must still have fired so the
-        # user can use the page on first load.
         events = page.evaluate("window.__daemonStatusEvents")
         assert any(e.get("connected") is True for e in events), events
     finally:

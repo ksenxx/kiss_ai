@@ -10,22 +10,17 @@ import pluginN from "eslint-plugin-n";
 import pluginPrettier from "eslint-plugin-prettier";
 
 export default [
-  // Exclude vendor/minified files and build output
   {
     ignores: [
       "out/**",
       "node_modules/**",
       "media/marked.min.js",
       "media/highlight.min.js",
-      // Vendored minified vosk-browser bundle (speech recognition WASM
-      // loader) — 5.8MB of generated code; linting it aborts eslint.
       "media/vosk.js",
     ],
   },
-  // Base: ESLint recommended + Prettier compat
   eslint.configs.recommended,
   prettierConfig,
-  // Google TypeScript Style core rules
   {
     plugins: {
       n: pluginN,
@@ -48,12 +43,10 @@ export default [
       ],
     },
   },
-  // TypeScript files — Google style via typescript-eslint recommended
   ...tseslint.configs.recommended.map((cfg) => ({
     ...cfg,
     files: ["src/**/*.ts"],
   })),
-  // TypeScript project-specific overrides
   {
     files: ["src/**/*.ts"],
     languageOptions: {
@@ -85,6 +78,7 @@ export default [
       "n/no-missing-require": "off",
       "n/shebang": "off",
       "no-dupe-class-members": "off",
+      "no-empty": ["error", {allowEmptyCatch: true}],
       "require-atomic-updates": "off",
       "@typescript-eslint/no-unused-vars": [
         "error",
@@ -92,7 +86,6 @@ export default [
       ],
     },
   },
-  // JavaScript webview files — Google style + browser globals
   {
     files: ["media/**/*.js"],
     languageOptions: {
@@ -127,6 +120,8 @@ export default [
         fetch: "readonly",
         crypto: "readonly",
         acquireVsCodeApi: "readonly",
+        createSorcarApi: "readonly",
+        SORCAR_API_COMMANDS: "readonly",
         marked: "readonly",
         hljs: "readonly",
         NodeFilter: "readonly",
@@ -135,6 +130,7 @@ export default [
     rules: {
       "no-var": "warn",
       "block-scoped-var": "warn",
+      "no-empty": ["error", {allowEmptyCatch: true}],
       "no-redeclare": "warn",
       eqeqeq: ["error", "always", {null: "ignore"}],
       "no-unused-vars": [

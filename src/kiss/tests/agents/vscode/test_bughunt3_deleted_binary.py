@@ -88,8 +88,6 @@ class TestDeletedBinaryMergeView(unittest.TestCase):
             f"restores the file there: {entry}",
         )
 
-        # Rejecting the deletion through the web reject path must
-        # restore the original bytes at the workspace location.
         _reject_all_hunks_in_file(entry)
         self.assertEqual(
             Path(self.repo, "img.bin").read_bytes(), BINARY_BYTES,

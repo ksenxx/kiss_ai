@@ -120,7 +120,7 @@ class TestTaskHistory(TestCase):
 
 class TestUsefulTools(TestCase):
     def test_write_and_read(self) -> None:
-        from kiss.core.useful_tools import UsefulTools
+        from kiss.agents.sorcar.useful_tools import UsefulTools
         tools = UsefulTools()
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, "test.txt")
@@ -219,8 +219,6 @@ class TestExtractTokenCounts:
 
         m = OpenAICompatibleModel("gpt-4", base_url="http://localhost", api_key="k")
         counts = m.extract_input_output_token_counts_from_response(FakeResponse())
-        # Text-only traffic keeps the legacy 4-tuple shape (the 7-tuple
-        # is reserved for audio-chat responses with audio-token subsets).
         assert counts == (100, 50, 0, 0)
 
     def test_no_usage_attr(self) -> None:
@@ -655,11 +653,11 @@ class TestOpenAICompatibleModelEmbedding:
 
 class TestUtilsFunctionsExtra:
     def test_utils_finish(self) -> None:
-        result = utils_finish(success=True, summary="42")
+        result = utils_finish(success=True, summary_in_html="42")
         payload = yaml.safe_load(result)
         assert payload["success"] is True
         assert payload["is_continue"] is False
-        assert payload["summary"] == "42"
+        assert payload["summary"] == "<p>42</p>"
 
 
 if __name__ == "__main__":

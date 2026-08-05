@@ -2,20 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test for GPT-synthesized ``talk`` audio playback: when a
-// backend ``{type: 'talk', ...}`` event carries ``audioB64`` (base64
-// MP3 synthesized server-side by speech_synthesis.py with a GPT audio
-// model), the webview must play it through an Audio element.  The
-// clip is the ONLY sound source — the robotic Web Speech fallback
-// was removed — so when the Audio API is unavailable, the Audio
-// constructor throws, or ``play()`` is rejected (autoplay policy),
-// playback degrades to SILENCE and the serialized talk queue still
-// advances to the next talk.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/talkGptAudio.test.js
 
 'use strict';
 
@@ -26,7 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/** Build a jsdom window running the production chat webview. */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -60,16 +45,14 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win};
 }
 
-/**
- * Install a TRIPWIRE Web Speech API on *win* (jsdom has none).  The
- * production code must never call it — the returned array records
- * any forbidden utterance so tests can assert it stays empty.
- */
 function installSpeech(win) {
   const spoken = [];
   win.SpeechSynthesisUtterance = function SpeechSynthesisUtterance(text) {
@@ -82,11 +65,6 @@ function installSpeech(win) {
   return spoken;
 }
 
-/**
- * Install a recording Audio constructor on *win*.  ``playResult``
- * controls what ``play()`` returns (e.g. a resolved or rejected
- * promise, or undefined like older browsers).
- */
 function installAudio(win, playResult) {
   const created = [];
   win.Audio = function Audio(src) {
@@ -96,12 +74,11 @@ function installAudio(win, playResult) {
   return created;
 }
 
-/** Dispatch a backend→webview event exactly like the extension does. */
 function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-const B64 = 'SUQzBAAAAAAAAA=='; // decodes to "ID3..." — an MP3 tag header
+const B64 = 'SUQzBAAAAAAAAA==';
 
 function testAudioEventPlaysAudioNotSpeech() {
   const {win} = makeWebview();
@@ -133,14 +110,12 @@ function testMissingMimeDefaultsToMpeg() {
 function testNoAudioApiDegradesToSilenceAndQueueAdvances() {
   const {win} = makeWebview();
   const spoken = installSpeech(win);
-  win.Audio = undefined; // device without the Audio API
+  win.Audio = undefined;
 
   send(win, {type: 'talk', language: 'en', text: 'silence please',
              talkId: 'a3', audioB64: B64});
 
   assert.strictEqual(spoken.length, 0, 'never falls back to Web Speech');
-  // The silent degradation must have released the serialized talk
-  // queue: a later talk with a playable clip starts immediately.
   const created = installAudio(win, Promise.resolve());
   send(win, {type: 'talk', language: 'en', text: 'audio works now',
              talkId: 'a3b', audioB64: B64});
@@ -159,8 +134,6 @@ async function testRejectedPlayDegradesToSilenceAndQueueAdvances() {
 
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.strictEqual(spoken.length, 0, 'never falls back to Web Speech');
-  // The rejected play() completed the talk silently — the queue must
-  // advance to the next talk.
   const created = installAudio(win, Promise.resolve());
   send(win, {type: 'talk', language: 'en', text: 'unblocked audio',
              talkId: 'a4b', audioB64: B64});
@@ -194,8 +167,6 @@ function testThrowingAudioConstructorDegradesToSilence() {
              audioB64: B64});
 
   assert.strictEqual(spoken.length, 0, 'never falls back to Web Speech');
-  // The constructor failure degraded to silence and released the
-  // serialized talk queue.
   const created = installAudio(win, Promise.resolve());
   send(win, {type: 'talk', text: 'plays fine', talkId: 'a5b',
              audioB64: B64});

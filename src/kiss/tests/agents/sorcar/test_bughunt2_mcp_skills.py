@@ -51,9 +51,6 @@ from kiss.tests.agents.sorcar.test_sorcar_mcp import (  # noqa: F401
 )
 from kiss.ui.cli.mcp_cli import _OAuthCallbackServer
 
-# A real stdio MCP server (low-level API) whose tool schema uses a
-# hyphenated property name, a Python keyword, and lists an optional
-# property before the required one — all legal in JSON Schema / MCP.
 _WEIRD_SERVER_SCRIPT = '''
 import json
 
@@ -158,9 +155,7 @@ def test_non_identifier_and_keyword_properties_live_call(
 
     fetch = next(t for t in tools if t.__name__ == "weirdsrv_fetch")
     params = inspect.signature(fetch).parameters
-    # Every synthesized parameter is a usable Python identifier.
     assert all(name.isidentifier() for name in params)
-    # Required-first ordering holds after sanitization too.
     defaults = [p.default is inspect.Parameter.empty for p in params.values()]
     assert defaults == sorted(defaults, reverse=True)
 
@@ -170,10 +165,8 @@ def test_non_identifier_and_keyword_properties_live_call(
                 if p.default is not inspect.Parameter.empty]
     assert len(required) == 1 and len(optional) == 1
 
-    # The server must receive the ORIGINAL JSON property names.
     received = json.loads(fetch(**{required[0]: "alice", optional[0]: 3}))
     assert received == {"from": "alice", "max-results": 3}
-    # Omitted optional arguments are not sent at all.
     received = json.loads(fetch(**{required[0]: "bob"}))
     assert received == {"from": "bob"}
 
@@ -191,14 +184,13 @@ def test_oauth_callback_ignores_non_callback_requests() -> None:
         url = f"http://localhost:{server.port}/callback?code=abc123&state=st9"
         with urllib.request.urlopen(url, timeout=10) as resp:
             assert resp.status == 200
-        # Stray request without an authorization code (e.g. favicon).
         try:
             with urllib.request.urlopen(
                 f"http://localhost:{server.port}/favicon.ico", timeout=10,
             ) as resp:
                 pass
         except urllib.error.HTTPError:
-            pass  # A non-200 answer for the stray request is fine.
+            pass
         code, state = server.wait(timeout=10)
         assert code == "abc123"
         assert state == "st9"
@@ -224,7 +216,6 @@ def test_no_truncation_note_at_exact_resource_cap(tmp_path: Path) -> None:
     assert content.count("<file>") == _MAX_RESOURCE_LISTING
     assert "listing truncated" not in content
 
-    # One file beyond the cap → the note appears and the list stays capped.
     (skill_dir / "assets" / "zzz-extra.txt").write_text("x")
     content = load_skill_content(skill)
     assert content.count("<file>") == _MAX_RESOURCE_LISTING

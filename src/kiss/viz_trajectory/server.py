@@ -20,13 +20,8 @@ from flask import Flask, jsonify, render_template
 
 logger = logging.getLogger(__name__)
 
-# Name of the per-project artifact root directory.  Job directories live under
-# ``<root>/.kiss.artifacts/jobs/job_*``.  Keep this in sync with
-# ``kiss.core.config._ARTIFACTS_DIR_NAME``.
 _ARTIFACTS_DIR_NAME = ".kiss.artifacts"
 
-# Directories that never contain job artifacts; skipping them keeps the
-# project-wide job discovery walk fast.
 _WALK_SKIP_DIRS = frozenset(
     {".git", "node_modules", "__pycache__", ".venv", "venv", "site-packages"}
 )
@@ -161,8 +156,6 @@ def discover_job_dirs(artifact_dir: Path) -> dict[str, Path]:
             current = Path(dirpath)
             if current.name == "jobs" and current.parent.name == _ARTIFACTS_DIR_NAME:
                 _add_job_dirs(current, found)
-                # Do not descend into individual job directories; only follow
-                # nested ``.kiss.artifacts`` roots to find jobs stored within.
                 dirnames[:] = [d for d in dirnames if d == _ARTIFACTS_DIR_NAME]
             else:
                 dirnames[:] = [d for d in dirnames if d not in _WALK_SKIP_DIRS]

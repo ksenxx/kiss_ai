@@ -61,7 +61,7 @@ def test_version_string_matches_kiss_version_module() -> None:
     from kiss.core._version import __version__ as raw_version
 
     assert __version__ == raw_version
-    assert __version__  # non-empty
+    assert __version__
 
 
 def test_version_abbreviation_rejected(

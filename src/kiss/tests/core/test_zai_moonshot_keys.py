@@ -57,8 +57,6 @@ def test_config_defaults_read_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# VS Code config allowlist
-# ---------------------------------------------------------------------------
 
 def test_vscode_allowlist_replaced() -> None:
     """The VS Code env-var allowlist swaps MINIMAX for Z.AI + Moonshot."""
@@ -80,23 +78,13 @@ def test_get_current_api_keys_includes_new_keys(
     assert "MINIMAX_API_KEY" not in current
 
 
-# ---------------------------------------------------------------------------
-# helpers.model_vendor (model picker grouping)
-# ---------------------------------------------------------------------------
-
 def test_model_vendor_zai_and_moonshot() -> None:
     """`model_vendor` routes glm-* to Z.AI and kimi-*/moonshot-* to Moonshot."""
     assert helpers.model_vendor("glm-4.6")[0] == "Z.AI"
     assert helpers.model_vendor("kimi-k2.6")[0] == "Moonshot"
     assert helpers.model_vendor("moonshot-v1-32k")[0] == "Moonshot"
-    # MiniMax routing must be gone — minimax-* now falls through to the
-    # default "Together AI" bucket (no dedicated MiniMax branch).
     assert helpers.model_vendor("minimax-m2.5")[0] != "MiniMax"
 
-
-# ---------------------------------------------------------------------------
-# model_info routing
-# ---------------------------------------------------------------------------
 
 def test_get_model_provider_zai_and_moonshot() -> None:
     """`get_model_provider` recognizes Z.AI and Moonshot prefixes."""
@@ -107,8 +95,6 @@ def test_get_model_provider_zai_and_moonshot() -> None:
 
 def test_get_model_provider_no_minimax_branch() -> None:
     """The dedicated MiniMax provider label is no longer returned."""
-    # The function should never return "MiniMax" for any of the historical
-    # MiniMax names — they either resolve elsewhere or to "Unknown".
     for name in ("minimax-m2.5", "minimax-m2.5-lightning", "minimax-m1"):
         assert model_info.get_model_provider(name) != "MiniMax"
 
@@ -117,15 +103,10 @@ def test_model_listing_advertises_new_providers() -> None:
     """The model listing reports the new providers' configuration status."""
     listing = model_info.get_generation_model_listing()
     providers = {entry[1] for entry in listing}
-    # At least one model from each of the new providers must be present.
     assert "Z.AI" in providers
     assert "Moonshot" in providers
     assert "MiniMax" not in providers
 
-
-# ---------------------------------------------------------------------------
-# MODEL_INFO.json catalog
-# ---------------------------------------------------------------------------
 
 _MODEL_INFO_PATH = (
     Path(model_info.__file__).resolve().parent / "MODEL_INFO.json"
@@ -156,10 +137,6 @@ def test_model_info_json_has_no_minimax_entries() -> None:
     assert not bad, f"MiniMax entries remain in MODEL_INFO.json: {bad!r}"
 
 
-# ---------------------------------------------------------------------------
-# Settings panel HTML + JS
-# ---------------------------------------------------------------------------
-
 _VSCODE_MEDIA = Path(__file__).resolve().parents[2] / "agents" / "vscode" / "media"
 
 
@@ -168,7 +145,6 @@ def test_settings_panel_html_has_new_inputs() -> None:
     assert 'id="cfg-key-ZAI_API_KEY"' in html
     assert 'id="cfg-key-MOONSHOT_API_KEY"' in html
     assert "MINIMAX_API_KEY" not in html
-    # Visible labels must mention the new providers.
     assert re.search(r"Z\.?AI API Key", html, flags=re.IGNORECASE)
     assert re.search(r"Moonshot API Key", html, flags=re.IGNORECASE)
 
@@ -183,16 +159,11 @@ def test_settings_panel_js_registers_new_keys() -> None:
     assert "minimax_api_key" not in js
 
 
-# ---------------------------------------------------------------------------
-# get_available_models honors the new envs
-# ---------------------------------------------------------------------------
-
 def test_available_models_includes_glm_when_zai_key_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When ZAI_API_KEY is set, at least one glm-* model is selectable."""
     monkeypatch.setenv("ZAI_API_KEY", "z-key")
-    # Refresh the singleton config so the env change is observed.
     monkeypatch.setattr(
         config_module, "DEFAULT_CONFIG", config_module.Config(), raising=False
     )

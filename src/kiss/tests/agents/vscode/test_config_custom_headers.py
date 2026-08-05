@@ -20,23 +20,11 @@ from typing import Any
 _VSCODE_DIR = Path(__file__).resolve().parents[3] / "agents" / "vscode"
 
 
-# ---------------------------------------------------------------------------
-# 1. HTML presence — textarea for headers exists in both templates
-# ---------------------------------------------------------------------------
 
 
 
 
-# ---------------------------------------------------------------------------
-# 2. JavaScript — populateConfigForm and collectConfigForm handle headers
-# ---------------------------------------------------------------------------
 
-
-
-
-# ---------------------------------------------------------------------------
-# 3. Config persistence — custom_headers is saved and loaded
-# ---------------------------------------------------------------------------
 
 
 class TestConfigPersistence(unittest.TestCase):
@@ -88,10 +76,6 @@ class TestConfigPersistence(unittest.TestCase):
         assert cfg["max_budget"] == 200
 
 
-# ---------------------------------------------------------------------------
-# 4. get_custom_model_entry includes extra_headers
-# ---------------------------------------------------------------------------
-
 
 class TestCustomModelEntryIncludesHeaders(unittest.TestCase):
     """get_custom_model_entry includes extra_headers from custom_headers config."""
@@ -142,16 +126,8 @@ class TestCustomModelEntryIncludesHeaders(unittest.TestCase):
         }
 
 
-# ---------------------------------------------------------------------------
-# 5. task_runner builds model_config with extra_headers from config
-# ---------------------------------------------------------------------------
 
 
-
-
-# ---------------------------------------------------------------------------
-# 6. CLI headers flow — _build_run_kwargs puts headers into model_config
-# ---------------------------------------------------------------------------
 
 
 class TestCLIHeadersFlow(unittest.TestCase):
@@ -202,10 +178,6 @@ class TestCLIHeadersFlow(unittest.TestCase):
         assert "extra_headers" not in kwargs.get("model_config", {})
 
 
-# ---------------------------------------------------------------------------
-# 7. _cmd_save_config integration — headers flow through save/load
-# ---------------------------------------------------------------------------
-
 
 class TestCmdSaveConfigHandlesHeaders(unittest.TestCase):
     """_cmd_save_config persists custom_headers and they appear in configData."""
@@ -219,11 +191,6 @@ class TestCmdSaveConfigHandlesHeaders(unittest.TestCase):
         self._tmpdir = tempfile.mkdtemp()
         vc.CONFIG_DIR = Path(self._tmpdir)
         vc.CONFIG_PATH = Path(self._tmpdir) / "config.json"
-        # ``_cmd_save_config`` calls ``apply_config_to_env`` which
-        # mutates the process-global ``DEFAULT_CONFIG`` (for example
-        # ``max_budget``).  Swap in a scratch Config so the mutation
-        # cannot leak into later tests, and restore the original
-        # object in tearDown.
         self._orig_default_config = config_module.DEFAULT_CONFIG
         config_module.DEFAULT_CONFIG = config_module.Config()
 
@@ -273,7 +240,6 @@ class TestCmdSaveConfigHandlesHeaders(unittest.TestCase):
         cfg = load_config()
         assert cfg["custom_headers"] == "X-Test:123\nAuth:Bearer abc"
 
-        # Check that configData broadcast includes custom_headers
         config_msgs = [
             m for m in server.printer.messages  # type: ignore[union-attr, attr-defined]
             if m.get("type") == "configData"

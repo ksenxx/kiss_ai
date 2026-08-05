@@ -35,9 +35,6 @@ _SIGNAL_BACKUP = _SIGNAL_CONFIG.with_suffix(".json.bughunt2-bak")
 _SMS_CONFIG = _sms_config.path
 _SMS_BACKUP = _SMS_CONFIG.with_suffix(".json.bughunt2-bak")
 
-# A real shell program emulating signal-cli. For "receive" it prints JSON lines
-# shaped like signal-cli output for two different senders (three messages total).
-# For "send" to the magic recipient +FAIL it exits 1 with an error on stderr.
 _FAKE_SIGNAL_CLI = """#!/bin/sh
 if [ "$1" = "-u" ]; then shift 2; fi
 cmd="$1"

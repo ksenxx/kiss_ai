@@ -1,0 +1,570 @@
+#!/bin/bash
+# Author: Koushik Sen (ksen@berkeley.edu)
+# Contributors:
+# Koushik Sen (ksen@berkeley.edu)
+# add your name here
+#
+# Deploy *this* KISS Sorcar checkout to a remote Linux machine and publish its
+# web app (``kiss-web``) so it is reachable from any machine in the world.
+#
+# Usage:  ./sorcar-cloud user@ip-address
+#
+# Flow:
+#   1. Check SSH connectivity to user@ip-address.
+#   2. Copy the folder that contains this script to ~/<project>/ on the remote
+#      machine, excluding only ``.venv`` (a macOS virtualenv is useless on
+#      Linux).  ``.git`` is not copied but rebuilt on the remote (step 2b): a
+#      git worktree's ``.git`` is a one-line pointer to a local path that does
+#      not exist there, and shipping a gigabyte of history over ssh is slower
+#      than fetching it from GitHub.
+#   2b. Make the remote folder a repository you can commit and push from: the
+#      same remotes as this checkout, the history fetched from GitHub as
+#      ``ksenxx`` over the ssh key from step 4 (no token is ever copied), your
+#      branch checked out at the same commit, and the copied working tree
+#      committed on top so ``git status`` is clean.  A ``kiss/wt-*`` branch is
+#      never used: the agent treats such a branch as one of its own worktrees
+#      and reclaiming it would delete the deployment.
+#   3. Copy the ~/*rc file that holds the API keys (the one with the most
+#      ``FOO_API_KEY=`` style lines), and distill those lines into
+#      ~/.kiss/api_keys.env (sourced by bash) and ~/.kiss/api_keys.systemd.env
+#      (read by the kiss-web service).  Sourcing a zsh rc from bash is
+#      unreliable, hence the distilled copies.
+#   3b. Ship the task database (~/.kiss/sorcar.db) fresh on every run, so the
+#      remote web app's History panel lists every task this machine ever ran,
+#      with the tasks that ran in this checkout re-pointed at the remote one
+#      (the panel hides tasks from other workspaces by default).
+#      scripts/ship-task-db.sh does the work and explains why a plain copy of
+#      ~/.kiss/sorcar.* loses tasks; it stops the remote web app for the swap
+#      and starts it again before returning.
+#   4. Copy ~/.ssh/ so the remote can push to git and hop to other hosts as
+#      you.  ``authorized_keys`` is never overwritten — that file is what lets
+#      you SSH *into* the remote.
+#   5. Run install.sh in the copied folder (git, Node.js, VS Code extension
+#      build).  A ``code`` CLI is required by install.sh, so code-server is
+#      installed (standalone, no sudo) when the host has no editor CLI.
+#   6. Build the Python environment with ``uv sync`` and start ``kiss-web`` as
+#      a systemd *user* service with lingering enabled, so the web app keeps
+#      running after you log out and comes back after a reboot.
+#   7. Publish it worldwide: a remote password is required (kiss-web only opens
+#      a Cloudflare tunnel when one is set), ``cloudflared`` is installed when
+#      missing, and the resulting public https URL is verified from this
+#      machine and opened in your browser.
+#
+# Environment overrides:
+#   SORCAR_REMOTE_DIR   name of the remote folder (default: project name)
+#   SORCAR_WEB_PORT     port kiss-web listens on remotely (default: 8787)
+#   SORCAR_PASSWORD     web app password (default: reuse existing, else random)
+#   SORCAR_GITHUB_USER  GitHub account used on the remote (default: ksenxx)
+#   SORCAR_GIT_BRANCH   branch to check out remotely (default: this branch,
+#                       or the main repository's when this is a worktree)
+#   SORCAR_GIT_NAME     git author name on the remote (default: the account)
+#   SORCAR_GIT_EMAIL    git author email (default: <account>@users.noreply.github.com)
+#   SORCAR_NO_BROWSER   set to 1 to skip opening the browser
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Logging helpers (same vocabulary as sorcar-linux / sorcar-docker)
+# ---------------------------------------------------------------------------
+info() { printf '\033[0;32m[INFO]\033[0m  %s\n' "$*"; }
+step() { printf '\033[0;34m[STEP]\033[0m  %s\n' "$*"; }
+warn() { printf '\033[1;33m[WARN]\033[0m  %s\n' "$*"; }
+die()  { printf '\033[0;31m[ERR]\033[0m  %s\n' "$*" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# 1. Arguments and local pre-flight checks
+# ---------------------------------------------------------------------------
+usage() {
+    awk '/^# Usage:/{p=1} p&&/^#/{sub(/^# ?/,""); print} p&&!/^#/{exit}' "$0"
+}
+
+TARGET="${1:-}"
+case "$TARGET" in
+    ""|-h|--help) usage; [[ -n "$TARGET" ]] && exit 0 || exit 1 ;;
+esac
+[[ "$TARGET" == *"@"* ]] || warn "'$TARGET' has no 'user@' part; using the SSH default user."
+
+WEB_PORT="${SORCAR_WEB_PORT:-8787}"
+[[ "$WEB_PORT" =~ ^[0-9]+$ ]] && ((WEB_PORT >= 1 && WEB_PORT <= 65535)) \
+    || die "SORCAR_WEB_PORT must be a port number, got '$WEB_PORT'."
+
+for tool in ssh scp rsync tar curl; do
+    command -v "$tool" &>/dev/null || die "$tool is not installed."
+done
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[[ -f "$SCRIPT_DIR/install.sh" ]] || die "No install.sh next to $0 — is this a KISS Sorcar checkout?"
+
+# When run from a git worktree (".kiss-worktrees/kiss_wt-1785-29b4"), the
+# interesting repository is the main one it belongs to: its name is the remote
+# folder's name, and its branch is the branch to deploy.
+main_repo_dir() {
+    if [[ -f "$SCRIPT_DIR/.git" ]]; then
+        local gitdir main
+        gitdir="$(sed -n 's/^gitdir: //p' "$SCRIPT_DIR/.git")"
+        main="$(cd "$gitdir/../../.." 2>/dev/null && pwd || true)"
+        printf '%s' "${main:-$SCRIPT_DIR}"
+    else
+        printf '%s' "$SCRIPT_DIR"
+    fi
+}
+MAIN_REPO="$(main_repo_dir)"
+PROJECT="${SORCAR_REMOTE_DIR:-$(basename "$MAIN_REPO")}"
+case "$PROJECT" in
+    ""|.|..|/|*/*) die "Refusing to use '$PROJECT' as the remote folder name." ;;
+esac
+
+step "Checking SSH connectivity to $TARGET ..."
+ssh -o ConnectTimeout=15 "$TARGET" 'echo ok' >/dev/null \
+    || die "Cannot SSH into $TARGET. Check the address and your SSH keys."
+REMOTE_HOME="$(ssh "$TARGET" 'printf %s "$HOME"')"
+[[ -n "$REMOTE_HOME" && "$REMOTE_HOME" != "/" ]] || die "Could not read \$HOME on $TARGET."
+REMOTE_DIR="$REMOTE_HOME/$PROJECT"
+info "SSH OK — deploying $SCRIPT_DIR -> $TARGET:$REMOTE_DIR"
+
+# ---------------------------------------------------------------------------
+# 2. Copy the project folder (excluding only .venv, see header for .git)
+#
+# tar-over-ssh instead of rsync: macOS ships openrsync, which needs minutes
+# for this 200 MB / 1400 file tree while a single tar stream takes seconds.
+# Everything except .venv and .git is wiped first so the remote is an exact
+# mirror; .venv survives because ``uv sync`` can then reuse it, and .git
+# survives because step 5b keeps a real repository there (re-fetching the
+# whole history on every deploy would be wasteful).
+# ---------------------------------------------------------------------------
+step "Copying the project folder to $TARGET:$REMOTE_DIR (excluding .venv) ..."
+ssh "$TARGET" "REMOTE_DIR='$REMOTE_DIR' bash -s" <<'CLEAN'
+set -e
+case "$REMOTE_DIR" in
+    "$HOME"/?*) ;;                      # must be a child of $HOME
+    *) echo "ERROR: refusing to clean '$REMOTE_DIR'" >&2; exit 1 ;;
+esac
+mkdir -p "$REMOTE_DIR"
+find "$REMOTE_DIR" -mindepth 1 -maxdepth 1 \
+    ! -name '.venv' ! -name '.git' -exec rm -rf {} +
+CLEAN
+# COPYFILE_DISABLE stops macOS tar from emitting ._AppleDouble junk files.
+# tar exit code 1 means "file changed while reading" (a live checkout) — the
+# archive is still valid, so only codes >1 are fatal.
+COPYFILE_DISABLE=1 tar --no-xattrs --exclude='./.venv' --exclude='./.git' \
+    -C "$SCRIPT_DIR" -czf - . \
+    | ssh "$TARGET" "tar -C '$REMOTE_DIR' -xzf -"
+rc=${PIPESTATUS[0]}
+((rc <= 1)) || die "Copying the project folder failed (tar exit $rc)."
+info "Project folder copied."
+
+# ---------------------------------------------------------------------------
+# 3. Copy the ~/*rc file that contains the API keys
+# ---------------------------------------------------------------------------
+KEY_RE='^[[:space:]]*(export[[:space:]]+)?[A-Z][A-Z0-9_]*='
+find_rc_file() {
+    local best="" best_n=0 candidate n
+    for candidate in "$HOME"/.*rc; do
+        [[ -f "$candidate" ]] || continue
+        n="$(grep -cE "${KEY_RE}.*" "$candidate" 2>/dev/null || true)"
+        grep -qE '(API_KEY|_TOKEN)[[:space:]]*=' "$candidate" 2>/dev/null || continue
+        if ((n > best_n)); then best="$candidate"; best_n="$n"; fi
+    done
+    printf '%s' "$best"
+}
+RC_FILE="$(find_rc_file)"
+[[ -n "$RC_FILE" ]] || die "No ~/*rc file with API keys found — nothing to give the remote agent."
+
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+# Distil the credential lines.  ~/.kiss/api_keys.env is bash syntax; the
+# systemd variant drops "export", shell-environment variables and any value
+# containing $ or ` (systemd does not expand them, so a "PATH=x:$PATH" line
+# would corrupt the service environment).
+grep -E "$KEY_RE" "$RC_FILE" \
+    | sed -E 's/^[[:space:]]*//; s/^export[[:space:]]+//' > "$TMP_DIR/keys.raw"
+awk '{print "export " $0}' "$TMP_DIR/keys.raw" > "$TMP_DIR/api_keys.env"
+grep -vE '^(PATH|MANPATH|LD_LIBRARY_PATH|DYLD_LIBRARY_PATH|PS1|PROMPT|LANG|LC_[A-Z]+|HOME|SHELL|TERM|EDITOR)=' \
+    "$TMP_DIR/keys.raw" | grep -vE '[$`]' > "$TMP_DIR/api_keys.systemd.env" || true
+KEY_COUNT="$(wc -l < "$TMP_DIR/api_keys.env" | tr -d ' ')"
+
+step "Copying $(basename "$RC_FILE") and $KEY_COUNT exported variables to $TARGET ..."
+ssh "$TARGET" 'mkdir -p "$HOME/.kiss" && chmod 700 "$HOME/.kiss"'
+scp -q "$RC_FILE" "$TARGET:$(basename "$RC_FILE")"
+scp -q "$TMP_DIR/api_keys.env" "$TMP_DIR/api_keys.systemd.env" "$TARGET:.kiss/"
+ssh "$TARGET" 'bash -s' <<'RCWIRE'
+set -e
+chmod 600 "$HOME/.kiss/api_keys.env" "$HOME/.kiss/api_keys.systemd.env"
+# Make interactive and non-interactive bash sessions (which is what the agent
+# and its tools run under) see the keys.  The block is delimited so that
+# re-running this script replaces it instead of appending a second copy.
+BEGIN='# >>> sorcar-cloud API keys >>>'
+END='# <<< sorcar-cloud API keys <<<'
+touch "$HOME/.bashrc"
+awk -v b="$BEGIN" -v e="$END" '
+    $0 == b {skip = 1} skip == 0 {print} $0 == e {skip = 0}
+' "$HOME/.bashrc" > "$HOME/.bashrc.sorcar-tmp"
+{
+    cat "$HOME/.bashrc.sorcar-tmp"
+    echo "$BEGIN"
+    echo '[ -f "$HOME/.kiss/api_keys.env" ] && . "$HOME/.kiss/api_keys.env"'
+    echo "$END"
+} > "$HOME/.bashrc"
+rm -f "$HOME/.bashrc.sorcar-tmp"
+RCWIRE
+info "API keys installed (~/.kiss/api_keys.env, sourced from ~/.bashrc)."
+
+# ---------------------------------------------------------------------------
+# 3b. Ship the task database, so the remote History panel lists every task
+#     this machine ever ran.  scripts/ship-task-db.sh explains why a plain
+#     copy of ~/.kiss/sorcar.* loses tasks; it stops the remote web app for
+#     the swap and starts it again before returning.
+# ---------------------------------------------------------------------------
+step "Shipping the task database to $TARGET ..."
+bash "$SCRIPT_DIR/scripts/ship-task-db.sh" "$TARGET" "$MAIN_REPO" "$REMOTE_DIR"
+
+# ---------------------------------------------------------------------------
+# 4. Copy ~/.ssh/ — identity only, never authorized_keys
+# ---------------------------------------------------------------------------
+if [[ -d "$HOME/.ssh" ]]; then
+    step "Copying ~/.ssh/ to $TARGET (keeping the remote's authorized_keys) ..."
+    ssh "$TARGET" 'mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"'
+    rsync -aHz -e ssh \
+        --exclude='authorized_keys' --exclude='authorized_keys2' \
+        --exclude='environment' --exclude='*.sock' --exclude='.DS_Store' \
+        "$HOME/.ssh/" "$TARGET:.ssh/"
+    # ssh refuses to use a key whose permissions are group/world readable.
+    ssh "$TARGET" 'bash -s' <<'FIXSSH'
+set -e
+chmod 700 "$HOME/.ssh"
+find "$HOME/.ssh" -type f -exec chmod 600 {} +
+find "$HOME/.ssh" -type f \( -name '*.pub' -o -name 'known_hosts*' \) -exec chmod 644 {} +
+FIXSSH
+    info "SSH identity copied to $REMOTE_HOME/.ssh."
+else
+    warn "No local ~/.ssh directory — skipping."
+fi
+
+# ---------------------------------------------------------------------------
+# 5-7. Remote bootstrap: install.sh, uv sync, kiss-web service, public URL.
+#
+# The heredoc is quoted so nothing expands locally; parameters travel through
+# the environment on the ssh command line.  A pseudo-terminal (-t) is not used
+# because install.sh must not block on prompts.
+# ---------------------------------------------------------------------------
+PASSWORD="${SORCAR_PASSWORD:-}"
+
+# Git facts of this checkout, so the remote repository becomes a usable clone
+# you can commit and push from: same remotes, same branch, same history.
+GITHUB_USER="${SORCAR_GITHUB_USER:-ksenxx}"
+GIT_BRANCH="${SORCAR_GIT_BRANCH:-$(git -C "$SCRIPT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)}"
+GIT_HEAD="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)"
+# The deployment is a main checkout, so it must not sit on a "kiss/wt-*"
+# branch: the agent treats such a branch as one of its own worktrees and
+# reclaims it — which deletes the directory.  Fall back to the main
+# repository's branch (this script may be running from a worktree of it).
+case "$GIT_BRANCH" in
+    kiss/wt-*|HEAD|"")
+        GIT_BRANCH="$(git -C "$MAIN_REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+        case "$GIT_BRANCH" in kiss/wt-*|HEAD|"") GIT_BRANCH=main ;; esac
+        # The local commit belongs to the branch we just left behind, so it
+        # is not a valid base for this one; step 5b falls back to origin/.
+        GIT_HEAD=""
+        warn "Deploying on branch '$GIT_BRANCH' (a kiss/wt-* branch cannot be checked out remotely)."
+        ;;
+esac
+# Commits made on the remote are authored as the GitHub account, so GitHub
+# attributes them to it (the noreply address is the one GitHub maps to a user).
+GIT_NAME="${SORCAR_GIT_NAME:-$GITHUB_USER}"
+GIT_EMAIL="${SORCAR_GIT_EMAIL:-$GITHUB_USER@users.noreply.github.com}"
+# base64 keeps the multi-line "name<TAB>url" list intact across the ssh command line.
+GIT_REMOTES_B64="$(git -C "$SCRIPT_DIR" remote -v 2>/dev/null \
+    | awk '$3 == "(fetch)" { print $1 "\t" $2 }' | base64 | tr -d '\n')"
+
+step "Installing KISS Sorcar on $TARGET (this takes a few minutes) ..."
+ssh "$TARGET" "REMOTE_DIR='$REMOTE_DIR' WEB_PORT='$WEB_PORT' PASSWORD='$PASSWORD' \
+    GIT_BRANCH='$GIT_BRANCH' GIT_HEAD='$GIT_HEAD' GIT_NAME='$GIT_NAME' \
+    GIT_EMAIL='$GIT_EMAIL' GITHUB_USER='$GITHUB_USER' \
+    GIT_REMOTES_B64='$GIT_REMOTES_B64' bash -s" <<'REMOTE'
+set -euo pipefail
+export PATH="$HOME/.local/bin:$PATH"
+[ -f "$HOME/.kiss/api_keys.env" ] && . "$HOME/.kiss/api_keys.env"
+rinfo() { printf '\033[0;36m[%s]\033[0m %s\n' "$(hostname -s)" "$*"; }
+
+cd "$REMOTE_DIR"
+
+# --- 5a. C toolchain: some Python wheels are built from source by uv --------
+if ! command -v cc >/dev/null 2>&1; then
+    rinfo "Installing build-essential (needed to compile Python wheels)..."
+    sudo -n apt-get install -y build-essential >/dev/null 2>&1 \
+        || rinfo "WARNING: could not install build-essential; continuing."
+fi
+command -v git >/dev/null 2>&1 || { echo "ERROR: git is missing on this host." >&2; exit 1; }
+
+# --- 5b. A real git repository you can commit and push from ----------------
+# The laptop's .git is not shipped (a worktree's .git is a dangling pointer,
+# and a full history is a gigabyte), so the repository is rebuilt here:
+#   * the same remotes as the laptop, fetched from GitHub over the ssh key
+#     copied in step 4 — no token is ever shipped;
+#   * the laptop's branch, attached to the laptop's HEAD commit when GitHub
+#     has it, so history is shared and ``git push`` fast-forwards;
+#   * the copied working tree committed on top, so ``git status`` is clean.
+# install.sh also needs this: it packages the extension with ``git ls-files``.
+if [ ! -d .git ]; then
+    rinfo "Initializing the git repository in $REMOTE_DIR ..."
+    git init -q -b "$GIT_BRANCH"
+fi
+# The copy step wiped any .kiss-worktrees/ directories a previous deploy's
+# agent left behind; drop their now-dangling registrations too.
+git worktree prune
+git config user.name "$GIT_NAME"
+git config user.email "$GIT_EMAIL"
+git config github.user "$GITHUB_USER"
+git config credential.username "$GITHUB_USER"
+# GitHub https URLs are pushed over ssh instead, using the copied key (which
+# authenticates as $GITHUB_USER); a https remote would need a token.
+git config url."git@github.com:".insteadOf "https://github.com/"
+printf '%s' "$GIT_REMOTES_B64" | base64 -d > /tmp/sorcar-remotes.$$ || : > /tmp/sorcar-remotes.$$
+while IFS=$'\t' read -r rname rurl; do
+    [ -n "$rname" ] || continue
+    if git remote get-url "$rname" >/dev/null 2>&1; then
+        git remote set-url "$rname" "$rurl"
+    else
+        git remote add "$rname" "$rurl"
+    fi
+done < /tmp/sorcar-remotes.$$
+rm -f /tmp/sorcar-remotes.$$
+
+export GIT_SSH_COMMAND='ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes'
+GIT_BASE=""
+if git remote get-url origin >/dev/null 2>&1; then
+    rinfo "Fetching history from origin ($(git remote get-url origin)) ..."
+    if git fetch --prune --tags --quiet origin; then
+        for candidate in "$GIT_HEAD" "refs/remotes/origin/$GIT_BRANCH" \
+                         refs/remotes/origin/main refs/remotes/origin/master; do
+            [ -n "$candidate" ] || continue
+            if sha=$(git rev-parse -q --verify "$candidate^{commit}"); then
+                GIT_BASE="$sha"; break
+            fi
+        done
+    else
+        rinfo "WARNING: could not fetch from origin — the repository will have no shared history."
+    fi
+fi
+if [ -n "$GIT_BASE" ]; then
+    # Move the branch to the base commit without touching the working tree:
+    # the copied files must survive and become the branch's next commit.
+    git update-ref "refs/heads/$GIT_BRANCH" "$GIT_BASE"
+    git symbolic-ref HEAD "refs/heads/$GIT_BRANCH"
+    git reset -q --mixed "$GIT_BASE"
+    [ "$GIT_BASE" = "$GIT_HEAD" ] \
+        && rinfo "Branch $GIT_BRANCH set to the local HEAD $(git rev-parse --short "$GIT_BASE")." \
+        || rinfo "Local HEAD is not on GitHub; branch $GIT_BRANCH based on $(git rev-parse --short "$GIT_BASE")."
+else
+    # No shared history available (no origin, or the fetch failed): still put
+    # HEAD on the requested branch so the snapshot below lands there.
+    git symbolic-ref HEAD "refs/heads/$GIT_BRANCH"
+fi
+git add -A
+git diff --cached --quiet \
+    || git commit -q -m "sorcar-cloud: working tree from $(hostname -s) at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+if git rev-parse -q --verify "refs/remotes/origin/$GIT_BRANCH" >/dev/null; then
+    git branch --quiet --set-upstream-to="origin/$GIT_BRANCH" "$GIT_BRANCH" 2>/dev/null || true
+fi
+rinfo "Repository ready: $(git log -1 --format='%h %s' 2>/dev/null || echo 'no commits') on $GIT_BRANCH"
+
+# --- 5c. A `code` CLI, which install.sh requires ---------------------------
+# On a headless server there is no desktop VS Code.  code-server ships the
+# same extension CLI, so a shim forwards the extension subcommands to it and
+# swallows editor launches (this script owns what runs).
+if ! command -v code >/dev/null 2>&1; then
+    if ! command -v code-server >/dev/null 2>&1; then
+        rinfo "Installing code-server (standalone, no sudo)..."
+        curl -fsSL https://code-server.dev/install.sh \
+            | sh -s -- --method=standalone --prefix="$HOME/.local" >/dev/null
+    fi
+    mkdir -p "$HOME/.local/bin"
+    cat > "$HOME/.local/bin/code" <<'SHIM'
+#!/bin/bash
+case "${1:-}" in
+    --install-extension|--uninstall-extension|--list-extensions|--version|--locate-extension)
+        exec code-server "$@" ;;
+    *) exit 0 ;;
+esac
+SHIM
+    chmod +x "$HOME/.local/bin/code"
+    hash -r
+fi
+
+# --- 5d. install.sh --------------------------------------------------------
+# KISS_SKIP_UPDATE: never ``git pull`` over the tree we just shipped.
+# KISS_SKIP_LAUNCH: no editor launch; this script starts the web app instead.
+rinfo "Running install.sh ..."
+KISS_SKIP_UPDATE=1 KISS_SKIP_LAUNCH=1 bash "$REMOTE_DIR/install.sh"
+
+# --- 6a. Python environment ------------------------------------------------
+if ! command -v uv >/dev/null 2>&1; then
+    rinfo "Installing uv ..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null
+    hash -r
+fi
+if [ -d .venv ] && ! .venv/bin/python -c pass >/dev/null 2>&1; then
+    rinfo "Removing an unusable .venv ..."
+    rm -rf .venv
+fi
+rinfo "Building the Python environment (uv sync) ..."
+uv sync
+[ -x .venv/bin/kiss-web ] || { echo "ERROR: uv sync did not produce .venv/bin/kiss-web" >&2; exit 1; }
+# Import the model SDKs now: a half-populated environment otherwise only
+# surfaces when a task fails with "Anthropic SDK not installed".
+.venv/bin/python -c 'import kiss, anthropic, openai' \
+    || { echo "ERROR: the Python environment is incomplete (see uv sync above)" >&2; exit 1; }
+
+# --- 7a. Password + work_dir in ~/.kiss/config.json ------------------------
+# kiss-web only opens a Cloudflare tunnel when a password is configured, so a
+# password is what makes the web app both reachable worldwide and protected.
+PASSWORD="$PASSWORD" WEB_PORT="$WEB_PORT" REMOTE_DIR="$REMOTE_DIR" \
+python3 - <<'PY'
+import json, os, secrets, string
+path = os.path.expanduser("~/.kiss/config.json")
+try:
+    with open(path, encoding="utf-8") as fh:
+        cfg = json.load(fh)
+except (OSError, ValueError):
+    cfg = {}
+password = os.environ["PASSWORD"] or cfg.get("remote_password") or "".join(
+    secrets.choice(string.ascii_lowercase + string.digits) for _ in range(12)
+)
+cfg["remote_password"] = password
+cfg["work_dir"] = os.environ["REMOTE_DIR"]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(cfg, fh, indent=2)
+os.chmod(path, 0o600)
+print("SORCAR_PASSWORD=" + password)
+PY
+
+# --- 7b. cloudflared: the tunnel that makes the web app world-reachable ----
+if ! command -v cloudflared >/dev/null 2>&1; then
+    rinfo "Installing cloudflared ..."
+    case "$(uname -m)" in
+        x86_64|amd64) CF_ARCH=amd64 ;;
+        aarch64|arm64) CF_ARCH=arm64 ;;
+        *) CF_ARCH="" ;;
+    esac
+    if [ -n "$CF_ARCH" ]; then
+        curl -fsSL -o "$HOME/.local/bin/cloudflared" \
+            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$CF_ARCH"
+        chmod +x "$HOME/.local/bin/cloudflared"
+        hash -r
+    fi
+fi
+command -v cloudflared >/dev/null 2>&1 \
+    || { echo "ERROR: cloudflared is required for worldwide access" >&2; exit 1; }
+
+# --- 6b/7c. kiss-web as a systemd user service -----------------------------
+# A user service plus lingering keeps the web app alive after logout and
+# restarts it after a crash or reboot — required for "reachable from anywhere,
+# any time".  The service binds 0.0.0.0:$WEB_PORT and publishes the tunnel.
+rinfo "Starting kiss-web as a systemd user service on port $WEB_PORT ..."
+mkdir -p "$HOME/.config/systemd/user" "$HOME/.kiss"
+cat > "$HOME/.config/systemd/user/kiss-web.service" <<UNIT
+[Unit]
+Description=KISS Sorcar Remote Web Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$REMOTE_DIR/.venv/bin/kiss-web --workdir $REMOTE_DIR
+WorkingDirectory=$REMOTE_DIR
+EnvironmentFile=-%h/.kiss/api_keys.systemd.env
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Restart=always
+RestartSec=5
+StandardOutput=append:%h/.kiss/kiss-web-stdout.log
+StandardError=append:%h/.kiss/kiss-web-stderr.log
+
+[Install]
+WantedBy=default.target
+UNIT
+loginctl enable-linger "$(id -un)" >/dev/null 2>&1 || true
+systemctl --user daemon-reload
+systemctl --user enable kiss-web.service >/dev/null 2>&1 || true
+# Retire the previous tunnel before restarting: kiss-web adopts a cloudflared
+# it finds in ~/.kiss/cloudflared.pid and republishes its URL, and that URL
+# stops resolving (HTTP 530) once the old tunnel dies with its owner.
+systemctl --user stop kiss-web.service >/dev/null 2>&1 || true
+pkill -f 'cloudflared.*tunnel' >/dev/null 2>&1 || true
+rm -f "$HOME/.kiss/cloudflared.pid" "$HOME/.kiss/remote-url.json"
+systemctl --user restart kiss-web.service
+
+# --- 7d. Wait for the local endpoint, then for the public URL --------------
+for _ in $(seq 1 90); do
+    code=$(curl -sk -o /dev/null -w '%{http_code}' "https://127.0.0.1:$WEB_PORT/" || true)
+    [ "$code" = "200" ] && break
+    sleep 1
+done
+[ "${code:-}" = "200" ] || {
+    echo "ERROR: kiss-web did not answer on https://127.0.0.1:$WEB_PORT" >&2
+    tail -20 "$HOME/.kiss/kiss-web-stderr.log" >&2 || true
+    exit 1
+}
+rinfo "kiss-web answers on https://127.0.0.1:$WEB_PORT"
+# Wait for a tunnel URL that actually answers: Cloudflare needs a few seconds
+# to route a fresh quick tunnel, and the file is rewritten if the tunnel is
+# replaced, so re-read it on every attempt instead of trusting the first value.
+url=""
+for _ in $(seq 1 60); do
+    candidate=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("tunnel",""))' \
+                "$HOME/.kiss/remote-url.json" 2>/dev/null || true)
+    if [ -n "$candidate" ] \
+       && [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$candidate/")" = "200" ]; then
+        url="$candidate"
+        break
+    fi
+    sleep 3
+done
+[ -n "$url" ] || {
+    echo "ERROR: no reachable public tunnel URL appeared (last: ${candidate:-none})" >&2
+    tail -20 "$HOME/.kiss/kiss-web-stderr.log" >&2 || true
+    exit 1
+}
+rinfo "Public tunnel is live: $url"
+echo "SORCAR_PUBLIC_URL=$url"
+REMOTE
+
+# ---------------------------------------------------------------------------
+# 8. Read back the public URL / password, verify from this machine, open it.
+#    The remote's stdout above is echoed for the user; the two SORCAR_* lines
+#    are re-read here over a fresh, quiet ssh call.
+# ---------------------------------------------------------------------------
+PUBLIC_URL="$(ssh "$TARGET" 'python3 -c "import json;print(json.load(open(\"$HOME/.kiss/remote-url.json\"))[\"tunnel\"])"')"
+PASSWORD="$(ssh "$TARGET" 'python3 -c "import json;print(json.load(open(\"$HOME/.kiss/config.json\")).get(\"remote_password\",\"\"))"')"
+[[ -n "$PUBLIC_URL" ]] || die "Could not read the public URL from $TARGET."
+
+step "Verifying $PUBLIC_URL from this machine ..."
+for _ in $(seq 1 30); do
+    HTTP_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$PUBLIC_URL/" || true)"
+    [[ "$HTTP_CODE" == "200" ]] && break
+    sleep 2
+done
+[[ "$HTTP_CODE" == "200" ]] \
+    || warn "The public URL answered HTTP $HTTP_CODE — Cloudflare may still be propagating."
+
+GIT_STATE="$(ssh "$TARGET" "cd '$REMOTE_DIR' && git log -1 --format='%h %s' && git status --porcelain | wc -l" 2>/dev/null | tr '\n' ' ' || true)"
+
+echo ""
+echo "  ┌──────────────────────────────────────────────────────────────"
+echo "  │  KISS Sorcar web app (reachable from anywhere)"
+echo "  │  URL:       $PUBLIC_URL"
+echo "  │  Password:  $PASSWORD"
+echo "  │  Host:      $TARGET   Folder: $REMOTE_DIR"
+echo "  │  Service:   systemctl --user status kiss-web   (log: ~/.kiss/kiss-web-stderr.log)"
+echo "  │  Git:       branch $GIT_BRANCH, commit $GIT_STATE(uncommitted files)"
+echo "  │             commits as $GIT_NAME <$GIT_EMAIL>, pushes as $GITHUB_USER over ssh"
+echo "  └──────────────────────────────────────────────────────────────"
+echo ""
+
+if [[ "${SORCAR_NO_BROWSER:-}" != "1" ]]; then
+    case "$(uname -s)" in
+        Darwin) open "$PUBLIC_URL" >/dev/null 2>&1 || true ;;
+        Linux)  command -v xdg-open >/dev/null 2>&1 && (xdg-open "$PUBLIC_URL" >/dev/null 2>&1 &) || true ;;
+    esac
+fi
+info "Done."

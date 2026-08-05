@@ -2,39 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end tests: the "Sorcar" wake-word microphone listener must
-// follow the visibility of the secondary-sidebar webview.
-//
-// The Sorcar sidebar view is registered with
-// ``retainContextWhenHidden: true`` (extension.ts), so CLOSING the
-// secondary side bar does NOT dispose the webview — it only hides it
-// (``onDidChangeVisibility`` fires with ``visible === false``) and the
-// ``onDidDispose`` handler that stops the mic never runs.  Before the
-// fix the wake-word listener therefore kept the microphone open while
-// the secondary bar was closed (a privacy hazard: nothing on screen
-// hints that the mic is live).
-//
-// Locked-in behavior:
-//   1. Hiding the view (closing the secondary side bar) while the
-//      wake-word listener is running kills the WHOLE listener process
-//      tree — the microphone is released.
-//   2. Re-showing the view (opening the secondary side bar) restarts
-//      the listener automatically, because the user had it enabled.
-//   3. Late visibility events from a stale/superseded webview do not
-//      stop the listener for the freshly resolved visible view.
-//   4. If the mic was OFF when the view was hidden, re-showing the
-//      view must NOT start the listener.
-//   5. If the user explicitly turns the mic OFF and the view is then
-//      hidden and re-shown, the listener must NOT auto-start.
-//
-// The tests drive the REAL compiled ``SorcarSidebarView.js`` and
-// ``VoiceWakeService`` with a REAL spawned subprocess tree; only the
-// ``vscode`` API module is stubbed (it does not exist under plain
-// Node) and ``uv`` is a fake shell script that records its pid tree.
-//
-// Run directly with ``node test/voiceWakeSidebarVisibility.test.js``
-// after ``npm run compile``.
 
 'use strict';
 
@@ -135,17 +102,13 @@ function killGroup(pid, signal = 'SIGKILL') {
     process.kill(-pid, signal);
     return;
   } catch {
-    // Not a group leader (or already dead) — fall through.
   }
   try {
     process.kill(pid, signal);
   } catch {
-    // Already dead.
   }
 }
 
-// The fake ``uv`` appends "wrapper_pid child_pid" per start, so each
-// listener (re)start adds one line and restarts are observable.
 function makeFakeHome() {
   const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-voice-vis-'));
   const binDir = path.join(tmpHome, '.local', 'bin');
@@ -193,12 +156,6 @@ async function waitFor(predicate, message, timeoutMs = 5000) {
   throw new Error(message);
 }
 
-/**
- * Build a fake secondary-sidebar WebviewView whose visibility the test
- * can flip, mirroring what VS Code does when the user closes/opens the
- * secondary side bar with retainContextWhenHidden (visibility change,
- * no dispose).
- */
 function makeWebviewView() {
   const posted = [];
   const recvEmitter = new StubEventEmitter();
@@ -239,7 +196,6 @@ function makeView() {
   return {view, wv};
 }
 
-// --- 1. closing the secondary bar must release the microphone --------
 async function testHideStopsListener() {
   const {tmpHome, pidFile} = makeFakeHome();
   const {view, wv} = makeView();
@@ -254,8 +210,6 @@ async function testHideStopsListener() {
     assert.ok(alive(wrapperPid), 'wrapper must be alive after voiceToggle');
     assert.ok(alive(childPid), 'child must be alive after voiceToggle');
 
-    // The user closes the secondary side bar: retainContextWhenHidden
-    // means the webview is only HIDDEN — no onDidDispose fires.
     wv.setVisible(false);
 
     await waitFor(
@@ -272,7 +226,6 @@ async function testHideStopsListener() {
   }
 }
 
-// --- 2. reopening the secondary bar must resume the microphone -------
 async function testShowRestartsListener() {
   const {tmpHome, pidFile} = makeFakeHome();
   const {view, wv} = makeView();
@@ -291,7 +244,6 @@ async function testShowRestartsListener() {
       'listener must stop when the sidebar is hidden',
     );
 
-    // The user reopens the secondary side bar.
     wv.setVisible(true);
 
     await waitFor(
@@ -312,7 +264,6 @@ async function testShowRestartsListener() {
   }
 }
 
-// --- 3. stale visibility events must not affect the current view ----
 async function testStaleHiddenEventDoesNotStopFreshViewListener() {
   const {tmpHome, pidFile} = makeFakeHome();
   const {view, wv} = makeView();
@@ -325,10 +276,6 @@ async function testStaleHiddenEventDoesNotStopFreshViewListener() {
     );
     const [wrapperPid, childPid] = readPidLines(pidFile)[0];
 
-    // VS Code can re-resolve a webview before all events from the old
-    // one have drained.  A late visibility=false event from that old
-    // webview must be ignored, or it will stop the listener that now
-    // belongs to the fresh, visible view.
     const fresh = makeWebviewView();
     view.resolveWebviewView(fresh.webviewView, {}, {});
     wv.setVisible(false);
@@ -351,7 +298,6 @@ async function testStaleHiddenEventDoesNotStopFreshViewListener() {
   }
 }
 
-// --- 4. mic off before hide => still off after show -------------------
 async function testShowDoesNotStartWhenMicWasOff() {
   const {tmpHome, pidFile} = makeFakeHome();
   const {view, wv} = makeView();
@@ -372,7 +318,6 @@ async function testShowDoesNotStartWhenMicWasOff() {
   }
 }
 
-// --- 5. explicit user OFF wins over the auto-resume -------------------
 async function testExplicitOffIsNotResumed() {
   const {tmpHome, pidFile} = makeFakeHome();
   const {view, wv} = makeView();
@@ -385,7 +330,6 @@ async function testExplicitOffIsNotResumed() {
     );
     const [wrapperPid, childPid] = readPidLines(pidFile)[0];
 
-    // The user turns the mic OFF, then closes and reopens the bar.
     wv.fireMessage({type: 'voiceToggle', enabled: false});
     await waitFor(
       () => !alive(wrapperPid) && !alive(childPid),

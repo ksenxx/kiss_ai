@@ -91,11 +91,6 @@ class TestAppendUserMessageHandler:
         )
 
         assert tab.pending_user_messages == ["follow up A", "follow up B"]
-        # The bare test state has no agent (and therefore no task id
-        # yet): the user still sees an IMMEDIATE transient echo (no
-        # ``taskId`` stamp), and a durable copy is deferred to the
-        # drain hook, which records + persists it under the consuming
-        # task's id (``recordOnly`` — replay-safe, never re-sent live).
         assert tab.unattributed_prompt_echoes == [
             "follow up A", "follow up B",
         ]
@@ -260,7 +255,6 @@ class TestDrainPendingUserMessages:
             ),
         ]
         assert model.calls == expected
-        # Second drain (next model step) must be a no-op.
         agent._drain_pending_user_messages(model)
         assert model.calls == expected
 
@@ -435,9 +429,6 @@ class TestPreStepHookSurvivesRunReset:
         original_run = KISSAgent.run
 
         def capture_run(self: KISSAgent, **kwargs: Any) -> str:
-            # Record the hook the per-session executor was given the
-            # instant ``RelentlessAgent.perform_task`` wires it up,
-            # then short-circuit the real LLM loop.
             captured["hook"] = self.pre_step_hook
             return '"success": true\n"summary": "stub"\n'
 
@@ -454,7 +445,6 @@ class TestPreStepHookSurvivesRunReset:
         finally:
             KISSAgent.run = original_run  # type: ignore[assignment]
 
-        # Before the fix this would be ``None`` (wiped by ``_reset``).
         assert captured.get("hook") is not None
         assert captured["hook"] == agent._drain_pending_user_messages
 
@@ -462,7 +452,6 @@ class TestPreStepHookSurvivesRunReset:
         from kiss.core.kiss_agent import KISSAgent
 
         agent = SorcarAgent("Sorcar No Tab")
-        # No ``_tab_id`` attribute set at all.
 
         captured: dict[str, Any] = {}
         original_run = KISSAgent.run
@@ -518,7 +507,6 @@ class TestSteeringMessageWrappedForModel:
         server._cmd_append_user_message(
             {"tabId": "tab-wrap", "prompt": "focus on the login bug"},
         )
-        # The queue (and the UI echo) keep the raw text.
         assert tab.pending_user_messages == ["focus on the login bug"]
 
         agent = SorcarAgent.__new__(SorcarAgent)
@@ -573,7 +561,6 @@ class TestPendingMessagesClearedOnTaskFinish:
     def test_running_agent_state_default_is_empty_list(self) -> None:
         tab = _RunningAgentState("tab-x", "gemini")
         assert tab.pending_user_messages == []
-        # And it must be a real list (mutable, separate per instance).
         other = _RunningAgentState("tab-y", "gemini")
         other.pending_user_messages.append("only-on-other")
         assert tab.pending_user_messages == []
@@ -628,8 +615,6 @@ class TestPendingMessagesClearedOnTaskFinish:
         task_thread.join(timeout=15)
         assert not task_thread.is_alive()
 
-        # The same tab object is still in the registry — fetch the
-        # post-finally state and confirm the queue was drained.
         post_tab = _RunningAgentState.running_agent_states.get(tab_id)
         assert post_tab is not None
         assert post_tab.pending_user_messages == []

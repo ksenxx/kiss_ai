@@ -251,7 +251,6 @@ class TestHistoryPanelSearchOnOpen(unittest.TestCase):
         """Extract the toggleHistorySidebar function body wired to menuBtn."""
         import re
 
-        # Find the click handler name registered on menuBtn.
         m = re.search(
             r"menuBtn\.addEventListener\(\s*'click'\s*,\s*([A-Za-z_$][\w$]*)",
             self._js,

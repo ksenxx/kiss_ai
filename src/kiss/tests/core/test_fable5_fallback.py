@@ -77,7 +77,6 @@ class TestGetFallbackModel:
     def test_model_without_fallback_returns_none(self) -> None:
         """A registered model that does not declare ``fallback``
         returns ``None`` (not an error)."""
-        # ``claude-opus-4-8`` itself has no ``fallback`` field.
         assert get_fallback_model("claude-opus-4-8") is None
 
     def test_harbor_prefix_is_stripped(self) -> None:
@@ -412,7 +411,6 @@ class TestFallbackEndToEnd:
                         "api_key": "sk-test",
                     },
                 )
-            # The swap must have happened exactly once.
             assert agent._fallback_used is True
             assert agent.model_name == fallback
         finally:

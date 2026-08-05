@@ -2,24 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression test (webview mode): the wake word keeps
-// working while a previous transcription is still in flight.
-//
-// Since the listener fix, the extension host may deliver a second
-// {type: 'voiceWake'} BEFORE the first utterance's {type:
-// 'voiceSpeech'} arrives (translations are reported asynchronously).
-// The webview must:
-//
-//  - accept that interleaved second wake (flash red again) instead
-//    of ignoring it,
-//  - still insert the first utterance's late translation, and
-//  - insert both translations in arrival order.
-//
-// This test runs the real ``media/voice.js`` against a real jsdom
-// document (no mocks for the code under test).
-//
-// Run directly with ``node test/voiceWakeDuringTranscription.test.js``.
 
 'use strict';
 
@@ -45,11 +27,6 @@ function test(name, fn) {
   }
 }
 
-/**
- * Build a fresh jsdom window containing the two elements voice.js
- * needs (#voice-btn, #task-input), inject the webview-mode config and
- * execute the real voice.js.
- */
 function makeWindow() {
   const dom = new JSDOM(
     '<!DOCTYPE html><html><body>' +
@@ -72,19 +49,14 @@ function sendHostMessage(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-// ---------------------------------------------------------------------------
-
 test('a second wake during an in-flight transcription still triggers', () => {
   const win = makeWindow();
   const btn = win.document.getElementById('voice-btn');
-  // Round 1: wake + capture end; the gpt-audio call is now in flight.
   win.Date.now = () => 1000000;
   sendHostMessage(win, {type: 'voiceWake'});
   sendHostMessage(win, {type: 'voiceTranscribing'});
   assert.ok(btn.classList.contains('voice-transcribing'));
-  // Round 2 starts BEFORE round 1's translation arrives (the listener
-  // keeps detecting while the API call runs on a background thread).
-  win.Date.now = () => 1010000; // past the 2s wake cooldown
+  win.Date.now = () => 1010000;
   sendHostMessage(win, {type: 'voiceWake'});
   assert.ok(
     btn.classList.contains('voice-triggered'),
@@ -104,10 +76,8 @@ test('a late translation still lands after an interleaved wake', () => {
   sendHostMessage(win, {type: 'voiceTranscribing'});
   win.Date.now = () => 1010000;
   sendHostMessage(win, {type: 'voiceWake'});
-  // Round 1's translation arrives only now.
   sendHostMessage(win, {type: 'voiceSpeech', text: 'first utterance'});
   assert.strictEqual(inp.value, 'first utterance');
-  // Round 2's translation appends.
   sendHostMessage(win, {type: 'voiceTranscribing'});
   sendHostMessage(win, {type: 'voiceSpeech', text: 'second utterance'});
   assert.strictEqual(inp.value, 'first utterance second utterance');
@@ -122,10 +92,8 @@ test('interleaved silence result does not block later wakes or text', () => {
   sendHostMessage(win, {type: 'voiceTranscribing'});
   win.Date.now = () => 1010000;
   sendHostMessage(win, {type: 'voiceWake'});
-  // Round 1 turns out to be a failed/silent translation.
   sendHostMessage(win, {type: 'voiceSpeech', text: ''});
   assert.strictEqual(inp.value, '');
-  // Round 2 completes normally.
   win.Date.now = () => 1020000;
   sendHostMessage(win, {type: 'voiceTranscribing'});
   sendHostMessage(win, {type: 'voiceSpeech', text: 'still works'});
@@ -139,19 +107,16 @@ test('a late terminal event keeps the newer round\'s indicator', () => {
   const btn = win.document.getElementById('voice-btn');
   const inp = win.document.getElementById('task-input');
   win.Date.now = () => 1000000;
-  sendHostMessage(win, {type: 'voiceWake'}); // round 1
-  sendHostMessage(win, {type: 'voiceTranscribing'}); // round 1 in flight
+  sendHostMessage(win, {type: 'voiceWake'});
+  sendHostMessage(win, {type: 'voiceTranscribing'});
   win.Date.now = () => 1010000;
-  sendHostMessage(win, {type: 'voiceWake'}); // round 2 capturing (red)
-  // Round 1's late terminal result must insert its text but NOT
-  // clear the red flash that belongs to round 2's active capture.
+  sendHostMessage(win, {type: 'voiceWake'});
   sendHostMessage(win, {type: 'voiceSpeech', text: 'first'});
   assert.strictEqual(inp.value, 'first');
   assert.ok(
     btn.classList.contains('voice-triggered'),
     'late round-1 result must not clear round 2\'s red flash',
   );
-  // Round 2 finishes normally: yellow, then terminal clears all.
   sendHostMessage(win, {type: 'voiceTranscribing'});
   assert.ok(btn.classList.contains('voice-transcribing'));
   sendHostMessage(win, {type: 'voiceSpeech', text: 'second'});
@@ -159,8 +124,6 @@ test('a late terminal event keeps the newer round\'s indicator', () => {
   assert.ok(!btn.classList.contains('voice-triggered'));
   assert.ok(!btn.classList.contains('voice-transcribing'));
 });
-
-// ---------------------------------------------------------------------------
 
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length > 0) {

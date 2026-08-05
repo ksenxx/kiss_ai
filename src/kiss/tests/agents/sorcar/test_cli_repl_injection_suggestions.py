@@ -124,7 +124,6 @@ def test_cli_history_wins_over_trick(tmp_path: Path, kiss_db) -> None:
     th._add_task("Reproduce my custom historical task", chat_id="c1")
     completer = CliCompleter(str(tmp_path))
     matches = completer._build_matches("Reproduce")
-    # History match must be present and must NOT be the trick.
     assert "Reproduce my custom historical task" in matches
     assert "Reproduce the issue by writing end-to-end test. " \
            "Then fix the issue." not in matches
@@ -137,11 +136,6 @@ def test_cli_trick_falls_back_to_active_file_when_no_match(
     active = tmp_path / "code.py"
     active.write_text("def calculate_total(items):\n    return sum(items)\n")
     completer = CliCompleter(str(tmp_path), active_file=str(active))
-    # ``calculate_t`` is not at a sentence start (no period before "call")
-    # so no trick match — but also no trick prefixes "calculate_t", so
-    # the trick branch correctly skips and the active-file branch runs.
-    # The candidate is the whole line plus the identifier suffix so the
-    # accept keeps the already-typed head.
     matches = completer._build_matches("call calculate_t")
     assert matches == ["call calculate_total"]
 

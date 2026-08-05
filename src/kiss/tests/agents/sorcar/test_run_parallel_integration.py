@@ -25,7 +25,7 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent, run_tasks_parallel
 from kiss.server.json_printer import JsonPrinter
 
 FAST_MODEL = "claude-haiku-4-5"
-TINY_BUDGET = 0.50  # $0.50 per test — enough for simple tasks
+TINY_BUDGET = 0.50
 
 
 def _has_anthropic_key() -> bool:
@@ -45,10 +45,6 @@ def _parse_yaml_result(result: str) -> dict:
         return parsed
     return {"raw": result}
 
-
-# ---------------------------------------------------------------------------
-# 1. run_tasks_parallel() — the standalone function
-# ---------------------------------------------------------------------------
 
 
 @skip_no_key
@@ -93,7 +89,6 @@ class TestRunTasksParallelReal:
         ]
         results = run_tasks_parallel(tasks, max_workers=3, model_name=FAST_MODEL)
         assert len(results) == 3
-        # Each result should contain its respective keyword
         summaries = [_parse_yaml_result(r).get("summary", "") for r in results]
         assert "ALPHA" in summaries[0], f"Expected ALPHA in: {summaries[0]}"
         assert "BETA" in summaries[1], f"Expected BETA in: {summaries[1]}"
@@ -102,7 +97,6 @@ class TestRunTasksParallelReal:
     @pytest.mark.slow
     def test_with_work_dir(self, tmp_path: Path) -> None:
         """Tasks can use a custom work_dir."""
-        # Create a file in tmp_path for the agent to read
         test_file = tmp_path / "greeting.txt"
         test_file.write_text("Hello from the test file!")
 
@@ -124,7 +118,6 @@ class TestRunTasksParallelReal:
     @pytest.mark.slow
     def test_file_tasks_parallel(self, tmp_path: Path) -> None:
         """Multiple file-reading tasks run in parallel."""
-        # Create two files
         (tmp_path / "a.txt").write_text("Contents of file A: apple")
         (tmp_path / "b.txt").write_text("Contents of file B: banana")
 
@@ -144,10 +137,6 @@ class TestRunTasksParallelReal:
         assert "apple" in all_text.lower(), f"Expected 'apple' in: {all_text}"
         assert "banana" in all_text.lower(), f"Expected 'banana' in: {all_text}"
 
-
-# ---------------------------------------------------------------------------
-# 1b. Budget aggregation — sub-agent costs roll up to the parent
-# ---------------------------------------------------------------------------
 
 
 class TestBudgetAggregationFast:
@@ -180,8 +169,6 @@ class TestBudgetAggregationReal:
         sub-agents' budget into its own ``budget_used`` (and tokens/steps).
         """
         parent = SorcarAgent("parent-budget")
-        # Reset is normally done by run(); we set the fields directly
-        # so we can call _run_tasks_parallel as a unit.
         parent.work_dir = str(tmp_path)
         parent.model_name = FAST_MODEL
         parent.printer = None
@@ -201,18 +188,12 @@ class TestBudgetAggregationReal:
         )
         assert len(results) == 2
 
-        # Every real LLM call costs >$0 and consumes at least one token
-        # and one step.  Verify the parent's running totals grew.
         assert parent.budget_used > before_budget, (
             f"parent.budget_used did not grow: {parent.budget_used}"
         )
         assert parent.total_tokens_used > before_tokens
         assert parent.total_steps > before_steps
 
-
-# ---------------------------------------------------------------------------
-# 1c. Nested parallel — sub-agents themselves invoke ``run_parallel``
-# ---------------------------------------------------------------------------
 
 
 @skip_no_key
@@ -282,17 +263,6 @@ class TestNestedParallelReal:
         )
         assert len(results) == 2
 
-        # The parent's running totals must reflect EVERY level of the
-        # tree.  Six real LLM-driven agents ran (2 middles + 4 leaves),
-        # and the per-level aggregation done by ``_run_tasks_parallel``
-        # at every node must roll those costs all the way up to the
-        # parent.  Confirming that all three counters grew above zero
-        # proves nested chaining works: if any intermediate level had
-        # failed to add its sub-agents in, at least one of the three
-        # counters would still be at its pre-call zero baseline.  We
-        # deliberately avoid asserting on the textual content of the
-        # middle summaries because LLM responses are non-deterministic;
-        # the budget aggregation contract is what we care about here.
         assert parent.budget_used > 0.0, (
             f"parent.budget_used did not aggregate nested cost: "
             f"{parent.budget_used}"
@@ -345,9 +315,6 @@ class TestNestedParallelReal:
         )
         assert len(results) == 2
 
-        # Task-centric contract: every spawned sub-agent (2 middles +
-        # 2 leaves each = 6) broadcasts one ``new_tab`` event with its
-        # own unique persisted task id.
         open_events = [
             e for e in printer.captured if e.get("type") == "new_tab"
         ]
@@ -362,11 +329,6 @@ class TestNestedParallelReal:
             "Sub-agent task ids must be unique"
         )
 
-        # ``subagentDone`` carries the deterministic routing id
-        # ``task-{parent_key}__sub_{idx}``.  The two middles are direct
-        # children of the root key; every leaf's routing id embeds its
-        # middle's PERSISTED task id, confirming that routing chained
-        # correctly across nesting levels.
         done_events = [
             e for e in printer.captured if e.get("type") == "subagentDone"
         ]
@@ -401,10 +363,6 @@ class TestNestedParallelReal:
             f"Leaves must be spread across both middles: {leaf_parents}"
         )
 
-
-# ---------------------------------------------------------------------------
-# 2. Edge cases
-# ---------------------------------------------------------------------------
 
 
 @skip_no_key
@@ -470,10 +428,6 @@ class TestRunParallelEdgeCases:
         assert "max_workers" in params
 
 
-# ---------------------------------------------------------------------------
-# 3. Concurrent correctness with file I/O
-# ---------------------------------------------------------------------------
-
 
 @skip_no_key
 class TestParallelFileIO:
@@ -497,7 +451,6 @@ class TestParallelFileIO:
             work_dir=str(tmp_path),
         )
         assert len(results) == 3
-        # At least check that results came back
         for r in results:
             parsed = _parse_yaml_result(r)
             assert "summary" in parsed
@@ -525,10 +478,6 @@ class TestParallelFileIO:
                 f"Expected 'shared' in: {summary}"
             )
 
-
-# ---------------------------------------------------------------------------
-# 4. Subagent tab events — E2E with real LLM calls and a real printer
-# ---------------------------------------------------------------------------
 
 
 class _CapturePrinter(JsonPrinter):
@@ -568,9 +517,6 @@ class TestSubagentTabEventsE2E:
         )
         assert len(results) == 2
 
-        # Task-centric contract: each sub-agent broadcasts one
-        # ``new_tab`` event carrying its own persisted ``task_id``; the
-        # frontend materialises the sub-agent tab from that.
         open_events = [
             e for e in printer.captured if e.get("type") == "new_tab"
         ]
@@ -583,9 +529,6 @@ class TestSubagentTabEventsE2E:
         for ev in open_events:
             assert "parent_tab_id" in ev
 
-        # ``subagentDone`` carries the deterministic backend routing id
-        # ``task-{parent_key}__sub_{idx}`` derived from the caller's
-        # thread-local task id.
         done_events = [
             e for e in printer.captured if e.get("type") == "subagentDone"
         ]
@@ -610,8 +553,6 @@ class TestSubagentTabEventsE2E:
             printer=printer,
         )
 
-        # The sub-agent's streaming events are stamped with its own
-        # persisted task id (announced by its ``new_tab`` event).
         open_events = [
             e for e in printer.captured if e.get("type") == "new_tab"
         ]

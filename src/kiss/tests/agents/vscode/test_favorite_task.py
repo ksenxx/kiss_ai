@@ -138,7 +138,6 @@ class TestSetFavoriteCommandDispatch:
         """Missing taskId is silently dropped (no exception)."""
         server, events = _make_server()
         server._handle_command({"type": "setFavorite", "isFavorite": True})
-        # No error event fired.
         assert [e for e in events if e.get("type") == "error"] == []
 
 
@@ -162,11 +161,14 @@ class TestMainJsFavoriteButton:
 
     def test_favorite_click_posts_set_favorite_message(self) -> None:
         src = self._js()
-        # Look for postMessage with type: 'setFavorite'.
         assert re.search(
-            r"postMessage\(\s*\{\s*type:\s*'setFavorite'",
+            r"api\.setFavorite\(\s*\{",
             src,
-        ), "main.js must postMessage({type: 'setFavorite', ...}) on click"
+        ), "main.js must call api.setFavorite({...}) on click"
+        api_src = MAIN_JS.with_name("api.js").read_text()
+        assert "'setFavorite'" in api_src, (
+            "api.js must catalog the setFavorite wire command"
+        )
 
     def test_favorite_button_reads_s_is_favorite(self) -> None:
         src = self._js()

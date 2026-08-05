@@ -111,7 +111,7 @@ def _tts_pcm_base64(directory: Path, text: str) -> str:
     )
     with wave.open(str(wav), "rb") as wf:
         pcm = wf.readframes(wf.getnframes())
-    pcm += b"\x00" * (2 * 2 * 16000)  # 2s of trailing silence
+    pcm += b"\x00" * (2 * 2 * 16000)
     return base64.b64encode(pcm).decode("ascii")
 
 

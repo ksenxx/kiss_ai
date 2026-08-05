@@ -36,7 +36,7 @@ def test_stamp_event_ts_adds_ts_when_absent() -> None:
 
 def test_stamp_event_ts_preserves_existing_ts() -> None:
     """A pre-stamped (replayed) event keeps its original ``ts``."""
-    original = 1614956820000  # 2021-03-05
+    original = 1614956820000
     event = {"type": "tool_call", "name": "Bash", "ts": original}
     stamp_event_ts(event)
     assert event["ts"] == original
@@ -99,7 +99,7 @@ def test_web_printer_broadcast_preserves_replay_ts() -> None:
     printer = WebPrinter()
     printer._thread_local.task_id = "104"
     printer.start_recording()
-    original = 946684800000  # 2000-01-01
+    original = 946684800000
     printer.broadcast({"type": "result", "text": "ok", "ts": original})
     events = printer.stop_recording()
     assert len(events) == 1
@@ -113,7 +113,7 @@ def test_replay_backfills_ts_from_legacy_timestamp() -> None:
     when they happened via the ``events.timestamp`` DB column that the
     loaders inject as ``_timestamp`` (seconds float).
     """
-    legacy_sec = 1593855000.5  # 2020-07-04
+    legacy_sec = 1593855000.5
     events = _coalesced_replay_events([
         {"type": "prompt", "text": "old", "_timestamp": legacy_sec},
     ])

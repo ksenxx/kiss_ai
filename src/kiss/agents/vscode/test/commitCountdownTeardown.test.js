@@ -2,34 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Integration test for the SCM commit-message countdown in
-// ``extension.ts`` (drives the real compiled ``out/extension.js``
-// activate() with only ``vscode`` and sibling modules stubbed, the same
-// pattern as activationUpdateNotificationAction.test.js).
-//
-// Bugs locked in:
-//
-//   1. Interval leak — when the daemon never replies,
-//      ``generateCommitMessage`` resolves via its internal timeout
-//      WITHOUT firing ``onCommitMessage``, so nothing ever called
-//      ``stopCommitCountdown``: the countdown interval kept overwriting
-//      the SCM input box with "Generating in 0s ..." every second
-//      FOREVER.  The generation promise must tear the countdown down on
-//      settle and wipe the stale text.
-//
-//   2. Focus steal — ``setScmMessage`` executed ``workbench.view.scm``
-//      on EVERY countdown tick, yanking the SCM sidebar open once per
-//      second for the whole generation.  The reveal must happen only on
-//      user-visible transitions (start / final message).
-//
-//   3. The success path must be untouched: a real ``onCommitMessage``
-//      result lands in the input box and is NOT clobbered by the
-//      teardown.
-//
-// Run directly with ``node`` (after ``npm run compile``):
-//
-//     node src/kiss/agents/vscode/test/commitCountdownTeardown.test.js
 
 'use strict';
 
@@ -123,9 +95,6 @@ Module._load = function (request, parent, isMain) {
   return origLoad.call(this, request, parent, isMain);
 };
 
-// --- Fake sidebar: mirrors the real generateCommitMessage contract ------
-// (resolves when onCommitMessage fires OR after a timeout, whichever
-// comes first) — with the 30 s production timeout compressed to 300 ms.
 const commitListeners = [];
 const FAKE_TIMEOUT_MS = 300;
 
@@ -174,7 +143,6 @@ function fireCommitMessage(ev) {
   for (const cb of commitListeners.slice()) cb(ev);
 }
 
-// --- Fake git repo whose inputBox we observe ----------------------------
 const inputBox = {value: ''};
 const fakeGitApi = {
   repositories: [{inputBox, state: {indexChanges: [{}]}}],
@@ -245,11 +213,6 @@ async function runTest() {
     const trigger = registeredCommands.get('kissSorcar.generateCommitMessage');
     assert.ok(trigger, 'kissSorcar.generateCommitMessage must be registered');
 
-    // ------------------------------------------------------------------
-    // Bug 1: daemon never replies — the generation promise settles via
-    // timeout without an onCommitMessage event.  The countdown must be
-    // torn down and the stale "Generating in Ns ..." text wiped.
-    // ------------------------------------------------------------------
     await trigger(undefined, undefined, undefined);
     await sleep(50);
     assert.strictEqual(
@@ -275,13 +238,9 @@ async function runTest() {
         'generation settled',
     );
 
-    // ------------------------------------------------------------------
-    // Bug 2: during the countdown, workbench.view.scm must be executed
-    // only once (at start) — not on every tick.
-    // ------------------------------------------------------------------
     executedCommands.length = 0;
     const p2 = trigger(undefined, undefined, undefined);
-    await sleep(2300); // > 2 countdown ticks; fake timeout already passed
+    await sleep(2300);
     await p2;
     const revealsDuring = scmRevealCount();
     assert.ok(
@@ -291,9 +250,6 @@ async function runTest() {
         'steal the sidebar focus',
     );
 
-    // ------------------------------------------------------------------
-    // Success path: a real result lands and is NOT clobbered.
-    // ------------------------------------------------------------------
     const p3 = trigger(undefined, undefined, undefined);
     await sleep(50);
     assert.ok(

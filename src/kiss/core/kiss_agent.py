@@ -40,35 +40,13 @@ _NON_RETRYABLE_PHRASES = (
     "unauthorized",
     "permission denied",
     "could not resolve authentication",
-    # Fable-5 production failures: the model has been deprecated / gated
-    # by Anthropic ("Claude Fable 5 is not available. Please use Opus
-    # 4.8"), and account-level credit-balance-too-low errors surface as
-    # 400s.  Both keep 3× retries burning quota with identical failures;
-    # marking them non-retryable lets the fallback path (registered in
-    # MODEL_INFO.json via the ``fallback`` field, resolved via
-    # ``get_fallback_model``) take over immediately.
     "is not available",
     "not_found_error",
     "credit balance is too low",
 )
 MAX_CONSECUTIVE_ERRORS = 3
 MAX_CONSECUTIVE_NO_TOOL_CALLS = 2
-#: Fraction of the model's maximum context length at which the agent
-#: proactively stops the run (raising ``ContextWindowExceededError``)
-#: instead of letting the next provider request fail with a hard
-#: context-overflow error.  The headroom absorbs the next step's tool
-#: results and model output.
 CONTEXT_LIMIT_FRACTION = 0.9
-#: Lower-cased substrings that identify provider context-overflow errors.
-#: Kept deliberately SPECIFIC (no bare "context window") so unrelated
-#: errors that merely mention the words cannot be misrouted to the
-#: context-overflow recovery path.
-#: - Anthropic: "Your input exceeds the context window of this model",
-#:   "prompt is too long: N tokens > M maximum"
-#: - OpenAI: error code "context_length_exceeded", "This model's maximum
-#:   context length is N tokens"
-#: - Gemini: "The input token count (N) exceeds the maximum number of
-#:   tokens allowed (M)"
 _CONTEXT_OVERFLOW_PHRASES = (
     "exceeds the context window",
     "prompt is too long",
@@ -118,39 +96,9 @@ class KISSAgent(Base):
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
-        # Optional hook invoked at the top of every ``_execute_step``,
-        # immediately before the next model call.  Receives the live
-        # :class:`kiss.core.models.model.Model` so the hook can mutate
-        # its conversation (e.g. ``add_message_to_conversation``) to
-        # inject additional user-role context queued asynchronously by
-        # an external source (e.g. the VS Code frontend's
-        # ``appendUserMessage`` command — see
-        # :meth:`kiss.agents.sorcar.sorcar_agent.SorcarAgent.run`).
         self.pre_step_hook: Callable[..., None] | None = None
-        # Optional guard consulted BEFORE every tool call.  Receives
-        # ``(tool_name, tool_args)`` and returns ``None`` to allow the
-        # call or a string to BLOCK it: the string becomes the tool's
-        # error result (printed with ``is_error=True``) and the tool
-        # is not executed.  A blocked ``finish`` is NOT terminal — the
-        # step loop continues so the model can satisfy the guard (e.g.
-        # ``ChatSorcarAgent``'s every-5-steps ``summary`` gate) and
-        # retry.  Copied onto each per-session executor by
-        # :class:`kiss.core.relentless_agent.RelentlessAgent`.
         self.tool_call_guard: Callable[[str, dict[str, Any]], str | None] | None = None
-        # Size of the LIVE conversation in tokens (last call's full
-        # prompt + completion).  Also (re)set in ``_reset``; initialized
-        # here so the attribute exists on agents that are constructed
-        # but not yet run (``_check_limits`` reads it).
         self.context_tokens_used = 0
-        # Optional hook invoked by :meth:`_check_limits` after this
-        # agent's own budget/step checks.  Installed by
-        # :class:`kiss.core.relentless_agent.RelentlessAgent` on each
-        # per-session executor so the executor also enforces the
-        # PARENT task's total budget — including spend attributed to
-        # the parent mid-session by parallel sub-agents (see
-        # ``_attribute_sub_usage`` in ``sorcar_agent``), which this
-        # executor's own ``budget_used`` never sees.  The hook raises
-        # :class:`KISSError` when the parent's budget is exceeded.
         self.budget_check_hook: Callable[[], None] | None = None
 
     def _reset(
@@ -165,11 +113,6 @@ class KISSAgent(Base):
         print_prompts: bool = True,
     ) -> None:
         self.model_name = model_name
-        # When False, the system prompt and task prompt are NOT printed
-        # to the printer.  Internal helper agents (e.g. the summarizer in
-        # ``RelentlessAgent``) share the parent task's printer; printing
-        # their internal prompts would surface confusing
-        # ``type="prompt"`` events in the user-visible event stream.
         self.print_prompts = print_prompts
         self.verbose = verbose if verbose is not None else True
         self.set_printer(printer, verbose=self.verbose)
@@ -194,29 +137,18 @@ class KISSAgent(Base):
                 thinking_callback=thinking_callback,
             )
         self.is_agentic = is_agentic
-        self.max_steps = max_steps if max_steps is not None else 100
+        self.max_steps = max_steps if max_steps is not None else 10000
         self.max_budget = max_budget if max_budget is not None else 10.0
         self.function_map: dict[str, Callable[..., Any]] = {}
         self._cached_tools_schema: list[dict[str, Any]] | None = None
         self.messages: list[dict[str, Any]] = []
         self.step_count = 0
         self.total_tokens_used = 0
-        # Size of the LIVE conversation in tokens: the full prompt
-        # (input + all cache buckets) plus completion of the most recent
-        # provider call.  Unlike ``total_tokens_used`` (a cumulative sum
-        # across all calls), this tracks how close the conversation is to
-        # the model's context window.
         self.context_tokens_used = 0
         self.budget_used = 0.0
         self.run_start_timestamp = int(time.time())
         self._consecutive_no_tool_calls = 0
-        # Saved so ``_try_switch_to_fallback`` can rebuild the model
-        # (preserving ``base_url``/``api_key`` overrides) when a
-        # non-retryable model error triggers a fallback swap.
         self._model_config: dict[str, Any] | None = model_config
-        # One-shot guard: only allow one fallback swap per run, so that
-        # a misconfigured ``fallback: A`` chain (A→B→A, or A→A) cannot
-        # spin infinitely.
         self._fallback_used = False
 
     def _set_prompt(
@@ -272,7 +204,7 @@ class KISSAgent(Base):
                 If None, no tools are provided (only the built-in finish tool is added).
             is_agentic (bool): Whether the agent is agentic. Default is True.
             max_steps (int): The maximum number of steps to take.
-                Default is 100.
+                Default is 10000.
             max_budget (float): The maximum budget to spend.
                 Default is 10.0.
             model_config (dict[str, Any] | None): The model configuration to use for the agent.
@@ -337,10 +269,6 @@ class KISSAgent(Base):
         if not self.is_agentic:
             return
 
-        # Copy the caller's list: appending ``self.finish`` to the passed-in
-        # list object would mutate the caller's data, and a second agent
-        # reusing the same list would register the FIRST agent's bound
-        # ``finish`` instead of its own.
         tools = list(tools or [])
         tool_names = {getattr(tool, "__name__", None) for tool in tools}
 
@@ -427,13 +355,6 @@ class KISSAgent(Base):
             token_callback=token_cb,
             thinking_callback=thinking_cb,
         )
-        # ``initialize`` performs the SDK client construction (an
-        # OpenAI/Anthropic/... constructor call) — without it,
-        # ``generate_and_process_with_tools`` would dereference
-        # ``self.client`` which is ``None`` after ``__init__``.  We pass
-        # an empty prompt because we immediately overwrite the
-        # conversation with the primary model's history below, so the
-        # value ``initialize`` seeds is irrelevant.
         new_model.initialize("")
         new_model.conversation = old_conversation
         new_model.usage_info_for_messages = self.model.usage_info_for_messages
@@ -472,12 +393,6 @@ class KISSAgent(Base):
             except KISSError as e:  # pragma: no cover – requires model to fail mid-step
                 logger.debug("Exception caught", exc_info=True)
                 if isinstance(e, _EmptyModelResponseError | ModelRefusalError):
-                    # ModelRefusalError: the provider's safety layer refused
-                    # the request (stop_reason="refusal", empty content —
-                    # fable-5 does this on benign security-research prompts
-                    # that opus-4-8 answers normally).  A refusal is
-                    # deterministic for identical content, so retrying is
-                    # pointless — swap to the fallback model immediately.
                     reason = (
                         'a safety refusal (stop_reason="refusal")'
                         if isinstance(e, ModelRefusalError)
@@ -492,13 +407,6 @@ class KISSAgent(Base):
             except Exception as e:
                 logger.debug("Exception caught", exc_info=True)
                 if _is_context_overflow_error(e):
-                    # The conversation no longer fits the model's context
-                    # window.  Retrying is pointless — the retry handler
-                    # below would append yet another message, growing the
-                    # conversation further and guaranteeing the same
-                    # failure — so raise the typed error immediately and
-                    # let the orchestrator (e.g. ``RelentlessAgent``)
-                    # summarize progress and continue in a fresh session.
                     raise ContextWindowExceededError(
                         f"Agent {self.name} exceeded the model's context window: {e}"
                     ) from e
@@ -559,14 +467,6 @@ class KISSAgent(Base):
                 total_steps=self.step_count,
             )
 
-        # Enforce the budget on the very response that exceeded it:
-        # without this, an over-budget response would still execute a
-        # full round of (potentially very expensive) tool calls and only
-        # stop at the top of the NEXT step.  When the response contains
-        # ONLY ``finish`` calls the agent is already stopping — let it
-        # through so the final result is returned instead of discarded.
-        # A mixed finish + non-finish response is still checked, so the
-        # finish call cannot become a loophole for extra tool execution.
         if function_calls and any(fc["name"] != "finish" for fc in function_calls):
             self._check_limits()
 
@@ -576,19 +476,6 @@ class KISSAgent(Base):
                 "model", response_text + "\n```text\n" + usage_info + "\n```\n", start_timestamp
             )
             if self._consecutive_no_tool_calls >= MAX_CONSECUTIVE_NO_TOOL_CALLS:
-                # When the model returns text content but no tool calls,
-                # treat it as an implicit finish (covered by
-                # test_no_tool_call_loop.py).  But if the response is
-                # empty/whitespace-only, returning it would surface to the
-                # user as the literal string "(no result)" (substituted by
-                # JsonPrinter._broadcast_result) and be persisted as
-                # "No summary available" — a silent task death.  This was
-                # the production failure mode for claude-fable-5 (task
-                # history ids 3706/3707/3708/3710 in ~/.kiss/sorcar.db),
-                # where the provider adapter dropped reasoning blocks and
-                # left an empty assistant turn.  Raise a visible diagnostic
-                # so RelentlessAgent can route it into a success=False
-                # result the user can act on.
                 if not response_text or not response_text.strip():
                     raise _EmptyModelResponseError(
                         f"Agent {self.name} aborted: model "
@@ -625,11 +512,6 @@ class KISSAgent(Base):
             if name == "finish" and blocked is None:
                 finish_result = response_str
             else:
-                # A tool such as ``run_parallel`` can attribute a large
-                # amount of sub-agent spend to the relentless parent.
-                # Re-check immediately after EVERY non-finish tool so a
-                # later tool from this same response cannot run after the
-                # parent budget has already been exhausted.
                 self._check_limits()
 
         model_content = (
@@ -698,9 +580,6 @@ class KISSAgent(Base):
                 raise KISSError(f"Function {function_name} is not a registered tool")
             function_response = str(self.function_map[function_name](**function_args))
         except BudgetExceededError:
-            # Budget exhaustion is a hard stop, not a recoverable tool
-            # failure.  Propagate it instead of converting it into text
-            # that would let the agent continue spending.
             raise
         except (Exception, SystemExit) as e:
             logger.debug("Exception caught", exc_info=True)
@@ -710,15 +589,6 @@ class KISSAgent(Base):
             function_response = (
                 f"Failed to call {function_name} with {function_args}: {e}{sig_str}\n"
             )
-            # The tool invocation itself raised — mark the printed
-            # ``tool_result`` as an error so the terminal surfaces the
-            # red ``FAILED`` rule (and so the Read-specific
-            # syntax-highlighting branch in ``ConsolePrinter`` cannot
-            # misrender the "Failed to call …" diagnostic as Python
-            # source).  Note: in-tool sentinels like "Error:" or
-            # "(file is empty)" do NOT set this flag — those are
-            # valid (non-raised) tool return values and are filtered
-            # by the printer's own content-based guard.
             is_error = True
 
         if self.printer:
@@ -738,27 +608,15 @@ class KISSAgent(Base):
         Raises:
             KISSError: If agent budget or step limit is exceeded.
         """
-        # A budget is a hard cap.  At exact equality there is no money
-        # left for another provider request, so stop before starting one
-        # (this also makes a configured $0 budget issue zero requests).
         if self.budget_used >= self.max_budget:
             raise BudgetExceededError(f"Agent {self.name} budget exceeded.")
         if self.step_count > self.max_steps:
             raise KISSError(f"Agent {self.name} exceeded {self.max_steps} steps.")
-        # The parent-budget hook must run BEFORE the context check: when
-        # both the orchestrator's total budget and the context window are
-        # exhausted, ``BudgetExceededError`` (a hard stop, no summarizer
-        # LLM spend) must win over ``ContextWindowExceededError`` (which
-        # triggers paid summarize-and-continue recovery).
         if self.budget_check_hook is not None:
             self.budget_check_hook()
         try:
             max_context = get_max_context_length(self.model.model_name)
         except KISSError:
-            # Unknown/unregistered model (e.g. a custom ``base_url``
-            # deployment absent from MODEL_INFO.json): its context length
-            # is unknowable, so skip the proactive check; the reactive
-            # provider-overflow path in ``_run_agentic_loop`` still applies.
             max_context = None
         if max_context is not None and self.context_tokens_used >= (
             CONTEXT_LIMIT_FRACTION * max_context
@@ -799,9 +657,6 @@ class KISSAgent(Base):
             elif len(usage) == 5:
                 input_tokens, output_tokens, cache_read, cache_write, cache_write_1h = usage
             else:
-                # Audio-chat responses (gpt-audio family) additionally
-                # report the audio-token subsets, which bill at the
-                # model's separate audio rates.
                 (
                     input_tokens,
                     output_tokens,
@@ -821,12 +676,6 @@ class KISSAgent(Base):
                 + audio_output
             )
             self.total_tokens_used += call_tokens
-            # The last call's full prompt + completion approximates the
-            # live conversation size (the next request will contain at
-            # least this many tokens).  A response with missing/empty
-            # usage must NOT reset the live-context estimate to zero —
-            # that would silently disable the proactive check in
-            # ``_check_limits``.
             if call_tokens > 0:
                 self.context_tokens_used = call_tokens
             cost = calculate_cost(

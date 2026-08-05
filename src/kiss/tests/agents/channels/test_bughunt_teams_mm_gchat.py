@@ -92,7 +92,7 @@ def test_msteams_poll_uses_channels_url_and_message_ids(graph_server) -> None:
     path = _paths(graph_server)[0]
     assert "/teams/team1/channels/chan1/messages" in path
     assert "third_party_agents" not in path
-    assert "filter" not in path  # oldest sentinel "0" must not produce a $filter
+    assert "filter" not in path
     assert len(msgs) == 1
     assert msgs[0]["ts"] == "MSG1"
     assert msgs[0]["thread_ts"] == "MSG1"
@@ -149,7 +149,7 @@ def test_msteams_poll_channel_runner_contract(graph_server) -> None:
     backend.send_message("team1:chan1", "reply", thread_ts)
     reply_path = _paths(graph_server)[-1]
     assert "/messages/MSG1/replies" in reply_path
-    assert "2024-05-01" not in reply_path  # never use a datetime as message id
+    assert "2024-05-01" not in reply_path
 
 
 @pytest.mark.skipif(

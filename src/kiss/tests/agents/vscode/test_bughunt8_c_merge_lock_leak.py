@@ -75,8 +75,6 @@ class TestMergeActionLockLeak(unittest.TestCase):
                 },
             ],
         }
-        # The real registration path used by WebPrinter.broadcast for
-        # ``merge_data`` events.
         self.server._register_merge_state(tab_id, merge_data)
 
     def test_completed_review_releases_action_lock(self) -> None:

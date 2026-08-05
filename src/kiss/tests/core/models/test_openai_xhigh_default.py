@@ -66,8 +66,6 @@ def _echo(text: str) -> str:
     return text
 
 
-# Each handler instance is per-request; persist captured bodies on the
-# class itself so the test can read them after .generate() returns.
 class _CapturingHandler(BaseHTTPRequestHandler):
     """Captures the JSON body of every POST and returns a minimal response."""
 

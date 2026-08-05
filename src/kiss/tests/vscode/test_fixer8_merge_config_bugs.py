@@ -104,10 +104,6 @@ class _MF(_MergeFlowMixin):
         self.work_dir = work_dir
 
 
-# ---------------------------------------------------------------------------
-# F2 — post-task refresh must not clobber a fresher concurrent cache entry
-# ---------------------------------------------------------------------------
-
 
 class TestRefreshAfterTaskRace:
     def test_fresher_concurrent_entry_survives_post_task_scan(
@@ -131,8 +127,6 @@ class TestRefreshAfterTaskRace:
         host._file_cache[wd_str] = ["stale.txt"]
 
         host._refresh_files_after_task(wd_str)
-        # Concurrent writer (e.g. explicit refresh) publishes a fresher
-        # scan while the post-task background scan is still walking.
         fresh = ["fresh.txt"]
         with host._state_lock:
             host._file_cache[wd_str] = fresh
@@ -153,9 +147,7 @@ class TestRefreshAfterTaskRace:
         assert host._file_cache == {}
         assert host.rec_printer.events == []
 
-    def test_changed_set_updates_cache_and_broadcasts(
-        self, tmp_path: Path,
-    ) -> None:
+    def test_changed_set_updates_cache(self, tmp_path: Path) -> None:
         (tmp_path / "new.txt").write_text("x")
         wd_str = str(tmp_path)
         host = _AC(wd_str)
@@ -168,12 +160,7 @@ class TestRefreshAfterTaskRace:
                     break
             time.sleep(0.02)
         assert host._file_cache[wd_str] == ["new.txt"]
-        assert any(e.get("type") == "files" for e in host.rec_printer.events)
 
-
-# ---------------------------------------------------------------------------
-# F4 — _main_dirty_files must not strip space-adjacent filenames
-# ---------------------------------------------------------------------------
 
 
 class TestMainDirtyFilesNoStrip:
@@ -200,10 +187,6 @@ class TestMainDirtyFilesNoStrip:
         assert "a.txt -> b.txt" not in files
 
 
-# ---------------------------------------------------------------------------
-# F5 — porcelain fallback parser: no strip, renames split, both sides
-# ---------------------------------------------------------------------------
-
 
 class TestPorcelainPathsFallbackParser:
     def test_rename_split_and_spaces_preserved(self, tmp_path: Path) -> None:
@@ -218,8 +201,6 @@ class TestPorcelainPathsFallbackParser:
         assert status.returncode == 0
         files = _porcelain_paths(status.stdout, rename_both_sides=True)
 
-        # The worktree fallback mirrors the primary ``--no-renames``
-        # diff, which lists BOTH sides of a rename.
         assert "a.txt" in files
         assert "b.txt" in files
         assert "a.txt -> b.txt" not in files
@@ -249,10 +230,6 @@ class TestPorcelainPathsFallbackParser:
 
         assert 'we"ird.txt' in files
 
-
-# ---------------------------------------------------------------------------
-# F8 — _write_base_copy: dead ``binary`` parameter removed; bytes exact
-# ---------------------------------------------------------------------------
 
 
 class TestWriteBaseCopyNoBinaryParam:
@@ -307,10 +284,6 @@ class TestWriteBaseCopyNoBinaryParam:
         assert base.read_bytes() == b""
 
 
-# ---------------------------------------------------------------------------
-# F9 — _ghost_suffix behaviour for the three produced kinds
-# ---------------------------------------------------------------------------
-
 
 class TestGhostSuffixKinds:
     def test_task_kind_uses_full_query(self) -> None:
@@ -341,10 +314,6 @@ class TestGhostSuffixKinds:
         assert _ghost_suffix("anything", []) == ""
 
 
-# ---------------------------------------------------------------------------
-# F12 — sanitize_config: booleans are not numbers
-# ---------------------------------------------------------------------------
-
 
 class TestSanitizeConfigBooleanBudget:
     def test_true_budget_falls_back_to_default(self) -> None:
@@ -367,10 +336,6 @@ class TestSanitizeConfigBooleanBudget:
             assert sanitize_config({key: 0})[key] is False
 
 
-# ---------------------------------------------------------------------------
-# F17 — root-anchored .gitignore entries match at the root only
-# ---------------------------------------------------------------------------
-
 
 class TestGitignoreAnchoring:
     def _tree(self, tmp_path: Path, gitignore: str) -> Path:
@@ -390,7 +355,6 @@ class TestGitignoreAnchoring:
         paths = _scan_files(str(wd))
         assert "build/f.txt" not in paths
         assert "build/" not in paths
-        # git does NOT ignore src/build for a root-anchored /build.
         assert "src/build/f.txt" in paths
 
     def test_unanchored_name_skips_any_depth(self, tmp_path: Path) -> None:

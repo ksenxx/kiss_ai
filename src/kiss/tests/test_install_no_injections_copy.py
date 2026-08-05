@@ -30,16 +30,9 @@ def test_install_sh_does_not_copy_injections_md() -> None:
     install_sh = _REPO / "install.sh"
     assert install_sh.exists(), f"install.sh not found at {install_sh}"
     text = install_sh.read_text()
-    # Match any cp/install command whose destination ends in
-    # ``INJECTIONS.md`` and whose source is something other than
-    # MY_INJECTION.md.  We allow references to the file (e.g. comments
-    # explaining the rationale) but not actual filesystem copies.
     forbidden_patterns = [
-        # ``cp "$INJECTIONS_SRC" "$INJECTIONS_DST"`` style.
         r'cp\s+["\']?\$INJECTIONS_SRC["\']?\s+["\']?\$INJECTIONS_DST["\']?',
-        # Inline cp with literal INJECTIONS.md path on the right side.
         r'cp\s+\S+\s+\S*\.kiss/INJECTIONS\.md',
-        # Variable assignment to KISS_HOME/INJECTIONS.md (the copy dest).
         r'INJECTIONS_DST\s*=\s*["\']?\$KISS_HOME_DIR/INJECTIONS\.md',
     ]
     for pattern in forbidden_patterns:
@@ -58,28 +51,13 @@ def test_dependency_installer_does_not_copy_injections_md() -> None:
     )
     assert di.exists(), f"DependencyInstaller.ts not found at {di}"
     text = di.read_text()
-    # ``installMarkdownAssets`` previously wrote
-    # ``path.join(kissProjectPath, 'src', 'kiss', 'INJECTIONS.md')`` as
-    # the source of a ``copyFileSync`` whose destination was
-    # ``path.join(kissHomeDir, 'INJECTIONS.md')``.  That pair must be
-    # gone.  We forbid the two-line co-occurrence inside the install
-    # routine.
     if "installMarkdownAssets" in text:
-        # The function may still be DEFINED (as a no-op or marker), but
-        # if it is, it must NOT enumerate INJECTIONS.md as an asset to
-        # copy.  Locate every block delimited by ``copyFileSync`` and
-        # ensure none names INJECTIONS.md.
         for m in re.finditer(r"copyFileSync\(([^)]*)\)", text):
             args = m.group(1)
             assert "INJECTIONS.md" not in args, (
                 f"DependencyInstaller.ts still calls "
                 f"copyFileSync with INJECTIONS.md: {m.group(0)!r}"
             )
-    # The asset table entry ``[..., 'INJECTIONS.md']`` (or string
-    # literal ``'INJECTIONS.md'`` inside an asset array) must be
-    # absent from the install flow.  We forbid the specific destination
-    # path ``path.join(kissHomeDir, 'INJECTIONS.md')`` (the original
-    # copy destination).
     assert (
         re.search(
             r"path\.join\(\s*kissHomeDir\s*,\s*['\"]INJECTIONS\.md['\"]\s*\)",

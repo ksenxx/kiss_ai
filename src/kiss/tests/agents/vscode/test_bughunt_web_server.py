@@ -49,10 +49,12 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 from websockets.asyncio.client import ClientConnection, connect
+from websockets.exceptions import ConnectionClosed
 
 import kiss.agents.sorcar.persistence as th
 import kiss.core.vscode_config as vc
 from kiss.server.web_server import (
+    _AUTH_FAIL_MAX,
     RemoteAccessServer,
     _generate_self_signed_cert,
 )
@@ -183,7 +185,6 @@ class ReadyFanoutWorkDirTest(_ServerTestBase):
         dir_other = Path(self.tmpdir) / "inst_other"
         dir_mine.mkdir()
         dir_other.mkdir()
-        # Another instance persisted its folder globally.
         vc.save_config({"work_dir": str(dir_other)})
 
         ws = await self._connect_ok()
@@ -227,27 +228,30 @@ class AuthFailureRegistryGrowthTest(_ServerTestBase):
         )
 
     async def test_failed_auth_still_recorded_and_lockout_works(self) -> None:
-        """Real failures are still tracked and still trigger lockout."""
+        """Real failures are tracked and the threshold guess locks at once."""
         vc.save_config({"remote_password": "s3cret"})
-        # 5 failures (each connection allows 2 attempts; drive 3
-        # connections of 2 bad attempts each = 6 recorded failures).
-        for _ in range(3):
+        for _ in range(_AUTH_FAIL_MAX - 1):
             ws = await self._connect("wrong")
-            # First failure elicits an auth_required retry prompt.
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "auth_required")
-            await ws.send(json.dumps({"type": "auth", "password": "wrong"}))
-            # Second failure closes the connection (error event first).
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
-            self.assertEqual(resp["type"], "error")
             await ws.close()
+
+        ws = await self._connect("wrong")
+        resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+        self.assertEqual(resp["type"], "auth_locked")
+        await ws.close()
         self.assertTrue(self.server._is_auth_locked("127.0.0.1"))
-        # A locked IP is refused outright: the server closes the
-        # socket without ever sending auth_ok (the send or the recv
-        # observes the close, depending on timing).
-        with self.assertRaises(Exception):
-            ws = await self._connect("s3cret")
-            json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+
+        ws = await connect(self.url, ssl=self.ctx)
+        self._sockets.append(ws)
+        try:
+            await ws.send(json.dumps({"type": "auth", "password": "s3cret"}))
+        except Exception:
+            pass
+        resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+        self.assertEqual(resp["type"], "auth_locked")
+        with self.assertRaises(ConnectionClosed):
+            await asyncio.wait_for(ws.recv(), timeout=5)
 
 
 if __name__ == "__main__":

@@ -49,9 +49,6 @@ from kiss.tests.core.models.test_multihop_model_switching import (
     reveal_secret,
 )
 
-# Free OpenRouter models that support tool calling (checked via
-# https://openrouter.ai/api/v1/models ``supported_parameters``).  Free-tier
-# upstreams rate-limit aggressively, so several candidates are tried.
 _FREE_TOOL_MODELS = [
     "openrouter/nvidia/nemotron-3-nano-30b-a3b:free",
     "openrouter/google/gemma-4-26b-a4b-it:free",
@@ -133,7 +130,6 @@ class TestSorcarOpenRouterLive:
         tools = agent._get_tools()
         set_model = _find_tool(tools, "set_model")
 
-        # Hop 1: live OpenAI model, exactly as a running executor holds it.
         agent.model = model_factory("gpt-4o")
         agent.model_name = "gpt-4o"
         agent.model.initialize(
@@ -151,11 +147,6 @@ class TestSorcarOpenRouterLive:
             1,
         )
 
-        # Hop 2: switch INTO an OpenRouter model via the production
-        # set_model tool.  Regression hotspot: the OpenAI endpoint/key must
-        # NOT be carried over — routing must re-derive openrouter.ai and
-        # OPENROUTER_API_KEY.  Free-tier upstreams 429 often, so several
-        # candidate models are tried before skipping.
         hop2_done = False
         rate_limit_errors: list[str] = []
         for name in _FREE_TOOL_MODELS:
@@ -182,8 +173,6 @@ class TestSorcarOpenRouterLive:
                 f"upstream: {rate_limit_errors}"
             )
 
-        # Hop 3: switch back OUT to a native OpenAI model.  The OpenRouter
-        # endpoint/key must not leak into the OpenAI model either.
         self._switch(agent, set_model, "gpt-4o")
         assert isinstance(agent.model, OpenAICompatibleModel)
         assert agent.model.base_url.startswith("https://api.openai.com"), (
@@ -191,7 +180,6 @@ class TestSorcarOpenRouterLive:
             "switching back to a native OpenAI model"
         )
 
-        # The full history — including the OpenRouter turn — must survive.
         agent.model.add_message_to_conversation(
             "user",
             "List every secret word you learned from the reveal_secret "

@@ -49,7 +49,6 @@ _SUPPORTED_KINDS = (
     inspect.Parameter.KEYWORD_ONLY,
 )
 
-# token -> {"tools": {name: callable}, "dir": generated-file directory}.
 _REGISTRY: dict[str, dict[str, Any]] = {}
 _REGISTRY_LOCK = threading.Lock()
 

@@ -2,27 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test: the "Working on it." voice-dictation ack plays
-// NATIVELY on the extension host machine — never via the webview.
-//
-// Chain under test (all real, compiled code):
-//
-//   host `voiceSpeech` → media/voice.js (jsdom) inserts the dictated
-//   text and raises `kiss-voice-submit` → media/main.js submits the
-//   task AND forwards voice.js's `{type: 'voiceAck'}` bridge post to
-//   the extension host → compiled out/SorcarSidebarView.js handles
-//   'voiceAck' → out/voiceAckPlayer.js spawns a REAL audio-player
-//   child process (KISS_SORCAR_PLAY_CMD recorder script — the same
-//   override cli_talk honours) with media/working-on-it.mp3 as its
-//   last argument.
-//
-// This is the fix for the "alien voice": the webview's Audio.play()
-// is rejected by Chromium's autoplay policy (no recent click during
-// dictation, microsoft/vscode#197937) and its old Web Speech fallback
-// spoke every ack with the loud robotic system voice.
-//
-// Run with:  node test/voiceAckHostPlayback.test.js
 
 'use strict';
 
@@ -50,7 +29,6 @@ for (const compiled of [OUT_SIDEBAR, OUT_PLAYER]) {
   );
 }
 
-// ---- vscode module stub (for the compiled extension) ----------------
 class StubEventEmitter {
   constructor() {
     this._listeners = [];
@@ -118,16 +96,12 @@ Module._resolveFilename = function (request, parent, ...rest) {
   return origResolve.call(this, request, parent, ...rest);
 };
 
-// ---- sandbox HOME + recorder player ---------------------------------
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-ack-e2e-'));
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
 const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
 
-// A REAL scripted child process standing in for afplay: records its
-// argv (the mp3 path) — the KISS_SORCAR_PLAY_CMD override contract
-// shared with kiss.ui.cli.cli_talk.
 const recordFile = path.join(tmpHome, 'played.txt');
 const recorder = path.join(tmpHome, 'recorder.sh');
 fs.writeFileSync(
@@ -137,7 +111,6 @@ fs.writeFileSync(
 );
 process.env.KISS_SORCAR_PLAY_CMD = `sh "${recorder}"`;
 
-// ---- stub daemon (UDS) so main.js can submit the dictated task ------
 const server = net.createServer(sock => {
   let buf = '';
   sock.on('data', chunk => {
@@ -162,7 +135,6 @@ const server = net.createServer(sock => {
   });
 });
 
-// ---- jsdom webview running the REAL main.js + voice.js --------------
 function buildWebviewWindow() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -177,8 +149,6 @@ function buildWebviewWindow() {
   win.Element.prototype.scrollIntoView = function () {};
   win.Element.prototype.scrollTo = function () {};
   win.HTMLElement.prototype.scrollTo = function () {};
-  // Keep the wake-word listener OFF: this test dictates via a direct
-  // voiceSpeech message, so the host must not spawn a real listener.
   win.localStorage.setItem('kissVoiceEnabled', '0');
   win.__VOICE__ = {mode: 'webview'};
   const ctx = {toExtension: null};
@@ -251,12 +221,13 @@ async function main() {
   view.resolveWebviewView(wvv.webviewView, {}, {});
   wvv.wire();
   ctx.win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  ctx.win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  ctx.win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  ctx.win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   ctx.win.eval(fs.readFileSync(path.join(MEDIA, 'voice.js'), 'utf8'));
   await sleep(80);
 
-  // The host delivers a dictated, translated task (wake word already
-  // consumed) exactly like VoiceWakeService does.
   wvv.webviewView.webview.postMessage({
     type: 'voiceSpeech',
     text: 'Fix the flaky test',
@@ -281,8 +252,6 @@ async function main() {
   assert.ok(fs.existsSync(clip), 'bundled working-on-it.mp3 must exist');
   console.log('  \u2713 dictated task plays the ack natively on the host');
 
-  // The webview never received a playable ack URL in webview mode, and
-  // exactly one player process ran for exactly one dictation.
   assert.strictEqual(args.length, 1, `expected one playback, got ${args.length}`);
   console.log('  \u2713 exactly one native playback per dictated task');
 

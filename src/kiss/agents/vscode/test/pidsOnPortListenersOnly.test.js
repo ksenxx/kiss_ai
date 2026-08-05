@@ -2,24 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test for ``pidsOnPort`` — the helper behind
-// ``killProcessOnPort`` in ``DependencyInstaller``.
-//
-// Contract locked in here: ``pidsOnPort(port)`` returns only processes
-// LISTENING on the port, never TCP *clients* connected to it.  The old
-// ``lsof -ti :port`` (no ``-sTCP:LISTEN`` filter) also returned client
-// PIDs — cloudflared proxying the remote tunnel, or a browser holding
-// a WebSocket to localhost:8787 — and ``restartKissWebDaemon`` would
-// SIGTERM/SIGKILL them along with the daemon.
-//
-// The test spawns a REAL listener (a child node process) and connects
-// a REAL client from this test process, then asserts the child PID is
-// reported and this process's PID is not.
-//
-// Runs against the compiled extension under ``out/``:
-//
-//     tsc -p . && node test/pidsOnPortListenersOnly.test.js
 
 'use strict';
 
@@ -30,12 +12,6 @@ const path = require('path');
 const {spawn, execFileSync} = require('child_process');
 const Module = require('module');
 
-// DependencyInstaller requires 'vscode' at load time; redirect to the
-// shared on-disk stub (none of the code under test touches vscode).
-// ``_vscode-stub.js`` is a git-tracked fixture shared by tests running
-// in parallel; it already re-exports ``global.__kissVscodeStub || {}`` —
-// never rewrite or delete it here (writeFileSync truncates first, racing
-// a concurrent ``require('vscode')`` in sibling test processes).
 global.__kissVscodeStub = {
   workspace: {isTrusted: false, getConfiguration: () => ({get: () => undefined})},
   Uri: {joinPath: () => ({fsPath: ''})},
@@ -59,8 +35,6 @@ assert.strictEqual(
   'pidsOnPort must be exported from the compiled DependencyInstaller',
 );
 
-// lsof must exist for this test to be meaningful (it is the tool the
-// production code shells out to).
 try {
   execFileSync('lsof', ['-v'], {stdio: 'ignore'});
 } catch {
@@ -70,7 +44,6 @@ try {
 }
 
 async function main() {
-  // Child process: real TCP listener on an ephemeral port.
   const listenerSrc =
     "const net=require('net');" +
     "const s=net.createServer(c=>{});" +
@@ -90,8 +63,6 @@ async function main() {
     setTimeout(() => reject(new Error('listener start timeout')), 10000);
   });
 
-  // Real client connection from THIS process (plays the role of
-  // cloudflared / the browser in production).
   const client = net.connect({host: '127.0.0.1', port});
   await new Promise((resolve, reject) => {
     client.once('connect', resolve);
@@ -129,7 +100,6 @@ async function main() {
     );
   });
 
-  // Find a genuinely free port (bind ephemeral, then release it).
   const freePort = await new Promise(resolve => {
     const free = net.createServer();
     free.listen(0, '127.0.0.1', () => {

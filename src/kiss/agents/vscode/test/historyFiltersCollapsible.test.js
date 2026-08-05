@@ -2,56 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test for the collapsible "Filters" panel in the task
-// History sidebar.  The status filter chips (Running / Errored /
-// Succeeded / Workspace / Favorites) and the From/To date range
-// used for filtering tasks must live inside a collapsible panel
-// titled "Filters" — in BOTH the VS Code extension webview and the
-// remote web chat, which share this very ``media/chat.html`` +
-// ``media/main.js`` pair (see ``buildChatHtml`` in SorcarTab.ts and
-// ``_build_html`` in src/kiss/server/web_server.py).
-//
-// Requirements driven by this test:
-//
-//   1. chat.html wraps the whole ``.history-filter-bar`` (chips +
-//      date range) inside a ``#history-filters-body`` container that
-//      belongs to a ``#history-filters-panel`` wrapper sitting
-//      between the history search box and ``#history-list``.
-//
-//   2. The panel header is a real ``<button id=
-//      "history-filters-toggle">`` labelled "Filters" with proper
-//      disclosure semantics: ``aria-expanded`` reflecting the state
-//      and ``aria-controls="history-filters-body"``.
-//
-//   3. The panel is COLLAPSED by default: the body carries the
-//      ``hidden`` attribute and ``aria-expanded`` is "false".  Once
-//      the user expands it, every filter control (five chip
-//      checkboxes, two date inputs, two picker buttons) is present
-//      and visible inside it — i.e. the filter buttons and dates are
-//      visible whenever the panel is uncollapsed.
-//
-//   4. Clicking the toggle expands the panel (body not hidden,
-//      ``aria-expanded="true"``) and clicking again collapses it.
-//
-//   5. The collapsed/expanded choice persists across webview
-//      reloads via ``localStorage``.
-//
-//   6. Filtering still works with the panel wrapper in place:
-//      unchecking a chip inside the expanded panel hides matching
-//      history rows.
-//
-//   7. main.css styles the toggle as an interactive disclosure
-//      header (pointer cursor, rotating chevron) and guarantees a
-//      hidden body stays ``display: none``.
-//
-// This test drives the production ``media/main.js`` + real
-// ``media/chat.html`` markup inside jsdom — no mocks of project
-// code — exactly like ``historyFilterChips.test.js``.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/historyFiltersCollapsible.test.js
 
 'use strict';
 
@@ -62,13 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Load the real chat.html + main.js into a jsdom webview.
- *
- * ``preSetup(win)`` runs after the DOM exists but BEFORE main.js is
- * evaluated — tests use it to seed ``localStorage`` and verify the
- * persisted-state restore path.
- */
 function makeWebview(preSetup) {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -101,7 +44,10 @@ function makeWebview(preSetup) {
   if (preSetup) preSetup(win);
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
@@ -110,7 +56,6 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** Visible (display !== 'none') history row titles. */
 function visibleTitles(win) {
   const list = win.document.getElementById('history-list');
   const out = [];
@@ -208,7 +153,6 @@ function testFiltersPanelMarkup() {
       'sidebar panel',
   );
 
-  // The panel sits between the search box and the history list.
   const historyPanel = doc.getElementById('sidebar-tab-history-panel');
   const kids = Array.from(historyPanel.children);
   const searchIdx = kids.findIndex(el => el.classList.contains('search-wrap'));
@@ -261,7 +205,6 @@ function testFiltersPanelMarkup() {
     'the body must be a direct child of #history-filters-panel',
   );
 
-  // The whole filter bar (chips + dates) lives INSIDE the body.
   const bar = doc.querySelector('.history-filter-bar');
   assert.ok(bar, '.history-filter-bar must exist');
   assert.strictEqual(
@@ -287,9 +230,6 @@ function testDefaultCollapsedThenControlsVisibleOnExpand() {
   const {win} = makeWebview();
   const doc = win.document;
 
-  // ``#app`` ships hidden in the static HTML and is revealed once the
-  // host connects; flip it here exactly like ``setServerLoading(false)``
-  // does in production so ancestor-visibility checks are meaningful.
   doc.getElementById('app').style.display = '';
 
   const toggle = doc.getElementById('history-filters-toggle');
@@ -305,8 +245,6 @@ function testDefaultCollapsedThenControlsVisibleOnExpand() {
     'the body must carry the hidden attribute while collapsed',
   );
 
-  // Expanding reveals every filter button and date input (not inside
-  // any hidden ancestor and not display:none itself).
   clickToggle(win);
   for (const id of FILTER_CONTROL_IDS) {
     let el = doc.getElementById(id);
@@ -358,7 +296,6 @@ function testToggleExpandsAndCollapses() {
 }
 
 function testExpandedStatePersists() {
-  // Expand the panel and capture what was persisted.
   const first = makeWebview();
   clickToggle(first.win);
   const persistedItems = {};
@@ -372,7 +309,6 @@ function testExpandedStatePersists() {
     'expanding must persist the choice in localStorage',
   );
 
-  // A fresh webview seeded with the SAME storage restores expanded.
   const second = makeWebview(win => {
     for (const [k, v] of Object.entries(persistedItems)) {
       win.localStorage.setItem(k, v);
@@ -391,7 +327,6 @@ function testExpandedStatePersists() {
     'a reloaded webview must keep the body visible',
   );
 
-  // Collapsing again also persists, and a third webview restores it.
   clickToggle(second.win);
   const collapsedItems = {};
   for (let i = 0; i < second.win.localStorage.length; i++) {
@@ -432,7 +367,6 @@ function testFilteringStillWorksInsidePanel() {
     'all three rows visible with the default collapsed panel',
   );
 
-  // Expand the panel so the user can reach the filter chips.
   clickToggle(win);
 
   const toggle = (id, checked) => {
@@ -454,7 +388,6 @@ function testFilteringStillWorksInsidePanel() {
     're-checking the chip shows every row again',
   );
 
-  // Collapsing the panel must not clear the active filters.
   toggle('hf-completed', false);
   clickToggle(win);
   assert.deepStrictEqual(
@@ -468,9 +401,6 @@ function testFilteringStillWorksInsidePanel() {
 }
 
 function testLocalStorageUnavailableFallsBackToCollapsed() {
-  // Some embedders deny localStorage entirely (the accessor throws).
-  // The panel must still default to collapsed and stay toggleable —
-  // this drives the two catch branches of the persistence wiring.
   const {win} = makeWebview(w => {
     Object.defineProperty(w, 'localStorage', {
       configurable: true,

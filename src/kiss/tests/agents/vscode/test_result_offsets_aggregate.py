@@ -51,14 +51,10 @@ def test_result_panel_adds_budget_offset_from_subagents() -> None:
     """
     printer = _CapturePrinter()
     printer._thread_local.task_id = "parent-tab"
-    # Simulate run_parallel having accumulated three sub-agents'
-    # cost / tokens / steps into the printer offsets.
-    printer.budget_offset = 0.0615 + 0.0721 + 0.0636  # = 0.1972
+    printer.budget_offset = 0.0615 + 0.0721 + 0.0636
     printer.tokens_offset = 12_345
     printer.steps_offset = 30
 
-    # Executor finishes and prints its own "result" with the executor's
-    # OWN budget — sub-agent cost lives in budget_offset, not here.
     printer.print(
         "summary: All three sub-tasks done\nsuccess: true\n",
         type="result",
@@ -71,7 +67,6 @@ def test_result_panel_adds_budget_offset_from_subagents() -> None:
     assert len(results) == 1, results
     event = results[0]
 
-    # Total cost must be executor cost + sub-agent offset.
     expected_total_cost = 0.1058 + 0.1972
     assert event["cost"].startswith("$"), event
     got = float(event["cost"][1:])
@@ -125,6 +120,5 @@ def test_result_panel_handles_na_cost() -> None:
     results = _result_events(printer)
     event = results[0]
     assert event["cost"] == "N/A"
-    # tokens / steps offsets still applied
     assert event["total_tokens"] == 110
     assert event["step_count"] == 5

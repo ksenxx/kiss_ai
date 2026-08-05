@@ -38,20 +38,15 @@ def test_closing_active_tab_adopts_surviving_tab(tmp_path: Path) -> None:
         ctx = tool._context
         assert ctx is not None
 
-        # A second, real tab in the same context (e.g. opened earlier
-        # via a target=_blank link).
         survivor = ctx.new_page()
         survivor.goto(b.as_uri())
 
-        # The user closes the ACTIVE tab out from under the tool.
         tool._page.close()
 
         out = tool.get_page_content()
 
-        # The surviving tab (and the whole session) must be preserved…
         assert tool._context is ctx, "browser session was torn down"
         assert not survivor.is_closed(), "surviving tab was closed"
-        # …and the tool must now operate on the surviving tab.
         assert "KeepMe" in out, out
     finally:
         tool.close()

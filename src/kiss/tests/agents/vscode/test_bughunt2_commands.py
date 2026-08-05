@@ -64,7 +64,6 @@ class TestCompleteSnapshotClobber(unittest.TestCase):
         """A non-string ``activeFileContent`` is 'not supplied', not ''."""
         server, _events = _make_server()
         conn_id = "win-a"
-        # 1. A well-formed complete command establishes the snapshot.
         server._handle_command({
             "type": "complete",
             "query": "",
@@ -80,9 +79,6 @@ class TestCompleteSnapshotClobber(unittest.TestCase):
             server._last_active_content.get(conn_id),
             "unique_snapshot_token = 1\n",
         )
-        # 2. A malformed command (numeric content, junk file) arrives —
-        #    e.g. from a buggy or hostile client.  It must not corrupt
-        #    either half of the snapshot.
         server._handle_command({
             "type": "complete",
             "query": "",
@@ -115,7 +111,6 @@ class TestCompleteSnapshotClobber(unittest.TestCase):
             "connId": conn_id,
             "tabId": "t1",
         })
-        # The user switches to a genuinely empty file.
         server._handle_command({
             "type": "complete",
             "query": "",
@@ -185,10 +180,6 @@ class TestRunStartWindowPromptLoss(unittest.TestCase):
             "workDir": work_dir,
             "useWorktree": False,
             "autoCommit": False,
-            # A model that cannot resolve: the real worker thread runs,
-            # fails fast inside ``_run_task``'s guarded setup (no LLM
-            # call is ever attempted), and its ``finally`` cleans up —
-            # exactly the production error path.
             "model": "kiss-bughunt2-no-such-model",
         }
         t1 = threading.Thread(
@@ -199,9 +190,6 @@ class TestRunStartWindowPromptLoss(unittest.TestCase):
         assert self.first_clear_entered.wait(timeout=30), (
             "first run never reached its clear broadcast"
         )
-        # First submit is mid-``clear``-broadcast: ``task_thread`` is
-        # assigned but NOT yet started and ``is_task_active`` is still
-        # False — the exact start window.
         second_cmd = dict(first_cmd)
         second_cmd["prompt"] = "bughunt2 follow-up during start window"
         self.server._handle_command(second_cmd)
@@ -217,7 +205,6 @@ class TestRunStartWindowPromptLoss(unittest.TestCase):
             ]
         self.release.set()
         t1.join(timeout=30)
-        # Let the real worker finish and clean up its state.
         deadline = time.time() + 30
         while time.time() < deadline:
             state = _RunningAgentState.running_agent_states.get(tab_id)
