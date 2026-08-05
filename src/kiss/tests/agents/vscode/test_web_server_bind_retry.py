@@ -56,8 +56,6 @@ class _BindRetryTestBase(IsolatedAsyncioTestCase):
     """Common knob-shortening setup so the retry loop terminates fast."""
 
     async def asyncSetUp(self) -> None:
-        # Original constants, restored in teardown so a failure in
-        # one test does not slow neighbouring tests.
         self._orig_attempts = ws_mod._BIND_RETRY_ATTEMPTS
         self._orig_backoff = ws_mod._BIND_RETRY_BACKOFF
         ws_mod._BIND_RETRY_ATTEMPTS = 3
@@ -81,14 +79,11 @@ class TestPortBusyExitsCleanly(_BindRetryTestBase):
                 host="127.0.0.1",
                 port=port,
                 work_dir=self._tmpdir.name,
-                # Use a per-test UDS path so concurrent test runs do
-                # not race on the shared ``~/.kiss/sorcar.sock``.
                 uds_path=f"{self._tmpdir.name}/sorcar.sock",
             )
             with self.assertRaises(SystemExit) as ctx:
                 await server._setup_server()
             self.assertEqual(ctx.exception.code, 2)
-            # The server must NOT have been left half-initialised.
             self.assertIsNone(server._ws_server)
         finally:
             busy.close()
@@ -104,8 +99,6 @@ class TestPortFreesDuringRetry(_BindRetryTestBase):
         its port is in TIME_WAIT, the supervisor respawned, the port
         frees a couple of hundred ms later" race.
         """
-        # Allow more attempts so the asynchronous "release after a
-        # short sleep" task definitely lands inside the retry window.
         ws_mod._BIND_RETRY_ATTEMPTS = 6
         ws_mod._BIND_RETRY_BACKOFF = (0.05,) * 6
 

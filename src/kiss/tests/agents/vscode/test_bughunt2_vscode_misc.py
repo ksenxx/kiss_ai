@@ -63,8 +63,6 @@ class TestNonFiniteBudgetRejected(unittest.TestCase):
         vscode_config.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         vscode_config.CONFIG_PATH.write_text(raw)
 
-    # -- load_config: hand-edited config.json -------------------------
-
     def test_load_config_nan_literal_falls_back_to_default(self) -> None:
         """A ``NaN`` literal in config.json must not survive load_config."""
         self._write_config_json('{"max_budget": NaN}')
@@ -95,8 +93,6 @@ class TestNonFiniteBudgetRejected(unittest.TestCase):
         cfg = load_config()
         self.assertEqual(cfg["max_budget"], DEFAULTS["max_budget"])
 
-    # -- sanitize_config: direct saveConfig payloads -------------------
-
     def test_sanitize_config_rejects_nan_float(self) -> None:
         out = sanitize_config({"max_budget": float("nan")})
         self.assertEqual(out["max_budget"], DEFAULTS["max_budget"])
@@ -115,16 +111,12 @@ class TestNonFiniteBudgetRejected(unittest.TestCase):
             sanitize_config({"max_budget": "42"})["max_budget"], 42.0,
         )
 
-    # -- apply_config_to_env: the enforcement sink ---------------------
-
     def test_apply_config_nan_keeps_budget_enforceable(self) -> None:
         """End-to-end: nan budget must not disable enforcement."""
         apply_config_to_env({"max_budget": float("nan")})
         budget = config_module.DEFAULT_CONFIG.max_budget
         self.assertTrue(math.isfinite(budget))
         self.assertEqual(budget, float(DEFAULTS["max_budget"]))
-        # The actual enforcement predicate: an over-budget cost must
-        # compare as over budget (nan makes this False for any cost).
         self.assertTrue(budget * 2 > budget)
 
     def test_apply_config_inf_falls_back_to_default(self) -> None:

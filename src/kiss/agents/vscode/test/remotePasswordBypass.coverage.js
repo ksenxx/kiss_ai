@@ -2,17 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Coverage gate for the remote-password shim (``_WS_SHIM_JS`` in
-// ``web_server.py``): re-runs ``remotePasswordBypass.test.js`` under
-// V8's built-in coverage (``NODE_V8_COVERAGE``) and FAILS unless every
-// line of the shim was executed.  The test evals the shim with a
-// ``//# sourceURL=ws-shim.js`` pragma, which is how the coverage JSON
-// entries for the shim are identified here.
-//
-// Run with:
-//
-//     node src/kiss/agents/vscode/test/remotePasswordBypass.coverage.js
 
 'use strict';
 
@@ -35,10 +24,6 @@ function readShimJs() {
   return m[1];
 }
 
-// Paint one eval-instance's char coverage from its V8 ranges.  Ranges
-// nest; applying them sorted by (startOffset asc, endOffset desc)
-// paints outer ranges first so inner ranges override, matching V8
-// block-coverage semantics.
 function paintInstance(functions, length) {
   const painted = new Uint8Array(length);
   const ranges = [];
@@ -68,7 +53,6 @@ function main() {
     process.exit(res.status || 1);
   }
 
-  // A shim char is covered if ANY eval instance executed it.
   const covered = new Uint8Array(shim.length);
   let instances = 0;
   for (const f of fs.readdirSync(covDir)) {
@@ -85,8 +69,6 @@ function main() {
     'no ws-shim.js coverage entries found — did the test stop eval-ing ' +
     'the shim with the sourceURL pragma?');
 
-  // Line coverage: every non-blank line must have at least one covered
-  // non-whitespace character.
   const lines = shim.split('\n');
   let offset = 0;
   let total = 0;
@@ -120,13 +102,6 @@ function main() {
     process.exit(1);
   }
 
-  // Branch-level gate: every uncovered char span must be the single
-  // spec-unreachable branch — the defensive catch around
-  // ``window.location.reload()``.  ``Location.reload`` is an
-  // unforgeable platform API (its property cannot be replaced, and it
-  // does not throw when invoked on the page's own location), so this
-  // catch exists only for exotic embedded browsers and cannot be
-  // executed from a test.  Everything else must be covered.
   const badSpans = [];
   let i = 0;
   while (i < shim.length) {

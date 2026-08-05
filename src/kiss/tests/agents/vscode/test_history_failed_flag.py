@@ -107,11 +107,7 @@ class TestHistoryFailedFlag(unittest.TestCase):
             task_id=killed_id,
         )
 
-        # Real recovery flow: sentinel row left by a prior process,
-        # rewritten by ``_recover_orphaned_tasks``.
         recovered_id, _ = th._add_task("recovered task")
-        # Leave the sentinel in place and let the recovery sweep
-        # rewrite it, exactly as it would on fresh-server boot.
         th._recover_orphaned_tasks(set())
 
         self.server._handle_command({"type": "getHistory"})

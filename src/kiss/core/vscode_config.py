@@ -28,40 +28,11 @@ from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
-# Valid POSIX environment-variable identifier.  ``save_api_key_to_shell``
-# interpolates the key *name* into the RC ``export`` line verbatim (only
-# the value is shell-quoted), and ``_cmd_save_config`` forwards any
-# string name from an untrusted client payload — so the name must be
-# validated or a newline/metacharacter name writes arbitrary commands
-# into the user's shell RC file.
 _ENV_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
-# Serializes the read-modify-write of ``config.json`` in ``save_config``.
-# The on-disk write is already atomic (staged temp file + ``os.replace``),
-# but atomicity alone does not prevent a lost update: two threads that
-# each read the same old file, overlay only their own keys, and then
-# replace it would drop one another's change.  Holding this lock across
-# the entire load-merge-store sequence makes concurrent ``save_config``
-# calls (e.g. an agent persisting ``last_model`` while the command
-# handler persists a settings toggle) serialize so every update survives.
 _config_lock = threading.Lock()
 
-# ``CONFIG_DIR``/``CONFIG_PATH`` are exposed as *lazy* module
-# attributes via the PEP 562 ``__getattr__`` below: each access
-# re-resolves ``$KISS_HOME`` (or ``~/.kiss``) through
-# :func:`kiss.core.config.kiss_home`, so ``KISS_HOME`` set after
-# import (as ``src/kiss/tests/conftest.py`` does) is honored and tests
-# never clobber the user's real ``~/.kiss/config.json`` — which the
-# running ``kiss-web`` daemon watches and would otherwise restart its
-# cloudflared tunnel for every time a test calls
-# ``save_config({"remote_password": ...})``.  Tests may still assign
-# ``vscode_config.CONFIG_DIR = tmp`` to pin an explicit override; the
-# assignment lands in the module dict and shadows the lazy lookup
-# until the test deletes or restores it.
 if TYPE_CHECKING:
-    # Static declaration of the PEP 562 lazy attributes so type
-    # checkers (pyright) know they exist; at runtime the names are
-    # absent from the module dict unless a test pins an override.
     CONFIG_DIR: Path
     CONFIG_PATH: Path
 
@@ -93,29 +64,25 @@ DEFAULTS: dict[str, Any] = {
     "custom_headers": "",
     "use_web_browser": True,
     "remote_password": "",
-    # ``auto_commit_mode`` is the persistent "Auto commit" toggle in
-    # the menu dropdown.  When True, post-task processing skips the
-    # interactive merge/diff workflow and auto-commits the agent's
-    # changes.  In worktree mode the worktree is additionally
-    # auto-merged into the original branch.  Mirrored via
-    # ``update_settings(auto_commit_mode=...)`` (distinct from the
-    # one-shot ``auto_commit=True`` trigger used by the legacy icon
-    # button).
     "auto_commit_mode": True,
-    # Settings below were previously missing from DEFAULTS, causing
-    # ``save_config`` to silently drop them.  Added so that
-    # ``update_settings`` changes persist across tasks.
     "is_parallel": True,
     "is_worktree": True,
-    "demo_mode": False,
     "work_dir": "",
-    # ``last_model`` is the most recently selected model name.  It is a
-    # persistent user preference (like the toggles above) and is stored
-    # here in ``config.json`` rather than the SQLite ``model_usage``
-    # table — the database now tracks only per-model usage *counts*, not
-    # which model was last selected.
     "last_model": "",
 }
+
+RETIRED_KEYS: frozenset[str] = frozenset({"demo_mode"})
+"""Settings that used to exist and must be forgotten on sight.
+
+``config.json`` is written by every previous release, so dropping a key
+from :data:`DEFAULTS` is not enough: :func:`load_config` overlays whatever
+the file holds, :func:`sanitize_config` passes unknown keys through (that
+is how genuine extension-owned keys such as ``email`` and ``tunnel_token``
+survive), and :func:`save_config` rewrites the file from its own previous
+contents.  A retired key would therefore be read back, echoed to every
+client in ``configData``, and re-persisted forever.  Listing it here
+purges it from both the value read and the file written.
+"""
 
 API_KEY_ENV_VARS: frozenset[str] = frozenset({
     "GEMINI_API_KEY",
@@ -164,7 +131,8 @@ def sanitize_config(data: dict[str, Any]) -> dict[str, Any]:
     ``1.0``/``0.0``; strings keep only
     genuine ``str`` values (falling back to the default otherwise).
     Non-DEFAULTS keys (e.g. ``tunnel_token``, ``email``) pass through
-    untouched.
+    untouched, except the retired ones listed in :data:`RETIRED_KEYS`,
+    which are dropped.
 
     Args:
         data: Raw configuration dict.
@@ -172,7 +140,7 @@ def sanitize_config(data: dict[str, Any]) -> dict[str, Any]:
     Returns:
         A new dict with sanitized values; *data* is not modified.
     """
-    result = dict(data)
+    result = {k: v for k, v in data.items() if k not in RETIRED_KEYS}
     for key, default in DEFAULTS.items():
         if key not in result:
             continue
@@ -182,10 +150,6 @@ def sanitize_config(data: dict[str, Any]) -> dict[str, Any]:
                 result[key] = bool(value)
         elif isinstance(default, int | float):
             if isinstance(value, bool):
-                # ``bool`` is an ``int`` subclass and ``float(True)``
-                # succeeds — without this rejection a boolean
-                # ``max_budget`` would silently become ``1.0``/``0.0``
-                # instead of falling back to the default.
                 logger.debug(
                     "Ignoring boolean config value %s=%r", key, value,
                 )
@@ -200,10 +164,6 @@ def sanitize_config(data: dict[str, Any]) -> dict[str, Any]:
                     )
                     result[key] = default
                     continue
-            # ``json.load`` accepts NaN/Infinity literals (and ``1e999``
-            # overflows to inf), and ``float("nan")`` succeeds above —
-            # a non-finite budget silently disables every
-            # ``cost > max_budget`` check, so reject it here.
             if not math.isfinite(value):
                 logger.debug(
                     "Ignoring non-finite config value %s=%r", key, value,
@@ -260,14 +220,6 @@ def save_config(data: dict[str, Any]) -> None:
     cfg_dir = _config_dir()
     cfg_path = _config_path()
     cfg_dir.mkdir(parents=True, exist_ok=True)
-    # Serialize the whole read-modify-write so concurrent callers cannot
-    # each read the same old file and clobber one another's keys.  The
-    # threading lock covers callers inside this process; the ``flock``
-    # on a sidecar lock file covers concurrent *processes* (e.g. the
-    # kiss-web daemon persisting tunnel state while a VS Code window's
-    # service daemon persists ``last_model``) — without it, two daemons
-    # that each read the same old file and replace it would drop one
-    # another's keys.
     with (
         _config_lock,
         open(cfg_dir / ".config.lock", "w", encoding="utf-8") as lock_file,
@@ -286,14 +238,12 @@ def save_config(data: dict[str, Any]) -> None:
             for k in DEFAULTS:
                 if k in data:
                     existing[k] = data[k]
+            for k in RETIRED_KEYS:
+                existing.pop(k, None)
             serialized = json.dumps(existing, indent=2)
             fd, tmp = tempfile.mkstemp(
                 prefix=".kiss-config-", dir=str(cfg_dir),
             )
-            # W3-D3: unlink the staged temp file when the write or the
-            # replace fails (ENOSPC, EACCES, …) — otherwise every
-            # failure leaks one ``.kiss-config-*`` file into
-            # ``~/.kiss/`` forever.
             try:
                 try:
                     os.write(fd, serialized.encode("utf-8"))
@@ -321,9 +271,6 @@ def _get_user_shell() -> str:
     return "bash"
 
 
-# Fallback absolute locations searched when the shell binary cannot
-# be found on ``PATH`` (e.g. when ``source_shell_env`` is invoked from
-# a cron job started with a stripped environment).
 _SHELL_FALLBACK_PATHS: dict[str, tuple[str, ...]] = {
     "zsh": ("/bin/zsh", "/usr/bin/zsh", "/usr/local/bin/zsh", "/opt/homebrew/bin/zsh"),
     "bash": ("/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash", "/opt/homebrew/bin/bash"),
@@ -400,9 +347,6 @@ def save_api_key_to_shell(key_name: str, key_value: str) -> None:
     rc = _shell_rc_path(shell)
     rc.parent.mkdir(parents=True, exist_ok=True)
 
-    # H3 — shell-quote the value so embedded `"`, `$`, backticks, etc.
-    # cannot break out of the export line and execute arbitrary commands
-    # when the RC is sourced.
     quoted = shlex.quote(key_value)
     if shell == "fish":
         export_line = f"set -gx {key_name} {quoted}"
@@ -429,8 +373,6 @@ def save_api_key_to_shell(key_name: str, key_value: str) -> None:
             lines.append("\n")
         lines.append(export_line + "\n")
 
-    # H3 — write atomically with mode 0600 so the RC (which now contains
-    # API keys) is never world-readable, even momentarily.
     _atomic_write_text_secure(rc, "".join(lines))
 
     os.environ[key_name] = key_value
@@ -450,9 +392,6 @@ def _atomic_write_text_secure(target: Path, content: str) -> None:
     parent = target.parent
     parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".kiss-rc-", dir=str(parent))
-    # W3-D3: unlink the staged temp file when the write or the replace
-    # fails — otherwise every failure leaks one ``.kiss-rc-*`` file
-    # into the user's HOME directory (visible litter next to the RC).
     try:
         try:
             os.write(fd, content.encode("utf-8"))
@@ -466,9 +405,6 @@ def _atomic_write_text_secure(target: Path, content: str) -> None:
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
-    # Defensive: ensure the destination is 0600 even if it pre-existed
-    # with looser permissions (replace preserves the source mode but
-    # some filesystems don't honour that contract).
     try:
         os.chmod(target, 0o600)
     except OSError:
@@ -500,10 +436,6 @@ def apply_config_to_env(cfg: dict[str, Any]) -> None:
 
     budget = cfg.get("max_budget", DEFAULTS["max_budget"])
     if isinstance(budget, bool):
-        # ``bool`` is an ``int`` subclass, so ``float(True)`` succeeds
-        # and would silently shrink the live budget to $1.00 / $0.00.
-        # ``sanitize_config`` rejects booleans for numeric keys; mirror
-        # that here so a raw (unsanitized) payload behaves identically.
         logger.debug("Ignoring boolean max_budget %r", budget)
         budget_value = float(DEFAULTS["max_budget"])
     else:
@@ -512,10 +444,6 @@ def apply_config_to_env(cfg: dict[str, Any]) -> None:
         except (TypeError, ValueError):
             logger.debug("Ignoring non-numeric max_budget %r", budget)
             budget_value = float(DEFAULTS["max_budget"])
-    # ``float("nan")`` / ``float("inf")`` raise nothing above, and a
-    # genuine non-finite float passes ``float()`` unchanged — but a
-    # nan/inf budget makes every ``cost > max_budget`` check False,
-    # silently disabling budget enforcement.  Fall back to the default.
     if not math.isfinite(budget_value):
         logger.debug("Ignoring non-finite max_budget %r", budget)
         budget_value = float(DEFAULTS["max_budget"])
@@ -603,11 +531,6 @@ def source_shell_env() -> None:
     shell = _get_user_shell()
     rc = _shell_rc_path(shell)
     if not rc.exists():
-        # On a fresh installation there may be no shell RC file yet, but
-        # an API key can still be present in the inherited environment.
-        # Refresh ``DEFAULT_CONFIG`` so it reflects ``os.environ`` even
-        # when there is nothing to source (mirrors the other early-return
-        # path below, which also refreshes).
         _refresh_config()
         return
     shell_path = _resolve_shell_path(shell)
@@ -618,10 +541,6 @@ def source_shell_env() -> None:
         )
         _refresh_config()
         return
-    # ``source_shell_env`` may run from a cron / launchd context with a
-    # stripped ``PATH``.  Augment it with standard system locations so
-    # the inner shell can locate ``env`` (and any RC-referenced
-    # utilities such as ``brew shellenv``).
     augmented_path = os.pathsep.join(
         p for p in (
             os.environ.get("PATH", ""),
@@ -635,50 +554,11 @@ def source_shell_env() -> None:
     )
     sub_env = {**os.environ, "PATH": augmented_path}
     try:
-        # H1 — shell-quote ``rc`` so a HOME containing single-quotes,
-        # spaces, or other metacharacters cannot inject extra shell
-        # commands when the RC is sourced.
         rc_q = shlex.quote(str(rc))
-        # ``env -0`` separates records with NUL so a value that
-        # CONTAINS newlines can neither forge nor truncate a key:
-        # with line-based ``env`` output, an unrelated exported
-        # variable whose value embeds ``"\nOPENAI_API_KEY=forged"``
-        # produced a line the parser below imported, silently
-        # overwriting the real key (and a legitimate multi-line key
-        # was cut at its first line).  The plain-``env`` fallback only
-        # runs on systems whose ``env`` lacks ``-0``.
-        # W3-D2: the env dump is unconditional (``;``, not ``&&``) in
-        # BOTH branches.  ``source`` returns the exit status of the
-        # RC's *last command* — a completely normal RC whose final
-        # line is e.g. a failing ``which foo`` or a false
-        # ``[ -f x ] && …`` test made ``source rc && { env…; }``
-        # silently skip the dump, importing ZERO keys with no error,
-        # while the fish branch already dumped unconditionally.  The
-        # RC's exit status is irrelevant: the dump is the whole point
-        # of the subprocess.
         if shell == "fish":
-            # fish does not honour shlex.quote's POSIX rules verbatim,
-            # but the safe subset (no single-quote, no $) round-trips.
             cmd = f"source {rc_q} 2>/dev/null; env -0 2>/dev/null; or env"
         else:
             cmd = f"source {rc_q} 2>/dev/null; {{ env -0 2>/dev/null || env; }}"
-        # Use ``Popen`` as a context manager (rather than the higher
-        # level ``subprocess.run``) so the stdout/stderr pipe fds are
-        # *always* closed via ``__exit__`` — even on the rare paths
-        # where ``run`` would have re-raised before tearing the pipes
-        # down (e.g. ``communicate`` raising ``OSError`` after the
-        # ``TimeoutExpired`` kill path).  ``stdin=DEVNULL`` avoids
-        # leaking the parent's stdin fd into the child and prevents
-        # any RC line that reads from stdin (e.g. an interactive
-        # ``read`` in ``.bashrc``) from blocking until the timeout.
-        # Reading ``stderr`` into a sink (rather than discarding via
-        # ``2>/dev/null`` inside the cmd alone) is fine — the pipe is
-        # closed on exit.  Tests across the suite call
-        # ``source_shell_env`` many times via the CLI client / VSCode
-        # config code paths; leaking even two fds per invocation
-        # eventually exhausts ``RLIMIT_NOFILE`` and surfaces as
-        # ``OSError: [Errno 24] Too many open files`` in unrelated
-        # later tests.
         with subprocess.Popen(
             [shell_path, "-c", cmd],
             stdin=subprocess.DEVNULL,
@@ -692,14 +572,8 @@ def source_shell_env() -> None:
                 stdout, _stderr = proc.communicate(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                # Drain the pipes so ``__exit__``'s ``wait()`` does
-                # not deadlock on a full PIPE buffer, then re-raise so
-                # the surrounding ``except`` logs the timeout.
                 proc.communicate()
                 raise
-        # NUL-separated ``env -0`` records when available (exact —
-        # values may contain newlines); newline-split fallback for an
-        # ``env`` without ``-0`` support.
         records = (
             stdout.split("\0") if "\0" in stdout else stdout.splitlines()
         )

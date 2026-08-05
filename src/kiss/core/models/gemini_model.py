@@ -639,11 +639,6 @@ class GeminiModel(Model):
 
         content, function_calls = self._parse_parts(all_parts)
 
-        # Omit the ``tool_calls`` key entirely when the model made no
-        # calls: a ``tool_calls: None`` entry would be replayed verbatim
-        # after a model hand-off and rejected by other providers (e.g.
-        # the OpenAI Responses API fails with "Unknown parameter:
-        # 'input[N].tool_calls'").
         assistant_msg: dict[str, Any] = {"role": "assistant", "content": content}
         if function_calls:
             assistant_msg["tool_calls"] = [
@@ -673,12 +668,6 @@ class GeminiModel(Model):
             thoughts_tokens = getattr(um, "thoughts_token_count", 0) or 0
             output_tokens += thoughts_tokens
             cached_tokens = getattr(um, "cached_content_token_count", 0) or 0
-            # ``prompt_token_count`` INCLUDES the cached content (per the
-            # UsageMetadata reference), so cached tokens are subtracted and
-            # billed separately at the cache-read rate.  Server-side
-            # tool-use prompts (e.g. Google Search grounding) are reported
-            # separately in ``tool_use_prompt_token_count`` and billed as
-            # ordinary input tokens.
             tool_use_tokens = getattr(um, "tool_use_prompt_token_count", 0) or 0
             input_tokens = max(prompt_tokens - cached_tokens, 0) + tool_use_tokens
             return input_tokens, output_tokens, cached_tokens, 0

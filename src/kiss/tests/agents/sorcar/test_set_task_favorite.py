@@ -69,8 +69,6 @@ class TestSetTaskFavorite:
         """Tasks created without ``extra`` have no ``is_favorite`` key."""
         task_id, _ = th._add_task("plain task")
         extra = _read_extra(task_id)
-        # Empty extra column → empty dict → no is_favorite key, which
-        # the server reads as False via dict.get default.
         assert extra.get("is_favorite", False) is False
 
     def test_set_favorite_true_on_empty_extra(self) -> None:
@@ -143,9 +141,6 @@ class TestSetTaskFavorite:
         db.commit()
         assert th._set_task_favorite(task_id, True) is True
         extra = _read_extra(task_id)
-        # r3-H3: ``_row_to_extra_json`` emits every typed column.
-        # Pop the defaulted ones so the test focuses on the
-        # write-under-test: ``is_favorite`` flips to True.
         for k in (
             "auto_commit_mode", "is_parallel", "is_worktree",
             "model", "work_dir", "version",

@@ -31,7 +31,6 @@ class TestClaudeCodeBareFlags(unittest.TestCase):
         args = m._build_cli_args()
         self.assertIn("--print", args)
         self.assertIn("--no-session-persistence", args)
-        # ``--tools`` followed by an empty string disables built-in tools.
         self.assertIn("--tools", args)
         idx = args.index("--tools")
         self.assertEqual(args[idx + 1], "")

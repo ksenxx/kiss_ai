@@ -2,15 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Regression tests for the History-sidebar copy buttons in
-// media/main.js: the per-row task copy button (makeSidebarCopyButton)
-// and the tiny per-id copy buttons on the ids line (makeIdCopyButton).
-// Locks in the clipboard payloads and the icon-swap "copied" feedback
-// so the duplicated builders can share one wiring helper without any
-// visible change.
-//
-//     node src/kiss/agents/vscode/test/simplify2_copy_buttons.test.js
 'use strict';
 
 const assert = require('assert');
@@ -38,7 +29,6 @@ async function run() {
   const {win} = makeWebview();
   const doc = win.document;
 
-  // Recording async clipboard, installed like a real secure context.
   const copied = [];
   Object.defineProperty(win.navigator, 'clipboard', {
     configurable: true,
@@ -52,7 +42,6 @@ async function run() {
 
   send(win, {type: 'history', sessions: [SESSION], offset: 0});
 
-  // --- Per-row task copy button copies the row's preview text. ---
   const rowBtn = doc.querySelector('.sidebar-item-copy');
   assert.ok(rowBtn, 'history row renders a .sidebar-item-copy button');
   const idleSvg = rowBtn.innerHTML;
@@ -62,7 +51,6 @@ async function run() {
   assert.ok(rowBtn.classList.contains('copied'), 'row button flashes');
   assert.notStrictEqual(rowBtn.innerHTML, idleSvg, 'icon swaps to check');
 
-  // --- Per-id copy buttons copy the raw chat / task ids. ---
   const chatBtn = doc.querySelector('.ids-copy-btn.ids-copy-chat');
   const taskBtn = doc.querySelector('.ids-copy-btn.ids-copy-task');
   assert.ok(chatBtn, 'ids line renders a chat-id copy button');
@@ -80,10 +68,6 @@ async function run() {
   assert.ok(chatBtn.classList.contains('copied'), 'chat button flashes');
   assert.ok(taskBtn.classList.contains('copied'), 'task button flashes');
 
-  // --- Preserve each builder's historical rapid-click timer semantics. ---
-  // A row-button second click does NOT cancel the first timer, so the first
-  // click still reverts it at t=1.5 s.  ID buttons do reset their timer and
-  // therefore remain flashed for 1.5 s after the second click.
   await sleep(1_000);
   rowBtn.click();
   chatBtn.click();

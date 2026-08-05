@@ -47,22 +47,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Effectively-unbounded wait used when the caller passes no timeout —
-# ``kiss.server.sorcar.run`` requires a finite deadline.
 _NO_TIMEOUT_SECONDS = 10 * 365 * 24 * 3600.0
 
-# Process-global lazily-started in-process daemon serving the API's
-# Unix-domain socket for third-party launches in processes that do not
-# already run a ``kiss-web`` daemon (channel CLIs, cron pollers).
-# Guarded by ``_API_SERVER_LOCK`` so concurrent first launches build
-# exactly one server.
 _API_SERVER: RemoteAccessServer | None = None
 _API_SERVER_SOCK: str = ""
 _API_SERVER_LOCK = threading.Lock()
 
-# Test / embedding seam: when set, launches that do not pass an
-# explicit ``sock_path`` connect to this socket instead of starting
-# the process-global in-process daemon.
 _SOCK_PATH_OVERRIDE: str | None = None
 
 
@@ -319,19 +309,11 @@ def run_agent_via_kiss_web(
         if token:
             release_tools(token)
 
-    # A task whose agent crashed abruptly ends without a terminal
-    # ``result`` event (that event is normally emitted by the agent's
-    # own failure contract), so ``result.text`` can be empty; channel
-    # runners relay the summary to users, so never leave it blank.
     summary = result.text or ("" if result.success else "Task failed")
     result_yaml = str(yaml.safe_dump(
         {"success": result.success, "summary": summary},
         sort_keys=False,
     ))
-    # Propagate the run's identity and usage onto the carrier
-    # instance: pollers read ``agent.chat_id`` to resume the
-    # conversation and CLI entry points print
-    # ``budget_used`` / ``total_tokens_used`` run stats.
     if result.chat_id and hasattr(agent, "_chat_id"):
         agent._chat_id = result.chat_id
     agent.last_run_result = result_yaml

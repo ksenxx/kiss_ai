@@ -2,9 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-/**
- * VS Code-like notifications rendered inside the KISS Sorcar chat webview.
- */
 
 import * as vscode from 'vscode';
 
@@ -21,28 +18,15 @@ function resolveAllPendingActions(): void {
   for (const resolve of resolvers) resolve(undefined);
 }
 
-/**
- * Register the active chat webview poster used by notification helpers.
- *
- * When no webview is registered, helpers fall back to VS Code's native
- * notification APIs so startup/install messages are still visible.
- */
 export function setWebviewNotificationPoster(
   notificationPoster: NotificationPost | undefined,
 ): void {
-  // Any poster change (clear OR replace) must resolve pending action
-  // promises that were registered against the previous poster.  The
-  // previous webview is no longer reachable so its toasts can never
-  // produce a notificationAction reply, and the new webview (if any)
-  // does not know about the old IDs.  Leaving them pending would hang
-  // flows like API-key prompts forever.
   if (notificationPoster !== poster) {
     resolveAllPendingActions();
   }
   poster = notificationPoster;
 }
 
-/** Resolve a pending webview-notification action selected by the user. */
 export function resolveWebviewNotificationAction(
   id: string,
   action: string | undefined,
@@ -112,7 +96,6 @@ function showNotification(
   });
 }
 
-/** Show an informational KISS notification in the chat webview. */
 export function showInformationNotification(
   message: string,
   ...items: unknown[]
@@ -120,7 +103,6 @@ export function showInformationNotification(
   return showNotification('info', message, ...items);
 }
 
-/** Show a warning KISS notification in the chat webview. */
 export function showWarningNotification(
   message: string,
   ...items: unknown[]
@@ -128,7 +110,6 @@ export function showWarningNotification(
   return showNotification('warning', message, ...items);
 }
 
-/** Show an error KISS notification in the chat webview. */
 export function showErrorNotification(
   message: string,
   ...items: unknown[]
@@ -136,9 +117,6 @@ export function showErrorNotification(
   return showNotification('error', message, ...items);
 }
 
-/**
- * Run a task with progress shown in the chat webview notification stack.
- */
 export function withWebviewNotificationProgress<R>(
   options: vscode.ProgressOptions,
   task: (

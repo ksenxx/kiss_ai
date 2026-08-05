@@ -2,38 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Integration test: a Sorcar webview tab that STARTED a running task,
-// then was closed and re-opened while the task is still running, MUST
-// keep receiving the daemon's tab-stamped events (status, task_events,
-// …) — even when VS Code fires the OLD webview's ``onDidDispose``
-// AFTER it has already re-resolved the view with the NEW webview.
-//
-// Why the earlier fix (resetting ``_disposed`` in resolveWebviewView)
-// is NOT enough:
-//
-//   VS Code does not guarantee dispose-then-resolve ordering when a
-//   sidebar webview view is re-shown / moved.  The fresh webview is
-//   commonly resolved FIRST (``resolveWebviewView`` runs, ``_disposed``
-//   is cleared, ``_view`` points at the new webview) and only THEN does
-//   the stale OLD webview's ``onDidDispose`` fire.  The previous fix's
-//   ``onDidDispose`` set ``this._disposed = true`` UNCONDITIONALLY, so
-//   the late dispose of the OLD webview clobbered the flag and the NEW
-//   webview stopped receiving every daemon->webview message again — the
-//   reopened tab never learns the task is still running, leaves
-//   ``isRunning`` false, and the user's next message is dropped exactly
-//   as in the original bug.
-//
-// This test drives the REAL compiled ``SorcarSidebarView.js`` and
-// ``AgentClient.js`` (only ``vscode`` is stubbed) against a real UDS
-// daemon socket.  It starts a task, RE-RESOLVES the view with a fresh
-// webview (reopen) and only THEN fires the OLD webview's onDidDispose
-// (the real VS Code ordering), then has the daemon stream live events
-// and asserts the NEW webview receives them.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/bughunt_reopen_late_dispose.test.js
 
 'use strict';
 
@@ -115,10 +83,6 @@ Module._resolveFilename = function (request, parent, ...rest) {
   return origResolve.call(this, request, parent, ...rest);
 };
 
-// ``_vscode-stub.js`` is a git-tracked fixture shared by tests running
-// in parallel; it already re-exports ``global.__kissVscodeStub`` — never
-// rewrite or delete it here (writeFileSync truncates first, racing a
-// concurrent ``require('vscode')`` in sibling test processes).
 global.__kissVscodeStub = vscodeStub;
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-reopen-ld-'));
@@ -218,7 +182,6 @@ async function runTests() {
 
   const TAB = 'tab-A';
 
-  // --- Open the tab and start a task ---------------------------------
   const wv1 = makeWebviewView();
   view.resolveWebviewView(wv1.webviewView, {}, {});
   wv1.fireMessage({type: 'ready', tabId: TAB, restoredTabs: []});
@@ -245,15 +208,9 @@ async function runTests() {
     'sanity: the launching tab receives status running:true',
   );
 
-  // --- Re-open the tab while the task is still running ----------------
-  // CRITICAL: VS Code re-resolves the view with the NEW webview FIRST
-  // (this is the common ordering when a sidebar view is re-shown), and
-  // only THEN fires the OLD webview's onDidDispose.
   const wv2 = makeWebviewView();
   view.resolveWebviewView(wv2.webviewView, {}, {});
 
-  // The stale OLD webview's dispose fires LATE — AFTER the new webview
-  // is already live.  It must NOT clobber forwarding to the new view.
   wv1.fireDispose();
 
   wv2.fireMessage({
@@ -263,8 +220,6 @@ async function runTests() {
   });
   await waitForClient();
 
-  // The daemon re-broadcasts the running status on resume and streams
-  // live events (exactly what _replay_session does on resumeSession).
   await daemonSend({
     type: 'status',
     running: true,

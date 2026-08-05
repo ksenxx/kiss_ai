@@ -52,8 +52,6 @@ def test_generate_times_out_on_stalled_stream(
     with pytest.raises(KISSError, match="timed out"):
         model.generate()
     elapsed = time.monotonic() - start
-    # Old behavior blocked for the fake CLI's full 30s sleep; the fix
-    # must abort right after the 2s timeout (5s reader-join grace max).
     assert elapsed < 15, f"generate() blocked for {elapsed:.1f}s despite timeout=2"
 
 

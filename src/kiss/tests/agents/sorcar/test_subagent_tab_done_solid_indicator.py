@@ -48,7 +48,6 @@ def _extract_render_tab_bar(src: str) -> str:
     balanced braces to find its closing ``}``.
     """
     start = src.index("function renderTabBar(")
-    # Find the opening ``{`` of the function body.
     open_brace = src.index("{", start)
     depth = 0
     i = open_brace
@@ -81,6 +80,25 @@ function _walk(root, fn) {
     fn(c);
     _walk(c, fn);
   }
+}
+
+function makeClassList(el) {
+  // DOMTokenList shim kept in sync with ``el.className`` (which
+  // ``_matches`` above reads).
+  return {
+    contains(name) {
+      return (el.className || '').split(/\s+/).filter(Boolean)
+        .includes(name);
+    },
+    add(name) {
+      if (!this.contains(name))
+        el.className = ((el.className || '') + ' ' + name).trim();
+    },
+    remove(name) {
+      el.className = (el.className || '').split(/\s+/)
+        .filter(c => c && c !== name).join(' ');
+    },
+  };
 }
 
 function makeElement(tag) {
@@ -134,13 +152,20 @@ function makeElement(tag) {
       return this._innerHTML || '';
     },
   };
+  el.classList = makeClassList(el);
   return el;
 }
 
 const tabListEl = makeElement('div');
 const tabBarEl = makeElement('div');
+// renderTabBar reads document.body's classes to decide whether to
+// append the remote webapp's theme-toggle button.  An unclassed body
+// models the VS Code webview, the surface whose main.css indicator
+// styling these tests pin.
+const bodyEl = makeElement('body');
 
 global.document = {
+  body: bodyEl,
   getElementById(id) {
     if (id === 'tab-list') return tabListEl;
     if (id === 'tab-bar') return tabBarEl;
@@ -303,10 +328,6 @@ class TestSubagentTabDoneSolidIndicator(unittest.TestCase):
             f"Done rule must include ``animation: none`` to stop the "
             f"pulse.  Got: {block!r}",
         )
-        # No ``color:`` declaration that overrides the default purple.
-        # (The base ``.subagent-indicator`` rule sets
-        # ``color: var(--purple);`` — overriding it here would change
-        # the done state's colour.)
         color_decl = re.search(r"\bcolor\s*:\s*([^;]+);", block)
         self.assertIsNone(
             color_decl,

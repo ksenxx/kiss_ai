@@ -65,6 +65,7 @@ def _run_task(model_name: str, task: str) -> str:
     )
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("model_name", TEST_MODELS)
 def test_current_info_task_triggers_internet_search(model_name: str) -> None:
     """A task needing current information must trigger real go_to_url calls."""
@@ -75,19 +76,15 @@ def test_current_info_task_triggers_internet_search(model_name: str) -> None:
         "language released as of today? Reply with the exact version number."
     )
     result = ""
-    for attempt in range(2):  # retry once to absorb model/API nondeterminism
+    for attempt in range(2):
         try:
             result = _run_task(model_name, task)
         except KISSError:
-            # The agent may exhaust max_steps/budget without calling
-            # finish (nondeterministic live-model behavior).  The policy
-            # under test is only that a search happened, so accept the
-            # run if ``go_to_url`` was called before the error.
             if VISITED_URLS:
                 break
             if attempt == 1:
                 raise
-            continue  # transient live-API failure; retry once
+            continue
         if VISITED_URLS:
             break
     assert VISITED_URLS, (

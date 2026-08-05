@@ -139,8 +139,6 @@ def test_command_without_options_falls_back_to_predictive(
     assert completer._build_matches("/help me ref") == [
         "/help me refactor the parser",
     ]
-    # With a trailing space the same predictive fallback still applies
-    # (the history line starts with "/help ") — no option menu appears.
     assert completer._build_matches("/help ") == [
         "/help me refactor the parser",
     ]
@@ -173,7 +171,6 @@ def test_ptk_dropdown_shows_resume_options_with_help(tmp_path: Path) -> None:
         "Open the chat containing this task id",
         "How many recent chats to list (default 20)",
     ]
-    # Accepting a candidate replaces the whole line with "<cmd> <opt> ".
     assert comps[0].text == "/resume --task "
     assert comps[0].start_position == -len("/resume ")
 

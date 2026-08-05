@@ -36,12 +36,8 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import sync_playwright
 
-# Composer controls in DOM order.
 _BTN_IDS = ["menu-btn", "model-btn", "upload-btn", "tricks-btn", "voice-btn"]
 
-# Historical VISIBLE gap (px) between each adjacent pair before the
-# halving: 10px icon padding + 1px flex gap (+10px more when the next
-# control is another padded circle rather than the bordered pill).
 _OLD_VISIBLE_GAPS = {
     ("menu-btn", "model-btn"): 11.0,
     ("model-btn", "upload-btn"): 11.0,
@@ -190,8 +186,6 @@ def test_remote_composer_button_gaps_quartered(tmp_path: Path) -> None:
             "not overlap visually"
         )
 
-    # The halving must come from spacing, not from shrinking the
-    # touch targets: every circular control keeps its 36px hit area.
     for bid in ("menu-btn", "upload-btn", "tricks-btn", "voice-btn"):
         assert targets[bid]["width"] == 36, targets
         assert targets[bid]["height"] == 36, targets

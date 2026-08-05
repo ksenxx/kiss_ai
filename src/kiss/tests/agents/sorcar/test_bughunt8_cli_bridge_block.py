@@ -29,13 +29,14 @@ import tempfile
 import threading
 from pathlib import Path
 
+import pytest
+
 from kiss.ui.cli import cli_daemon_bridge
 
 
 class TestBridgeNeverBlocksForever:
+    @pytest.mark.slow
     def test_send_event_returns_when_daemon_stops_reading(self) -> None:
-        # AF_UNIX paths are capped at ~104 bytes on macOS, so use a
-        # short /tmp directory instead of pytest's deep tmp_path.
         tmp_dir = Path(tempfile.mkdtemp(prefix="kiss-bh8-", dir="/tmp"))
         sock_path = tmp_dir / "wedged.sock"
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -45,8 +46,6 @@ class TestBridgeNeverBlocksForever:
         stop = threading.Event()
 
         def accept_loop() -> None:
-            # Accept every connection but NEVER read from it — the
-            # wedged-daemon scenario.
             server.settimeout(0.2)
             while not stop.is_set():
                 try:
@@ -65,8 +64,6 @@ class TestBridgeNeverBlocksForever:
         done = threading.Event()
 
         def sender() -> None:
-            # 8 x 1 MiB events vastly exceed any UDS kernel buffer, so
-            # a blocking sendall with no timeout wedges here forever.
             payload = "A" * (1024 * 1024)
             for _ in range(8):
                 cli_daemon_bridge.send_event(

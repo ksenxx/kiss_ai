@@ -102,10 +102,6 @@ class TestTalkTool(unittest.TestCase):
 
         t = threading.Thread(target=agent_thread, daemon=True)
         t.start()
-        # ``talk()`` round-trips through the GPT audio model for speech
-        # synthesis; a 5s cap was routinely too tight under
-        # parallel-suite load.  10s comfortably covers the call while
-        # still failing fast on a hung endpoint.
         t.join(timeout=10.0)
         self.assertFalse(t.is_alive())
 
@@ -140,10 +136,6 @@ class TestTalkTool(unittest.TestCase):
 
         t = threading.Thread(target=agent_thread, daemon=True)
         t.start()
-        # ``talk()`` round-trips through the GPT audio model for speech
-        # synthesis; a 5s cap was routinely too tight under
-        # parallel-suite load.  10s comfortably covers the call while
-        # still failing fast on a hung endpoint.
         t.join(timeout=10.0)
         self.assertFalse(t.is_alive())
 
@@ -171,10 +163,6 @@ class TestTalkTool(unittest.TestCase):
 
         t = threading.Thread(target=agent_thread, daemon=True)
         t.start()
-        # ``talk()`` round-trips through the GPT audio model for speech
-        # synthesis; a 5s cap was routinely too tight under
-        # parallel-suite load.  10s comfortably covers the call while
-        # still failing fast on a hung endpoint.
         t.join(timeout=10.0)
         self.assertFalse(t.is_alive())
 
@@ -208,22 +196,17 @@ class TestTalkTool(unittest.TestCase):
 
         t = threading.Thread(target=agent_thread, daemon=True)
         t.start()
-        # Two ``talk()`` calls each round-trip through the GPT audio
-        # model for speech synthesis; a 5s cap was routinely too tight
-        # under parallel-suite load.  10s comfortably covers the
-        # sequential pair while still failing fast on a hung endpoint.
         t.join(timeout=10.0)
         self.assertFalse(t.is_alive())
 
         talk_events = [
             ev for ev in printer.emitted if ev.get("type") == "talk"
         ]
-        self.assertEqual(len(talk_events), 4)  # 2 calls x 2 tabs
+        self.assertEqual(len(talk_events), 4)
         ids = [ev.get("talkId") for ev in talk_events]
         for talk_id in ids:
             self.assertIsInstance(talk_id, str)
             self.assertTrue(talk_id)
-        # 2 distinct ids overall, and the copies of each call agree.
         self.assertEqual(len(set(ids)), 2)
         by_id: dict[str, list[dict[str, Any]]] = {}
         for ev in talk_events:
@@ -256,10 +239,6 @@ class TestTalkTool(unittest.TestCase):
 
         t = threading.Thread(target=agent_thread, daemon=True)
         t.start()
-        # ``talk()`` round-trips through the GPT audio model for speech
-        # synthesis; a 5s cap was routinely too tight under
-        # parallel-suite load.  10s comfortably covers the call while
-        # still failing fast on a hung endpoint.
         t.join(timeout=10.0)
         self.assertFalse(t.is_alive())
 

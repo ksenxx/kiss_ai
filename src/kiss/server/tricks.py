@@ -41,24 +41,13 @@ from pathlib import Path
 
 from kiss.server.user_assets import ensure_user_asset_from_default
 
-# ``[.!?]`` followed by whitespace marks a sentence boundary.  The
-# trailing ``\s+`` is greedy: any run of whitespace (including
-# newlines) belongs to the boundary, so the partial begins at the
-# first non-whitespace character of the next sentence.
 _SENTENCE_BOUNDARY = re.compile(r"[.!?]\s+")
 
-#: User-visible body of the default ``## Trick`` section auto-seeded
-#: into ``~/.kiss/MY_INJECTION.md`` on first read.  Two spaces between
-#: sentences (matches the task spec verbatim).
 MY_INJECTION_DEFAULT_BODY = (
     "Write end-to-end 100% coverage tests for the feature first."
     "  Then implement the feature."
 )
 
-#: Full default file content for ``~/.kiss/MY_INJECTION.md``.  A single
-#: ``## Trick`` section whose body is :data:`MY_INJECTION_DEFAULT_BODY`.
-#: A trailing newline matches the convention used by
-#: ``MY_TASK_TEMPLATES.md`` (``## Task\n\nHi!\n``).
 DEFAULT_MY_INJECTION = "## Trick\n\n" + MY_INJECTION_DEFAULT_BODY + "\n"
 
 
@@ -95,9 +84,6 @@ def _read_my_injection_tricks() -> list[str]:
     try:
         text = user_path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
-        # A corrupted MY_INJECTION.md (binary blob, bad encoding) must
-        # not kill the singleton autocomplete worker thread — let the
-        # daemon keep serving the bundled tricks.
         return []
     return _parse_trick_sections(text)
 
@@ -112,9 +98,6 @@ def _bundled_injections_path() -> Path:
     override = os.environ.get("KISS_INJECTIONS_PATH")
     if override:
         return Path(override)
-    # ``__file__`` is ``…/kiss/server/tricks.py``; the bundled
-    # INJECTIONS.md lives at ``…/kiss/INJECTIONS.md`` (one ``parent``
-    # up from ``server/``).
     return Path(__file__).parent.parent / "INJECTIONS.md"
 
 
@@ -184,15 +167,11 @@ def current_sentence_partial(query: str) -> str:
     """
     if not query:
         return ""
-    # Locate the *last* sentence boundary in the query: we want the
-    # partial relative to the most recent sentence, not the first.
     last_boundary_end = 0
     for m in _SENTENCE_BOUNDARY.finditer(query):
         last_boundary_end = m.end()
     partial = query[last_boundary_end:]
     if last_boundary_end == 0:
-        # No interior sentence boundary — strip any leading whitespace
-        # so an indented first sentence still matches.
         partial = partial.lstrip()
     return partial
 

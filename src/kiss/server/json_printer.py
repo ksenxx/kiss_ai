@@ -24,10 +24,8 @@ import time
 from functools import partial
 from typing import Any
 
-from kiss.agents.sorcar.persistence import (
-    _amend_last_talk_tool_call_audio,
-    _queue_chat_event,
-)
+from kiss.agents.sorcar.persistence import _queue_chat_event
+from kiss.core import stop_signal
 from kiss.core.printer import (
     Printer,
     extract_extras,
@@ -36,16 +34,6 @@ from kiss.core.printer import (
     truncate_result,
 )
 
-# Event types that carry a ``taskId`` PAYLOAD field but are NOT
-# task-stream events.  ``taskDeleted`` announces that a History-panel
-# row was deleted; its ``taskId`` names the just-removed DB row.  Such
-# events are global system broadcasts: they must never be recorded
-# under (or persisted for) the named task, and transport subclasses
-# (see :meth:`WebPrinter.broadcast` in ``web_server.py``) must send
-# them verbatim to EVERY connected client instead of fanning them out
-# to the task's subscribers.
-GLOBAL_EVENT_TYPES = frozenset({"taskDeleted"})
-
 _DISPLAY_EVENT_TYPES = frozenset({
     "clear", "thinking_start", "thinking_delta", "thinking_end",
     "text_delta", "text_end", "tool_call", "tool_result",
@@ -53,10 +41,6 @@ _DISPLAY_EVENT_TYPES = frozenset({
     "task_done", "task_error", "task_stopped", "task_interrupted",
     "followup_suggestion",
     "autocommit_done",
-    # Backend warnings the user must see (e.g. the worktree agent's
-    # stash-pop failure / merge-conflict warnings).  They are rendered
-    # live by the frontend, so they must also be recorded/persisted or
-    # they silently vanish when the task is reopened or replayed.
     "warning",
 })
 
@@ -127,17 +111,114 @@ class _BashState:
         self.generation: int = 0
         self.last_flush: float = 0.0
         self.streamed: bool = False
-        # W2-F5: per-task lock held across the generation re-check +
-        # ``broadcast`` of a flush, and across ``reset()``'s
-        # generation bump.  It closes the reset-vs-flush TOCTOU
-        # WITHOUT holding the printer-global ``_bash_lock`` during
-        # ``broadcast`` (network I/O in transport subclasses) — which
-        # used to block every concurrent ``print(type="bash_stream")``
-        # from ANY task behind one slow client socket, and would
-        # deadlock any future subclass whose broadcast path touches
-        # ``_bash_lock``.  Lock order: ``flush_lock`` is always
-        # acquired BEFORE ``_bash_lock``, never while holding it.
         self.flush_lock = threading.Lock()
+
+
+# Interactive-UI events that put something on screen until it is
+# answered, mapped to the events that take it back off again.  A
+# mirror lives exactly as long as one of these is on screen.
+_UI_CLOSE_EVENTS: dict[str, tuple[str, ...]] = {
+    "merge_ended": ("merge_data", "merge_started", "merge_nav"),
+    "autocommit_done": ("autocommit_prompt",),
+    "worktree_result": ("worktree_done",),
+}
+_UI_OPEN_EVENTS: frozenset[str] = frozenset(
+    event_type
+    for closed in _UI_CLOSE_EVENTS.values()
+    for event_type in closed
+)
+
+
+class _UiMirror:
+    """One tab's interactive UI, mirrored onto other clients' tabs.
+
+    A chat can be open in several frontend tabs at once (the VS Code
+    window that launched the task, a browser on a phone, a second
+    laptop).  Blocking UIs — the merge/diff review, the auto-commit
+    prompt, the worktree merge/discard strip — are owned by exactly
+    one tab: the on-disk merge artifacts, the server-side hunk cursor
+    and the git working tree all hang off that tab's id.  This record
+    names the other tabs that must render the same UI, so opening and
+    closing it stays in lock step across every client.
+
+    Attributes:
+        viewer_tab_ids: Tabs of other clients showing the same task.
+        work_dir: The owner's working directory, used when an action
+            arrives from a viewer whose own folder may differ.
+        task_key: The task the UI belongs to, so a tab that joins
+            the task later can be shown the same UI.
+        open_events: The latest still-unanswered event of each open
+            type, replayed verbatim to such a late joiner.
+    """
+
+    __slots__ = ("viewer_tab_ids", "work_dir", "task_key", "open_events")
+
+    def __init__(self, work_dir: str, task_key: str) -> None:
+        self.viewer_tab_ids: list[str] = []
+        self.work_dir = work_dir
+        self.task_key = task_key
+        self.open_events: dict[str, dict[str, Any]] = {}
+
+
+def _orphaned_ui_close_events(
+    owner_tab_id: str, mirror: _UiMirror,
+) -> list[dict[str, Any]]:
+    """Return the events that take *mirror*'s UI off the viewers' screens.
+
+    Used when the owner tab disappears with a UI still open.  One
+    closing event per still-open UI, per viewer, carrying the reason so
+    the user sees why the buttons went away rather than watching them
+    vanish.
+
+    Args:
+        owner_tab_id: The tab that owned the UI and has now gone.
+        mirror: Its mirror record, already detached from the printer.
+
+    Returns:
+        Ready-to-broadcast closing events.
+    """
+    closers = {
+        close_type
+        for close_type, opened in _UI_CLOSE_EVENTS.items()
+        if any(open_type in mirror.open_events for open_type in opened)
+    }
+    return [
+        {
+            "type": close_type,
+            "tabId": viewer_tab_id,
+            "mirrorOf": owner_tab_id,
+            "success": False,
+            "message": "The window that opened this closed it.",
+        }
+        for viewer_tab_id in mirror.viewer_tab_ids
+        for close_type in sorted(closers)
+    ]
+
+
+class _PrinterThreadLocal(threading.local):
+    """Per-thread printer state whose ``stop_event`` is process-visible.
+
+    ``stop_event`` is a property over :mod:`kiss.core.stop_signal`
+    rather than plain thread-local storage, so the single assignment
+    that binds a stop event to a task thread (``task_runner``,
+    ``chat_sorcar_agent``'s fan-out workers, ``sorcar_agent``'s
+    sub-agents) also publishes it to code *below* the agent.  Model
+    adapters need it to abort a stream that has gone silent: without it
+    a stop is only noticed when the agent next prints, which left task
+    ``709ebce3`` unstoppable for 178 seconds
+    (``reports/stop_button_delay_2026-08-05.html``).  Keeping one
+    storage location — instead of publishing to two — means the flag
+    the agent polls and the flag the model watches can never disagree.
+    """
+
+    @property
+    def stop_event(self) -> threading.Event | None:
+        """The calling thread's stop event, or ``None`` when unbound."""
+        return stop_signal.get_thread_stop_event()
+
+    @stop_event.setter
+    def stop_event(self, event: threading.Event | None) -> None:
+        stop_signal.set_thread_stop_event(event)
 
 
 class JsonPrinter(Printer):
@@ -182,27 +263,26 @@ class JsonPrinter(Printer):
         return bs
 
     def __init__(self) -> None:
-        self._thread_local = threading.local()
+        self._thread_local = _PrinterThreadLocal()
         self._lock = threading.Lock()
         self._bash_lock = threading.Lock()
-        # All per-task maps are keyed by ``str(task_id)``.  The empty
-        # string ``""`` is used as a fallback key for events that
-        # happen on a thread with no thread-local ``task_id`` set
-        # (e.g. very early task lifecycle, or unit tests).
         self._bash_states: dict[str, _BashState] = {}
         self._tokens_offsets: dict[str, int] = {}
         self._budget_offsets: dict[str, float] = {}
         self._steps_offsets: dict[str, int] = {}
         self._recordings: dict[str, list[dict[str, Any]]] = {}
         self._persist_agents: dict[str, Any] = {}
-        # ``_subscribers`` maps a task_id (str) to the set of frontend
-        # tab ids that should receive every broadcast for that task.
-        # The agent thread emits events tagged with ``taskId`` only;
-        # the transport layer (e.g. ``WebPrinter.broadcast``) fans
-        # each event out to every subscriber tab, stamping the
-        # tab-specific ``tabId`` on each fan-out copy.  The single
-        # recording per task is shared by all subscribed tabs.
         self._subscribers: dict[str, set[str]] = {}
+        self._subscriber_expiry: dict[str, float] = {}
+        # Tabs whose picker currently shows a running agent's model
+        # instead of their user's pick, and the model each running task
+        # switched itself to (see broadcast_agent_model_pick).
+        self._model_override_tabs: set[str] = set()
+        self._task_model_override: dict[str, str] = {}
+        # Interactive UIs (merge review, auto-commit prompt, worktree
+        # strip) owned by one tab but mirrored onto the tabs of every
+        # other client viewing the same task.  Keyed by owner tab id.
+        self._ui_mirrors: dict[str, _UiMirror] = {}
 
     @staticmethod
     def _coerce_task_id(value: Any) -> str:
@@ -243,11 +323,54 @@ class JsonPrinter(Printer):
         if not key or not tab_id:
             return
         with self._lock:
+            self._sweep_expired_subscribers()
             viewers = self._subscribers.get(key)
             if viewers is None:
                 viewers = set()
                 self._subscribers[key] = viewers
             viewers.add(tab_id)
+            # A tab joining a task whose agent already switched models
+            # missed that one-shot event, and would otherwise sit on the
+            # wrong label until the task ended.
+            catch_up = self._task_model_override.get(key, "")
+            if catch_up:
+                self._model_override_tabs.add(tab_id)
+            pending_ui = self._join_ui_mirrors(key, tab_id)
+        if catch_up:
+            self.broadcast_model_pick(catch_up, "agent", tab_id)
+        for event in pending_ui:
+            self.broadcast(event)
+
+    def _join_ui_mirrors(
+        self, task_key: str, tab_id: str,
+    ) -> list[dict[str, Any]]:
+        """Show *tab_id* the interactive UIs already open on *task_key*.
+
+        A client that opens a chat while another client is mid-review
+        (or sitting on an unanswered auto-commit prompt) has to be
+        caught up, or the question stays invisible in that window until
+        somebody else answers it.  Must be called with :attr:`_lock`
+        held; the returned events are broadcast by the caller once the
+        lock is released.
+
+        Args:
+            task_key: The coerced task id *tab_id* just subscribed to.
+            tab_id: The joining tab.
+
+        Returns:
+            Copies of the open UI events, stamped for *tab_id*.
+        """
+        pending: list[dict[str, Any]] = []
+        for owner_tab_id, mirror in self._ui_mirrors.items():
+            if mirror.task_key != task_key or owner_tab_id == tab_id:
+                continue
+            if tab_id not in mirror.viewer_tab_ids:
+                mirror.viewer_tab_ids.append(tab_id)
+            pending.extend(
+                {**event, "tabId": tab_id, "mirrorOf": owner_tab_id}
+                for event in mirror.open_events.values()
+            )
+        return pending
 
     def _fanout_targets(self, task_id: Any) -> list[str]:
         """Return a snapshot of subscriber tab ids for *task_id*.
@@ -264,10 +387,275 @@ class JsonPrinter(Printer):
         if not key:
             return []
         with self._lock:
+            self._sweep_expired_subscribers()
             viewers = self._subscribers.get(key)
             if not viewers:
                 return []
             return list(viewers)
+
+    def open_ui_mirror(
+        self,
+        owner_tab_id: str,
+        viewer_tab_ids: list[str],
+        work_dir: str = "",
+        task_key: str = "",
+    ) -> None:
+        """Mirror *owner_tab_id*'s interactive UI onto other clients' tabs.
+
+        Called whenever a blocking UI opens (merge review, auto-commit
+        prompt, worktree strip).  The viewer set is a snapshot rather
+        than a live query of :attr:`_subscribers`, because a review the
+        user leaves open for a while outlives the task's subscriber
+        set (``cleanup_task`` expires it a few minutes after the task
+        ends) — yet the closing event must still reach the very tabs
+        that were shown the UI.  Re-opening refreshes the snapshot
+        while keeping whatever is already on screen.
+
+        Args:
+            owner_tab_id: The tab that owns the UI and its on-disk
+                state.
+            viewer_tab_ids: Tabs of other clients viewing the same
+                task.  Duplicates and the owner itself are ignored.
+            work_dir: The owner's working directory.
+            task_key: The task the UI belongs to, used to catch up a
+                tab that joins the task while the UI is open.
+        """
+        if not owner_tab_id:
+            return
+        with self._lock:
+            mirror = self._ui_mirrors.get(owner_tab_id)
+            if mirror is None:
+                mirror = _UiMirror(work_dir, task_key)
+                self._ui_mirrors[owner_tab_id] = mirror
+            else:
+                mirror.work_dir = work_dir
+                mirror.task_key = task_key
+            # Tabs already shown an earlier phase are KEPT: the
+            # subscriber set expires a few minutes after the task ends,
+            # so re-reading it late would silently drop the very tabs
+            # still displaying the review this phase follows.  Closed
+            # tabs are removed by cleanup_tab, so nothing accumulates.
+            for tab_id in viewer_tab_ids:
+                if (
+                    tab_id
+                    and tab_id != owner_tab_id
+                    and tab_id not in mirror.viewer_tab_ids
+                ):
+                    mirror.viewer_tab_ids.append(tab_id)
+
+    def close_ui_mirror(self, owner_tab_id: str) -> None:
+        """Drop *owner_tab_id*'s mirror without notifying anyone.
+
+        For the case where opening the UI failed and the owner has
+        already rolled its own state back, so there is nothing on any
+        screen to take down.
+
+        Args:
+            owner_tab_id: The tab whose UI never opened.
+        """
+        with self._lock:
+            self._ui_mirrors.pop(owner_tab_id, None)
+
+    def ui_mirror_owner(self, tab_id: str, open_event: str = "") -> str:
+        """Return the tab owning the interactive UI shown on *tab_id*.
+
+        An action (accept a hunk, commit, discard a worktree) carries
+        the tab id of the client that produced it.  When that client is
+        only mirroring someone else's UI, the action has to be applied
+        to the owner — the tab that holds the merge cursor, the
+        on-disk merge artifacts and the repository.
+
+        Args:
+            tab_id: The tab id carried by the inbound command.
+            open_event: The event type that put the acted-on UI on
+                screen (e.g. ``"merge_data"``).  A tab watching two
+                chats can mirror two owners at once, so the action is
+                matched to the owner actually showing that UI.
+
+        Returns:
+            The owner tab id, or *tab_id* itself when it owns its UI
+            (or no mirror is registered for it).
+        """
+        if not tab_id:
+            return tab_id
+        with self._lock:
+            if tab_id in self._ui_mirrors:
+                return tab_id
+            for owner_tab_id, mirror in self._ui_mirrors.items():
+                if tab_id not in mirror.viewer_tab_ids:
+                    continue
+                if open_event and open_event not in mirror.open_events:
+                    continue
+                return owner_tab_id
+        return tab_id
+
+    def ui_mirror_work_dir(self, owner_tab_id: str) -> str:
+        """Return the working directory recorded for *owner_tab_id*'s UI.
+
+        Args:
+            owner_tab_id: The tab that owns the UI.
+
+        Returns:
+            The owner's working directory, or ``""`` when unknown.
+        """
+        with self._lock:
+            mirror = self._ui_mirrors.get(owner_tab_id)
+        return mirror.work_dir if mirror is not None else ""
+
+    def ui_mirror_tabs(self, owner_tab_id: str) -> list[str]:
+        """Return every tab that renders *owner_tab_id*'s UI, owner first.
+
+        Args:
+            owner_tab_id: The tab that owns the UI.
+
+        Returns:
+            ``[owner, *viewers]``.  Just ``[owner]`` when nothing
+            mirrors it.
+        """
+        with self._lock:
+            mirror = self._ui_mirrors.get(owner_tab_id)
+            viewers = list(mirror.viewer_tab_ids) if mirror is not None else []
+        return [owner_tab_id, *viewers]
+
+    def broadcast_tab_ui(self, event: dict[str, Any]) -> None:
+        """Broadcast a tab-scoped UI *event* to every mirroring tab.
+
+        Tab-stamped events are routed verbatim to all clients, which
+        each keep only the copy naming a tab they know.  Tab ids are
+        per-client, so one stamped copy is emitted per mirroring tab;
+        copies for viewers also carry ``mirrorOf`` naming the owner, so
+        the transports can tell an original from its mirror.
+
+        Args:
+            event: A UI event carrying an owner ``tabId``.
+        """
+        owner_tab_id = event.get("tabId", "")
+        if not owner_tab_id:
+            self.broadcast(event)
+            return
+        targets = self._track_ui_event(owner_tab_id, event)
+        for target in targets:
+            copy = {**event, "tabId": target}
+            if target != owner_tab_id:
+                copy["mirrorOf"] = owner_tab_id
+            self.broadcast(copy)
+
+    def _track_ui_event(
+        self, owner_tab_id: str, event: dict[str, Any],
+    ) -> list[str]:
+        """Record what *owner_tab_id* has on screen and return the targets.
+
+        An opening event replaces the previous one of its kind; a
+        closing event retires the events it answers.  Once nothing is
+        on screen the mirror is dropped, so a tab that merely watched
+        an old review can never be mistaken for a viewer of a new one.
+
+        The state change and the target snapshot happen under one hold
+        of the lock: a tab that joins mid-way must either be caught up
+        by :meth:`_join_ui_mirrors` or be in this event's target list —
+        splitting the two would let it fall between them and be shown
+        an opening it is never told to close (or a close for an opening
+        it never saw).
+
+        Args:
+            owner_tab_id: The tab that owns the UI.
+            event: The UI event being broadcast.
+
+        Returns:
+            The tabs to send this event to, owner first.
+        """
+        event_type = event.get("type", "")
+        with self._lock:
+            mirror = self._ui_mirrors.get(owner_tab_id)
+            if mirror is None:
+                return [owner_tab_id]
+            targets = [owner_tab_id, *mirror.viewer_tab_ids]
+            if event_type in _UI_OPEN_EVENTS:
+                mirror.open_events[event_type] = event
+            answered = _UI_CLOSE_EVENTS.get(event_type, ())
+            for answered_type in answered:
+                mirror.open_events.pop(answered_type, None)
+            if answered and not mirror.open_events:
+                del self._ui_mirrors[owner_tab_id]
+        return targets
+
+    def broadcast_model_pick(
+        self,
+        model: str,
+        source: str,
+        tab_id: str,
+    ) -> None:
+        """Show *model* in the model picker of *tab_id*.
+
+        ``modelPick`` carries an explicit ``tabId`` so it is routed as a
+        transient system event: delivered verbatim to every connected
+        client (which filters on ``tabId``) and never recorded into the
+        task's event log, so replaying a finished conversation cannot
+        resurrect a stale picker label.
+
+        Args:
+            model: Model name to display.
+            source: ``"agent"`` for the display-only model a running
+                agent switched itself to, or ``"restore"`` for the
+                user's own pick coming back when the task ends.
+            tab_id: The tab whose picker to update.
+        """
+        if not model or not tab_id:
+            return
+        self.broadcast(
+            {
+                "type": "modelPick",
+                "model": model,
+                "source": source,
+                "tabId": tab_id,
+            },
+        )
+
+    def broadcast_agent_model_pick(self, model: str, tab_id: str) -> None:
+        """Show a running agent's *model* in every tab watching its task.
+
+        The launching tab plus every viewer subscribed to the agent's
+        task (history-resume tabs, chat viewers) get the override, so
+        each window watching the agent sees what it is actually
+        running.  Every other tab keeps showing its own user's pick.
+
+        Each target is remembered so the picker can be handed back
+        when the task ends — and only then, which is why a task whose
+        agent never switched models costs nothing.
+
+        Args:
+            model: The model the agent just switched to.
+            tab_id: The tab the agent's task was launched in (``""``
+                when the agent runs outside a tab, e.g. from the CLI).
+        """
+        if not model:
+            return
+        task_key = self._task_key()
+        targets = set(self._fanout_targets(task_key))
+        if tab_id:
+            targets.add(tab_id)
+        with self._lock:
+            self._model_override_tabs |= targets
+            if task_key:
+                self._task_model_override[task_key] = model
+        for target in sorted(targets):
+            self.broadcast_model_pick(model, "agent", target)
+
+    def restore_model_pick(self, model: str, tab_id: str) -> None:
+        """Put *tab_id*'s own picker back to *model*, if an agent took it.
+
+        A no-op for a tab that never showed an override, so an ordinary
+        task ends without putting anything extra on the wire.
+
+        Args:
+            model: The model the user picked for this tab.
+            tab_id: The tab whose picker to hand back.
+        """
+        with self._lock:
+            if tab_id not in self._model_override_tabs:
+                return
+            self._model_override_tabs.discard(tab_id)
+        self.broadcast_model_pick(model, "restore", tab_id)
 
     def _inject_task_id(self, event: dict[str, Any]) -> dict[str, Any]:
         """Return *event* with ``taskId`` injected from thread-local storage.
@@ -304,12 +692,6 @@ class JsonPrinter(Printer):
         key = self._coerce_task_id(event.get("taskId"))
         if not key:
             return
-        # Look up the registered agent under ``_lock`` so a concurrent
-        # ``cleanup_task`` (which pops from ``_persist_agents`` under
-        # the same lock) cannot remove the entry between our ``get``
-        # and our use of the returned agent.  Holding the lock also
-        # serialises us against ``ChatSorcarAgent.run`` registering
-        # a fresh agent under the same key.
         with self._lock:
             agent = self._persist_agents.get(key)
         if agent is None:
@@ -350,7 +732,7 @@ class JsonPrinter(Printer):
         self._steps_offsets[self._task_key()] = value
 
     def cleanup_tab(self, tab_id: str) -> None:
-        """Remove *tab_id* from every subscriber set.
+        """Remove *tab_id* from every subscriber, override and mirror set.
 
         Should be called when a frontend tab is closed.  The
         underlying per-task state (recording, bash buffer, offsets)
@@ -360,45 +742,150 @@ class JsonPrinter(Printer):
         :meth:`cleanup_task` to drop the per-task state when the task
         itself ends.
 
+        A UI the tab OWNS is deliberately left alone — this also runs
+        when a tab merely re-subscribes (session replay, new chat), and
+        a review open in other windows must survive that.  Disposal of
+        the tab itself goes through :meth:`close_owner_ui`.
+
         Args:
             tab_id: The frontend tab identifier to drop.
         """
         if not tab_id:
             return
         with self._lock:
+            self._model_override_tabs.discard(tab_id)
+            for mirror in self._ui_mirrors.values():
+                if tab_id in mirror.viewer_tab_ids:
+                    mirror.viewer_tab_ids.remove(tab_id)
+            self._sweep_expired_subscribers()
             for task_key in list(self._subscribers.keys()):
                 viewers = self._subscribers[task_key]
                 viewers.discard(tab_id)
                 if not viewers:
                     self._subscribers.pop(task_key, None)
+                    self._subscriber_expiry.pop(task_key, None)
 
-    def cleanup_task(self, task_id: Any) -> None:
+    def close_owner_ui(self, owner_tab_id: str) -> None:
+        """Take *owner_tab_id*'s interactive UI off the other clients.
+
+        Called when the owner tab is disposed for good.  The tab that
+        held the merge cursor, the on-disk artifacts and the repository
+        is gone, so a button left on the other screens could only act
+        on nothing — or, once the mirror is forgotten, on the wrong
+        repository.
+
+        Args:
+            owner_tab_id: The tab being disposed.
+        """
+        with self._lock:
+            orphaned = self._ui_mirrors.pop(owner_tab_id, None)
+        if orphaned is None:
+            return
+        for event in _orphaned_ui_close_events(owner_tab_id, orphaned):
+            self.broadcast(event)
+
+    def has_ui_mirror_for_task(self, task_id: Any) -> bool:
+        """Return whether a UI of *task_id* is still waiting to be answered.
+
+        Args:
+            task_id: The task identifier to look for.
+
+        Returns:
+            True when some tab owns an open UI belonging to that task.
+        """
+        key = self._coerce_task_id(task_id)
+        if not key:
+            return False
+        with self._lock:
+            return any(
+                mirror.task_key == key and mirror.open_events
+                for mirror in self._ui_mirrors.values()
+            )
+
+    def cleanup_task(
+        self, task_id: Any, subscriber_linger_seconds: float = 300.0,
+    ) -> None:
         """Remove all per-task state for *task_id* to free memory.
 
         Called by the task-runner once a task has fully terminated.
         Cancels any pending bash flush timer and drops the per-task
-        recording, persist-agent, and usage-offset entries.  The
-        subscriber set is **intentionally preserved** so any post-
-        task broadcasts (e.g. the async ``followup_suggestion``) still
-        fan out to the originating tab; subscriber cleanup happens
-        when the frontend tab itself closes via :meth:`cleanup_tab`.
+        recording, persist-agent, and usage-offset entries.
+
+        Bash-state teardown synchronizes with in-flight flushes in two
+        steps: the popped state's generation is bumped (under
+        ``_bash_lock``, where every flush path re-checks it), so a
+        flush that copied text but has not yet passed the generation
+        re-check discards it; then the state's ``flush_lock`` is
+        acquired and released (after ``_bash_lock`` is dropped, so the
+        lock order matches the flush paths), so a flush that already
+        passed its re-check and is broadcasting finishes BEFORE this
+        method returns.  After ``cleanup_task`` returns, no stale
+        ``system_output`` for the task can be broadcast.
+
+        The subscriber set is preserved for ``subscriber_linger_seconds``
+        so any post-task broadcasts (e.g. the async
+        ``followup_suggestion``) still fan out to the originating tab.
+        Expired sets are pruned opportunistically (no timer thread per
+        task) by every subscriber-map operation — previously they were
+        kept for the tab's whole lifetime, leaking one entry per
+        completed task in long-lived tabs.  A tab that closes earlier
+        is still removed immediately via :meth:`cleanup_tab`.
 
         Args:
             task_id: The task identifier whose state should be freed.
+            subscriber_linger_seconds: How long the task's subscriber
+                set survives to serve post-task broadcasts; ``<= 0``
+                prunes synchronously.
         """
         key = self._coerce_task_id(task_id)
         if not key:
             return
         with self._bash_lock:
             bs = self._bash_states.pop(key, None)
-            if bs is not None and bs.timer is not None:
-                bs.timer.cancel()
+            if bs is not None:
+                if bs.timer is not None:
+                    bs.timer.cancel()
+                bs.generation += 1
+                bs.buffer.clear()
+        if bs is not None:
+            # Wait out a flush that passed its generation re-check
+            # before the bump and is still broadcasting under
+            # ``flush_lock`` — its output belongs to the task's
+            # lifetime and must land before cleanup completes.
+            with bs.flush_lock:
+                pass
         with self._lock:
             self._recordings.pop(key, None)
+            self._task_model_override.pop(key, None)
             self._tokens_offsets.pop(key, None)
             self._budget_offsets.pop(key, None)
             self._steps_offsets.pop(key, None)
             self._persist_agents.pop(key, None)
+            if key in self._subscribers:
+                if subscriber_linger_seconds <= 0:
+                    self._subscribers.pop(key, None)
+                    self._subscriber_expiry.pop(key, None)
+                else:
+                    self._subscriber_expiry[key] = (
+                        time.monotonic() + subscriber_linger_seconds
+                    )
+            self._sweep_expired_subscribers()
+
+    def _sweep_expired_subscribers(self) -> None:
+        """Drop subscriber sets whose post-task linger has expired.
+
+        Must be called with ``self._lock`` held.  Cheap when nothing
+        is pending (the expiry map only holds completed tasks still
+        inside their linger window), so every subscriber-map operation
+        can afford to call it — this replaces a per-task timer thread.
+        """
+        if not self._subscriber_expiry:
+            return
+        now = time.monotonic()
+        for key, deadline in list(self._subscriber_expiry.items()):
+            if now >= deadline:
+                del self._subscriber_expiry[key]
+                self._subscribers.pop(key, None)
 
     def reset(self) -> None:
         """Reset internal streaming state for a new turn.
@@ -552,65 +1039,6 @@ class JsonPrinter(Printer):
         if rec is not None:
             rec.append(event)
 
-    def attach_talk_audio(self, audio_b64: str, audio_mime: str) -> bool:
-        """Attach a synthesized clip to the current task's last ``talk`` call.
-
-        The agentic loop broadcasts (and records/persists) the ``talk``
-        ``tool_call`` event BEFORE the tool runs, so the event never
-        carries the clip synthesized DURING execution — and demo-mode
-        replay plays exactly ``extras.audioB64`` of that recorded event
-        (the synthesis fallback is gone).  The ``talk`` tool calls this
-        right after :func:`synthesize_talk_audio` succeeds; it amends
-        BOTH copies of the event:
-
-        - the in-memory recording (the recorded list holds the same
-          dict that was broadcast, so mutating ``extras`` in place is
-          enough — the live fan-out already happened and is unaffected);
-        - the persisted ``events`` row, via
-          :func:`_amend_last_talk_tool_call_audio`.
-
-        Args:
-            audio_b64: Base64-encoded synthesized clip bytes.
-            audio_mime: The clip's MIME type (e.g. ``"audio/mpeg"``).
-
-        Returns:
-            ``True`` when at least one copy (recording or DB row) was
-            amended, ``False`` otherwise.
-        """
-        if not audio_b64:
-            return False
-        key = self._task_key()
-        amended = False
-        with self._lock:
-            rec = self._recordings.get(key) if key else None
-            for event in reversed(rec or []):
-                if (
-                    event.get("type") != "tool_call"
-                    or event.get("name") != "talk"
-                ):
-                    continue
-                extras = event.get("extras")
-                if not isinstance(extras, dict):
-                    extras = {}
-                    event["extras"] = extras
-                if extras.get("audioB64"):
-                    # Already carries a clip (an earlier talk in the
-                    # same task); the most recent audio-less call is
-                    # the one being spoken now.
-                    continue
-                extras["audioB64"] = audio_b64
-                extras["audioMime"] = audio_mime
-                amended = True
-                break
-            agent = self._persist_agents.get(key) if key else None
-        task_id = getattr(agent, "_last_task_id", None)
-        if task_id is not None:
-            if _amend_last_talk_tool_call_audio(
-                str(task_id), audio_b64, audio_mime,
-            ):
-                amended = True
-        return amended
-
     def broadcast(self, event: dict[str, Any]) -> None:
         """Inject the thread-local taskId, record, and persist the event.
 
@@ -633,32 +1061,11 @@ class JsonPrinter(Printer):
         stamp_event_ts(event)
         event.pop("recordOnly", None)
         if "tabId" in event:
-            # Mirror :meth:`WebPrinter.broadcast`'s explicit-tabId
-            # semantics so the base class (production-reachable via
-            # ``VSCodeServer()``'s default printer and the CLI's
-            # ``RecordingConsolePrinter``) cannot drift: events that
-            # carry an explicit ``tabId`` are transient targeted
-            # system events — never recorded or persisted — EXCEPT
-            # task-scoped ``prompt`` / ``result`` events, whose
-            # durable copy is recorded + persisted with the ``tabId``
-            # STRIPPED (replay re-stamps events with the subscribing
-            # viewer's own tab id, so a stale frontend tab id must
-            # never survive in the recording or the DB).  Without
-            # this branch a viewer-targeted transient ``clear`` (a
-            # display type) leaked into the recording/DB and durable
-            # prompt/result copies kept the stale tab id.
             if event.get("type") in ("prompt", "result") and event.get("taskId"):
                 record = {k: v for k, v in event.items() if k != "tabId"}
                 with self._lock:
                     self._record_event(record)
                 self._persist_event(record)
-            return
-        if event.get("type") in GLOBAL_EVENT_TYPES:
-            # Global system broadcast (e.g. ``taskDeleted``): its
-            # ``taskId`` is a payload field naming a just-deleted task,
-            # not a stream tag.  Never record or persist it — that
-            # would append it to an active recording / re-insert event
-            # rows for the deleted task.
             return
         event = self._inject_task_id(event)
         with self._lock:
@@ -692,12 +1099,6 @@ class JsonPrinter(Printer):
         cost: str = "N/A",
         step_count: int = 0,
     ) -> None:
-        # Apply per-task offsets so sub-agent cost / tokens / steps that
-        # were accumulated into the printer (e.g. by ``run_parallel``)
-        # are included in the final result panel.  Otherwise the parent
-        # agent's displayed cost would be smaller than the sum of its
-        # sub-agents' costs.  Matches the offset arithmetic in the
-        # ``usage_info`` branch of :meth:`JsonPrinter.print`.
         cost = self._cost_with_offset(cost)
         total_tokens = total_tokens + self.tokens_offset
         step_count = step_count + self.steps_offset
@@ -773,18 +1174,6 @@ class JsonPrinter(Printer):
                     bs.timer.daemon = True
                     bs.timer.start()
             if text:
-                # Mirror ``_flush_bash``'s two-phase protocol: re-check
-                # the generation under ``_bash_lock`` and broadcast
-                # under the per-task ``flush_lock`` (W2-F5), so a
-                # concurrent ``reset()`` (start of a new turn, which
-                # bumps the generation to invalidate stale output)
-                # cannot slip in between the drain above and this
-                # broadcast — otherwise stale bash output from the
-                # previous turn would be broadcast (and recorded/
-                # persisted) into the new turn.  Holding ``flush_lock``
-                # instead of ``_bash_lock`` across the (potentially
-                # slow, socket-bound) broadcast keeps other tasks'
-                # bash streaming unblocked.
                 with bs.flush_lock:
                     stale = False
                     with self._bash_lock:
@@ -794,12 +1183,18 @@ class JsonPrinter(Printer):
                             {"type": "system_output", "text": text},
                         )
             with self._bash_lock:
-                self._bash_state.streamed = True
+                # Use the state captured above — the creating
+                # ``_bash_state`` property would resurrect a state
+                # that ``cleanup_task`` freed while ``broadcast`` was
+                # running, leaking it forever under a dead task id.
+                bs.streamed = True
             return ""
         if type == "tool_call":
             self._flush_bash()
             with self._bash_lock:
-                self._bash_state.streamed = False
+                live = self._bash_states.get(self._task_key())
+                if live is not None:
+                    live.streamed = False
             self.broadcast({"type": "text_end"})
             self._format_tool_call(str(content), kwargs.get("tool_input", {}))
             return ""
@@ -863,25 +1258,16 @@ class JsonPrinter(Printer):
                 results).
         """
         self._flush_bash()
-        # Show every tool's return value (so the user sees the output
-        # of run_parallel, ask_user_question, update_settings, the
-        # WebUseTool methods, etc.) EXCEPT ``finish`` -- the agentic
-        # loop renders that one as a dedicated "result" panel right
-        # after, so a tool_result here would just be a duplicate.
         show_result = tool_name != "finish"
         with self._bash_lock:
-            streamed = self._bash_state.streamed
-            self._bash_state.streamed = False
+            # Non-creating lookup: a tool result arriving after
+            # ``cleanup_task`` must not resurrect the freed state.
+            live = self._bash_states.get(self._task_key())
+            streamed = live.streamed if live is not None else False
+            if live is not None:
+                live.streamed = False
         result_content = "" if streamed else truncate_result(str(content))
         if show_result:
-            # Carry ``tool_name`` and (for Read calls) the
-            # originating ``path`` / ``start_line`` over the wire
-            # so a daemon-attached sorcar CLI client can
-            # reconstruct the ``tool_input`` slice its local
-            # ``ConsolePrinter`` needs to syntax-highlight a Read
-            # result body.  Without this the daemon→CLI replay
-            # would always plain-write the file contents, even
-            # though the in-process CLI does highlight them.
             event: dict[str, Any] = {
                 "type": "tool_result",
                 "content": result_content,
@@ -964,22 +1350,11 @@ class JsonPrinter(Printer):
                 f"${budget_used:.4f}" if budget_used else "N/A",
             )
         elif hasattr(message, "content"):
-            # W3-D4: route message-object tool results (third-party /
-            # claude-style agents whose messages carry ``.content``
-            # blocks) through the SAME emission helper as the primary
-            # ``print(type="tool_result")`` path, so the event carries
-            # ``tool_name`` and gets the identical finish-suppression /
-            # streamed-dedup treatment.
             blocks = [
                 block
                 for block in message.content
                 if hasattr(block, "is_error") and hasattr(block, "content")
             ]
-            # The kwargs-level ``tool_input`` describes the whole
-            # message; stamping it onto every block of a multi-block
-            # message would mislabel unrelated results (e.g. a Read
-            # ``path``/``start_line`` on a Bash block), so it is only
-            # trusted when it unambiguously maps to a single block.
             shared_input = (
                 kwargs.get("tool_input") if len(blocks) == 1 else None
             )

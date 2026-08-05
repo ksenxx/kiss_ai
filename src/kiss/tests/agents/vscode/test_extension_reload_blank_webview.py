@@ -187,7 +187,6 @@ class TestReinstallTransientWindow(unittest.TestCase):
             "same-version reinstall should transiently remove out/extension.js; "
             "if it never goes missing the bug's precondition has changed.",
         )
-        # And the reinstall really did update the file once it settled.
         self.assertEqual(ext_js.read_text(), "MARKER_V2")
 
 
@@ -231,31 +230,25 @@ class TestReloadGuardBehavior(unittest.TestCase):
         ext_js.parent.mkdir(parents=True)
         sock = self.tmp / "sorcar.sock"
 
-        # 1. Mid-delete: extension.js missing → never reload.
         r = self._ready(ext_js, sock, -1)
         self.assertFalse(r["ready"])
         self.assertEqual(r["size"], -1)
 
-        # 2. Mid-write: file present but empty → never reload.
         ext_js.write_text("")
         r = self._ready(ext_js, sock, 0)
         self.assertFalse(r["ready"])
         self.assertEqual(r["size"], 0)
 
-        # 3. Present but still growing (size changed since last poll) → wait.
         ext_js.write_text("partial-bundle")
         size = len("partial-bundle")
-        r = self._ready(ext_js, sock, -1)  # prev != current size
+        r = self._ready(ext_js, sock, -1)
         self.assertFalse(r["ready"])
         self.assertEqual(r["size"], size)
 
-        # 4. Size stable but daemon socket not back yet → still wait, so the
-        #    reloaded webview would have something to connect to.
         r = self._ready(ext_js, sock, size)
         self.assertFalse(r["ready"])
 
-        # 5. Settled: stable non-empty file AND daemon socket present → reload.
-        sock.write_text("")  # stand-in for the daemon's UDS socket
+        sock.write_text("")
         r = self._ready(ext_js, sock, size)
         self.assertTrue(r["ready"])
         self.assertEqual(r["size"], size)

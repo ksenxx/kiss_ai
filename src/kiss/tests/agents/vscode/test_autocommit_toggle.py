@@ -122,22 +122,15 @@ class TestAutocommitModeSkipsMergeReview(_AutocommitTaskHarness):
         tab.use_worktree = False
         tab.auto_commit_mode = True
 
-        # Simulate the agent modifying a tracked file.
         Path(self.tmpdir, "README.md").write_text(
             "# Hello\n\nAgent-edited content\n",
         )
 
-        # Drive the post-task auto-commit path the task runner would
-        # invoke when ``tab.auto_commit_mode`` is ON.  This is exactly
-        # the call ``_run_task_inner``'s finally block now makes
-        # instead of ``_prepare_and_start_merge``.
         self.server._handle_autocommit_action("commit", tab_id)
 
         types = [e["type"] for e in self.events]
-        # No interactive merge view was opened.
         assert "merge_started" not in types
         assert "merge_data" not in types
-        # And the changes were auto-committed.
         assert "autocommit_done" in types
         done = next(
             e for e in self.events if e["type"] == "autocommit_done"
@@ -146,7 +139,6 @@ class TestAutocommitModeSkipsMergeReview(_AutocommitTaskHarness):
         assert done["committed"] is True
         assert done["tabId"] == tab_id
 
-        # Git status is clean again.
         status = _git(self.tmpdir, "status", "--porcelain")
         assert status.stdout.strip() == ""
 

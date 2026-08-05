@@ -57,8 +57,6 @@ class TestEventDispatcherFiltersByTabId(unittest.TestCase):
         self.printer = ConsolePrinter(file=self.buf)
         self.disp = _EventDispatcher(self.printer, tab_id="CLI_TAB")
 
-    # ----- streamed display events -----
-
     def test_text_delta_from_other_tab_is_dropped(self) -> None:
         self.disp.dispatch(
             {
@@ -80,9 +78,6 @@ class TestEventDispatcherFiltersByTabId(unittest.TestCase):
         self.assertIn("hello from me", self.buf.getvalue())
 
     def test_text_delta_with_no_tab_id_is_rendered(self) -> None:
-        # Pre-tab-fanout daemon builds emit some events with no
-        # ``tabId`` (system-prompt + initial banners).  We must not
-        # accidentally swallow these.
         self.disp.dispatch(
             {"type": "text_delta", "text": "global text"},
         )
@@ -147,11 +142,7 @@ class TestEventDispatcherFiltersByTabId(unittest.TestCase):
         )
         self.assertEqual(self.buf.getvalue(), "")
 
-    # ----- targeted control events -----
-
     def test_status_from_other_tab_does_not_toggle_task_active(self) -> None:
-        # Arm dispatcher with the current task id so it would
-        # accept matching status events.
         self.disp.current_task_id = "TASK_X"
         self.disp.dispatch(
             {
@@ -164,7 +155,6 @@ class TestEventDispatcherFiltersByTabId(unittest.TestCase):
         self.assertFalse(self.disp.task_active.is_set())
 
     def test_status_from_own_tab_toggles_task_active(self) -> None:
-        # Unarmed (no current_task_id) → every matching status applies.
         self.disp.dispatch(
             {
                 "type": "status",
@@ -195,10 +185,6 @@ class TestEventDispatcherFiltersByTabId(unittest.TestCase):
         self.assertEqual(self.disp.ask_user_q.get_nowait(), "Mine?")
 
     def test_clear_from_other_tab_does_not_set_chat_id(self) -> None:
-        # Pre-fix bug: a webview's ``newChat`` broadcast a
-        # ``clear`` carrying its tabId + chat_id to ALL clients,
-        # and the CLI dispatcher silently overwrote its own
-        # cached chat id with the OTHER tab's chat id.
         self.disp.chat_id = "MY_CHAT"
         self.disp.dispatch(
             {
@@ -220,10 +206,6 @@ class TestEventDispatcherFiltersByTabId(unittest.TestCase):
         self.assertEqual(self.disp.chat_id, "MY_CHAT_2")
 
     def test_notification_from_other_tab_is_dropped(self) -> None:
-        # Auto-commit notifications carry the originating tab id
-        # (see :class:`WorktreeSorcarAgent._broadcast_autocommit_notification`).
-        # A webview-driven autocommit must not surface as a toast on
-        # the CLI operator's terminal.
         self.disp.dispatch(
             {
                 "type": "notification",
@@ -248,8 +230,6 @@ class TestEventDispatcherFiltersByTabId(unittest.TestCase):
         self.assertIn("Generating commit message", self.buf.getvalue())
 
     def test_notification_with_no_tab_id_is_rendered(self) -> None:
-        # Server-reset notifications and other global toasts have no
-        # ``tabId``; the webview shows them, so the CLI must too.
         self.disp.dispatch(
             {
                 "type": "notification",
@@ -263,14 +243,7 @@ class TestEventDispatcherFiltersByTabId(unittest.TestCase):
             self.buf.getvalue(),
         )
 
-    # ----- request/reply events still routed properly -----
-
     def test_cli_info_with_other_tab_is_dropped(self) -> None:
-        # ``cliInfo`` replies the CLI client requested itself carry
-        # the CLI's own tabId.  A reply targeted at another tab
-        # (theoretical — the server uses ``connId`` to route, but
-        # nothing prevents a broadcast leak) must not be enqueued
-        # to the CLI's synchronous waiter.
         self.disp.dispatch(
             {
                 "type": "cliInfo",
@@ -304,8 +277,6 @@ class TestEventDispatcherFiltersByTabId(unittest.TestCase):
         self.assertTrue(self.disp.models_q.empty())
 
     def test_models_with_no_tab_id_is_enqueued(self) -> None:
-        # ``_cmd_get_models`` routes via ``connId`` and emits no
-        # ``tabId`` — must still reach the waiter.
         self.disp.dispatch(
             {
                 "type": "models",
@@ -316,8 +287,6 @@ class TestEventDispatcherFiltersByTabId(unittest.TestCase):
         self.assertEqual(ev.get("models"), [{"name": "global-model"}])
 
     def test_configdata_with_no_tab_id_updates_current_model(self) -> None:
-        # ``configData`` from the daemon's ``ready`` fanout carries no
-        # ``tabId``; the CLI must still pick up the canonical model.
         self.disp.dispatch(
             {
                 "type": "configData",
@@ -336,8 +305,6 @@ class TestEventDispatcherFiltersByTabId(unittest.TestCase):
             },
         )
         self.assertEqual(self.disp.current_model, "my-model")
-
-    # ----- error events -----
 
     def test_error_event_from_other_tab_is_dropped(self) -> None:
         self.disp.dispatch(
@@ -366,7 +333,6 @@ class TestEventDispatcherBackwardsCompatibility(unittest.TestCase):
     def setUp(self) -> None:
         self.buf = io.StringIO()
         self.printer = ConsolePrinter(file=self.buf)
-        # Construct WITHOUT tab_id (backwards-compat path).
         self.disp = _EventDispatcher(self.printer)
 
     def test_no_tab_id_accepts_all_tabs(self) -> None:

@@ -16,11 +16,11 @@ OUTPUT = PROJECT_ROOT / "API.md"
 
 INCLUDE_FILES: set[Path] = {
     Path("core/kiss_agent.py"),
-    Path("core/relentless_agent.py"),
+    Path("agents/sorcar/relentless_agent.py"),
     Path("agents/sorcar/sorcar_agent.py"),
     Path("agents/sorcar/chat_sorcar_agent.py"),
-    Path("agents/sorcar/git_worktree.py"),
     Path("agents/sorcar/worktree_sorcar_agent.py"),
+    Path("server/sorcar.py"),
 }
 INCLUDE_DIRS: set[Path] = {Path("third_party_agents")}
 
@@ -393,12 +393,11 @@ def discover_modules() -> list[ModuleDoc]:
 def _sort_modules(modules: list[ModuleDoc]) -> list[ModuleDoc]:
     order = [
         "kiss.core.kiss_agent",
-        "kiss.core.relentless_agent",
+        "kiss.agents.sorcar.relentless_agent",
         "kiss.agents.sorcar.sorcar_agent",
         "kiss.agents.sorcar.chat_sorcar_agent",
-        "kiss.agents.sorcar.git_worktree",
         "kiss.agents.sorcar.worktree_sorcar_agent",
-        "kiss.agents.third_party_agents",
+        "kiss.server.sorcar",
     ]
     rank = {name: i for i, name in enumerate(order)}
 

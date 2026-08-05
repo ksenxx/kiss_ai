@@ -59,7 +59,6 @@ REPO = Path(__file__).resolve().parents[5]
 INSTALL_SCRIPT = REPO / "install.sh"
 RELEASE_SCRIPTS = [
     REPO / "scripts" / "release.sh",
-    REPO / "scripts" / "release_exp.sh",
 ]
 
 
@@ -78,17 +77,10 @@ def _npm_ci_invocation(script: Path) -> tuple[str, int]:
     offset = 0
     for raw in src.splitlines(keepends=True):
         stripped = raw.lstrip()
-        # Drop bash comments and lines whose only ``npm ci`` mention is the
-        # heartbeat *label* string (preceding the real invocation tokens).
         if not stripped.startswith("#"):
-            # Match either ``npm ci <flags>`` at the start of the line or
-            # ``… npm ci "${NPM_CI_FLAGS[@]}"`` after run_with_heartbeat.
             if re.search(r"(^|\s)npm ci(\s|$)", raw) and "echo " not in raw:
                 lines.append((raw.rstrip("\n"), offset))
         offset += len(raw)
-    # Pick the last executable invocation — the retry branch in
-    # ``install.sh`` re-runs the same command, but the *first* one is the
-    # one whose ordering we care about (it runs before compile/package).
     assert lines, f"no 'npm ci' invocation found in {script}"
     return lines[0]
 
@@ -121,9 +113,6 @@ def _npm_ci_flags(script: Path) -> list[str]:
     if m:
         return m.group(1).split()
     line, _ = _npm_ci_invocation(script)
-    # Drop the ``npm ci`` prefix; any preceding ``run_with_heartbeat "label"``
-    # tokens never appear on the release-script side (which uses the inline
-    # form), so split-after-``ci`` is sufficient here.
     tokens = line.split()
     idx = tokens.index("ci")
     return tokens[idx + 1 :]
@@ -297,7 +286,6 @@ def _run_npm_ci(flags: list[str], tmp_path: Path, name: str) -> Path:
     npm = shutil.which("npm")
     assert npm is not None
     env["PATH"] = f"{Path(npm).parent}:{env['PATH']}"
-    # Build the lockfile without installing anything (runs no scripts).
     subprocess.run(
         [npm, "install", "--package-lock-only", "--no-audit", "--no-fund"],
         cwd=proj,
@@ -333,8 +321,6 @@ def _extract_signal_helpers(script: Path) -> str:
     start = src.index("LAST_SIGNAL_TS=0")
     end = src.index('OS="$(uname -s)"')
     chunk = src[start:end]
-    # ``return $rc`` inside ``run_with_heartbeat`` requires the function
-    # body — included in the slice — so the chunk is self-contained.
     return chunk
 
 
@@ -406,12 +392,6 @@ def test_run_with_heartbeat_survives_stray_sigint(tmp_path: Path) -> None:
     marker = tmp_path / "sleep_finished"
     ready = tmp_path / "wrapped_started"
     log = tmp_path / "harness.log"
-    # The harness:
-    #   * pulls in the extracted helpers verbatim,
-    #   * runs ``sleep`` under ``run_with_heartbeat`` with a wide
-    #     heartbeat interval so its output doesn't race the test,
-    #   * touches a marker file if and only if the wrapped command
-    #     exited 0 (i.e. wasn't killed by the stray signal).
     harness = tmp_path / "harness.sh"
     harness.write_text(
         "#!/bin/bash\n"
@@ -430,12 +410,6 @@ def test_run_with_heartbeat_survives_stray_sigint(tmp_path: Path) -> None:
     )
     harness.chmod(0o755)
 
-    # Redirect harness output to a file rather than a pipe: the heartbeat
-    # subshell spawns a ``sleep $HEARTBEAT_INTERVAL`` child that, after a
-    # stray SIGINT kills its parent shell, is reparented to init and keeps
-    # the inherited stdout fd open until it finishes — which would hold
-    # ``proc.communicate()`` open until the heartbeat interval elapses.
-    # A file fd does not have that EOF dependency.
     with open(log, "wb") as out:
         proc = subprocess.Popen(
             ["bash", str(harness)],
@@ -446,11 +420,6 @@ def test_run_with_heartbeat_survives_stray_sigint(tmp_path: Path) -> None:
             preexec_fn=_reset_signal_dispositions,
         )
         try:
-            # Wait until the wrapped command is actually running (it writes
-            # the ready marker) before delivering SIGINT to the harness's
-            # entire process group — the exact condition that previously
-            # killed npm/copy-kiss.sh.  A fixed sleep raced bash's trap
-            # installation under heavy parallel test load.
             deadline = time.time() + 15.0
             while time.time() < deadline and not ready.exists():
                 time.sleep(0.05)
@@ -482,8 +451,6 @@ def test_run_with_heartbeat_survives_stray_sigint(tmp_path: Path) -> None:
         "inherit SIG_IGN for INT/TERM via the subshell `trap '' INT TERM; "
         f"exec ...` wrapper.  Output:\n{stdout}"
     )
-    # And the install.sh-level trap must have printed the "Interrupt
-    # received but ignored" diagnostic so the user knows what happened.
     assert "Interrupt received but ignored" in stdout, (
         "the install.sh-level SIGINT trap did not fire — handle_interrupt "
         f"is wired wrong.  Output:\n{stdout}"
@@ -535,19 +502,6 @@ def test_run_with_heartbeat_double_sigint_aborts(tmp_path: Path) -> None:
                 time.sleep(0.05)
             assert ready.exists(), "wrapped command never started"
             os.killpg(proc.pid, signal.SIGINT)
-            # Wait until the FIRST trap has actually executed before
-            # sending the second signal: bash runs traps only between
-            # commands, so under heavy load two quick SIGINTs can coalesce
-            # into a single ``handle_interrupt`` invocation — the
-            # second-signal abort branch would then never run and the
-            # wrapped ``sleep 30`` would outlive the wait below.  The
-            # 3-second double-interrupt window starts at the first trap's
-            # execution, so detect-then-send stays safely inside it.
-            # A generous timeout: under heavy parallel test load (8
-            # concurrent pytest processes) scheduler starvation can delay
-            # the parent bash between the ready-marker write and the trap
-            # execution/log flush well past the 10 s default, producing a
-            # spurious "first SIGINT trap never fired" flake.
             first = _wait_for_log_text(
                 log, "Interrupt received but ignored", timeout=30.0
             )
@@ -593,13 +547,11 @@ def test_update_build_npm_ci_flags_block_install_scripts(
     dependency's install script (the keytar hang vector) — then proves the
     flags parsed from ``install.sh`` prevent it.
     """
-    # Reproduce the bug: without install.sh's flags the lifecycle script runs.
     marker = _run_npm_ci([], tmp_path, "buggy")
     assert marker.is_file(), (
         "fixture self-check: plain npm ci should run the install script"
     )
 
-    # The fix: install.sh's flags must prevent the script from running.
     flags = _npm_ci_flags(INSTALL_SCRIPT)
     marker = _run_npm_ci(flags, tmp_path, "fixed")
     assert not marker.exists(), (

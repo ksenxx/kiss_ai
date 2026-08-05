@@ -109,9 +109,6 @@ class TestWorktreeProgressRouted(unittest.TestCase):
         tab = server._get_tab("t-13")
         tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         tab.use_worktree = True
-        # The merge handler now reads ``wt._repo_root`` to acquire
-        # the per-repo serialization lock — use a real ``GitWorktree``
-        # so that property has a valid ``Path`` value.
         with tempfile.TemporaryDirectory() as td:
             tab.agent._wt = GitWorktree(
                 repo_root=_Path(td),

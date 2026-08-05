@@ -107,7 +107,6 @@ class TestExtraWritesStayValidJson(_TempDbTestBase):
             "task with nan cost",
             extra={"model": "m", "cost": float("nan")},
         )
-        # New schema: NaN never reaches the column — _safe_float drops it.
         db = th._get_db()
         with th._rw_lock.read_lock():
             row = db.execute(
@@ -116,7 +115,6 @@ class TestExtraWritesStayValidJson(_TempDbTestBase):
             ).fetchone()
         assert row["model"] == "m"
         assert math.isfinite(row["cost"])
-        # Synthesized JSON is always valid.
         raw = self._raw_extra(task_id)
         parsed = json.loads(raw)
         assert parsed["model"] == "m"
@@ -133,7 +131,6 @@ class TestExtraWritesStayValidJson(_TempDbTestBase):
                 "SELECT tokens, cost, steps FROM task_history WHERE id = ?",
                 (task_id,),
             ).fetchone()
-        # NaN/Inf collapsed to defaults; finite values preserved.
         assert row["steps"] == 3
         assert row["tokens"] == 0
         assert math.isfinite(row["cost"])
@@ -185,9 +182,6 @@ class TestSubagentNanExtraConsistency(_TempDbTestBase):
         x_id, _chat_x = _add_task(
             "orphaned subagent task",
             extra={
-                # Use a valid UUID-shaped id that does not match any
-                # real task — exercises the orphaned-subagent path
-                # without triggering the parent_task_id validator.
                 "subagent": {
                     "parent_task_id":
                         "ffffffffffffffffffffffffffffffff"
@@ -204,10 +198,6 @@ class TestSubagentNanExtraConsistency(_TempDbTestBase):
     def test_sql_classify_subagent_via_parent_task_id_column(
         self,
     ) -> None:
-        # The schema stores parent_task_id in a dedicated TEXT
-        # column — the SQL predicate ``_HISTORY_NOT_SUBAGENT`` reads
-        # it directly so NaN/Infinity values in the ``extra`` payload
-        # can no longer confuse sub-agent classification.
         parent_id, chat = _add_task("parent task")
         sub_id = self._insert_raw_subagent(
             "subagent row", chat, parent_id, cost=0.1,
@@ -229,10 +219,8 @@ class TestSubagentNanExtraConsistency(_TempDbTestBase):
                 "FROM task_history WHERE id = ?",
                 (parent_id,),
             ).fetchone()
-        # Sub-agent row: SQL says hidden (not_sub == 0); column matches.
         assert sub_row["not_sub"] == 0
         assert sub_row["parent_task_id"] == parent_id
-        # Parent row: SQL says visible (not_sub == 1); column empty.
         assert parent_row["not_sub"] == 1
         assert not parent_row["parent_task_id"]
 

@@ -284,21 +284,17 @@ class TestCCOpusTextStreamingInToolMode:
         finally:
             subprocess.Popen = original_popen  # type: ignore[assignment,misc]
 
-        # Read raw recording before coalescing to count individual broadcasts
         key = printer._task_key()
         with printer._lock:
             raw = list(printer._recordings.get(key, []))
         raw_text_deltas = [e for e in raw if e.get("type") == "text_delta"]
 
-        # The CLI stream has 3 text_delta events. If they are batched into 1,
-        # the text was not streamed — it appeared all at once.
         assert len(raw_text_deltas) >= 3, (
             f"Expected ≥3 raw text_delta events (one per CLI chunk), "
             f"got {len(raw_text_deltas)}: "
             f"{[d.get('text', '')[:40] for d in raw_text_deltas]}"
         )
 
-        # Also verify the coalesced recording is correct
         recorded = printer.stop_recording()
         text_deltas = [e for e in recorded if e["type"] == "text_delta"]
         full_text = "".join(d["text"] for d in text_deltas)
@@ -327,30 +323,25 @@ class TestCCOpusTextStreamingInToolMode:
         finally:
             subprocess.Popen = original_popen  # type: ignore[assignment,misc]
 
-        # Read raw recording before coalescing
         key = printer._task_key()
         with printer._lock:
             raw = list(printer._recordings.get(key, []))
         raw_types = [e.get("type") for e in raw]
 
-        # Thinking must have start/end boundaries
         assert "thinking_start" in raw_types, f"No thinking_start: {raw_types}"
         assert "thinking_end" in raw_types, f"No thinking_end: {raw_types}"
 
-        # Thinking tokens must stream (≥2 raw thinking_delta events)
         raw_thinking = [e for e in raw if e.get("type") == "thinking_delta"]
         assert len(raw_thinking) >= 2, (
             f"Expected ≥2 raw thinking_delta events, got {len(raw_thinking)}"
         )
 
-        # Text tokens must also stream (≥2 raw text_delta events)
         raw_text = [e for e in raw if e.get("type") == "text_delta"]
         assert len(raw_text) >= 2, (
             f"Expected ≥2 raw text_delta events, got {len(raw_text)}: "
             f"{[d.get('text', '')[:40] for d in raw_text]}"
         )
 
-        # Verify full content
         recorded = printer.stop_recording()
         thinking_deltas = [e for e in recorded if e["type"] == "thinking_delta"]
         full_thinking = "".join(d["text"] for d in thinking_deltas)
@@ -384,19 +375,16 @@ class TestCCOpusTextStreamingInToolMode:
         finally:
             subprocess.Popen = original_popen  # type: ignore[assignment,misc]
 
-        # Read raw recording before coalescing
         key = printer._task_key()
         with printer._lock:
             raw = list(printer._recordings.get(key, []))
         raw_text_deltas = [e for e in raw if e.get("type") == "text_delta"]
 
-        # Must have streamed text tokens incrementally (not 1 big chunk)
         assert len(raw_text_deltas) >= 2, (
             f"Expected ≥2 raw text_delta events, got {len(raw_text_deltas)}: "
             f"{[d.get('text', '')[:40] for d in raw_text_deltas]}"
         )
 
-        # Tool calls must still be parsed correctly
         assert len(function_calls) == 1
         assert function_calls[0]["name"] == "Bash"
 

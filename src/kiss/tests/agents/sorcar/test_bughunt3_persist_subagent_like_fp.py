@@ -62,31 +62,20 @@ class _TempDbTestBase:
 class TestSubagentLikeFalsePositive(_TempDbTestBase):
     """Rows that merely CONTAIN '"subagent"' in extra must stay visible."""
 
-    # A nested "subagent" key: NOT a sub-agent row per the canonical
-    # detector (the dedicated ``parent_task_id`` column is the source
-    # of truth, and only the TOP-LEVEL ``subagent`` key in *extra*
-    # populates it), yet its JSON encoding contains the literal
-    # substring '"subagent"'.
     EXTRA: dict[str, object] = {"model": "m1", "opts": {"subagent": False}}
 
     def test_history_readers_keep_false_positive_row(self) -> None:
         task_text = "review subagent documentation"
         task_id, chat_id = _add_task(task_text, extra=self.EXTRA)
 
-        # Canonical detector agrees this is NOT a sub-agent row.
-        # In the new schema, sub-agent identification uses the dedicated
-        # ``parent_task_id`` column, so a non-top-level "subagent" key
-        # in *extra* does not get persisted as a sub-agent at all.
         row = th._get_db().execute(
             "SELECT parent_task_id FROM task_history WHERE id = ?",
             (task_id,),
         ).fetchone()
         assert (row["parent_task_id"] or "") == ""
-        # … and the chat context (JSON-validating reader) includes it.
         ctx = _load_chat_context(chat_id)
         assert [e["task"] for e in ctx] == [task_text]
 
-        # The LIKE-only readers must agree and keep the row visible.
         hist = _load_history()
         assert [h["id"] for h in hist] == [task_id]
 
@@ -107,7 +96,6 @@ class TestSubagentLikeFalsePositive(_TempDbTestBase):
         assert [h["id"] for h in hist] == [parent_id]
         assert _search_history("child") == []
         assert _prefix_match_tasks("child", limit=1) == []
-        # Chat context also filters genuine sub-agent rows.
         ctx = _load_chat_context(chat_id)
         assert [e["task"] for e in ctx] == ["parent task"]
 
@@ -124,9 +112,6 @@ class TestSubagentLikeFalsePositive(_TempDbTestBase):
         assert prv["task_id"] == t2
 
     def test_legacy_malformed_extra_rows_stay_visible(self) -> None:
-        # In the new flat-column schema, sub-agent classification is
-        # driven solely by the ``parent_task_id`` column.  An empty /
-        # whitespace value must keep the row visible in history lists.
         task_id, _ = _add_task("legacy row")
         db = th._get_db()
         with th._rw_lock.write_lock():

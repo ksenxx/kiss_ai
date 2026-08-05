@@ -40,6 +40,7 @@ import unittest
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
+import pytest
 from websockets.asyncio.client import ClientConnection, connect
 
 import kiss.agents.sorcar.persistence as th
@@ -191,6 +192,7 @@ class TestReplayMergeActionRace(IsolatedAsyncioTestCase):
         with self.server._merge_states_lock:
             self.assertIn(tab_id, self.server._merge_states)
 
+    @pytest.mark.slow
     async def test_replay_waits_for_in_flight_merge_action(self) -> None:
         """No merge replay may be emitted while a merge action is running."""
         tab_id = "tab-replay-race"
@@ -198,8 +200,6 @@ class TestReplayMergeActionRace(IsolatedAsyncioTestCase):
 
         ws = await self._connect_ok()
 
-        # Hold the tab's merge-action lock, exactly as an in-flight
-        # reject (mid file-rewrite) does in _handle_web_merge_action.
         lock = self.server._merge_action_lock(tab_id)
         await lock.acquire()
         try:
@@ -237,9 +237,6 @@ class TestReplayMergeActionRace(IsolatedAsyncioTestCase):
             await ws.send(json.dumps({
                 "type": "ready", "tabId": tab_id, "restoredTabs": [],
             }))
-            # While the replay waits, the review finishes (this is what
-            # the final accept/reject action does before releasing the
-            # lock: the state is popped, then all-done is dispatched).
             await asyncio.sleep(0.3)
             with self.server._merge_states_lock:
                 self.server._merge_states.pop(tab_id, None)

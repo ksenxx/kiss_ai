@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.core.useful_tools import UsefulTools
+from kiss.agents.sorcar.useful_tools import UsefulTools
 
 
 class TestEditCrlfPreservation(unittest.TestCase):
@@ -45,8 +45,6 @@ class TestEditCrlfPreservation(unittest.TestCase):
         CRLF file, and the replacement must be written with CRLF."""
         p = self.dir / "f.txt"
         p.write_bytes(b"alpha\r\nbeta\r\ngamma\r\ndelta\r\n")
-        # Read() shows the model LF-translated text, so the model passes
-        # LF newlines inside old_string/new_string.
         result = self.tools.Edit(str(p), "beta\ngamma", "BETA\nGAMMA")
         self.assertIn("Successfully replaced 1", result)
         self.assertEqual(
@@ -68,7 +66,6 @@ class TestEditCrlfPreservation(unittest.TestCase):
         p.write_bytes(b"a\r\nb\r\nc\r\na\r\nb\r\n")
         result = self.tools.Edit(str(p), "a\nb", "X")
         self.assertIn("appears 2 times", result)
-        # File untouched.
         self.assertEqual(p.read_bytes(), b"a\r\nb\r\nc\r\na\r\nb\r\n")
 
     def test_lf_file_unaffected_regression(self) -> None:

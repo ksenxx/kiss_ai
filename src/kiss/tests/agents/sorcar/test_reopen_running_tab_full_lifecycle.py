@@ -54,8 +54,6 @@ class TestReopenRunningTabFullLifecycle(unittest.TestCase):
 
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
-        # Replace ``_run_task_inner`` with a blocking stub: the test
-        # uses ``release`` to deterministically end the task.
         self.started = threading.Event()
         self.release = threading.Event()
         self.runs: list[dict] = []
@@ -66,14 +64,12 @@ class TestReopenRunningTabFullLifecycle(unittest.TestCase):
             tab.is_task_active = True
             self.runs.append(cmd)
             self.started.set()
-            # Block until the test signals task completion.
             self.release.wait(timeout=10)
 
         self.server._run_task_inner = fake_inner  # type: ignore[assignment]
 
     def tearDown(self) -> None:
         self.release.set()
-        # Join any worker threads on lingering tabs.
         for tab in list(_RunningAgentState.running_agent_states.values()):
             th = tab.task_thread
             if th is not None:
@@ -90,7 +86,6 @@ class TestReopenRunningTabFullLifecycle(unittest.TestCase):
     def test_reopen_during_run_then_run_again_after_finish(self) -> None:
         tab_id = "tab-XYZ"
 
-        # ---- Phase 1: user starts the task in tab_id ----
         self.server._handle_command({
             "type": "run",
             "prompt": "do a long task",
@@ -102,17 +97,8 @@ class TestReopenRunningTabFullLifecycle(unittest.TestCase):
         chat_id = tab.chat_id
         assert chat_id, "chat_id must be allocated"
 
-        # Initial clear was broadcast.
         assert self._events_of("clear", tab_id)
 
-        # ---- Phase 2: user closes the tab while task is running ----
-        # In the extension the webview is destroyed (onDidDispose) but
-        # the daemon-side ``_RunningAgentState`` and task_thread stay
-        # alive.  The extension does NOT send ``closeTab`` for a
-        # webview-view close — only chat-tab closes do.  So the daemon
-        # state is unchanged here; no command is sent.
-
-        # ---- Phase 3: user reopens the view → resumeSession ----
         with self._evt_lock:
             self.events.clear()
         self.server._handle_command({
@@ -133,7 +119,6 @@ class TestReopenRunningTabFullLifecycle(unittest.TestCase):
             f"{[e.get('type') for e in self.events]}"
         )
 
-        # ---- Phase 4: user types DURING the running task ----
         with self._evt_lock:
             self.events.clear()
         self.server._handle_command({
@@ -145,7 +130,6 @@ class TestReopenRunningTabFullLifecycle(unittest.TestCase):
             "BUG: appendUserMessage during the task must be queued, "
             f"got pending={tab.pending_user_messages}"
         )
-        # User text is echoed back so the chat surface shows it.
         prompt_echoes = [
             e
             for e in self._events_of("prompt", tab_id)
@@ -153,9 +137,6 @@ class TestReopenRunningTabFullLifecycle(unittest.TestCase):
         ]
         assert prompt_echoes, "queued prompt must be echoed to the webview"
 
-        # Also: a ``run`` sent while busy (because the re-opened
-        # webview can momentarily still think it is idle and send
-        # ``submit`` → ``run``) is injected too, not dropped.
         with self._evt_lock:
             self.events.clear()
         self.server._handle_command({
@@ -168,7 +149,6 @@ class TestReopenRunningTabFullLifecycle(unittest.TestCase):
             "BUG: run-while-busy must inject the prompt rather than drop it"
         )
 
-        # ---- Phase 5: task ends → release the worker ----
         self.release.set()
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -178,18 +158,11 @@ class TestReopenRunningTabFullLifecycle(unittest.TestCase):
         assert tab.task_thread is None, (
             "BUG: task_thread must be cleared by _run_task's finally"
         )
-        # Daemon broadcast status running:false in the finally block.
         status_off = [
             e for e in self._events_of("status", tab_id) if e.get("running") is False
         ]
         assert status_off, "task finish must broadcast status running:false"
 
-        # ---- Phase 6: user types AFTER the task ended → submit/run ----
-        # In the real webview, isRunning is now false (set by the
-        # status:false event), so the webview sends ``submit`` which
-        # the extension translates to a ``run`` command.  Verify the
-        # daemon starts a NEW task — does NOT silently drop / reuse.
-        # Re-arm the worker bookkeeping for the second run.
         self.started.clear()
         self.release.clear()
         prev_runs = len(self.runs)
@@ -209,12 +182,10 @@ class TestReopenRunningTabFullLifecycle(unittest.TestCase):
             "was started."
         )
         assert len(self.runs) == prev_runs + 1
-        # A fresh clear was broadcast for the new task.
         assert self._events_of("clear", tab_id), (
             "new task must broadcast a fresh ``clear`` event"
         )
 
-        # ---- Phase 7: input during the SECOND task must also be queued ----
         self.server._handle_command({
             "type": "appendUserMessage",
             "prompt": "tweak the result",
@@ -225,7 +196,6 @@ class TestReopenRunningTabFullLifecycle(unittest.TestCase):
             f"got pending={tab.pending_user_messages}"
         )
 
-        # Release the second task for clean teardown.
         self.release.set()
 
 

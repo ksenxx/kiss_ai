@@ -48,8 +48,6 @@ def _regular_tab_branch_source() -> str:
     fn_idx = src.index("function renderTabBar(")
     branch_idx = src.index("if (tab.isSubagentTab) {", fn_idx)
     else_idx = src.index("} else {", branch_idx)
-    # The else branch ends at the next ``}`` that closes the if/else
-    # — locate it by scanning for the matching brace.
     depth = 1
     i = else_idx + len("} else {")
     while i < len(src) and depth > 0:
@@ -70,8 +68,6 @@ class TestRegularTabStatusUsesColouredCircle:
         """The status span must render U+25CF (●), not U+2713 / U+2717."""
         body = _regular_tab_branch_source()
         assert "\\u25CF" in body or "\\u25cf" in body or "●" in body, body
-        # Old ✓ / ✗ glyphs (including their unicode escape forms) must
-        # not be present in executable code anymore.
         assert "✓" not in body, body
         assert "✗" not in body, body
         assert "\\u2713" not in body, body
@@ -84,7 +80,6 @@ class TestRegularTabStatusUsesColouredCircle:
         body = _regular_tab_branch_source()
         assert "chat-tab-status chat-tab-ok" in body, body
         assert "chat-tab-status chat-tab-fail" in body, body
-        # Selection is still keyed on ``tab.lastTaskFailed``.
         assert "tab.lastTaskFailed" in body, body
 
     def test_status_icon_only_when_tab_has_run_task(self) -> None:
@@ -94,8 +89,6 @@ class TestRegularTabStatusUsesColouredCircle:
         completed a task and tabs loaded from history.
         """
         body = _regular_tab_branch_source()
-        # The branch starts with ``if (tab.isRunning) { spinner } else
-        # if (tab.hasRunTask) { status icon }``.
         m = re.search(
             r"if\s*\(\s*tab\.isRunning\s*\).*?\}\s*else\s+if\s*\(\s*"
             r"tab\.hasRunTask\s*\)\s*\{",

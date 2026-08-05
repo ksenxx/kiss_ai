@@ -46,10 +46,6 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 VSCODE_TS_DIR = (
     Path(__file__).resolve().parents[3] / "agents" / "vscode" / "src"
 )
@@ -74,12 +70,6 @@ def _rng_payload(rng: random.Random, *, length_max: int = 40,
     pool = [c for c in pool if c not in forbid]
     return "".join(rng.choice(pool) for _ in range(rng.randint(1, length_max)))
 
-
-# ---------------------------------------------------------------------------
-# 1. Behavioral fuzz — vscode_config.save_api_key_to_shell across shells.
-#    Every payload must round-trip through a real shell without any side
-#    effect.  H3 fix property.
-# ---------------------------------------------------------------------------
 
 
 @unittest.skipIf(sys.platform == "win32",
@@ -144,7 +134,6 @@ class TestFuzzSaveApiKeyRoundTripBash(unittest.TestCase):
 
     def test_specific_dangerous_payloads(self) -> None:
         m = self._marker
-        # Each payload tries a different injection technique.
         for payload in [
             f'$(touch {m})',
             f'`touch {m}`',
@@ -175,10 +164,6 @@ class TestFuzzSaveApiKeyRoundTripZsh(TestFuzzSaveApiKeyRoundTripBash):
                  "POSIX shells required for round-trip fuzzing")
 
 
-# ---------------------------------------------------------------------------
-# 2. Behavioral fuzz — diff_merge._git
-# ---------------------------------------------------------------------------
-
 
 class TestFuzzGitCwdNoInjection(unittest.TestCase):
     """``_git`` must run via argv (no shell), so fuzzed cwd values that
@@ -197,14 +182,9 @@ class TestFuzzGitCwdNoInjection(unittest.TestCase):
                 tmpdir = Path(tempfile.mkdtemp(
                     prefix="kiss-git-fuzz-", suffix=_rng_payload(
                         rng, length_max=8, forbid="\n\r\0/")))
-                # Initialise an empty repo so ``git status`` has work to do.
                 subprocess.run(["git", "init", "-q", str(tmpdir)],
                                capture_output=True, timeout=20)
-                # Pre-existing payloads in the working dir tree must not
-                # be evaluated as shell.
                 bad_name = f"$(touch '{marker}')"
-                # Don't actually create that file — we only need
-                # ``_git`` to receive the (possibly weird) cwd as data.
                 cp = dm._git(str(tmpdir), "status", "--porcelain")
                 self.assertEqual(cp.returncode, 0,
                                  msg=cp.stderr)
@@ -239,16 +219,8 @@ class TestFuzzGitCwdNoInjection(unittest.TestCase):
                               f"to git: {captured[-1]}")
 
 
-# ---------------------------------------------------------------------------
-# 3. Behavioral fuzz — _save_untracked_base file names
-# ---------------------------------------------------------------------------
 
 
-
-
-# ---------------------------------------------------------------------------
-# 4. Behavioral fuzz — vscode_config.source_shell_env paths
-# ---------------------------------------------------------------------------
 
 
 @unittest.skipIf(sys.platform == "win32",
@@ -261,12 +233,6 @@ class TestFuzzSourceShellEnvPaths(unittest.TestCase):
         if not shutil.which("bash"):
             self.skipTest("bash required")
         self._tmp = tempfile.TemporaryDirectory()
-        # ``source_shell_env`` imports every ``export`` in the sourced
-        # RC into ``os.environ`` — including the sentinel
-        # ``OPENAI_API_KEY=present`` planted below.  Snapshot/restore
-        # the environment so the sentinel does not leak into later
-        # tests (it made live OpenAI calls fail 401 with "Incorrect
-        # API key provided: present").
         self._env_patch = mock.patch.dict(os.environ)
         self._env_patch.start()
         self._marker = (Path(tempfile.gettempdir())
@@ -285,9 +251,6 @@ class TestFuzzSourceShellEnvPaths(unittest.TestCase):
 
         rng = random.Random(0xCAFE)
         for _ in range(20):
-            # Build a directory name with shell metacharacters under tmp
-            # so we can plant the RC file at the resulting weird path
-            # and call ``source_shell_env``.
             payload = _rng_payload(rng, length_max=10,
                                    forbid="\n\r\0/")
             sub = Path(self._tmp.name) / f"d-{payload}"
@@ -296,9 +259,6 @@ class TestFuzzSourceShellEnvPaths(unittest.TestCase):
             except OSError:
                 continue
             rc = sub / ".bashrc"
-            # Write a minimal RC that exports a known key — we want to
-            # detect whether sourcing this file would also execute the
-            # injected payload that lives in the file *path*.
             rc.write_text('export OPENAI_API_KEY=present\n')
             with mock.patch.object(vc, "_shell_rc_path", lambda s: rc), \
                     mock.patch.object(vc, "_get_user_shell", lambda: "bash"), \
@@ -308,37 +268,17 @@ class TestFuzzSourceShellEnvPaths(unittest.TestCase):
                              f"source_shell_env injected for path {sub}")
 
 
-# ---------------------------------------------------------------------------
-# 5. Source-grep fuzz — DependencyInstaller.ts must not regress
-# ---------------------------------------------------------------------------
 
 
 
 
-# ---------------------------------------------------------------------------
-# 6. Source-grep fuzz — kissPaths.ts must consult workspace trust
-# ---------------------------------------------------------------------------
 
 
 
 
-# ---------------------------------------------------------------------------
-# 7. Source-grep fuzz — webview path-traversal / CSP / nonce
-# ---------------------------------------------------------------------------
 
 
 
-
-# ---------------------------------------------------------------------------
-# 8. Behavioral fuzz — markdown sanitizer must strip dangerous content
-# ---------------------------------------------------------------------------
-
-
-
-
-# ---------------------------------------------------------------------------
-# 9. Behavioral fuzz — autocomplete prefix injection
-# ---------------------------------------------------------------------------
 
 
 class TestFuzzAutocompletePrefix(unittest.TestCase):
@@ -376,7 +316,6 @@ class TestFuzzAutocompletePrefix(unittest.TestCase):
                 srv._get_files(prefix)
                 self.assertFalse(marker.exists(),
                                  f"autocomplete fired shell for {prefix!r}")
-                # Every call yields exactly one broadcast.
                 self.assertEqual(len(broadcasts), 1)
                 self.assertEqual(broadcasts[0]["type"], "files")
         finally:
@@ -384,16 +323,8 @@ class TestFuzzAutocompletePrefix(unittest.TestCase):
                 marker.unlink()
 
 
-# ---------------------------------------------------------------------------
-# 10. Source-grep fuzz — every Python subprocess.run uses an argv list
-# ---------------------------------------------------------------------------
 
 
-
-
-# ---------------------------------------------------------------------------
-# 11. Behavioral fuzz — chmod 0600 round-trip on RC under random umasks
-# ---------------------------------------------------------------------------
 
 
 @unittest.skipIf(sys.platform == "win32", "POSIX chmod test")
@@ -438,16 +369,8 @@ class TestFuzzRcModeUnderRandomUmasks(unittest.TestCase):
                 "(expected 0o600)")
 
 
-# ---------------------------------------------------------------------------
-# 12. Behavioral fuzz — DependencyInstaller xmlEscape / unitEscape
-# ---------------------------------------------------------------------------
 
 
-
-
-# ---------------------------------------------------------------------------
-# 13. Behavioral — exhaustive injection-payload corpus must round-trip
-# ---------------------------------------------------------------------------
 
 
 @unittest.skipIf(sys.platform == "win32",
@@ -468,12 +391,6 @@ class TestKnownInjectionCorpus(unittest.TestCase):
         self._refresh_patch = mock.patch.object(vc, "_refresh_config",
                                                 lambda: None)
         self._refresh_patch.start()
-        # ``save_api_key_to_shell`` exports the saved value into
-        # ``os.environ[key_name]``.  Snapshot/restore the environment
-        # (as the sibling fuzz classes do) so the last injection
-        # payload does not leak into ``OPENAI_API_KEY`` for the rest of
-        # the pytest process — that leak made every later live OpenAI
-        # call (e.g. audio transcription in test_multimodal) fail 401.
         self._env_patch = mock.patch.dict(
             os.environ,
             {"HOME": str(self.home), "SHELL": "/bin/bash"})

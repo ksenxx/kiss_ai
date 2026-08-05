@@ -73,10 +73,6 @@ def _iterate_under_state_lock(
                 for st in _RunningAgentState.running_agent_states.values():
                     if st.is_subagent:
                         count += 1
-                    # ``time.sleep(0)`` is a hint to the scheduler;
-                    # combined with a tiny random sleep it makes the
-                    # iteration straddle multiple GIL preemption
-                    # boundaries.
                     time.sleep(random.uniform(0, 0.001))
                 assert count >= 0
     except BaseException as exc:  # pragma: no cover — race surface

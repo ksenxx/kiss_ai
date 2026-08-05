@@ -33,17 +33,6 @@ from kiss.core.print_to_console import ConsolePrinter
 from kiss.server.json_printer import JsonPrinter
 from kiss.ui.cli import cli_daemon_bridge, cli_talk
 
-# Task ids that have announced ``cliTaskStart`` to the daemon but not
-# yet ``cliTaskEnd``.  A module-level STRONG registry (w3 F4): the
-# previous WeakSet-of-printers safety net (w2 F21) kept printers
-# garbage-collectable, but a printer GC'd mid-task (agent abandoned
-# the task, exception path dropped the last reference) took its
-# pending ``cliTaskEnd`` obligation to the grave — the daemon's
-# ``_cli_running_tasks`` entry and the webview's blinking-green
-# "running" indicator then leaked until daemon restart.  The
-# end-obligation therefore lives here, keyed by task id only, so the
-# single atexit handler below can flush it without holding (or
-# needing) any printer reference.  Printers stay GC-able.
 _pending_lock = threading.Lock()
 _pending_task_ids: set[str] = set()
 
@@ -85,19 +74,7 @@ class RecordingConsolePrinter(JsonPrinter):
     def __init__(self) -> None:
         super().__init__()
         self._console = ConsolePrinter()
-        # Task ids for which we've already announced a
-        # ``cliTaskStart`` envelope to the daemon — only the FIRST
-        # event for a fresh task triggers the announce.  Set of
-        # 32-char lowercase-hex ``task_history.id`` strings.
-        # Guarded by ``_cli_task_lock`` because the printer
-        # may be invoked from the agent loop AND the agent's
-        # background worker threads concurrently.
         self._cli_task_lock = threading.Lock()
-        # Maps each running task id to an Event set once its
-        # ``cliTaskStart`` envelope has actually been SENT to the
-        # daemon.  Concurrent broadcasters of the same fresh task wait
-        # on the event so no task event (or ``cliTaskEnd``) can reach
-        # the daemon before its ``cliTaskStart`` (w2 F22).
         self._cli_task_started: dict[str, threading.Event] = {}
 
     def broadcast(self, event: dict[str, Any]) -> None:
@@ -119,19 +96,15 @@ class RecordingConsolePrinter(JsonPrinter):
         (b) shown the blinking-green-circle "running" indicator in
         its tab title.  When a terminal ``result`` event arrives,
         emits a matching ``cliTaskEnd`` envelope so the daemon
-        clears the indicator on every subscribed tab.
+        clears the indicator on every subscribed tab.  Announced
+        task ids are remembered as 32-char lowercase-hex
+        ``task_history.id`` strings, guarded by ``_cli_task_lock``
+        because the printer may be invoked from the agent loop and
+        the agent's background worker threads concurrently.
 
         Args:
             event: The event dictionary to broadcast.
         """
-        # r3-sorcar-C1: Normalise any caller-provided ``taskId`` on
-        # the incoming ``event`` dict to canonical lowercase 32-hex
-        # BEFORE invoking ``super().broadcast(event)``.  The base
-        # class's recording / persistence layer consults
-        # ``event["taskId"]`` directly, so lowercasing only the
-        # forwarded daemon copy would leave the recording layer
-        # indexed under raw case (split-brain that breaks subscriber
-        # routing and resume-from-history).
         raw_event_tid = event.get("taskId")
         if raw_event_tid:
             normed_event_tid = str(raw_event_tid).lower()
@@ -140,25 +113,10 @@ class RecordingConsolePrinter(JsonPrinter):
                 and is_task_history_id(normed_event_tid)
             ):
                 event = {**event, "taskId": normed_event_tid}
-        # ``recordOnly`` (a durable copy of a prompt echo that was
-        # already rendered live at queueing time — see
-        # ``SorcarAgent._drain_pending_user_messages``): the base
-        # class strips the marker and records + persists, which is
-        # the marker's full contract.  Capture it BEFORE
-        # ``super().broadcast`` pops it so the daemon forward below
-        # is skipped — forwarding would render a duplicate prompt
-        # panel on every subscribed webview.
         record_only = bool(event.get("recordOnly"))
         super().broadcast(event)
         if record_only:
             return
-        # Mirror webview-style notification toasts on the terminal so
-        # the in-process CLI (cli_repl) sees the same auto-commit
-        # life-cycle / server-reset notifications a chat webview sees.
-        # Other broadcast event types are control-plane (``status``,
-        # ``clear``, ``configData``…) and are intentionally silent
-        # on the terminal — the live display events still arrive
-        # through :meth:`print` from the agentic loop.
         if event.get("type") == "notification":
             self._console.print(
                 event.get("message") or "",
@@ -166,47 +124,21 @@ class RecordingConsolePrinter(JsonPrinter):
                 severity=event.get("severity") or "info",
                 progress_message=event.get("progressMessage") or "",
             )
-        # Agent-initiated text-to-speech (the ``talk`` tool): a pure
-        # CLI session has no webview client, so the terminal machine
-        # itself must play the utterance on its default speakers —
-        # the process-wide player mirrors the webview's playback
-        # (talkId dedupe + one serialising queue per device) and
-        # never blocks the agent loop.
         if event.get("type") == "talk":
             cli_talk.shared_player().play(event)
         injected = self._inject_task_id(event)
         forwarded_id = injected.get("taskId")
-        # r4-sorcar-H5 / r5-sorcar-H7: forward ONLY explicit global
-        # system events (``new_tab`` / ``tasks_updated``) when taskId
-        # is empty.  The previous blanket forward let in-process
-        # diagnostics, lifecycle markers, and any future taskId-less
-        # event type flood the daemon UDS; gate on the type to limit
-        # the surface to the broadcasts the frontend actually needs
-        # to allocate new tabs and refresh history.
         global_forward_types = {"new_tab", "tasks_updated"}
         if not forwarded_id:
             if injected.get("type") in global_forward_types:
                 cli_daemon_bridge.send_event(injected)
             return
-        # Canonicalise the FORWARDED envelope's ``taskId`` to
-        # lowercase so the daemon registry and every connected
-        # webview see a single identity for what is really the same
-        # task — defends against an ``_inject_task_id`` override or
-        # subclass that yields uppercase / mixed case.
         task_id_str = str(forwarded_id).lower()
         task_id: str | None = (
             task_id_str if is_task_history_id(task_id_str) else None
         )
         if task_id is not None and injected.get("taskId") != task_id:
             injected = {**injected, "taskId": task_id}
-        # r3-sorcar-C2: mutate the running-map under the lock but
-        # release the lock BEFORE invoking the daemon bridge.  The
-        # thread that registers a fresh task id sends the
-        # ``cliTaskStart`` envelope and then sets the per-task
-        # ``started`` event; every other broadcaster of the same task
-        # waits on that event first, so the daemon can never observe
-        # a task event (or ``cliTaskEnd``) before the matching
-        # ``cliTaskStart`` (w2 F22).
         if task_id is not None:
             with self._cli_task_lock:
                 started = self._cli_task_started.get(task_id)
@@ -215,18 +147,11 @@ class RecordingConsolePrinter(JsonPrinter):
                     started = threading.Event()
                     self._cli_task_started[task_id] = started
             if is_new:
-                # Register the end-obligation in the module-level
-                # strong registry BEFORE announcing the start, so the
-                # atexit safety net can never observe a started task
-                # missing from the registry (w3 F4).
                 with _pending_lock:
                     _pending_task_ids.add(task_id)
                 try:
                     cli_daemon_bridge.send_cli_task_start(task_id)
                 finally:
-                    # Unblock waiters even if the (best-effort) bridge
-                    # send failed — ordering, not delivery, is the
-                    # guarantee here.
                     started.set()
             else:
                 started.wait(timeout=5.0)
@@ -235,9 +160,6 @@ class RecordingConsolePrinter(JsonPrinter):
             with self._cli_task_lock:
                 entry = self._cli_task_started.pop(task_id, None)
             if entry is not None:
-                # Clear the end-obligation before sending the real
-                # ``cliTaskEnd`` so the atexit safety net cannot send
-                # a duplicate for an already-ended task.
                 with _pending_lock:
                     _pending_task_ids.discard(task_id)
                 cli_daemon_bridge.send_cli_task_end(task_id)

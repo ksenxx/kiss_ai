@@ -27,9 +27,6 @@ from typing import Any
 
 logger = logging.getLogger("kiss-vscode")
 
-# Parameter kinds the agent's tool-schema builder can express: every
-# argument must be bindable by keyword (the agent invokes tools with
-# ``**function_args``).
 _SUPPORTED_KINDS = (
     inspect.Parameter.POSITIONAL_OR_KEYWORD,
     inspect.Parameter.KEYWORD_ONLY,
@@ -113,54 +110,32 @@ def load_tools_file(raw_path: Any) -> list[Callable[..., Any]]:
     if path.suffix != ".py" or not path.is_file():
         logger.warning("Ignoring toolsFile %r: not an existing .py file", raw_path)
         return []
-    # A unique module name isolates concurrent tasks (and repeated runs
-    # against edited files) from each other in ``sys.modules``.
     module_name = f"_kiss_tools_file_{uuid.uuid4().hex}"
     module = types.ModuleType(module_name)
     module.__file__ = str(path)
-    # Register during execution (importlib protocol: dataclasses,
-    # self-referential imports, and ``__module__`` lookups need it) …
     sys.modules[module_name] = module
     try:
-        # Compile + exec the SOURCE directly instead of going through
-        # ``importlib``'s ``SourceFileLoader``: the loader's
-        # ``__pycache__`` round trip (a) keys staleness on
-        # (mtime, size) only — two same-length edits of the tools file
-        # within one mtime granule silently serve the FIRST version's
-        # bytecode to the next run — and (b) drops ``.pyc`` litter
-        # into the caller's directory on every task.
         source = path.read_text(encoding="utf-8")
-        # ``dont_inherit=True``: without it ``compile`` copies THIS
-        # module's ``from __future__ import annotations`` into the
-        # tools module, silently turning its annotations into strings.
         code = compile(source, str(path), "exec", dont_inherit=True)
         exec(code, module.__dict__)  # noqa: S102
-    except (Exception, SystemExit):
-        # ``SystemExit`` included (mirrors ``KISSAgent._execute_tool``):
-        # a tools file that calls ``sys.exit()`` at import time must
-        # not unwind the daemon's task thread.  ``KeyboardInterrupt``
-        # (user Stop injected by ``_force_stop_thread``) still
-        # propagates so the task actually stops.
+    except BaseException:  # noqa: BLE001 — untrusted module code may raise anything
+        # BaseException (not just Exception/SystemExit): a tools file
+        # that raises e.g. KeyboardInterrupt at import time must
+        # degrade to "no extra tools" like any other bad module — the
+        # task runner treats an escaping KeyboardInterrupt as a task
+        # cancellation, so letting it propagate would cancel the whole
+        # agent task because of a broken tools file.
         logger.warning("Failed to import toolsFile %r", raw_path, exc_info=True)
         return []
     finally:
-        # … and drop the entry afterwards: the functions keep working
-        # through their own ``__globals__`` reference, and per-run
-        # unique names must not accumulate in ``sys.modules``.
         sys.modules.pop(module_name, None)
     tools: list[Callable[..., Any]] = []
     for name, obj in vars(module).items():
         if name.startswith("_") or not inspect.isfunction(obj):
             continue
         if obj.__module__ != module_name:
-            continue  # imported into the module, not defined in it
+            continue
         if name != obj.__name__:
-            # A top-level NAME that is not the function's own name:
-            # a lambda (``__name__ == "<lambda>"`` would break the
-            # tool schema), an alias of another top-level function
-            # (would register the same tool twice), or a re-exported
-            # nested function.  Only genuine ``def name(...)``
-            # top-level definitions become tools.
             logger.warning(
                 "Skipping tools-file binding %r: not a top-level "
                 "function definition (function __name__ is %r)",
@@ -203,10 +178,6 @@ def _is_suitable_tool(func: Callable[..., Any]) -> bool:
     try:
         signature = inspect.signature(func)
     except (TypeError, ValueError):
-        # The tools file can corrupt introspection metadata (e.g. a
-        # non-signature ``__signature__`` attribute → TypeError, or a
-        # self-referential ``__wrapped__`` loop → ValueError).  The
-        # agent's schema builder needs a working signature, so skip.
         logger.warning(
             "Skipping tools-file function %r: signature introspection "
             "failed",

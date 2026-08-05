@@ -32,10 +32,6 @@ from collections.abc import Iterable
 
 import coverage
 
-# A coverage item is an opaque, hashable token that uniquely identifies
-# one covered behavior (a Python arc, an LCOV line, an LCOV branch, or
-# an LCOV function).  The first element is a "kind" tag so items from
-# different sources never collide.
 CoverageItem = tuple[object, ...]
 
 

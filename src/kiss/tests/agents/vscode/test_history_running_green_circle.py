@@ -23,7 +23,7 @@ pipeline used by the History sidebar to surface the
   must render a visible ``.sidebar-item-running`` dot as the FIRST
   child of every row whose ``is_running`` is ``True``, using the
   green colour ``#2e7d32`` (``rgb(46, 125, 50)``), the
-  ``sidebar-running-pulse`` keyframe animation, and 8x8 geometry.
+  ``running-pulse`` keyframe animation, and 8x8 geometry.
   Rows whose ``is_running`` is ``False`` must NOT render the dot.
 
 * A **live update** half — a ``status: running=true`` event must
@@ -61,6 +61,7 @@ _MEDIA_DIR = (
     / "media"
 )
 _CSS = _MEDIA_DIR / "main.css"
+_API_JS = _MEDIA_DIR / "api.js"
 _JS = _MEDIA_DIR / "main.js"
 _HTML = _MEDIA_DIR / "chat.html"
 
@@ -68,6 +69,7 @@ _HTML = _MEDIA_DIR / "chat.html"
 def _build_test_page() -> str:
     """Return a self-contained HTML page that loads the real CSS+JS."""
     css = _CSS.read_text(encoding="utf-8")
+    api_js = _API_JS.read_text(encoding="utf-8")
     js = _JS.read_text(encoding="utf-8")
     html = _HTML.read_text(encoding="utf-8")
     body_start = html.find("<body")
@@ -135,6 +137,7 @@ def _build_test_page() -> str:
       if (!window.__iifeError) window.__iifeError = String(ev.error || ev.message);
     }});
   </script>
+  <script>{api_js}</script>
   <script>{js}</script>
 </body>
 </html>
@@ -322,8 +325,6 @@ def _history_event_from_real_backend(
                 target=stop.wait, name="kiss-test-fake-worker", daemon=True,
             )
             worker.start()
-            # Give the OS scheduler a moment so ``is_alive()`` is true
-            # by the time ``_get_running_task_ids`` polls.
             for _ in range(50):
                 if worker.is_alive():
                     break
@@ -355,8 +356,6 @@ def _history_event_from_real_backend(
         th._DB_PATH = orig_db_path  # type: ignore[attr-defined]
         shutil.rmtree(tmp, ignore_errors=True)
 
-
-# --- Backend tests -------------------------------------------------
 
 
 def test_backend_marks_alive_thread_as_running() -> None:
@@ -392,8 +391,6 @@ def test_backend_marks_alive_thread_as_running() -> None:
             f"got: {running}"
         )
 
-        # The dead-thread case: stop the worker, ``is_alive()`` flips
-        # to False, ``_get_running_task_ids`` must drop the id.
         stop.set()
         worker.join(timeout=2.0)
         assert not worker.is_alive(), "test worker must have stopped"
@@ -422,15 +419,9 @@ def test_backend_overrides_failed_sentinel_for_running_task() -> None:
     been reattached and is now actively running.  The History row
     must show the green pulsing dot, NOT the red failed dot.
     """
-    # The helper persists exactly one task per call; when
-    # ``fake_running_task_id`` is the same DB's auto-assigned id, the
-    # alive-thread fixture overlaps the persisted "failed" sentinel
-    # and exercises the override path.  We don't know the id ahead of
-    # time, so use a sentinel that the helper resolves to the just-
-    # persisted id (see _history_event_from_real_backend).
     event = _history_event_from_real_backend(
         result="Agent Failed Abruptly",
-        fake_running_task_id="-1",  # sentinel: use the persisted id
+        fake_running_task_id="-1",
     )
     sessions = event["sessions"]
     row = next(
@@ -472,8 +463,6 @@ def test_backend_marks_cli_launched_task_as_running() -> None:
         th._DB_PATH = orig_db_path  # type: ignore[attr-defined]
         shutil.rmtree(tmp, ignore_errors=True)
 
-
-# --- Frontend tests ------------------------------------------------
 
 
 def test_running_session_renders_green_circle(_browser) -> None:
@@ -528,7 +517,6 @@ def test_running_session_renders_green_circle(_browser) -> None:
         )
         by_text = {r["text"]: r for r in info}
 
-        # Running task — must have a green pulsing dot.
         run = by_text["running task"]
         assert run["category"] == "running", (
             f"running row miscategorised: {run['category']!r}"
@@ -552,8 +540,8 @@ def test_running_session_renders_green_circle(_browser) -> None:
             "running dot is not the success-green colour: "
             f"background-color={dot['background']!r}; expected rgb(46, 125, 50)"
         )
-        assert dot["animationName"] == "sidebar-running-pulse", (
-            "running dot must animate via 'sidebar-running-pulse'; "
+        assert dot["animationName"] == "running-pulse", (
+            "running dot must animate via 'running-pulse'; "
             f"animation-name={dot['animationName']!r}"
         )
         assert dot["animationDuration"] == "1.5s", (
@@ -584,7 +572,6 @@ def test_running_session_renders_green_circle(_browser) -> None:
             f"running dot has wrong aria-label: {dot['ariaLabel']!r}"
         )
 
-        # Failed task — red dot, NOT green.
         fail = by_text["failing task"]
         assert not fail["hasRunningDot"], (
             "failed task should not render a .sidebar-item-running element"
@@ -593,7 +580,6 @@ def test_running_session_renders_green_circle(_browser) -> None:
             "failed task should render a .sidebar-item-failed element"
         )
 
-        # Completed task — no dot at all.
         ok = by_text["successful task"]
         assert not ok["hasRunningDot"], (
             "completed task should not render a .sidebar-item-running element"
@@ -693,7 +679,6 @@ def test_status_running_true_event_triggers_history_refresh(_browser) -> None:
     """
     context, page = _open_history_page(_browser)
     try:
-        # Seed the panel with one finished row.
         finished_sample = dict(_sample_sessions()[2])
         finished_sample["task_id"] = 4001
         finished_sample["id"] = "chat-live"
@@ -706,8 +691,6 @@ def test_status_running_true_event_triggers_history_refresh(_browser) -> None:
             ")"
         ), "no green dot expected before the task starts running"
 
-        # Dispatch the backend status: running=true and assert the
-        # frontend posts getHistory back to the host.
         page.evaluate(
             "() => { window.__postedMessages.length = 0; }"
         )
@@ -732,9 +715,6 @@ def test_status_running_true_event_triggers_history_refresh(_browser) -> None:
             " }"
         )
 
-        # Deliver the host's response with is_running=true.  Use the
-        # generation the frontend just asked for so renderHistory
-        # accepts it.
         live = dict(finished_sample)
         live["is_running"] = True
         live["endTs"] = 0
@@ -747,7 +727,6 @@ def test_status_running_true_event_triggers_history_refresh(_browser) -> None:
             ")"
         ), "green dot must appear after status running=true refresh"
 
-        # Then drive status: running=false and verify the dot drops.
         page.evaluate("() => { window.__postedMessages.length = 0; }")
         page.evaluate(
             "() => window.__post({ type: 'status', running: false })"
@@ -785,12 +764,14 @@ def test_running_dot_is_centered_middle_left_in_history_task_panel(
     _browser,
 ) -> None:
     """At a narrow viewport the running marker must remain at the
-    middle-left of the whole task panel.
+    middle-left of the task panel's first text line.
 
     The History sidebar renders each task as a multi-line panel with
     title, metrics, and workspace metadata.  The green running marker
-    should stay on the left edge while being vertically centered in the
-    panel, not pinned to the first text line at the top-left.
+    should stay on the left edge, vertically centered on the first line
+    of the task title.  The action buttons occupy a line of their own
+    below the title, so centering on the whole panel would drop the
+    marker away from the text it belongs to.
     """
     context, page = _open_history_page(_browser, width=180, height=900)
     try:
@@ -809,7 +790,14 @@ def test_running_dot_is_centered_middle_left_in_history_task_panel(
               const textRect = text.getBoundingClientRect();
               return {
                 rowWidth: rowRect.width,
-                rowMiddle: rowRect.top + rowRect.height / 2,
+                firstLineMiddle: (() => {
+                  const probe = document.createElement('span');
+                  probe.textContent = 'x';
+                  text.appendChild(probe);
+                  const lineHeight = probe.getBoundingClientRect().height;
+                  probe.remove();
+                  return textRect.top + lineHeight / 2;
+                })(),
                 dotMiddle: dotRect.top + dotRect.height / 2,
                 textLeft: textRect.left,
                 dotLeft: dotRect.left,
@@ -818,7 +806,9 @@ def test_running_dot_is_centered_middle_left_in_history_task_panel(
             """
         )
         assert geometry["rowWidth"] < 170, geometry
-        assert abs(geometry["dotMiddle"] - geometry["rowMiddle"]) <= 2, geometry
+        assert abs(geometry["dotMiddle"] - geometry["firstLineMiddle"]) <= 2, (
+            geometry
+        )
         assert geometry["dotLeft"] < geometry["textLeft"], geometry
     finally:
         context.close()
@@ -859,7 +849,7 @@ def test_search_results_can_render_running_green_circle(_browser) -> None:
                 !!dot && dot.offsetParent !== null &&
                 getComputedStyle(dot).backgroundColor === 'rgb(46, 125, 50)' &&
                 getComputedStyle(dot).animationName ===
-                  'sidebar-running-pulse';
+                  'running-pulse';
             }
             """
         )
@@ -920,12 +910,6 @@ def test_backend_history_event_renders_green_circle_end_to_end(
     green pulsing dot is visible on the row backed by the real DB."""
     context, page = _open_history_page(_browser)
     try:
-        # Persist a fresh task and overlay it with a synthetic alive
-        # thread so the broadcast is driven by the real persistence
-        # layer plus the real ``_get_running_task_ids`` plumbing.  The
-        # ``-1`` sentinel asks the helper to re-use the just-persisted
-        # task id for the alive-thread fixture so we don't have to
-        # predict the auto-assigned id.
         event = _history_event_from_real_backend(fake_running_task_id="-1")
         row = next(
             s for s in event["sessions"]
@@ -953,7 +937,7 @@ def test_backend_history_event_renders_green_circle_end_to_end(
               return row.offsetParent !== null &&
                 dot.offsetParent !== null &&
                 cs.backgroundColor === 'rgb(46, 125, 50)' &&
-                cs.animationName === 'sidebar-running-pulse';
+                cs.animationName === 'running-pulse';
             }
             """
         )

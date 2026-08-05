@@ -163,8 +163,6 @@ class TestResultStatusParity:
         out = buf.getvalue()
         events = _drain(browser)
         r = [e for e in events if e["type"] == "result"][-1]
-        # Webview: success true emits no banner (only is_continue / success
-        # false do), and the console must do the same.
         assert "Status:" not in out
         assert r["success"] is True
         assert r["is_continue"] is False
@@ -208,8 +206,6 @@ class TestResultStatusParity:
         out = buf.getvalue()
         events = _drain(browser)
         r = [e for e in events if e["type"] == "result"][-1]
-        # The webview Result event carries step_count; the console now
-        # surfaces the same number in the panel subtitle.
         assert "steps=7" in out
         assert r["step_count"] == 7
 
@@ -231,8 +227,6 @@ class TestResultOffsetParity:
         out = buf.getvalue()
         events = _drain(browser)
         r = [e for e in events if e["type"] == "result"][-1]
-        # Webview adds the offsets: tokens 200+1000, cost 0.05+0.10,
-        # steps 4+3.  The console subtitle must show the same totals.
         assert r["total_tokens"] == 1200
         assert r["cost"] == "$0.1500"
         assert r["step_count"] == 7

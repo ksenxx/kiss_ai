@@ -54,7 +54,6 @@ def test_autocomplete_survives_binary_active_file(tmp_path: Path) -> None:
     binary_file.write_bytes(b"\xff\xfe\x00\x01\x80binary\x00data\xff")
     server = VSCodeServer()
 
-    # Must return a (possibly empty) match list, never raise.
     matches = server._active_file_identifier_matches("fo", str(binary_file), "")
 
     assert matches == []

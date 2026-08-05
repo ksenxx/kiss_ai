@@ -118,9 +118,6 @@ class TestAugmentMergeDataNewlines(unittest.TestCase):
             entry["current_text"], LONE_CR_CONTENT.decode(),
             "current_text was newline-translated (lone \\r became \\n)",
         )
-        # The browser highlights hunk lines by splitting the text it
-        # received on "\n"; that count must agree with the hunk math,
-        # which split the on-disk bytes on "\n" only (1 line here).
         self.assertEqual(
             len(_split_lines_keepends(entry["current_text"])),
             len(_split_lines_keepends(LONE_CR_CONTENT.decode())),

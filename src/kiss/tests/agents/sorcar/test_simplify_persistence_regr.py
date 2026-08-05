@@ -11,7 +11,6 @@ Covers the exact code paths simplified in ``persistence.py`` and
   orphan-event dropping),
 * safe numeric coercers (``_safe_int`` / ``_safe_float``),
 * ``_add_task`` / ``_save_task_extra`` parent-id shapes and error paths,
-* ``_delete_task`` recursive cascade,
 * ``_shutdown_persist_in_flight_results`` sentinel rewrite,
 * prefix matching helpers,
 * ``cli_steering`` box-geometry helpers.
@@ -130,7 +129,6 @@ class TestLegacySchemaMigration(_TempDbTestBase):
             "INSERT INTO events (task_id, seq, event_json, timestamp) "
             "VALUES (1, 0, '{}', ?)", (now,),
         )
-        # Orphan event: task_id 99 has no task row -> must be dropped.
         conn.execute(
             "INSERT INTO events (task_id, seq, event_json, timestamp) "
             "VALUES (99, 0, '{}', ?)", (now,),
@@ -145,14 +143,12 @@ class TestLegacySchemaMigration(_TempDbTestBase):
         assert parent["model"] == "m1"
         assert parent["cost"] == 1.5
         assert parent["tokens"] == 12
-        # r6-persistence-H3: string "false"/"0" flags coerce to 0.
         assert parent["is_parallel"] == 0
         assert parent["is_worktree"] == 0
         assert child["parent_task_id"] == parent["id"]
         evs = conn.execute("SELECT task_id FROM events").fetchall()
         assert len(evs) == 1
         assert evs[0]["task_id"] == parent["id"]
-        # All five indexes must exist after migration.
         idx = {
             r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='index'"
@@ -163,7 +159,6 @@ class TestLegacySchemaMigration(_TempDbTestBase):
             "idx_th_parent_task_id", "idx_ev_task_id",
         ):
             assert name in idx
-        # Second call is a no-op on the new schema.
         assert th._migrate_old_schema_if_needed(conn) is False
         conn.close()
 
@@ -217,35 +212,11 @@ class TestAddTaskAndExtra(_TempDbTestBase):
                 {"parent_task_id": parent_id, "subagent": parent_id},
                 task_id=task_id,
             )
-        # Garbage parent id must not re-parent the row.
         th._save_task_extra({"parent_task_id": "nope"}, task_id=task_id)
         assert th._load_subagent_rows_by_parent_task_id(parent_id) == []
         th._save_task_extra({"parent_task_id": parent_id}, task_id=task_id)
         subs = th._load_subagent_rows_by_parent_task_id(parent_id)
         assert [s["task_id"] for s in subs] == [task_id]
-
-
-class TestDeleteCascade(_TempDbTestBase):
-    """Recursive sub-agent cascade delete, events included."""
-
-    def test_grandchildren_and_events_deleted(self) -> None:
-        parent_id, chat_id = th._add_task("parent")
-        child_id, _ = th._add_task(
-            "child", chat_id, extra={"parent_task_id": parent_id})
-        grand_id, _ = th._add_task(
-            "grand", chat_id, extra={"parent_task_id": child_id})
-        other_id, other_chat = th._add_task("other")
-        for tid in (parent_id, child_id, grand_id, other_id):
-            th._append_chat_event({"type": "x"}, task_id=tid)
-        assert th._delete_task(parent_id) is True
-        db = th._get_db()
-        left = db.execute("SELECT id FROM task_history").fetchall()
-        assert [r["id"] for r in left] == [other_id]
-        evs = db.execute("SELECT DISTINCT task_id FROM events").fetchall()
-        assert [r["task_id"] for r in evs] == [other_id]
-        assert th._delete_task(parent_id) is False
-        assert th._chat_has_tasks(chat_id) is False
-        assert th._chat_has_tasks(other_chat) is True
 
 
 class TestShutdownPersist(_TempDbTestBase):
@@ -295,21 +266,18 @@ class TestPrefixMatch(_TempDbTestBase):
 
 
 class TestChatContextCache(_TempDbTestBase):
-    """Cache round-trip and invalidation on add/save/delete."""
+    """Cache round-trip and invalidation on add/save."""
 
     def test_cache_invalidation(self) -> None:
         task_id, chat_id = th._add_task("taskA")
         th._save_task_result("resA", task_id=task_id)
         assert th._load_chat_context_text(chat_id) == "taskA\nresA"
-        # Cached second call.
         assert th._load_chat_context_text(chat_id) == "taskA\nresA"
         t2, _ = th._add_task("taskB", chat_id)
         th._save_task_result("resB", task_id=t2)
         assert th._load_chat_context_text(chat_id) == (
             "taskA\nresA\ntaskB\nresB"
         )
-        th._delete_task(t2)
-        assert th._load_chat_context_text(chat_id) == "taskA\nresA"
 
 
 class TestBoxGeometry:
@@ -327,7 +295,7 @@ class TestBoxGeometry:
     def test_box_top_row(self) -> None:
         assert _box_top_row(40) == 36
         assert _box_top_row(40, 10) == 31
-        assert _box_top_row(3, 10) == 2  # clamped
+        assert _box_top_row(3, 10) == 2
 
     def test_partial_suffix_len(self) -> None:
         assert _partial_suffix_len("abc\x1b[20", "\x1b[201~") == 4
@@ -382,7 +350,7 @@ class TestAnchoredReplLoops:
         from kiss.ui.cli.cli_steering import AnchoredRepl
         with _PipeStdin() as stdin:
             repl = AnchoredRepl()
-            stdin.write(b"\x04")  # Ctrl+D on empty buffer
+            stdin.write(b"\x04")
             line = repl.read_idle_line()
         assert line is None
 

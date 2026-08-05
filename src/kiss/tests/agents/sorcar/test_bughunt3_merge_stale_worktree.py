@@ -88,7 +88,6 @@ class TestMergeWithStaleWorktreeRegistration:
             (wt_dir / "work.txt").write_text("agent work\n")
             assert GitWorktreeOps.commit_all(wt_dir, "agent: add work.txt")
 
-            # Simulate crashed cleanup: directory gone, registration kept.
             shutil.rmtree(wt_dir)
             assert _is_registered_worktree(repo, wt_dir)
 
@@ -106,7 +105,6 @@ class TestMergeWithStaleWorktreeRegistration:
             assert msg.startswith("Successfully merged"), msg
             assert (repo / "work.txt").read_text() == "agent work\n"
             assert agent._wt is None
-            # The whole point: the task branch must not be left behind.
             assert not GitWorktreeOps.branch_exists(repo, branch), (
                 "merge() succeeded but the kiss/wt-* branch was left "
                 "behind because the stale worktree registration was "

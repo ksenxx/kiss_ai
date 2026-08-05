@@ -2,25 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test for the mic-button flash colors around the voice
-// flow (webview mode):
-//
-//  - After the "Sorcar" wake word is heard ({type: 'voiceWake'}), the
-//    mic button flashes RED: class 'voice-triggered' is added and
-//    stays on while the host captures the speech that follows.
-//  - When the host starts the gpt-audio transcription/translation call
-//    ({type: 'voiceTranscribing'}), the flash turns YELLOW: class
-//    'voice-transcribing' replaces 'voice-triggered'.
-//  - When the translated text arrives ({type: 'voiceSpeech', text}),
-//    both flash classes are cleared and the text is inserted.
-//  - Silence ({type: 'voiceSpeech', text: ''}) also clears the flash
-//    without touching the input.
-//
-// This test runs the real ``media/voice.js`` against a real jsdom
-// document (no mocks for the code under test).
-//
-// Run directly with ``node test/voiceMicFlash.test.js``.
 
 'use strict';
 
@@ -46,11 +27,6 @@ function test(name, fn) {
   }
 }
 
-/**
- * Build a fresh jsdom window containing the two elements voice.js
- * needs (#voice-btn, #task-input), inject the webview-mode config and
- * execute the real voice.js.
- */
 function makeWindow() {
   const dom = new JSDOM(
     '<!DOCTYPE html><html><body>' +
@@ -61,8 +37,6 @@ function makeWindow() {
   );
   const win = dom.window;
   win.__VOICE__ = {mode: 'webview'};
-  // The mic is closed by default (fresh install); seed the explicit
-  // opt-in so listening auto-enables for these flash-state tests.
   win.localStorage.setItem('kissVoiceEnabled', '1');
 
   const script = win.document.createElement('script');
@@ -75,8 +49,6 @@ function makeWindow() {
 function sendHostMessage(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
-
-// ---------------------------------------------------------------------------
 
 test('wake flashes the mic button red (voice-triggered)', () => {
   const win = makeWindow();
@@ -132,8 +104,6 @@ test('silence clears the flash without touching the input', () => {
 });
 
 test('transcribing without a prior wake still flashes yellow', () => {
-  // Defensive: even if the WAKE line is lost, a TRANSCRIBING event
-  // must still show the yellow indicator on its own.
   const win = makeWindow();
   const btn = win.document.getElementById('voice-btn');
   sendHostMessage(win, {type: 'voiceTranscribing'});
@@ -141,9 +111,6 @@ test('transcribing without a prior wake still flashes yellow', () => {
 });
 
 test('a listener error clears the flash', () => {
-  // If the Python listener dies mid-capture, the host reports the
-  // error through voiceState; the stale red/yellow flash must not
-  // linger until its long safety timeout.
   const win = makeWindow();
   const btn = win.document.getElementById('voice-btn');
   sendHostMessage(win, {type: 'voiceWake'});
@@ -168,14 +135,11 @@ test('the listener stopping clears the flash', () => {
 });
 
 test('turning voice off locally clears the flash immediately', () => {
-  // Clicking the mic toggle off must not leave a stale red/yellow
-  // flash waiting for a host message that may never come.
   const win = makeWindow();
   const btn = win.document.getElementById('voice-btn');
-  // makeWindow seeds the opt-in, so listening auto-enables at load.
   sendHostMessage(win, {type: 'voiceWake'});
   sendHostMessage(win, {type: 'voiceTranscribing'});
-  btn.click(); // disable listening
+  btn.click();
   assert.ok(!btn.classList.contains('voice-triggered'));
   assert.ok(!btn.classList.contains('voice-transcribing'));
 });
@@ -185,7 +149,6 @@ test('full wake -> transcribing -> speech cycle repeats cleanly', () => {
   const btn = win.document.getElementById('voice-btn');
   const inp = win.document.getElementById('task-input');
   for (let round = 0; round < 2; round++) {
-    // A new wake is debounced for 2s; jump past the cooldown.
     win.Date.now = () => 1000000 + round * 10000;
     sendHostMessage(win, {type: 'voiceWake'});
     assert.ok(btn.classList.contains('voice-triggered'), `round ${round}`);
@@ -197,8 +160,6 @@ test('full wake -> transcribing -> speech cycle repeats cleanly', () => {
   }
   assert.strictEqual(inp.value, 'part0 part1');
 });
-
-// ---------------------------------------------------------------------------
 
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length > 0) {

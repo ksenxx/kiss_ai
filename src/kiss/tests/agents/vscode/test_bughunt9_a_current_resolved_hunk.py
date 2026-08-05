@@ -110,9 +110,8 @@ class TestCurrentSkipsResolvedHunk(IsolatedAsyncioTestCase):
         """Register a 2-file review whose second file cannot be restored."""
         good = _modified_file_entry(self.work, "good.txt")
         bad = _deleted_file_entry(self.work, "cfg")
-        # The agent replaced the deleted file with a directory of the
-        # same name, so restoring it raises IsADirectoryError.
         (self.work / "cfg").mkdir()
+        (self.work / "cfg" / "inner.txt").write_text("x\n")
         self.server._register_merge_state(
             tab_id, {"work_dir": str(self.work), "files": [good, bad]},
         )
@@ -128,7 +127,6 @@ class TestCurrentSkipsResolvedHunk(IsolatedAsyncioTestCase):
             "type": "mergeAction", "action": "reject-all", "tabId": tab_id,
         })
 
-        # The good file was rejected; the bad file's hunk stayed open.
         self.assertTrue(state.is_resolved(0, 0))
         self.assertFalse(state.is_resolved(1, 0))
         self.assertEqual(state.remaining, 1)
@@ -151,7 +149,6 @@ class TestCurrentSkipsResolvedHunk(IsolatedAsyncioTestCase):
         await self.server._handle_web_merge_action({
             "type": "mergeAction", "action": "reject-all", "tabId": tab_id,
         })
-        # The user accepts what the UI shows as the current hunk.
         await self.server._handle_web_merge_action({
             "type": "mergeAction", "action": "accept", "tabId": tab_id,
         })
@@ -168,7 +165,6 @@ class TestCurrentSkipsResolvedHunk(IsolatedAsyncioTestCase):
             statuses.get((1, 0)), "accepted",
             "the accept must resolve the still-open hunk of the failed file",
         )
-        # Review is complete now, so the state must have been popped.
         with self.server._merge_states_lock:
             self.assertNotIn(tab_id, self.server._merge_states)
 

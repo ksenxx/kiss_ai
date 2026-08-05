@@ -84,7 +84,6 @@ class TestNoGitRepoErrorOnEmptyWorktree(unittest.TestCase):
         self._parent_class = cast(Any, SorcarAgent.__mro__[1])
         self._original_run = self._parent_class.run
 
-        # Stub agent run to make no file changes.
         def stub_run(self_agent: object, **kwargs: object) -> str:
             return "success: true\nsummary: no changes\n"
 
@@ -114,8 +113,6 @@ class TestNoGitRepoErrorOnEmptyWorktree(unittest.TestCase):
         return "Not a git repository"."""
         tab_id = "t-empty-wt"
 
-        # Run the full task lifecycle (including _run_task's finally
-        # block that disposes the agent).
         self.server._run_task({
             "prompt": "task with no changes",
             "workDir": self.repo,
@@ -125,11 +122,9 @@ class TestNoGitRepoErrorOnEmptyWorktree(unittest.TestCase):
             "model": "",
         })
 
-        # Now trigger a worktreeAction (as the frontend might).
         self.events.clear()
         result = self.server._handle_worktree_action("merge", tab_id)
 
-        # The error must NOT be "Not a git repository".
         assert "Not a git repository" not in result.get("message", ""), (
             f"BUG: got misleading 'Not a git repository' error: {result}"
         )
@@ -159,7 +154,6 @@ class TestNoGitRepoErrorOnEmptyWorktree(unittest.TestCase):
         should succeed (agent preserved)."""
         tab_id = "t-with-changes"
 
-        # Stub agent run to create a file.
         def stub_with_file(self_agent: object, **kwargs: object) -> str:
             work_dir = kwargs.get("work_dir")
             if isinstance(work_dir, str) and work_dir:
@@ -177,20 +171,13 @@ class TestNoGitRepoErrorOnEmptyWorktree(unittest.TestCase):
             "model": "",
         })
 
-        # The agent should be preserved (worktree pending with changes).
         tab = _RunningAgentState.running_agent_states.get(tab_id)
         assert tab is not None
         assert tab.agent is not None, "Agent should be preserved when worktree has changes"
         assert tab.agent._wt_pending, "Worktree should still be pending"
 
-        # The post-task flow opened a hunk merge review for the
-        # worktree changes (``is_merging`` is held until the review
-        # finishes).  The frontend only offers Merge/Discard after the
-        # review's ``all-done`` mergeAction, which routes to
-        # ``_finish_merge`` — mirror that here.
         self.server._finish_merge(tab_id)
 
-        # Discard should work (not error).
         result = self.server._handle_worktree_action("discard", tab_id)
         assert result["success"], f"Discard should succeed: {result}"
 

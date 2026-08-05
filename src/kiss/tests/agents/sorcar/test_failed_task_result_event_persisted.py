@@ -138,9 +138,6 @@ class TestFailedTaskResultEventPersisted:
         rec = results[0]
         assert rec["text"] == "Task stopped by user"
         assert rec["success"] is False
-        # Replay re-stamps events with the subscribing viewer's own tab
-        # id, so the persisted copy must be tabId-stripped (same
-        # contract as the injected-prompt durable copy).
         assert "tabId" not in rec
         assert rec.get("taskId") == task_id
 
@@ -163,7 +160,7 @@ class TestFailedTaskResultEventPersisted:
         events = self._persisted_events(task_id)
         assert [e for e in events if e.get("type") == "result"] == []
         sent = [e for e in self.printer.wire if e.get("type") == "result"]
-        assert len(sent) == 1  # still delivered live to the tab
+        assert len(sent) == 1
 
     def test_recorded_transcript_includes_failure_result(self):
         """The in-memory recording (tab-restore transcript) gets the
@@ -221,10 +218,6 @@ class TestTaskRunnerFailureResultPersistedE2E:
         Path(self.work_dir).mkdir()
         from kiss.server.server import VSCodeServer
 
-        # ``VSCodeServer`` defaults to a transport-less ``JsonPrinter``;
-        # inject the REAL ``WebPrinter`` (captured at the WS transport
-        # boundary only) so broadcast recording / persistence / fan-out
-        # all run in full.
         printer = _CapturingWebPrinter()
         self.server = VSCodeServer(printer=printer)
         self.wire = printer.wire

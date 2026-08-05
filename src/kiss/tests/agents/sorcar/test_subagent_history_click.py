@@ -145,9 +145,7 @@ class TestHistorySurfacesSubagentMetadata:
         hist_events = [e for e in events if e.get("type") == "history"]
         assert len(hist_events) == 1
         sessions = hist_events[0]["sessions"]
-        # The sub-agent row must NOT appear in the user-facing history.
         assert all(s.get("task_id") != task_id for s in sessions)
-        # The parent row still appears.
         assert any(s.get("task_id") == parent_id for s in sessions)
 
     def test_regular_row_has_no_subagent_flag(self) -> None:
@@ -199,32 +197,24 @@ class TestReplaySessionOpensSubagentTab:
             chat_id=chat_id, tab_id=new_tab_id, task_id=task_id,
         )
 
-        # 1. ``openSubagentTab`` was broadcast for the new tab id.
         opens = [e for e in events if e.get("type") == "openSubagentTab"]
         assert len(opens) == 1, f"events={events}"
         op = opens[0]
         assert op["tab_id"] == new_tab_id
         assert op["isSubagentTab"] is True
-        # Description is taken from the row's own ``task`` column.
         assert op["description"] == "Sub-task A"
-        # Sub-agent has completed (not in running_agents) so isDone=True.
         assert op["isDone"] is True
 
-        # 2. ``task_events`` was broadcast after, routed to new tab.
         replays = [e for e in events if e.get("type") == "task_events"]
         assert len(replays) == 1
         assert replays[0]["tabId"] == new_tab_id
         assert replays[0]["chat_id"] == chat_id
-        # The persisted event must be present.
         assert any(
             ev.get("type") == "text_delta"
             and ev.get("text") == "subagent-history-event"
             for ev in replays[0]["events"]
         )
 
-        # 3. ``openSubagentTab`` is emitted BEFORE ``task_events`` so
-        # the frontend tab is already a sub-agent tab when events
-        # arrive.
         open_idx = events.index(opens[0])
         replay_idx = events.index(replays[0])
         assert open_idx < replay_idx
@@ -246,7 +236,6 @@ class TestReplaySessionOpensSubagentTab:
         )
         server, _events = _make_server()
 
-        # Simulate the parent agent still running under its own tab.
         parent_tab = server._get_tab("tab-parent")
         parent_tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         parent_tab.agent._chat_id = chat_id
@@ -264,13 +253,7 @@ class TestReplaySessionOpensSubagentTab:
             task_id=task_id,
         )
 
-        # Parent tab MUST remain keyed under "tab-parent" — not
-        # rebound to "tab-history-click".
         assert "tab-parent" in _RunningAgentState.running_agent_states
         assert _RunningAgentState.running_agent_states["tab-parent"] is parent_tab
-        # Replay is a VIEW operation: the viewer tab must NOT get its
-        # own ``_RunningAgentState`` registry entry (no agent runs
-        # there), and in particular the parent's state must not have
-        # been rebound under the new tab id.
         assert "tab-history-click" not in _RunningAgentState.running_agent_states
         parent_thread.join(timeout=1)

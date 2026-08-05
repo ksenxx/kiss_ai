@@ -81,8 +81,6 @@ class TestChatContextCacheDbReplace(_TempDbTestBase):
 
         self._delete_db_files_externally()
 
-        # The recreated (empty) database has no rows for this chat, so
-        # the context text must be empty — not the deleted DB's text.
         assert _load_chat_context_text(chat_id) == ""
 
     def test_no_stale_text_after_db_file_replaced(self) -> None:
@@ -92,12 +90,7 @@ class TestChatContextCacheDbReplace(_TempDbTestBase):
         _save_task_result("old-db result", task_id=task_id)
         assert "old-db task" in _load_chat_context_text(chat_id)
 
-        # Build a replacement database at a scratch path containing a
-        # DIFFERENT task for the very same chat_id, then move it over
-        # the live file — as an external restore-from-backup would.
         self._delete_db_files_externally()
-        # Force a reconnect (new file + schema) and insert the
-        # replacement row for the same chat_id via the public API.
         replacement_id, _ = _add_task("new-db task", chat_id)
         _save_task_result("new-db result", task_id=replacement_id)
 
@@ -115,9 +108,6 @@ class TestChatContextCacheDbReplace(_TempDbTestBase):
         first = _load_chat_context_text(chat_id)
         assert "hit task" in first
 
-        # Insert a row behind the cache's back (raw SQL bypasses the
-        # _add_task invalidation hook).  A cache HIT must serve the
-        # old text; a miss would expose the new row.
         db = th._get_db()
         with th._rw_lock.write_lock():
             db.execute(
@@ -127,6 +117,5 @@ class TestChatContextCacheDbReplace(_TempDbTestBase):
             )
             db.commit()
         assert _load_chat_context_text(chat_id) == first
-        # And the normal invalidation path still refreshes.
         th._invalidate_chat_context_cache(chat_id)
         assert "sneaky task" in _load_chat_context_text(chat_id)

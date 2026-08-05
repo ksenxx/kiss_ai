@@ -196,12 +196,6 @@ class TestStopRouting(unittest.TestCase):
         tab2 = self.server._get_tab("2")
         tab1.stop_event = ev1
         tab2.stop_event = ev2
-        # ``_stop_task`` schedules a watchdog that injects a
-        # ``KeyboardInterrupt`` into the tab-1 task thread ~1s later.
-        # Use the swallowing sleeper so the KI does not propagate out
-        # of the thread and surface as a
-        # ``PytestUnhandledThreadExceptionWarning`` (potentially
-        # attributed to a later test in the same run).
         t1 = threading.Thread(
             target=_sleep_swallowing_kbi, args=(5,), daemon=True,
         )
@@ -303,9 +297,6 @@ class TestConcurrentTabs(unittest.TestCase):
 
         def slow_run(cmd: dict) -> None:
             call_count[0] += 1
-            # The real ``_run_task_inner`` (stubbed here) flips
-            # ``is_task_active`` True while the agent runs; mirror that so
-            # the injection guard behaves as in production.
             _RunningAgentState.running_agent_states[
                 cmd.get("tabId", "")
             ].is_task_active = True
@@ -324,12 +315,9 @@ class TestConcurrentTabs(unittest.TestCase):
             "type": "run", "prompt": "task2", "model": "m", "tabId": "1",
         })
 
-        # No error broadcast and no new task thread started.
         new_events = self.events[events_before:]
         assert all(e.get("type") != "error" for e in new_events)
         assert call_count[0] == 1
-        # The second run's prompt is injected into the live agent rather
-        # than dropped, and echoed back so the user sees it in chat.
         tab = _RunningAgentState.running_agent_states["1"]
         assert tab.pending_user_messages == ["task2"]
         echoes = [
@@ -456,10 +444,6 @@ class TestAskUserQuestion(unittest.TestCase):
         self.server.printer.subscribe_tab("8", "8")
         self.server.printer._thread_local.stop_event = threading.Event()
 
-        # The answer must arrive AFTER the question is asked: answers
-        # already queued before the askUser broadcast are stale
-        # duplicates from a previous question and are now drained by
-        # ``_ask_user_question`` (bughunt5 stale-answer fix).
         def _answer_when_asked() -> None:
             for _ in range(500):
                 if any(e["type"] == "askUser" for e in list(self.events)):
@@ -600,20 +584,13 @@ class TestPerTabAgentIsolation(unittest.TestCase):
         """tab.agent is replaced fresh per task — no state persists across tasks."""
         server, _ = _make_server()
         tab = server._get_tab("1")
-        # ``_get_tab`` lazily allocates a slot agent so tests and
-        # out-of-task callers (worktree merge / discard, conflict
-        # check, history click) can read agent state directly.  The
-        # slot is wiped to ``None`` at the end of every ``_run_task``
-        # so no agent state survives a task boundary; a fresh agent
-        # is built in ``_cmd_run`` immediately before each worker
-        # thread starts.
         first = tab.agent
         assert first is not None
         tab.agent = None
-        again = tab  # same _RunningAgentState
-        again = server._get_tab("1")  # _get_tab repopulates the slot
+        again = tab
+        again = server._get_tab("1")
         assert again.agent is not None
-        assert again.agent is not first  # fresh per allocation
+        assert again.agent is not first
 
 
 class TestSelectedModelIsolation(unittest.TestCase):
@@ -696,8 +673,6 @@ class TestClearChatDedup(unittest.TestCase):
 
     def _get_clear_chat_block(self) -> str:
         idx = self.js_src.index("case 'clearChat':")
-        # ``showWelcome`` is the case that follows ``clearChat`` (the
-        # dead ``ensureChat`` listener was removed — no producer).
         end = self.js_src.index("case 'showWelcome':", idx)
         return self.js_src[idx:end]
 

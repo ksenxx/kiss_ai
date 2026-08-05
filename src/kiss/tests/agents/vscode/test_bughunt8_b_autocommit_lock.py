@@ -66,7 +66,6 @@ class TestAutocommitStagingFailure(unittest.TestCase):
         """index.lock held by another process: the reply must not claim
         success / a clean tree while dirty changes remain unstaged."""
         (self.repo / "f.txt").write_text("one\ntwo\n")
-        # Simulate a concurrent git process holding the index lock.
         (self.repo / ".git" / "index.lock").write_text("")
         try:
             self.server._handle_autocommit_action(
@@ -88,7 +87,6 @@ class TestAutocommitStagingFailure(unittest.TestCase):
             "misleading clean-tree message despite dirty working tree: "
             f"{done[0]}",
         )
-        # The user's dirty change is still there, unstaged.
         self.assertIn("two", (self.repo / "f.txt").read_text())
 
 

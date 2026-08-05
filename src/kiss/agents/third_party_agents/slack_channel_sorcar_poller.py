@@ -110,8 +110,6 @@ def _acquire_lock() -> Any:
         process lifetime so the lock is held until exit.
     """
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    # Open without truncating so a losing contender never clobbers the
-    # PID recorded by the current lock holder.
     fp = LOCK_FILE.open("a+", encoding="utf-8")
     try:
         fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -253,9 +251,9 @@ def _run_sorcar(prompt: str, chat_id: str) -> tuple[str, str]:
     """Run a Sorcar task and return ``(slack_text, chat_id)``.
 
     Uses :class:`WorktreeSorcarAgent` so that ``update_settings`` calls
-    for ``is_worktree``, ``auto_commit``, and ``demo_mode`` have real
-    effects (git worktree isolation, actual git commits, persisted
-    config) even without a UI.
+    for ``is_worktree`` and ``auto_commit`` have real effects (git
+    worktree isolation, actual git commits, persisted config) even
+    without a UI.
 
     Args:
         prompt: The user's Slack message text.
@@ -271,8 +269,6 @@ def _run_sorcar(prompt: str, chat_id: str) -> tuple[str, str]:
     cfg = load_config()
     use_worktree = bool(cfg.get("is_worktree", False))
 
-    # Launch as a kiss-web registered agent via ``_cmd_run`` so the
-    # task is live-visible / interactable from remote webviews.
     try:
         result = run_agent_via_kiss_web(
             agent,
@@ -414,8 +410,6 @@ def _poll_once(
         resp.get("messages", []), key=lambda m: float(m.get("ts", "0"))
     )
 
-    # Only process messages newer than the startup watermark so we never
-    # retroactively run old channel discussions as Sorcar tasks.
     min_ts = float(state.get("min_ts", "0"))
 
     for msg in messages:
@@ -495,9 +489,6 @@ def _startup_health_check() -> None:
 
     if get_available_models():
         if alert:
-            # Remove the marker first: concurrent invocations (my test
-            # run vs the real cron tick) race on the recovery path, and
-            # unlink-before-post makes at most one of them announce.
             try:
                 HEALTH_ALERT_FILE.unlink(missing_ok=True)
             except OSError:
@@ -544,12 +535,6 @@ def main() -> None:
     global _LOCK_FP
     _setup_logging()
     _LOCK_FP = _acquire_lock()
-    # Under cron ``$SHELL`` is unset, which makes ``source_shell_env``
-    # fall back to sourcing ``~/.bashrc`` instead of the user's real
-    # login-shell RC (e.g. ``~/.zshrc``), silently importing zero API
-    # keys — every Sorcar task then aborts with "No model available"
-    # and the reply is empty.  Recover the login shell from the user
-    # database before sourcing.
     if not os.environ.get("SHELL"):
         os.environ["SHELL"] = pwd.getpwuid(os.getuid()).pw_shell or "/bin/zsh"
     source_shell_env()
@@ -572,7 +557,6 @@ def main() -> None:
         logging.exception("Startup failed")
         raise
 
-    # On first run, set a watermark so we only process messages from now on.
     state = _load_state()
     if "min_ts" not in state:
         state["min_ts"] = str(time.time())

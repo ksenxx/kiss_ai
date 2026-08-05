@@ -132,10 +132,6 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.01)
         raise AssertionError("server never registered the UDS writer")
 
-    # ------------------------------------------------------------------
-    # F1: _send_locks re-insert leak
-    # ------------------------------------------------------------------
-
     async def test_send_lock_not_recreated_for_removed_endpoint(self) -> None:
         """A send racing endpoint removal must not leak a _send_locks entry.
 
@@ -155,10 +151,8 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
         with printer._ws_lock:
             self.assertNotIn(writer, printer._send_locks)
             self.assertNotIn(writer, printer._pending_sends)
-        # The straggler send that lost the race with removal.
         data = json.dumps({"type": "notice", "text": "straggler"})
         await asyncio.to_thread(printer._schedule_send, writer, data)
-        # Give the loop time to run (or cancel) the send coroutine.
         await asyncio.sleep(0.3)
         with printer._ws_lock:
             self.assertNotIn(
@@ -194,15 +188,9 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
             orphans, f"orphaned _send_locks entries leaked: {orphans}",
         )
 
-    # ------------------------------------------------------------------
-    # F7: malformed ready tab ids
-    # ------------------------------------------------------------------
-
     async def test_ready_with_non_str_tab_ids_still_serviced(self) -> None:
         """Non-str tabId/chatId values must not abort ready handling."""
         reader, writer = await self._connect_uds()
-        # An unhashable top-level tabId used to raise TypeError inside
-        # _cancel_pending_tab_close BEFORE focusInput was sent.
         await self._send(
             writer,
             {
@@ -216,7 +204,6 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
         )
         focus = await self._drain_until(reader, "focusInput")
         self.assertEqual(focus.get("tabId"), "")
-        # Connection is alive and a well-formed ready still round-trips.
         await self._send(
             writer, {"type": "ready", "tabId": "t-after", "restoredTabs": []},
         )
@@ -228,8 +215,6 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         """Entries after a malformed restoredTabs entry are still processed."""
         reader, writer = await self._connect_uds()
-        # Arm a deferred close for the tab that appears AFTER the
-        # malformed entry; _handle_ready must cancel it.
         self.server._schedule_tab_close("rt-later")
         with self.server._pending_tab_closes_lock:
             self.assertIn("rt-later", self.server._pending_tab_closes)
@@ -301,9 +286,7 @@ class TestAuthFailureBookkeeping(unittest.TestCase):
         for _ in range(ws_mod._AUTH_FAIL_MAX):
             self.server._record_auth_failure(ip)
         self.assertTrue(self.server._is_auth_locked(ip))
-        # Fresh (in-window) entries of other IPs survive the sweep.
         self.assertIn(other_ip, self.server._auth_failures)
-        # Below the threshold, the fresh IP is not locked.
         self.assertFalse(self.server._is_auth_locked(other_ip))
 
 
@@ -327,11 +310,7 @@ class TestTeardownWithDuckTypedPrinter(unittest.TestCase):
 
     def test_close_tab_survives_printer_without_cleanup_tab(self) -> None:
         server = VSCodeServer(printer=cast(Any, _BroadcastOnlyPrinter()))
-        # Unknown tab id: _close_tab pops nothing and reaches
-        # _teardown_tab_resources(tab_id, None), which used to call
-        # printer.cleanup_tab unguarded -> AttributeError.
         server._close_tab("fixer6-tab-x")
-        # Direct teardown of a tab with viewer state behaves the same.
         with server._state_lock:
             server._tab_chat_views["fixer6-tab-y"] = "chat-1"
         server._teardown_tab_resources("fixer6-tab-y", None)

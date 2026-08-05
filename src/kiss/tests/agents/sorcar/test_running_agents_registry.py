@@ -133,8 +133,6 @@ class TestRunningAgentsRegistry:
             work_dir=self.tmpdir,
         )
 
-        # After ``run()`` returns, the agent's last task id must be
-        # set and the registry must NOT still contain that key.
         assert agent._last_task_id is not None
         assert agent._last_task_id not in ChatSorcarAgent.running_agents
         assert ChatSorcarAgent.running_agents == {}
@@ -148,8 +146,7 @@ class TestRunningAgentsRegistry:
         finished = threading.Event()
 
         def observer_poll() -> None:
-            for _ in range(2000):  # up to ~2s
-                # Snapshot a copy because the worker may pop concurrently.
+            for _ in range(2000):
                 snapshot = dict(ChatSorcarAgent.running_agents)
                 if snapshot:
                     task_id, live = next(iter(snapshot.items()))
@@ -182,10 +179,7 @@ class TestRunningAgentsRegistry:
             "running_agents[task_id] must be the agent that is running, "
             "not some other instance"
         )
-        # ``agent._last_task_id`` was assigned right before the
-        # registry insert, so the keys must match.
         assert observed["task_id"] == agent._last_task_id
-        # And on exit the registry is empty.
         assert ChatSorcarAgent.running_agents == {}
 
     def test_entry_removed_when_run_raises(self) -> None:
@@ -223,6 +217,4 @@ class TestRunningAgentsRegistry:
             SorcarAgent.run = original  # type: ignore[method-assign]
 
         assert raised is boom, "the original exception must propagate"
-        # Even though run() raised, the finally must have popped the
-        # entry so it does not leak.
         assert ChatSorcarAgent.running_agents == {}

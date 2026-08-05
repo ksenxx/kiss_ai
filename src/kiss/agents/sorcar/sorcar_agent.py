@@ -6,21 +6,19 @@
 
 from __future__ import annotations
 
-import functools
 import json
 import logging
 import os
 import threading
+import time
 import uuid
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-# CLI plumbing lives in cli_helpers; re-exported here for backwards
-# compatibility (tests and callers import these from this module).
 from kiss.agents.sorcar.cli_helpers import (
     _DEFAULT_TASK as _DEFAULT_TASK,
 )
@@ -30,9 +28,10 @@ from kiss.agents.sorcar.cli_helpers import (
 from kiss.agents.sorcar.cli_helpers import (
     cli_ask_user_question as cli_ask_user_question,
 )
-from kiss.agents.sorcar.code_graph import intercept_grep_hint
 from kiss.agents.sorcar.persistence import _load_last_model
+from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.agents.sorcar.skills import make_skill_tool
+from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.base import SYSTEM_PROMPT
 from kiss.core.kiss_error import BudgetExceededError
@@ -40,12 +39,12 @@ from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import (
     MODEL_INFO,
     OPENAI_COMPATIBLE_PROVIDERS,
+    _match_openai_compatible_provider,
+    _strip_provider_prefix,
     get_default_model,
 )
 from kiss.core.models.model_info import model as _model_factory
 from kiss.core.printer import Printer
-from kiss.core.relentless_agent import RelentlessAgent
-from kiss.core.useful_tools import UsefulTools
 
 logger = logging.getLogger(__name__)
 
@@ -133,10 +132,11 @@ def auto_commit_changes(
             Both hooks are SKIPPED when there is nothing to commit
             (no staged diff after the initial ``stage_all``), so the
             webview never sees a misleading "Generating commit
-            message" toast without a follow-up.  The "committed"
-            hook is also not invoked when ``commit_staged`` returns
-            ``False`` after *message_fn* (e.g. pre-commit hook
-            rejected the commit).
+            message" toast without a follow-up.  When
+            ``commit_staged`` returns ``False`` after *message_fn*
+            (e.g. a pre-commit hook rejected the commit),
+            ``notify_fn("failed", "")`` is invoked instead so the
+            sticky "generating" toast always gets a terminal update.
 
             All ``notify_fn`` exceptions are swallowed so a broken
             UI hook can never block the commit itself.
@@ -147,11 +147,6 @@ def auto_commit_changes(
     from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
     GitWorktreeOps.stage_all(commit_dir)
-    # Short-circuit cleanly when there is nothing to commit: no
-    # "generating" toast (it would be misleading because no commit
-    # will happen), no LLM call (saves tokens), no follow-up
-    # "committed" toast.  Late-arriving files don't matter here
-    # because there's no slow message_fn window to race against.
     if not GitWorktreeOps.staged_diff(commit_dir):
         return False
     _safe_notify(notify_fn, "generating", "")
@@ -170,15 +165,16 @@ def auto_commit_changes(
             from kiss.agents.sorcar.commit_message import _append_task_result
 
             msg = _append_task_result(msg, task_result)
-    # Re-stage immediately before committing to capture any files
-    # that materialized during the (typically slow) *message_fn*
-    # call — see the docstring above for the production race this
-    # closes.  Cheap when nothing changed (``git add -A`` is a no-op
-    # against an unchanged tree).
     GitWorktreeOps.stage_all(commit_dir)
     committed = GitWorktreeOps.commit_staged(commit_dir, msg)
     if committed:
         _safe_notify(notify_fn, "committed", _commit_subject(msg))
+    else:
+        # Terminal notification for the failure path: without it the
+        # sticky "Generating commit message" toast (emitted above)
+        # would linger in the webview forever after e.g. a pre-commit
+        # hook rejection.
+        _safe_notify(notify_fn, "failed", "")
     return committed
 
 
@@ -234,25 +230,138 @@ def _agent_usage(agent: Any) -> tuple[float, int, int]:
     )
 
 
-def _broadcast_subagent_done(printer: Any, tab_ids: list[str]) -> None:
+def _broadcast_subagent_done(
+    printer: Any, tab_ids: list[str], model: str = "",
+) -> None:
     """Broadcast ``subagentDone`` for each tab id so the frontend can
-    stop the running indicator on the sub-agent tab.  Errors are
-    swallowed (the broadcast is best-effort UI signalling)."""
+    stop the running indicator on the sub-agent tab.
+
+    A sub-agent that switched models with ``set_model`` also has to hand
+    its tab's model picker back to *model* — the model the task was
+    launched with — for the same reason a top-level task does.  Errors
+    are swallowed (the broadcast is best-effort UI signalling).
+
+    Args:
+        printer: The printer to broadcast through.
+        tab_ids: The sub-agent's tab plus any tabs viewing it.
+        model: The model the sub-agent was launched with, restored into
+            those tabs' pickers.
+    """
     broadcast = getattr(printer, "broadcast", None)
     if broadcast is None:
         return
+    restore = getattr(printer, "restore_model_pick", None)
     for vid in tab_ids:
         try:
             broadcast({"type": "subagentDone", "tab_id": vid, "tabId": ""})
+            if callable(restore) and model:
+                restore(model, vid)
         except Exception:
             pass
+
+
+# How long the parent may sit in one wait() before re-reading its stop
+# event.  A completed child wakes the wait immediately, so this only
+# bounds flag-checking: the abandon path below allows 15s anyway, and
+# ``_force_stop_thread`` waits 1s before its first injection and retries
+# at +5s.  It must not be much smaller: nested fan-outs put one waiting
+# parent on the stack per level, and every one of them wakes on this
+# interval, so a 0.1s slice made a deeply nested tree crawl under GIL
+# contention.
+_SUBAGENT_POLL_SECONDS = 1.0
+_SUBAGENT_STOP_GRACE_SECONDS = 15.0
+
+
+def _await_subagents(
+    futures: list[Future[str]],
+    stop_event: threading.Event | None,
+) -> list[str]:
+    """Collect fan-out results without becoming unstoppable.
+
+    ``list(pool.map(...))`` parks the parent thread in a C-level lock,
+    where it can neither poll its stop event (a parent prints nothing
+    while its children run) nor accept the ``KeyboardInterrupt`` that
+    ``VSCodeServer._stop_task`` injects — CPython delivers an injected
+    exception only at a bytecode boundary.  That is why the parent of
+    task ``709ebce3`` outlived the Stop click by three minutes
+    (``reports/stop_button_delay_2026-08-05.html``).  Waiting in short
+    slices instead keeps the parent at a bytecode boundary throughout.
+
+    A stopped child normally unwinds in well under a second, and its
+    result is still collected so sibling spend and summaries survive.
+    Only a child that ignores its stop event for
+    ``_SUBAGENT_STOP_GRACE_SECONDS`` is abandoned, so that one wedged
+    sub-agent can no longer hold the whole task hostage.
+
+    Args:
+        futures: One future per fanned-out sub-agent, in task order.
+        stop_event: The parent task's stop event, or ``None`` when the
+            fan-out is not running under a stoppable task.
+
+    Returns:
+        The sub-agent results, in the order the tasks were given.
+
+    Raises:
+        KeyboardInterrupt: When a stop was requested and at least one
+            child was still running after the grace period.
+    """
+    pending = set(futures)
+    give_up_at: float | None = None
+    while pending:
+        _done, pending = wait(pending, timeout=_SUBAGENT_POLL_SECONDS)
+        if not pending:
+            break
+        if stop_event is None or not stop_event.is_set():
+            continue
+        if give_up_at is None:
+            give_up_at = time.monotonic() + _SUBAGENT_STOP_GRACE_SECONDS
+        elif time.monotonic() >= give_up_at:
+            raise KeyboardInterrupt("Agent stop requested")
+    return [f.result() for f in futures]
+
+
+def _collect_unfinished_usage(
+    futures: list[Future[str]],
+    sub_agents: list[Any],
+    sub_usage: list[tuple[float, int, int]],
+) -> None:
+    """Fill in the spend of children that never got to report it.
+
+    A child fills its own ``sub_usage`` slot in its ``finally``, so a
+    child the parent abandoned (see :func:`_await_subagents`) would leave
+    a zero there and its cost, tokens and steps would silently vanish
+    from the parent task's totals.  Reading the live figures off the
+    child's agent recovers everything it had spent up to this instant —
+    without waiting for it, which is the whole point of abandoning it.
+    A live read of a still-running child can lag its true spend slightly
+    (it may land mid-handoff between executor sessions), which is why a
+    child that finishes in the meantime keeps its own final figure.
+
+    Args:
+        futures: One future per fanned-out sub-agent, in task order.
+        sub_agents: The children's agents, in the same order; entries are
+            ``None`` for children that never started.
+        sub_usage: Per-child ``(cost, tokens, steps)`` slots, updated in
+            place for unfinished children only.
+    """
+    for idx, future in enumerate(futures):
+        agent = sub_agents[idx]
+        if future.done() or agent is None:
+            continue
+        live = _live_agent_usage(agent)
+        # A worker writes its own slot BEFORE its future completes, so a
+        # future that finished while this live read was in flight has
+        # already published a strictly better figure: keep it.
+        if future.done():
+            continue
+        sub_usage[idx] = live
 
 
 def _live_agent_usage(agent: Any) -> tuple[float, int, int]:
     """Return live ``(budget, tokens, steps)`` for *agent*, including its
     in-flight executor session.
 
-    :class:`~kiss.core.relentless_agent.RelentlessAgent` folds a session
+    :class:`~kiss.agents.sorcar.relentless_agent.RelentlessAgent` folds a session
     executor's spend into the agent's totals only when the session ends,
     so mid-session the live spend is visible only on
     ``agent._current_executor``.
@@ -296,11 +405,7 @@ class _LiveUsageMonitor:
         self._agents: list[Any] = []
         self._done = threading.Event()
         self._thread: threading.Thread | None = None
-        self._last_emitted: tuple[str, int, int] | None = None
-        # Capture the parent's thread-local task id HERE, in the calling
-        # thread — the monitor thread must emit on the PARENT task's
-        # stream (broadcast tags events and resolves usage offsets by
-        # the emitting thread's task key).
+        self._last_emitted: tuple[float, int, int] | None = None
         thread_local = getattr(printer, "_thread_local", None) if printer else None
         self._parent_task_id = (
             getattr(thread_local, "task_id", "") if thread_local else ""
@@ -357,18 +462,30 @@ class _LiveUsageMonitor:
             try:
                 sub_budget, sub_tokens, sub_steps = _live_agent_usage(sub)
             except Exception:
-                # One misbehaving sub-agent must not blind the whole
-                # header to every other sub-agent's live spend.
                 logger.debug("Live usage poll failed", exc_info=True)
                 continue
             budget += sub_budget
             tokens += sub_tokens
             steps += sub_steps
-        cost = f"${budget:.4f}"
-        snapshot = (cost, tokens, steps)
+        snapshot = (budget, tokens, steps)
         if snapshot == self._last_emitted:
             return
+        if self._last_emitted is not None:
+            last_budget, last_tokens, last_steps = self._last_emitted
+            if (
+                budget < last_budget - 1e-9
+                or tokens < last_tokens
+                or steps < last_steps
+            ):
+                # Torn read: at every RelentlessAgent session handoff the
+                # executor is detached BEFORE its spend is folded into the
+                # agent fields, so a poll in that window sees neither copy.
+                # Never emit a total where ANY cumulative dimension
+                # (budget, tokens, or steps) regresses — the next poll
+                # repairs it.
+                return
         self._last_emitted = snapshot
+        cost = f"${budget:.4f}"
         self._printer.print(
             f"Tokens: {tokens:,}, Budget: {cost} (live, incl. parallel sub-agents), ",
             type="usage_info",
@@ -423,21 +540,75 @@ def _attribute_tts_usage(agent: Any, usage: dict[str, Any]) -> None:
         _attribute_sub_usage(agent, budget, tokens, 0)
 
 
-# Base URLs the ``model()`` factory itself assigns when routing a model
-# name to its provider.  ``set_model`` must NOT carry one of these into the
-# new model's ``model_config``: the factory bypasses provider routing
-# whenever ``model_config`` contains ``base_url``, so restoring a default
-# endpoint would e.g. point ``claude-*`` at ``api.openai.com`` after an
-# OpenAI -> Anthropic switch.  Only *custom* endpoints (local gateways,
-# proxies) are worth preserving across a switch.  Derived from the vendor
-# registry so newly registered vendors are covered automatically.
 _FACTORY_DEFAULT_BASE_URLS: frozenset[str] = frozenset(
     provider.base_url.rstrip("/") for provider in OPENAI_COMPATIBLE_PROVIDERS
 )
 
 
-# Attachment MIME-type prefixes and the human-readable labels used when
-# describing attachments in the initial prompt, in display order.
+_PROVIDER_SPECIFIC_CONFIG_KEYS: dict[str, frozenset[str]] = {
+    "openai": frozenset({"reasoning_effort", "use_responses_api"}),
+    "anthropic": frozenset({"thinking"}),
+    "gemini": frozenset({"thinking_config"}),
+}
+
+
+def _model_family(model_name: str) -> str:
+    """Return the provider family *model_name* routes to in the factory.
+
+    Mirrors the routing order of :func:`kiss.core.models.model_info.model`:
+    OpenAI-compatible providers first, then Gemini, then Anthropic.
+
+    Args:
+        model_name: A model name, possibly carrying a harbor-style
+            ``provider/`` prefix.
+
+    Returns:
+        One of ``"openai"``, ``"gemini"``, ``"anthropic"``, or
+        ``"other"``.
+    """
+    name = _strip_provider_prefix(model_name)
+    if _match_openai_compatible_provider(name) is not None:
+        return "openai"
+    if name.startswith("gemini-"):
+        return "gemini"
+    if name.startswith("claude-"):
+        return "anthropic"
+    return "other"
+
+
+def _sanitize_model_config_for_switch(
+    config: dict[str, Any], old_model_name: str, new_model_name: str,
+) -> dict[str, Any]:
+    """Drop source-provider request options that the target cannot accept.
+
+    ``set_model`` copies the old adapter's complete ``model_config``
+    onto the new one.  Provider-specific request options (Anthropic's
+    ``thinking``, Gemini's ``thinking_config``, OpenAI's
+    ``reasoning_effort`` / ``use_responses_api``) survive that copy and
+    are then sent as unsupported SDK kwargs by the target adapter, so
+    the switch reports success but the next model request fails.  When
+    the provider family changes, remove every known provider-specific
+    key that does not belong to the target family.
+
+    Args:
+        config: The config dict to sanitize (mutated in place).
+        old_model_name: The model name the config came from.
+        new_model_name: The model name the config is being given to.
+
+    Returns:
+        The same *config* dict, for chaining.
+    """
+    new_family = _model_family(new_model_name)
+    if new_family == _model_family(old_model_name):
+        return config
+    for family, keys in _PROVIDER_SPECIFIC_CONFIG_KEYS.items():
+        if family == new_family:
+            continue
+        for key in keys:
+            config.pop(key, None)
+    return config
+
+
 _ATTACHMENT_KINDS: tuple[tuple[str, str], ...] = (
     ("image/", "image(s)"),
     ("application/pdf", "PDF(s)"),
@@ -456,58 +627,14 @@ def _attachment_parts(attachments: list[Attachment]) -> list[str]:
     return parts
 
 
-def _make_plain_bash_tool(
-    agent: SorcarAgent, useful_tools: UsefulTools,
-) -> Callable[..., str]:
-    """Build the non-Docker ``Bash`` tool with query-before-grep interception.
-
-    The returned function answers grep-like commands from the built code
-    graph (via :func:`intercept_grep_hint`, at most once per distinct
-    hint) and otherwise delegates to :meth:`UsefulTools.Bash`.
-
-    Args:
-        agent: The owning agent (``agent.work_dir`` locates the graph).
-        useful_tools: The tool collection executing real commands.
-
-    Returns:
-        The ``Bash`` tool function to register with the model.
-    """
-    hints_seen: set[str] = set()
-
-    # ``wraps`` copies the delegate's name, docstring, and (crucially)
-    # its concrete parameter annotations, so the model-visible tool
-    # schema is byte-identical to registering ``useful_tools.Bash``
-    # directly (this module's postponed annotations would otherwise
-    # degrade ``timeout_seconds``/``max_output_chars`` to strings).
-    @functools.wraps(useful_tools.Bash)
-    def Bash(  # noqa: N802
-        command: str,
-        description: str,
-        timeout_seconds: float = 300,
-        max_output_chars: int = 50000,
-    ) -> str:
-        hint = intercept_grep_hint(command, agent.work_dir, hints_seen)
-        if hint is not None:
-            return hint
-        return useful_tools.Bash(
-            command, description, timeout_seconds, max_output_chars,
-        )
-
-    return Bash
-
-
 class SorcarAgent(RelentlessAgent):
     """Agent with both coding tools and browser automation for web + code tasks."""
 
-    # True only on subclasses that isolate every task in a git worktree
-    # (see :class:`~kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent`).
     uses_worktree: bool = False
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self.web_use_tool: WebUseTool | None = None
-        # NOT redundant: the base class only sets ``docker_manager`` in
-        # ``_reset`` (called from ``run``); tools can be built earlier.
         self.docker_manager: Any = None
         self._use_web_tools: bool = True
         self._is_parallel: bool = False
@@ -547,9 +674,6 @@ class SorcarAgent(RelentlessAgent):
                 f"sub-agents (${max_budget - remaining:.4f} / "
                 f"${max_budget:.2f})."
             )
-        # Keep one equal share for the parent to consume the sub-agent
-        # results and issue its terminal ``finish`` call.  With no tasks
-        # there is no fan-out and the full remainder stays with the parent.
         return remaining if num_tasks <= 0 else remaining / (num_tasks + 1)
 
     def _run_tasks_parallel(
@@ -578,12 +702,6 @@ class SorcarAgent(RelentlessAgent):
             List of YAML result strings in the same order as *tasks*.
         """
         totals: dict[str, float] = {}
-        # Live-stream the parent task's cumulative usage (parent session
-        # + all sub-agents) while the fan-out runs, so the cost/tokens
-        # header stays accurate at every turn instead of freezing until
-        # every sub-agent completes.  Stopped (joined) BEFORE
-        # ``_attribute_sub_usage`` bumps the printer offsets, so a late
-        # emission can never double-count the sub-agents' spend.
         monitor = _LiveUsageMonitor(self, self.printer)
         monitor.start()
         try:
@@ -595,24 +713,22 @@ class SorcarAgent(RelentlessAgent):
                 printer=self.printer,
                 totals_out=totals,
                 usage_monitor=monitor,
-                # Cap every sub-agent to a fair share of THIS task's
-                # remaining budget — without it each sub-agent would default
-                # to the full configured budget and a single sub-agent could
-                # spend the entire budget of the main task.  One equal share
-                # remains reserved for the parent to process results and finish.
                 max_budget=self._subagent_budget_share(len(tasks)),
-                # Sub-agents must talk to the same provider endpoint as the
-                # parent (custom ``base_url``/``api_key`` routing).
                 model_config=getattr(self, "model_config", None),
             )
         finally:
+            # stop() joins the monitor BEFORE the offsets bump below so a
+            # late emission can never double-count.  The attribution runs
+            # in this finally so an interrupt (user stop) that unwinds
+            # the fan-out cannot make the sub-agents' spend disappear
+            # from the parent task's budget/token/step totals.
             monitor.stop()
-        _attribute_sub_usage(
-            self,
-            float(totals.get("budget_used", 0.0)),
-            int(totals.get("total_tokens_used", 0)),
-            int(totals.get("total_steps", 0)),
-        )
+            _attribute_sub_usage(
+                self,
+                float(totals.get("budget_used", 0.0)),
+                int(totals.get("total_tokens_used", 0)),
+                int(totals.get("total_steps", 0)),
+            )
         return results
 
     def _get_tools(self) -> list:
@@ -684,11 +800,6 @@ class SorcarAgent(RelentlessAgent):
             broadcast = getattr(self.printer, "broadcast", None)
             if not callable(broadcast):
                 return "(talk not available in this environment)"
-            # ``talkId`` uniquely identifies this utterance.  The
-            # printer fans out one tab-stamped copy per subscribed
-            # viewer tab and delivers every copy to every connected
-            # client; clients dedupe by talkId so each device speaks
-            # the utterance exactly once (never twice).
             payload: dict[str, Any] = {
                 "type": "talk",
                 "language": language,
@@ -696,13 +807,6 @@ class SorcarAgent(RelentlessAgent):
                 "emotion": emotion,
                 "talkId": uuid.uuid4().hex,
             }
-            # Synthesize a far more natural voice server-side with a
-            # GPT audio model (gpt-audio-1.5) and ship the MP3 inside
-            # the event; every interface (VS Code webview, browser tab,
-            # iOS webapp) plays it directly and stays silent when
-            # synthesis failed or audio playback is unavailable/blocked
-            # on the device (the CLI terminal alone falls back to the
-            # system TTS command).
             tts_usage: dict[str, Any] = {}
             try:
                 from kiss.core.speech_synthesis import synthesize_talk_audio
@@ -712,44 +816,19 @@ class SorcarAgent(RelentlessAgent):
                 )
             except Exception:
                 synthesized = None
-            # Fold the synthesis agent's real spend into THIS task's
-            # accounting — otherwise every talk() call's TTS cost is
-            # missing from the reported per-task cost.
             _attribute_tts_usage(self, tts_usage)
             if synthesized:
                 payload["audioB64"], payload["audioMime"] = synthesized
-                # Attach the clip to the recorded/persisted ``talk``
-                # ``tool_call`` event too: that event was emitted (and
-                # persisted) BEFORE this tool ran, so it carries no
-                # audio — and demo-mode replay plays exactly the
-                # persisted ``extras.audioB64`` (the synthesis
-                # fallback is gone).  Without this every replayed
-                # narration would be silent.
-                attach = getattr(self.printer, "attach_talk_audio", None)
-                if callable(attach):
-                    try:
-                        attach(payload["audioB64"], payload["audioMime"])
-                    except Exception:
-                        logger.exception(
-                            "failed to attach talk audio to the recorded"
-                            " tool_call event"
-                        )
             broadcast(payload)
             return f"Spoke to the user in language {language!r}."
 
         if self.docker_manager:
-            from kiss.core.docker_tools import DockerTools
+            from kiss.agents.sorcar.docker_tools import DockerTools
 
             docker_tools = DockerTools(self._docker_bash)
-            code_graph_hints_seen: set[str] = set()
 
             def Bash(command: str, description: str) -> str:  # noqa: N802
-                """Run a command in Docker, preferring a code-graph answer."""
-                hint = intercept_grep_hint(
-                    command, self.work_dir, code_graph_hints_seen,
-                )
-                if hint is not None:
-                    return hint
+                """Run a command in the task's Docker container."""
                 return self._docker_bash(command, description)
 
             tools: list = [
@@ -762,23 +841,16 @@ class SorcarAgent(RelentlessAgent):
                 work_dir=self.work_dir,
             )
             tools = [
-                _make_plain_bash_tool(self, useful_tools),
+                useful_tools.Bash,
                 useful_tools.Read, useful_tools.Edit, useful_tools.Write,
             ]
         if self._use_web_tools and self.web_use_tool is None:
-            if getattr(self, "_subagent_info", None) is not None:
-                # Parallel sub-agents must never share (or escalate) the
-                # user's persistent browser profile: each profile-lock
-                # escalation opened one more visible Chromium window that
-                # stayed open for the sub-agent's whole lifetime.  Give
-                # sub-agents a headless browser in a throwaway profile
-                # that close() (invoked in this agent's run() finally
-                # block) deletes.
-                self.web_use_tool = WebUseTool(
-                    work_dir=self.work_dir, headless=True, ephemeral=True,
-                )
-            else:
-                self.web_use_tool = WebUseTool(work_dir=self.work_dir)
+            # Sub-agents run concurrently, so they get a throwaway profile
+            # instead of contending for the shared profile's Chromium lock.
+            self.web_use_tool = WebUseTool(
+                work_dir=self.work_dir,
+                ephemeral=getattr(self, "_subagent_info", None) is not None,
+            )
             tools.extend(self.web_use_tool.get_tools())
         def run_parallel(tasks: str, max_workers: str = "") -> str:
             """Run multiple independent tasks concurrently using parallel agents.
@@ -841,9 +913,12 @@ class SorcarAgent(RelentlessAgent):
         def set_model(model_name: str) -> str:
             """Change only this running agent's LLM model dynamically.
 
-            This does not persist ``last_model`` and therefore cannot
-            change the user-facing model picker default.  Only an
-            explicit picker selection should update that preference.
+            The tabs watching this task show the new model in their
+            picker for as long as the task runs, then revert to the
+            user's own choice.  The switch is display-only: it never
+            persists ``last_model``, so the user's picker preference
+            survives untouched — only an explicit picker selection
+            updates that.
 
             Args:
                 model_name: New LLM model name (for example
@@ -855,19 +930,11 @@ class SorcarAgent(RelentlessAgent):
                 change (or a "no change" message when the requested
                 model is already active).
             """
-            # The model actually making LLM calls lives on the inner
-            # per-session executor (``RelentlessAgent.perform_task``
-            # creates a fresh ``KISSAgent`` per sub-session and stores
-            # it in ``self._current_executor``); the relentless parent
-            # (``self``) never instantiates a ``model`` of its own.
-            # Target the executor so the swap lands on the instance the
-            # ReAct loop reads on every step — otherwise the change
-            # would silently defer to the NEXT sub-session, which most
-            # runs never start.
             target = getattr(self, "_current_executor", None) or self
             old_model = getattr(target, "model", None)
             if old_model is None:
                 self.model_name = model_name
+                self._show_model_in_picker(model_name)
                 return (
                     f"Model deferred-changed to {model_name} "
                     "(no live model yet)."
@@ -875,120 +942,106 @@ class SorcarAgent(RelentlessAgent):
             if old_model.model_name == model_name:
                 return f"Model is already {model_name}; no change."
 
-            # Reconstruct ``model_config`` for the factory.  The
-            # ``OpenAICompatibleModel`` factory path strips ``base_url``
-            # and ``api_key`` from ``model_config`` before storing it,
-            # so we restore them from the live model's attributes so the
-            # new model lands on the same endpoint — but ONLY for custom
-            # endpoints.  A factory-default ``base_url`` (e.g.
-            # ``https://api.openai.com/v1`` on a routed ``gpt-*`` model)
-            # must not be carried over: ``model()`` bypasses provider
-            # routing whenever the config contains ``base_url``, which
-            # would wrongly build an OpenAI-compatible client for a
-            # ``claude-*``/``gemini-*`` name on a cross-provider switch.
             new_config: dict[str, Any] = dict(old_model.model_config or {})
-            # Drop a factory-injected ``reasoning_effort`` default.  The
-            # ``model()`` factory auto-defaults ``reasoning_effort`` into
-            # ``model_config`` for models whose MODEL_INFO entry declares a
-            # ``thinking`` level (e.g. ``"high"`` for gpt-5.5); such a value
-            # describes the OLD model, not a user choice.  Carrying it over
-            # breaks switches to non-reasoning models (OpenAI rejects
-            # ``reasoning_effort`` for e.g. gpt-4o with a 400) and would
-            # override the new model's own default (e.g. the ``-xhigh``
-            # alias's level leaking onto the base model).  The new model
-            # re-defaults its own level on construction.  A user-explicit
-            # non-default effort is preserved.
             old_info = MODEL_INFO.get(old_model.model_name)
             if (
                 old_info is not None
                 and new_config.get("reasoning_effort") == old_info.thinking
             ):
                 new_config.pop("reasoning_effort", None)
+            _sanitize_model_config_for_switch(
+                new_config, old_model.model_name, model_name,
+            )
             old_base_url = getattr(old_model, "base_url", None)
             old_api_key = getattr(old_model, "api_key", None)
-            if (
-                old_base_url
-                and old_base_url.rstrip("/") not in _FACTORY_DEFAULT_BASE_URLS
-                and "base_url" not in new_config
-            ):
-                new_config["base_url"] = old_base_url
-                if old_api_key is not None:
-                    new_config["api_key"] = old_api_key
+            if "use_responses_api" in new_config:
+                # `use_responses_api` forces /responses delegation, which
+                # only some OpenAI-compatible vendors support.  Keep it
+                # only when the switch stays on the SAME vendor endpoint.
+                from kiss.core.models.model_info import (
+                    openai_compatible_provider_for_base_url,
+                )
+
+                old_vendor = openai_compatible_provider_for_base_url(
+                    old_base_url or ""
+                )
+                new_vendor = _match_openai_compatible_provider(
+                    _strip_provider_prefix(model_name)
+                )
+                if old_vendor is None or old_vendor is not new_vendor:
+                    new_config.pop("use_responses_api", None)
+            if old_base_url and "base_url" not in new_config:
+                normalized = old_base_url.rstrip("/")
+                if normalized in _FACTORY_DEFAULT_BASE_URLS:
+                    # Standard provider endpoint: preserve routing (and
+                    # crucially the possibly task-specific api_key) only
+                    # when the target model routes to the SAME provider
+                    # default — otherwise the factory would silently
+                    # replace a per-task key with the process-global one.
+                    target_provider = _match_openai_compatible_provider(
+                        _strip_provider_prefix(model_name)
+                    )
+                    preserve = (
+                        target_provider is not None
+                        and target_provider.base_url.rstrip("/") == normalized
+                    )
+                else:
+                    # Custom endpoint: always carry it (and its key) over.
+                    preserve = True
+                if preserve:
+                    new_config["base_url"] = old_base_url
+                    if old_api_key is not None:
+                        new_config["api_key"] = old_api_key
             new_model = _model_factory(
                 model_name,
                 model_config=new_config or None,
                 token_callback=old_model.token_callback,
                 thinking_callback=old_model.thinking_callback,
             )
-            # The provider client (``self.client``) is created only
-            # inside ``Model.initialize`` — a freshly-constructed
-            # model has ``client = None`` and its first ``generate``
-            # would crash with ``'NoneType' object has no attribute
-            # 'chat'``.  Initialize with a throwaway prompt (building
-            # the client), then hand off the live conversation below,
-            # which discards that placeholder message.
+            old_family = _model_family(old_model.model_name)
+            if (
+                old_api_key
+                and old_family in ("gemini", "anthropic")
+                and old_family == _model_family(model_name)
+                and hasattr(new_model, "api_key")
+            ):
+                # Native same-provider switch (Gemini→Gemini,
+                # Claude→Claude): the factory always injects the
+                # process-global key, which would silently replace a
+                # task-specific one.  Both native adapters build their
+                # SDK client from self.api_key inside initialize(), so
+                # overriding BEFORE initialize() routes requests with
+                # the task's credential.  setattr: the attribute lives
+                # on the concrete adapters, not the Model base class
+                # (the hasattr guard above ensures it exists).
+                setattr(new_model, "api_key", old_api_key)  # noqa: B010
             new_model.initialize("")
-            # Carry over the live conversation state so the next LLM
-            # call resumes from the same point.  Each provider stores a
-            # different native format: OpenAI-schema models store
-            # ``tool_calls`` with JSON-string arguments plus
-            # ``role="tool"`` / ``role="system"`` messages;
-            # AnthropicModel stores Anthropic Messages-format block
-            # lists (``thinking`` / ``tool_use`` / ``tool_result``);
-            # GeminiModel stores OpenAI-like messages but with dict
-            # tool-call arguments and optional ``attachments`` keys.  A
-            # direct hand-off is safe in every direction because each
-            # model class converts the foreign format at request time:
-            # ``_normalize_conversation_for_api`` in
-            # ``OpenAICompatibleModel`` / ``AnthropicModel``,
-            # ``_convert_conversation_to_gemini_contents`` in
-            # ``GeminiModel`` (system text is hoisted into the
-            # provider's top-level system parameter), and
-            # ``flatten_content_to_text`` in the CLI-backed models.
             new_model.conversation = old_model.conversation
             new_model.usage_info_for_messages = old_model.usage_info_for_messages
+            old_sigs = getattr(old_model, "_thought_signatures", None)
+            new_sigs = getattr(new_model, "_thought_signatures", None)
+            if isinstance(old_sigs, dict) and isinstance(new_sigs, dict):
+                # Gemini-to-Gemini switch: the conversation references
+                # historical tool-call ids whose thought signatures live
+                # only in this side map (initialize() cleared the new
+                # model's copy); without them signature-enforcing Gemini
+                # models reject the next request.
+                new_sigs.update(old_sigs)
 
             previous_name = old_model.model_name
             target.model = new_model  # type: ignore[attr-defined, union-attr]
             target.model_name = model_name
-            # Keep the relentless parent's ``model_name`` in sync so
-            # any subsequent sub-session (which re-reads it when
-            # constructing its executor) stays on the new model.
             self.model_name = model_name
-            # Rebuild the cached tools schema against the new model
-            # (different providers can produce slightly different
-            # schemas — e.g. Anthropic vs OpenAI).  The schema cache
-            # lives on the same object as the swapped model (the
-            # executor during a live run).
             if getattr(target, "function_map", None):
                 target._cached_tools_schema = new_model._build_openai_tools_schema(  # type: ignore[attr-defined, union-attr]
                     target.function_map,
                 )
+            self._show_model_in_picker(model_name)
             return f"Model changed from {previous_name} to {model_name}."
 
-        # Agent Skills (https://agentskills.io): the tool's docstring
-        # carries only each skill's name + description (token-efficient
-        # progressive disclosure); full SKILL.md bodies load on demand.
-        # No tool is registered when no skills are discovered.
         skill_tool = make_skill_tool(self.work_dir or ".")
         if skill_tool is not None:
             tools.append(skill_tool)
-        # code_graph: local tree-sitter knowledge graph of the work dir
-        # (query/path/explain instead of grep).  Registered only when the
-        # optional tree-sitter grammars are importable; a failure here
-        # must never break agent startup.
-        try:
-            from kiss.agents.sorcar.code_graph import make_code_graph_tool
-
-            code_graph_tool = make_code_graph_tool(self.work_dir or ".")
-            if code_graph_tool is not None:
-                tools.append(code_graph_tool)
-        except Exception:
-            logger.warning("code_graph tool setup failed", exc_info=True)
-        # MCP servers: every tool of every configured server becomes a
-        # ``<server>_<tool>`` function (filtered by the
-        # ``mcp_permissions`` wildcard rules).  A broken server is
-        # logged and skipped so it can never break agent startup.
         try:
             from kiss.agents.sorcar.mcp_servers import make_mcp_tools
 
@@ -1002,6 +1055,27 @@ class SorcarAgent(RelentlessAgent):
             tools.append(run_parallel)
             tools.append(number_of_cores)
         return tools
+
+    def _show_model_in_picker(self, model_name: str) -> None:
+        """Display *model_name* in the picker of every tab watching this task.
+
+        The override lasts only while the task runs — the daemon puts
+        the user's own pick back when the task ends — so this is purely
+        a live view of what the agent is running right now.  Purely
+        cosmetic, hence best-effort: printers without the capability
+        (plain console runs) and transport errors are ignored rather
+        than allowed to fail the ``set_model`` tool call.
+
+        Args:
+            model_name: The model the agent just switched to.
+        """
+        show = getattr(self.printer, "broadcast_agent_model_pick", None)
+        if not callable(show):
+            return
+        try:
+            show(model_name, getattr(self, "_tab_id", "") or "")
+        except Exception:
+            logger.warning("model picker update failed", exc_info=True)
 
     def perform_task(
         self,
@@ -1018,21 +1092,12 @@ class SorcarAgent(RelentlessAgent):
             YAML string with 'success' and 'summary' keys.
         """
         all_tools = self._get_tools() + tools
-        # Wire up the pre-step hook so user prompts queued via the VS
-        # Code frontend's ``appendUserMessage`` command while this task
-        # is running get injected into the live model's conversation as
-        # additional ``user`` messages immediately before the next model
-        # call.  This MUST happen here (after ``RelentlessAgent.run`` has
-        # already called ``_reset``, which clears ``pre_step_hook``) and
-        # before ``super().perform_task`` runs the per-session executor
-        # loop — that loop copies ``self.pre_step_hook`` onto each inner
-        # executor.  Only meaningful when this agent has been bound to a
-        # frontend tab (``_tab_id`` is set by
-        # :meth:`_TaskRunnerMixin._run_task_inner`).
         if getattr(self, "_tab_id", None):
             self.pre_step_hook = self._drain_pending_user_messages
+            self.tool_call_guard = self._block_finish_when_user_message_pending
         else:
             self.pre_step_hook = None
+            self.tool_call_guard = None
         return super().perform_task(all_tools, attachments=attachments)
 
     def _reset(
@@ -1047,15 +1112,6 @@ class SorcarAgent(RelentlessAgent):
         verbose: bool | None = None,
     ) -> None:
         resolved_model = model_name or _load_last_model() or get_default_model()
-        # Remember the model this task was LAUNCHED with.  The
-        # ``set_model`` tool mutates ``self.model_name`` mid-task
-        # (deliberately — subsequent sub-sessions of the SAME task must
-        # stay on the switched model), so end-of-task persistence
-        # (e.g. ``ChatSorcarAgent.run``'s final task-history save) must
-        # read this attribute instead of ``self.model_name`` — the
-        # recorded model of a task, like every other global model
-        # preference, must never change because an agent switched its
-        # own model while running (see INVARIANTS.md #217).
         self._launch_model_name = resolved_model
         super()._reset(
             model_name=resolved_model,
@@ -1097,7 +1153,7 @@ class SorcarAgent(RelentlessAgent):
             arguments: Dictionary of values to fill prompt_template placeholders.
             system_prompt: system prompt to be appended to the actual system prompt
             tools: List of tools to be added in addition to bash and web tools.
-            max_steps: Maximum steps per sub-session. Defaults to config value.
+            max_steps: Maximum steps per sub-session. Defaults to 10000.
             max_budget: Maximum budget in USD. Defaults to config value.
             work_dir: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
             printer: Printer instance for output display.
@@ -1122,12 +1178,6 @@ class SorcarAgent(RelentlessAgent):
         self.web_use_tool = None
         tl = getattr(printer, "_thread_local", None) if printer else None
         self._stop_event = getattr(tl, "stop_event", None) if tl else None
-        # NOTE: the pending-user-messages pre-step hook is wired up in
-        # :meth:`perform_task` (which runs *after* ``RelentlessAgent.run``
-        # calls ``_reset``).  Installing it here would be useless because
-        # ``RelentlessAgent._reset`` — invoked by ``super().run`` below —
-        # resets ``self.pre_step_hook`` back to ``None`` before the
-        # per-session executor loop reads it.
         try:
             system_instructions = (
                 SYSTEM_PROMPT
@@ -1172,6 +1222,7 @@ class SorcarAgent(RelentlessAgent):
             self.web_use_tool = None
             self._ask_user_question_callback = None
             self.pre_step_hook = None
+            self.tool_call_guard = None
 
     def _drain_pending_user_messages(self, model: Any) -> None:
         """Append any queued follow-up prompts to *model*'s conversation.
@@ -1213,29 +1264,100 @@ class SorcarAgent(RelentlessAgent):
             return
         with _RunningAgentState._registry_lock:
             tab = _RunningAgentState.running_agent_states.get(tab_id)
-            if tab is None or not tab.pending_user_messages:
+            if tab is None or (tab.agent is not None and tab.agent is not self):
+                # Ownership check: register() explicitly allows a different
+                # state to replace this key (tab reuse), so a stale agent
+                # must never consume the replacement's queued input.
+                return
+            if not tab.pending_user_messages and not tab.unattributed_prompt_echoes:
                 return
             queued = list(tab.pending_user_messages)
             tab.pending_user_messages.clear()
             deferred = list(tab.unattributed_prompt_echoes)
             tab.unattributed_prompt_echoes.clear()
-        if deferred:
-            broadcast = getattr(
-                getattr(self, "printer", None), "broadcast", None,
-            )
-            if broadcast is not None:
-                for msg in deferred:
-                    broadcast({
-                        "type": "prompt",
-                        "text": msg,
-                        "recordOnly": True,
-                    })
         for msg in queued:
             model.add_message_to_conversation(
                 "user",
                 f"User says: {msg}. "
                 "Take the message into account and finish your task.",
             )
+        # The recordOnly echoes are emitted AFTER the queued messages
+        # entered the model conversation, and each broadcast is guarded:
+        # a broken printer must never lose the (already cleared) steering
+        # input or abort the task from this best-effort persistence hook.
+        if deferred:
+            broadcast = getattr(
+                getattr(self, "printer", None), "broadcast", None,
+            )
+            if broadcast is not None:
+                for msg in deferred:
+                    try:
+                        broadcast({
+                            "type": "prompt",
+                            "text": msg,
+                            "recordOnly": True,
+                        })
+                    except Exception:
+                        # Requeue so the durable echo is retried on the
+                        # next drain instead of being lost forever.
+                        logger.debug(
+                            "recordOnly prompt echo broadcast failed",
+                            exc_info=True,
+                        )
+                        with _RunningAgentState._registry_lock:
+                            owner = _RunningAgentState.running_agent_states.get(
+                                tab_id
+                            )
+                            if owner is not None and (
+                                owner.agent is None or owner.agent is self
+                            ):
+                                owner.unattributed_prompt_echoes.append(msg)
+
+    def _block_finish_when_user_message_pending(
+        self, name: str, args: dict[str, Any],
+    ) -> str | None:
+        """Reject ``finish`` while a queued user follow-up is undrained.
+
+        The server accepts ``appendUserMessage`` while a model call is
+        in flight, but queued messages are drained only by the
+        pre-step hook at the TOP of a step.  Without this guard, a
+        prompt queued after the last drain would be silently discarded
+        when the in-flight response calls ``finish`` — the user sees
+        their follow-up echoed in the UI even though the agent never
+        saw it.  Blocking the ``finish`` forces one more step, whose
+        pre-step drain injects the queued message.
+
+        Args:
+            name: The tool name the model is calling.
+            args: The tool call arguments (unused).
+
+        Returns:
+            ``None`` to allow the call, or a rejection message when
+            ``finish`` was attempted with steering input still queued.
+        """
+        del args
+        if name != "finish":
+            return None
+        tab_id = getattr(self, "_tab_id", "") or ""
+        if not tab_id:
+            return None
+        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+
+        with _RunningAgentState._registry_lock:
+            tab = _RunningAgentState.running_agent_states.get(tab_id)
+            pending = (
+                tab is not None
+                and (tab.agent is None or tab.agent is self)
+                and bool(tab.pending_user_messages)
+            )
+        if not pending:
+            return None
+        return (
+            "Error: finish rejected — the user sent a new message while "
+            "you were working. It will be appended to the conversation "
+            "at the start of your next step; take it into account "
+            "before finishing."
+        )
 
 
 def _coerce_tasks(tasks: Any) -> list[str]:
@@ -1272,9 +1394,6 @@ def _coerce_tasks(tasks: Any) -> list[str]:
             except (ValueError, TypeError):
                 parsed = None
             if isinstance(parsed, list):
-                # A JSON empty list means zero tasks (NOT one task whose
-                # text is "[]"); non-string elements (e.g. '[1, 2]') are
-                # coerced to one task string per element.
                 return [t if isinstance(t, str) else str(t) for t in parsed]
         return [tasks]
     if isinstance(tasks, list) and all(isinstance(t, str) for t in tasks):
@@ -1365,29 +1484,15 @@ def run_tasks_parallel(
     """
     tasks = _coerce_tasks(tasks)
 
-    # Local import: ``chat_sorcar_agent`` imports from this module, so a
-    # top-level import would be circular.
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-    # Per-sub-agent usage so the caller can aggregate it back into the
-    # parent agent's accounting.  Each entry is a tuple of
-    # ``(budget_used, total_tokens_used, total_steps)``.
     sub_usage: list[tuple[float, int, int]] = [(0.0, 0, 0)] * len(tasks)
+    # Published as soon as each child exists so an abandoned child's
+    # spend can still be read (see _collect_unfinished_usage).
+    sub_agents: list[Any] = [None] * len(tasks)
 
-    # Capture the parent's thread-local ``task_id`` HERE, in the calling
-    # thread.  ``printer._thread_local`` is a real ``threading.local``,
-    # so reading it inside a worker thread would never see the parent
-    # thread's value (and ``ChatSorcarAgent.run`` clears the worker's
-    # own id before ``_run_single``'s ``finally`` runs) — the
-    # ``subagentDone`` broadcast would then never fire.
     parent_tl = getattr(printer, "_thread_local", None) if printer else None
     parent_key = getattr(parent_tl, "task_id", "") if parent_tl else ""
-    # Capture the parent's stop_event HERE too (same thread-local
-    # reasoning as ``task_id`` above): ``SorcarAgent.run`` resolves
-    # ``self._stop_event`` from the *worker* thread's
-    # ``printer._thread_local``, so unless the event is copied into
-    # each worker thread-local below, sub-agents never see the parent
-    # stop request and Stop cannot kill their Bash process groups.
     parent_stop_event = getattr(parent_tl, "stop_event", None) if parent_tl else None
 
     def _run_single(args: tuple[int, str]) -> str:
@@ -1396,29 +1501,11 @@ def run_tasks_parallel(
         if tl is not None:
             tl.stop_event = parent_stop_event
         agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
-        # Mark the spawned agent as a sub-agent.  ``ChatSorcarAgent.run``
-        # reads this marker to drive its own sub-agent-specific
-        # behaviour (e.g. broadcasting ``new_tab`` to a browser-based
-        # frontend, persisting the ``subagent`` extra field).  This
-        # keeps the parallel executor itself free of any task-id or
-        # frontend knowledge.  The base ``SorcarAgent`` path has no
-        # parent ``task_id`` to record, so ``parent_task_id`` is the
-        # empty string here (the same "no persisted parent" sentinel
-        # the chat-aware override uses — see r4-sorcar-H2 in
-        # ``ChatSorcarAgent._run_tasks_parallel``; a ``None`` here
-        # would persist ``subagent: {parent_task_id: null}`` while the
-        # chat path persists ``""``, split-braining downstream
-        # ``parent_task_id == ""`` checks).  ``parent_tab_id`` is
-        # likewise ``""`` so the persisted payload shape matches the
-        # chat path.
+        sub_agents[idx] = agent
         agent._subagent_info = {"parent_task_id": "", "parent_tab_id": ""}
         if usage_monitor is not None:
             usage_monitor.track(agent)
         try:
-            # ``is_parallel=True`` propagates the parallel capability so
-            # sub-agents themselves get the ``run_parallel`` tool and
-            # can invoke nested parallel execution.  Without this, nested
-            # parallel (sub-agent calls run_parallel) is impossible.
             result: str = agent.run(
                 prompt_template=task,
                 model_name=model_name,
@@ -1432,27 +1519,45 @@ def run_tasks_parallel(
         except Exception as exc:
             return _yaml_failure(exc)
         finally:
-            sub_usage[idx] = _agent_usage(agent)
+            # _live_agent_usage (not _agent_usage): an interrupted child
+            # never folds its in-flight executor session's spend into the
+            # agent totals, so the folded-only read would undercount it.
+            sub_usage[idx] = _live_agent_usage(agent)
             if printer is not None and parent_key:
-                # Use the same ``task-{parent}__sub_{idx}`` tab-id
-                # format that ``ChatSorcarAgent._run_tasks_parallel``
-                # registers/broadcasts, so a frontend tab materialized
-                # under the chat-style deterministic id can always be
-                # matched and its running indicator stopped.
                 _broadcast_subagent_done(
-                    printer, [f"task-{parent_key}__sub_{idx}"],
+                    printer,
+                    [f"task-{parent_key}__sub_{idx}"],
+                    model_name or "",
                 )
+            # Pool workers are reused and the binding is per THREAD, so
+            # leaving it behind would let an unrelated sibling inherit a
+            # stop meant for this task.
+            if tl is not None:
+                tl.stop_event = None
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        results = list(pool.map(_run_single, enumerate(tasks)))
-
-    if totals_out is not None:
-        totals_out["budget_used"] = sum(u[0] for u in sub_usage)
-        totals_out["total_tokens_used"] = sum(u[1] for u in sub_usage)
-        totals_out["total_steps"] = sum(u[2] for u in sub_usage)
+    pool: ThreadPoolExecutor | None = None
+    futures: list[Future[str]] = []
+    abandoned = False
+    try:
+        pool = ThreadPoolExecutor(max_workers=max_workers)
+        futures = [pool.submit(_run_single, item) for item in enumerate(tasks)]
+        try:
+            results = _await_subagents(futures, parent_stop_event)
+        except BaseException:
+            abandoned = any(not f.done() for f in futures)
+            raise
+    finally:
+        # Only a child that ignored its stop event is abandoned; every
+        # other path joins (and so RECLAIMS the workers) exactly as the
+        # old `with ThreadPoolExecutor(...)` block did.
+        if pool is not None:
+            pool.shutdown(wait=not abandoned, cancel_futures=abandoned)
+        # Fill totals_out even when a worker propagates an interrupt, and
+        # read the live figures of any child that never got to report its
+        # own, so no completed sibling's spend is lost.
+        _collect_unfinished_usage(futures, sub_agents, sub_usage)
+        if totals_out is not None:
+            totals_out["budget_used"] = sum(u[0] for u in sub_usage)
+            totals_out["total_tokens_used"] = sum(u[1] for u in sub_usage)
+            totals_out["total_steps"] = sum(u[2] for u in sub_usage)
     return results
-
-
-
-
-

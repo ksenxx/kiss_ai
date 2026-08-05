@@ -51,10 +51,6 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server.web_server import WebPrinter
 
-# ---------------------------------------------------------------------------
-# Fake OpenAI server: parent → run_parallel, sub-agents + parent's 2nd call → finish.
-# ---------------------------------------------------------------------------
-
 
 def _run_parallel_response() -> dict[str, Any]:
     return {
@@ -171,21 +167,11 @@ class _Handler(BaseHTTPRequestHandler):
             req = {}
         is_stream = bool(req.get("stream", False))
         messages = req.get("messages", [])
-        # Sub-agent requests are identified by their TASK prompt (a
-        # user-role message containing "Compute").  Only user-role
-        # content is inspected: sub-agents inherit the parent's
-        # ``model_config`` (budget-distribution fix), so their system
-        # prompt — which mentions run_parallel — also reaches this
-        # server, and a whole-conversation heuristic would misroute
-        # them into infinite nested run_parallel spawning.
         user_text = " ".join(
             str(m.get("content", "")) for m in messages if m.get("role") == "user"
         )
         is_sub = "Compute" in user_text
         has_rp_result = any(m.get("role") == "tool" for m in messages)
-        # The every-5-steps summary gate: when the pre-step hook just
-        # demanded a summary (it appends a user message ending the
-        # conversation), the ONLY accepted tool call is ``summary``.
         last = messages[-1] if messages else {}
         summary_due = last.get("role") == "user" and "Call the summary tool NOW" in str(
             last.get("content", "")
@@ -264,12 +250,6 @@ def _start_server() -> tuple[ThreadingHTTPServer, str]:
     return srv, f"http://127.0.0.1:{srv.server_port}/v1"
 
 
-# ---------------------------------------------------------------------------
-# Fake WebPrinter: capture per-tab post-fanout payloads + mimic frontend's
-# ``new_tab`` round-trip synchronously so later sub-agent broadcasts have a
-# real subscriber to fan out to.
-# ---------------------------------------------------------------------------
-
 
 class _FakeWebPrinter(WebPrinter):
     """A ``WebPrinter`` that captures WS payloads instead of sending them.
@@ -284,11 +264,7 @@ class _FakeWebPrinter(WebPrinter):
 
     def __init__(self) -> None:
         super().__init__()
-        # All per-tab payloads after fan-out, in the order
-        # ``_send_to_ws_clients`` would have shipped them.
         self.wire: list[dict[str, Any]] = []
-        # Mapping from sub-agent ``task_id`` -> allocated sub-tab uuid
-        # (mimics frontend's ``createNewTab`` allocating a uuid).
         self._sub_tabs: dict[str, str] = {}
         self._wire_lock = threading.Lock()
 
@@ -317,24 +293,6 @@ class _FakeWebPrinter(WebPrinter):
                 self._sub_tabs[str(task_id)] = sub_tab_id
                 self.subscribe_tab(task_id, sub_tab_id)
 
-
-# ---------------------------------------------------------------------------
-# In-memory port of media/main.js default-case dispatch.
-#
-# Mirrors the routing rules in main.js:
-#
-#   default:
-#     if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
-#       const bgTab = findTabByEvt(ev);
-#       if (bgTab) processOutputEventForBgTab(ev, bgTab);
-#       break;
-#     }
-#     processOutputEvent(ev);  // appends to active tab
-#
-# We additionally model the side effects of the ``new_tab`` handler
-# (creates a fresh tab and switches focus) so the simulated
-# ``activeTabId`` evolves the same way the real webview's does.
-# ---------------------------------------------------------------------------
 
 
 def _simulate_webview_dispatch(
@@ -380,7 +338,7 @@ def _simulate_webview_dispatch(
             if sub_tab is None:
                 continue
             tabs.add(sub_tab)
-            active = sub_tab  # createNewTab() switches focus
+            active = sub_tab
             rendered.setdefault(sub_tab, [])
             continue
         if t == "openSubagentTab":
@@ -401,24 +359,15 @@ def _simulate_webview_dispatch(
         if ev_tab is not None and ev_tab != "" and ev_tab != active:
             if ev_tab in tabs:
                 rendered.setdefault(ev_tab, []).append(ev)
-            # Else: silently dropped (no matching tab exists).
             continue
-        # Active-tab dispatch.  Apply defensive guard from main.js:
-        # drop a misrouted result / usage_info event when its taskId
-        # does not match the active tab's currentTaskId.
         if t in ("result", "usage_info"):
             ev_task = ev.get("taskId")
             act_task = current_task.get(active)
             if ev_task and act_task and str(ev_task) != str(act_task):
-                # Dropped by guard — do not render.
                 continue
         rendered.setdefault(active, []).append(ev)
     return rendered
 
-
-# ---------------------------------------------------------------------------
-# DB redirect (avoid clobbering user state).
-# ---------------------------------------------------------------------------
 
 
 def _redirect(tmpdir: str) -> tuple[Any, Any, Any]:
@@ -436,10 +385,6 @@ def _redirect(tmpdir: str) -> tuple[Any, Any, Any]:
 def _restore(saved: tuple[Any, Any, Any]) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved
 
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 
 class TestSubagentResultNotInParentWebview:
@@ -494,8 +439,6 @@ class TestSubagentResultNotInParentWebview:
             e for e in parent_bucket if e.get("type") == "result"
         ]
 
-        # The parent tab must show exactly ONE result panel, and that
-        # panel must be the parent's own (carrying the parent's taskId).
         assert len(parent_results) == 1, (
             f"Parent tab should render exactly 1 result panel, got "
             f"{len(parent_results)}: "
@@ -528,11 +471,6 @@ class TestSubagentResultNotInParentWebview:
         parent_task_key = "9001"
         sub_task_key = "9002"
 
-        # Wire mirroring what the bug would look like: parent's
-        # task_events stamps currentTaskId, parent's result panel
-        # renders, then SUGGESTED NEXT, then a MIS-ROUTED sub-agent
-        # ``result`` event with the parent's tabId but a different
-        # taskId (the leaked sub-agent's task id).
         wire: list[dict[str, Any]] = [
             {
                 "type": "task_events",
@@ -555,11 +493,6 @@ class TestSubagentResultNotInParentWebview:
                 "taskId": parent_task_key,
                 "text": "SUGGESTED NEXT",
             },
-            # The bug: a sub-agent's result reaches the parent's WS
-            # stream tagged with parent_tab_id (whatever the root
-            # cause may be).  Without the guard, the frontend would
-            # render this on the parent tab's DOM, producing the
-            # duplicate Result panel the user reported.
             {
                 "type": "result",
                 "tabId": parent_tab_id,
@@ -580,8 +513,6 @@ class TestSubagentResultNotInParentWebview:
             e for e in rendered.get(parent_tab_id, [])
             if e.get("type") == "result"
         ]
-        # Exactly the parent's own result; the leaked sub-agent
-        # result must be dropped by the defensive guard.
         assert len(parent_results) == 1, (
             f"Defensive guard failed: parent tab rendered "
             f"{len(parent_results)} result panels (expected 1).  "

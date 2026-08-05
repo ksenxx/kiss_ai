@@ -79,10 +79,11 @@ install_git() {
 
 install_git || true
 
-cd
-if [ -d ~/kiss_ai ]; then
-  if [ -d ~/kiss_ai/.git ]; then
-    cd ~/kiss_ai
+mkdir -p ~/.kiss
+cd ~/.kiss
+if [ -d ~/.kiss/kiss_ai ]; then
+  if [ -d ~/.kiss/kiss_ai/.git ]; then
+    cd ~/.kiss/kiss_ai
     # Try a fast-forward pull; if the branch diverged (e.g. upstream was
     # force-pushed), stash any local edits and reset hard to upstream so the
     # bootstrap doesn't abort.  The main ./install.sh below will restore the
@@ -99,25 +100,25 @@ if [ -d ~/kiss_ai ]; then
       fi
     fi
   else
-    rm -rf ~/kiss_ai
+    rm -rf ~/.kiss/kiss_ai
     if have_working_git; then
-      git clone https://github.com/ksenxx/kiss_ai.git ~/kiss_ai
+      git clone https://github.com/ksenxx/kiss_ai.git ~/.kiss/kiss_ai
     else
       curl -L -o main.zip https://github.com/ksenxx/kiss_ai/archive/refs/heads/main.zip
       unzip main.zip
       rm main.zip
-      mv kiss_ai-main ~/kiss_ai
+      mv kiss_ai-main ~/.kiss/kiss_ai
     fi
   fi
 else
   if have_working_git; then
-    git clone https://github.com/ksenxx/kiss_ai.git ~/kiss_ai
+    git clone https://github.com/ksenxx/kiss_ai.git ~/.kiss/kiss_ai
   else
     curl -L -o main.zip https://github.com/ksenxx/kiss_ai/archive/refs/heads/main.zip
     unzip main.zip
     rm main.zip
-    mv kiss_ai-main ~/kiss_ai
+    mv kiss_ai-main ~/.kiss/kiss_ai
   fi
 fi
-cd ~/kiss_ai
+cd ~/.kiss/kiss_ai
 ./install.sh

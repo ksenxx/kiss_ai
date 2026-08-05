@@ -32,6 +32,7 @@ _MAIN_JS = (
     / "media"
     / "main.js"
 )
+_API_JS = _MAIN_JS.with_name("api.js")
 
 
 def _extract_fn_body(src: str, header: str) -> str:
@@ -110,6 +111,8 @@ class TestCreateNewTabDoesNotBlockInput(unittest.TestCase):
             function clearGhost() {}
             function hideAC() {}
             function closeModelDD() {}
+            // Opening a chat ends the launch tab switch; irrelevant here.
+            function closeLaunchSwitch() {}
             function startTimer() {}
             function stopTimer() {}
             function removeSpinner() {}
@@ -122,7 +125,6 @@ class TestCreateNewTabDoesNotBlockInput(unittest.TestCase):
             function syncClearBtn() {}
             function updateChevronIcon() {}
             function applyChevronState() {}
-            function clearDemoEndedUi() {}
 
             // Mirror main.js exactly:
             function updateInputDisabled() {
@@ -205,7 +207,12 @@ class TestCreateNewTabDoesNotBlockInput(unittest.TestCase):
                     + ' sendBtn.disabled=' + sendBtn.disabled);
             }
             """
-        script = preamble + "\n" + create_new_tab_src + "\n" + harness
+        script = (
+            preamble
+            + "\n" + _API_JS.read_text()
+            + "\nvar api = createSorcarApi(function(m) { vscode.postMessage(m); });\n"
+            + create_new_tab_src + "\n" + harness
+        )
         result = _run_node(script)
         assert result.returncode == 0, (
             f"node error: {result.stderr}\nstdout: {result.stdout}"

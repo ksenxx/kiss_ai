@@ -88,7 +88,6 @@ class TestQuickTunnelPrefersOwnMetricsPort(unittest.TestCase):
         os.environ["PATH"] = f"{tmpdir}{os.pathsep}{self._old_path}"
         self._old_pidfile = ws._CLOUDFLARED_PIDFILE
         ws._CLOUDFLARED_PIDFILE = tmpdir / "cloudflared.pid"
-        # Foreign metrics server inside the hardcoded scan range.
         self._foreign: http.server.HTTPServer | None = None
         for port in range(20240, 20260):
             try:

@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""E2E regression tests for findings-6 fixes #4, #10, and #16.
+"""E2E regression tests for findings-6 fixes #4 and #10.
 
 #4  ``ChatSorcarAgent.new_chat`` leaked the one-shot
     ``resume_from_task_id`` seed: after ``resume_from_task_id(tid);
@@ -15,19 +15,13 @@
     and ``_list_recent_chats``' inner tasks query.  All readers must
     agree on the exact same result sets.
 
-#16 ``code_graph._ensure_graph_git_excluded`` crashed with
-    ``UnicodeDecodeError`` (uncaught, propagating out of
-    ``build_graph``) on repos whose ``info/exclude`` contains
-    non-UTF-8 bytes — legal, since git treats the file as raw bytes.
-
-All tests run against real SQLite databases / git repos in temp dirs;
+All tests run against real SQLite databases in temp dirs;
 no kiss code is mocked.
 """
 
 from __future__ import annotations
 
 import shutil
-import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -35,7 +29,6 @@ from typing import cast
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.code_graph import _ensure_graph_git_excluded
 
 
 class _TempDbTestBase:
@@ -136,40 +129,3 @@ class TestSubagentFilteringConsistency(_TempDbTestBase):
         assert th._load_latest_chat_events_by_chat_id(sub_chat) is None
         assert th._load_chat_context(sub_chat) == []
         assert sub_chat not in [c["chat_id"] for c in th._list_recent_chats()]
-
-
-class TestEnsureGraphGitExcludedNonUtf8:
-    """#16: non-UTF-8 ``info/exclude`` bytes must never crash the build."""
-
-    @staticmethod
-    def _make_repo_with_binary_exclude(tmp: Path) -> tuple[Path, Path]:
-        repo = tmp / "repo"
-        repo.mkdir()
-        subprocess.run(
-            ["git", "init", str(repo)], capture_output=True, check=True,
-        )
-        exclude = repo / ".git" / "info" / "exclude"
-        exclude.parent.mkdir(parents=True, exist_ok=True)
-        # Latin-1 comment + raw high bytes: legal for git (raw bytes),
-        # invalid UTF-8 for a strict Python decode.
-        exclude.write_bytes(b"# caf\xe9 latin-1 comment\n\x80\x81pattern\n")
-        return repo, exclude
-
-    def test_non_utf8_exclude_does_not_raise_and_appends(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, exclude = self._make_repo_with_binary_exclude(Path(tmp))
-            # Before the fix this raised UnicodeDecodeError (a
-            # ValueError, uncaught by the OSError handler).
-            _ensure_graph_git_excluded(str(repo))
-            data = exclude.read_bytes()
-            assert data.count(b".kiss/code_graph/\n") == 1
-            # The original non-UTF-8 bytes round-trip unchanged.
-            assert b"# caf\xe9 latin-1 comment" in data
-            assert b"\x80\x81pattern" in data
-
-    def test_idempotent_on_non_utf8_exclude(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            repo, exclude = self._make_repo_with_binary_exclude(Path(tmp))
-            _ensure_graph_git_excluded(str(repo))
-            _ensure_graph_git_excluded(str(repo))
-            assert exclude.read_bytes().count(b".kiss/code_graph/") == 1

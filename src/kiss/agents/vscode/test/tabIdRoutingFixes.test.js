@@ -2,26 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end chat-webview regression tests for the tabId routing bugs
-// found by the claude-fable-5 / kimi-k3 / gpt-5.6-sol review sequence.
-// Drives the real chat.html + panelCopy.js + main.js in jsdom.
-//
-//  B1 — a blank-parent ``openSubagentTab`` (direct history-open of a
-//       sub-agent row whose parent task has no live backend state) is
-//       broadcast to EVERY webview; a webview that does not already
-//       own the target tab must NOT materialise a phantom sub-agent
-//       tab, and the follow-up tabId-stamped ``task_events`` must not
-//       leak the transcript into it.  A webview that DOES own the
-//       target tab (the one whose user clicked the row) still gets
-//       the conversion.
-//  B2 — ``notification`` toasts stamped with another window's tabId
-//       (WorktreeSorcarAgent's auto-commit lifecycle) must not render;
-//       local-tab-stamped and tabless toasts still render.
-//  B3 — an ``error`` stamped for a BACKGROUND local tab must be kept
-//       in that tab's saved fragment (like ``warning``) and become
-//       visible when the user switches to the tab; foreign-window
-//       errors are dropped; active-tab errors render immediately.
 
 'use strict';
 
@@ -64,7 +44,10 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   return {win, posted};
 }
 
@@ -72,7 +55,6 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** The webview's initial active tab id (posted on the init ready). */
 function initialTabId(posted) {
   const ready = posted.find(m => m && m.type === 'ready' && m.tabId);
   assert.ok(ready, 'webview posted a ready message with its active tabId');
@@ -88,8 +70,6 @@ function tabElement(win, tabId) {
 function notificationToasts(win) {
   return Array.from(win.document.querySelectorAll('[data-notification-id]'));
 }
-
-// ---------------------------------------------------------------- B1
 
 function testPhantomSubagentTabNotMaterialised() {
   const {win} = makeWebview();
@@ -108,7 +88,6 @@ function testPhantomSubagentTabNotMaterialised() {
     'a webview that does not own the target tab must not materialise ' +
       'a phantom sub-agent tab from a blank-parent openSubagentTab',
   );
-  // The follow-up tabId-stamped transcript replay must not leak either.
   send(win, {
     type: 'task_events',
     task: 'leaked sub-agent',
@@ -127,9 +106,6 @@ function testPhantomSubagentTabNotMaterialised() {
 
 function testOwnedTabConversionStillWorks() {
   const {win, posted} = makeWebview();
-  // The user clicks a sub-agent history row: the webview creates a
-  // fresh chat tab itself (new_tab defensive path activates one) and
-  // posts resumeSession; the backend then converts that very tab.
   send(win, {type: 'new_tab', task_id: 'sub-task-9'});
   const resume = posted.find(m => m && m.type === 'resumeSession');
   assert.ok(resume && resume.tabId, 'created tab posted resumeSession');
@@ -168,8 +144,6 @@ function testUnknownParentStillDropped() {
   );
   console.log('  ok - unknown-parent openSubagentTab still dropped');
 }
-
-// ---------------------------------------------------------------- B2
 
 function testForeignTabNotificationDropped() {
   const {win, posted} = makeWebview();
@@ -218,13 +192,10 @@ function testForeignTabNotificationDropped() {
   console.log('  ok - notifications route by local tab ownership');
 }
 
-// ---------------------------------------------------------------- B3
-
 function testBackgroundTabErrorRetained() {
   const {win, posted} = makeWebview();
   const bgTabId = initialTabId(posted);
-  // Activate a second tab; the initial tab becomes a background tab.
-  send(win, {type: 'new_tab', task_id: 'task-b3'});
+  win._testApi.createNewTab();
   assert.notStrictEqual(
     tabElement(win, bgTabId).className.includes('active'),
     true,
@@ -237,12 +208,11 @@ function testBackgroundTabErrorRetained() {
     "a background tab's error must not render into the ACTIVE tab",
   );
 
-  // Switching back to the background tab must reveal the error banner.
   tabElement(win, bgTabId).dispatchEvent(
     new win.MouseEvent('click', {bubbles: true}),
   );
   assert.ok(
-    win.document.getElementementById === undefined, // sanity no-op
+    win.document.getElementementById === undefined,
   );
   assert.ok(
     win.document.getElementById('output').textContent.includes('bg boom'),

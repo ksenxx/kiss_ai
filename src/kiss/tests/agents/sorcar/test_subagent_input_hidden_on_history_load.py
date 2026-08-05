@@ -61,7 +61,6 @@ class TestOpenSubagentTabHidesInputForActiveTab:
 
     def test_handler_checks_active_tab(self) -> None:
         block = _open_subagent_case_block()
-        # Must compare the converted sub-tab's id against activeTabId.
         assert "subTab.id === activeTabId" in block, (
             "openSubagentTab handler must guard the visibility update "
             "with `subTab.id === activeTabId` so it only hides the "
@@ -71,8 +70,6 @@ class TestOpenSubagentTabHidesInputForActiveTab:
 
     def test_handler_hides_input_container(self) -> None:
         block = _open_subagent_case_block()
-        # Must set ``inputContainer.style.display = 'none'`` inside
-        # the case block.  Look for the exact assignment.
         assert "inputContainer.style.display = 'none'" in block, (
             "openSubagentTab handler must set "
             "`inputContainer.style.display = 'none'` to hide the input "
@@ -92,4 +89,3 @@ class TestOpenSubagentTabHidesInputForActiveTab:
             "`subTab.isSubagentTab = true` so the order of effects is "
             "obvious to readers."
         )
-

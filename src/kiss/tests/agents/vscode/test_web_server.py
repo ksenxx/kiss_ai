@@ -91,7 +91,6 @@ class TestBuildHtml(unittest.TestCase):
         self.assertIn("/media/highlight.min.js", html)
         self.assertIn("/media/marked.min.js", html)
         self.assertIn("/media/main.js", html)
-        self.assertIn("/media/demo.js", html)
 
     def test_html_has_no_vscode_csp(self) -> None:
         """The standalone HTML does not contain VS Code CSP nonce directives."""
@@ -155,17 +154,6 @@ class TestWebappServerLoadingOverlay(unittest.TestCase):
         of the shim's ``onmessage`` handler.
         """
         html = _build_html()
-        # Isolate the NORMAL auth_ok path.  The handler begins with an
-        # early-return reload short-circuit for the
-        # "reconnect-after-prior-auth" recovery case (see
-        # ``_hadAuthThenClosed`` in the shim — when the WS dropped
-        # post-auth and the new socket re-authenticates we reload the
-        # whole page rather than continue in place).  That early
-        # return ends with its own ``return;``, so naively splitting on
-        # the first ``return;`` after the auth_ok marker would only
-        # examine the reload short-circuit and miss the normal-path
-        # ``daemonStatus`` dispatch.  Anchor on ``_authenticated =
-        # true`` instead, which marks the start of the normal path.
         marker = "msg.type === 'auth_ok'"
         self.assertIn(marker, html)
         after_auth_ok = html.split(marker, 1)[1]
@@ -199,8 +187,6 @@ class TestWebappServerLoadingOverlay(unittest.TestCase):
         marker = "msg.type === 'auth_required'"
         self.assertIn(marker, html)
         after_required = html.split(marker, 1)[1]
-        # The branch ends with the _showAuthModal().then(...) call —
-        # examine everything up to and including that call.
         required_branch = after_required.split("_showAuthModal()", 1)[0]
         self.assertIn("daemonStatus", required_branch)
         self.assertIn("connected: true", required_branch)
@@ -557,11 +543,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
     """Test WebSocket communication without authentication."""
 
     async def asyncSetUp(self) -> None:
-        # Other tests in the suite (e.g. ones that monkeypatch ``HOME``
-        # or temporarily redirect ``persistence._KISS_DIR``) can leave
-        # the SQLite path pointing at a now-deleted ``tmp_path``.  Pin
-        # persistence to a fresh test-owned directory so these tests
-        # remain independent regardless of run order.
         import kiss.agents.sorcar.persistence as _persistence
         self._saved_persistence = (
             _persistence._DB_PATH,
@@ -978,13 +959,23 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             self.assertIn("configData", received_types)
 
     async def test_ws_stop_no_error(self) -> None:
-        """stop command with no running task does not produce an error."""
+        """stop command with no running task is reported, not an error.
+
+        The stop is answered with ``stop_ack accepted=false`` so the tab
+        can tell the user its click found nothing to stop; dropping it in
+        silence is what made a mis-targeted click look like a dead button
+        (``reports/stop_button_delay_2026-08-05.html``).
+        """
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
             await ws.send(json.dumps({"type": "stop", "tabId": "no-task"}))
             await ws.send(json.dumps({"type": "getModels"}))
+            ack = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            self.assertEqual(ack["type"], "stop_ack")
+            self.assertIs(ack["accepted"], False)
+            self.assertEqual(ack["tabId"], "no-task")
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "models")
 
@@ -1037,6 +1028,131 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             await ws.send(json.dumps({"type": "getModels"}))
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "models")
+
+    async def test_ws_check_paths_reports_existing_files_only(self) -> None:
+        """checkPaths replies pathsExist with true only for real files.
+
+        End-to-end over WSS: the chat webview served by the remote
+        webapp sends ``checkPaths`` for the file-path-looking strings
+        it linkified in event panel contents, and only paths naming an
+        existing regular file may become clickable links.
+        """
+        work_dir = self.server.work_dir
+        real = Path(work_dir) / "real.txt"
+        real.write_text("hello\n")
+        sub = Path(work_dir) / "subdir"
+        sub.mkdir()
+        missing = str(Path(work_dir) / "missing.txt")
+        too_long = "/" + "x" * 5000  # resolve() raises OSError
+
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "checkPaths",
+                        "paths": [
+                            str(real),      # absolute, exists
+                            "real.txt",     # relative to workDir, exists
+                            missing,        # absolute, missing
+                            "missing.txt",  # relative, missing
+                            "subdir",       # a directory, not a file
+                            too_long,       # triggers OSError on resolve
+                            "",             # degenerate: empty
+                            42,             # degenerate: not a string
+                        ],
+                        "workDir": work_dir,
+                        "tabId": "cp-tab",
+                    }
+                )
+            )
+            reply: dict[str, Any] | None = None
+            deadline = asyncio.get_event_loop().time() + 5
+            while asyncio.get_event_loop().time() < deadline:
+                raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                ev = json.loads(raw)
+                if ev.get("type") == "pathsExist":
+                    reply = ev
+                    break
+            assert reply is not None, "no pathsExist reply received"
+            self.assertEqual(reply["tabId"], "cp-tab")
+            self.assertEqual(reply["workDir"], work_dir)
+            self.assertEqual(
+                reply["results"],
+                {
+                    str(real): True,
+                    "real.txt": True,
+                    missing: False,
+                    "missing.txt": False,
+                    "subdir": False,
+                    too_long: False,
+                },
+            )
+
+    async def test_ws_check_paths_empty_workdir_uses_daemon_dir(self) -> None:
+        """checkPaths without workDir resolves against the daemon work dir."""
+        work_dir = self.server.work_dir
+        real = Path(work_dir) / "fallback.txt"
+        real.write_text("hi\n")
+
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "checkPaths",
+                        "paths": ["fallback.txt", "nope.txt"],
+                        "tabId": "cp-tab2",
+                    }
+                )
+            )
+            reply: dict[str, Any] | None = None
+            deadline = asyncio.get_event_loop().time() + 5
+            while asyncio.get_event_loop().time() < deadline:
+                raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                ev = json.loads(raw)
+                if ev.get("type") == "pathsExist":
+                    reply = ev
+                    break
+            assert reply is not None, "no pathsExist reply received"
+            self.assertEqual(reply["workDir"], "")
+            self.assertEqual(
+                reply["results"],
+                {"fallback.txt": True, "nope.txt": False},
+            )
+
+    async def test_ws_check_paths_malformed_paths_yields_empty(self) -> None:
+        """checkPaths with a non-list paths field replies with no results."""
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "checkPaths",
+                        "paths": "not-a-list",
+                        "workDir": 123,
+                        "tabId": 7,
+                    }
+                )
+            )
+            reply: dict[str, Any] | None = None
+            deadline = asyncio.get_event_loop().time() + 5
+            while asyncio.get_event_loop().time() < deadline:
+                raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                ev = json.loads(raw)
+                if ev.get("type") == "pathsExist":
+                    reply = ev
+                    break
+            assert reply is not None, "no pathsExist reply received"
+            self.assertEqual(reply["results"], {})
+            self.assertEqual(reply["workDir"], "")
+            self.assertEqual(reply["tabId"], "")
 
     async def test_ws_generate_commit_message(self) -> None:
         """generateCommitMessage command does not produce Unknown command error."""
@@ -1201,6 +1317,7 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 {"type": "autocommitAction", "action": "skip", "tabId": "t"},
                 {"type": "saveConfig", "config": {}, "apiKeys": {}},
                 {"type": "openFile", "path": "/tmp/x"},
+                {"type": "checkPaths", "paths": ["/tmp/x"]},
                 {"type": "focusEditor"},
 
                 {"type": "webviewFocusChanged", "focused": True},
@@ -1750,7 +1867,6 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
             await self._trigger_merge(tab_id)
             await self._collect_until(ws, "merge_started")
 
-            # "next" navigation should produce a merge_nav with cur set
             await ws.send(
                 json.dumps(
                     {
@@ -1771,8 +1887,6 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
             self.assertIn("hi", nav["cur"])
             self.assertEqual(nav["resolved"], [])
 
-            # Accept one hunk -> resolved should grow by one with
-            # status="accepted".
             await ws.send(
                 json.dumps(
                     {
@@ -1850,10 +1964,6 @@ class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
         reject only wrote to the ``.deleted`` placeholder used for
         display.
         """
-        # Simulate the agent deleting the previously-committed file.
-        # ``self._test_file`` was created and committed in asyncSetUp
-        # with content "line1\nline2\nline3\n".  Remove the unrelated
-        # post-setup edit and delete the file entirely.
         os.unlink(self._test_file)
         self.assertFalse(Path(self._test_file).exists())
 
@@ -2750,12 +2860,11 @@ class TestRejectAllHunksInFile(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             placeholder = os.path.join(td, ".deleted", "foo.py")
             Path(placeholder).parent.mkdir(parents=True)
-            Path(placeholder).write_text("")  # display stand-in
+            Path(placeholder).write_text("")
             base_path = os.path.join(td, "base", "foo.py")
             Path(base_path).parent.mkdir(parents=True)
             Path(base_path).write_text("original line 1\noriginal line 2\n")
             target = os.path.join(td, "work", "foo.py")
-            # target file was deleted by the agent — does not exist yet
             self.assertFalse(Path(target).exists())
             _reject_all_hunks_in_file({
                 "current": placeholder,
@@ -2763,7 +2872,6 @@ class TestRejectAllHunksInFile(unittest.TestCase):
                 "target": target,
                 "hunks": [{"cs": 0, "cc": 0, "bs": 0, "bc": 2}],
             })
-            # The workspace path must be restored.
             self.assertTrue(Path(target).is_file())
             self.assertEqual(
                 Path(target).read_text(),
@@ -2782,7 +2890,6 @@ class TestRejectAllHunksInFile(unittest.TestCase):
             Path(base_path).parent.mkdir(parents=True)
             Path(base_path).write_text("a\nb\nc\n")
             target = os.path.join(td, "work", "foo.py")
-            # Hunk says: insert 3 base lines at the start of current
             hunk = {"cs": 0, "cc": 0, "bs": 0, "bc": 3}
             _reject_hunk_in_file(placeholder, base_path, hunk, target)
             self.assertTrue(Path(target).is_file())
@@ -2868,7 +2975,6 @@ class TestAugmentMergeData(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             base_path = os.path.join(td, "old.pdf")
             cur_path = os.path.join(td, "new.pdf")
-            # Bytes that fail UTF-8 decoding (typical PDF header + 0xff).
             Path(base_path).write_bytes(b"%PDF-1.4\n\x00\x01\xff\xfe")
             Path(cur_path).write_bytes(b"%PDF-1.7\n\x00\x02\xff\xfe")
             event = {
@@ -2883,13 +2989,10 @@ class TestAugmentMergeData(unittest.TestCase):
                     ]
                 },
             }
-            # Must not raise, and must still yield string text fields
-            # so downstream JSON serialization is safe.
             result = _augment_merge_data(event)
             f = result["data"]["files"][0]
             self.assertEqual(f["base_text"], "")
             self.assertEqual(f["current_text"], "")
-            # JSON-serializable.
             json.dumps(result)
 
     def test_binary_file_without_flag_does_not_raise(self) -> None:
@@ -3783,9 +3886,6 @@ class TestWatchdogBranches(IsolatedAsyncioTestCase):
             except asyncio.CancelledError:
                 pass
             await ws.send(json.dumps({"type": "getModels"}))
-            # The periodic version-check task may interleave its own
-            # ``update_available`` broadcast between our request and
-            # the ``models`` reply.  Skip any unrelated event types.
             resp: dict[str, object] = {}
             for _ in range(10):
                 resp = json.loads(
@@ -4664,12 +4764,6 @@ class TestRemoveUrlFileOSError(unittest.TestCase):
         """_remove_url_file does not raise when file path is problematic."""
         import kiss.server.web_server as ws_mod
 
-        # ``_URL_FILE`` is a lazy PEP 562 module attribute; restore by
-        # deleting the pin so the module resolves it lazily again
-        # (re-assigning the computed value would freeze it forever).
-        # Passing an existing directory deterministically makes
-        # ``Path.unlink`` raise IsADirectoryError on every platform;
-        # the helper must swallow that OSError and leave it intact.
         with tempfile.TemporaryDirectory() as td:
             ws_mod._URL_FILE = Path(td)
             try:
@@ -5745,7 +5839,6 @@ class TestCheckAndRestartTunnelSuccess(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self.port = _find_free_port()
-        # Tunnel restart requires a configured password (H1 guard).
         save_config({"remote_password": "test-pw"})
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -6232,17 +6325,11 @@ class TestRemoveUrlFileReadOnly(unittest.TestCase):
             fake_url_file.parent.mkdir(parents=True, exist_ok=True)
             fake_url_file.write_text('{"local":"https://localhost:8787"}')
 
-            # ``_URL_FILE`` is a lazy PEP 562 module attribute; restore
-            # by deleting the pin so the module resolves it lazily again
-            # (re-assigning the computed value would freeze it forever).
             ws_mod._URL_FILE = fake_url_file  # type: ignore[misc]
 
             os.chmod(str(fake_url_file.parent), 0o444)
             try:
                 _remove_url_file(ws_mod._URL_FILE)
-                # On normal POSIX users the read-only directory blocks
-                # unlink; privileged test users may still remove it, so
-                # the portable contract asserted here is no exception.
             finally:
                 os.chmod(str(fake_url_file.parent), 0o755)
                 del ws_mod._URL_FILE

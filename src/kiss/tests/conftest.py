@@ -2,17 +2,52 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Pytest configuration and shared test utilities for KISS tests."""
+"""Pytest configuration and shared test utilities for KISS tests.
 
+Orphan-sweep join guard
+-----------------------
+
+Every :class:`~kiss.server.server.VSCodeServer` constructor starts a
+daemon thread named ``orphan-task-sweep`` that runs SQL on a per-thread
+SQLite connection which ``persistence._get_db()`` also publishes in the
+module-global ``_db_conn`` (see ``_run_orphan_sweep`` in
+``kiss/server/server.py``).  About 150 test files construct a server in
+``setUp`` and then, in ``tearDown``, close ``persistence._db_conn`` and
+delete the temporary KISS_HOME.  If the sweep is still inside
+``db.execute(...)`` at that point, the C-level
+``pysqlite_connection_execute`` call dereferences a freed connection and
+the whole interpreter dies with SIGSEGV, taking the entire pytest
+process down with it.
+
+:func:`pytest_runtest_call` below therefore joins every live sweep
+thread right before each ``unittest.TestCase.tearDown`` body runs — the
+last moment at which the connection is still valid.  Joining is done by
+wrapping the test instance's ``tearDown`` rather than from the
+hookwrapper's ``finally``: for unittest-style tests pytest runs
+``setUp``/test/``tearDown`` inside a single ``runtest`` call, so the
+``finally`` would only fire long after ``tearDown`` already closed the
+connection.  The ``finally`` is still used as a backstop for sweeps
+started by non-unittest tests.
+"""
+
+import functools
 import os
 import tempfile
+import threading
 import unittest
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 
 from kiss.agents.sorcar import persistence as _th
+from kiss.core import stop_signal
 from kiss.core.kiss_error import KISSError
+
+# Generous: a sweep only walks the sentinel rows of one temporary
+# database, so it finishes in milliseconds unless the machine is badly
+# overloaded.
+_SWEEP_JOIN_TIMEOUT_SECONDS = 30.0
 
 _subprocess_rc = os.path.join(os.path.dirname(__file__), "..", "..", "..", ".coveragerc.subprocess")
 if os.path.isfile(_subprocess_rc):
@@ -39,6 +74,65 @@ def pytest_addoption(parser):
 
 
 collect_ignore = ["test_openevolve.py", "run_all_models_test.py"]
+
+
+def join_orphan_sweeps() -> None:
+    """Wait for every live ``orphan-task-sweep`` thread to finish.
+
+    Returns:
+        None. Threads that outlive the timeout are left running: the
+        caller cannot do better, and blocking forever would hang the
+        whole session.
+    """
+    for thread in threading.enumerate():
+        if thread.name == "orphan-task-sweep" and thread.is_alive():
+            thread.join(timeout=_SWEEP_JOIN_TIMEOUT_SECONDS)
+
+
+def _tear_down_after_orphan_sweeps(tear_down: Callable[[], None]) -> None:
+    """Join lingering orphan sweeps, then run the test's own teardown.
+
+    Args:
+        tear_down: The ``unittest.TestCase.tearDown`` bound method this
+            call replaces.
+
+    Returns:
+        None.
+    """
+    join_orphan_sweeps()
+    tear_down()
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_call(item: pytest.Item) -> Iterator[None]:
+    """Guard every test's teardown against the orphan-sweep race.
+
+    Also unbinds the runner thread's stop event afterwards.  A test that
+    binds one (``printer._thread_local.stop_event = ...``) publishes it
+    for the whole thread — that is the point of
+    :mod:`kiss.core.stop_signal`, which lets model streams see a stop —
+    so a test that leaves a *set* event behind would make the next
+    test's first ``print()`` raise ``KeyboardInterrupt``.  Production
+    unbinds per run; tests get it centrally here.
+
+    Args:
+        item: The test about to run. For ``unittest.TestCase`` items its
+            ``tearDown`` is wrapped so sweeps are joined before the
+            teardown body closes the database.
+
+    Returns:
+        Generator required by the pytest hookwrapper protocol.
+    """
+    instance = getattr(item, "instance", None)
+    if isinstance(instance, unittest.TestCase):
+        instance.tearDown = functools.partial(  # type: ignore[method-assign]
+            _tear_down_after_orphan_sweeps, instance.tearDown,
+        )
+    try:
+        yield
+    finally:
+        join_orphan_sweeps()
+        stop_signal.set_thread_stop_event(None)
 
 
 def simple_calculator(expression: str) -> str:

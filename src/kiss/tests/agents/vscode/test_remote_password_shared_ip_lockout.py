@@ -151,7 +151,6 @@ class TestClientIpBucketing(unittest.TestCase):
         self.assertEqual(self.server._client_ip(ws), "127.0.0.1")
 
     def test_non_loopback_peer_ignores_forwarded_ip(self) -> None:
-        # A direct (non-tunnel) peer must not be able to spoof the header.
         ws = self._fake_ws("203.0.113.50", "10.0.0.1")
         self.assertEqual(self.server._client_ip(ws), "203.0.113.50")
 
@@ -242,7 +241,6 @@ class TestSharedIpLockoutRegression(IsolatedAsyncioTestCase):
             async with connect(
                 self._url(), ssl=_no_verify_ssl(), additional_headers=headers
             ) as ws:
-                # First (non-retry) wrong guess.
                 await ws.send(json.dumps({"type": "auth", "password": "nope"}))
                 try:
                     await asyncio.wait_for(ws.recv(), timeout=5)
@@ -251,31 +249,28 @@ class TestSharedIpLockoutRegression(IsolatedAsyncioTestCase):
                 made += 1
                 if made >= guesses:
                     return
-                # Retry wrong guess on the same socket.
-                await ws.send(json.dumps({"type": "auth", "password": "nope2"}))
                 try:
+                    await ws.send(
+                        json.dumps({"type": "auth", "password": "nope2"})
+                    )
                     await asyncio.wait_for(ws.recv(), timeout=5)
                 except Exception:
-                    pass
+                    return
                 made += 1
 
     async def test_attacker_lockout_is_not_global(self) -> None:
-        # Sanity: a fresh visitor is prompted for the password.
         self.assertEqual(
             await self._first_handshake_frame("198.51.100.7", ""),
             "auth_required",
         )
 
-        # Attacker IP burns through the failure budget.
-        await self._make_failures("203.0.113.99", _AUTH_FAIL_MAX + 1)
+        await self._make_failures("203.0.113.99", _AUTH_FAIL_MAX)
 
-        # The attacker's own IP is now locked out.
         self.assertEqual(
             await self._first_handshake_frame("203.0.113.99", ""),
             "auth_locked",
         )
 
-        # A DIFFERENT visitor must still be asked for the password.
         self.assertEqual(
             await self._first_handshake_frame("198.51.100.7", ""),
             "auth_required",

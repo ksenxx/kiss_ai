@@ -145,6 +145,16 @@ class _RecordingPrinter:
     def broadcast(self, event: dict[str, Any]) -> None:
         self.events.append(event)
 
+    def broadcast_tab_ui(self, event: dict[str, Any]) -> None:
+        """Record a tab-scoped UI event.
+
+        The production ``JsonPrinter.broadcast_tab_ui`` fans the event
+        out to mirroring tabs; with no mirrors registered it reduces to
+        a single ``broadcast``, which is what merge/discard progress
+        events go through here.
+        """
+        self.broadcast(event)
+
 
 def _server(repo: Path) -> VSCodeServer:
     """Construct a VSCodeServer pointed at *repo* with a recording printer."""
@@ -188,9 +198,6 @@ class TestRaceMergeGuardTOCTOU:
         wt = _make_wt_with_commit(repo, "kiss/wt-race1-1", agent_a)
 
         lock = repo_lock(repo)
-        # Simulate another thread holding ``repo_lock`` (e.g. the
-        # owner is inside ``_try_setup_worktree`` running
-        # ``copy_dirty_state``).  Cross-thread acquisition must block.
         acquired_in_other_thread: list[bool] = []
         release_event = threading.Event()
         acquired_event = threading.Event()
@@ -216,8 +223,6 @@ class TestRaceMergeGuardTOCTOU:
         merge_thread = threading.Thread(target=run_merge, daemon=True)
         merge_thread.start()
 
-        # Give the merge thread a chance to run; it must NOT have
-        # progressed to removing wt_dir while the lock is held.
         time.sleep(0.5)
         assert wt.wt_dir.exists(), (
             "RACE-1: merge thread reached _do_merge while another "
@@ -235,7 +240,6 @@ class TestRaceMergeGuardTOCTOU:
         assert result.get("success") is True, (
             f"merge should have succeeded after lock release: {result}"
         )
-        # Squash-merge commit must be on main.
         log = subprocess.run(
             ["git", "-C", str(repo), "log", "--format=%H", "main"],
             capture_output=True, text=True, check=True,
@@ -273,9 +277,6 @@ class TestRaceMergeGuardTOCTOU:
         _make_wt_with_commit(repo, "kiss/wt-race1-2", agent)
 
         lock = repo_lock(repo)
-        # Acquire ``repo_lock`` from a separate thread so the merge
-        # blocks on it.  (RLocks track owner threads — acquiring on
-        # the main thread would let the merge re-enter.)
         holder_acquired = threading.Event()
         holder_release = threading.Event()
 
@@ -299,9 +300,6 @@ class TestRaceMergeGuardTOCTOU:
         merge_thread = threading.Thread(target=run_merge, daemon=True)
         merge_thread.start()
 
-        # The merge handler runs ``_state_lock`` (sets is_merging),
-        # then tries to acquire ``repo_lock`` which is held by the
-        # holder thread — so it now waits.  Give it time.
         deadline = time.time() + 3.0
         while time.time() < deadline:
             with server._state_lock:
@@ -317,7 +315,6 @@ class TestRaceMergeGuardTOCTOU:
         holder_release.set()
         holder_t.join(timeout=5)
         merge_thread.join(timeout=15)
-        # After completion the flag must be cleared.
         assert not tab.is_merging, "is_merging must be cleared post-merge"
         assert result_holder and result_holder[0].get("success") is True
 
@@ -349,7 +346,6 @@ class TestRacePostTaskVsUserAction:
         start = src.index("def _run_task_inner")
         rest = src[start:]
         present_idx = rest.index("_present_pending_worktree")
-        # Find the ``is_task_active = False`` after the present call.
         post_present = rest[present_idx:]
         clear_idx_rel = post_present.index("tab.is_task_active = False")
         clear_idx = present_idx + clear_idx_rel
@@ -383,7 +379,6 @@ class TestRacePostTaskVsUserAction:
         agent = cast(WorktreeSorcarAgent, tab.agent)
         wt = _make_wt_with_commit(repo, "kiss/wt-race3-active", agent)
 
-        # Click the discard button while the task is still active.
         result = server._handle_worktree_action("discard", "a")
         assert result.get("success") is False, (
             f"RACE-3: discard must be refused while task is active. "
@@ -392,7 +387,6 @@ class TestRacePostTaskVsUserAction:
         assert "still running" in (result.get("message") or "").lower(), (
             f"Expected 'still running' message; got: {result}"
         )
-        # And ``agent._wt`` must be untouched.
         assert agent._wt is wt, "agent._wt was mutated despite refusal"
         assert wt.wt_dir.exists(), (
             "Worktree directory was removed despite refusal"
@@ -422,10 +416,6 @@ class TestRaceSetupRespectsRepoLock:
         end = src.index("\n    def ", start + 1)
         body = src[start:end]
 
-        # The body must contain a ``with repo_lock(repo):`` block
-        # that encloses ``copy_dirty_state``.  Search for the actual
-        # call sites (with ``GitWorktreeOps.`` prefix) so we don't
-        # match the docstring reference.
         lock_idx = body.find("with repo_lock(repo):")
         copy_idx = body.find("GitWorktreeOps.copy_dirty_state")
         baseline_idx = body.find("GitWorktreeOps.save_baseline_commit")
@@ -451,8 +441,6 @@ class TestRaceSetupRespectsRepoLock:
         with TemporaryDirectory() as td:
             repo = Path(td)
             lock = repo_lock(repo)
-            # RLock allows same-thread re-entrance; a plain Lock
-            # would deadlock here.
             lock.acquire()
             try:
                 acquired_again = lock.acquire(blocking=False)
@@ -487,16 +475,13 @@ class TestRaceNonWtStartBlockedByOngoingMerge:
         repo = _make_repo(tmp_path / "repo")
         server = _server(repo)
 
-        # Tab A: a worktree tab actively running its merge handler.
         tab_a = server._get_tab("a")
         tab_a.use_worktree = True
         tab_a.is_merging = True
 
-        # Tab B: tries to start a non-wt task.
         tab_b = server._get_tab("b")
         tab_b.use_worktree = False
 
-        # Apply the actual guard predicate from ``_run_task_inner``.
         with server._state_lock:
             should_refuse = any(
                 t.is_merging and t.use_worktree
@@ -507,7 +492,6 @@ class TestRaceNonWtStartBlockedByOngoingMerge:
             "handler's ``is_merging = True`` flag."
         )
 
-        # Clearing tab A's flag releases the gate.
         tab_a.is_merging = False
         with server._state_lock:
             should_refuse = any(

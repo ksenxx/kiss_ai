@@ -235,10 +235,6 @@ class CodexModel(CLITextModel):
 
         assert proc.stdout is not None
 
-        # Run stream parsing in a background thread so the timeout applies
-        # to the entire execution, not just proc.wait() after it finishes.
-        # Without this, _parse_stream_events blocks indefinitely when the
-        # codex agent keeps producing events (thinking, running commands).
         parse_result: list[tuple[str, dict[str, Any], str | None]] = []
         parse_error: list[BaseException] = []
 
@@ -358,7 +354,6 @@ class CodexModel(CLITextModel):
                     if output:
                         self._emit_as_thinking(output)
             elif event_type == "text_delta":
-                # New streaming format for newer models like gpt-5.5-codex
                 delta = event.get("delta", {})
                 if isinstance(delta, dict) and delta.get("type") == "text_delta":
                     text = delta.get("text", "")
@@ -366,7 +361,6 @@ class CodexModel(CLITextModel):
                         content += text
                         self._invoke_token_callback(text)
             elif event_type == "thinking_delta":
-                # Thinking content in new streaming format
                 delta = event.get("delta", {})
                 if isinstance(delta, dict) and delta.get("type") == "thinking_delta":
                     text = delta.get("text", "")

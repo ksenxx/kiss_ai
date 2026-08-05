@@ -62,17 +62,6 @@ class TestSigtermDuringSigintCleanup(unittest.TestCase):
             sig: signal.getsignal(sig)
             for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
         }
-        # When pytest itself runs as a *background job of a
-        # non-job-control shell* (``sh -c 'pytest … &'`` — exactly how
-        # CI wrappers and parallel test runners launch workers), POSIX
-        # requires that shell to start the job with SIGINT set to
-        # ``SIG_IGN``.  CPython then never installs its default
-        # KeyboardInterrupt handler, so the genuine SIGINT this test
-        # delivers to itself is silently discarded, ``srv.start()``
-        # never unwinds, and the test hangs forever.  Restore the
-        # default handler for the duration of the test so it sees the
-        # same signal environment as a real terminal; the ``finally``
-        # below puts the original disposition back.
         signal.signal(signal.SIGINT, signal.default_int_handler)
         port = _free_port()
         with tempfile.TemporaryDirectory() as tmp:
@@ -90,7 +79,7 @@ class TestSigtermDuringSigintCleanup(unittest.TestCase):
             )
             interrupter.start()
             try:
-                srv.start()  # returns after the SIGINT unwinds cleanup
+                srv.start()
                 self.assertTrue(
                     srv._shutdown_initiated,
                     "start()'s cleanup did not arm _shutdown_initiated "
@@ -98,8 +87,6 @@ class TestSigtermDuringSigintCleanup(unittest.TestCase):
                     "landing during cleanup would raise "
                     "KeyboardInterrupt and skip _detach_tunnel()",
                 )
-                # The production consequence: a SIGTERM delivered while
-                # (or after) the cleanup runs must be absorbed.
                 try:
                     srv._handle_shutdown_signal(int(signal.SIGTERM))
                 except KeyboardInterrupt:

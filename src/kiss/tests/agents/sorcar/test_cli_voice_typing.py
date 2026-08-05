@@ -49,16 +49,9 @@ RED = "\x1b[31m"
 BLINK = "\x1b[5m"
 YELLOW = "\x1b[33m"
 RESET = "\x1b[0m"
-# Header prefixes: the top border opens "╭─" (cyan) and the indicator
-# follows immediately — steady red before the wake word, blinking red
-# after it (see ``voice_panel_top``).
 HDR_PLAIN = f"{CYAN}╭─{RESET}{RED}"
 HDR_BLINK = f"{CYAN}╭─{RESET}{BLINK}{RED}"
 
-
-# ---------------------------------------------------------------------------
-# Fake listener child processes (real subprocesses, no mocks)
-# ---------------------------------------------------------------------------
 
 
 def _speech(text: str) -> str:
@@ -114,10 +107,6 @@ def _set_voice_cmd(monkeypatch: pytest.MonkeyPatch, script: Path) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# stdin pipe + anchored REPL harness
-# ---------------------------------------------------------------------------
-
 
 @pytest.fixture
 def stdin_pipe() -> Any:
@@ -142,7 +131,7 @@ def repl() -> AnchoredRepl:
     """An anchored REPL whose box renders into a captured StringIO."""
     r = AnchoredRepl()
     r.box._out = io.StringIO()
-    r.box._active = True  # render without owning a real terminal
+    r.box._active = True
     return r
 
 
@@ -182,10 +171,6 @@ def _voice_start(repl: AnchoredRepl) -> Callable[[], Any]:
     return functools.partial(cli_voice.start_voice_anchored, repl.box)
 
 
-# ---------------------------------------------------------------------------
-# Requirement 1: typing MUST keep working while voice is active
-# ---------------------------------------------------------------------------
-
 
 class TestTypingDuringVoice:
     def test_typing_submits_while_voice_active(
@@ -220,7 +205,6 @@ class TestTypingDuringVoice:
         finally:
             t.join()
         assert submitted == ["typed hello"]
-        # The REPL exit closed the listener child.
         assert _wait_dead(int(pid_file.read_text()))
 
     def test_idle_header_shows_indicator_while_voice_on(
@@ -258,7 +242,6 @@ class TestTypingDuringVoice:
             t.join()
         rendered = repl.box._out.getvalue()
         assert HDR_PLAIN + "Listening ..." in rendered
-        # The idle title follows the indicator on the same top border.
         assert f"Listening ...{RESET}{CYAN}KISS Sorcar" in rendered
 
     def test_typed_draft_preserved_when_speech_submits(
@@ -403,10 +386,6 @@ class TestTypingDuringVoice:
         assert err and err[0].startswith(YELLOW)
 
 
-# ---------------------------------------------------------------------------
-# Requirement 2: the STEER header shows Listening ... / Transcribing ...
-# ---------------------------------------------------------------------------
-
 
 class TestSteerHeaderIndicator:
     def test_steer_header_shows_indicator_and_speech_queues(
@@ -438,16 +417,12 @@ class TestSteerHeaderIndicator:
             session.close()
         assert queued == ["steer me"]
         rendered = repl.box._out.getvalue()
-        # Steady red Listening ... before the wake word.
         assert HDR_PLAIN + "Listening ..." in rendered
-        # Blinking after WAKE, with the STEER title following the
-        # indicator on the same top border.
         assert (
             f"{HDR_BLINK}Listening ...{RESET}{CYAN}Dynamic steer"
             in rendered
         )
         assert HDR_BLINK + "Transcribing ..." in rendered
-        # Closing voice mode clears the header indicator.
         assert repl.box.overlay == ""
 
     def test_close_discards_undrained_utterance(
@@ -463,12 +438,9 @@ class TestSteerHeaderIndicator:
         session = cli_voice.start_voice_anchored(repl.box)
         assert session is not None
         try:
-            # Wait for the utterance to be injected but do NOT drain it
-            # (no pump-stdin loop is running) — then turn voice off.
             assert _wait_until(lambda: bool(repl.box._injected))
         finally:
             session.close()
-        # close() discarded the stale utterance and the indicator.
         assert repl.box.drain_injected() == []
         assert repl.box.overlay == ""
 

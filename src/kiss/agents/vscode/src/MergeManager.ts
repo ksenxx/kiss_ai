@@ -2,13 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-/**
- * Merge view manager for reviewing agent file changes.
- *
- * Ports the inline merge/decoration logic from the code-server extension
- * (code_server.py _CS_EXTENSION_JS) to native VS Code APIs, allowing
- * accept/reject of individual hunks after the agent modifies files.
- */
 
 import * as vscode from 'vscode';
 import * as fs from 'fs';
@@ -20,38 +13,23 @@ import {
 } from './WebviewNotifications';
 
 interface ProcessedHunk {
-  /** Old-lines start (0-based, in the merged document) */
   os: number;
-  /** Old-lines count */
   oc: number;
-  /** New-lines start (0-based, in the merged document) */
   ns: number;
-  /** New-lines count */
   nc: number;
-  /** Stored base (old) lines for re-insertion after save */
   baseLines: string[];
 }
 
 interface MergeFileState {
   basePath: string;
   hunks: ProcessedHunk[];
-  /** True when the file did not exist before the agent created it. */
   isNewFile: boolean;
-  /** True for binary files that cannot be diffed at the line level. */
   isBinary: boolean;
-  /**
-   * Real workspace path of the reviewed file.  Differs from the map
-   * key (the ``current`` path) only when the agent DELETED a tracked
-   * file: ``current`` is then a ``~/.kiss/.../.deleted/...``
-   * placeholder the UI can render, while rejecting the deletion must
-   * restore the file HERE (mirrors the manifest ``target`` field and
-   * ``web_server._reject_hunk_in_file``).
-   */
   targetPath: string;
-  /** Symlink target when the base blob is a symlink (manifest field). */
   linkTarget?: string;
-  /** True when the base file mode had the exec bit set. */
-  exec: boolean;
+  // Tri-state pre-task executable mode: true = base was executable,
+  // false = base was not, undefined = unknown (leave the mode alone).
+  exec: boolean | undefined;
 }
 
 export interface MergeFileData {
@@ -59,18 +37,30 @@ export interface MergeFileData {
   base: string;
   current: string;
   hunks: Array<{bs: number; bc: number; cs: number; cc: number}>;
-  /** Set to true for binary files with no text hunks. */
   binary?: boolean;
-  /** Real workspace path (differs from ``current`` for deletions). */
   target?: string;
-  /** Base blob is a symlink pointing here (see diff_merge.py). */
   link_target?: string;
-  /** Base file mode had the exec bit set. */
   exec?: boolean;
 }
 
 export interface MergeData {
   files: MergeFileData[];
+}
+
+/**
+ * Whether a merge may bring an editor in front of the user.
+ *
+ * A plain boolean is a snapshot; a predicate is re-read at the moment the
+ * editor would actually be opened, which is the only correct answer when
+ * the decision depends on which chat tab the user is looking at right now.
+ */
+export type RevealPermission = boolean | (() => boolean);
+
+const ALWAYS_REVEAL = (): boolean => true;
+
+function toRevealPredicate(reveal: RevealPermission): () => boolean {
+  if (typeof reveal === 'function') return reveal;
+  return reveal ? ALWAYS_REVEAL : () => false;
 }
 
 export class MergeManager extends EventEmitter {
@@ -82,8 +72,13 @@ export class MergeManager extends EventEmitter {
   private _hunkOpInProgress: boolean = false;
   private _mergeInProgress: boolean = false;
   private _pendingMerge: MergeData | null = null;
+  private _pendingReveal: () => boolean = ALWAYS_REVEAL;
   private _navSeq: number = 0;
   private _reinsertingFiles = new Set<string>();
+  // Files this manager opened in the editor itself (i.e. that were not
+  // already open when it needed them). Post-merge editor restoration
+  // must only close these, never editors the user opened.
+  public readonly openedFiles = new Set<string>();
 
   constructor() {
     super();
@@ -114,10 +109,6 @@ export class MergeManager extends EventEmitter {
     this._disposables.push(didSaveSub);
   }
 
-  /**
-   * Before save: strip base (old) lines so saved content is clean.
-   * Uses waitUntil() to defer the save until edits complete.
-   */
   private _onWillSave(e: vscode.TextDocumentWillSaveEvent): void {
     const fp = e.document.uri.fsPath;
     const s = this._ms[fp];
@@ -126,12 +117,14 @@ export class MergeManager extends EventEmitter {
     e.waitUntil(
       (async () => {
         const ed = await this._getOrOpenEditor(fp);
-        // Remove old-lines in reverse order to preserve earlier indices
         for (let i = s.hunks.length - 1; i >= 0; i--) {
           const h = s.hunks[i];
           if (h.oc > 0) {
-            await this._delLines(ed, h.os, h.oc);
-            // Shift this and all later hunks
+            const ok = await this._delLines(ed, h.os, h.oc);
+            // Only advance hunk state when the edit actually happened;
+            // otherwise the old lines are still in the document and the
+            // recorded coordinates must keep describing them.
+            if (!ok) continue;
             for (let j = i; j < s.hunks.length; j++) {
               if (j === i) {
                 s.hunks[j].ns -= h.oc;
@@ -147,9 +140,6 @@ export class MergeManager extends EventEmitter {
     );
   }
 
-  /**
-   * After save: re-insert base lines so merge decorations reappear.
-   */
   private async _onDidSave(doc: vscode.TextDocument): Promise<void> {
     const fp = doc.uri.fsPath;
     if (!this._reinsertingFiles.delete(fp)) return;
@@ -159,10 +149,6 @@ export class MergeManager extends EventEmitter {
     let offset = 0;
     for (const h of s.hunks) {
       const old = h.baseLines;
-      // Skip hunks whose base lines are still present (oc > 0): a
-      // merge session refresh can land between the willSave strip and
-      // this re-insertion, and re-inserting into an un-stripped hunk
-      // would duplicate the base lines and desync every coordinate.
       if (old.length > 0 && h.oc === 0) {
         const insertLine = h.os + offset;
         const txt = old.join('\n') + '\n';
@@ -170,8 +156,6 @@ export class MergeManager extends EventEmitter {
           eb.insert(new vscode.Position(insertLine, 0), txt);
         });
         if (!ok) {
-          // One retry (mirrors _delLinesWithRetry); on failure leave
-          // oc = 0 so the state still matches the document.
           ok = await ed.edit(eb => {
             eb.insert(new vscode.Position(insertLine, 0), txt);
           });
@@ -260,6 +244,7 @@ export class MergeManager extends EventEmitter {
       e => e.document.uri.fsPath === fp,
     );
     if (existing) return existing;
+    this.openedFiles.add(fp);
     const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(fp));
     return vscode.window.showTextDocument(doc, {
       preview: false,
@@ -297,7 +282,6 @@ export class MergeManager extends EventEmitter {
     const s = this._ms[fp];
     if (!s) return;
     const h = s.hunks[idx];
-    // Binary files: no text editing — just accept or reject the whole file
     if (s.isBinary) {
       const wasNew = s.isNewFile;
       const restore = {
@@ -310,7 +294,6 @@ export class MergeManager extends EventEmitter {
       if (!s.hunks.length) {
         delete this._ms[fp];
         if (countProp === 'nc') {
-          // Rejecting: restore base or delete new file
           if (wasNew) {
             await this._deleteNewFile(fp);
           } else {
@@ -343,10 +326,9 @@ export class MergeManager extends EventEmitter {
       if (wasNew && countProp === 'nc') {
         await this._deleteNewFile(fp);
       } else if (countProp === 'nc' && s.targetPath !== fp) {
-        // The agent DELETED this tracked file; the reviewed ``fp`` is
-        // only the ``.deleted`` placeholder.  Rejecting the deletion
-        // must restore the base content at the real workspace path.
         this._restoreBase(s);
+      } else if (countProp === 'nc') {
+        this._applyExecState(s.targetPath, s.exec);
       }
     }
     this._afterHunkAction(fp);
@@ -442,7 +424,7 @@ export class MergeManager extends EventEmitter {
       idx: this._ms[found.fp].hunks.indexOf(found.h),
     };
 
-    // Binary files: open with vscode.open which handles non-text files
+    this._recordOpen(found.fp);
     if (this._ms[found.fp]?.isBinary) {
       await vscode.commands.executeCommand(
         'vscode.open',
@@ -455,12 +437,12 @@ export class MergeManager extends EventEmitter {
     const doc = await vscode.workspace.openTextDocument(
       vscode.Uri.file(found.fp),
     );
-    if (this._navSeq !== seq) return; // Superseded by newer navigation
+    if (this._navSeq !== seq) return;
     const ed = await vscode.window.showTextDocument(doc, {
       preview: false,
       viewColumn: vscode.ViewColumn.One,
     });
-    if (this._navSeq !== seq) return; // Superseded by newer navigation
+    if (this._navSeq !== seq) return;
     const ln = this._hunkLine(found.h);
     ed.revealRange(
       new vscode.Range(ln, 0, ln, 0),
@@ -473,9 +455,10 @@ export class MergeManager extends EventEmitter {
     fp: string,
     countProp: 'oc' | 'nc',
     startProp: 'os' | 'ns',
-  ): Promise<void> {
+  ): Promise<boolean> {
     const s = this._ms[fp];
-    if (!s) return;
+    if (!s) return true;
+    let allOk = true;
     const ed = await this._getOrOpenEditor(fp);
     for (let i = s.hunks.length - 1; i >= 0; i--) {
       if (s.hunks[i][countProp] > 0) {
@@ -485,34 +468,38 @@ export class MergeManager extends EventEmitter {
           s.hunks[i][countProp],
         );
         if (!ok) {
+          allOk = false;
           console.error(
             `[MergeManager] Failed to delete hunk ${i} lines in ${fp}`,
           );
         }
       }
     }
+    return allOk;
   }
 
-  /**
-   * Restore the pre-task base content of a file on reject, at the REAL
-   * workspace path (``targetPath``, which differs from the reviewed
-   * ``current`` path when the agent deleted the file).
-   *
-   * Mirrors the server-side ``_restore_base_bytes`` hazards:
-   *
-   *   * never write THROUGH an existing symlink — its destination may
-   *     be a precious file (possibly outside the repo) whose silent
-   *     truncation would be data loss; replace the link instead;
-   *   * a ``linkTarget`` entry must recreate the symlink itself, not
-   *     write the blob's target string as regular-file content;
-   *   * re-apply the exec bit so a rejected deletion of a ``100755``
-   *     script comes back executable.
-   */
+  /** Record that this manager is about to open *fp* in the editor. */
+  private _recordOpen(fp: string): void {
+    const alreadyVisible = vscode.window.visibleTextEditors.some(
+      e => e.document.uri.fsPath === fp,
+    );
+    if (!alreadyVisible) this.openedFiles.add(fp);
+  }
+
+  /** Restore the pre-task executable mode recorded in the manifest. */
+  private _applyExecState(targetPath: string, exec: boolean | undefined): void {
+    if (exec === undefined) return;
+    try {
+      const mode = fs.statSync(targetPath).mode;
+      fs.chmodSync(targetPath, exec ? mode | 0o111 : mode & ~0o111);
+    } catch {}
+  }
+
   private _restoreBase(s: {
     targetPath: string;
     basePath: string;
     linkTarget?: string;
-    exec: boolean;
+    exec: boolean | undefined;
   }): void {
     const {targetPath, basePath, linkTarget, exec} = s;
     try {
@@ -520,47 +507,35 @@ export class MergeManager extends EventEmitter {
         if (fs.lstatSync(targetPath).isSymbolicLink()) {
           fs.unlinkSync(targetPath);
         }
-      } catch {
-        /* target missing — fine, it was deleted */
-      }
+      } catch {}
       fs.mkdirSync(path.dirname(targetPath), {recursive: true});
       if (linkTarget !== undefined) {
         try {
           fs.unlinkSync(targetPath);
-        } catch {
-          /* missing */
-        }
+        } catch {}
         fs.symlinkSync(linkTarget, targetPath);
         return;
       }
       fs.copyFileSync(basePath, targetPath);
-      if (exec) {
-        fs.chmodSync(targetPath, fs.statSync(targetPath).mode | 0o111);
-      }
+      this._applyExecState(targetPath, exec);
     } catch {
       console.error(`[MergeManager] failed to restore base for ${targetPath}`);
     }
   }
 
-  /**
-   * Delete a newly-created file from disk and close its editor tab.
-   *
-   * Called when the user rejects all changes to a file that the agent
-   * created (did not exist before the task).  Uses WorkspaceEdit.deleteFile
-   * so VS Code closes the corresponding editor tab automatically.
-   */
   private async _deleteNewFile(fp: string): Promise<void> {
+    let deleted = false;
     try {
       const edit = new vscode.WorkspaceEdit();
       edit.deleteFile(vscode.Uri.file(fp), {ignoreIfNotExists: true});
-      await vscode.workspace.applyEdit(edit);
+      deleted = await vscode.workspace.applyEdit(edit);
     } catch {
-      // Best-effort: fall back to direct unlink
+      deleted = false;
+    }
+    if (!deleted) {
       try {
         fs.unlinkSync(fp);
-      } catch {
-        /* ignore */
-      }
+      } catch {}
     }
   }
 
@@ -570,48 +545,43 @@ export class MergeManager extends EventEmitter {
     label: string,
   ): Promise<void> {
     const fps = Object.keys(this._ms);
-    const newFilesToDelete =
-      countProp === 'nc' ? fps.filter(fp => this._ms[fp]?.isNewFile) : [];
-    // Collect files that need base restoration on reject: binary files,
-    // plus agent-DELETED text files (reviewed via a ``.deleted``
-    // placeholder, i.e. targetPath !== current path).
-    const toRestore =
-      countProp === 'nc'
-        ? fps
-            .filter(fp => {
-              const s = this._ms[fp];
-              if (!s || s.isNewFile) return false;
-              return s.isBinary || s.targetPath !== fp;
-            })
-            .map(fp => ({
-              targetPath: this._ms[fp].targetPath,
-              basePath: this._ms[fp].basePath,
-              linkTarget: this._ms[fp].linkTarget,
-              exec: this._ms[fp].exec,
-            }))
-        : [];
-    try {
-      for (const fp of fps) {
-        if (!this._ms[fp]?.isBinary) {
-          await this._deleteFileHunks(fp, countProp, startProp);
+    let anyFailed = false;
+    for (const fp of fps) {
+      const s = this._ms[fp];
+      if (!s) continue;
+      if (!s.isBinary) {
+        const ok = await this._deleteFileHunks(fp, countProp, startProp);
+        if (!ok) {
+          // Keep the file's merge state so the user can retry; a failed
+          // edit must not be reported as a completed review.
+          anyFailed = true;
+          continue;
         }
       }
-    } finally {
-      this._ms = {};
-      this._curHunk = null;
-      for (const fp of fps) {
-        this._refreshDeco(fp);
+      const wasNew = s.isNewFile;
+      delete this._ms[fp];
+      this._refreshDeco(fp);
+      if (countProp === 'nc') {
+        if (wasNew) {
+          await this._deleteNewFile(fp);
+        } else if (s.isBinary || s.targetPath !== fp) {
+          this._restoreBase(s);
+        } else {
+          this._applyExecState(s.targetPath, s.exec);
+        }
       }
-      for (const fp of newFilesToDelete) {
-        await this._deleteNewFile(fp);
-      }
-      for (const r of toRestore) {
-        this._restoreBase(r);
-      }
-      await vscode.workspace.saveAll(false);
-      showInformationNotification(label);
-      this.emit('allDone');
     }
+    this._curHunk = null;
+    await vscode.workspace.saveAll(false);
+    if (anyFailed) {
+      showWarningNotification(
+        'Some changes could not be applied. Please try again.',
+      );
+      this.nextChange();
+      return;
+    }
+    showInformationNotification(label);
+    this.emit('allDone');
   }
 
   private async _resolveFile(
@@ -631,17 +601,23 @@ export class MergeManager extends EventEmitter {
         }
       : null;
     if (!wasBinary) {
-      await this._deleteFileHunks(fp, countProp, startProp);
+      const ok = await this._deleteFileHunks(fp, countProp, startProp);
+      if (!ok) {
+        // The document still holds the undeleted lines; keep the merge
+        // state so the user can retry instead of losing the review.
+        showWarningNotification('Failed to apply change. Please try again.');
+        this._refreshDeco(fp);
+        return;
+      }
     }
     delete this._ms[fp];
     if (countProp === 'nc') {
-      // Rejecting
       if (wasNew) {
         await this._deleteNewFile(fp);
       } else if (restore && (wasBinary || restore.targetPath !== fp)) {
-        // Binary file, or an agent-DELETED text file reviewed via a
-        // ``.deleted`` placeholder: restore the base at the real path.
         this._restoreBase(restore);
+      } else if (restore) {
+        this._applyExecState(restore.targetPath, restore.exec);
       }
     }
     this._curHunk = null;
@@ -690,34 +666,63 @@ export class MergeManager extends EventEmitter {
   }
 
   /**
-   * Open merge view: insert old lines, apply decorations, navigate to first hunk.
+   * Load a merge payload and, unless suppressed, show its first hunk.
+   *
+   * Args:
+   *   data: The merge payload to review.
+   *   reveal: Whether the first changed file may be brought in front of
+   *     the user. Pass ``false`` -- or a predicate that will return
+   *     ``false`` -- for a merge produced by a chat tab the user is not
+   *     looking at: the hunk state and decorations are still prepared,
+   *     but no editor is opened or scrolled. The user sees the diff when
+   *     they switch to that tab and navigate a hunk. Prefer a predicate:
+   *     preparing a merge awaits several host operations, and the user
+   *     can leave the tab while they run, so the permission is only
+   *     meaningful when it is read just before the editor is opened.
    */
-  async openMerge(data: MergeData): Promise<void> {
+  async openMerge(
+    data: MergeData,
+    reveal: RevealPermission = true,
+  ): Promise<void> {
+    const mayReveal = toRevealPredicate(reveal);
     if (this._mergeInProgress) {
       this._pendingMerge = data;
+      this._pendingReveal = mayReveal;
       return;
     }
     this._mergeInProgress = true;
     try {
-      await this._doOpenMerge(data);
-      while (this._pendingMerge) {
-        const next = this._pendingMerge;
+      let next: MergeData | null = data;
+      let nextReveal = mayReveal;
+      while (next) {
+        const cur: MergeData = next;
+        const curReveal = nextReveal;
+        next = null;
+        try {
+          await this._doOpenMerge(cur, curReveal);
+        } catch (err) {
+          // A failed open must not leave a stale _pendingMerge behind:
+          // it would replay an outdated payload over a newer merge.
+          console.error('[MergeManager] openMerge failed:', err);
+        }
+        next = this._pendingMerge;
+        nextReveal = this._pendingReveal;
         this._pendingMerge = null;
-        await this._doOpenMerge(next);
+        this._pendingReveal = ALWAYS_REVEAL;
       }
     } finally {
       this._mergeInProgress = false;
     }
   }
 
-  private async _doOpenMerge(data: MergeData): Promise<void> {
+  private async _doOpenMerge(
+    data: MergeData,
+    mayReveal: () => boolean = ALWAYS_REVEAL,
+  ): Promise<void> {
     try {
       await vscode.workspace.saveAll(false);
-    } catch {
-      /* ignore */
-    }
+    } catch {}
 
-    // Clear previous decorations
     for (const fp of Object.keys(this._ms)) {
       for (const ed of vscode.window.visibleTextEditors) {
         if (ed.document.uri.fsPath === fp) {
@@ -727,10 +732,6 @@ export class MergeManager extends EventEmitter {
       }
     }
     this._ms = {};
-    // A pending ``_onDidSave`` re-insertion for a file from the
-    // PREVIOUS merge session must not fire against the fresh state —
-    // its hunk coordinates belong to the old session and would
-    // duplicate base lines / corrupt the new session's coordinates.
     this._reinsertingFiles.clear();
 
     let firstFileFp: string | null = null;
@@ -740,7 +741,6 @@ export class MergeManager extends EventEmitter {
         firstFileFp = f.current;
       }
 
-      // Binary files: skip text editing, add a dummy hunk for navigation
       if (f.binary) {
         const dummyHunk: ProcessedHunk = {
           os: 0,
@@ -759,11 +759,16 @@ export class MergeManager extends EventEmitter {
         this._ms[f.current] = {
           basePath: f.base,
           hunks: [dummyHunk],
-          isNewFile: !hasBase,
+          // A pre-existing file whose pre-task content was empty also has
+          // a zero-byte base snapshot; the manifest carries `exec` (or
+          // `link_target`) exactly when the pre-task file existed, so use
+          // that to avoid deleting a pre-existing file on reject.
+          isNewFile:
+            !hasBase && f.exec === undefined && f.link_target === undefined,
           isBinary: true,
           targetPath: f.target || f.current,
           linkTarget: f.link_target,
-          exec: !!f.exec,
+          exec: f.exec,
         };
         continue;
       }
@@ -771,8 +776,6 @@ export class MergeManager extends EventEmitter {
       const currentUri = vscode.Uri.file(f.current);
       const doc = await vscode.workspace.openTextDocument(currentUri);
 
-      // Revert dirty documents to match on-disk state using WorkspaceEdit
-      // (works without a visible editor, unlike workbench.action.files.revert)
       if (doc.isDirty) {
         try {
           const diskContent = fs.readFileSync(f.current, 'utf8');
@@ -789,25 +792,18 @@ export class MergeManager extends EventEmitter {
             diskContent,
           );
           await vscode.workspace.applyEdit(revertEdit);
-        } catch {
-          /* ignore */
-        }
+        } catch {}
       }
 
       let baseLines: string[] = [];
       try {
         baseLines = fs.readFileSync(f.base, 'utf8').split('\n');
-      } catch {
-        /* ignore */
-      }
+      } catch {}
 
       const hunks = (f.hunks || [])
         .map(h => ({cs: h.cs, cc: h.cc, bs: h.bs, bc: h.bc}))
         .sort((a, b) => a.cs - b.cs);
 
-      // Batch all base-line insertions into a single WorkspaceEdit.
-      // Positions use the original document coordinates (pre-insertion);
-      // VS Code adjusts them automatically when applying atomically.
       const wsEdit = new vscode.WorkspaceEdit();
       let offset = 0;
       const processed: ProcessedHunk[] = [];
@@ -831,18 +827,19 @@ export class MergeManager extends EventEmitter {
       if (wsEdit.size > 0) {
         const ok = await vscode.workspace.applyEdit(wsEdit);
         if (!ok) {
+          // The base lines were never inserted, so the computed hunk
+          // coordinates do not describe the document. Tracking them
+          // anyway would let accept/reject delete unrelated lines.
           console.error(`[MergeManager] applyEdit failed for ${f.current}`);
+          showWarningNotification(
+            `Could not open the review for ${f.name}; ` +
+              'its changes are left applied.',
+          );
+          if (firstFileFp === f.current) firstFileFp = null;
+          continue;
         }
       }
 
-      // A file is "new" only when its pre-task base copy is empty:
-      // ``diff_merge._write_base_copy`` writes an empty base exactly
-      // when git has no blob for the file (brand-new file).  The old
-      // ``every(h => h.oc === 0)`` heuristic also matched EXISTING
-      // files whose only changes were insertions (e.g. an appended
-      // function produces hunks with bc=0 ⇒ oc=0), so rejecting such
-      // a change deleted the user's pre-existing file from disk.
-      // Mirrors the ``hasBase`` check used for binary files above.
       const hasTextBase = (() => {
         try {
           return fs.statSync(f.base).size > 0;
@@ -850,7 +847,10 @@ export class MergeManager extends EventEmitter {
           return false;
         }
       })();
-      const isNewFile = processed.length > 0 && !hasTextBase;
+      // See the binary case above: `exec` present means the pre-task file
+      // existed, so an empty base snapshot alone does not make it new.
+      const isNewFile =
+        processed.length > 0 && !hasTextBase && f.exec === undefined;
       this._ms[f.current] = {
         basePath: f.base,
         hunks: processed,
@@ -858,38 +858,44 @@ export class MergeManager extends EventEmitter {
         isBinary: false,
         targetPath: f.target || f.current,
         linkTarget: f.link_target,
-        exec: !!f.exec,
+        exec: f.exec,
       };
     }
 
-    // Show only the first changed file in the editor (viewColumn: One
-    // avoids replacing the chat webview panel which lives in a later column)
-    // and navigate to its first hunk.
     if (firstFileFp && this._ms[firstFileFp]?.hunks.length) {
       this._curHunk = {fp: firstFileFp, idx: 0};
-      if (this._ms[firstFileFp].isBinary) {
-        // Binary file: use vscode.open which handles non-text files
-        await vscode.commands.executeCommand(
-          'vscode.open',
-          vscode.Uri.file(firstFileFp),
-          {viewColumn: vscode.ViewColumn.One, preview: false},
-        );
-      } else {
-        const firstDoc = await vscode.workspace.openTextDocument(
-          vscode.Uri.file(firstFileFp),
-        );
-        const firstEd = await vscode.window.showTextDocument(firstDoc, {
-          preview: false,
-          viewColumn: vscode.ViewColumn.One,
-        });
-        const fh = this._ms[firstFileFp].hunks[0];
-        const fl = fh.nc > 0 ? fh.ns : fh.os;
-        firstEd.revealRange(
-          new vscode.Range(fl, 0, fl, 0),
-          vscode.TextEditorRevealType.InCenter,
-        );
-        firstEd.selection = new vscode.Selection(fl, 0, fl, 0);
+      // A merge from a chat tab the user is not looking at keeps its hunk
+      // state but must not pull an editor in front of them. Nothing was
+      // opened, so there is also nothing for the restore pass to close.
+      // The permission is read here, after every await above, because the
+      // user may have switched or closed the chat tab while they ran.
+      if (!mayReveal()) {
         this._refreshDeco(firstFileFp);
+      } else {
+        this._recordOpen(firstFileFp);
+        if (this._ms[firstFileFp].isBinary) {
+          await vscode.commands.executeCommand(
+            'vscode.open',
+            vscode.Uri.file(firstFileFp),
+            {viewColumn: vscode.ViewColumn.One, preview: false},
+          );
+        } else {
+          const firstDoc = await vscode.workspace.openTextDocument(
+            vscode.Uri.file(firstFileFp),
+          );
+          const firstEd = await vscode.window.showTextDocument(firstDoc, {
+            preview: false,
+            viewColumn: vscode.ViewColumn.One,
+          });
+          const fh = this._ms[firstFileFp].hunks[0];
+          const fl = fh.nc > 0 ? fh.ns : fh.os;
+          firstEd.revealRange(
+            new vscode.Range(fl, 0, fl, 0),
+            vscode.TextEditorRevealType.InCenter,
+          );
+          firstEd.selection = new vscode.Selection(fl, 0, fl, 0);
+          this._refreshDeco(firstFileFp);
+        }
       }
     } else {
       this._curHunk = null;

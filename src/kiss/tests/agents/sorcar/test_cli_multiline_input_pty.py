@@ -71,13 +71,6 @@ _CHILD_SCRIPT = textwrap.dedent(
     """,
 )
 
-# xterm modifyOtherKeys "enable" sequences.  Level 1 (``\\x1b[>4;1m``)
-# turns modifyOtherKeys on for keys that have no representation in the
-# usual ASCII table; level 2 (``\\x1b[>4;2m``) is the more aggressive
-# variant that also rewrites keys that *do* have a representation, so
-# Shift+Enter goes from a bare ``\\r`` to ``\\x1b[27;2;13~``.  Either
-# value is acceptable to the test emulator; level 2 is what we want
-# the production code to send.
 _MOK_ENABLE_RE = re.compile(rb"\x1b\[>4;[12]m")
 _MOK_DISABLE_RE = re.compile(rb"\x1b\[>4;0m")
 
@@ -131,8 +124,6 @@ class _TerminalEmulator(threading.Thread):
 
     def _scan(self, chunk: bytes) -> None:
         """Update the modifyOtherKeys flag from *chunk*."""
-        # Keep the trailing 16 bytes from the previous chunk to catch
-        # an enable sequence that was split across two reads.
         with self._lock:
             data = self._buffer + chunk
             self._buffer = data[-16:]
@@ -162,9 +153,6 @@ def _make_env(tmp_path: Path) -> dict[str, str]:
         "KISS_TEST_WORKDIR": str(tmp_path),
         "PYTHONUNBUFFERED": "1",
     }
-    # Inherit the venv-relative entries that ``uv run`` injects so the
-    # child can ``import prompt_toolkit`` / ``import kiss`` from the
-    # same interpreter as the parent.
     for key in ("VIRTUAL_ENV", "PYTHONPATH"):
         if key in os.environ:
             env[key] = os.environ[key]
@@ -213,10 +201,6 @@ def _drive_real_pty(
             if emulator.enabled()
             else shift_enter_unmodified
         )
-        # Snapshot the modifyOtherKeys flag *before* sending the
-        # potentially-submitting byte: the child may exit between the
-        # write and the post-Enter write, closing the master fd and
-        # losing the flag in subsequent OSError handling.
         final_enabled = emulator.enabled()
         _safe_write(fd, shift_enter)
         time.sleep(0.05)
@@ -271,10 +255,6 @@ def _wait_for_exit(pid: int, timeout: float) -> bool:
     os.waitpid(pid, 0)
     return False
 
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.timeout(60)
@@ -338,8 +318,6 @@ def test_real_terminal_alt_enter_inserts_newline(tmp_path: Path) -> None:
     line, _ = _drive_real_pty(
         tmp_path,
         pre_enter_bytes=b"hello",
-        # Force the Esc+CR encoding for Alt+Enter regardless of
-        # whether modifyOtherKeys ended up enabled.
         shift_enter_unmodified=b"\x1b\r",
         shift_enter_modify_other_keys=b"\x1b\r",
         post_enter_bytes=b"world\r",

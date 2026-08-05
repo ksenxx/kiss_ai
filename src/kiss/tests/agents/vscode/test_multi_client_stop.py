@@ -72,11 +72,9 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
         source_tab_id = "source-tab"
         viewer_tab_id = "viewer-tab"
 
-        # Set up the source tab with a running task
         source_tab = server._get_tab(source_tab_id)
         source_tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
 
-        # The task blocks until stop_event is set
         task_started = threading.Event()
 
         def blocking_run(**kwargs: Any) -> None:
@@ -84,7 +82,6 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
             source_tab.agent.budget_used = 0.03
             source_tab.agent.step_count = 5
             task_started.set()
-            # Block until stopped
             while not source_tab.stop_event.is_set():
                 time.sleep(0.01)
             raise KeyboardInterrupt("Stopped by user")
@@ -102,27 +99,17 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
         source_tab.task_thread = task_thread
         task_thread.start()
 
-        # Wait for the task to actually start running
         assert task_started.wait(timeout=5), "Task did not start in time"
 
-        # Set up the viewer tab (simulates _replay_session subscribing)
         viewer_tab = server._get_tab(viewer_tab_id)
-        # The viewer has no stop_event or task_thread — it's just a viewer
         assert viewer_tab.stop_event is None
         assert viewer_tab.task_thread is None
 
-        # Subscribe both the source and viewer to the source's task
-        # (in production the agent itself subscribes the source tab in
-        # ``ChatSorcarAgent.run``; here ``blocking_run`` replaces it so
-        # we subscribe manually).
         server.printer.subscribe_tab(source_tab_id, source_tab_id)
         server.printer.subscribe_tab(source_tab_id, viewer_tab_id)
 
-        # Now the viewer clicks "Stop" — this should resolve to the
-        # source tab and stop it.
         server._stop_task(viewer_tab_id)
 
-        # The source task thread should exit
         task_thread.join(timeout=10)
         assert not task_thread.is_alive(), "Source task thread should have been stopped"
 
@@ -261,7 +248,6 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
         orphan_tab = server._get_tab("orphan")
         assert orphan_tab.stop_event is None
 
-        # Should not raise
         server._stop_task("orphan")
 
     def test_stop_from_unknown_tab_is_noop(self) -> None:
@@ -316,7 +302,6 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
         source_tab_id = "src-close"
         viewer_tab_id = "view-close"
 
-        # ── 1. Source starts running a task ──────────────────────────────
         source_tab = server._get_tab(source_tab_id)
         source_tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
 
@@ -344,23 +329,17 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
         task_thread.start()
         assert task_started.wait(timeout=5), "Task did not start in time"
 
-        # ── 2. Viewer subscribes (as _replay_session does) ───────────────
         server._get_tab(viewer_tab_id)
         server.printer.subscribe_tab(source_tab_id, source_tab_id)
         server.printer.subscribe_tab(source_tab_id, viewer_tab_id)
         assert viewer_tab_id in server.printer._subscribers[source_tab_id]
         assert source_tab_id in server.printer._subscribers[source_tab_id]
 
-        # ── 3. Source frontend closes while the task is running ─────────
-        # _close_tab MUST defer disposal because the task is alive,
-        # so the source_tab_id remains in every subscriber set until
-        # _dispose_if_closed runs at task end.
         server._close_tab(source_tab_id)
         assert source_tab_id in _RunningAgentState.running_agent_states
         assert _RunningAgentState.running_agent_states[source_tab_id].frontend_closed is True
         assert viewer_tab_id in server.printer._subscribers[source_tab_id]
 
-        # ── 4. Viewer clicks Stop → resolves through subscription ───────
         server._stop_task(viewer_tab_id)
         task_thread.join(timeout=10)
         assert not task_thread.is_alive(), (
@@ -368,12 +347,6 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
             "source frontend closed"
         )
 
-        # ── 5. Task end + deferred dispose remove the source tab ────────
-        # _run_task's finally block calls _dispose_if_closed which
-        # pops the source state and runs cleanup_tab(source) →
-        # removing the source tab from every subscriber set.  The
-        # viewer's subscription entry survives because the viewer
-        # tab is still open in the frontend.
         deadline = time.time() + 5.0
         while time.time() < deadline and source_tab_id in _RunningAgentState.running_agent_states:
             time.sleep(0.01)
@@ -385,15 +358,17 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
             source_tab_id, set(),
         ), "Source tab should be removed from its task subscriber set"
 
-        # ── 6. Viewer clicks Stop again → orphan path → graceful no-op ─
-        # The viewer tab has no stop_event, and no subscription remains
-        # pointing to a live source.  The implementation MUST NOT crash.
         events_before = len(events)
-        server._stop_task(viewer_tab_id)  # MUST NOT raise
-        # No new broadcasts should result from stopping nothing.
-        assert len(events) == events_before, (
-            "Stopping an orphaned viewer should not broadcast new events"
-        )
+        server._stop_task(viewer_tab_id)
+        # The orphaned stop is a no-op for the task, but it is NOT
+        # silent: it tells the tab its click found nothing to stop.
+        # Dropping it without a word is what made a mis-targeted click
+        # indistinguishable from a task that had not reacted yet
+        # (reports/stop_button_delay_2026-08-05.html).
+        new_events = events[events_before:]
+        assert new_events == [
+            {"type": "stop_ack", "accepted": False, "tabId": viewer_tab_id},
+        ], f"Stopping an orphaned viewer broadcast {new_events}"
 
     def test_stop_with_orphan_subscription_pointing_to_missing_source(
         self,
@@ -410,21 +385,13 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
 
         viewer_tab_id = "lonely-viewer"
         server._get_tab(viewer_tab_id)
-        # Force an orphan subscription: source side has never been
-        # registered, but the subscription mapping references it.
-        # ``subscribe_tab`` alias-resolves the source id but does not
-        # require an existing _RunningAgentState — exactly the
-        # condition the orphan-handling code must tolerate.
         server.printer.subscribe_tab("ghost-source-id", viewer_tab_id)
 
-        # No source state exists.
         assert "ghost-source-id" not in _RunningAgentState.running_agent_states
-        # But the subscription points to it.
         assert viewer_tab_id in server.printer._subscribers.get(
             "ghost-source-id", set(),
         )
 
-        # MUST NOT raise.
         server._stop_task(viewer_tab_id)
 
 

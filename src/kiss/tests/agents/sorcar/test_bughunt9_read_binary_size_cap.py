@@ -18,8 +18,8 @@ round-tripping as inline attachments.
 import struct
 import zlib
 
+from kiss.agents.sorcar.useful_tools import _MAX_BINARY_READ_BYTES, UsefulTools
 from kiss.core.models.model import parse_binary_attachments
-from kiss.core.useful_tools import _MAX_BINARY_READ_BYTES, UsefulTools
 
 
 def _png_bytes(payload_size: int) -> bytes:
@@ -51,10 +51,7 @@ def test_read_oversized_binary_is_refused_without_loading(tmp_path):
 
     assert result.startswith("Error:"), result[:200]
     assert "too large" in result.lower()
-    # The pre-fix behaviour returned the whole base64 payload (~28MB for
-    # a 21MB file); the fixed error message must stay tiny.
     assert len(result) < 2000
-    # And it must not smuggle an attachment sentinel through.
     _, attachments = parse_binary_attachments(result)
     assert attachments == []
 

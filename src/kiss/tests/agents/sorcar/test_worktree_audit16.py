@@ -11,10 +11,12 @@ BUG-68: ``_finish_merge`` and ``_run_task_inner``'s post-task cleanup
     with ``_emit_pending_worktree`` (which broadcasts
     ``worktree_done`` as a fallback — BUG-66 fix).
 
-    All three call sites must present a consistent UX: when
-    auto-discard is blocked by a concurrent non-wt task, broadcast
-    ``worktree_done`` so the user knows the branch is pending and
-    can take manual action.
+    Resolved by removing the cause rather than reporting it: an
+    empty worktree is now discarded even while a non-wt task runs,
+    since that discard touches neither the main working tree's files
+    nor its HEAD.  There is no orphaned branch left to tell the user
+    about, and no meaningless merge/discard prompt.  See
+    ``test_worktree_leak_when_main_tree_busy.py``.
 
 BUG-70: ``_check_merge_conflict`` only checks the unstaged and staged
     files of the main repo (historically via the since-removed
@@ -108,12 +110,15 @@ class _RecordingPrinter:
 
 class TestBug68FinishMergeNoBroadcastOnEmptyNonWtBusy:
     """``_finish_merge`` with no worktree changes and a concurrent
-    non-wt task must preserve the branch (auto-discard is blocked)
-    WITHOUT broadcasting the meaningless ``worktree_done`` prompt.
+    non-wt task must discard the empty worktree WITHOUT broadcasting
+    the meaningless ``worktree_done`` prompt.
 
     The frontend renders ``worktree_done`` as "Auto-commit and merge
     or Discard?", which makes no sense when there are zero changed
-    files.  The branch stays in ``git branch`` for manual cleanup.
+    files.  Leaving the branch behind instead is not an option
+    either: nothing ever retried the cleanup, so the worktree leaked
+    permanently.  Discarding an empty worktree is safe while the main
+    tree is busy — it touches neither its files nor its HEAD.
     """
 
     def test_finish_merge_empty_wt_non_wt_busy(self, tmp_path: Path) -> None:
@@ -130,7 +135,8 @@ class TestBug68FinishMergeNoBroadcastOnEmptyNonWtBusy:
         tab.is_merging = True
 
         agent = cast(WorktreeSorcarAgent, tab.agent)
-        _create_wt(repo, "kiss/wt-bug68a-1", agent)
+        branch = "kiss/wt-bug68a-1"
+        wt = _create_wt(repo, branch, agent)
 
         other = server._get_tab("other-bug68a")
         other.is_running_non_wt = True
@@ -139,13 +145,19 @@ class TestBug68FinishMergeNoBroadcastOnEmptyNonWtBusy:
 
         wt_done = [e for e in printer.events if e.get("type") == "worktree_done"]
         assert not wt_done, (
-            "worktree_done must NOT be broadcast for an empty worktree "
-            "even when auto-discard is blocked by a busy non-wt task — "
+            "worktree_done must NOT be broadcast for an empty worktree — "
             "the resulting merge/discard prompt is meaningless when "
             f"there are no changes.  Events: {printer.events}"
         )
-        assert agent._wt is not None, (
-            "BUG-68: worktree was discarded despite non-wt being busy."
+        assert agent._wt is None, (
+            "BUG-68: a busy non-wt task blocked the discard of an empty "
+            "worktree, leaking the branch and directory forever."
+        )
+        assert not GitWorktreeOps.branch_exists(repo, branch), (
+            "branch survived the auto-discard."
+        )
+        assert not wt.wt_dir.exists(), (
+            "worktree directory survived the auto-discard."
         )
 
         other.is_running_non_wt = False

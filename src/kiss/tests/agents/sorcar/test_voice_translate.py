@@ -163,7 +163,6 @@ class TestVoiceTranslateFromWav(unittest.TestCase):
             )
             proc = _run_listener(wav)
         self.assertIn("WAKE", proc.stdout.split(), msg=proc.stderr[-2000:])
-        # The UI shows a yellow "transcribing" flash driven by this line.
         self.assertIn(
             "TRANSCRIBING", proc.stdout.split(),
             msg=proc.stdout + proc.stderr[-2000:],
@@ -175,8 +174,6 @@ class TestVoiceTranslateFromWav(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, msg=proc.stderr[-2000:])
 
     def test_translate_non_english_speech_to_english(self) -> None:
-        # Use a French macOS voice when available so the GPT model must
-        # actually translate; otherwise skip.
         voices = subprocess.run(
             ["say", "-v", "?"], capture_output=True, text=True, check=True,
         ).stdout
@@ -213,9 +210,6 @@ class TestVoiceTranslateFromWav(unittest.TestCase):
         self.assertNotIn("bonjour", text, msg=proc.stdout)
 
     def test_question_is_transcribed_not_answered(self) -> None:
-        # gpt-audio's known failure mode is answering the dictated
-        # speech ("Paris.") instead of transcribing it; the dictation
-        # prompt must make it output the words verbatim.
         with tempfile.TemporaryDirectory() as tmp:
             tmpdir = Path(tmp)
             wake = _tts_wav(tmpdir, "wake", "Sorcar")
@@ -234,8 +228,6 @@ class TestVoiceTranslateFromWav(unittest.TestCase):
         self.assertNotIn("paris", text, msg=proc.stdout)
 
     def test_speech_cut_off_at_end_of_file_is_still_translated(self) -> None:
-        # The file ends while the capture is still waiting for trailing
-        # silence; the listener must flush and translate what it heard.
         with tempfile.TemporaryDirectory() as tmp:
             tmpdir = Path(tmp)
             wake = _tts_wav(tmpdir, "wake", "Sorcar")
@@ -266,8 +258,6 @@ class TestVoiceTranslateFromWav(unittest.TestCase):
         lines = proc.stdout.split()
         self.assertIn("WAKE", lines, msg=proc.stderr[-2000:])
         self.assertIn("NO_SPEECH", lines, msg=proc.stdout + proc.stderr[-2000:])
-        # Pure silence never reaches the GPT call, so the UI must not
-        # be told a transcription started.
         self.assertNotIn("TRANSCRIBING", lines)
         self.assertEqual(_speech_payloads(proc.stdout), [])
         self.assertEqual(proc.returncode, 0, msg=proc.stderr[-2000:])
@@ -286,8 +276,6 @@ class TestVoiceTranslateFromWav(unittest.TestCase):
         lines = proc.stdout.split()
         self.assertIn("WAKE", lines, msg=proc.stderr[-2000:])
         self.assertIn("NO_SPEECH", lines, msg=proc.stdout + proc.stderr[-2000:])
-        # Speech was captured, so the transcribing indicator fired even
-        # though the GPT call itself failed.
         self.assertIn("TRANSCRIBING", lines)
         self.assertEqual(_speech_payloads(proc.stdout), [])
         self.assertEqual(proc.returncode, 0, msg=proc.stderr[-2000:])
@@ -309,8 +297,8 @@ class TestSpeechCapture(unittest.TestCase):
     def test_capture_ends_after_trailing_silence(self) -> None:
         capture = SpeechCapture()
         loud, silent = _loud_block(), _silent_block()
-        self.assertIsNone(capture.feed(silent))  # leading silence ignored
-        self.assertIsNone(capture.feed(loud))  # speech begins immediately
+        self.assertIsNone(capture.feed(silent))
+        self.assertIsNone(capture.feed(loud))
         result = None
         blocks = 0
         while result is None:
@@ -345,7 +333,7 @@ class TestSpeechCapture(unittest.TestCase):
             result = capture.feed(silent)
             blocks += 1
             self.assertLess(blocks, 200, "capture never timed out")
-        self.assertEqual(result, b"")  # no speech detected
+        self.assertEqual(result, b"")
         self.assertGreaterEqual(
             blocks * BLOCK_SECONDS,
             SpeechCapture.NO_SPEECH_TIMEOUT_SECONDS,
@@ -384,14 +372,12 @@ class TestSpeechCapture(unittest.TestCase):
             "please fix it",
         )
         self.assertEqual(strip_leading_wake_word("fix Sorcar bug"), "fix Sorcar bug")
-        # gpt-audio has been observed transcribing "Sorcar" as "Sorger".
         self.assertEqual(
             strip_leading_wake_word("Sorger, fix the failing test"),
             "fix the failing test",
         )
 
     def test_clean_transcript_strips_preamble_and_quotes(self) -> None:
-        # Real gpt-audio output shape observed in stress probes.
         self.assertEqual(
             clean_transcript(
                 'Sure. Here is the transcription of the speech:\n\n'

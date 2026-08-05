@@ -22,9 +22,6 @@ import threading
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 
-# ── Redundancy 1: _cmd_run must keep get-or-create + alive-check + thread
-#    start in a single _state_lock block (no nested re-acquisition) ──
-
 
 class TestCmdRunUsesGetTab:
     """Verify that _cmd_run uses a single _state_lock block."""

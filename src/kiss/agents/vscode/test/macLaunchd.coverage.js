@@ -2,16 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Coverage gate for ``macLaunchd.js``: re-runs
-// ``macLaunchdRestart.test.js`` under V8's built-in coverage
-// (``NODE_V8_COVERAGE``) and FAILS unless every executable line of the
-// module was executed — i.e. the e2e suite exercises 100% of the fix
-// for the "kiss-web launch takes a lot of time after an update" bug.
-//
-// Run with:
-//
-//     node src/kiss/agents/vscode/test/macLaunchd.coverage.js
 
 'use strict';
 
@@ -24,10 +14,6 @@ const path = require('path');
 const MODULE_FILE = path.resolve(__dirname, '..', 'src', 'macLaunchd.js');
 const TEST_FILE = path.join(__dirname, 'macLaunchdRestart.test.js');
 
-// Paint one script instance's char coverage from its V8 ranges.
-// Ranges nest; applying them sorted by (startOffset asc, endOffset
-// desc) paints outer ranges first so inner ranges override, matching
-// V8 block-coverage semantics.
 function paintInstance(functions, length, painted) {
   const ranges = [];
   for (const fn of functions) for (const r of fn.ranges) ranges.push(r);
@@ -40,15 +26,11 @@ function paintInstance(functions, length, painted) {
     const end = Math.min(r.endOffset, length);
     for (let i = Math.max(0, r.startOffset); i < end; i++) instance[i] = v;
   }
-  // Merge: a char covered in ANY instance counts as covered.
   for (let i = 0; i < length; i++) if (instance[i]) painted[i] = 1;
 }
 
 function main() {
   if (process.platform !== 'darwin') {
-    // The real-launchd half of the suite (which covers the happy
-    // paths) only runs on macOS, so the 100% gate is only meaningful
-    // there.
     console.log('  skip - macLaunchd coverage gate (not macOS)');
     return;
   }

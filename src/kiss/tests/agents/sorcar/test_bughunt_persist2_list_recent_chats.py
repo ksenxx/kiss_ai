@@ -63,7 +63,6 @@ class TestListRecentChatsSkipsSubagents(_TempDbTestBase):
     def test_subagent_rows_excluded_from_chat_tasks(self) -> None:
         parent_id, chat_id = _add_task("parent visible task")
         _save_task_result("parent result", task_id=parent_id)
-        # Exact shape written by ChatSorcarAgent._run_tasks_parallel.
         _add_task(
             "subagent internal fan-out task",
             chat_id=chat_id,
@@ -85,9 +84,6 @@ class TestListRecentChatsSkipsSubagents(_TempDbTestBase):
 
     def test_chat_with_only_subagent_rows_not_listed(self) -> None:
         visible_id, visible_chat = _add_task("normal chat task")
-        # A legacy/orphaned chat whose only rows are sub-agent rows
-        # (e.g. the parent row was deleted by an older build that did
-        # not cascade) must not be offered as a resumable session.
         _, orphan_chat = _add_task(
             "orphaned subagent task",
             extra={

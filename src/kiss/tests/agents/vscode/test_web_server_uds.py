@@ -155,7 +155,6 @@ class TestUdsListener(IsolatedAsyncioTestCase):
             await writer.wait_closed()
         except Exception:
             pass
-        # Allow the server's _uds_handler finally block to run.
         for _ in range(50):
             with self.server._pending_tab_closes_lock:
                 if "tab-uds-2" in self.server._pending_tab_closes:
@@ -173,8 +172,6 @@ class TestUdsListener(IsolatedAsyncioTestCase):
             limit=16 * 1024 * 1024,
         )
         try:
-            # Register the writer with the printer by sending ready;
-            # the handler calls add_uds_writer before reading commands.
             writer.write(
                 json.dumps(
                     {"type": "ready", "tabId": "tab-uds-3",
@@ -184,9 +181,6 @@ class TestUdsListener(IsolatedAsyncioTestCase):
             await writer.drain()
             await self._drain_events(reader, "focusInput", timeout=2.0)
 
-            # Directly broadcast an event from the printer (mirrors
-            # what an agent task-runner thread does).  The event must
-            # arrive over the UDS connection.
             self.server._printer.broadcast(
                 {"type": "ping", "tabId": "tab-uds-3", "value": 42},
             )
@@ -223,9 +217,6 @@ class TestUdsListener(IsolatedAsyncioTestCase):
             await writer.drain()
             await self._drain_events(reader, "focusInput", timeout=2.0)
 
-            # Build a submit whose serialised JSON length far exceeds
-            # 64 KiB — the legacy default StreamReader limit.  200 KiB
-            # of base64 data is plenty to overflow the old buffer.
             big_b64 = "A" * (200 * 1024)
             submit = {
                 "type": "submit",
@@ -248,9 +239,6 @@ class TestUdsListener(IsolatedAsyncioTestCase):
             writer.write(line)
             await writer.drain()
 
-            # The handler echoes the prompt via ``setTaskText`` before
-            # invoking the task runner — its arrival proves the line
-            # was successfully read and dispatched.
             echo = await self._drain_events(
                 reader, "setTaskText", timeout=5.0,
             )
@@ -312,10 +300,6 @@ class TestUdsListener(IsolatedAsyncioTestCase):
 
         fake_tab_id = "ad4ecb65-2878-4c2c-9736-3bb9be18814a"
         fake = _FakeTab("74")
-        # Duck-typed insertion: ``_handle_active_tasks_query`` only
-        # reads ``is_task_active`` / ``task_history_id`` / ``last_task_id``.
-        # pyright cannot see through the runtime structural shape so the
-        # value cast is needed to satisfy the registry's declared type.
         from typing import cast
 
         with _RunningAgentState._registry_lock:
@@ -354,9 +338,6 @@ class TestUdsListener(IsolatedAsyncioTestCase):
 
     async def test_stop_async_removes_socket(self) -> None:
         """``stop_async`` unlinks the socket file on shutdown."""
-        # asyncTearDown calls stop_async after this; bind a fresh
-        # server here to observe the unlink without disturbing the
-        # shared fixture.
         certfile = Path(self.tmpdir) / "cert2.pem"
         keyfile = Path(self.tmpdir) / "key2.pem"
         from kiss.server.web_server import _generate_self_signed_cert

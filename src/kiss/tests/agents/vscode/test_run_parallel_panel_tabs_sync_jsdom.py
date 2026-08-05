@@ -61,8 +61,6 @@ import subprocess
 import unittest
 from pathlib import Path
 
-# __file__ lives at src/kiss/tests/agents/vscode/<this file>.py — walk
-# back to ``src/kiss`` (parents[3]) and step into ``agents/vscode``.
 _KISS_ROOT = Path(__file__).resolve().parents[3]
 _VSCODE_DIR = _KISS_ROOT / "agents" / "vscode"
 _TEST_JS = _VSCODE_DIR / "test" / "runParallelPanelTabsSync.test.js"

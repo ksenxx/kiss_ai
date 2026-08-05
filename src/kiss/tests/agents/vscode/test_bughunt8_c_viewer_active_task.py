@@ -75,13 +75,11 @@ class TestSubscribeChatViewersSkipsBusyViewer(unittest.TestCase):
         busy_state = self.server._get_tab(busy_viewer)
         self.server._get_tab(idle_viewer)
 
-        # All three tabs have chat C open.
         with self.server._state_lock:
             self.server._tab_chat_views[launcher] = chat_id
             self.server._tab_chat_views[busy_viewer] = chat_id
             self.server._tab_chat_views[idle_viewer] = chat_id
 
-        # The busy viewer is actively running its OWN task 7999.
         assert busy_state.agent is not None
         busy_state.agent._last_task_id = "7999"
         busy_state.is_task_active = True
@@ -100,8 +98,6 @@ class TestSubscribeChatViewersSkipsBusyViewer(unittest.TestCase):
             f"{busy_events}",
         )
 
-        # Regression guard: the idle viewer still gets the standard
-        # clear + status running=True sequence.
         idle_types = [e.get("type") for e in self.recorder.for_tab(idle_viewer)]
         self.assertEqual(idle_types, ["clear", "status"])
 
@@ -126,9 +122,6 @@ class TestStatusEndSkipsBusyViewer(unittest.TestCase):
         busy_state = self.server._get_tab(busy_viewer)
         self.server._get_tab(idle_viewer)
 
-        # Both viewers are subscribed to task 7301 (launched from the
-        # launcher tab).  The busy viewer has since started its OWN
-        # task 7999 which is still running.
         self.server.printer.subscribe_tab("7301", launcher)
         self.server.printer.subscribe_tab("7301", busy_viewer)
         self.server.printer.subscribe_tab("7301", idle_viewer)

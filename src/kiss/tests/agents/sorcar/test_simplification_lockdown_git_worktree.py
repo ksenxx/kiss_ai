@@ -94,12 +94,9 @@ class TestCommitAll:
     def test_single_commit_includes_all_change_kinds(self, tmp_path: Path) -> None:
         """One commit_all call captures staged+unstaged+untracked changes."""
         repo = _make_repo(tmp_path / "repo")
-        # staged change
         (repo / "staged.txt").write_text("staged\n")
         _git("add", "staged.txt", cwd=repo)
-        # unstaged change to a tracked file
         (repo / "README.md").write_text("# Modified\n")
-        # untracked file
         (repo / "untracked.txt").write_text("untracked\n")
 
         before = _commit_count(repo)
@@ -107,7 +104,6 @@ class TestCommitAll:
         assert _commit_count(repo) == before + 1
         assert _head_message(repo) == "lockdown: all kinds"
 
-        # All three changes are in the new commit; tree is clean.
         show = _git(
             "show", "--name-only", "--format=", "HEAD", cwd=repo
         ).stdout.split()
@@ -149,7 +145,6 @@ class TestCommitStaged:
         before = _commit_count(repo)
         assert GitWorktreeOps.commit_staged(repo, "nothing staged") is False
         assert _commit_count(repo) == before
-        # The unstaged change is untouched.
         assert (repo / "README.md").read_text() == "# Unstaged only\n"
 
     def test_rejecting_hook_returns_false_not_raise(self, tmp_path: Path) -> None:
@@ -192,7 +187,6 @@ class TestDeleteBranch:
 
         assert GitWorktreeOps.delete_branch(repo, branch) is True
         assert not GitWorktreeOps.branch_exists(repo, branch)
-        # The branch.<name> config section must actually be gone.
         get = _git("config", "--get", f"branch.{branch}.kiss-original", cwd=repo)
         assert get.returncode != 0
         assert get.stdout.strip() == ""
@@ -205,10 +199,8 @@ class TestDeleteBranch:
         (wt_dir / "extra.txt").write_text("unmerged work\n")
         assert GitWorktreeOps.commit_all(wt_dir, "unmerged commit")
         _git("config", f"branch.{branch}.kiss-original", "main", cwd=repo)
-        # Free the branch from the worktree so only "unmerged" blocks -d.
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.prune(repo)
-        # Sanity: safe delete alone would refuse.
         assert _git("branch", "-d", branch, cwd=repo).returncode != 0
 
         assert GitWorktreeOps.delete_branch(repo, branch) is True
@@ -360,13 +352,11 @@ class TestSquashMergeFromBaseline:
         branch = "kiss/wt-baseline"
         wt_dir = _create_worktree(repo, branch)
 
-        # Baseline commit captures (simulated) user dirty state.
         (wt_dir / "user_dirty.txt").write_text("user dirty state\n")
         assert GitWorktreeOps.commit_all(wt_dir, "kiss: baseline")
         baseline = GitWorktreeOps.head_sha(wt_dir)
         assert baseline is not None
 
-        # Agent work after the baseline.
         (wt_dir / "agent.txt").write_text("agent change\n")
         assert GitWorktreeOps.commit_all(wt_dir, "agent: post-baseline work")
 
@@ -376,7 +366,6 @@ class TestSquashMergeFromBaseline:
         assert _commit_count(repo) == before + 1
         assert _head_message(repo) == "agent: post-baseline work"
         assert (repo / "agent.txt").read_text() == "agent change\n"
-        # The baseline (user dirty state) commit must NOT be merged.
         assert not (repo / "user_dirty.txt").exists()
         assert not GitWorktreeOps.has_uncommitted_changes(repo)
 

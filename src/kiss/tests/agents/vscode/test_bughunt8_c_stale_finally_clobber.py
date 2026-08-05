@@ -132,8 +132,6 @@ class TestStaleWorkerFinallyClobbersNewTask(unittest.TestCase):
     def test_stale_finally_leaves_fresh_tab_state_intact(self) -> None:
         tab_id = "bh8c-stale-tab"
 
-        # --- Task 1: armed exactly like _cmd_run, with a real agent
-        # whose run() blocks so the worker is provably in flight.
         state1 = self.server._get_tab(tab_id)
         agent1 = _BlockingAgent()
         state1.agent = agent1
@@ -154,18 +152,10 @@ class TestStaleWorkerFinallyClobbersNewTask(unittest.TestCase):
         worker1.start()
         assert agent1.entered.wait(timeout=30), "task 1 never started"
 
-        # Pause worker1's post-run cleanup: grab _state_lock BEFORE
-        # releasing the agent, so the worker blocks at its first
-        # cleanup lock acquisition — i.e. before the outer finally's
-        # per-tab reset runs.
         self.server._state_lock.acquire()
         try:
             agent1.release.set()
 
-            # While worker1 is wedged in cleanup, the frontend closes
-            # the tab (disposing the backend state) and reopens it:
-            # a FRESH state is registered under the SAME tab id and a
-            # new task is armed on it.
             _RunningAgentState.running_agent_states.pop(tab_id, None)
             state2 = _RunningAgentState(tab_id, self.model)
             _RunningAgentState.register(tab_id, state2)

@@ -36,10 +36,6 @@ from unittest import IsolatedAsyncioTestCase
 import kiss.agents.sorcar.persistence as th
 from kiss.server.web_server import RemoteAccessServer
 
-# Soft file-size limit during the faulted first attempt.  Must be
-# comfortably larger than every incidental file the process may touch
-# in that window (fresh sqlite db, log lines) yet far smaller than the
-# huge base line the second hunk restores.
 _FSIZE_LIMIT = 512 * 1024
 _BIG_LINE = "x" * (4 * 1024 * 1024) + "\n"
 
@@ -103,8 +99,6 @@ class TestRejectRetryIdempotent(IsolatedAsyncioTestCase):
             host="127.0.0.1", port=0, work_dir=str(self.work),
         )
         self.server._loop = asyncio.get_running_loop()
-        # Ignore SIGXFSZ so an over-limit write returns EFBIG (a plain
-        # OSError) instead of killing the test process.
         self._old_sig = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
         self._old_limit = resource.getrlimit(resource.RLIMIT_FSIZE)
 
@@ -128,7 +122,6 @@ class TestRejectRetryIdempotent(IsolatedAsyncioTestCase):
         with self.server._merge_states_lock:
             state = self.server._merge_states[tab_id]
 
-        # --- attempt 1: hunk 0 splices fine, hunk 1's write hits EFBIG.
         soft, hard = self._old_limit
         resource.setrlimit(resource.RLIMIT_FSIZE, (_FSIZE_LIMIT, hard))
         try:
@@ -139,12 +132,9 @@ class TestRejectRetryIdempotent(IsolatedAsyncioTestCase):
         finally:
             resource.setrlimit(resource.RLIMIT_FSIZE, self._old_limit)
 
-        # The fault must have kept every hunk unresolved (per-file
-        # marking happens only after the whole file restored cleanly).
         self.assertEqual(state.remaining, 2)
         self.assertEqual(state.resolutions(), [])
 
-        # --- attempt 2: the user clicks reject-all again.
         await self.server._handle_web_merge_action({
             "type": "mergeAction", "action": "reject-all", "tabId": tab_id,
         })
@@ -158,7 +148,6 @@ class TestRejectRetryIdempotent(IsolatedAsyncioTestCase):
             f"(got {len(final_text)} bytes, want {len(base_text)}; "
             f"head={final_text[:80]!r})",
         )
-        # Both hunks resolved; the completed review was popped.
         with self.server._merge_states_lock:
             self.assertNotIn(tab_id, self.server._merge_states)
 

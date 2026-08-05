@@ -2,19 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Integration test for the chat-webview panel Copy button.
-//
-// Locks in the rule: when the user clicks a Copy button on any chat
-// panel (Result, Prompt, System Prompt, streamed Thoughts text, ...)
-// the clipboard must receive the agent's raw markdown / plain text —
-// NOT the rendered HTML's markdown-stripped textContent.
-//
-// Runs the real ``media/panelCopy.js`` against a real jsdom document
-// (no mocks, no fakes for the code under test).  Exercised directly
-// with ``node``:
-//
-//     node test/panelCopy.test.js
 
 'use strict';
 
@@ -23,10 +10,6 @@ const path = require('path');
 const {JSDOM} = require('jsdom');
 
 const PANEL_COPY_PATH = path.join(__dirname, '..', 'media', 'panelCopy.js');
-
-// ---------------------------------------------------------------------------
-// Test harness — same shape as reloadGuard.test.js / installerPath.test.js.
-// ---------------------------------------------------------------------------
 
 let passed = 0;
 const failures = [];
@@ -43,22 +26,12 @@ function test(name, fn) {
   }
 }
 
-/**
- * Build a fresh jsdom window with ``panelCopy.js`` loaded as a real
- * <script> tag and a writable ``navigator.clipboard.writeText`` stub
- * that records the most recent payload.  Returning the window + a
- * ``getClipboard()`` getter mirrors how the webview runs in production
- * (browser globals only — no Node-specific shortcuts).
- */
 function makeWindow() {
-  // about:blank gives us a working document.body + element factory.
   const dom = new JSDOM(
     '<!DOCTYPE html><html><body></body></html>',
     {runScripts: 'dangerously', pretendToBeVisual: true},
   );
   const win = dom.window;
-  // Plant a clipboard recorder before panelCopy.js runs so the click
-  // handler picks it up via the standard navigator.clipboard surface.
   let clipboardText = null;
   Object.defineProperty(win.navigator, 'clipboard', {
     configurable: true,
@@ -69,7 +42,6 @@ function makeWindow() {
       },
     },
   });
-  // Load panelCopy.js as a real script tag so it registers on window.
   const fs = require('fs');
   const src = fs.readFileSync(PANEL_COPY_PATH, 'utf-8');
   const scriptEl = win.document.createElement('script');
@@ -93,34 +65,22 @@ function clickFirst(el, selector) {
   }));
 }
 
-// Synchronously flush the microtask queue so the awaited
-// ``clipboard.writeText`` resolves before assertions.  jsdom's
-// ``setImmediate`` is enough because the click handler only chains a
-// single ``.then(done)`` off the writeText promise.
 function flushMicrotasks() {
   return new Promise(resolve => setImmediate(resolve));
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 async function run() {
-  // --- API surface ----------------------------------------------------------
   test('exports getRawText + addCopyButton on window.PanelCopy', () => {
     const {PanelCopy} = makeWindow();
     assert.strictEqual(typeof PanelCopy.getRawText, 'function');
     assert.strictEqual(typeof PanelCopy.addCopyButton, 'function');
   });
 
-  // --- getRawText -----------------------------------------------------------
   test('getRawText honours data-raw-text override', () => {
     const {document, PanelCopy} = makeWindow();
     const panel = document.createElement('div');
     panel.innerHTML =
       '<h3>Heading</h3><p><strong>bold</strong> text</p>';
-    // Simulate a Result panel that stashed the source markdown so the
-    // walker returns the markdown instead of recursing into the HTML.
     panel.dataset.rawText = '# Heading\n\n**bold** text';
     assert.strictEqual(
       PanelCopy.getRawText(panel),
@@ -148,7 +108,6 @@ async function run() {
     b.textContent = 'beta';
     panel.appendChild(a);
     panel.appendChild(b);
-    // Block children join with a newline.
     assert.strictEqual(PanelCopy.getRawText(panel), 'alpha\nbeta');
   });
 
@@ -168,7 +127,6 @@ async function run() {
     );
   });
 
-  // --- addCopyButton (full integration with the click handler) -------------
   test('addCopyButton attaches a single button (idempotent)', () => {
     const {document, PanelCopy} = makeWindow();
     const panel = document.createElement('div');
@@ -184,10 +142,6 @@ async function run() {
     'clicking copy on a Result panel copies the raw markdown',
     async () => {
       const {document, PanelCopy, getClipboard} = makeWindow();
-      // Replicate the DOM shape main.js builds for a ``result`` event
-      // with a markdown summary.  The Copy button must pull the raw
-      // markdown from data-raw-text — the rendered HTML's textContent
-      // is "Hello World" with the #/`*` markers stripped.
       const rc = document.createElement('div');
       rc.className = 'ev rc';
       rc.innerHTML =
@@ -206,8 +160,6 @@ async function run() {
       await flushMicrotasks();
 
       assert.strictEqual(getClipboard(), rawMd);
-      // The textContent path would have copied this — assert we did
-      // NOT take it.
       assert.notStrictEqual(getClipboard(), 'Result Tokens 123 Cost $0.01 Hello World');
     },
   );
@@ -237,10 +189,6 @@ async function run() {
     'clicking copy on a bash output panel preserves whitespace',
     async () => {
       const {document, PanelCopy, getClipboard} = makeWindow();
-      // bash panels carry plain-text output in a nested
-      // .bash-panel-content child — no data-raw-text override is set,
-      // so getRawText must fall back to walking the textContent
-      // verbatim (preserving columns, indentation, blank lines).
       const op = document.createElement('div');
       op.className = 'bash-panel';
       const opContent = document.createElement('div');
@@ -263,10 +211,6 @@ async function run() {
       'returns the raw markdown of that text block',
     async () => {
       const {document, PanelCopy, getClipboard} = makeWindow();
-      // Thoughts panels do not set their own data-raw-text — the
-      // walker descends to nested children, picks up the raw markdown
-      // stashed by ``text_end`` on the .txt block, and concatenates
-      // it with neighbouring text content.
       const llmPanel = document.createElement('div');
       llmPanel.className = 'llm-panel';
       const hdr = document.createElement('div');
@@ -294,9 +238,6 @@ async function run() {
       'override falls back to a textContent walk',
     async () => {
       const {document, PanelCopy, getClipboard} = makeWindow();
-      // Older replayed events or plain-text results may not carry
-      // data-raw-text.  The copy must still produce something useful
-      // (not the empty string).
       const rc = document.createElement('div');
       rc.className = 'ev rc';
       rc.innerHTML =
@@ -328,9 +269,6 @@ async function run() {
     assert.strictEqual(ancestorClicks, 0);
   });
 
-  // ---------------------------------------------------------------------
-  // Summary
-  // ---------------------------------------------------------------------
   console.log('');
   if (failures.length === 0) {
     console.log(`All ${passed} panelCopy tests passed.`);

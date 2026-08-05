@@ -2,33 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// END-TO-END test for the Cmd+E / Ctrl+E (``kissSorcar.runSelection``)
-// keybinding: the REAL compiled extension entry point
-// (``out/extension.js`` activate()) + the REAL
-// ``out/SorcarSidebarView.js`` wired to the REAL webview
-// (``media/main.js`` running in jsdom) over a real Unix-domain-socket
-// stub daemon.  Only the ``vscode`` module and heavyweight activation
-// side modules (DependencyInstaller, UpdateChecker, gitApi, kissPaths,
-// WebviewNotifications) are stubbed.
-//
-// REQUIREMENT (the bug): when Cmd+E is pressed with text highlighted in
-// the editor, the highlighted text must be
-//   (1) copied out of the editor selection,
-//   (2) PASTED INTO THE INPUT TEXTBOX of the chat webview, and
-//   (3) SUBMITTED to the agent for execution through the webview's
-//       normal send path (so tab id, selected model, running-task
-//       steering etc. all behave exactly like pressing Send).
-//
-// The buggy behavior: ``runSelection`` bypassed the webview entirely —
-// the text never appeared in the input textbox, the submit did not go
-// through the webview's send path (no tabId, wrong model), and when the
-// sidebar webview was not yet resolved the ``setTaskText`` message was
-// silently dropped.
-//
-// Run directly with ``node`` (after ``npm run compile``):
-//
-//     node src/kiss/agents/vscode/test/runSelectionSubmit.test.js
 
 'use strict';
 
@@ -44,7 +17,6 @@ const EXT_ROOT = path.join(__dirname, '..');
 const OUT_DIR = path.join(EXT_ROOT, 'out');
 const MEDIA = path.join(EXT_ROOT, 'media');
 
-// ---- vscode module stub ----------------------------------------------
 class StubEventEmitter {
   constructor() {
     this._listeners = [];
@@ -89,8 +61,6 @@ function makeMemento(seed) {
 let workspaceFolders = [];
 const registeredCommands = new Map();
 const executedCommands = [];
-// Optional hook: lets a test simulate VS Code resolving the sidebar
-// webview when ``kissSorcar.chatViewSecondary.focus`` is executed.
 let onFocusViewCommand = null;
 
 const vscodeStub = {
@@ -164,7 +134,6 @@ Module._resolveFilename = function (request, parent, ...rest) {
 };
 global.__kissVscodeStub = vscodeStub;
 
-// ---- stub the heavyweight activation-side modules ---------------------
 const notifications = [];
 
 function stubModule(filePath, exports) {
@@ -207,7 +176,6 @@ stubModule(path.join(OUT_DIR, 'WebviewNotifications.js'), {
     task({report: () => {}}, {onCancellationRequested: () => {}}),
 });
 
-// ---- isolated HOME + stub daemon (UDS) --------------------------------
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-cmde-'));
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
@@ -255,7 +223,6 @@ const server = net.createServer(sock => {
   });
 });
 
-// ---- jsdom webview running the REAL main.js ---------------------------
 let persistedState;
 
 function buildWebviewWindow() {
@@ -290,7 +257,10 @@ function buildWebviewWindow() {
 
 function evalWebviewScripts(win) {
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 }
 
 function makeWebviewView(ctx) {
@@ -323,7 +293,6 @@ function makeWebviewView(ctx) {
   };
 }
 
-/** Editor stub whose ``getText(selection)`` returns ``text``. */
 function makeEditor(ws, text) {
   return {
     document: {
@@ -355,8 +324,6 @@ async function runTests() {
   const ws = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-cmde-ws-'));
   workspaceFolders = [{uri: makeUri(ws)}];
 
-  // Capture the webview-view provider that activate() registers so the
-  // test can resolve it exactly like VS Code does.
   let provider = null;
   vscodeStub.window.registerWebviewViewProvider = (_id, p) => {
     provider = p;
@@ -367,8 +334,6 @@ async function runTests() {
     subscriptions: [],
     extensionUri: makeUri(EXT_ROOT),
     extensionPath: EXT_ROOT,
-    // Pre-set the first-launch gates so activation does not schedule the
-    // auto-open / auto-widen timers that would interfere with the test.
     workspaceState: makeMemento({firstLaunchDone: true, sidebarWidened: true}),
     globalState: makeMemento(),
   };
@@ -381,11 +346,6 @@ async function runTests() {
 
   const cmdE = () => registeredCommands.get('kissSorcar.runSelection')();
 
-  // ================================================================
-  // Scenario 1 — webview already open: Cmd+E pastes the highlighted
-  // text into the chat input textbox and submits it through the
-  // webview's send path (daemon gets a tab-stamped ``run``).
-  // ================================================================
   const ctx1 = buildWebviewWindow();
   const wvv1 = makeWebviewView(ctx1);
   provider.resolveWebviewView(wvv1.webviewView, {}, {});
@@ -393,9 +353,6 @@ async function runTests() {
   evalWebviewScripts(ctx1.win);
   await sleep(50);
 
-  // Record every value the chat input textbox goes through so the test
-  // can prove the selection was PASTED into it (sendMessage clears the
-  // textbox afterwards, exactly like a user pressing Send).
   const inp1 = ctx1.win.document.getElementById('task-input');
   const inputValues = [];
   inp1.addEventListener('input', () => inputValues.push(inp1.value));
@@ -437,11 +394,6 @@ async function runTests() {
       ')',
   );
 
-  // ================================================================
-  // Scenario 2 — a task is RUNNING in the active tab: Cmd+E pastes and
-  // submits as a steering follow-up (``appendUserMessage``) exactly
-  // like typing into the box and pressing Send while running.
-  // ================================================================
   const SEL2 = 'also add unit tests for it';
   vscodeStub.window.activeTextEditor = makeEditor(ws, SEL2);
   daemonCmds.length = 0;
@@ -468,10 +420,6 @@ async function runTests() {
   assert.strictEqual(appends[0].prompt, SEL2);
   assert.strictEqual(appends[0].tabId, TAB1);
 
-  // ================================================================
-  // Scenario 3 — no editor / empty selection: a notification is shown
-  // and nothing is pasted or submitted.
-  // ================================================================
   daemonReply({type: 'status', running: false, tabId: TAB1});
   await sleep(80);
   daemonCmds.length = 0;
@@ -496,7 +444,6 @@ async function runTests() {
     'nothing submitted for empty selection / missing editor',
   );
 
-  // A stray insertAndSubmit with no text must be a no-op in the webview.
   wvv1.webviewView.webview.postMessage({type: 'insertAndSubmit', text: ''});
   await sleep(100);
   assert.strictEqual(
@@ -509,13 +456,6 @@ async function runTests() {
   if (typeof ext.deactivate === 'function') ext.deactivate();
   ctx1.win.close();
 
-  // ================================================================
-  // Scenario 4 — the sidebar webview is NOT yet resolved when Cmd+E is
-  // pressed: the command must open/resolve the webview (via the
-  // ``kissSorcar.chatViewSecondary.focus`` command, like VS Code does),
-  // paste the selection into the input textbox and submit it.  The old
-  // code silently dropped every message here.
-  // ================================================================
   registeredCommands.clear();
   let provider2 = null;
   vscodeStub.window.registerWebviewViewProvider = (_id, p) => {
@@ -534,7 +474,7 @@ async function runTests() {
   ext2.activate(context2);
   assert.ok(provider2, 'second activate() must register the provider');
 
-  persistedState = undefined; // fresh webview state
+  persistedState = undefined;
   const ctx2 = buildWebviewWindow();
   const wvv2 = makeWebviewView(ctx2);
   const lateInputValues = [];
@@ -577,14 +517,6 @@ async function runTests() {
   if (typeof ext2.deactivate === 'function') ext2.deactivate();
   ctx2.win.close();
 
-  // ================================================================
-  // Scenario 5 — cold-open race: the webview VIEW resolves quickly but
-  // its SCRIPT (media/main.js) loads slowly (600ms — well past the
-  // 150ms show delay in focusChatInput).  Cmd+E must wait for the
-  // webview's ``ready`` handshake instead of posting into a webview
-  // with no message listener yet — otherwise the paste + submit is
-  // silently dropped.
-  // ================================================================
   registeredCommands.clear();
   let provider3 = null;
   vscodeStub.window.registerWebviewViewProvider = (_id, p) => {
@@ -603,15 +535,13 @@ async function runTests() {
   ext3.activate(context3);
   assert.ok(provider3, 'third activate() must register the provider');
 
-  persistedState = undefined; // fresh webview state
+  persistedState = undefined;
   const ctx3 = buildWebviewWindow();
   const wvv3 = makeWebviewView(ctx3);
   const slowInputValues = [];
   onFocusViewCommand = () => {
     if (ctx3.resolved) return;
     ctx3.resolved = true;
-    // The VIEW resolves immediately (like VS Code), but the webview
-    // SCRIPT only finishes loading 600ms later.
     provider3.resolveWebviewView(wvv3.webviewView, {}, {});
     wvv3.wire();
     setTimeout(() => {
@@ -658,17 +588,14 @@ function cleanup() {
   try {
     if (lastServerSock) lastServerSock.destroy();
   } catch {
-    // best-effort teardown
   }
   try {
     server.close();
   } catch {
-    // best-effort teardown
   }
   try {
     fs.unlinkSync(sockPath);
   } catch {
-    // best-effort teardown
   }
   fs.rmSync(tmpHome, {recursive: true, force: true});
 }

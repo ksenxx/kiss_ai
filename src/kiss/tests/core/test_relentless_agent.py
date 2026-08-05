@@ -13,7 +13,7 @@ import unittest
 import pytest
 import yaml
 
-from kiss.core.relentless_agent import (
+from kiss.agents.sorcar.relentless_agent import (
     CONTINUATION_PROMPT,
     IMPORTANT_INSTRUCTIONS,
     TASK_PROMPT,
@@ -22,8 +22,6 @@ from kiss.core.relentless_agent import (
 )
 from kiss.tests.conftest import requires_gemini_api_key
 
-# gemini-2.0-flash was retired by Google (404 "no longer available");
-# use the current cheap flash model for real-call tests.
 TEST_MODEL = "gemini-2.5-flash"
 
 
@@ -49,11 +47,12 @@ class TestTemplateConstants(unittest.TestCase):
         self.assertIn("done step 1", formatted)
 
     def test_important_instructions_placeholders(self) -> None:
-        """IMPORTANT_INSTRUCTIONS has step_threshold, work_dir, current_pid."""
+        """IMPORTANT_INSTRUCTIONS renders context risk, workdir, and PID."""
         formatted = IMPORTANT_INSTRUCTIONS.format(
-            step_threshold="8", work_dir="/tmp/test", current_pid="12345"
+            work_dir="/tmp/test", current_pid="12345"
         )
-        self.assertIn("step 8", formatted)
+        self.assertIn("risk of running out of context", formatted)
+        self.assertNotIn("**) or", formatted)
         self.assertIn("/tmp/test", formatted)
         self.assertIn("12345", formatted)
         self.assertIn("MOST IMPORTANT INSTRUCTIONS", formatted)
@@ -71,7 +70,7 @@ class TestFinish(unittest.TestCase):
 
     def test_finish_string_true(self) -> None:
         """finish() converts string 'true' to bool True."""
-        result = finish(success="true", is_continue="yes", summary="x")  # type: ignore[arg-type]
+        result = finish(success="true", is_continue="yes", summary_in_html="x")  # type: ignore[arg-type]
         parsed = yaml.safe_load(result)
         self.assertTrue(parsed["success"])
         self.assertTrue(parsed["is_continue"])
@@ -89,7 +88,7 @@ class TestRunBranches(unittest.TestCase):
                 model_name=TEST_MODEL,
                 prompt_template=(
                     "IMMEDIATELY call finish(success=True, is_continue=False, "
-                    "summary='docker test done'). Do NOT call any other tool first."
+                    "summary_in_html='docker test done'). Do NOT call any other tool first."
                 ),
                 max_steps=5,
                 max_budget=1.0,
@@ -135,7 +134,7 @@ class TestDockerStreamCallback(unittest.TestCase):
                 prompt_template=(
                     "First call docker_cmd(command='echo streamed_output'), "
                     "then IMMEDIATELY call "
-                    "finish(success=True, is_continue=False, summary='streamed'). "
+                    "finish(success=True, is_continue=False, summary_in_html='streamed'). "
                     "Do NOT call any other tool."
                 ),
                 tools=[docker_cmd],
@@ -218,20 +217,17 @@ class TestMultiSessionSummaryMerge(unittest.TestCase):
 
     def test_merged_summary_on_completion(self) -> None:
         """After 2 continue sessions + final success, summary merges all sessions."""
-        # Session 1: continue with summary "did A"
         resp1 = self._make_tool_call_response(
             "finish",
-            {"success": False, "is_continue": True, "summary": "did A"},
+            {"success": False, "is_continue": True, "summary_in_html": "did A"},
         )
-        # Session 2: continue with summary "did B"
         resp2 = self._make_tool_call_response(
             "finish",
-            {"success": False, "is_continue": True, "summary": "did B"},
+            {"success": False, "is_continue": True, "summary_in_html": "did B"},
         )
-        # Session 3: success with summary "did C"
         resp3 = self._make_tool_call_response(
             "finish",
-            {"success": True, "is_continue": False, "summary": "did C"},
+            {"success": True, "is_continue": False, "summary_in_html": "did C"},
         )
         server, port = self._start_openai_server([resp1, resp2, resp3])
         try:
@@ -253,16 +249,12 @@ class TestMultiSessionSummaryMerge(unittest.TestCase):
             parsed = yaml.safe_load(result)
             assert parsed["success"] is True
             summary = parsed["summary"]
-            # Prior (continued) sessions are PREPENDED as "Previous Session N"
-            # blocks; the terminal (success) session is appended last under
-            # "### Final Session".
-            assert "### Previous Session 1" in summary
+            assert "<h3>Previous Session 1</h3>" in summary
             assert "did A" in summary
-            assert "### Previous Session 2" in summary
+            assert "<h3>Previous Session 2</h3>" in summary
             assert "did B" in summary
-            assert "### Final Session" in summary
+            assert "<h3>Final Session</h3>" in summary
             assert "did C" in summary
-            # Order: previous sessions come first, final session last.
             assert summary.index("did A") < summary.index("did B") < summary.index(
                 "did C"
             )
@@ -273,7 +265,7 @@ class TestMultiSessionSummaryMerge(unittest.TestCase):
         """Single-session success does not add Session headers."""
         resp = self._make_tool_call_response(
             "finish",
-            {"success": True, "is_continue": False, "summary": "all done"},
+            {"success": True, "is_continue": False, "summary_in_html": "all done"},
         )
         server, port = self._start_openai_server([resp])
         try:
@@ -294,9 +286,9 @@ class TestMultiSessionSummaryMerge(unittest.TestCase):
                 )
             parsed = yaml.safe_load(result)
             assert parsed["success"] is True
-            assert parsed["summary"] == "all done"
-            assert "### Previous Session" not in parsed["summary"]
-            assert "### Final Session" not in parsed["summary"]
+            assert parsed["summary"] == "<p>all done</p>"
+            assert "<h3>Previous Session" not in parsed["summary"]
+            assert "<h3>Final Session" not in parsed["summary"]
         finally:
             server.shutdown()
 

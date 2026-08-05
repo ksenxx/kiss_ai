@@ -157,12 +157,6 @@ class TestRelaunchPreservesChatHistory(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_restored_tab_submit_preserves_prior_chat(self) -> None:
-        # ------------------------------------------------------------------
-        # 1) Simulate the state left behind by a prior VS Code session:
-        #    one completed task persisted under a specific chat_id.
-        #    In production this row would have been created by
-        #    ``ChatSorcarAgent.run``'s _add_task/_save_task_result path.
-        # ------------------------------------------------------------------
         prior_chat_id = "chat-relaunch-fixture-000000000001"
         task_id, chat_id = _add_task(
             "First user prompt from the prior session",
@@ -180,22 +174,11 @@ class TestRelaunchPreservesChatHistory(unittest.TestCase):
         )
         _flush_chat_events()
 
-        # Sanity — the chat context loads with exactly one entry.
         ctx = _load_chat_context(prior_chat_id)
         assert len(ctx) == 1, ctx
         assert "prior session" in str(ctx[0]["task"] or "")
         assert "Prior assistant answer" in str(ctx[0]["result"] or "")
 
-        # ------------------------------------------------------------------
-        # 2) Simulate VS Code relaunch by instantiating a FRESH
-        #    :class:`VSCodeServer` (mirrors a daemon cold-start with an
-        #    empty ``_RunningAgentState.running_agent_states`` /
-        #    ``_tab_chat_views``).  The webview then restores its tabs
-        #    and the extension replays ``resumeSession`` per restored
-        #    tab, exactly as ``SorcarSidebarView.ts`` does on ``ready``.
-        # ------------------------------------------------------------------
-        # Guarantee that the fresh server does NOT inherit any per-tab
-        # state from a previous test run of the same in-process module.
         from kiss.agents.sorcar.running_agent_state import _RunningAgentState
         _RunningAgentState.running_agent_states.clear()
 
@@ -214,12 +197,6 @@ class TestRelaunchPreservesChatHistory(unittest.TestCase):
                 },
             )
 
-            # ------------------------------------------------------------------
-            # 3) User submits a follow-up prompt on the restored tab.
-            #    Under the bug this call mints a fresh chat_id and the
-            #    agent's ``build_chat_prompt`` returns just the new
-            #    prompt with no "Previous tasks and results" preamble.
-            # ------------------------------------------------------------------
             server._handle_command(
                 {
                     "type": "run",
@@ -234,8 +211,6 @@ class TestRelaunchPreservesChatHistory(unittest.TestCase):
             assert done.wait(timeout=30), (
                 "grandparent run never fired for the submitted task"
             )
-            # Wait for the worker thread's outer finally to complete so
-            # ``tab.chat_id`` / persistence writes are settled.
             assert _wait_until(
                 lambda: (
                     server._get_tab(tab_id).task_thread is None
@@ -246,11 +221,6 @@ class TestRelaunchPreservesChatHistory(unittest.TestCase):
         finally:
             _unpatch_grandparent_run(original_run)
 
-        # ------------------------------------------------------------------
-        # 4) The restored tab's chat_id MUST still be the prior chat_id.
-        #    Under the bug it is a freshly-minted UUID unrelated to
-        #    ``prior_chat_id``.
-        # ------------------------------------------------------------------
         tab = server._get_tab(tab_id)
         self.assertEqual(
             tab.chat_id, prior_chat_id,
@@ -258,12 +228,6 @@ class TestRelaunchPreservesChatHistory(unittest.TestCase):
             f"tab.chat_id={tab.chat_id!r} expected={prior_chat_id!r}",
         )
 
-        # ------------------------------------------------------------------
-        # 5) The prompt the LLM actually saw must contain the previous
-        #    task's text and result — i.e.
-        #    ``ChatSorcarAgent.build_chat_prompt`` must have found the
-        #    prior chat context and prepended it.
-        # ------------------------------------------------------------------
         self.assertTrue(
             captured_prompts,
             "grandparent run captured no prompt at all",
@@ -287,11 +251,6 @@ class TestRelaunchPreservesChatHistory(unittest.TestCase):
             "The newly submitted prompt is missing from the LLM prompt.",
         )
 
-        # ------------------------------------------------------------------
-        # 6) The new task must have been persisted under the SAME
-        #    chat_id as the prior task — otherwise the chat is split
-        #    into two orphan sessions in the history sidebar.
-        # ------------------------------------------------------------------
         _flush_chat_events()
         ctx_after = _load_chat_context(prior_chat_id)
         titles = [str(e.get("task", "") or "") for e in ctx_after]

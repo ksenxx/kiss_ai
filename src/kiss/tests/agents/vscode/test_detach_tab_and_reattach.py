@@ -75,11 +75,6 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
     real_broadcast = JsonPrinter.broadcast
 
     def capture(event: dict) -> None:
-        # Mirror :meth:`WebPrinter.broadcast` exactly:
-        #   * Events with explicit ``tabId`` go through verbatim.
-        #   * Other events are tagged with ``taskId`` and fanned out
-        #     to every subscriber tab, with each copy stamped with
-        #     its own ``tabId``.
         if "tabId" in event:
             with lock:
                 events.append(event)
@@ -91,9 +86,7 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
             with lock:
                 events.append({**ev, "tabId": tab_id})
 
-    # Bind capture in place of the JSON-stdout-writing broadcast.
     server.printer.broadcast = capture  # type: ignore[assignment]
-    # Keep a reference so we don't shadow unused-imports.
     _ = real_broadcast
     return server, events
 
@@ -129,10 +122,6 @@ def _start_fake_running_task(
     post_release_emitted = threading.Event()
 
     task_key = str(task_id) if task_id is not None else tab_id
-    # Subscribe the source tab to the running task so its own client
-    # receives the broadcasts (the agent thread does this inside
-    # ``ChatSorcarAgent.run`` in production; the fake task skips that
-    # path so we wire it up here).
     server.printer.subscribe_tab(task_key, tab_id)
 
     def fake_run() -> None:
@@ -151,7 +140,6 @@ def _start_fake_running_task(
     tab.task_thread = thread
     thread.start()
     started_event.wait(timeout=5)
-    # Stash markers on the server so tests can inspect them.
     setattr(server, "_pre_emitted", pre_release_emitted)
     setattr(server, "_post_emitted", post_release_emitted)
     return started_event, release_event, thread
@@ -173,8 +161,6 @@ class TestCloseTabDoesNotStopRunningTask:
 
     def test_close_tab_keeps_thread_alive_and_finishes_task(self) -> None:
         server, _events = _make_server()
-        # ``tab_id`` and ``chat_id`` are orthogonal — the tab's
-        # routing key need not match the chat persistence key.
         chat_id = "chat-running-1"
         tab_id_a = "tab-A"
         started, release, thread = _start_fake_running_task(
@@ -183,16 +169,13 @@ class TestCloseTabDoesNotStopRunningTask:
         assert started.is_set()
         assert thread.is_alive()
 
-        # Simulate the frontend closing the tab while the task runs.
         server._handle_command({"type": "closeTab", "tabId": tab_id_a})
 
-        # Backend MUST keep the _RunningAgentState so the task can finish.
         assert tab_id_a in _RunningAgentState.running_agent_states
         assert thread.is_alive(), (
             "Agent thread must continue to run after closeTab"
         )
 
-        # Release the task; it must run to its natural completion.
         release.set()
         thread.join(timeout=5)
         assert not thread.is_alive(), (
@@ -224,7 +207,6 @@ class TestResumeRunningTaskReattachesLiveEvents:
     def test_resume_running_task_subscribes_and_fans_out_events(
         self,
     ) -> None:
-        # Seed history: one task row + one persisted event.
         task_id, chat_id = th._add_task("running task")
         th._append_chat_event(
             {"type": "text_delta", "text": "hi-from-history"},
@@ -232,10 +214,6 @@ class TestResumeRunningTaskReattachesLiveEvents:
         )
 
         server, events = _make_server()
-        # ``tab_id`` and ``chat_id`` are orthogonal — the source tab
-        # carries its own routing key, and the viewer that joins from
-        # history allocates a fresh tab id; the chat lookup is routed
-        # by the persisted chat id.
         tab_id_a = "tab-A"
         tab_id_b = "tab-B"
 
@@ -243,12 +221,9 @@ class TestResumeRunningTaskReattachesLiveEvents:
             server, tab_id_a, chat_id, task_id=task_id,
         )
 
-        # Close tab A; backend retains _RunningAgentState because task active.
         server._handle_command({"type": "closeTab", "tabId": tab_id_a})
         assert tab_id_a in _RunningAgentState.running_agent_states
 
-        # User clicks the running task in history → frontend allocates
-        # a new tab id and sends resumeSession.
         server._handle_command({
             "type": "resumeSession",
             "chatId": chat_id,
@@ -256,23 +231,15 @@ class TestResumeRunningTaskReattachesLiveEvents:
             "tabId": tab_id_b,
         })
 
-        # The source tab state survives (it still owns the running
-        # thread).  The new viewer tab is a PURE VIEWER: per the C2/C3
-        # invariant in ``_replay_session`` it gets NO registry entry —
-        # multi-viewer fan-out is wired through the printer's
-        # subscriber map, not through ``_running_agent_states``.
         assert tab_id_a in _RunningAgentState.running_agent_states
         assert tab_id_b not in _RunningAgentState.running_agent_states
         assert _RunningAgentState.running_agent_states[tab_id_a].task_thread is thread
 
-        # Replay broadcast went to the new tab id.
         replays = [e for e in events if e.get("type") == "task_events"]
         assert len(replays) == 1
         assert replays[0]["tabId"] == tab_id_b
         assert replays[0]["chat_id"] == chat_id
 
-        # Running-status broadcast was sent for the new tab so the
-        # spinner shows up immediately.
         running_statuses = [
             e for e in events
             if e.get("type") == "status"
@@ -283,13 +250,8 @@ class TestResumeRunningTaskReattachesLiveEvents:
             f"expected status running=True for {tab_id_b}, got {events}"
         )
 
-        # Capture the position so we can isolate post-subscribe events.
         post_replay_idx = len(events)
 
-        # Release the fake task; the agent thread emits one 'post'
-        # event with thread-local tab id == tab_id_a.  Because tab_id_b
-        # is subscribed, the printer must fan out an additional copy
-        # tagged with tab_id_b.
         release.set()
         thread.join(timeout=5)
         assert not thread.is_alive()
@@ -327,14 +289,12 @@ class TestResumeRunningTaskReattachesLiveEvents:
             "tabId": tab_id_b,
         })
 
-        # No status:running=True broadcast for finished tasks.
         running = [
             e for e in events
             if e.get("type") == "status" and e.get("running") is True
         ]
         assert running == []
 
-        # History is broadcast.
         replays = [e for e in events if e.get("type") == "task_events"]
         assert len(replays) == 1
         assert replays[0]["tabId"] == tab_id_b

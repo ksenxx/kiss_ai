@@ -695,9 +695,6 @@ class TestServerWorktreeWorkflow:
 
         wt_events = [e for e in events if e["type"] == "worktree_done"]
         assert wt_events == []
-        # ``WorktreeSorcarAgent.run`` swallows non-KISSError exceptions
-        # from the parent class and returns a YAML failure summary, so
-        # the task wrapper still emits ``task_done`` (not ``task_error``).
         done_events = [e for e in events if e["type"] == "task_done"]
         assert len(done_events) == 1
         assert _agent(server)._wt_pending
@@ -818,4 +815,3 @@ class TestServerWorktreeWorkflow:
         tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
         if tab.agent._wt_pending:
             tab.agent.discard()
-

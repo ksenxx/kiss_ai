@@ -2,22 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end integration tests for the fast-complete picker.
-//
-// The chat webview's input textbox now shows ALL fast-complete
-// options as a dropdown picker — the same UI the ``@``-mention file
-// picker uses — instead of only the single inline ghost-text
-// suggestion.  The backend emits both events:
-//
-//   * ``ghost``       — the legacy single-suffix inline overlay
-//                       (still consumed by ``acceptGhost`` on Tab).
-//   * ``completions`` — a new list-of-candidates event that opens
-//                       the dropdown picker in ``#autocomplete``.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/fast_complete_picker.test.js
 
 'use strict';
 
@@ -28,11 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom window running the production chat webview.  Returns
- * ``{win, posted}`` where ``posted`` is the array of every message the
- * webview has posted to the (recording) ``vscode`` host stub.
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -66,7 +45,10 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   return {win, posted};
 }
 
@@ -81,7 +63,6 @@ function setInput(win, text) {
   return inp;
 }
 
-/** Simulate the user typing *ch* at the end of the input. */
 function typeChar(win, ch) {
   const inp = win.document.getElementById('task-input');
   inp.value += ch;
@@ -114,7 +95,6 @@ const COMPLETIONS = [
   {type: 'identifier', text: 'fix parse_arguments'},
 ];
 
-// 1. A matching completions event opens the dropdown picker.
 function testCompletionsRendersPicker() {
   const {win} = makeWebview();
   setInput(win, 'fix');
@@ -135,7 +115,6 @@ function testCompletionsRendersPicker() {
   assert.ok(text.includes('fix parse_arguments'));
 }
 
-// 2. The picker groups items by section and uses an icon column.
 function testCompletionsHasSectionsAndIcons() {
   const {win} = makeWebview();
   setInput(win, 'fix');
@@ -157,7 +136,6 @@ function testCompletionsHasSectionsAndIcons() {
   );
 }
 
-// 3. The picker shows a footer with the kbd hints.
 function testCompletionsRendersFooter() {
   const {win} = makeWebview();
   setInput(win, 'fix');
@@ -172,14 +150,13 @@ function testCompletionsRendersFooter() {
   assert.ok(/Esc/.test(footer.textContent));
 }
 
-// 4. A stale completions reply for an OLD query is dropped.
 function testCompletionsStaleQueryDropped() {
   const {win} = makeWebview();
   setInput(win, 'fix the new bug');
   send(win, {
     type: 'completions',
     completions: COMPLETIONS,
-    query: 'fix', // user has typed past this — reply is stale
+    query: 'fix',
   });
   assert.strictEqual(
     visible(win),
@@ -188,8 +165,6 @@ function testCompletionsStaleQueryDropped() {
   );
 }
 
-// 5. The picker stays hidden while an @-mention is being typed —
-//    the file picker takes precedence in that mode.
 function testCompletionsSuppressedDuringAtMention() {
   const {win} = makeWebview();
   setInput(win, 'open @util');
@@ -205,11 +180,10 @@ function testCompletionsSuppressedDuringAtMention() {
   );
 }
 
-// 6. The picker stays hidden when the cursor is not at the end.
 function testCompletionsSuppressedWhenCursorNotAtEnd() {
   const {win} = makeWebview();
   const inp = setInput(win, 'fix the bug now');
-  inp.setSelectionRange(3, 3); // cursor in the middle
+  inp.setSelectionRange(3, 3);
   send(win, {
     type: 'completions',
     completions: COMPLETIONS,
@@ -222,8 +196,6 @@ function testCompletionsSuppressedWhenCursorNotAtEnd() {
   );
 }
 
-// 7. Clicking an item replaces the input with that completion +
-//    a trailing space.
 function testClickAcceptsCompletion() {
   const {win} = makeWebview();
   const inp = setInput(win, 'fix');
@@ -246,8 +218,6 @@ function testClickAcceptsCompletion() {
   );
 }
 
-// 8. The first item is auto-selected (sel class) and ArrowDown
-//    advances the selection.
 function testArrowDownMovesSelection() {
   const {win} = makeWebview();
   const inp = setInput(win, 'fix');
@@ -269,8 +239,6 @@ function testArrowDownMovesSelection() {
   assert.ok(!its2[0].classList.contains('sel'));
 }
 
-// 9. Pressing Tab while the picker is open accepts the highlighted
-//    completion (does NOT fall through to inline ghost accept).
 function testTabAcceptsCompletion() {
   const {win} = makeWebview();
   const inp = setInput(win, 'fix');
@@ -293,9 +261,6 @@ function testTabAcceptsCompletion() {
   assert.strictEqual(visible(win), false);
 }
 
-// 10. REGRESSION — pressing Enter inside the picker must NOT accept
-//     the highlighted item: the picker closes and the typed text is
-//     submitted as-is (Tab is the only keyboard accept key).
 function testEnterDoesNotAcceptCompletion() {
   const {win, posted} = makeWebview();
   const inp = setInput(win, 'fix');
@@ -304,7 +269,6 @@ function testEnterDoesNotAcceptCompletion() {
     completions: COMPLETIONS,
     query: 'fix',
   });
-  // Explicitly highlight a candidate via keyboard navigation first.
   inp.dispatchEvent(
     new win.KeyboardEvent('keydown', {
       key: 'ArrowDown',
@@ -342,9 +306,6 @@ function testEnterDoesNotAcceptCompletion() {
   );
 }
 
-// 10b. The @-mention file picker is the one picker where Enter still
-//      accepts the highlighted item, so file mentions can be
-//      completed with Enter without submitting the chat message.
 function testEnterAcceptsFileMention() {
   const {win, posted} = makeWebview();
   const inp = setInput(win, 'open @util');
@@ -375,7 +336,6 @@ function testEnterAcceptsFileMention() {
   );
 }
 
-// 11. Pressing Escape dismisses the picker.
 function testEscapeDismissesPicker() {
   const {win} = makeWebview();
   const inp = setInput(win, 'fix');
@@ -394,7 +354,6 @@ function testEscapeDismissesPicker() {
   assert.strictEqual(visible(win), false);
 }
 
-// 12. An empty completions list closes any previously visible picker.
 function testEmptyCompletionsHidesPicker() {
   const {win} = makeWebview();
   setInput(win, 'fix');
@@ -416,8 +375,6 @@ function testEmptyCompletionsHidesPicker() {
   );
 }
 
-// 13. The legacy ``ghost`` event must still update inline ghost text
-//    (back-compat).
 function testGhostStillWorks() {
   const {win} = makeWebview();
   const inp = setInput(win, 'fix');
@@ -427,7 +384,6 @@ function testGhostStillWorks() {
     overlay.includes('the bug'),
     'ghost event must still feed the inline overlay',
   );
-  // Tab still accepts the inline ghost when no picker is open.
   const ev = new win.KeyboardEvent('keydown', {
     key: 'Tab',
     bubbles: true,
@@ -437,8 +393,6 @@ function testGhostStillWorks() {
   assert.strictEqual(inp.value, 'fix the bug ');
 }
 
-// 14. Typing a query in the input still posts a ``complete`` command
-//    to the backend (the front-end protocol contract).
 function testTypingRequestsCompletions() {
   const {win, posted} = makeWebview();
   const inp = win.document.getElementById('task-input');
@@ -447,12 +401,9 @@ function testTypingRequestsCompletions() {
   inp.dispatchEvent(new win.Event('input', {bubbles: true}));
   typeChar(win, 'i');
   typeChar(win, 'x');
-  // The webview debounces by 300 ms — fast-forward.
   const sentinel = Date.now() + 600;
   while (Date.now() < sentinel) {
-    // Spin until debounce timer fires.
   }
-  // Drain microtasks/timers — the debounce uses ``setTimeout``.
   return new Promise(resolve => {
     win.setTimeout(() => {
       const cmd = posted.find(p => p && p.type === 'complete');
@@ -463,8 +414,6 @@ function testTypingRequestsCompletions() {
   });
 }
 
-// 15. A late completions reply for the *current* query that the user
-//    has since cleared must not pop the picker over an empty input.
 function testCompletionsForEmptyInputDoesNotShow() {
   const {win} = makeWebview();
   setInput(win, '');
@@ -480,8 +429,6 @@ function testCompletionsForEmptyInputDoesNotShow() {
   );
 }
 
-// 16. Click handlers stop propagation so they don't blur the input
-//    (the picker uses ``mousedown`` to avoid losing focus).
 function testPickerSurvivesMouseDown() {
   const {win} = makeWebview();
   setInput(win, 'fix');
@@ -491,16 +438,11 @@ function testPickerSurvivesMouseDown() {
     query: 'fix',
   });
   const its = items(win);
-  // mousedown must not close the picker before click fires.
   const md = new win.MouseEvent('mousedown', {bubbles: true, cancelable: true});
   its[0].dispatchEvent(md);
   assert.strictEqual(visible(win), true);
 }
 
-// 17. Per-connection scoping: a completions event with a foreign
-//    ``connId`` (a sibling VS Code window) must not affect this
-//    webview.  The frontend never sets ``window._connId``; the test
-//    just confirms that ``connId`` on the event is tolerated.
 function testCompletionsConnIdTolerated() {
   const {win} = makeWebview();
   setInput(win, 'fix');
@@ -510,14 +452,9 @@ function testCompletionsConnIdTolerated() {
     query: 'fix',
     connId: 'sibling-window-uuid',
   });
-  // The webview currently does NOT filter by connId for events
-  // delivered to it (the backend already routes to the right
-  // connection), so it must still render normally.
   assert.strictEqual(visible(win), true);
 }
 
-// 18. Back-compat: a completions event with NO ``query`` field
-//    (older backend / recorded streams) must still render.
 function testCompletionsBackCompatNoQuery() {
   const {win} = makeWebview();
   setInput(win, 'fix');
@@ -529,8 +466,6 @@ function testCompletionsBackCompatNoQuery() {
   );
 }
 
-// 19. Robustness: a completions event with NO ``completions`` field
-//    must close the picker without crashing (defensive default).
 function testCompletionsMissingFieldHandled() {
   const {win} = makeWebview();
   setInput(win, 'fix');
@@ -542,7 +477,6 @@ function testCompletionsMissingFieldHandled() {
   );
 }
 
-// 20. Frequent / trick / identifier icons render distinctly.
 function testCompletionsIconsPerType() {
   const {win} = makeWebview();
   setInput(win, 'fix');
@@ -559,12 +493,10 @@ function testCompletionsIconsPerType() {
   const icons = picker(win).querySelectorAll('.ac-icon');
   assert.strictEqual(icons.length, 4);
   const html = picker(win).innerHTML;
-  // Each glyph must be uniquely present.
   assert.ok(/polygon points="13 2 3 14/.test(html), 'task bolt icon present');
   assert.ok(/M12 2l1.5 5L19 8.5/.test(html), 'trick sparkle icon present');
   assert.ok(/M8 4H6a2 2 0 00-2 2v4/.test(html), 'identifier code icon present');
   assert.ok(/M12 2l3.09 6.26/.test(html), 'frequent star icon present');
-  // Section labels.
   const labels = sections(win);
   assert.ok(labels.includes('History'));
   assert.ok(labels.includes('Frequent'));
@@ -572,8 +504,6 @@ function testCompletionsIconsPerType() {
   assert.ok(labels.includes('From editor'));
 }
 
-// 21. ``acceptCompletion`` must NOT add a second trailing space when
-//    the chosen completion text already ends in whitespace.
 function testAcceptCompletionPreservesTrailingSpace() {
   const {win} = makeWebview();
   const inp = setInput(win, 'fix');
@@ -590,7 +520,6 @@ function testAcceptCompletionPreservesTrailingSpace() {
   );
 }
 
-// 22. The footer must lock all three kbd hints (navigate/accept/dismiss).
 function testCompletionsFooterContents() {
   const {win} = makeWebview();
   setInput(win, 'fix');
@@ -605,7 +534,6 @@ function testCompletionsFooterContents() {
   assert.ok(/dismiss/.test(footer.textContent), 'dismiss hint present');
 }
 
-// 23. ``hlMatch`` highlights the user's prefix in every item.
 function testCompletionsHighlightsPrefix() {
   const {win} = makeWebview();
   setInput(win, 'fix');
@@ -619,17 +547,9 @@ function testCompletionsHighlightsPrefix() {
   assert.strictEqual(hl[0].textContent, 'fix');
 }
 
-// 25. Regression: an EMPTY ``completions`` reply that arrives
-//     while an ``@``-mention file picker is already open must NOT
-//     close the file picker.  The earlier code path called
-//     ``hideAC()`` on the empty-data branch before checking
-//     ``getAtCtx()``, which collapsed the visible file picker when
-//     a delayed empty completions reply for the previously-typed
-//     text raced in.
 function testEmptyCompletionsDoesNotClobberAtMentionPicker() {
   const {win} = makeWebview();
   setInput(win, 'open @util');
-  // Open the @-mention file picker with a non-empty 'files' reply.
   send(win, {
     type: 'files',
     files: [
@@ -643,7 +563,6 @@ function testEmptyCompletionsDoesNotClobberAtMentionPicker() {
     true,
     'precondition: file picker is open after `files` reply',
   );
-  // Now a stale empty completions reply lands.
   send(win, {
     type: 'completions',
     completions: [],
@@ -654,19 +573,12 @@ function testEmptyCompletionsDoesNotClobberAtMentionPicker() {
     true,
     'empty completions reply must NOT close the file picker',
   );
-  // Items still there.
   assert.ok(
     items(win).length >= 2,
     'file picker items must be preserved',
   );
 }
 
-// 27. REGRESSION — existing text erased on accept.  ``identifier``
-//    completions carry only the raw identifier (the backend completes
-//    the *trailing token* of the query, not the whole input), so
-//    accepting one must preserve everything the user already typed
-//    before that token.  The buggy accept path did
-//    ``inp.value = item.text`` and wiped the head of the input.
 function testIdentifierAcceptPreservesExistingText() {
   const {win} = makeWebview();
   const inp = setInput(win, 'please fix the bug in parse_arg');
@@ -688,9 +600,6 @@ function testIdentifierAcceptPreservesExistingText() {
   );
 }
 
-// 28. REGRESSION — same for ``trick`` completions: the backend
-//    matches the *current sentence's* leading partial, so accepting
-//    a trick must preserve every earlier sentence in the input.
 function testTrickAcceptPreservesEarlierSentences() {
   const {win} = makeWebview();
   const inp = setInput(win, 'Fix the crash. Then rep');
@@ -713,8 +622,6 @@ function testTrickAcceptPreservesEarlierSentences() {
   );
 }
 
-// 29. REGRESSION — click-accepting an identifier completion (mouse
-//    path, not Tab) must also preserve the existing text.
 function testIdentifierClickAcceptPreservesExistingText() {
   const {win} = makeWebview();
   const inp = setInput(win, 'rename self.old_na');
@@ -731,9 +638,6 @@ function testIdentifierClickAcceptPreservesExistingText() {
   );
 }
 
-// 26. Tab inside the picker must call preventDefault so the chat
-//    is not submitted (which Tab + Enter shares with the inline
-//    ghost-accept path).
 function testTabInPickerPreventsDefault() {
   const {win} = makeWebview();
   const inp = setInput(win, 'fix');

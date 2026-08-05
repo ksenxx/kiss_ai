@@ -77,16 +77,10 @@ class TestPersistedStepsFallback(unittest.TestCase):
         assert agent is not None
 
         def failing_run(**kwargs: object) -> str:
-            # Mirror the real agent lifecycle: allocate this task's
-            # history row and hand its id back through the
-            # ``_on_task_id_allocated`` callback so the cleanup
-            # ``finally`` persists metrics into a real row.
             task_id, chat_id = _add_task(_TASK_PROMPT)
             callback = kwargs.get("_on_task_id_allocated")
             assert callable(callback)
             callback(task_id, chat_id)
-            # Plain-agent style: this task consumes 3 steps, tracked
-            # only in ``step_count`` — ``total_steps`` stays put.
             assert agent is not None
             agent.step_count = 3
             raise RuntimeError("boom-steps-fallback")

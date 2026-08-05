@@ -153,16 +153,12 @@ class TestPersistedReopenSubscribesRunningSubagent:
             parent_task_id=parent_id, parent_tab_id="tab-parent",
         )
 
-        # 1. The reopened deterministic tab is subscribed to the LIVE
-        #    sub-agent's stream (keyed by the sub-agent's own row id).
         assert (sub_id, frontend_sub_tab) in printer.subscribe_calls, (
             f"reopened running sub tab was not subscribed; got "
             f"{printer.subscribe_calls!r}"
         )
         assert frontend_sub_tab in printer._fanout_targets(sub_id)
 
-        # 2. The broadcast marks the sub-agent as RUNNING so the
-        #    frontend shows the input textbox + buttons.
         opens = [
             e for e in printer.events if e.get("type") == "openSubagentTab"
         ]
@@ -170,9 +166,6 @@ class TestPersistedReopenSubscribesRunningSubagent:
         assert opens[0]["tab_id"] == frontend_sub_tab
         assert opens[0]["isDone"] is False
 
-        # 3. Stop / prompt injection on the reopened tab resolve to the
-        #    sub-agent's backend registry entry — the wiring the input
-        #    surface depends on.
         resolved = server._find_source_tab_for_viewer(frontend_sub_tab)
         assert resolved == f"task-{parent_id}__sub_0", resolved
 
@@ -221,8 +214,6 @@ class TestPersistedReopenSubscribesRunningSubagent:
         ) -> None:
             original_broadcast(self_p, event)
             if event.get("type") == "openSubagentTab":
-                # The sub-agent finishes NOW — same order as
-                # production: pop running_agents, then unregister.
                 ChatSorcarAgent.running_agents.pop(sub_id, None)
                 _RunningAgentState.unregister(backend_tab_id)
 
@@ -254,7 +245,6 @@ class TestPersistedReopenSubscribesRunningSubagent:
         server, printer, _chat_id, parent_id, sub_id = (
             self._setup_rows_and_server()
         )
-        # No running_agents entry and no live registry state → done.
 
         server._open_persisted_subagent_tabs(
             parent_task_id=parent_id, parent_tab_id="tab-parent",
@@ -293,9 +283,6 @@ class TestForceStopBlockedSubagent:
             self.printer = printer
             task_key = kwargs.get("prompt_template", "")
             if task_key == "victim":
-                # Wedged: never polls the stop event.  Sleeps in small
-                # slices so the injected KeyboardInterrupt surfaces at
-                # the next bytecode boundary.
                 deadline = time.monotonic() + 30
                 while time.monotonic() < deadline:
                     time.sleep(0.02)
@@ -345,11 +332,8 @@ class TestForceStopBlockedSubagent:
             "thread in the registry"
         )
 
-        # The exact user gesture: Stop clicked on the sub-agent's tab.
         server._stop_task(victim_tab)
 
-        # The watchdog joins for 1 s, then injects KeyboardInterrupt;
-        # the victim worker unwinds and unregisters its state.
         assert _wait_until(
             lambda: victim_tab
             not in _RunningAgentState.running_agent_states,
@@ -391,11 +375,8 @@ class TestForceStopBlockedSubagent:
             stop = getattr(printer._thread_local, "stop_event", None)
             assert stop is not None
             if task_key == "victim":
-                # Cooperative exit: return as soon as the stop fires.
                 assert _wait_until(stop.is_set, 10)
                 return "success: false\nsummary: victim exited\n"
-            # Sibling: run PAST the watchdog's 1 s join + injection
-            # window on the same reused pool thread.
             try:
                 deadline = time.monotonic() + 2.5
                 while time.monotonic() < deadline:

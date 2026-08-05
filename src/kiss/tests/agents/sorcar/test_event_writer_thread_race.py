@@ -126,8 +126,6 @@ class TestEventWriterThreadRace:
         persisted by ``_flush_chat_events`` (no early return)."""
         task_id, _ = _add_task("flush before writer start task")
         th._stop_event_writer()
-        # Queue directly, bypassing the auto-start in ``_queue_chat_event``,
-        # to reconstruct the "writer never started" state.
         import json as _json
 
         th._event_queue.put(

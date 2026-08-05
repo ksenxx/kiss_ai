@@ -2,52 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression test: in the remote webapp (browser mode) the
-// "Sorcar" wake word must ALWAYS be heard before any speech is
-// captured and sent for transcription.
-//
-// Bug being reproduced: browser-mode ``media/voice.js`` never reset
-// its Vosk recognizer after a wake.  The Python listener does exactly
-// that (voice_wake.py: "Reset so leftover partial text cannot
-// re-trigger after cooldown") but the browser port missed it.  The
-// decoded "sorcar" utterance therefore stayed pending inside the
-// recognizer while the post-wake capture owned the audio; as soon as
-// the capture ended and the recognizer heard audio again, Vosk hit an
-// endpoint and emitted a stale final result whose text was the wake
-// word itself.  That stale result re-fired the wake (the 2s cooldown
-// had long expired during the capture) and the user's NEXT utterance
-// was captured and transcribed even though nobody said "Sorcar"
-// again.
-//
-// The fix mirrors the Python listener: on a wake, browser mode
-// flushes the recognizer with ``retrieveFinalResult()`` (the only
-// reset vosk-browser exposes; the flushed utterance arrives as one
-// 'result' event that is consumed and ignored) and drops recognizer
-// events while a capture owns the audio.
-//
-// Two tests:
-//
-//  1. Deterministic repro with a vosk-faithful recognizer stub (an
-//     un-finalized utterance stays pending while the capture starves
-//     the recognizer and is finalized at the next silence endpoint,
-//     exactly like real Vosk).  FAILS before the fix: the stale
-//     "sorcar" final re-triggers and a second utterance is posted for
-//     transcription without a wake word.
-//
-//  2. REAL voice, REAL speaker, REAL microphone (macOS only, skipped
-//     when the audio environment is unavailable): `say` synthesizes
-//     "Sorcar ... open the read me file please ... this speech has no
-//     wake word at all", `afplay` plays it through the machine's
-//     speakers, the microphone records it (python sounddevice), and
-//     the recording is streamed through the REAL production
-//     media/voice.js pipeline backed by the REAL Vosk
-//     small-English model (python vosk bridge configured with the
-//     exact grammar/word-confidence semantics of the vosk-browser
-//     worker).  Exactly one voiceTranscribe may be posted: the
-//     sentence spoken without the wake word must never be transcribed.
-//
-// Run directly with ``node test/voiceWakeRequiredBeforeTranscribe.test.js``.
 
 'use strict';
 
@@ -60,7 +14,7 @@ const {JSDOM} = require('jsdom');
 
 const VOICE_JS_PATH = path.join(__dirname, '..', 'media', 'voice.js');
 const REPO_ROOT = path.join(__dirname, '..', '..', '..', '..', '..');
-const BLOCK = 4096; // frames per ScriptProcessor block
+const BLOCK = 4096;
 
 let passed = 0;
 const failures = [];
@@ -81,14 +35,6 @@ function flush() {
   return new Promise(resolve => setTimeout(resolve, 0));
 }
 
-/**
- * Build a jsdom window running the REAL media/voice.js in browser
- * mode on top of a stub audio pipeline.  The recognizer is supplied
- * by the caller through `makeRecognizer` so the deterministic test
- * can use a vosk-faithful state machine and the real-audio test can
- * proxy to an actual Vosk process.  The code under test is
- * unmodified production code.
- */
 async function makeBrowserVoice({sampleRate = 16000, makeRecognizer} = {}) {
   const dom = new JSDOM(
     '<!DOCTYPE html><html><body>' +
@@ -161,7 +107,6 @@ async function makeBrowserVoice({sampleRate = 16000, makeRecognizer} = {}) {
 
   win.eval(fs.readFileSync(VOICE_JS_PATH, 'utf8'));
 
-  // Enable listening (browser mode never auto-starts).
   win.document.getElementById('voice-btn').click();
   for (let i = 0; i < 10 && processors.length === 0; i++) await flush();
   assert.strictEqual(processors.length, 1, 'audio pipeline did not start');
@@ -177,8 +122,6 @@ async function makeBrowserVoice({sampleRate = 16000, makeRecognizer} = {}) {
       now += ms;
     },
     feed(samples) {
-      // Wall time advances with the audio so the wake cooldown clock
-      // behaves like production, where blocks arrive in real time.
       now += (samples.length / sampleRate) * 1000;
       processors[0].onaudioprocess({
         inputBuffer: {
@@ -196,19 +139,10 @@ function loudBlock(win, amplitude = 0.1, frames = BLOCK) {
   return samples;
 }
 
-/**
- * A recognizer stub faithful to the Vosk semantics this bug depends
- * on: a decoded utterance stays pending until a silence endpoint
- * finalizes it as a 'result' event, and retrieveFinalResult() (the
- * flush the real vosk-browser worker exposes) finalizes it
- * immediately.  While a capture owns the audio the recognizer gets no
- * blocks, so the pending utterance survives the whole capture — the
- * exact state real Vosk is in after voice.js forgot to reset it.
- */
 class FaithfulRecognizer {
   constructor() {
     this.handlers = {};
-    this.pending = null; // un-finalized decoded utterance text
+    this.pending = null;
     this.silentBlocks = 0;
     this.flushes = 0;
   }
@@ -216,7 +150,6 @@ class FaithfulRecognizer {
   on(event, cb) {
     this.handlers[event] = cb;
   }
-  /** The test "speaks": the model decodes text into a partial. */
   hear(text) {
     this.pending = text;
     this.silentBlocks = 0;
@@ -232,8 +165,6 @@ class FaithfulRecognizer {
     if (this.pending === null) return;
     this.silentBlocks = loud ? 0 : this.silentBlocks + 1;
     if (this.silentBlocks >= 3) {
-      // Endpoint on trailing silence: Vosk finalizes the pending
-      // utterance as a final result.
       const text = this.pending;
       this.pending = null;
       this.handlers.result({
@@ -247,8 +178,6 @@ class FaithfulRecognizer {
     }
   }
   retrieveFinalResult() {
-    // The vosk-browser worker's FinalResult(): flush the pending
-    // utterance and deliver it as a normal 'result' event.
     this.flushes++;
     const text = this.pending || '';
     this.pending = null;
@@ -257,14 +186,9 @@ class FaithfulRecognizer {
   remove() {}
 }
 
-/** Feed n silent blocks through the page's audio pipeline. */
 function silence(v, n) {
   for (let i = 0; i < n; i++) v.feed(new v.win.Float32Array(BLOCK));
 }
-
-// ---------------------------------------------------------------------------
-// Real-audio helpers (macOS: say -> speaker -> microphone -> real Vosk).
-// ---------------------------------------------------------------------------
 
 const RECORDER_PY = `
 import sys, wave
@@ -291,11 +215,6 @@ with wave.open(sys.argv[1], "wb") as w:
     w.writeframes(b"".join(frames))
 `;
 
-// A JSON-lines bridge exposing a REAL Vosk KaldiRecognizer with the
-// exact request handling of the vosk-browser worker: an audio chunk
-// yields either a final 'result' (AcceptWaveform hit an endpoint) or
-// a 'partialresult'; a "final" request flushes via FinalResult() and
-// yields it as a 'result' event.
 const VOSK_BRIDGE_PY = `
 import base64, json, sys
 from vosk import KaldiRecognizer, Model, SetLogLevel
@@ -321,7 +240,6 @@ for line in sys.stdin:
     sys.stdout.flush()
 `;
 
-/** Spawn a line-oriented python helper via the repo's uv environment. */
 function spawnPython(scriptPath, args) {
   return spawn('uv', ['run', 'python', scriptPath].concat(args), {
     cwd: REPO_ROOT,
@@ -329,7 +247,6 @@ function spawnPython(scriptPath, args) {
   });
 }
 
-/** Read one line from a child's stdout. */
 function readLine(child, pending) {
   return new Promise((resolve, reject) => {
     let onData = null;
@@ -357,12 +274,6 @@ function readLine(child, pending) {
   });
 }
 
-/**
- * Recognizer proxy that forwards the page's audio to the real Vosk
- * bridge process and replays the bridge's events through the
- * vosk-browser handler interface.  `idle()` awaits every in-flight
- * request so the test can feed audio deterministically.
- */
 class RealVoskRecognizer {
   constructor(bridge) {
     this.bridge = bridge;
@@ -438,17 +349,12 @@ async function main() {
       });
       const rec = v.recognizer;
 
-      // Round 1: a genuine wake.  300ms of quiet satisfies the
-      // post-alias pause gate, then the spoken "sorcar" arrives as a
-      // partial and fires the wake.
       silence(v, 2);
       rec.hear('sorcar');
       assert.ok(
         v.btn.classList.contains('voice-triggered'),
         'the real wake must flash the mic button red',
       );
-      // The dictated task: speech, then 2s of trailing silence ends
-      // the capture and posts it for transcription.
       v.feed(loudBlock(v.win));
       v.feed(loudBlock(v.win));
       silence(v, 8);
@@ -458,11 +364,6 @@ async function main() {
         'the utterance after the wake word must be transcribed',
       );
 
-      // The recognizer now hears audio again.  Nobody says "Sorcar":
-      // only silence and then a sentence.  Real Vosk still holds the
-      // pre-capture "sorcar" utterance (voice.js never reset it) and
-      // finalizes it at the first silence endpoint as a stale final
-      // result — which must NOT re-trigger the wake.
       silence(v, 3);
       assert.ok(
         !v.btn.classList.contains('voice-triggered'),
@@ -479,15 +380,12 @@ async function main() {
           'transcribed (the reproduced bug: it is)',
       );
 
-      // The fix flushes the recognizer at wake time, exactly like the
-      // Python listener's Reset().
       assert.ok(
         rec.flushes >= 1,
         'the wake must flush/reset the recognizer so the pending ' +
           'wake-word utterance cannot re-trigger later',
       );
 
-      // A genuine second wake still works after the flush.
       silence(v, 2);
       rec.hear('sore car');
       assert.ok(
@@ -512,7 +410,7 @@ async function main() {
         console.log('      (skipped: requires macOS audio tooling)');
         return;
       }
-      for (const tool of ['say', 'afplay', 'osascript', 'uv']) {
+      for (const tool of ['say', 'afplay', 'uv']) {
         if (!which(tool)) {
           console.log(`      (skipped: ${tool} not available)`);
           return;
@@ -525,18 +423,9 @@ async function main() {
       }
 
       const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-wake-req-'));
-      const savedVolume = spawnSync('osascript', [
-        '-e',
-        'output volume of (get volume settings)',
-      ])
-        .stdout.toString()
-        .trim();
       let recorder = null;
       let bridge = null;
       try {
-        // One spoken session: the wake word, a pause, the dictated
-        // task, a long pause (the capture ends and the recognizer
-        // resumes listening), then a sentence WITHOUT any wake word.
         const aiff = path.join(tmpdir, 'session.aiff');
         spawnSync('say', [
           'Sorcar [[slnc 1500]] open the read me file please ' +
@@ -546,7 +435,6 @@ async function main() {
           aiff,
         ]);
 
-        // Record the REAL microphone while the REAL speakers play it.
         const recorderPy = path.join(tmpdir, 'recorder.py');
         fs.writeFileSync(recorderPy, RECORDER_PY);
         const wav = path.join(tmpdir, 'mic.wav');
@@ -554,7 +442,6 @@ async function main() {
         const recorderOut = {buf: ''};
         const ready = await readLine(recorder, recorderOut);
         assert.strictEqual(ready, 'ready', 'mic recorder must start');
-        spawnSync('osascript', ['-e', 'set volume output volume 55']);
         const play = spawnSync('afplay', [aiff]);
         assert.strictEqual(play.status, 0, 'speaker playback must work');
         await new Promise(r => setTimeout(r, 500));
@@ -567,9 +454,6 @@ async function main() {
           'the microphone must have recorded the played session',
         );
 
-        // Stream the microphone recording through the REAL production
-        // voice.js pipeline backed by the REAL Vosk model with the
-        // grammar voice.js itself configures.
         const bridgePy = path.join(tmpdir, 'bridge.py');
         fs.writeFileSync(bridgePy, VOSK_BRIDGE_PY);
         let grammarArg = null;
@@ -604,7 +488,6 @@ async function main() {
           v.feed(block);
           await v.recognizer.idle();
         }
-        // Trailing silence so any open capture finishes.
         silence(v, 40);
         await v.recognizer.idle();
         await flush();
@@ -631,12 +514,6 @@ async function main() {
       } finally {
         if (recorder) recorder.kill();
         if (bridge) bridge.kill();
-        if (savedVolume) {
-          spawnSync('osascript', [
-            '-e',
-            `set volume output volume ${savedVolume}`,
-          ]);
-        }
         fs.rmSync(tmpdir, {recursive: true, force: true});
       }
     },

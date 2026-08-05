@@ -31,6 +31,8 @@ import json
 import os
 from typing import Any
 
+import pytest
+
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.gemini_model import GeminiModel
 from kiss.core.models.model import Model
@@ -43,8 +45,6 @@ from kiss.tests.conftest import (
     requires_openai_api_key,
 )
 
-# One distinct, unguessable secret per hop.  The final model can only know
-# these words if every earlier hop's tool result survived every conversion.
 _SECRETS: dict[int, str] = {
     1: "PLUTONIUM-KITE",
     2: "MARIGOLD-ANVIL",
@@ -144,10 +144,10 @@ def _make_v2() -> OpenAICompatibleModel2:
 class TestMultiHopModelSwitchingLive:
     """Five-hop live hand-off chain: chat -> v2 -> Anthropic -> Gemini -> v2."""
 
+    @pytest.mark.slow
     def test_five_hop_chain_is_lossless(self) -> None:
         """Every hop tool-calls on the accumulated mixed-format history and
         the final model recalls all secrets from all previous hops."""
-        # Hop 1: OpenAI Chat Completions (v1) native chat format.
         m1 = model("gpt-4o")
         assert isinstance(m1, OpenAICompatibleModel)
         m1.initialize(
@@ -161,8 +161,6 @@ class TestMultiHopModelSwitchingLive:
             1,
         )
 
-        # Hop 2: OpenAI Responses API (v2) — history gains reasoning /
-        # function_call / function_call_output items.
         m2 = _handoff(m1, _make_v2())
         _run_tool_turn(
             m2,
@@ -171,7 +169,6 @@ class TestMultiHopModelSwitchingLive:
             2,
         )
 
-        # Hop 3: Anthropic Messages API — must digest chat + Responses items.
         m3 = _handoff(m2, model("claude-haiku-4-5"))
         assert isinstance(m3, AnthropicModel)
         _run_tool_turn(
@@ -181,7 +178,6 @@ class TestMultiHopModelSwitchingLive:
             3,
         )
 
-        # Hop 4: Gemini — must digest chat + Responses + Anthropic blocks.
         m4 = _handoff(m3, model("gemini-2.5-flash"))
         assert isinstance(m4, GeminiModel)
         _run_tool_turn(
@@ -191,8 +187,6 @@ class TestMultiHopModelSwitchingLive:
             4,
         )
 
-        # Hop 5: back to OpenAI Responses (v2).  First prove tools still
-        # work on top of the four-provider history...
         m5 = _handoff(m4, _make_v2())
         _run_tool_turn(
             m5,
@@ -201,9 +195,6 @@ class TestMultiHopModelSwitchingLive:
             1,
         )
 
-        # ...then prove the history is semantically lossless: the model can
-        # only list all four secrets if every hop's tool result survived
-        # every conversion.
         m5.add_message_to_conversation(
             "user",
             "List ALL the secret words that were revealed by the "
@@ -216,10 +207,6 @@ class TestMultiHopModelSwitchingLive:
                 f"final model failed to recall {secret!r}; got: {content!r}"
             )
 
-        # Structural losslessness: every secret must still be present
-        # verbatim somewhere in the handed-off conversation.  (Note the
-        # list object itself may be rebound: v2 rebuilds the conversation
-        # when converting foreign items to native Responses items.)
         serialized = json.dumps(m5.conversation, default=str)
         for secret in _SECRETS.values():
             assert secret in serialized

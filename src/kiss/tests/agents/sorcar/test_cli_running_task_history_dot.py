@@ -10,7 +10,7 @@ When a ``ChatSorcarAgent`` is executed by the ``sorcar`` CLI
 (outside the VS Code / browser UI), the task row in the History
 panel sidebar MUST display the green pulsing-circle "running"
 indicator (CSS class ``sidebar-item-running``, keyframes
-``sidebar-running-pulse``) for as long as the agent is running.
+``running-pulse``) for as long as the agent is running.
 
 Pre-fix the running indicator was never set for CLI-launched tasks:
 ``VSCodeServer._get_history`` builds the ``is_running`` flag from
@@ -88,10 +88,6 @@ class TestCliRunningTaskHistoryDot(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp()
         self.sock_path = str(Path(self.tmpdir) / "sorcar.sock")
 
-        # Redirect persistence to a temp sqlite DB so the
-        # ``task_history`` row we create here doesn't leak into the
-        # user's real ``~/.kiss`` and so ``_load_history`` returns
-        # exactly the rows we control.
         self._saved_persistence = (th._DB_PATH, th._db_conn, th._KISS_DIR)
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
@@ -106,9 +102,6 @@ class TestCliRunningTaskHistoryDot(unittest.TestCase):
         self.loop_thread.start()
 
         self.server = RemoteAccessServer(uds_path=self.sock_path)
-        # ``_send_to_ws_clients`` needs the printer's loop set so it
-        # can hand off writes from the calling thread to the
-        # asyncio loop.
         self.server._printer._loop = self.loop
 
         self.uds_server: asyncio.Server = asyncio.run_coroutine_threadsafe(
@@ -122,12 +115,6 @@ class TestCliRunningTaskHistoryDot(unittest.TestCase):
         os.environ["KISS_SORCAR_SOCK"] = self.sock_path
         _reset_cli_daemon_writer()
 
-        # Capture every event broadcast by ``_get_history`` so we can
-        # inspect the assembled session list.  ``WebPrinter.broadcast``
-        # forwards through ``JsonPrinter.broadcast`` (records +
-        # persists) and then fans out — we only need the recorded
-        # payload here so a simple wrapper around the existing
-        # broadcast suffices.
         self.captured: list[dict[str, Any]] = []
         real_broadcast = self.server._printer.broadcast
 
@@ -201,8 +188,6 @@ class TestCliRunningTaskHistoryDot(unittest.TestCase):
 
     def test_cli_running_task_is_flagged_in_history_response(self) -> None:
         """``_get_history`` must mark CLI-running tasks ``is_running=True``."""
-        # Persist a real row + one event so ``_load_history`` returns
-        # this task in its result set.
         task_id, _chat_id = _add_task(
             task="cli-launched task", chat_id="",
         )
@@ -211,9 +196,6 @@ class TestCliRunningTaskHistoryDot(unittest.TestCase):
             task_id=task_id,
         )
 
-        # Sanity: before any CLI announcement the row must come back
-        # NOT running.  This guards against false positives from
-        # leftover state.
         self.server._vscode_server._get_history(query=None, offset=0)
         sess = self._latest_history_session(task_id)
         assert sess is not None, (
@@ -224,20 +206,11 @@ class TestCliRunningTaskHistoryDot(unittest.TestCase):
             f"task should NOT be marked running before CLI announce: {sess}"
         )
 
-        # Simulate the production CLI: install the real
-        # ``RecordingConsolePrinter`` the CLI installs, set the
-        # task id on the thread-local context, and broadcast the
-        # first event.  ``RecordingConsolePrinter`` sends
-        # ``cliTaskStart`` on the first event seen for a fresh
-        # integer ``taskId`` — the same envelope the CLI emits in
-        # production.
         cli_printer = RecordingConsolePrinter()
         cli_printer._thread_local.task_id = str(task_id)
         cli_printer.broadcast({"type": "text_delta", "text": "hello"})
         self._wait_for_cli_running(task_id)
 
-        # The actual fix point: a fresh ``_get_history`` call must
-        # now return ``is_running=True`` for the CLI-launched task.
         self.captured.clear()
         self.server._vscode_server._get_history(query=None, offset=0)
         sess = self._latest_history_session(task_id)
@@ -250,15 +223,10 @@ class TestCliRunningTaskHistoryDot(unittest.TestCase):
             "the History panel renders the pulsing green dot. Got: "
             f"{json.dumps(sess, sort_keys=True)}"
         )
-        # While the task is running it must NOT be painted as failed
-        # even though the persisted result column still holds the
-        # mid-task ``"Agent Failed Abruptly"`` sentinel.
         assert sess.get("failed") is False, (
             f"running task must not be flagged failed: {sess}"
         )
 
-        # Phase 2: CLI announces end → row must flip back to
-        # ``is_running=False`` and the pulsing dot stops.
         cli_printer.broadcast({
             "type": "result", "text": "done", "summary": "ok",
         })

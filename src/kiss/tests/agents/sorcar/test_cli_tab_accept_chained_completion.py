@@ -99,7 +99,7 @@ def _drive_session(
             def run_driver() -> None:
                 try:
                     driver(pipe, buf)
-                except BaseException as exc:  # propagated after join
+                except BaseException as exc:
                     errors.append(exc)
                     pipe.send_text("\r")
 
@@ -138,7 +138,7 @@ def test_single_tab_accepts_and_chains_all_menu_levels(
             lambda: buf.text == "/resu" and bool(_menu(buf)),
             "the /resume command menu",
         )
-        pipe.send_text("\t")  # ONE Tab: accept -> option menu pops
+        pipe.send_text("\t")
         _wait_for(
             lambda: buf.text == "/resume "
             and bool(_menu(buf))
@@ -146,7 +146,7 @@ def test_single_tab_accepts_and_chains_all_menu_levels(
             "the argument-option menu after one Tab on /resume",
         )
         seen["options"] = snapshot(buf)
-        pipe.send_text("\t")  # ONE Tab: accept --task -> task-id menu
+        pipe.send_text("\t")
         _wait_for(
             lambda: buf.text == "/resume --task "
             and bool(_menu(buf))
@@ -154,7 +154,7 @@ def test_single_tab_accepts_and_chains_all_menu_levels(
             "the task-id menu after one Tab on --task",
         )
         seen["task_ids"] = snapshot(buf)
-        pipe.send_text("\t")  # ONE Tab: accept the id -> remaining menu
+        pipe.send_text("\t")
         _wait_for(
             lambda: buf.text == f"/resume --task {task_id} "
             and bool(_menu(buf))
@@ -162,15 +162,12 @@ def test_single_tab_accepts_and_chains_all_menu_levels(
             "the remaining-option menu after one Tab on the task id",
         )
         seen["remaining"] = snapshot(buf)
-        pipe.send_text("\r")  # Enter submits the typed line unchanged
+        pipe.send_text("\r")
 
     line = _drive_session(tmp_path, driver)
 
-    # Level 1: one Tab on "/resume" popped its argument options.
     assert [d for _, d, _ in seen["options"]] == ["--task", "--limit"]
     assert seen["options"][0][0] == "/resume --task "
-    # Level 2: one Tab on "--task" popped the task ids, DISPLAYED as
-    # "<id>: <description>" but inserting only the bare id.
     assert seen["task_ids"] == [
         (
             f"/resume --task {task_id} ",
@@ -178,9 +175,7 @@ def test_single_tab_accepts_and_chains_all_menu_levels(
             "task",
         ),
     ]
-    # Level 3: one Tab on the id popped the not-yet-used options.
     assert [d for _, d, _ in seen["remaining"]] == ["--limit"]
-    # Enter submitted the typed text — never a completion candidate.
     assert line == f"/resume --task {task_id} "
 
 
@@ -197,7 +192,7 @@ def test_down_navigation_then_tab_accepts_navigated_candidate(
             and [c.display_text for c in _menu(buf)] == ["--task", "--limit"],
             "the argument-option menu",
         )
-        pipe.send_text("\x1b[B\x1b[B")  # Down Down: highlight --limit
+        pipe.send_text("\x1b[B\x1b[B")
         _wait_for(
             lambda: buf.complete_state is not None
             and buf.complete_state.current_completion is not None
@@ -205,7 +200,7 @@ def test_down_navigation_then_tab_accepts_navigated_candidate(
             == "--limit",
             "--limit to be highlighted",
         )
-        pipe.send_text("\t")  # Tab accepts the NAVIGATED candidate
+        pipe.send_text("\t")
         _wait_for(
             lambda: buf.text == "/resume --limit ",
             "--limit to be accepted",
@@ -228,7 +223,7 @@ def test_tab_accept_model_command_pops_model_names(
             and _menu(buf)[0].display_text == "/model",
             "the /model command candidate",
         )
-        pipe.send_text("\t")  # ONE Tab: accept -> model-name menu pops
+        pipe.send_text("\t")
         _wait_for(
             lambda: buf.text == "/model "
             and bool(_menu(buf))
@@ -256,10 +251,8 @@ def test_tab_accept_without_arguments_pops_no_menu(
             and _menu(buf)[0].display_text == "/help",
             "the /help command menu",
         )
-        pipe.send_text("\t")  # ONE Tab: accept; no follow-up candidates
+        pipe.send_text("\t")
         _wait_for(lambda: buf.text == "/help ", "/help to be inserted")
-        # The restarted completion finds nothing; give it a moment and
-        # assert no menu is (or becomes) visible.
         time.sleep(0.3)
         assert not _menu(buf), "no argument menu expected after /help"
         pipe.send_text("\r")
@@ -280,7 +273,7 @@ def test_tab_accept_predictive_history_does_not_restart(
             and _menu(buf)[0].text == "fix the parser bug",
             "the predictive history menu",
         )
-        pipe.send_text("\t")  # ONE Tab: accept; non-slash line, no restart
+        pipe.send_text("\t")
         _wait_for(
             lambda: buf.text == "fix the parser bug",
             "the history candidate to be inserted",

@@ -2,23 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Integration test for the reload-readiness guard used to auto-reload the
-// KISS Sorcar VS Code window after an extension reinstall ("Update" button →
-// install.sh).
-//
-// Runs against the real ``reloadGuard.js`` and the real filesystem (a
-// throwaway temp dir) — no mocks, no fakes.  Exercised directly with ``node``
-// so it needs no VS Code extension host:
-//
-//     node test/reloadGuard.test.js
-//
-// The regression it locks in: a freshly reinstalled extension must be able to
-// reload even when the kiss-web daemon socket is still gone.  install.sh kills
-// the daemon and deletes ~/.kiss/sorcar.sock before writing the update marker,
-// and on a source install the socket only returns once the *post-reload*
-// ensureDependencies() respawns the daemon.  Gating the reload on the socket
-// therefore dead-locked: users had to restart VS Code by hand.
 
 'use strict';
 
@@ -28,10 +11,6 @@ const os = require('os');
 const path = require('path');
 
 const {extensionFileSize, pathExists, isReloadReady} = require('../src/reloadGuard');
-
-// ---------------------------------------------------------------------------
-// Test harness
-// ---------------------------------------------------------------------------
 
 let passed = 0;
 const failures = [];
@@ -65,11 +44,6 @@ function removeSocket() {
   if (fs.existsSync(sockPath)) fs.rmSync(sockPath);
 }
 
-/**
- * Pure replica of the reload-decision predicate in extension.ts'
- * ``triggerReload``.  Kept in lockstep with that logic so the test can drive
- * the full poll loop deterministically without a real timer.
- */
 function shouldReload(state) {
   const {codeReady, socketUp, codeStableForMs, waitedMs, graceMs, timeoutMs} =
     state;
@@ -79,18 +53,10 @@ function shouldReload(state) {
   );
 }
 
-/**
- * Drive the settle poll loop using the REAL ``isReloadReady`` against the REAL
- * filesystem and return the wall-clock (ms) at which a reload would fire.
- *
- * ``onPoll(waitedMs)`` mutates the filesystem to simulate the reinstall
- * progressing (file appearing, growing, socket returning) between polls.
- */
 function runSettleLoop({intervalMs, graceMs, timeoutMs, onPoll}) {
   let prevSize = -1;
   let waited = 0;
   let codeReadySince = -1;
-  // Generous upper bound so a buggy never-fire predicate can't hang the test.
   for (let guard = 0; guard < 1000; guard++) {
     waited += intervalMs;
     if (onPoll) onPoll(waited);
@@ -122,10 +88,6 @@ const INTERVAL = 500;
 const GRACE = 3_000;
 const TIMEOUT = 15_000;
 
-// ---------------------------------------------------------------------------
-// extensionFileSize / pathExists
-// ---------------------------------------------------------------------------
-
 test('extensionFileSize returns -1 for a missing file', () => {
   removeExtJs();
   assert.strictEqual(extensionFileSize(extJsPath), -1);
@@ -147,10 +109,6 @@ test('pathExists reflects socket presence', () => {
   assert.strictEqual(pathExists(sockPath), true);
 });
 
-// ---------------------------------------------------------------------------
-// isReloadReady — flags reported independently
-// ---------------------------------------------------------------------------
-
 test('isReloadReady: missing entry file is never code-ready', () => {
   removeExtJs();
   setSocket();
@@ -170,7 +128,6 @@ test('isReloadReady: empty entry file is never code-ready', () => {
 
 test('isReloadReady: a still-growing file is not code-ready', () => {
   setExtJs('abc');
-  // prevSize differs from current size → not stable yet.
   const r = isReloadReady(extJsPath, sockPath, 1);
   assert.strictEqual(r.codeReady, false);
 });
@@ -195,15 +152,9 @@ test('isReloadReady: stable file WITH socket is fully ready', () => {
   assert.strictEqual(r.ready, true);
 });
 
-// ---------------------------------------------------------------------------
-// Full settle-loop behaviour (the actual regression)
-// ---------------------------------------------------------------------------
-
 test('reload fires immediately once code is stable AND socket is up', () => {
   setExtJs('console.log("ext");');
   setSocket();
-  // File already present and socket up: stable on the 2nd poll (size matches
-  // prevSize), so reload at the second interval.
   const firedAt = runSettleLoop({
     intervalMs: INTERVAL,
     graceMs: GRACE,
@@ -214,9 +165,6 @@ test('reload fires immediately once code is stable AND socket is up', () => {
 });
 
 test('reload fires after the socket grace when the daemon never returns (deadlock broken)', () => {
-  // Reproduces the reported bug: install.sh has installed the new code but
-  // killed the daemon and removed the socket; the socket never comes back
-  // before the reload (it can only return post-reload).
   setExtJs('console.log("new ext");');
   removeSocket();
   const firedAt = runSettleLoop({
@@ -224,12 +172,9 @@ test('reload fires after the socket grace when the daemon never returns (deadloc
     graceMs: GRACE,
     timeoutMs: TIMEOUT,
     onPoll: () => {
-      // Socket stays gone for the whole loop.
       removeSocket();
     },
   });
-  // Code is stable from the 2nd poll; reload after GRACE beyond that, and
-  // strictly before the old 60s / new absolute timeout.
   assert.strictEqual(firedAt, INTERVAL * 2 + GRACE);
   assert.ok(firedAt < TIMEOUT, 'must fire well before the absolute timeout');
 });
@@ -242,13 +187,10 @@ test('a late-returning socket triggers reload before the grace elapses', () => {
     graceMs: GRACE,
     timeoutMs: TIMEOUT,
     onPoll: waited => {
-      // Daemon respawns 1s in — sooner than the 3s grace.
       if (waited >= 1_000) setSocket();
       else removeSocket();
     },
   });
-  // Code stable at poll 2 (1000ms); socket up at 1000ms → reload at 1000ms,
-  // earlier than 1000+grace.
   assert.ok(
     firedAt <= 1_500,
     `expected an early reload on socket return, got ${firedAt}`,
@@ -257,7 +199,6 @@ test('a late-returning socket triggers reload before the grace elapses', () => {
 });
 
 test('absolute timeout reloads even if the code never settles', () => {
-  // Entry file keeps changing size every poll → never code-stable.
   removeExtJs();
   removeSocket();
   let n = 0;
@@ -267,15 +208,11 @@ test('absolute timeout reloads even if the code never settles', () => {
     timeoutMs: TIMEOUT,
     onPoll: () => {
       n += 1;
-      setExtJs('x'.repeat(n)); // strictly growing → prevSize never matches
+      setExtJs('x'.repeat(n));
     },
   });
   assert.strictEqual(firedAt, TIMEOUT);
 });
-
-// ---------------------------------------------------------------------------
-// Summary
-// ---------------------------------------------------------------------------
 
 fs.rmSync(workDir, {recursive: true, force: true});
 

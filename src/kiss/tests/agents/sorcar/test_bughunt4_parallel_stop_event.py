@@ -63,16 +63,12 @@ def test_module_level_run_tasks_parallel_propagates_stop_event(
     captured: dict[str, Any] = {}
 
     def fake_run(self_agent: Any, **kwargs: Any) -> str:
-        # SorcarAgent.run has already resolved self._stop_event from the
-        # worker thread-local by the time it delegates here.
         captured["stop_event"] = getattr(self_agent, "_stop_event", None)
         return "success: true\nsummary: done\n"
 
     parent_class.run = fake_run
     printer = _Printer()
     ev = threading.Event()
-    # The calling (parent) thread carries the stop event, exactly as the
-    # VS Code task runner sets it before SorcarAgent.run executes.
     printer._thread_local.stop_event = ev
     printer._thread_local.task_id = "42"
     try:

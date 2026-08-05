@@ -63,13 +63,6 @@ import kiss.agents.sorcar.persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server.server import VSCodeServer
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-# Binary content for the user's pre-existing "good" pptx, large enough
-# that a partial overwrite is detectable on a byte-for-byte compare and
-# unlikely to match the agent's "partial" bytes by chance.
 _GOOD_PPTX_BYTES: bytes = b"GOOD-DECK\x00" + os.urandom(8192)
 _PARTIAL_PPTX_BYTES: bytes = b"PARTIAL\x00" + os.urandom(4096)
 
@@ -114,10 +107,6 @@ def _file_bytes_on_branch(repo: str, branch: str, path: str) -> bytes:
     return result.stdout
 
 
-# ---------------------------------------------------------------------------
-# Base
-# ---------------------------------------------------------------------------
-
 
 class _WorktreeStopBase(unittest.TestCase):
     """Fresh git repo + isolated persistence DB per test."""
@@ -128,7 +117,6 @@ class _WorktreeStopBase(unittest.TestCase):
         Path(self.repo).mkdir(parents=True, exist_ok=True)
         _init_repo_with_pptx(self.repo)
 
-        # Redirect persistence to a temp DB.
         self._saved_db = (
             _persistence._DB_PATH,
             _persistence._db_conn,
@@ -149,15 +137,12 @@ class _WorktreeStopBase(unittest.TestCase):
 
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
-        # Save the parent class' ``run`` so the test can patch and
-        # restore it without leaking state across tests.
         self._parent_class = cast(Any, SorcarAgent.__mro__[1])
         self._original_run = self._parent_class.run
 
     def tearDown(self) -> None:
         self._parent_class.run = self._original_run
 
-        # Clean up any pending worktree branches the test left behind.
         from kiss.agents.sorcar.running_agent_state import _RunningAgentState
         for tab in list(_RunningAgentState.running_agent_states.values()):
             if tab.agent is not None and tab.agent._wt_pending:
@@ -204,10 +189,6 @@ def _stub_run_partial_then_stop(filename: str, partial: bytes) -> Any:
     parent_class.run = stub_run
     return original
 
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 
 class TestUserStopPreservesMainBranch(_WorktreeStopBase):
@@ -268,33 +249,22 @@ class TestUserStopPreservesMainBranch(_WorktreeStopBase):
             "model": "",
         })
 
-        # Sanity: the stop path was actually taken.
         assert "task_stopped" in self._types() or (
             "task_interrupted" in self._types()
         ), (
             f"Expected task_stopped / task_interrupted; got: {self._types()}"
         )
 
-        # Sanity: the post-stop main branch still has the user's
-        # original good pptx (the partial work is in the worktree
-        # only, not yet merged).
         assert Path(self.repo, "slides.pptx").read_bytes() == _GOOD_PPTX_BYTES
 
-        # User closes the chat tab while the merge view is still
-        # open: the close is deferred (frontend_closed=True).
         self.server._close_tab(tab_id)
 
-        # WebSocket-close path now sends ``all-done`` to drain the
-        # deferred close.  In the buggy code this triggers the
-        # silent squash-merge inside ``_teardown_tab_resources``
-        # → ``_release_worktree`` → ``_do_merge``.
         self.server._cmd_merge_action({
             "action": "all-done",
             "tabId": tab_id,
             "workDir": self.repo,
         })
 
-        # Assertion #1: main's good pptx is untouched.
         main_pptx_now = Path(self.repo, "slides.pptx").read_bytes()
         assert main_pptx_now == _GOOD_PPTX_BYTES, (
             "REGRESSION (lost-slides bug): closing a chat tab after "
@@ -305,8 +275,6 @@ class TestUserStopPreservesMainBranch(_WorktreeStopBase):
             f"(matches PARTIAL: {main_pptx_now == _PARTIAL_PPTX_BYTES})."
         )
 
-        # Assertion #2: the partial work is preserved on a kiss/wt-*
-        # branch so the user can recover it manually.
         branches = _list_kiss_wt_branches(self.repo)
         assert len(branches) == 1, (
             "Expected exactly one kiss/wt-* branch preserved for "

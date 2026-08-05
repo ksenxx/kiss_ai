@@ -34,15 +34,9 @@ import pytest
 from kiss.ui.cli import cli_talk
 from kiss.ui.cli.cli_printer import RecordingConsolePrinter
 
-# A tiny-but-real MP3-looking byte string; the fake player only copies
-# bytes, so any payload works — what matters is byte-exact delivery.
 MP3_BYTES = b"ID3\x03\x00fake-mp3-frames-" + bytes(range(64))
 MP3_B64 = base64.b64encode(MP3_BYTES).decode("ascii")
 
-
-# ---------------------------------------------------------------------------
-# Fake player / say child processes (real subprocesses, no mocks)
-# ---------------------------------------------------------------------------
 
 
 def _write_player(
@@ -170,10 +164,6 @@ def _fresh_player():
     cli_talk.reset_shared_player_for_tests()
 
 
-# ---------------------------------------------------------------------------
-# The reproduction + core playback behaviour through the CLI printer
-# ---------------------------------------------------------------------------
-
 
 class TestCliTalkPlaysAudio:
     """The CLI printer must actually play broadcast ``talk`` audio."""
@@ -255,10 +245,6 @@ class TestCliTalkPlaysAudio:
             time.sleep(0.02)
         assert not audio_path.exists()
 
-
-# ---------------------------------------------------------------------------
-# TTS fallback (no audio / broken audio / broken player)
-# ---------------------------------------------------------------------------
 
 
 class TestCliTalkSayFallback:
@@ -349,16 +335,10 @@ class TestCliTalkSayFallback:
         )
         printer = RecordingConsolePrinter()
         printer.broadcast(_talk_event("into the void"))
-        # Give the worker a moment; any crash surfaces as an exception
-        # in later broadcasts or a dead worker thread.
         time.sleep(0.5)
         printer.broadcast(_talk_event("still alive"))
         time.sleep(0.3)
 
-
-# ---------------------------------------------------------------------------
-# Command resolution (env overrides, quoting)
-# ---------------------------------------------------------------------------
 
 
 class TestCommandResolution:
@@ -403,10 +383,6 @@ class TestCommandResolution:
         else:
             assert cmd is None or cmd[0] in {"espeak", "espeak-ng", "spd-say"}
 
-
-# ---------------------------------------------------------------------------
-# The interactive REPL path: daemon-fanned talk events via the dispatcher
-# ---------------------------------------------------------------------------
 
 
 class TestDispatcherTalkPlayback:

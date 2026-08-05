@@ -41,8 +41,6 @@ def test_negative_pid_lock_is_not_in_use(tmp_path) -> None:
     negative-pid form must never mark the profile in use either."""
     profile = tmp_path / "profile_neg"
     profile.mkdir(parents=True, exist_ok=True)
-    # rsplit('-', 1) on 'somehost--7' gives '7'; craft a target whose
-    # final field parses to a non-positive int directly.
     (profile / "SingletonLock").symlink_to("-0")
     assert _is_profile_in_use(str(profile)) is False
 

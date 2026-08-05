@@ -92,13 +92,10 @@ class TestAdjacentNavigationWithTimestampTies(_TempDbTestBase):
         assert prv2 is not None
         assert prv2["task_id"] == t1
 
-        # Endpoints stay endpoints.
         assert _get_adjacent_task_by_chat_id(chat_id, t1, "prev") is None
         assert _get_adjacent_task_by_chat_id(chat_id, t3, "next") is None
 
     def test_distinct_timestamps_still_ordered_by_time(self) -> None:
-        # Sanity: the id tiebreaker must not override genuine
-        # timestamp ordering (older row with a larger id).
         t1, chat_id = _add_task("first by time")
         t2, _ = _add_task("second by time", chat_id=chat_id)
         db = th._get_db()

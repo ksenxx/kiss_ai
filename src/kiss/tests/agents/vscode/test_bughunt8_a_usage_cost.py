@@ -51,7 +51,6 @@ class TestUsageInfoMalformedCost(unittest.TestCase):
         )
         events = _events_of(printer, "usage_info")
         assert len(events) == 1, printer.emitted
-        # Parity with the result path: malformed cost passes through.
         assert events[0]["cost"] == "$abc", events[0]
 
     def test_result_and_usage_info_parity_on_malformed_cost(self) -> None:

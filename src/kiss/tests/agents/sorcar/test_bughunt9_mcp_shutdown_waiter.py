@@ -30,21 +30,19 @@ import sys
 import threading
 import time
 
+import pytest
+
 from kiss.agents.sorcar.mcp_servers import MCPManager, MCPServerConfig
 
-# disconnect_all waits up to 10 s for each task to unwind gracefully;
-# anything comfortably below CONNECT_TIMEOUT (60 s) proves the waiter
-# was unblocked by the teardown rather than by its own timeout.
 _PROMPT_DEADLINE = 30.0
 
 
+@pytest.mark.slow
 def test_shutdown_unblocks_stuck_connect_waiter() -> None:
     """A connect() blocked on a silent server returns promptly on shutdown."""
     config = MCPServerConfig(
         name="silent",
         transport="stdio",
-        # A real child process that never speaks the MCP protocol, so
-        # the session handshake hangs until the transport dies.
         command=sys.executable,
         args=("-c", "import time; time.sleep(120)"),
     )
@@ -62,7 +60,6 @@ def test_shutdown_unblocks_stuck_connect_waiter() -> None:
 
     waiter = threading.Thread(target=do_connect, daemon=True)
     waiter.start()
-    # Let the connection task reach the hanging initialize() await.
     time.sleep(2.0)
     assert waiter.is_alive(), "connect() should still be blocked mid-handshake"
 

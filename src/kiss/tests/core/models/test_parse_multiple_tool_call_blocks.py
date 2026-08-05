@@ -108,7 +108,6 @@ class TestParseMultipleToolCallBlocks(unittest.TestCase):
         names = [c["name"] for c in calls]
         self.assertIn("Bash", names)
         self.assertIn("go_to_url", names)
-        # No spurious duplicates
         self.assertEqual(len(calls), 2)
 
     def test_unique_ids_per_call(self) -> None:

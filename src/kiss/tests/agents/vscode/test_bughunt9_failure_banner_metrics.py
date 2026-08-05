@@ -80,15 +80,11 @@ class TestFailureBannerMetricsAreDeltas(unittest.TestCase):
         tab = self.server._get_tab("metrics-tab")
         agent = tab.agent
         assert agent is not None
-        # Simulate an agent preserved from a PREVIOUS task on this tab
-        # (pending-worktree reuse): its cumulative counters are non-zero
-        # before this task's run even starts.
         agent.total_tokens_used = 1000
         agent.budget_used = 1.0
         agent.total_steps = 50
 
         def failing_run(**kwargs: object) -> str:
-            # This task consumes a small, known delta, then fails.
             assert agent is not None
             agent.total_tokens_used += 100
             agent.budget_used += 0.01
@@ -112,8 +108,6 @@ class TestFailureBannerMetricsAreDeltas(unittest.TestCase):
         banner = results[-1]
         assert banner.get("success") is False
         assert "boom-metrics" in str(banner.get("text", ""))
-        # The banner must report THIS task's consumption (the delta),
-        # not the agent's cumulative lifetime counters.
         assert banner.get("total_tokens") == 100, (
             f"expected per-task delta 100 tokens, got "
             f"{banner.get('total_tokens')!r} (cumulative leak)"

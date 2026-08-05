@@ -79,8 +79,6 @@ class _ServerHarness:
     def __init__(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-content-tab-")
         tmp = Path(self.tmpdir)
-        # Redirect persistence + config into the sandbox so the test
-        # cannot touch (or be influenced by) the developer's ~/.kiss.
         self._saved_persistence = (th._DB_PATH, th._db_conn, th._KISS_DIR)
         kiss_dir = tmp / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
@@ -91,7 +89,6 @@ class _ServerHarness:
         vc.CONFIG_DIR = tmp / "config"
         vc.CONFIG_PATH = vc.CONFIG_DIR / "config.json"
 
-        # Work dir with the files the chat links will point at.
         self.work_dir = tmp / "repo"
         self.work_dir.mkdir()
         (self.work_dir / "sample.py").write_text(_PY_SOURCE)
@@ -181,8 +178,6 @@ def _open_page(browser, harness):
 
     page.on("websocket", _on_ws)
     page.goto(harness.base_url + "/")
-    # Empty remote_password → auth succeeds automatically; the shim
-    # reveals #app on auth_ok.
     page.wait_for_selector("#task-input", state="visible", timeout=30000)
     page.wait_for_selector(".chat-tab", timeout=30000)
     return context, page, sent_frames
@@ -227,23 +222,18 @@ class TestContentTabFileLinks:
             )
             page.click("#lnk-code")
             page.wait_for_selector(".chat-tab.content-tab", timeout=30000)
-            # New, separate tab — chat tabs untouched.
             n_tabs_after = real_tabs.count()
             assert n_tabs_after == n_tabs_before + 1
             label = page.locator(".chat-tab.content-tab .chat-tab-label")
             assert label.inner_text() == "sample.py"
-            # The content tab is active and shows the file content.
             assert "active" in (
                 page.locator(".chat-tab.content-tab").get_attribute("class")
             )
             page.wait_for_selector(
                 "#content-tab-area .content-tab-view", timeout=30000,
             )
-            # Chat surface hidden while the content tab is active.
             assert page.locator("#output").is_hidden()
             assert page.locator("#input-area").is_hidden()
-            # Monaco (preferred) or the offline fallback must render
-            # the file text.
             page.wait_for_function(
                 """() => {
                      const area = document.getElementById('content-tab-area');
@@ -261,14 +251,11 @@ class TestContentTabFileLinks:
                 "#content-tab-area .content-code-fallback",
             ).count() > 0
             assert monaco_used or fallback_used
-            # Switch back to the chat tab: input text preserved, chat
-            # surface re-revealed, content area hidden.
             page.click(".chat-tab:not(.content-tab) .chat-tab-label")
             page.wait_for_selector("#task-input", state="visible")
             assert page.input_value("#task-input") == "my precious draft"
             assert page.locator("#output").is_visible()
             assert page.locator("#content-tab-area").is_hidden()
-            # And back to the content tab again — still rendered.
             page.click(".chat-tab.content-tab .chat-tab-label")
             page.wait_for_selector("#content-tab-area", state="visible")
         finally:
@@ -324,7 +311,6 @@ class TestContentTabFileLinks:
             page.wait_for_selector(
                 ".chat-tab.content-tab", state="detached", timeout=30000,
             )
-            # Chat tab restored as the active tab with its state.
             page.wait_for_selector("#task-input", state="visible")
             assert page.input_value("#task-input") == "still here"
             remaining = page.locator(
@@ -332,8 +318,6 @@ class TestContentTabFileLinks:
             )
             assert remaining.count() >= 1
             assert remaining.first.get_attribute("data-tab-id") == chat_tab_id
-            # No backend message referenced the content tab, and no
-            # closeTab was sent for ANY tab.
             page.wait_for_timeout(500)
             for frame in sent:
                 assert frame.get("type") != "closeTab"
@@ -414,7 +398,6 @@ class TestContentTabFileLinks:
             )
             page.click("#lnk-dup")
             page.wait_for_selector(".chat-tab.content-tab", timeout=30000)
-            # Go back to the chat tab so the second click is possible.
             page.click(".chat-tab:not(.content-tab) .chat-tab-label")
             page.wait_for_selector("#lnk-dup", state="visible")
             page.click("#lnk-dup")

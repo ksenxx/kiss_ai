@@ -130,7 +130,6 @@ class TestSubagentTitlesAreVisuallyDistinct:
     """
 
     def test_titles_differ_when_descriptions_share_prefix(self) -> None:
-        # Simulate what the frontend handler builds.
         descriptions = [
             "Research and summarize: WebAssembly portable binary...",
             "Research and summarize: Rust ownership model with...",
@@ -143,8 +142,6 @@ class TestSubagentTitlesAreVisuallyDistinct:
         assert len(set(titles)) == 3, (
             "titles must be unique even when descriptions share prefix"
         )
-        # First few characters (typical visible portion in a narrow tab
-        # bar) must already differ — this is the actual UX guarantee.
         prefixes = [t[:4] for t in titles]
         assert len(set(prefixes)) == 3, (
             f"first 4 chars of titles must differ: {prefixes}"

@@ -70,27 +70,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Trailing ``@<partial-path>`` token that triggers the file/folder picker.
 _AT_RE = re.compile(r"@([^\s]*)$")
-# ``/model <partial>`` line whose partial model name is fast-completed.
 _MODEL_CMD_RE = re.compile(r"^\s*/model\s+(.*)$")
 
-# Modifier+Enter escape sequences emitted by terminals via either
-# xterm's ``modifyOtherKeys`` mode (``ESC[27;<mod>;13~``) or the
-# kitty/CSI-u keyboard protocol (``ESC[13;<mod>u``).  prompt_toolkit
-# pre-maps the modifyOtherKeys variants for modifiers 2/5/6 to
-# :data:`Keys.ControlM` in
-# :data:`prompt_toolkit.input.ansi_escape_sequences.ANSI_SEQUENCES`
-# *before* any key bindings run, so without :func:`_unmap_enter_aliases`
-# below Shift/Ctrl/Ctrl-Shift+Enter on iTerm2 / macOS Terminal.app /
-# the VS Code integrated terminal would all be indistinguishable from
-# plain Enter and submit the buffer.  We delete those entries from the
-# table so the raw escape sequence reaches the tuple key-bindings
-# registered further down, which insert a real newline.  The canonical
-# table (modifiers 2..16, Shift through Cmd+Ctrl+Alt+Shift) lives in
-# :mod:`kiss.ui.cli.cli_panel` and is shared with
-# ``cli_steering._NEWLINE_AFTER_ESC`` so the two input paths can never
-# drift apart.
 _MODIFY_OTHER_KEYS_ENTER = MODIFY_OTHER_KEYS_ENTER
 
 
@@ -243,8 +225,6 @@ def _submit_enter(event: KeyPressEvent) -> None:
         and state.current_completion is not None
         and _AT_RE.search(state.original_document.text_before_cursor)
     ):
-        # @-mention file picker: keep the completed ``./<path>``
-        # mention in the buffer and close the menu without submitting.
         buf.complete_state = None
         return
     buf.cancel_completion()
@@ -310,21 +290,6 @@ def _newline_ctrl_j(event: KeyPressEvent) -> None:
     _insert_newline(event)
 
 
-# Modifier+Enter escape sequences delivered by modern terminals as
-# either the xterm ``modifyOtherKeys`` form ``ESC[27;<mod>;13~`` or the
-# kitty/CSI-u form ``ESC[13;<mod>u`` — with ``<mod>`` = 2 (Shift),
-# 3 (Alt), 4 (Alt+Shift), 5 (Ctrl), 6 (Ctrl+Shift), 7 (Ctrl+Alt),
-# 8 (Ctrl+Alt+Shift).  prompt_toolkit pre-maps the modifyOtherKeys
-# forms for 2/5/6 to :data:`Keys.ControlM` (plain Enter); the
-# :func:`_unmap_enter_aliases` call in ``PtkLineReader.__init__``
-# removes them before any key is parsed so the parser
-# falls back to per-character delivery and the tuple bindings below
-# match the raw escape sequence, inserting a real ``\n`` into the
-# buffer.  Every modifier+Enter combination would otherwise be
-# ambiguous with plain Enter on iTerm2 / macOS Terminal.app / the
-# VS Code integrated terminal — see the regression tests in
-# ``tests/agents/sorcar/test_cli_multiline_input.py``.
-
 
 def _bind_newline_sequence(*keys: str) -> None:
     """Register *keys* as a multi-key binding that inserts ``\\n``.
@@ -353,16 +318,9 @@ def _sequence_keys(seq: str) -> tuple[str, ...]:
     return ("escape", *tuple(seq[1:]))
 
 
-# xterm modifyOtherKeys: ``ESC[27;<mod>;13~`` for every supported modifier.
 for _seq in _MODIFY_OTHER_KEYS_ENTER:
     _bind_newline_sequence(*_sequence_keys(_seq))
 
-# kitty/CSI-u: ``ESC[13;<mod>u`` for Shift / Alt / Ctrl / Ctrl-Shift / …
-# and the Meta-bit-set combinations 9..16 (Cmd+Enter and friends on
-# macOS terminals that report the Meta modifier).  ``_sequence_keys``
-# splits every byte after ESC into its own tuple key, so two-digit
-# modifier values naturally span two tuple keys as the prompt_toolkit
-# parser (which matches one byte at a time) requires.
 for _seq in CSI_U_ENTER:
     _bind_newline_sequence(*_sequence_keys(_seq))
 
@@ -426,12 +384,8 @@ class PtkCompleter(Completer):
         Returns:
             The completions to display, best match first.
         """
-        del complete_event  # All categories pop while typing.
+        del complete_event
         line = document.text_before_cursor
-        # The branch order (@-mention → /model → slash command → flag
-        # value → argument options → predictive) is single-sourced in
-        # ``CliCompleter.completion_branch``, shared with the readline
-        # menu.
         kind, payload = self.cli.completion_branch(line)
         if kind == "at":
             return self._at_mention_completions(payload.group(1))
@@ -621,14 +575,6 @@ class PtkLineReader:
     """
 
     def __init__(self, completer: CliCompleter, history_path: Path) -> None:
-        # Strip prompt_toolkit's pre-mapped modifier+Enter aliases
-        # only now — when sorcar actually builds its own prompt — so
-        # merely importing this module can no longer mutate the
-        # process-global ``ANSI_SEQUENCES`` table out from under other
-        # prompt_toolkit consumers (w2 F19).  The input parser looks
-        # the table up at key-parse time, so unmapping here (before
-        # the first ``read``) is exactly as effective as the old
-        # import-time call.
         _unmap_enter_aliases()
         ptk_path = history_path.with_name(history_path.name + ".ptk")
         _migrate_readline_history(history_path, ptk_path)
@@ -637,32 +583,9 @@ class PtkLineReader:
             complete_while_typing=True,
             key_bindings=_KEY_BINDINGS,
             history=FileHistory(str(ptk_path)),
-            # Multi-line input: Alt+Enter / Ctrl+J / Shift+Enter /
-            # Ctrl+Enter / Ctrl+Shift+Enter all insert a real ``\n``
-            # into the buffer (see the bindings at module level — both
-            # the xterm ``modifyOtherKeys`` and the kitty/CSI-u
-            # encodings are covered); plain Enter still submits via
-            # the unfiltered Enter binding above, which first cancels
-            # any open completion menu (except the @-mention picker).
-            # Without ``multiline=True`` prompt_toolkit would short-
-            # circuit Enter to "accept-line" before our key bindings
-            # ever ran, so the user could never type a newline.
             multiline=True,
-            # Word-wrap long lines onto the next visual row instead of
-            # scrolling the input horizontally off-screen.  The
-            # framed panel paints a ``│`` on each visual row via
-            # :func:`_prompt_continuation`, so the box stays closed
-            # even when the typed task wraps.
             wrap_lines=True,
             prompt_continuation=_prompt_continuation,
-            # Reserve enough screen rows for the longest typing-triggered
-            # menu — currently the ``/`` slash-command list with every
-            # built-in command from :data:`SLASH_COMMANDS` (and a few
-            # custom commands).  prompt_toolkit's :class:`CompletionsMenu`
-            # caps its own height at 16 rows, so reserving the same number
-            # makes every slash command visible at once instead of being
-            # clipped to the previous default of 8 (which forced the user
-            # to scroll Up/Down to discover the rest).
             reserve_space_for_menu=16,
         )
         _enforce_min_input_height(self.session, _MIN_BODY_ROWS)

@@ -60,14 +60,9 @@ class TestViewerStopCrossTaskHijack(unittest.TestCase):
         z_state = self.server._get_tab(z_launcher)
         _register_state(viewer)
 
-        # Task 9101 ran earlier from old_launcher and FINISHED; the
-        # viewer watched it.  cleanup_task preserves the subscriber
-        # set, so the stale subscription survives.
         self.server.printer.subscribe_tab("9101", old_launcher)
         self.server.printer.subscribe_tab("9101", viewer)
 
-        # old_launcher has since started a NEW unrelated task 9555
-        # (viewer NOT subscribed): it owns a live stop_event again.
         assert old_state.agent is not None
         old_state.agent._last_task_id = "9555"
         old_state.is_task_active = True
@@ -80,8 +75,6 @@ class TestViewerStopCrossTaskHijack(unittest.TestCase):
         old_state.task_thread = unrelated_worker
         self.server.printer.subscribe_tab("9555", old_launcher)
 
-        # Task 9202 is RUNNING from z_launcher and the viewer is
-        # subscribed to it (e.g. via _reattach_running_chat).
         assert z_state.agent is not None
         z_state.agent._last_task_id = "9202"
         z_state.is_task_active = True

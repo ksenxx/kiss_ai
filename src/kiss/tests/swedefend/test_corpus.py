@@ -39,15 +39,13 @@ def test_cwe_coverage():
     cwes = {c.cwe_type for c in corpus if c.cwe_type}
     expected = {"CWE-78", "CWE-502", "CWE-327", "CWE-94", "CWE-22"}
     # The corpus additionally contains false-premise cases with different CWE
-    # tags (e.g. CWE-284, CWE-352); those are welcome extras — we only require
-    # the SWExploit-canonical five to be a subset.
     assert expected.issubset(cwes), f"Missing CWEs: {expected - cwes}"
 
 
 def test_corpus_structure():
     """Verify each case has required fields."""
     corpus = generate_corpus()
-    for case in corpus[:5]:  # sample
+    for case in corpus[:5]:
         assert case.name
         assert case.issue_text
         assert case.patch_source
