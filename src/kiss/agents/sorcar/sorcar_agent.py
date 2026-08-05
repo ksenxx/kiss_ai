@@ -1097,12 +1097,15 @@ class SorcarAgent(RelentlessAgent):
             YAML string with 'success' and 'summary' keys.
         """
         all_tools = self._get_tools() + tools
-        if getattr(self, "_tab_id", None):
-            self.pre_step_hook = self._drain_pending_user_messages
-            self.tool_call_guard = self._block_finish_when_user_message_pending
-        else:
-            self.pre_step_hook = None
-            self.tool_call_guard = None
+        # Always install the steering hooks: they are self-guarding
+        # no-ops when no follow-up channel exists (empty agent-local
+        # ``pending_user_messages`` queue and a printer without the
+        # duck-typed ``drain_pending_user_messages`` bridge), and both
+        # channels — the server UI's printer bridge and the CLI
+        # steering session's agent-local queue — must be drained when
+        # present.
+        self.pre_step_hook = self._drain_pending_user_messages
+        self.tool_call_guard = self._block_finish_when_user_message_pending
         return super().perform_task(all_tools, attachments=attachments)
 
     def _reset(
@@ -1454,7 +1457,7 @@ def run_tasks_parallel(
             tl.stop_event = parent_stop_event
         agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
         sub_agents[idx] = agent
-        agent._subagent_info = {"parent_task_id": "", "parent_tab_id": ""}
+        agent._subagent_info = {"parent_task_id": ""}
         if usage_monitor is not None:
             usage_monitor.track(agent)
         try:

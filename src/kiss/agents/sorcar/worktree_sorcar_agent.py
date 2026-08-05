@@ -194,7 +194,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             return False
         if not self.auto_commit_enabled:
             return False
-        commit_run_id = f"autocommit-{self._tab_id}-{time.time_ns()}"
+        commit_run_id = f"autocommit-{time.time_ns()}"
         return auto_commit_changes(
             self._wt.wt_dir,
             self._last_user_prompt or None,

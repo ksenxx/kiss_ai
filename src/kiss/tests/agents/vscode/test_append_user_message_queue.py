@@ -17,9 +17,13 @@ Covers:
   entry, wrapping it as ``User says: <msg>. Take the message into
   account and finish your task.`` (then leaves the queues empty so
   the same message is never injected twice).
-* Hook lifecycle: ``SorcarAgent.perform_task`` installs the drain as
-  ``pre_step_hook`` (and the finish guard as ``tool_call_guard``)
-  only when ``_tab_id`` is set.
+* Hook lifecycle: ``SorcarAgent.perform_task`` always installs the
+  drain as ``pre_step_hook`` (and the finish guard as
+  ``tool_call_guard``); both are self-guarding no-ops when neither
+  follow-up channel (the printer's duck-typed
+  ``drain_pending_user_messages`` bridge or the agent-local
+  ``pending_user_messages`` queue used by CLI steering) has anything
+  queued.
 * ``KISSAgent.pre_step_hook`` runs BEFORE each model call.
 * End-to-end: ``_run_task`` clears any leftover queued messages.
 
@@ -409,12 +413,10 @@ class TestPreStepHookInstalledByPerformTask:
     def teardown_method(self) -> None:
         _clear_registry()
 
-    def _run_and_capture(self, tab_id: str) -> dict[str, Any]:
+    def _run_and_capture(self, printer: Any) -> dict[str, Any]:
         from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 
         agent = SorcarAgent("Sorcar Regression")
-        if tab_id:
-            agent._tab_id = tab_id  # type: ignore[attr-defined]
 
         captured: dict[str, Any] = {}
         original_perform_task = RelentlessAgent.perform_task
@@ -437,6 +439,7 @@ class TestPreStepHookInstalledByPerformTask:
                 max_steps=2,
                 max_budget=1.0,
                 verbose=False,
+                printer=printer,
             )
         finally:
             RelentlessAgent.perform_task = original_perform_task  # type: ignore[method-assign]
@@ -444,7 +447,9 @@ class TestPreStepHookInstalledByPerformTask:
         return captured
 
     def test_executor_receives_live_drain_hook(self) -> None:
-        captured = self._run_and_capture("tab-survive")
+        from kiss.server.json_printer import JsonPrinter
+
+        captured = self._run_and_capture(JsonPrinter())
         agent = captured["agent"]
         assert captured.get("hook") is not None
         assert captured["hook"] == agent._drain_pending_user_messages
@@ -454,10 +459,18 @@ class TestPreStepHookInstalledByPerformTask:
             == agent._block_finish_when_user_message_pending
         )
 
-    def test_no_tab_id_means_no_hook(self) -> None:
-        captured = self._run_and_capture("")
-        assert captured.get("hook") is None
-        assert captured.get("guard") is None
+    def test_hooks_installed_without_drain_capable_printer(self) -> None:
+        """CLI steering queues follow-ups on the agent-local
+        ``pending_user_messages`` list even when no printer is attached
+        (``sorcar -t ... --verbose false``), so the hooks must be
+        installed regardless of printer capability."""
+        captured = self._run_and_capture(None)
+        agent = captured["agent"]
+        assert captured.get("hook") == agent._drain_pending_user_messages
+        assert (
+            captured.get("guard")
+            == agent._block_finish_when_user_message_pending
+        )
 
 
 class TestSteeringMessageWrappedForModel:
