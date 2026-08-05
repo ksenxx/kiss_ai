@@ -22,14 +22,6 @@ import unittest
 
 from kiss.server.server import VSCodeServer
 
-# The historical ``TestBroadcastOrderingRace`` exercised the
-# ``_stdout_lock`` ordering guarantee inside the now-deleted
-# ``VSCodePrinter``.  Under the single-daemon architecture the
-# extension talks to ``kiss-web`` over a Unix-domain socket and there
-# is no stdout transport — ``WebPrinter._send_to_ws_clients`` performs
-# the socket-level writes through a dedicated asyncio loop, so the
-# stdout-order invariant the old test pinned no longer exists.
-
 
 class TestFileCacheOverwriteRace(unittest.TestCase):
     """``VSCodeServer._get_files`` must not overwrite a newer cache.

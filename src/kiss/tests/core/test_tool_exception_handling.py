@@ -6,8 +6,8 @@
 
 import yaml
 
+from kiss.agents.sorcar.relentless_agent import finish
 from kiss.core.kiss_agent import KISSAgent
-from kiss.core.relentless_agent import finish
 
 
 def _make_agent() -> KISSAgent:

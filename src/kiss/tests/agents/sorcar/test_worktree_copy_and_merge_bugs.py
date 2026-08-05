@@ -78,8 +78,6 @@ class TestB1ArrowFilenameNotARename:
         _git(repo, "add", ".")
         _git(repo, "commit", "-m", "add x and y")
 
-        # A perfectly ordinary untracked file whose NAME contains the
-        # porcelain rename separator.  Status line: ``?? x -> y``.
         (repo / "x -> y").write_text("dirty arrow file\n")
 
         wt_dir = tmp_path / "wt"
@@ -154,7 +152,6 @@ class TestB2QuotedRenameSplit:
         _git(repo, "commit", "-m", "add tabbed file")
         _git(repo, "mv", old, new)
 
-        # Sanity: porcelain emits both sides quoted.
         status = _git(repo, "status", "--porcelain")
         assert '" -> "' in status.stdout
 
@@ -225,7 +222,6 @@ class TestB3StashBeforeCheckout:
         _git(repo, "add", ".")
         _git(repo, "commit", "-m", "add base.txt")
 
-        # Agent worktree branched from main with one agent commit.
         wt_dir = tmp_path / "wt"
         branch = "kiss/wt-b3"
         assert GitWorktreeOps.create(repo, branch, wt_dir)
@@ -233,17 +229,12 @@ class TestB3StashBeforeCheckout:
         _git(wt_dir, "add", ".")
         _git(wt_dir, "commit", "-m", "agent work")
 
-        # User switches to a feature branch, commits a different
-        # base.txt, then leaves an UNCOMMITTED edit on top — the exact
-        # situation where `git checkout main` refuses unless the dirty
-        # state is stashed first.
         _git(repo, "checkout", "-b", "feature")
         (repo / "base.txt").write_text("feature version\n")
         _git(repo, "add", ".")
         _git(repo, "commit", "-m", "feature change to base.txt")
         (repo / "base.txt").write_text("dirty uncommitted edit\n")
 
-        # Sanity: plain checkout of main must fail right now.
         checkout = _git(repo, "checkout", "main")
         assert checkout.returncode != 0, (
             "precondition: dirty checkout must fail without a stash"
@@ -257,7 +248,7 @@ class TestB3StashBeforeCheckout:
             wt_dir=wt_dir,
             baseline_commit=None,
         )
-        result, stash_warning = agent._do_merge(wt)
+        result, stash_warning, _cleanup = agent._do_merge(wt)
 
         assert result == MergeResult.SUCCESS, (
             f"merge must stash before checkout; got {result} "
@@ -266,9 +257,6 @@ class TestB3StashBeforeCheckout:
         assert GitWorktreeOps.current_branch(repo) == "main"
         assert (repo / "agent_work.txt").read_text() == "agent output\n"
 
-        # The user's dirty edit must not be lost: either it was popped
-        # back into the working tree, or it is still safe in the stash
-        # (with a warning telling the user how to recover it).
         stash_list = _git(repo, "stash", "list").stdout.strip()
         if stash_warning:
             assert stash_list, (
@@ -293,7 +281,6 @@ class TestB3StashBeforeCheckout:
         _git(wt_dir, "add", ".")
         _git(wt_dir, "commit", "-m", "agent work")
 
-        # Dirty edit while staying on main (no checkout needed).
         (repo / "base.txt").write_text("dirty on main\n")
 
         agent = WorktreeSorcarAgent("test-b3b")
@@ -304,7 +291,7 @@ class TestB3StashBeforeCheckout:
             wt_dir=wt_dir,
             baseline_commit=None,
         )
-        result, stash_warning = agent._do_merge(wt)
+        result, stash_warning, _cleanup = agent._do_merge(wt)
 
         assert result == MergeResult.SUCCESS
         assert stash_warning == ""

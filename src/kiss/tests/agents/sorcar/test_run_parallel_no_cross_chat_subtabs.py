@@ -79,20 +79,13 @@ class TestOpenSubagentTabGuardsOnParentTabId:
         block = _case_block(
             "case 'openSubagentTab':", "case 'subagentDone':",
         )
-        # Must check ev.parent_tab_id and bail when the receiving
-        # webview's tabs[] does not contain a tab with that id.
         assert "ev.parent_tab_id" in block
         assert "tabs.find" in block, (
             "openSubagentTab handler must consult local tabs[] to "
             "filter phantom sub-tab broadcasts from other webviews / "
             "chats.  Block was:\n" + block
         )
-        # The guard must short-circuit; "break" or "return" must
-        # appear in the early-guard expression that references
-        # parent_tab_id and tabs.find.
         guard_idx = block.find("ev.parent_tab_id")
-        # Look only at the early part of the block before makeTab so
-        # the guard is provably an EARLY return.
         make_tab_idx = block.find("makeTab")
         assert 0 < guard_idx < make_tab_idx, (
             "The parent_tab_id guard must appear BEFORE makeTab so "
@@ -124,11 +117,10 @@ class TestNewTabHandlerGuardsOnParentTabId:
         )
         assert "tabs.find" in block
         guard_idx = block.find("ev.parent_tab_id")
-        # Use the call form ``createNewTab()`` rather than the bare
-        # identifier so we don't match a doc-comment occurrence.
-        create_idx = block.find("createNewTab()")
+        create_idx = block.find("createBackgroundSubagentTab(")
         assert 0 < guard_idx < create_idx, (
-            "The parent_tab_id guard must appear BEFORE createNewTab()."
+            "The parent_tab_id guard must appear BEFORE the tab is "
+            "created (createBackgroundSubagentTab)."
         )
 
 
@@ -140,11 +132,8 @@ class TestSubagentNewTabBroadcastIncludesParentTabId:
 
     def test_broadcast_payload_includes_parent_tab_id_field(self) -> None:
         src = CHAT_AGENT_PY.read_text()
-        # Locate the ``"type": "new_tab"`` literal — there is only
-        # one such broadcast in the file (the sub-agent spawn one).
         idx = src.find('"type": "new_tab"')
         assert idx > 0, "could not locate sub-agent new_tab broadcast"
-        # Look at the surrounding ~600 chars (the dict literal).
         block = src[idx : idx + 600]
         assert '"parent_tab_id"' in block, (
             "Sub-agent new_tab broadcast must include parent_tab_id so "
@@ -160,11 +149,9 @@ class TestSubagentNewTabBroadcastIncludesParentTabId:
         sub-agent via ``_subagent_info`` so ``ChatSorcarAgent.run``
         can stamp the ``new_tab`` broadcast with it."""
         src = CHAT_AGENT_PY.read_text()
-        # Locate _run_tasks_parallel body
         marker = "def _run_tasks_parallel"
         start = src.find(marker)
         assert start > 0
-        # Bound by next def
         next_def = src.find("\n    def ", start + len(marker))
         block = src[start:next_def] if next_def > 0 else src[start:]
         assert "parent_tab_id" in block, (

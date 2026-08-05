@@ -73,8 +73,6 @@ class TestAwaitUserResponseLockingFix(unittest.TestCase):
                 import time
                 time.sleep(0.05)
 
-        # Subscribe the tab to its task so ``_await_user_response``
-        # can find the tab's ``user_answer_queue``.
         server.printer.subscribe_tab("test-tab", "test-tab")
 
         def call_await() -> None:

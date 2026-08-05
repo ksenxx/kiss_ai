@@ -55,10 +55,6 @@ from kiss.server.web_server import (
     _read_url_from_stderr,
 )
 
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
-
 
 def _find_free_port() -> int:
     """Return a free TCP port on localhost."""
@@ -96,10 +92,6 @@ class _ConfigSnapshot:
             CONFIG_PATH.unlink()
 
 
-# ---------------------------------------------------------------------------
-# H1 — open-by-default authentication: tunnel must not start when no password
-# ---------------------------------------------------------------------------
-
 
 class TestH1NoTunnelWithoutPassword(IsolatedAsyncioTestCase):
     """The cloudflared tunnel must not start when remote_password is empty."""
@@ -111,7 +103,7 @@ class TestH1NoTunnelWithoutPassword(IsolatedAsyncioTestCase):
         self.server = RemoteAccessServer(
             host="127.0.0.1",
             port=self.port,
-            use_tunnel=True,  # ← important: ask for a tunnel
+            use_tunnel=True,
             work_dir=tempfile.mkdtemp(),
         )
         await self.server.start_async()
@@ -134,7 +126,7 @@ class TestH1NoTunnelWithoutPassword(IsolatedAsyncioTestCase):
     async def test_watchdog_does_not_start_tunnel_without_password(self) -> None:
         """The watchdog tick must also refuse to spawn the tunnel."""
         self.server._tunnel_proc = None
-        self.server._tunnel_next_retry = 0.0  # bypass backoff
+        self.server._tunnel_next_retry = 0.0
         self.server.use_tunnel = True
         await self.server._check_and_restart_tunnel()
         self.assertIsNone(self.server._tunnel_proc)
@@ -147,7 +139,6 @@ class TestH1TunnelStartsWhenPasswordSet(IsolatedAsyncioTestCase):
         self._snap = _ConfigSnapshot().__enter__()
         save_config({"remote_password": "real-secret"})
         self._tmpdir = tempfile.mkdtemp()
-        # Drop in a fake cloudflared that immediately announces a URL.
         cf = os.path.join(self._tmpdir, "cloudflared")
         with open(cf, "w") as f:
             f.write(
@@ -190,10 +181,6 @@ class TestH1TunnelStartsWhenPasswordSet(IsolatedAsyncioTestCase):
         )
 
 
-# ---------------------------------------------------------------------------
-# H2 — cloudflared subprocess stdout must not be a PIPE
-# ---------------------------------------------------------------------------
-
 
 class TestH2StdoutDevnull(IsolatedAsyncioTestCase):
     """``_spawn_cloudflared`` must not connect cloudflared's stdout to a pipe."""
@@ -202,14 +189,10 @@ class TestH2StdoutDevnull(IsolatedAsyncioTestCase):
         self._snap = _ConfigSnapshot().__enter__()
         save_config({"remote_password": "pw"})
         self._tmpdir = tempfile.mkdtemp()
-        # Fake cloudflared that floods stdout to prove the pipe would deadlock.
         cf = os.path.join(self._tmpdir, "cloudflared")
         with open(cf, "w") as f:
             f.write(
                 "#!/bin/bash\n"
-                # >256 KiB of stdout; with stdout=PIPE and no reader,
-                # cloudflared would block on write() once the pipe
-                # buffer (~64 KiB) fills.
                 "yes 'STDOUT_FLOOD_LINE_FOR_H2_TEST' | head -c 262144\n"
                 'echo "INF https://h2-ok.trycloudflare.com" >&2\n'
                 "sleep 30\n"
@@ -257,7 +240,6 @@ class TestH2StdoutDevnull(IsolatedAsyncioTestCase):
             self.server._tunnel_proc.stdout,
             "cloudflared stdout must be DEVNULL, not a PIPE",
         )
-        # Also verify the URL was extracted from stderr (sanity).
         self.assertEqual(url, "https://h2-ok.trycloudflare.com")
 
     async def test_chatty_stdout_does_not_deadlock(self) -> None:
@@ -277,10 +259,6 @@ class TestH2StdoutDevnull(IsolatedAsyncioTestCase):
         self.assertEqual(url, "https://h2-ok.trycloudflare.com")
         self.assertLess(elapsed, 10, "tunnel start should be fast")
 
-
-# ---------------------------------------------------------------------------
-# H3 — constant-time password comparison
-# ---------------------------------------------------------------------------
 
 
 class TestH3ConstantTimeCompare(unittest.TestCase):
@@ -347,22 +325,15 @@ class TestH3CompareDigestActuallyCalled(IsolatedAsyncioTestCase):
         finally:
             secrets_mod.compare_digest = original  # type: ignore[assignment]
 
-        # At least one comparison must have happened, and it must be over
-        # bytes (the H3 fix).
         self.assertGreaterEqual(len(calls), 1)
         a, b = calls[0]
         self.assertIsInstance(a, bytes)
         self.assertIsInstance(b, bytes)
-        # And the comparison must be against the configured password.
         self.assertIn(
             b"right-password", {a, b},
             "compare_digest must compare against the configured password",
         )
 
-
-# ---------------------------------------------------------------------------
-# H4 — per-source rate limiting on auth attempts
-# ---------------------------------------------------------------------------
 
 
 class TestH4AuthRateLimit(IsolatedAsyncioTestCase):
@@ -372,7 +343,6 @@ class TestH4AuthRateLimit(IsolatedAsyncioTestCase):
         self._snap = _ConfigSnapshot().__enter__()
         save_config({"remote_password": "secret-h4"})
 
-        # Tighten the rate limiter so the test runs in seconds.
         self._old_max = ws_mod._AUTH_FAIL_MAX
         self._old_window = ws_mod._AUTH_FAIL_WINDOW
         self._old_lockout = ws_mod._AUTH_LOCKOUT
@@ -415,21 +385,29 @@ class TestH4AuthRateLimit(IsolatedAsyncioTestCase):
             return "closed"
 
     async def test_rate_limit_kicks_in_after_max_failures(self) -> None:
-        """After _AUTH_FAIL_MAX failures, new connections are rejected."""
-        # First 3 wrong attempts → each gets auth_required.
-        for i in range(ws_mod._AUTH_FAIL_MAX):
+        """After _AUTH_FAIL_MAX failures, new connections are rejected.
+
+        The lockout is re-checked after every recorded failure, so the
+        guess that crosses the brute-force threshold is itself denied its
+        remaining retry (``auth_locked``) instead of being re-prompted.
+        """
+        for i in range(ws_mod._AUTH_FAIL_MAX - 1):
             resp = await self._try_auth("wrong-password")
             self.assertEqual(
                 resp, "auth_required",
                 f"attempt {i}: expected auth_required, got {resp!r}",
             )
 
-        # The IP is now locked out: next connection is closed without
-        # any auth_required prompt.
+        resp = await self._try_auth("wrong-password")
+        self.assertEqual(
+            resp, "auth_locked",
+            "the threshold-crossing guess must be locked, not re-prompted",
+        )
+
         resp = await self._try_auth("wrong-password")
         self.assertIn(
-            resp, ("closed", "timeout"),
-            "after lockout the socket must be closed without prompting",
+            resp, ("closed", "timeout", "auth_locked"),
+            "after lockout the socket must be refused without prompting",
         )
 
     async def test_correct_password_locked_out_too(self) -> None:
@@ -437,7 +415,6 @@ class TestH4AuthRateLimit(IsolatedAsyncioTestCase):
         for _ in range(ws_mod._AUTH_FAIL_MAX):
             await self._try_auth("wrong-password")
 
-        # Even the correct password must not be accepted while locked.
         resp = await self._try_auth("secret-h4")
         self.assertIn(resp, ("closed", "timeout"))
 
@@ -462,18 +439,11 @@ class TestH4AuthRateLimit(IsolatedAsyncioTestCase):
     async def test_is_auth_locked_window_expiry(self) -> None:
         """Old failures outside the window do not contribute to the lock."""
         ip = "10.0.0.2"
-        # Manually inject ancient timestamps.
         ancient = time.monotonic() - (ws_mod._AUTH_FAIL_WINDOW + 10)
         self.server._auth_failures[ip] = [ancient] * (ws_mod._AUTH_FAIL_MAX + 5)
         self.assertFalse(self.server._is_auth_locked(ip))
-        # The pruning side-effect removes the whole entry (a leftover
-        # empty list would leak one dict entry per attacker IP forever).
         self.assertNotIn(ip, self.server._auth_failures)
 
-
-# ---------------------------------------------------------------------------
-# H5 — auto-generated TLS private key must be 0600
-# ---------------------------------------------------------------------------
 
 
 @unittest.skipIf(
@@ -521,7 +491,6 @@ class TestH5KeyFilePermissions(unittest.TestCase):
         """Calling generate twice replaces the key file (and stays 0600)."""
         _generate_self_signed_cert(self.cert_path, self.key_path)
         first = self.key_path.read_bytes()
-        # Loosen permissions to verify the regenerator restores 0600.
         os.chmod(self.key_path, 0o644)
         _generate_self_signed_cert(self.cert_path, self.key_path)
         second = self.key_path.read_bytes()
@@ -531,7 +500,6 @@ class TestH5KeyFilePermissions(unittest.TestCase):
 
     def test_real_kiss_tls_key_after_create_ssl_context(self) -> None:
         """End-to-end: ``_create_ssl_context`` produces a 0600 key in ~/.kiss/tls."""
-        # Redirect _TLS_DIR to a temp location for isolation.
         old_tls_dir = ws_mod._TLS_DIR
         ws_mod._TLS_DIR = self._tmpdir / "kiss_tls"
         try:
@@ -545,10 +513,6 @@ class TestH5KeyFilePermissions(unittest.TestCase):
             ws_mod._TLS_DIR = old_tls_dir
 
 
-# ---------------------------------------------------------------------------
-# H6 — stderr-reader thread terminates after timeout (does not leak)
-# ---------------------------------------------------------------------------
-
 
 class TestH6StderrReaderCleanup(unittest.TestCase):
     """The reader thread must exit promptly once the subprocess emits any
@@ -561,7 +525,6 @@ class TestH6StderrReaderCleanup(unittest.TestCase):
 
     def test_reader_exits_when_proc_dies_after_timeout(self) -> None:
         """When the subprocess dies, the reader thread exits cleanly."""
-        # A subprocess that prints 1 non-matching line, then exits.
         proc = subprocess.Popen(
             [
                 sys.executable, "-c",
@@ -579,11 +542,8 @@ class TestH6StderrReaderCleanup(unittest.TestCase):
                 proc, _parse_quick_tunnel_url, timeout=0.05,
             )
             self.assertIsNone(url)
-            # Wait for proc to exit naturally.
             proc.wait(timeout=2)
-            # Give the reader thread a moment to observe EOF and exit.
             time.sleep(0.3)
-            # No leaked daemon thread reading our subprocess's stderr.
             for t in threading.enumerate():
                 self.assertNotEqual(
                     t.name, "_stderr_reader_loop",
@@ -596,7 +556,6 @@ class TestH6StderrReaderCleanup(unittest.TestCase):
 
     def test_reader_exits_after_stop_event_on_next_line(self) -> None:
         """After timeout the stop_event is set; reader exits at next line."""
-        # Subprocess emits a line every 0.1s for ~3s, no URL match.
         proc = subprocess.Popen(
             [
                 sys.executable, "-u", "-c",
@@ -617,9 +576,6 @@ class TestH6StderrReaderCleanup(unittest.TestCase):
             )
             self.assertIsNone(url)
 
-            # The reader was active during the timeout; after timeout we
-            # expect it to exit by its NEXT readline iteration (within
-            # the 0.1s tick cadence).  Allow up to 1 s for cleanup.
             deadline = time.monotonic() + 1.5
             new_threads_alive: list[threading.Thread] = []
             while time.monotonic() < deadline:
@@ -673,23 +629,12 @@ class TestH6StderrReaderCleanup(unittest.TestCase):
         stderr pipe buffer fills (~64 KiB), blocking the Go process
         and causing a tunnel restart (new URL) every ~8 minutes.
         """
-        # Subprocess emits URL early, then keeps writing to stderr.
-        # If reader stops draining, the pipe buffer fills and the
-        # subprocess blocks on write() — we detect that as a timeout.
         proc = subprocess.Popen(
             [
                 sys.executable, "-u", "-c",
                 "import sys, time\n"
                 "sys.stderr.write('INF https://drain-test.trycloudflare.com\\n')\n"
                 "sys.stderr.flush()\n"
-                # Write enough data to fill a 64 KiB pipe buffer if
-                # nobody is reading.  Each line is ~80 bytes; 2000
-                # lines ≈ 160 KiB, well over the buffer limit.  No
-                # per-line sleep: on macOS ``time.sleep(0.001)`` often
-                # overshoots to 5–10ms, ballooning 2000 iterations past
-                # the 10s wait below and failing the test spuriously.
-                # If the reader stops draining, write() blocks on the
-                # full pipe buffer by itself — no pacing needed.
                 "for i in range(2000):\n"
                 "    sys.stderr.write(f'log line {i} padding' + 'x' * 50 + '\\n')\n"
                 "    sys.stderr.flush()\n"
@@ -705,9 +650,6 @@ class TestH6StderrReaderCleanup(unittest.TestCase):
                 proc, _parse_quick_tunnel_url, timeout=5,
             )
             self.assertEqual(url, "https://drain-test.trycloudflare.com")
-            # The subprocess should finish writing all 2000 lines
-            # within a few seconds.  If the reader stopped draining,
-            # the subprocess would block and never exit.
             exit_code = proc.wait(timeout=10)
             self.assertEqual(exit_code, 0, "subprocess should exit cleanly")
         finally:

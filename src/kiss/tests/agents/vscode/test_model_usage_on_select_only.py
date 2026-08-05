@@ -39,13 +39,7 @@ def _isolate_db(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     tmpdir = tempfile.mkdtemp()
     monkeypatch.setattr(pm, "_KISS_DIR", type(pm._KISS_DIR)(tmpdir))
     monkeypatch.setattr(pm, "_DB_PATH", type(pm._DB_PATH)(os.path.join(tmpdir, "sorcar.db")))
-    # ``last_model`` now lives in ``config.json`` (not the DB), so the
-    # config path must be redirected into the same temp dir for the
-    # ``_load_last_model``/``_save_last_model`` assertions to be isolated.
     cfg_path = os.path.join(tmpdir, "config.json")
-    # ``CONFIG_DIR``/``CONFIG_PATH`` are PEP 562 lazy attributes;
-    # ``setattr`` would pin the computed (stale tmp) Path at teardown.
-    # ``setitem`` deletes the pin instead, restoring lazy resolution.
     monkeypatch.setitem(vars(vc), "CONFIG_DIR", Path(tmpdir))
     monkeypatch.setitem(vars(vc), "CONFIG_PATH", Path(cfg_path))
     yield

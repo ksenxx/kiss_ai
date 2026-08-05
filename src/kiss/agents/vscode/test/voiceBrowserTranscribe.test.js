@@ -2,48 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression test: in the remote webapp (browser mode)
-// the "Sorcar" wake word was recognized but the speech that followed
-// was NEVER transcribed to text.
-//
-// Bug being reproduced: ``media/voice.js`` only implemented post-wake
-// speech handling for webview mode (the VS Code extension host runs a
-// local listener that captures + translates and posts voiceSpeech
-// back).  In browser mode ``triggerWake()`` merely flashed the mic
-// button red for 600ms — no audio was captured after the wake word,
-// nothing was sent to the server, and no text ever appeared in the
-// task input.
-//
-// The fix makes browser mode capture the utterance that follows the
-// wake word (RMS endpointing mirroring the Python listener's
-// SpeechCapture), downsample it to 16kHz s16le PCM and post
-// ``{type: 'voiceTranscribe', audio: <base64 pcm>}`` to the server
-// (via the 'kiss-voice-post' bridge -> WS shim), which replies with
-// the ``{type: 'voiceSpeech', text, speaker, language}`` message
-// voice.js already consumes.
-//
-// These tests run the REAL production ``media/voice.js`` in jsdom
-// with a browser-mode config, a stub audio pipeline (jsdom has no
-// microphone) and a stub Vosk wake recognizer, and lock in:
-//
-//  1. Wake followed by speech then silence posts a voiceTranscribe
-//     message whose base64 audio decodes to the captured 16kHz PCM
-//     (FAILS before the fix: nothing is ever posted).
-//  2. The wake recognizer does not hear capture audio (blocks are
-//     routed to the capture, mirroring the Python listener).
-//  3. Wake followed by only silence times out without posting
-//     anything and clears the red wake flash (NO_SPEECH).
-//  4. The server's voiceSpeech reply inserts the (speaker-prefixed)
-//     text into the task input and submits it via kiss-voice-submit.
-//  5. A late voiceSpeech from an older round does not clear a newer
-//     browser capture's red flash.
-//  6. Audio at a 48kHz mic rate is downsampled to 16kHz PCM.
-//  7. ACTUAL VOICE (macOS only): real spoken audio synthesized with
-//     `say` flows through the real capture path and the posted PCM
-//     round-trips with speech-level energy.
-//
-// Run directly with ``node test/voiceBrowserTranscribe.test.js``.
 
 'use strict';
 
@@ -55,7 +13,7 @@ const {spawnSync} = require('child_process');
 const {JSDOM} = require('jsdom');
 
 const VOICE_JS_PATH = path.join(__dirname, '..', 'media', 'voice.js');
-const BLOCK = 4096; // frames per ScriptProcessor block
+const BLOCK = 4096;
 
 let passed = 0;
 const failures = [];
@@ -76,15 +34,6 @@ function flush() {
   return new Promise(resolve => setTimeout(resolve, 0));
 }
 
-/**
- * Build a jsdom window running the REAL media/voice.js in browser
- * mode on top of a stub audio pipeline: getUserMedia hands out a fake
- * stream, AudioContext exposes a ScriptProcessor whose onaudioprocess
- * the test drives with synthetic (or real, TTS-derived) sample
- * blocks, and window.Vosk provides a recognizer stub whose
- * result/partialresult handlers the test can fire (jsdom cannot run
- * the vosk-browser WASM worker).  The code under test is unmodified.
- */
 async function makeBrowserVoice({sampleRate = 16000} = {}) {
   const dom = new JSDOM(
     '<!DOCTYPE html><html><body>' +
@@ -167,7 +116,6 @@ async function makeBrowserVoice({sampleRate = 16000} = {}) {
 
   win.eval(fs.readFileSync(VOICE_JS_PATH, 'utf8'));
 
-  // Enable listening (browser mode never auto-starts).
   win.document.getElementById('voice-btn').click();
   for (let i = 0; i < 10 && processors.length === 0; i++) await flush();
   assert.strictEqual(processors.length, 1, 'audio pipeline did not start');
@@ -193,8 +141,6 @@ async function makeBrowserVoice({sampleRate = 16000} = {}) {
       });
     },
     wake() {
-      // 300ms of quiet audio satisfies the 200ms post-alias pause
-      // gate, then the recognizer's partial result fires the wake.
       this.feed(new win.Float32Array(Math.ceil(0.3 * sampleRate)));
       recognizer.handlers.partialresult({result: {partial: 'sir car'}});
     },
@@ -224,7 +170,6 @@ async function main() {
         v.btn.classList.contains('voice-triggered'),
         'wake must flash the mic button red',
       );
-      // Two loud speech blocks, then 2s (8 x 256ms) of silence.
       v.feed(loudBlock(v.win));
       v.feed(loudBlock(v.win));
       for (let i = 0; i < 8; i++) v.feed(new v.win.Float32Array(BLOCK));
@@ -237,7 +182,6 @@ async function main() {
           '(the reproduced bug: nothing is ever posted)',
       );
       const pcm = decodePcm(msgs[0].audio);
-      // 2 loud + 8 trailing-silence blocks, 1:1 at a 16kHz mic rate.
       assert.strictEqual(pcm.length, 10 * BLOCK);
       assert.ok(
         Math.abs(pcm[0] - Math.round(0.1 * 0x7fff)) <= 1,
@@ -261,7 +205,6 @@ async function main() {
       before,
       'capture blocks must be routed away from the wake recognizer',
     );
-    // Once the capture ended, the recognizer hears audio again.
     v.feed(new v.win.Float32Array(BLOCK));
     assert.strictEqual(v.recognizer.acceptedBlocks, before + 1);
   });
@@ -271,7 +214,6 @@ async function main() {
     async () => {
       const v = await makeBrowserVoice();
       v.wake();
-      // 5s (20 x 256ms) of silence: the no-speech timeout.
       for (let i = 0; i < 20; i++) v.feed(new v.win.Float32Array(BLOCK));
       assert.strictEqual(
         v.posted.filter(m => m.type === 'voiceTranscribe').length,
@@ -352,9 +294,6 @@ async function main() {
       );
       assert.ok(v.btn.classList.contains('voice-transcribing'));
 
-      // Start a second round while the first transcription is still
-      // pending.  The first voiceSpeech reply is now stale relative to
-      // the second round's red capture flash and must not clear it.
       v.advance(2500);
       v.wake();
       assert.ok(v.btn.classList.contains('voice-triggered'));
@@ -392,13 +331,11 @@ async function main() {
   await test('48kHz mic audio is downsampled to 16kHz PCM', async () => {
     const v = await makeBrowserVoice({sampleRate: 48000});
     v.wake();
-    v.feed(loudBlock(v.win, 0.2, 48000)); // 1s of speech at 48kHz
-    v.feed(new v.win.Float32Array(96000)); // 2s silence ends the capture
+    v.feed(loudBlock(v.win, 0.2, 48000));
+    v.feed(new v.win.Float32Array(96000));
     const msgs = v.posted.filter(m => m.type === 'voiceTranscribe');
     assert.strictEqual(msgs.length, 1);
     const pcm = decodePcm(msgs[0].audio);
-    // 1s speech + 2s trailing silence, each block downsampled 3:1,
-    // so the PCM must be 16k samples per second of captured audio.
     assert.strictEqual(pcm.length, (48000 + 96000) / 3);
     assert.ok(
       Math.abs(pcm[0] - Math.round(0.2 * 0x7fff)) <= 1,

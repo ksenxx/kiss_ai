@@ -68,7 +68,6 @@ class TestRejectHunkInFile(unittest.TestCase):
         _reject_hunk_in_file(
             str(cur), str(base), {"bs": 1, "bc": 1, "cs": 1, "cc": 1},
         )
-        # Every CRLF ending must survive byte-for-byte.
         self.assertEqual(cur.read_bytes(), b"one\r\ntwo\r\nthree\r\n")
 
     def test_deleted_file_placeholder_writes_to_target(self) -> None:
@@ -83,7 +82,6 @@ class TestRejectHunkInFile(unittest.TestCase):
             str(target),
         )
         self.assertEqual(target.read_text(), "alpha\nbeta\n")
-        # Placeholder itself is untouched.
         self.assertEqual(placeholder.read_text(), "")
 
     def test_binary_flag_restores_base_bytes_wholesale(self) -> None:
@@ -101,8 +99,6 @@ class TestRejectHunkInFile(unittest.TestCase):
         base = self.tmpdir / "u.base"
         cur = self.tmpdir / "u.txt"
         base.write_bytes(b"plain\n")
-        # UTF-16 content without NUL in first bytes decodes as neither
-        # utf-8 nor does the splice apply — wholesale restore expected.
         cur.write_bytes("héllo\n".encode("utf-16"))
         _reject_hunk_in_file(
             str(cur), str(base), {"bs": 0, "bc": 1, "cs": 0, "cc": 1},
@@ -188,15 +184,15 @@ class TestRecordHunkRejected(unittest.TestCase):
 
     def test_cc_updated_and_pending_later_hunks_shifted(self) -> None:
         hunks: list[dict[str, Any]] = [
-            {"bs": 0, "bc": 3, "cs": 0, "cc": 1},   # delta +2
-            {"bs": 5, "bc": 1, "cs": 4, "cc": 1},   # pending -> shifted
-            {"bs": 8, "bc": 1, "cs": 7, "cc": 2},   # resolved -> NOT shifted
+            {"bs": 0, "bc": 3, "cs": 0, "cc": 1},
+            {"bs": 5, "bc": 1, "cs": 4, "cc": 1},
+            {"bs": 8, "bc": 1, "cs": 7, "cc": 2},
         ]
         pending = {1}
         _record_hunk_rejected(hunks, 0, pending.__contains__)
-        self.assertEqual(hunks[0]["cc"], 3)  # idempotent retry bookkeeping
-        self.assertEqual(hunks[1]["cs"], 6)  # 4 + 2
-        self.assertEqual(hunks[2]["cs"], 7)  # untouched
+        self.assertEqual(hunks[0]["cc"], 3)
+        self.assertEqual(hunks[1]["cs"], 6)
+        self.assertEqual(hunks[2]["cs"], 7)
 
     def test_hunk_unresolved_predicate_reads_state(self) -> None:
         state = _WebMergeState({"files": [
@@ -221,8 +217,6 @@ class TestRejectAllHunksInFile(unittest.TestCase):
         base = self.tmpdir / "p.base"
         cur = self.tmpdir / "p.txt"
         base.write_text("a\nb\nc\nd\ne\n")
-        # Hunk 0 replaces line0 with 2 lines; hunk 1 edits line c; hunk 2
-        # edits line e.  User accepted hunk 1 (keeps "C!").
         cur.write_text("A1\nA2\nb\nC!\nd\nE!\n")
         file_data: dict[str, Any] = {
             "name": "p.txt",
@@ -236,7 +230,6 @@ class TestRejectAllHunksInFile(unittest.TestCase):
         }
         _reject_all_hunks_in_file(file_data, [0, 2])
         self.assertEqual(cur.read_text(), "a\nb\nC!\nd\ne\n")
-        # Offsets were fixed up: hunk 2's cs shifted by hunk 0's delta.
         self.assertEqual(file_data["hunks"][0]["cc"], 1)
         self.assertEqual(file_data["hunks"][2]["cs"], 4)
 

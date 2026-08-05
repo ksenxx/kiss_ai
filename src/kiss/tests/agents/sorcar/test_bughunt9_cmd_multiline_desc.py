@@ -78,7 +78,6 @@ def test_block_scalar_description_is_one_line(
         f"argument-hint kept newlines: {cmd.argument_hint!r}"
     )
     assert cmd.argument_hint == "[pr-number] [focus]"
-    # The /commands listing stays one entry per line.
     listing = format_command_listing({"multi": cmd})
     assert len(listing.splitlines()) == 1
 
@@ -88,7 +87,7 @@ def test_listing_truncates_long_description(
 ) -> None:
     """Descriptions over 100 chars are capped exactly like skills."""
     project = tmp_path / "proj"
-    long_desc = "verylongword " * 20  # ~260 chars once collapsed
+    long_desc = "verylongword " * 20
     _write(
         project / ".kiss" / "commands" / "long.md",
         f"---\ndescription: {long_desc.strip()}\n---\nDo the long thing.\n",
@@ -98,4 +97,4 @@ def test_listing_truncates_long_description(
     (line,) = listing.splitlines()
     _, _, shown_desc = line.strip().partition("(project) ")
     assert shown_desc.endswith("...")
-    assert len(shown_desc) == 100  # 97 chars + "..." — format_skill_listing parity
+    assert len(shown_desc) == 100

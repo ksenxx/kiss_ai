@@ -146,15 +146,9 @@ def _patch_grandparent_run_blocking(
         printer = kwargs.get("printer") or getattr(self_agent, "printer", None)
         if printer is not None:
             printer.broadcast({"type": "text_delta", "text": _LIVE_TEXT})
-        # Drain any user-message queue that the test may have populated
-        # while the task was running — mirrors the production drain
-        # hook that ``SorcarAgent`` runs in its pre-step.
         drain = getattr(self_agent, "_drain_pending_user_messages", None)
         started.set()
         release.wait(timeout=30)
-        # Re-drain after release so any prompt the test queued after
-        # ``started.set()`` but before ``release.set()`` is observable
-        # via the recorded ``add_message_to_conversation`` calls.
         if drain is not None:
             try:
                 drain()
@@ -201,8 +195,6 @@ class TestResumeRunningFollowupInput(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
-        # Always release so the worker thread can unwind cleanly even
-        # when the test fails mid-flight.
         self.release.set()
         _unpatch_grandparent_run(self.original_run)
         _restore_db(self.saved)
@@ -235,7 +227,6 @@ class TestResumeRunningFollowupInput(unittest.TestCase):
         chat_id = launcher_state.chat_id
         assert chat_id
 
-        # Viewer tab opens the chat from history while the task runs.
         self.server._handle_command(
             {"type": "newChat", "tabId": tab_viewer},
         )
@@ -243,8 +234,6 @@ class TestResumeRunningFollowupInput(unittest.TestCase):
             "type": "resumeSession", "chatId": chat_id, "tabId": tab_viewer,
         })
 
-        # Sanity check: the viewer received a ``status running=true``
-        # stamped with ITS OWN tabId (the running-indicator on).
         run_true_viewer = [
             e for e in self._events()
             if e.get("type") == "status"
@@ -256,19 +245,12 @@ class TestResumeRunningFollowupInput(unittest.TestCase):
             "stamped with its own tabId after resumeSession"
         )
 
-        # Type a follow-up into the viewer tab's input box and submit.
-        # The frontend in the viewer tab observes ``isRunning=true``
-        # (from the status event above) and therefore forwards the
-        # text as an ``appendUserMessage`` carrying the viewer's tabId.
         self.server._handle_command({
             "type": "appendUserMessage",
             "prompt": "viewer follow-up",
             "tabId": tab_viewer,
         })
 
-        # The prompt must reach the LIVE agent — i.e. land in the
-        # launcher tab's pending_user_messages — not be dropped just
-        # because the viewer tab has no active task of its own.
         assert "viewer follow-up" in launcher_state.pending_user_messages, (
             "appendUserMessage from a history-resumed viewer tab was "
             "silently dropped instead of being routed to the live "
@@ -276,9 +258,6 @@ class TestResumeRunningFollowupInput(unittest.TestCase):
             f"{launcher_state.pending_user_messages!r}"
         )
 
-        # The prompt echo must appear in the viewer's chat surface
-        # (stamped with the viewer's tabId) so the user sees their
-        # typed message in the viewer's transcript.
         prompt_echoes_viewer = [
             e for e in self._events()
             if e.get("type") == "prompt"
@@ -306,14 +285,11 @@ class TestResumeRunningFollowupInput(unittest.TestCase):
             "type": "resumeSession", "chatId": chat_id, "tabId": tab_viewer,
         })
 
-        # Let the task complete.
         mark = len(self.events)
         self.release.set()
         task_thread = self.server._get_tab(tab_launcher).task_thread
         if task_thread is not None:
             task_thread.join(timeout=30)
-        # The worker thread's outer finally clears ``task_thread`` to
-        # None — poll for that as the canonical "task ended" signal.
         assert _wait_until(
             lambda: self.server._get_tab(tab_launcher).task_thread is None,
             timeout=30,
@@ -350,19 +326,14 @@ class TestResumeRunningFollowupInput(unittest.TestCase):
             "type": "resumeSession", "chatId": chat_id, "tabId": tab_viewer,
         })
 
-        # End the first task.
         self.release.set()
         assert _wait_until(
             lambda: self.server._get_tab(tab_launcher).task_thread is None,
             timeout=30,
         )
 
-        # Re-arm the patched run for the next task: it will signal
-        # ``started`` and then return immediately (release stays set).
         self.started.clear()
 
-        # Fresh task from the viewer tab.  The viewer's frontend now
-        # observes ``isRunning=false`` and sends a ``run`` command.
         self.server._handle_command({
             "type": "run", "prompt": "second task from viewer",
             "model": self.model, "workDir": self.tmpdir,

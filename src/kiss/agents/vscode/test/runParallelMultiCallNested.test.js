@@ -2,27 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end tests for the run_parallel ⇔ sub-agent tabs invariant
-// with MULTIPLE run_parallel calls per agent and NESTED (3-level)
-// run_parallel fan-outs (``media/main.js`` — the exact production
-// webview code shared by the VS Code extension and the remote web
-// app):
-//
-//   * Every run_parallel call an agent OR a sub-agent makes must open
-//     one tab per spawned sub-agent — irrespective of how many
-//     run_parallel calls that agent/sub-agent already made.
-//   * When a sub-agent finishes (``subagentDone``), ONLY its tab
-//     closes.
-//   * Collapsing a run_parallel panel (by the user or by the agent's
-//     automatic collapse passes) closes the tabs of ALL sub-agents
-//     spawned by THAT call — and only that call.
-//   * Uncollapsing a run_parallel panel reopens the tabs of ALL
-//     sub-agents spawned by THAT call — and only that call.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/runParallelMultiCallNested.test.js
 
 'use strict';
 
@@ -33,12 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom window running the production chat webview: the real
- * ``chat.html`` body (placeholders blanked), ``panelCopy.js`` and
- * ``main.js`` evaluated in the window, and a recording
- * ``acquireVsCodeApi`` stub (the only host API the webview has).
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -69,42 +42,39 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
 
-/** Dispatch a backend→webview event exactly like the extension does. */
 function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** All run_parallel panels in the ACTIVE chat DOM, oldest first. */
 function runParallelPanels(win) {
   return Array.from(win.document.querySelectorAll('#output .tc-run-parallel'));
 }
 
-/** All sub-agent tabs currently rendered in the tab bar. */
 function subagentTabEls(win) {
   return Array.from(
     win.document.querySelectorAll('#tab-list .chat-tab.subagent-tab'),
   );
 }
 
-/** Ids of all open sub-agent tabs (sorted). */
 function openSubTabIds(win) {
   return subagentTabEls(win)
     .map(el => el.dataset.tabId)
     .sort();
 }
 
-/** Click the collapse header of *panel* (toggles .collapsed). */
 function togglePanel(win, panel) {
   const hdr = panel.querySelector('.tc-h');
   hdr.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
-/** Click tab *tabId* in the tab bar to switch to it. */
 function switchToTabEl(win, tabId) {
   const el = win.document.querySelector(
     `#tab-list .chat-tab[data-tab-id="${tabId}"]`,
@@ -113,13 +83,6 @@ function switchToTabEl(win, tabId) {
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
-/**
- * Replay the exact backend broadcast sequence that spawns ONE
- * sub-agent under *parentId*: ``new_tab`` (webview posts
- * ``resumeSession`` with the freshly allocated tab id) followed by the
- * server's ``openSubagentTab`` conversion.  Returns the sub-agent's
- * frontend tab id.
- */
 function spawnSub(win, posted, parentId, taskId, desc, idx) {
   const before = posted.length;
   send(win, {
@@ -156,11 +119,6 @@ function spawnSub(win, posted, parentId, taskId, desc, idx) {
   return resume.tabId;
 }
 
-/**
- * Emit the tool_call for one ``run_parallel`` invocation by the agent
- * of *agentTabId* and spawn *taskIds.length* sub-agents under it.
- * Returns the sub-agents' frontend tab ids.
- */
 function runParallelCall(win, posted, agentTabId, taskIds, descPrefix) {
   send(win, {
     type: 'tool_call',
@@ -177,7 +135,6 @@ function runParallelCall(win, posted, agentTabId, taskIds, descPrefix) {
   return subTabIds;
 }
 
-/** Boot a webview with a running root task; returns its tab id. */
 function bootRunningRoot() {
   const {win, posted} = makeWebview();
   const ready = posted.find(m => m.type === 'ready');
@@ -192,12 +149,6 @@ function bootRunningRoot() {
   return {win, posted, rootId};
 }
 
-// ---------------------------------------------------------------------------
-// 1. An agent makes THREE sequential run_parallel calls.  Every call
-//    must open one tab per sub-agent; every subagentDone must close
-//    ONLY the finished sub-agent's tab; once a call's whole fan-out is
-//    done its panel collapses.
-// ---------------------------------------------------------------------------
 function testThreeSequentialRunParallelCallsOpenTabs() {
   const {win, posted, rootId} = bootRunningRoot();
 
@@ -227,7 +178,6 @@ function testThreeSequentialRunParallelCallsOpenTabs() {
       'panel #' + k + ' must start uncollapsed',
     );
 
-    // First sub-agent finishes → ONLY its tab closes.
     send(win, {type: 'subagentDone', tab_id: subTabIds[0]});
     assert.deepStrictEqual(
       openSubTabIds(win),
@@ -240,7 +190,6 @@ function testThreeSequentialRunParallelCallsOpenTabs() {
       !panel.classList.contains('collapsed'),
       'panel #' + k + ' must stay uncollapsed while a sibling tab is open',
     );
-    // Second (last) sub-agent finishes → its tab closes, panel collapses.
     send(win, {type: 'subagentDone', tab_id: subTabIds[1]});
     assert.strictEqual(
       subagentTabEls(win).length,
@@ -270,11 +219,6 @@ function testThreeSequentialRunParallelCallsOpenTabs() {
   console.log('  ok - three sequential run_parallel calls each open tabs');
 }
 
-// ---------------------------------------------------------------------------
-// 2. With THREE finished run_parallel panels in one chat, expanding /
-//    collapsing each panel must open / close ONLY the sub-agent tabs
-//    spawned by THAT call — never a sibling call's tabs.
-// ---------------------------------------------------------------------------
 function testPerPanelExpandCollapseIndependence() {
   const {win, posted, rootId} = bootRunningRoot();
 
@@ -310,7 +254,6 @@ function testPerPanelExpandCollapseIndependence() {
   const panels = runParallelPanels(win);
   assert.strictEqual(panels.length, 3, 'three panels rendered');
 
-  // Expand panel #1 → ONLY call #1's two sub-agents reopen.
   let before = posted.length;
   togglePanel(win, panels[0]);
   assert.strictEqual(
@@ -328,7 +271,6 @@ function testPerPanelExpandCollapseIndependence() {
   }
   const call1TabIds = openSubTabIds(win);
 
-  // Expand panel #3 → call #3's tabs open IN ADDITION; call #1's stay.
   before = posted.length;
   togglePanel(win, panels[2]);
   assert.strictEqual(
@@ -354,8 +296,6 @@ function testPerPanelExpandCollapseIndependence() {
     );
   }
 
-  // Collapse panel #3 → ONLY call #3's tabs close; call #1's tabs stay
-  // open and panel #1 stays uncollapsed.
   togglePanel(win, panels[2]);
   assert.deepStrictEqual(
     openSubTabIds(win),
@@ -368,7 +308,6 @@ function testPerPanelExpandCollapseIndependence() {
     'panel #1 must stay uncollapsed (its tabs are open)',
   );
 
-  // Collapse panel #1 → its tabs close too.
   togglePanel(win, panels[0]);
   assert.strictEqual(
     subagentTabEls(win).length,
@@ -376,7 +315,6 @@ function testPerPanelExpandCollapseIndependence() {
     'collapsing panel #1 must close its own sub-agent tabs',
   );
 
-  // Expand panel #2 → only call #2's fan-out reopens.
   before = posted.length;
   togglePanel(win, panels[1]);
   assert.strictEqual(
@@ -396,17 +334,9 @@ function testPerPanelExpandCollapseIndependence() {
   console.log('  ok - per-panel expand/collapse touches only its own tabs');
 }
 
-// ---------------------------------------------------------------------------
-// 3. Three-level nesting: the root agent spawns 3 sub-agents; one
-//    sub-agent (a background tab) itself calls run_parallel and spawns
-//    3 sub-sub-agents; one of THOSE calls run_parallel and spawns 3
-//    more.  Every level must open its own tabs, and every
-//    subagentDone must close only the corresponding tab.
-// ---------------------------------------------------------------------------
 function testThreeLevelNestedRunParallel() {
   const {win, posted, rootId} = bootRunningRoot();
 
-  // Level 1: root agent fans out 3 sub-agents.
   const l1 = runParallelCall(
     win,
     posted,
@@ -416,7 +346,6 @@ function testThreeLevelNestedRunParallel() {
   );
   assert.strictEqual(subagentTabEls(win).length, 3, 'level-1 tabs open');
 
-  // Level 2: sub-agent l1-a (a BACKGROUND tab) calls run_parallel.
   send(win, {type: 'thinking_start', tabId: l1[0]});
   send(win, {type: 'thinking_delta', tabId: l1[0], text: 'fanning out'});
   send(win, {type: 'thinking_end', tabId: l1[0]});
@@ -433,7 +362,6 @@ function testThreeLevelNestedRunParallel() {
     "a sub-agent's run_parallel must open tabs for ITS sub-agents too",
   );
 
-  // Level 3: sub-sub-agent l2-a (also a background tab) fans out.
   send(win, {type: 'thinking_start', tabId: l2[0]});
   send(win, {type: 'thinking_delta', tabId: l2[0], text: 'fanning out'});
   send(win, {type: 'thinking_end', tabId: l2[0]});
@@ -450,7 +378,6 @@ function testThreeLevelNestedRunParallel() {
     'a 3rd-level run_parallel must open tabs for its sub-agents too',
   );
 
-  // Level-3 sub-agents finish one by one: each closes ONLY its tab.
   send(win, {type: 'subagentDone', tab_id: l3[0]});
   assert.deepStrictEqual(
     openSubTabIds(win),
@@ -465,7 +392,6 @@ function testThreeLevelNestedRunParallel() {
     'all level-3 tabs closed, levels 1–2 untouched',
   );
 
-  // l2-a's run_parallel returns; l2-a finishes → only l2-a's tab closes.
   send(win, {type: 'tool_result', tabId: l2[0], content: 'l3 done'});
   send(win, {type: 'result', tabId: l2[0], summary: 'done', success: true});
   send(win, {type: 'subagentDone', tab_id: l2[0]});
@@ -482,7 +408,6 @@ function testThreeLevelNestedRunParallel() {
     'all level-2 tabs closed, level 1 untouched',
   );
 
-  // l1-a's run_parallel returns; level-1 sub-agents finish.
   send(win, {type: 'tool_result', tabId: l1[0], content: 'l2 done'});
   send(win, {type: 'result', tabId: l1[0], summary: 'done', success: true});
   send(win, {type: 'subagentDone', tab_id: l1[0]});
@@ -502,12 +427,6 @@ function testThreeLevelNestedRunParallel() {
   console.log('  ok - 3-level nested run_parallel opens/closes per level');
 }
 
-// ---------------------------------------------------------------------------
-// 4. Collapsing a NESTED run_parallel panel (inside a sub-agent's tab)
-//    closes the tabs of that call's sub-sub-agents only; expanding it
-//    reopens them.  Collapsing the ROOT panel closes the sub-agent tab
-//    AND (by cascade) its still-open descendants.
-// ---------------------------------------------------------------------------
 function testNestedPanelCollapseExpand() {
   const {win, posted, rootId} = bootRunningRoot();
 
@@ -515,8 +434,6 @@ function testNestedPanelCollapseExpand() {
   runParallelCall(win, posted, l1[0], ['l2-a', 'l2-b'], 'L2 ');
   assert.strictEqual(subagentTabEls(win).length, 4, 'both levels open');
 
-  // The user switches to sub-agent l1-a's tab and collapses its nested
-  // run_parallel panel by clicking its header.
   switchToTabEl(win, l1[0]);
   const nestedPanels = runParallelPanels(win);
   assert.strictEqual(
@@ -541,7 +458,6 @@ function testNestedPanelCollapseExpand() {
       'tabs it spawned (level-1 tabs stay open)',
   );
 
-  // Expanding the nested panel reopens its sub-sub-agent tabs.
   const before = posted.length;
   togglePanel(win, nestedPanel);
   assert.strictEqual(
@@ -560,8 +476,6 @@ function testNestedPanelCollapseExpand() {
   const l2New = openSubTabIds(win).filter(id => !l1.includes(id));
   assert.strictEqual(l2New.length, 2, 'two fresh level-2 tabs');
 
-  // Back on the root tab, collapsing the ROOT panel closes the level-1
-  // tabs and cascades to their descendants.
   switchToTabEl(win, rootId);
   const rootPanel = runParallelPanels(win)[0];
   assert.ok(rootPanel, 'root panel present in the root chat DOM');
@@ -577,18 +491,11 @@ function testNestedPanelCollapseExpand() {
   console.log('  ok - nested panel collapse/expand closes/reopens its tabs');
 }
 
-// ---------------------------------------------------------------------------
-// 5. A SUB-AGENT makes multiple run_parallel calls: the second call
-//    must open tabs exactly like the first (irrespective of how many
-//    calls were already made), and each nested panel controls only its
-//    own fan-out.
-// ---------------------------------------------------------------------------
 function testSubagentMakesMultipleRunParallelCalls() {
   const {win, posted, rootId} = bootRunningRoot();
 
   const l1 = runParallelCall(win, posted, rootId, ['l1-a'], 'L1 ');
 
-  // Nested call #1 by sub-agent l1-a; both sub-subs finish.
   const c1 = runParallelCall(win, posted, l1[0], ['n1-a', 'n1-b'], 'N1 ');
   send(win, {type: 'subagentDone', tab_id: c1[0]});
   send(win, {type: 'subagentDone', tab_id: c1[1]});
@@ -602,7 +509,6 @@ function testSubagentMakesMultipleRunParallelCalls() {
     'nested call #1 fan-out fully closed after both subagentDone',
   );
 
-  // Nested call #2 by the SAME sub-agent must open tabs again.
   const c2 = runParallelCall(win, posted, l1[0], ['n2-a', 'n2-b'], 'N2 ');
   assert.deepStrictEqual(
     openSubTabIds(win),
@@ -611,7 +517,6 @@ function testSubagentMakesMultipleRunParallelCalls() {
       'sub-agent, exactly like the first call',
   );
 
-  // Nested call #3 after #2 completes — still must open tabs.
   send(win, {type: 'subagentDone', tab_id: c2[0]});
   send(win, {type: 'subagentDone', tab_id: c2[1]});
   send(win, {type: 'tool_result', tabId: l1[0], content: 'call 2 done'});
@@ -626,9 +531,6 @@ function testSubagentMakesMultipleRunParallelCalls() {
       'sub-agent',
   );
 
-  // The user views l1-a's chat: two collapsed panels (#1, #2) and the
-  // live panel #3.  Expanding panel #1 must reopen ONLY its fan-out;
-  // collapsing panel #3 must close ONLY its fan-out.
   switchToTabEl(win, l1[0]);
   const panels = runParallelPanels(win);
   assert.strictEqual(panels.length, 3, 'three nested panels rendered');
@@ -663,12 +565,6 @@ function testSubagentMakesMultipleRunParallelCalls() {
   console.log("  ok - a sub-agent's repeated run_parallel calls open tabs");
 }
 
-// ---------------------------------------------------------------------------
-// 6. The agent/sub-agent itself collapses a finished nested panel via
-//    the automatic collapse pass at the sub-agent's task end
-//    (``result`` → collapseAllExceptResult on the bg tab's DOM): the
-//    nested fan-out's still-open tabs must close with it.
-// ---------------------------------------------------------------------------
 function testSubagentResultAutoCollapseClosesNestedTabs() {
   const {win, posted, rootId} = bootRunningRoot();
 
@@ -676,10 +572,6 @@ function testSubagentResultAutoCollapseClosesNestedTabs() {
   const l2 = runParallelCall(win, posted, l1[0], ['l2-a', 'l2-b'], 'L2 ');
   assert.strictEqual(subagentTabEls(win).length, 4, 'both levels open');
 
-  // The nested run_parallel finishes (its sub-agents' tabs are still
-  // open — no subagentDone was delivered, e.g. the sub-sub-agents were
-  // interrupted) and l1-a's own task ends: the bg result pass must
-  // collapse the finished nested panel, closing its tabs.
   send(win, {type: 'tool_result', tabId: l1[0], content: 'nested done'});
   send(win, {type: 'result', tabId: l1[0], summary: 'done', success: true});
   assert.deepStrictEqual(
@@ -703,13 +595,6 @@ function testSubagentResultAutoCollapseClosesNestedTabs() {
   console.log('  ok - sub-agent result auto-collapse closes nested tabs');
 }
 
-// ---------------------------------------------------------------------------
-// 7. A run_parallel panel rendered inside an ADJACENT-TASK history
-//    block carries the tabId of a long-gone session as its parent.
-//    Its collapse/expand must be inert: no sub-agent tabs open, no
-//    resumeSession is posted, and nothing crashes (the parent tab's
-//    chat DOM cannot be resolved).
-// ---------------------------------------------------------------------------
 function testAdjacentHistoryRunParallelPanelIsInert() {
   const {win, posted, rootId} = bootRunningRoot();
   send(win, {type: 'status', running: false, tabId: rootId});
@@ -743,9 +628,9 @@ function testAdjacentHistoryRunParallelPanelIsInert() {
   );
 
   const before = posted.length;
-  togglePanel(win, panel); // expand
+  togglePanel(win, panel);
   assert.ok(!panel.classList.contains('collapsed'), 'panel expanded');
-  togglePanel(win, panel); // collapse
+  togglePanel(win, panel);
   assert.strictEqual(
     subagentTabEls(win).length,
     0,
@@ -759,17 +644,10 @@ function testAdjacentHistoryRunParallelPanelIsInert() {
   console.log('  ok - adjacent-history run_parallel panel is inert');
 }
 
-// ---------------------------------------------------------------------------
-// 8. A sub-agent whose tab has NO chat DOM yet (no event ever streamed
-//    to it, so its outputFragment is still null) spawns a sub-sub-
-//    agent: the grandchild tab must still open (there is just no panel
-//    to associate it with yet).
-// ---------------------------------------------------------------------------
 function testSpawnUnderFragmentlessParentStillOpensTab() {
   const {win, posted, rootId} = bootRunningRoot();
 
   const l1 = runParallelCall(win, posted, rootId, ['l1-a'], 'L1 ');
-  // No event was ever streamed to l1-a's tab: its chat DOM is empty.
   const before = posted.length;
   send(win, {
     type: 'new_tab',
@@ -799,10 +677,6 @@ function testSpawnUnderFragmentlessParentStillOpensTab() {
     'the grandchild tab must be open next to its parent sub-agent tab',
   );
 
-  // The run_parallel tool_call reaches l1-a's tab only NOW (late
-  // stream): the freshly rendered panel must adopt the already-open,
-  // never-registered grandchild tab, so l1-a's task-end collapse pass
-  // closes it (collapsed panel ⇒ its sub-agent tabs are closed).
   send(win, {
     type: 'tool_call',
     name: 'run_parallel',
@@ -821,13 +695,6 @@ function testSpawnUnderFragmentlessParentStillOpensTab() {
   console.log('  ok - spawn under a DOM-less parent still opens a tab');
 }
 
-// ---------------------------------------------------------------------------
-// 9. A parent with THREE still-running run_parallel fan-outs is
-//    replayed (task_events re-renders all panels as fresh DOM
-//    elements).  Each replayed panel must adopt the open tabs of ITS
-//    OWN call (matched by call ordinal) — expanding a replayed panel
-//    must resume only that call's sub-agents.
-// ---------------------------------------------------------------------------
 function testMultiPanelParentReplayAdoptsPerCall() {
   const {win, posted, rootId} = bootRunningRoot();
 
@@ -839,8 +706,6 @@ function testMultiPanelParentReplayAdoptsPerCall() {
   }
   assert.strictEqual(subagentTabEls(win).length, 3, 'three live fan-outs');
 
-  // Replay the parent task: every panel is re-rendered (finished, so
-  // the replay collapse closes each adopted group).
   const rpEv = k => ({
     type: 'tool_call',
     name: 'run_parallel',
@@ -870,10 +735,9 @@ function testMultiPanelParentReplayAdoptsPerCall() {
     "the replay collapse must adopt and close EVERY call's tabs",
   );
 
-  // Expanding each replayed panel resumes ONLY its own call's task.
   for (let k = 1; k <= 3; k++) {
     const before = posted.length;
-    togglePanel(win, panels[k - 1]); // expand
+    togglePanel(win, panels[k - 1]);
     const resumed = posted
       .slice(before)
       .filter(m => m.type === 'resumeSession')
@@ -887,21 +751,13 @@ function testMultiPanelParentReplayAdoptsPerCall() {
         JSON.stringify(resumed) +
         ')',
     );
-    togglePanel(win, panels[k - 1]); // collapse again
+    togglePanel(win, panels[k - 1]);
     assert.strictEqual(subagentTabEls(win).length, 0, 'group closed');
   }
   win.close();
   console.log('  ok - multi-panel parent replay adopts per call');
 }
 
-// ---------------------------------------------------------------------------
-// 10. Fresh history reopen: a finished parent with three run_parallel
-//     calls (2, 3, and 1 sub-agents) is replayed, then the persisted
-//     sub-agent rows arrive via openSubagentTab in spawn order.  The
-//     rows must be grouped per call (each panel's expected task count
-//     from ``extras.tasks``), so expanding a panel reopens exactly its
-//     own fan-out.
-// ---------------------------------------------------------------------------
 function testHistoryReopenGroupsPersistedSubsByCall() {
   const {win, posted, rootId} = bootRunningRoot();
   send(win, {type: 'status', running: false, tabId: rootId});
@@ -922,8 +778,6 @@ function testHistoryReopenGroupsPersistedSubsByCall() {
       {type: 'tool_result', tabId: rootId, content: 'c1 done'},
       rpEv(['h3', 'h4', 'h5']),
       {type: 'tool_result', tabId: rootId, content: 'c2 done'},
-      // Call #3 with an unparseable tasks payload: its expected count
-      // is unknown, so grouping falls back to the newest panel.
       {
         type: 'tool_call',
         name: 'run_parallel',
@@ -940,7 +794,6 @@ function testHistoryReopenGroupsPersistedSubsByCall() {
     assert.ok(p.classList.contains('collapsed'), 'panels start collapsed');
   }
 
-  // The server replays the persisted sub-agent rows in spawn order.
   for (let i = 1; i <= 6; i++) {
     send(win, {
       type: 'openSubagentTab',
@@ -952,7 +805,6 @@ function testHistoryReopenGroupsPersistedSubsByCall() {
       isDone: true,
     });
   }
-  // A defensive row without a task id must not break the grouping.
   send(win, {
     type: 'openSubagentTab',
     tab_id: rootId + '__sub_extra',
@@ -967,7 +819,7 @@ function testHistoryReopenGroupsPersistedSubsByCall() {
 
   const expectGroup = (panelIdx, taskIds) => {
     const before = posted.length;
-    togglePanel(win, panels[panelIdx]); // expand
+    togglePanel(win, panels[panelIdx]);
     const resumed = posted
       .slice(before)
       .filter(m => m.type === 'resumeSession')
@@ -987,7 +839,7 @@ function testHistoryReopenGroupsPersistedSubsByCall() {
       taskIds.length,
       'panel #' + (panelIdx + 1) + ' opens one tab per persisted row',
     );
-    togglePanel(win, panels[panelIdx]); // collapse again
+    togglePanel(win, panels[panelIdx]);
     assert.strictEqual(subagentTabEls(win).length, 0, 'group closed');
   };
   expectGroup(1, ['h3', 'h4', 'h5']);
@@ -997,12 +849,6 @@ function testHistoryReopenGroupsPersistedSubsByCall() {
   console.log('  ok - history reopen groups persisted subs per call');
 }
 
-// ---------------------------------------------------------------------------
-// 11. An adjacent-task history block containing an OLD run_parallel
-//     panel is loaded while a LIVE run_parallel call is spawning: the
-//     live sub-agent must open its tab and register with the LIVE
-//     panel — the collapsed history panel must not defer or own it.
-// ---------------------------------------------------------------------------
 function testAdjacentHistoryPanelDoesNotStealLiveFanout() {
   const {win, posted, rootId} = bootRunningRoot();
 
@@ -1015,9 +861,6 @@ function testAdjacentHistoryPanelDoesNotStealLiveFanout() {
   const livePanel = runParallelPanels(win)[0];
   assert.ok(livePanel, 'live panel rendered');
 
-  // The user overscrolled: an adjacent (later) task renders BELOW the
-  // live chat — its own old run_parallel panel arrives collapsed and
-  // is now the LAST .tc-run-parallel in document order.
   send(win, {
     type: 'adjacent_task_events',
     tabId: rootId,
@@ -1058,7 +901,6 @@ function testAdjacentHistoryPanelDoesNotStealLiveFanout() {
   );
   assert.strictEqual(subagentTabEls(win).length, 1, 'live sub tab open');
 
-  // The tab belongs to the LIVE panel: collapsing it closes the tab.
   togglePanel(win, livePanel);
   assert.strictEqual(
     subagentTabEls(win).length,
@@ -1069,16 +911,9 @@ function testAdjacentHistoryPanelDoesNotStealLiveFanout() {
   console.log('  ok - adjacent history panel cannot steal a live fan-out');
 }
 
-// ---------------------------------------------------------------------------
-// 12. A delayed openSubagentTab for a sub-agent of call #1 (whose tab
-//     was closed by collapsing panel #1) arrives AFTER call #2's panel
-//     exists.  It must re-attach to panel #1 (which registered the
-//     task id) — not leak into call #2's fan-out.
-// ---------------------------------------------------------------------------
 function testDelayedOpenSubagentAttachesToOwningCall() {
   const {win, posted, rootId} = bootRunningRoot();
 
-  // Call #1 (tasks passed as a raw array — tolerated for robustness).
   send(win, {
     type: 'tool_call',
     name: 'run_parallel',
@@ -1096,16 +931,14 @@ function testDelayedOpenSubagentAttachesToOwningCall() {
   );
   assert.ok(lateResume, 'call #1 sub-agent opened');
   const panel1 = runParallelPanels(win)[0];
-  togglePanel(win, panel1); // collapse call #1 → its tab closes
+  togglePanel(win, panel1);
   assert.strictEqual(subagentTabEls(win).length, 0, 'call #1 tab closed');
   send(win, {type: 'tool_result', tabId: rootId, content: 'c1 done'});
 
-  // Call #2 spawns its own sub-agent.
   const c2 = runParallelCall(win, posted, rootId, ['t2-a'], 'C2 ');
   const panel2 = runParallelPanels(win)[1];
   assert.strictEqual(subagentTabEls(win).length, 1, 'call #2 tab open');
 
-  // The server's delayed conversion for call #1's closed tab arrives.
   send(win, {
     type: 'openSubagentTab',
     tab_id: lateResume.tabId,
@@ -1119,11 +952,9 @@ function testDelayedOpenSubagentAttachesToOwningCall() {
     'the stale conversion must not reopen a tab behind collapsed #1',
   );
 
-  // Call #2's fan-out must NOT have absorbed t-late: collapsing and
-  // re-expanding panel #2 must touch only t2-a.
-  togglePanel(win, panel2); // collapse → closes t2-a
+  togglePanel(win, panel2);
   let before = posted.length;
-  togglePanel(win, panel2); // expand
+  togglePanel(win, panel2);
   let resumed = posted
     .slice(before)
     .filter(m => m.type === 'resumeSession')
@@ -1139,9 +970,8 @@ function testDelayedOpenSubagentAttachesToOwningCall() {
   assert.strictEqual(subagentTabEls(win).length, 1, 'only t2-a reopened');
   assert.ok(c2.length === 1, 'sanity: one call-#2 sub-agent');
 
-  // Panel #1 still owns t-late: expanding it resumes only t-late.
   before = posted.length;
-  togglePanel(win, panel1); // expand call #1
+  togglePanel(win, panel1);
   resumed = posted
     .slice(before)
     .filter(m => m.type === 'resumeSession')
@@ -1155,16 +985,10 @@ function testDelayedOpenSubagentAttachesToOwningCall() {
   console.log('  ok - delayed openSubagentTab attaches to the owning call');
 }
 
-// ---------------------------------------------------------------------------
-// 13. A never-registered open sub-agent tab (spawned before its
-//     parent's DOM existed) is adopted by the NEWEST panel only: an
-//     older sibling panel's collapse pass must leave it alone.
-// ---------------------------------------------------------------------------
 function testUnregisteredTabAdoptsIntoNewestPanelOnly() {
   const {win, posted, rootId} = bootRunningRoot();
 
   const l1 = runParallelCall(win, posted, rootId, ['l1-a'], 'L1 ');
-  // Grandchild spawned while l1-a's tab has NO chat DOM: unregistered.
   send(win, {
     type: 'new_tab',
     task_id: 'g-task',
@@ -1176,8 +1000,6 @@ function testUnregisteredTabAdoptsIntoNewestPanelOnly() {
   );
   assert.ok(g, 'grandchild tab opened');
 
-  // l1-a's stream arrives late: TWO run_parallel panels render (call
-  // #1 finished with an unparseable tasks payload, call #2 running).
   send(win, {
     type: 'tool_call',
     name: 'run_parallel',
@@ -1186,9 +1008,6 @@ function testUnregisteredTabAdoptsIntoNewestPanelOnly() {
   });
   send(win, {type: 'tool_result', tabId: l1[0], content: 'c1 done'});
   send(win, {type: 'tool_call', name: 'run_parallel', tabId: l1[0]});
-  // l1-a's task ends: the collapse pass must adopt the unregistered
-  // grandchild into the NEWEST panel (call #2, still running → kept
-  // open), never into finished call #1.
   send(win, {type: 'result', tabId: l1[0], summary: 'done', success: true});
   assert.ok(
     subagentTabEls(win).some(el => el.dataset.tabId === g.tabId),
@@ -1196,8 +1015,6 @@ function testUnregisteredTabAdoptsIntoNewestPanelOnly() {
       '(it belongs to the newest, still-running call)',
   );
 
-  // Collapsing the newest panel (via the user viewing l1-a's chat)
-  // closes the adopted grandchild.
   switchToTabEl(win, l1[0]);
   const nested = runParallelPanels(win);
   assert.strictEqual(nested.length, 2, 'two nested panels rendered');

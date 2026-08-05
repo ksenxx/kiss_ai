@@ -105,13 +105,12 @@ sys.stdout.flush()
         while time.time() < deadline and not started.exists():
             out += _drain(fd, 0.2)
         assert started.exists(), f"agent never started; output: {out!r}"
-        # Let the box finish drawing, then capture only post-SIGCONT output.
         out += _drain(fd, 1.0)
 
         os.kill(pid, signal.SIGCONT)
         after = _drain(fd, 2.0)
 
-        region = f"\x1b[1;{24 - _BOX_H}r"  # rows=24, _BOX_H bottom rows reserved
+        region = f"\x1b[1;{24 - _BOX_H}r"
         assert region in after, (
             "SIGCONT did not re-anchor the scroll region / redraw the "
             f"steering box; post-resume output: {after!r}"
@@ -119,7 +118,7 @@ sys.stdout.flush()
         assert "╭" in after, "SIGCONT did not redraw the box top border"
     finally:
         try:
-            os.write(fd, b"\x03")  # abort the task so the child exits
+            os.write(fd, b"\x03")
         except OSError:
             pass
         _drain(fd, 5.0)

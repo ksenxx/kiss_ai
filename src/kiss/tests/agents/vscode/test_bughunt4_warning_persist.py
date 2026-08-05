@@ -15,8 +15,8 @@ types.ts declares the event).  But ``warning`` was never added to
 * ``_persist_event()`` refuses to enqueue them for live persistence,
 
 meaning a warning the user saw live silently vanishes when the task is
-reopened in a viewer tab, replayed from chat history, or replayed in
-demo mode.  The contract decided here: warnings are display events and
+reopened in a viewer tab or replayed from chat history.  The contract
+decided here: warnings are display events and
 must be recorded/persisted like any other rendered event.
 """
 

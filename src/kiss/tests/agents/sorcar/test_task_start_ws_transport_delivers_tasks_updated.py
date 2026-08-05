@@ -122,11 +122,6 @@ class TestTaskStartWsTransportDeliversTasksUpdated(unittest.TestCase):
         self.saved = _redirect_db(self.tmpdir)
         _init_git_repo(self.tmpdir)
 
-        # Use a real ``WebPrinter`` (the same printer the production
-        # ``RemoteAccessServer`` injects into ``VSCodeServer``) so the
-        # broadcast under test exercises the WS / UDS transport
-        # chokepoint ``_send_to_ws_clients`` — not just the base
-        # ``JsonPrinter.broadcast`` recording / persistence path.
         self.printer = WebPrinter()
         self.server = VSCodeServer(printer=self.printer)
         self.captured_frames: list[str] = []
@@ -138,12 +133,6 @@ class TestTaskStartWsTransportDeliversTasksUpdated(unittest.TestCase):
         def _capture(data: str) -> None:
             with self.captured_lock:
                 self.captured_frames.append(data)
-            # Still call the original so the printer's bookkeeping
-            # (pending-send tracking, etc.) runs.  ``self._loop is
-            # None`` in this test → ``_schedule_send`` returns early
-            # without actually opening a transport, but the captured
-            # JSON payload is the exact bytes a real WS / UDS peer
-            # would receive.
             original_send(data)
 
         printer._send_to_ws_clients = _capture  # type: ignore[method-assign]
@@ -190,17 +179,10 @@ class TestTaskStartWsTransportDeliversTasksUpdated(unittest.TestCase):
             "tabId": tab_id,
         })
 
-        # Wait until the patched parent ``run`` is actually entered:
-        # at this point ``ChatSorcarAgent.run`` has finished its
-        # start-time setup (including the ``tasks_updated`` broadcast
-        # under test).
         assert self.blocker.entered_event.wait(timeout=10), (
             "patched parent SorcarAgent.run was never invoked"
         )
 
-        # Give any pending broadcasts a brief moment to finish
-        # writing into the capture list (the broadcast is synchronous
-        # but the patched run releases entered_event BEFORE returning).
         deadline = time.monotonic() + 1.0
         events: list[dict[str, Any]] = []
         while time.monotonic() < deadline:
@@ -219,13 +201,6 @@ class TestTaskStartWsTransportDeliversTasksUpdated(unittest.TestCase):
             "ENDS, which is the user-visible bug.  Captured frame types "
             f"so far: {[e.get('type') for e in events]}"
         )
-        # Global broadcasts carry an empty ``taskId`` (or no key) so
-        # ``WebPrinter.broadcast`` routes them through the
-        # ``not event.get('taskId')`` global branch.  A frame stamped
-        # with a non-empty ``taskId`` would have gone through the
-        # per-tab fan-out branch and would only reach subscribers of
-        # that specific task — defeating the purpose of refreshing
-        # every connected client's sidebar.
         assert any(
             (not e.get("taskId")) for e in tasks_updated
         ), (

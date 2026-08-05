@@ -2,29 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// END-TO-END integration test: the REAL compiled extension
-// (``SorcarSidebarView.js`` + ``AgentClient.js``) wired to the REAL
-// webview (``media/main.js`` running in jsdom) over a real
-// Unix-domain-socket stub daemon.  Only the ``vscode`` module and the
-// daemon's agent logic are stubbed — every layer the bug touches
-// (webview send logic, extension forwarding + _runningTabs gate,
-// daemon command routing) is exercised for real.
-//
-// REQUIREMENT (the bug): when a task is started in an extension tab and
-// the tab (the secondary-sidebar view) is CLOSED and re-OPENED while the
-// task is still running, user input must NOT be ignored — neither during
-// the task nor after it finishes.  A tab where a task started must behave
-// exactly like a tab that loads the task:
-//   * a message typed WHILE the task runs must reach the daemon as an
-//     ``appendUserMessage`` (injected into the live agent), and
-//   * a message typed AFTER the task finishes must reach the daemon as a
-//     ``run`` (a brand-new task) — i.e. it must NOT be swallowed by the
-//     extension's ``submit`` → ``_runningTabs`` drop guard.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/bughunt_reopen_input_e2e.test.js
 
 'use strict';
 
@@ -38,7 +15,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-// ---- vscode module stub (for the compiled extension) ----------------
 class StubEventEmitter {
   constructor() {
     this._listeners = [];
@@ -105,10 +81,6 @@ Module._resolveFilename = function (request, parent, ...rest) {
   if (request === 'vscode') return require.resolve('./_vscode-stub.js');
   return origResolve.call(this, request, parent, ...rest);
 };
-// ``_vscode-stub.js`` is a git-tracked fixture shared by several tests
-// that run in parallel; it already contains
-// ``module.exports = global.__kissVscodeStub;`` — never write or delete
-// it here or concurrent tests lose their ``vscode`` module mid-run.
 global.__kissVscodeStub = vscodeStub;
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-e2e-'));
@@ -123,10 +95,6 @@ if (process.platform === 'win32') {
   process.exit(0);
 }
 
-// ---- stub daemon (UDS) ----------------------------------------------
-// Records every command the extension forwards and emulates the real
-// daemon's reply pattern: ``run`` → clear + status:running; and
-// ``resumeSession`` → status:running + task_events (server.py ordering).
 const daemonCmds = [];
 let lastServerSock = null;
 function daemonReply(obj) {
@@ -177,8 +145,7 @@ const server = net.createServer(sock => {
   });
 });
 
-// ---- jsdom webview running the REAL main.js -------------------------
-let persistedState; // shared across reopen (vscode.getState)
+let persistedState;
 
 function buildWebviewWindow() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
@@ -194,8 +161,6 @@ function buildWebviewWindow() {
   win.Element.prototype.scrollIntoView = function () {};
   win.Element.prototype.scrollTo = function () {};
   win.HTMLElement.prototype.scrollTo = function () {};
-  // ``toExtension`` is wired to the extension's onDidReceiveMessage
-  // dispatcher once resolveWebviewView has run.
   const ctx = {toExtension: null};
   win.acquireVsCodeApi = function () {
     return {
@@ -214,15 +179,12 @@ function buildWebviewWindow() {
 
 function evalWebviewScripts(win) {
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 }
 
-/**
- * Build a ``WebviewView`` whose ``webview.postMessage`` delivers
- * extension→webview messages into the jsdom window, and whose
- * ``onDidReceiveMessage`` is wired (via ctx.toExtension) to the jsdom
- * webview's ``vscode.postMessage``.
- */
 function makeWebviewView(ctx) {
   const recv = new StubEventEmitter();
   const dispose = new StubEventEmitter();
@@ -282,12 +244,11 @@ async function runTests() {
   const extUri = makeUri(path.join(__dirname, '..'));
   const view = new SorcarSidebarView(extUri);
 
-  // ---- Open tab 1 and start a task --------------------------------
   const ctx1 = buildWebviewWindow();
   const wvv1 = makeWebviewView(ctx1);
   view.resolveWebviewView(wvv1.webviewView, {}, {});
   wvv1.wire();
-  evalWebviewScripts(ctx1.win); // IIFE posts ``ready`` → extension
+  evalWebviewScripts(ctx1.win);
   await sleep(50);
 
   typeAndSend(ctx1.win, 'do a long task');
@@ -299,19 +260,14 @@ async function runTests() {
   );
   assert.ok(TAB, 'extension must have learned the active tab id from submit');
 
-  // ---- Close + reopen the view while the task is running ----------
-  // VS Code re-resolves with the fresh webview FIRST, then fires the
-  // old webview's dispose (the real ordering).
   const ctx2 = buildWebviewWindow();
   const wvv2 = makeWebviewView(ctx2);
   view.resolveWebviewView(wvv2.webviewView, {}, {});
   wvv2.wire();
   wvv1.fireDispose();
-  evalWebviewScripts(ctx2.win); // IIFE posts ``ready`` w/ restoredTabs
+  evalWebviewScripts(ctx2.win);
   await sleep(120);
 
-  // (1) DURING the task: typed input must reach the daemon as
-  //     appendUserMessage (NOT a dropped submit/run).
   daemonCmds.length = 0;
   typeAndSend(ctx2.win, 'please also update the docs');
   await sleep(80);
@@ -327,8 +283,6 @@ async function runTests() {
       '). The re-opened tab ignored the user input.',
   );
 
-  // (2) AFTER the task finishes: typed input must reach the daemon as a
-  //     new run (must NOT be dropped by the submit/_runningTabs guard).
   daemonReply({type: 'status', running: false, tabId: TAB});
   await sleep(80);
   daemonCmds.length = 0;

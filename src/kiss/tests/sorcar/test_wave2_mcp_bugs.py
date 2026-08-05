@@ -47,7 +47,7 @@ import pytest
 
 import kiss.agents.sorcar.mcp_servers as mcp_servers_module
 from kiss.agents.sorcar.mcp_servers import MCPManager, MCPServerConfig
-from kiss.core.useful_tools import UsefulTools
+from kiss.agents.sorcar.useful_tools import UsefulTools
 
 _SERVER_SCRIPT = '''
 from mcp.server.fastmcp import FastMCP
@@ -65,8 +65,6 @@ if __name__ == "__main__":
     mcp.run()
 '''
 
-# Sleeps well past the shrunken CONNECT_TIMEOUT before serving, so the
-# connection attempt times out first and only succeeds afterwards.
 _SLOW_SERVER_SCRIPT = '''
 import time
 
@@ -134,9 +132,6 @@ def real_stdin(
         os.close(master_fd)
 
 
-# ---------------------------------------------------------------------------
-# Finding #17: config.source participates in equality → spurious reconnects
-
 
 def test_source_change_reuses_live_connection(
     tmp_path: Path, real_stdin: None,
@@ -164,10 +159,8 @@ def test_source_change_reuses_live_connection(
         manager.shutdown()
 
 
-# ---------------------------------------------------------------------------
-# Finding #2: call_tool session TOCTOU
 
-
+@pytest.mark.slow
 def test_call_tool_session_nulled_between_check_and_use(
     tmp_path: Path, real_stdin: None,
 ) -> None:
@@ -235,10 +228,8 @@ def test_call_tool_session_nulled_between_check_and_use(
         manager.shutdown()
 
 
-# ---------------------------------------------------------------------------
-# Finding #3: connect() timeout leaves a poisoned record on late success
 
-
+@pytest.mark.slow
 def test_connect_timeout_straggler_is_torn_down_not_poisoned(
     tmp_path: Path,
     real_stdin: None,
@@ -262,8 +253,6 @@ def test_connect_timeout_straggler_is_torn_down_not_poisoned(
         assert time.monotonic() - start < 5.5
         assert conn.error == "connection timed out"
 
-        # Wait for the slow server's connection attempt to conclude
-        # (ready is set on success and on failure alike).
         assert conn.ready.wait(60), "connection attempt never concluded"
         time.sleep(0.5)
 
@@ -280,8 +269,6 @@ def test_connect_timeout_straggler_is_torn_down_not_poisoned(
             time.sleep(0.1)
         assert conn.session is None
 
-        # Recovery: with an adequate timeout the same server connects
-        # cleanly from scratch.
         monkeypatch.setattr(mcp_servers_module, "CONNECT_TIMEOUT", 45.0)
         fresh = manager.connect(cfg)
         assert fresh.error == ""
@@ -290,9 +277,6 @@ def test_connect_timeout_straggler_is_torn_down_not_poisoned(
     finally:
         manager.shutdown()
 
-
-# ---------------------------------------------------------------------------
-# Finding #7: _bash_streaming timeout-vs-completion misreport
 
 
 def test_bash_streaming_genuine_timeout_still_reported(tmp_path: Path) -> None:
@@ -312,9 +296,6 @@ def test_bash_streaming_completed_command_returns_output(tmp_path: Path) -> None
     assert "timeout" not in out.lower()
     assert "done-quickly\n" in lines
 
-
-# ---------------------------------------------------------------------------
-# Finding #14: Write newline translation
 
 
 def test_write_round_trip_is_byte_identical(tmp_path: Path) -> None:

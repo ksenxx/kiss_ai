@@ -68,7 +68,6 @@ class _PypiStub:
             def log_message(
                 self, format: str, *args: object,  # noqa: A002
             ) -> None:
-                # Silence stderr so the test output stays clean.
                 del format, args
 
             def do_GET(self) -> None:
@@ -114,7 +113,6 @@ class _UpdateCheckTestBase(IsolatedAsyncioTestCase):
         self._orig_url = ws._PYPI_LATEST_URL
         self._orig_interval = ws._VERSION_CHECK_INTERVAL
         ws._TAB_CLOSE_GRACE = 0.05
-        # Tight check interval keeps the test fast.
         ws._VERSION_CHECK_INTERVAL = 0.2
 
         self.pypi = _PypiStub(self.PYPI_PAYLOAD, status=self.PYPI_STATUS)
@@ -208,9 +206,6 @@ class TestUpdateAvailableBroadcast(_UpdateCheckTestBase):
 
     async def test_periodic_loop_polls_repeatedly(self) -> None:
         """The hourly loop keeps polling — multiple hits within the test."""
-        # The first check fires on startup, then ``_VERSION_CHECK_INTERVAL``
-        # (0.2s) controls the cadence.  Wait long enough for at least
-        # three polls so the periodic behaviour is exercised.
         deadline = asyncio.get_event_loop().time() + 3.0
         while self.pypi.hits < 3:
             if asyncio.get_event_loop().time() >= deadline:
@@ -222,12 +217,10 @@ class TestUpdateAvailableBroadcast(_UpdateCheckTestBase):
 class TestUpdateAvailableSameVersion(_UpdateCheckTestBase):
     """When PyPI reports the current version, ``available`` is False."""
 
-    PYPI_VERSION = "0.0.0"  # Will be overridden below.
+    PYPI_VERSION = "0.0.0"
 
     async def asyncSetUp(self) -> None:
         from kiss.core._version import __version__
-        # Pin the stub to the *current* installed version so the check
-        # sees no upgrade is needed.
         type(self).PYPI_PAYLOAD = {"info": {"version": __version__}}
         await super().asyncSetUp()
 
@@ -252,10 +245,7 @@ class TestUpdateCheckHandlesNetworkErrors(_UpdateCheckTestBase):
     PYPI_STATUS = 500
 
     async def test_failing_pypi_does_not_break_server(self) -> None:
-        # Sleep so the periodic loop fires at least twice against
-        # the failing endpoint.
         await asyncio.sleep(1.0)
-        # Server is still healthy: UDS still answers ``ready``.
         reader, writer = await self._connect_uds()
         try:
             await self._send_ready(writer, "tab-update-3")
@@ -312,8 +302,6 @@ class TestUpdateAvailableUsesLatestInstalledExtension(_UpdateCheckTestBase):
     PYPI_PAYLOAD = {"info": {"version": "2026.7.5"}}
 
     async def asyncSetUp(self) -> None:
-        # Build the fake ``~/.vscode/extensions/`` layout BEFORE the
-        # daemon starts so its first update-check reads the seeded root.
         self._ext_root_tmp = tempfile.mkdtemp(prefix="kiss-extroot-")
         for ver in ("2026.6.30", "2026.7.5"):
             ext_dir = (
@@ -327,20 +315,15 @@ class TestUpdateAvailableUsesLatestInstalledExtension(_UpdateCheckTestBase):
             (ext_dir / "_version.py").write_text(
                 f'__version__ = "{ver}"\n',
             )
-        # Decoy dirs to ensure the scanner filters strictly on our
-        # publisher/name prefix and does not blow up on unrelated files.
         (
             Path(self._ext_root_tmp) / "someone.other-extension-1.0.0"
         ).mkdir()
         (Path(self._ext_root_tmp) / "not-a-directory.txt").write_text("junk")
-        # Also drop a broken KISS dir (no _version.py) — must be skipped.
         (
             Path(self._ext_root_tmp)
             / "ksenxx.kiss-sorcar-broken"
             / "kiss_project"
         ).mkdir(parents=True)
-        # And one with a malformed _version.py — must be skipped without
-        # raising.
         bad = (
             Path(self._ext_root_tmp)
             / "ksenxx.kiss-sorcar-2026.6.99"
@@ -431,9 +414,6 @@ class TestUpdateAvailableEmptyExtensionsRootFallback(_UpdateCheckTestBase):
             ev = await self._wait_for_event(reader, "update_available")
             self.assertEqual(ev.get("latest"), "2099.1.1")
             current = ev.get("current")
-            # Whatever the bundled version is, it must be a non-empty
-            # string and different from the future PyPI version so the
-            # daemon still announces the update.
             self.assertIsInstance(current, str)
             self.assertNotEqual(current, "")
             self.assertNotEqual(current, "2099.1.1")
@@ -453,9 +433,6 @@ class TestVersionCompare(IsolatedAsyncioTestCase):
         self.assertEqual(ws._compare_versions("2026.6.10", "2026.6.9"), 1)
         self.assertEqual(ws._compare_versions("2026.6.9", "2026.6.10"), -1)
         self.assertEqual(ws._compare_versions("2026.6.9", "2026.6.9"), 0)
-        # Different number of components.
         self.assertEqual(ws._compare_versions("2026.7", "2026.6.9"), 1)
         self.assertEqual(ws._compare_versions("2026.6", "2026.6.0"), 0)
-        # Garbage falls back to equality so a malformed PyPI payload
-        # never falsely claims an update.
         self.assertEqual(ws._compare_versions("bad", "2026.6.9"), 0)

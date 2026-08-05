@@ -13,7 +13,7 @@ from typing import Any, cast
 import yaml
 
 import kiss.core.utils as utils
-from kiss.core.docker_manager import DockerManager
+from kiss.agents.sorcar.docker_manager import DockerManager
 from kiss.core.kiss_agent import KISSAgent
 
 prompt_template_refiner = """
@@ -152,7 +152,8 @@ def get_run_simple_coding_agent(test_fn: Callable[[str], bool]) -> Callable[...,
         extra_instructions = (
             "\n\nYou **MUST** test your code with the test tool provided and fix the "
             "bugs before returning the code. When done, call "
-            'finish(success=True, summary="<the final code>").'
+            'finish(success=True, summary_in_html="<the final code, '
+            'formatted as HTML, e.g. inside <pre><code>>").'
         )
         result = coding_agent.run(
             model_name=model_name,

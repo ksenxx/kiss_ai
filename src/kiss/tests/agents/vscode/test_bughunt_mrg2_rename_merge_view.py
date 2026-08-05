@@ -91,14 +91,12 @@ def test_renamed_file_merge_view_is_consistent_and_restorable(
     repo = _make_repo(tmp_path)
     original = (repo / "old.txt").read_text()
 
-    # Pre-task capture, exactly as task_runner does it.
     pre_hunks = _parse_diff_hunks(str(repo))
     pre_untracked = _capture_untracked(str(repo))
     pre_hashes = _snapshot_files(
         str(repo), pre_untracked | set(pre_hunks.keys()),
     )
 
-    # Agent action: rename the tracked file and make a small edit.
     _git(repo, "mv", "old.txt", "new.txt")
     (repo / "new.txt").write_text(
         original.replace("line5\n", "line5-agent\n"),
@@ -113,9 +111,6 @@ def test_renamed_file_merge_view_is_consistent_and_restorable(
     manifest = json.loads((data_dir / "pending-merge.json").read_text())
     entries = {f["name"]: f for f in manifest["files"]}
 
-    # Every hunk must reference base/current line ranges that actually
-    # exist — an empty base with hunks pointing past its end is the
-    # broken-rename signature.
     for name, entry in entries.items():
         base_lines = _read_lines(entry["base"])
         cur_lines = _read_lines(entry["current"])
@@ -129,15 +124,11 @@ def test_renamed_file_merge_view_is_consistent_and_restorable(
                 f"end of its {len(cur_lines)}-line current file"
             )
 
-    # The deletion of old.txt must be reviewable: rejecting everything
-    # has to be able to restore the original file at its old path.
     assert "old.txt" in entries, (
         "rename made the old path's deletion invisible in the merge view: "
         f"{sorted(entries)}"
     )
     assert _reject_all(entries["old.txt"]) == original
 
-    # And rejecting all of new.txt's hunks must yield its pre-task state
-    # (the file did not exist, i.e. empty content), not a corrupted file.
     assert "new.txt" in entries
     assert _reject_all(entries["new.txt"]) == ""

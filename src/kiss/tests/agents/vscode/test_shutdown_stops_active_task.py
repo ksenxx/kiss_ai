@@ -114,9 +114,6 @@ class TestShutdownStopsActiveTask(TestCase):
             agent._last_task_id = task_id
             captured["id"] = task_id
             entered.set()
-            # Block the way a real agent blocks inside an LLM API call:
-            # a plain sleep that does NOT poll the cooperative stop
-            # event.  Only an injected KeyboardInterrupt can break it.
             deadline = time.monotonic() + 30.0
             while time.monotonic() < deadline:
                 time.sleep(0.05)
@@ -142,8 +139,6 @@ class TestShutdownStopsActiveTask(TestCase):
         tab.task_thread = worker
         worker.start()
 
-        # Wait until the worker is actually inside the (blocking) agent
-        # run and the task row exists and ``is_task_active`` is set.
         assert entered.wait(timeout=10), "worker never entered agent.run"
         for _ in range(100):
             if tab.is_task_active:
@@ -179,7 +174,6 @@ class TestShutdownStopsActiveTask(TestCase):
 
     def test_stop_active_agent_tasks_is_noop_without_active_tasks(self) -> None:
         """With no active worker the shutdown helper must be a safe no-op."""
-        # Ensure no stray active tabs from other tests interfere.
         with _RunningAgentState._registry_lock:
             for tab in _RunningAgentState.running_agent_states.values():
                 thread = tab.task_thread

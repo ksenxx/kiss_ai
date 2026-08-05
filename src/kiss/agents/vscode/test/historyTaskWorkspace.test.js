@@ -2,33 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Integration test for the "workspace" line in the History sidebar's
-// per-task panel.
-//
-// Requirement driven by this test:
-//
-//   Every history row must render the task's workspace (the agent
-//   ``work_dir``) on its OWN line, IMMEDIATELY after the
-//   ``.running-item-metrics`` line (which itself follows the task
-//   text and metrics-row content).  Visually:
-//
-//       <steps> steps • <tokens> tok • $<cost> • <hh:mm:ss>[ • <date>]
-//       <work_dir>
-//
-//   * The workspace span has class ``running-item-workspace`` and
-//     is the metrics row's immediate next sibling inside the
-//     ``.sidebar-item`` row.
-//   * Rows whose backend ``work_dir`` is empty/missing must NOT
-//     render a workspace line (no blank line, no "(no workspace)").
-//
-// This test drives the production ``media/main.js`` (plus the real
-// ``media/chat.html`` markup and ``media/panelCopy.js``) inside jsdom,
-// exactly like ``historyTaskDuration.test.js``.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/historyTaskWorkspace.test.js
 
 'use strict';
 
@@ -69,7 +42,10 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
@@ -78,15 +54,6 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-// Fixture covering the four cases the workspace line must handle:
-//
-//   * row A: a normal task with a Unix-style workspace path.
-//   * row B: a normal task with a Windows-style workspace path
-//     (contains backslashes — must round-trip verbatim).
-//   * row C: a task whose ``work_dir`` is an empty string — no
-//     workspace line at all.
-//   * row D: a task whose ``work_dir`` field is missing entirely
-//     from the payload — no workspace line at all.
 const WS_A = '/Users/koushik/work/repo-A';
 const WS_B = 'C:\\Users\\koushik\\repo-B';
 
@@ -155,7 +122,6 @@ const SESSIONS_FIXTURE = [
     cost: 0,
     steps: 0,
     is_favorite: false,
-    // intentionally no ``work_dir`` key
     startTs: 1_700_000_300_000,
     endTs: 1_700_000_301_000,
   },
@@ -173,10 +139,6 @@ function rowsByTitle(win) {
   return map;
 }
 
-// The History sidebar's workspace filter checkbox (#hf-workspace)
-// hides every row whose ``work_dir`` does not match the currently
-// configured workspace.  We always want every fixture row to render,
-// so this helper clears the filter before sending the history event.
 function disableWorkspaceFilter(win) {
   send(win, {
     type: 'configData',
@@ -232,8 +194,6 @@ function testWorkspaceRendersAfterMetrics() {
     'row B must render a .running-item-workspace span for its work_dir',
   );
 
-  // Text must equal the original work_dir verbatim — no truncation,
-  // no path-separator normalisation.
   assert.strictEqual(
     aWs.textContent,
     WS_A,
@@ -245,9 +205,6 @@ function testWorkspaceRendersAfterMetrics() {
     `row B workspace text must equal ${WS_B}; got: ${bWs.textContent}`,
   );
 
-  // Position requirement: the workspace span must be the metrics
-  // span's IMMEDIATE next sibling (so the workspace shows up on the
-  // line right after the metrics line).
   const aMetrics = metricsSpan(a);
   const bMetrics = metricsSpan(b);
   assert.ok(aMetrics, 'row A must keep its metrics span');
@@ -263,8 +220,6 @@ function testWorkspaceRendersAfterMetrics() {
     'row B: workspace span must come immediately after metrics span',
   );
 
-  // Empty / missing work_dir must NOT render a workspace line at
-  // all — we don't want a blank line or a placeholder.
   assert.strictEqual(
     workspaceSpan(c),
     null,
@@ -284,15 +239,7 @@ function testWorkspaceRendersAfterMetrics() {
 }
 
 function testWorkspaceLineBreaksToOwnVisualLine() {
-  // The workspace span must use ``flex-basis: 100%`` (same trick the
-  // metrics row uses) so it drops onto its own visual line under the
-  // metrics row inside the flex container ``.sidebar-item``.  jsdom
-  // never loads the external ``main.css`` stylesheet that ``chat.html``
-  // references via ``{{STYLE_HREF}}``, so we read the CSS file
-  // directly and assert that a matching rule exists.  This is an
-  // end-to-end check against the real production stylesheet.
   const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
-  // Extract every ``.running-item-workspace { ... }`` block.
   const re = /\.running-item-workspace\s*\{([^}]*)\}/g;
   let m;
   let found = false;

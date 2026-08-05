@@ -2,50 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end tests for the per-panel event timestamp badge.
-//
-// REQUIREMENT: every TOP-LEVEL event panel in the chat webview
-// (tool_call, Result, Prompt, System Prompt, Thoughts) must show a
-// human-readable timestamp of the event — its FULL DATE plus a
-// SECONDS-precision time of day
-// ("Mar 5, 2021 2:07:33 PM") — from the event's ``ts`` field (ms
-// since epoch) at the LEFT of the panel's
-// BOTTOM footer bar — the same ``div.panel-time`` bar whose RIGHT
-// side shows the right-aligned "time spent" label
-// (``span.panel-elapsed``) — in both the VS Code extension webview
-// and the remote web app (which boot the very same media/chat.html +
-// panelCopy.js + main.js).  The badge must NOT render in the panel's
-// title row.
-//
-// SUB-panels nested INSIDE a tool-call event panel (the inline bash
-// output panel, a successful tool_result output panel, and the
-// FAILED tool_result panel) must show NO timestamp badge at all —
-// the owning tool-call panel's own footer badge already carries the
-// event time.  A tool_result panel that lands at TOP level (no
-// owning tool_call panel in the stream) still stamps its own badge.
-//
-// Additional invariants covered:
-//   * the footer bar is the panel's LAST child (bottom), the badge is
-//     the bar's FIRST child (left), and the "time spent" label always
-//     follows the badge in the same bar;
-//   * neither the badge text nor the elapsed label leaks into the
-//     Copy button's clipboard payload or the collapsed header
-//     preview;
-//   * events without a ``ts`` render no badge (old persisted rows);
-//   * replayed ``task_events`` show the ORIGINAL event date + time at
-//     the bottom of the panel, with the bar re-anchored below content
-//     appended after it;
-//   * the badge is idempotent (one per panel) and survives the
-//     early-prompt in-place replacement.
-//
-// Before the fix, the ``.panel-ts`` badge was rendered as a direct
-// child of the panel absolutely anchored in its TITLE row (not inside
-// the ``.panel-time`` bottom bar), so these tests fail — reproducing
-// the issue.  Runs the REAL production webview in jsdom (no mocks of
-// project code):
-//
-//     node src/kiss/agents/vscode/test/panelEventTimestamp.test.js
 
 'use strict';
 
@@ -71,25 +27,11 @@ async function test(name, fn) {
   }
 }
 
-/**
- * Build a jsdom window running the production chat webview: the real
- * ``chat.html`` body (placeholders blanked), ``panelCopy.js`` and
- * ``main.js`` evaluated in the window, and a recording
- * ``acquireVsCodeApi`` stub (the only host API the webview has).
- *
- * ``opts.remote`` boots the window the way the REMOTE WEB APP does:
- * the ``remote-chat`` body class (``BODY_CLASS_ATTR`` substitution in
- * web_server.py), the remote-only markup (#frequent-tasks-btn), and a
- * WebSocket-backed ``acquireVsCodeApi`` shim (``_WS_SHIM_JS`` in
- * web_server.py) whose postMessage forwards to the server socket.
- */
 function makeWebview(opts) {
   const remote = !!(opts && opts.remote);
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
   if (remote) {
-    // web_server.py substitutes BODY_CLASS_ATTR with the remote-chat
-    // class; the extension host leaves it empty.
     html = html.replace('{{BODY_CLASS_ATTR}}', ' class="remote-chat"');
   }
   html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
@@ -105,7 +47,6 @@ function makeWebview(opts) {
   win.Element.prototype.scrollIntoView = function () {};
   win.Element.prototype.scrollTo = function () {};
   win.HTMLElement.prototype.scrollTo = function () {};
-  // Synchronous rAF so streamed deltas flush immediately.
   win.requestAnimationFrame = function (cb) {
     cb();
     return 0;
@@ -125,16 +66,10 @@ function makeWebview(opts) {
   });
 
   if (remote) {
-    // The remote web app provides extra markup around the shared
-    // chat.html body (e.g. the frequent-tasks toggle) before the
-    // shared scripts run.
     const btn = win.document.createElement('button');
     btn.id = 'frequent-tasks-btn';
     win.document.body.appendChild(btn);
   }
-  // Both hosts expose ``acquireVsCodeApi``: the real API in the
-  // extension webview, the WebSocket-backed shim (``_WS_SHIM_JS``) in
-  // the remote web app.  Recreate that surface with a recorder.
   win.acquireVsCodeApi = function () {
     let state;
     return {
@@ -146,43 +81,34 @@ function makeWebview(opts) {
     };
   };
 
-  // The sourceURL pragmas name these eval instances in V8 coverage
-  // output so panelEventTimestamp.coverage.js can locate them and
-  // enforce 100% line coverage of the panelts-coverage regions.
   win.eval(
     fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8') +
       '\n//# sourceURL=panelts-panelCopy.js',
   );
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
       '\n//# sourceURL=panelts-main.js',
   );
 
   return {win, posted, getClipboard: () => clipboardText};
 }
 
-/** Dispatch a backend→webview event exactly like the extension does. */
 function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** The webview's own tab id (posted in its 'ready' handshake). */
 function tabIdOf(wv) {
   const ready = wv.posted.find(m => m.type === 'ready');
   assert.ok(ready && ready.tabId, 'webview must post ready with a tabId');
   return ready.tabId;
 }
 
-/** Flush the microtask queue (for the clipboard promise chain). */
 function flushMicrotasks() {
   return new Promise(resolve => setImmediate(resolve));
 }
 
-/**
- * The label the badge must show for ``ts``.  Mirrors the documented
- * contract: EVERY event carries its full date ("Mon D, YYYY") and a
- * seconds-precision time of day, in the user's locale.
- */
 function expectedLabel(ts) {
   const d = new Date(ts);
   const day = d.toLocaleDateString([], {
@@ -198,14 +124,6 @@ function expectedLabel(ts) {
   return day + ' ' + time;
 }
 
-/**
- * Assert that ``panel`` carries exactly one bottom footer bar
- * (direct-child ``.panel-time``, anchored as the panel's LAST child)
- * whose FIRST child is a ``.panel-ts`` badge showing ``ts``'s full
- * date + seconds-precision time label — i.e. the timestamp renders
- * at the bottom-LEFT of the panel,
- * in the same bar as the "time spent" label, NOT in the title row.
- */
 function assertBadge(panel, ts, what) {
   const bars = panel.querySelectorAll(':scope > .panel-time');
   assert.strictEqual(
@@ -236,15 +154,11 @@ function assertBadge(panel, ts, what) {
     expectedLabel(ts),
     `${what}: badge text`,
   );
-  // The badge must NOT render in the title row (as a direct panel
-  // child) — that is the pre-fix layout.
   assert.strictEqual(
     panel.querySelectorAll(':scope > .panel-ts').length,
     0,
     `${what}: no .panel-ts badge may remain a direct child of the panel`,
   );
-  // When the panel also shows a "time spent" label, it must live in
-  // the SAME bar, to the RIGHT of (i.e. after) the badge.
   const elapsed = panel.querySelectorAll('.panel-elapsed');
   for (let i = 0; i < elapsed.length; i++) {
     if (elapsed[i].closest('.panel-time') !== bar) continue;
@@ -261,12 +175,6 @@ function assertBadge(panel, ts, what) {
   }
 }
 
-/**
- * Assert that ``panel`` — a SUB-panel nested inside a tool-call event
- * panel — carries NO ``.panel-ts`` timestamp badge anywhere in its
- * subtree: the owning tool-call panel's footer badge already shows
- * the event time.
- */
 function assertNoBadge(panel, what) {
   assert.strictEqual(
     panel.querySelectorAll('.panel-ts').length,
@@ -275,7 +183,6 @@ function assertNoBadge(panel, what) {
   );
 }
 
-/** Drive one full agent turn and assert every panel shows its badge. */
 async function runFullTranscript(wv, contextName) {
   const win = wv.win;
   const TAB = tabIdOf(wv);
@@ -285,7 +192,6 @@ async function runFullTranscript(wv, contextName) {
   send(win, {type: 'clear', chat_id: 'chat-ts', tabId: TAB});
   send(win, {type: 'status', running: true, tabId: TAB, startTs: now});
 
-  // System prompt + prompt.
   send(win, {
     type: 'system_prompt',
     text: 'You are a test agent.',
@@ -293,8 +199,6 @@ async function runFullTranscript(wv, contextName) {
     ts: now,
   });
   send(win, {type: 'prompt', text: 'do the thing', tabId: TAB, ts: now});
-  // Footer-bar re-anchoring (MutationObserver) is delivered on the
-  // microtask queue — flush before asserting bar positions.
   await flushMicrotasks();
   const sysPanel = output.querySelector('.ev.system-prompt');
   const promptPanel = output.querySelector('.ev.prompt');
@@ -303,7 +207,6 @@ async function runFullTranscript(wv, contextName) {
   assertBadge(sysPanel, now, `${contextName}: system prompt`);
   assertBadge(promptPanel, now, `${contextName}: prompt`);
 
-  // Thoughts panel (thinking stream).
   send(win, {type: 'thinking_start', tabId: TAB, ts: now});
   send(win, {type: 'thinking_delta', text: 'Plan: run ls.', tabId: TAB});
   send(win, {type: 'thinking_end', tabId: TAB});
@@ -312,7 +215,6 @@ async function runFullTranscript(wv, contextName) {
   assert.ok(thoughts, `${contextName}: Thoughts panel exists`);
   assertBadge(thoughts, now, `${contextName}: Thoughts`);
 
-  // Bash tool call with streamed output.
   send(win, {
     type: 'tool_call',
     name: 'Bash',
@@ -337,7 +239,6 @@ async function runFullTranscript(wv, contextName) {
     ts: now,
   });
 
-  // Non-bash tool call whose successful result renders an output panel.
   send(win, {
     type: 'tool_call',
     name: 'Read',
@@ -358,14 +259,12 @@ async function runFullTranscript(wv, contextName) {
   const op = readTc.querySelector('.bash-panel');
   assert.ok(op, `${contextName}: tool_result output panel exists`);
   assertNoBadge(op, `${contextName}: tool_result output`);
-  // The owning tool-call panel keeps exactly ONE badge — its own.
   assert.strictEqual(
     readTc.querySelectorAll('.panel-ts').length,
     1,
     `${contextName}: the tool-call panel keeps only its own badge`,
   );
 
-  // Failing tool call → FAILED panel.
   send(win, {
     type: 'tool_call',
     name: 'Edit',
@@ -385,7 +284,6 @@ async function runFullTranscript(wv, contextName) {
   assert.ok(trErr, `${contextName}: FAILED tool_result panel exists`);
   assertNoBadge(trErr, `${contextName}: FAILED tool_result`);
 
-  // Result panel.
   send(win, {
     type: 'result',
     summary: '# All done',
@@ -399,9 +297,6 @@ async function runFullTranscript(wv, contextName) {
   assert.ok(rc, `${contextName}: Result panel exists`);
   assertBadge(rc, now, `${contextName}: Result`);
 
-  // Live panels that were stamped by the ticker must show the "time
-  // spent" label in the SAME bar, to the RIGHT of the timestamp: the
-  // bar's last child is the .panel-elapsed span with a duration.
   const tcBar = tc.querySelector(':scope > .panel-time');
   const tcElapsed = tcBar.querySelector(':scope > .panel-elapsed');
   assert.ok(
@@ -426,18 +321,12 @@ async function runFullTranscript(wv, contextName) {
 }
 
 async function run() {
-  // -------------------------------------------------------------------
-  // 1. Extension webview: every event panel shows its badge.
-  // -------------------------------------------------------------------
   await test('extension webview: every event panel shows the date + seconds timestamp at the LEFT of its bottom time-spent bar', async () => {
     const wv = makeWebview();
     await runFullTranscript(wv, 'extension');
     wv.win.close();
   });
 
-  // -------------------------------------------------------------------
-  // 2. Remote web app: same wiring, same badges.
-  // -------------------------------------------------------------------
   await test('remote web app: every event panel shows the date + seconds timestamp at the LEFT of its bottom time-spent bar', async () => {
     const wv = makeWebview({remote: true});
     assert.ok(
@@ -448,9 +337,6 @@ async function run() {
     wv.win.close();
   });
 
-  // -------------------------------------------------------------------
-  // 3. Events without ``ts`` render no badge (old persisted rows).
-  // -------------------------------------------------------------------
   await test('events without ts render no badge', () => {
     const wv = makeWebview();
     const win = wv.win;
@@ -473,11 +359,6 @@ async function run() {
     win.close();
   });
 
-  // -------------------------------------------------------------------
-  // 3b. A tool_result with NO owning tool_call panel in the stream
-  //     lands at top level and still stamps its own badge (both the
-  //     FAILED and the successful-output shapes).
-  // -------------------------------------------------------------------
   await test('top-level tool_result panels (no owning tool_call) keep their badge', async () => {
     const wv = makeWebview();
     const win = wv.win;
@@ -509,16 +390,11 @@ async function run() {
     win.close();
   });
 
-  // -------------------------------------------------------------------
-  // 4. Replayed task_events show the ORIGINAL (old) event time with a
-  //    date part.
-  // -------------------------------------------------------------------
   await test('replayed task_events show the original event date + time', async () => {
     const wv = makeWebview();
     const win = wv.win;
     const TAB = tabIdOf(wv);
     const output = win.document.getElementById('output');
-    // An event from a clearly different day/year than "now".
     const oldTs = new Date(2021, 2, 5, 14, 7).getTime();
     send(win, {
       type: 'task_events',
@@ -546,9 +422,6 @@ async function run() {
         },
       ],
     });
-    // Replayed panels get content appended AFTER their footer bar was
-    // created — the bar's MutationObserver re-anchors it as the last
-    // child on the microtask queue.
     await flushMicrotasks();
     const promptPanel = output.querySelector('.ev.prompt');
     assert.ok(promptPanel, 'replayed prompt panel exists');
@@ -562,14 +435,11 @@ async function run() {
     const rc = output.querySelector('.ev.rc');
     assert.ok(rc, 'replayed result panel exists');
     assertBadge(rc, oldTs, 'replayed result');
-    // Replayed panels never enter the live ticker: the bar shows the
-    // ORIGINAL event time only, no wall-clock "time spent" label.
     assert.strictEqual(
       thoughts.querySelectorAll('.panel-elapsed').length,
       0,
       'replayed panels show no elapsed label',
     );
-    // The label must include the date (old year), not just the time.
     const label = promptPanel.querySelector(
       ':scope > .panel-time > .panel-ts',
     ).textContent;
@@ -580,13 +450,6 @@ async function run() {
     win.close();
   });
 
-  // -------------------------------------------------------------------
-  // 4b. Legacy persisted rows (pre-``ts`` schema) carry only the
-  //     ``_timestamp`` DB column (seconds float) injected by the
-  //     persistence loaders — the webview must backfill ``ts`` from it
-  //     so old tasks show real event times too.  ``ts`` wins when both
-  //     are present; junk ``_timestamp`` values render no badge.
-  // -------------------------------------------------------------------
   await test('legacy replayed events with only _timestamp show the badge', async () => {
     const wv = makeWebview();
     const win = wv.win;
@@ -600,13 +463,11 @@ async function run() {
       chat_id: 'chat-legacy',
       task: 'legacy task',
       events: [
-        // Pre-``ts`` row: only the loader-injected ``_timestamp``.
         {
           type: 'prompt',
           text: 'legacy prompt',
           _timestamp: legacySec,
         },
-        // Both fields: the explicit ``ts`` stamp must win.
         {
           type: 'tool_call',
           name: 'Bash',
@@ -614,7 +475,6 @@ async function run() {
           ts: explicitTs,
           _timestamp: legacySec,
         },
-        // Junk ``_timestamp`` (TEXT column garbage): no badge.
         {
           type: 'tool_call',
           name: 'Read',
@@ -638,9 +498,6 @@ async function run() {
     win.close();
   });
 
-  // -------------------------------------------------------------------
-  // 5. The badge never leaks into the clipboard payload.
-  // -------------------------------------------------------------------
   await test('copy button payload excludes the timestamp badge', async () => {
     const wv = makeWebview();
     const win = wv.win;
@@ -672,7 +529,6 @@ async function run() {
       !copied.includes(label),
       `clipboard payload must not contain the badge text ${JSON.stringify(label)}: ${JSON.stringify(copied)}`,
     );
-    // Nor may the bar's "time spent" label leak into the payload.
     const elapsed = bar.querySelector(':scope > .panel-elapsed');
     assert.ok(elapsed, 'live tool_call bar has an elapsed label');
     assert.ok(
@@ -682,9 +538,6 @@ async function run() {
     win.close();
   });
 
-  // -------------------------------------------------------------------
-  // 6. The badge never leaks into the collapsed header preview.
-  // -------------------------------------------------------------------
   await test('collapsed header preview excludes the timestamp badge', () => {
     const wv = makeWebview();
     const win = wv.win;
@@ -703,7 +556,6 @@ async function run() {
     const label = tc.querySelector(
       ':scope > .panel-time > .panel-ts',
     ).textContent;
-    // Collapse via a header click, exactly like the user does.
     tc.querySelector('.tc-h').dispatchEvent(
       new win.MouseEvent('click', {bubbles: true, cancelable: true}),
     );
@@ -720,9 +572,6 @@ async function run() {
     win.close();
   });
 
-  // -------------------------------------------------------------------
-  // 7. Early prompt replaced in place keeps exactly one badge.
-  // -------------------------------------------------------------------
   await test('early prompt replacement re-stamps exactly one badge', async () => {
     const wv = makeWebview();
     const win = wv.win;
@@ -751,9 +600,6 @@ async function run() {
     win.close();
   });
 
-  // -------------------------------------------------------------------
-  // 8. formatEventTs: date + seconds format edge cases (shared helper).
-  // -------------------------------------------------------------------
   await test('formatEventTs always formats full date + seconds-precision time', () => {
     const wv = makeWebview();
     const {PanelCopy} = wv.win;
@@ -773,35 +619,24 @@ async function run() {
       PanelCopy.formatEventTs(otherYear),
       expectedLabel(otherYear),
     );
-    // EVERY label carries the full date (year included) — even for a
-    // recent same-day event — and the seconds of the time of day.
     assert.ok(/2026/.test(PanelCopy.formatEventTs(sameDay)));
     assert.ok(/:05:42/.test(PanelCopy.formatEventTs(sameDay)));
     assert.ok(/2026/.test(PanelCopy.formatEventTs(sameYear)));
     assert.ok(/:59:07/.test(PanelCopy.formatEventTs(sameYear)));
     assert.ok(/2024/.test(PanelCopy.formatEventTs(otherYear)));
     assert.ok(/:30:59/.test(PanelCopy.formatEventTs(otherYear)));
-    // Invalid / missing / non-positive inputs render nothing.
     assert.strictEqual(PanelCopy.formatEventTs(undefined), '');
     assert.strictEqual(PanelCopy.formatEventTs(null), '');
     assert.strictEqual(PanelCopy.formatEventTs('junk'), '');
     assert.strictEqual(PanelCopy.formatEventTs(0), '');
     assert.strictEqual(PanelCopy.formatEventTs(-5), '');
-    // Finite values beyond the ECMAScript Date range (±8.64e15 ms)
-    // produce an Invalid Date — must render nothing, never
-    // "Invalid Date Invalid Date".
     assert.strictEqual(PanelCopy.formatEventTs(8.64e15 + 1), '');
     assert.strictEqual(PanelCopy.formatEventTs(1e308), '');
-    // Default-now path (no second argument).
     const nowTs = Date.now();
     assert.strictEqual(PanelCopy.formatEventTs(nowTs), expectedLabel(nowTs));
     wv.win.close();
   });
 
-  // -------------------------------------------------------------------
-  // 9. addPanelTimestamp: direct API behavior (idempotency, no-ts,
-  //    badge lands in the footer bar, hover tooltip).
-  // -------------------------------------------------------------------
   await test('addPanelTimestamp stamps the footer bar, is idempotent and skips missing ts', () => {
     const wv = makeWebview();
     const win = wv.win;
@@ -811,8 +646,6 @@ async function run() {
     const panel = doc.createElement('div');
     doc.body.appendChild(panel);
     const ts = new Date(2026, 0, 1, 12, 0).getTime();
-    // No footer bar yet: the bar is created as the panel's last child
-    // and the badge is its first child.
     const badge = PanelCopy.addPanelTimestamp(panel, ts);
     assert.ok(badge, 'badge created');
     const bar = panel.querySelector(':scope > .panel-time');
@@ -820,19 +653,15 @@ async function run() {
     assert.strictEqual(panel.lastElementChild, bar, 'bar is the last child');
     assert.strictEqual(bar.firstElementChild, badge, 'badge is bar-first');
     assert.strictEqual(badge.title, new Date(ts).toLocaleString());
-    // Second call: same badge, no duplicate.
     const again = PanelCopy.addPanelTimestamp(panel, ts + 1000);
     assert.strictEqual(again, badge);
     assert.strictEqual(panel.querySelectorAll('.panel-ts').length, 1);
     assert.strictEqual(panel.querySelectorAll('.panel-time').length, 1);
-    // Missing / invalid ts: no badge, null return.
     const bare = doc.createElement('div');
     assert.strictEqual(PanelCopy.addPanelTimestamp(bare, undefined), null);
     assert.strictEqual(PanelCopy.addPanelTimestamp(bare, 'junk'), null);
     assert.strictEqual(bare.querySelectorAll('.panel-ts').length, 0);
     assert.strictEqual(PanelCopy.addPanelTimestamp(null, ts), null);
-    // With an existing bar already holding an elapsed label, the badge
-    // is inserted BEFORE it (timestamp left, time spent right).
     const withElapsed = doc.createElement('div');
     doc.body.appendChild(withElapsed);
     const bar2 = PanelCopy.ensurePanelFoot(withElapsed);
@@ -850,11 +679,6 @@ async function run() {
     win.close();
   });
 
-  // -------------------------------------------------------------------
-  // 9b. ensurePanelFoot: creates one bar, reuses it, and keeps it
-  //     anchored as the panel's LAST child when content is appended
-  //     after it (MutationObserver re-anchoring).
-  // -------------------------------------------------------------------
   await test('ensurePanelFoot reuses one bar and re-anchors it below appended content', async () => {
     const wv = makeWebview();
     const win = wv.win;
@@ -866,11 +690,8 @@ async function run() {
     const bar = PanelCopy.ensurePanelFoot(panel);
     assert.ok(bar.classList.contains('panel-time'), 'bar has .panel-time');
     assert.strictEqual(panel.lastElementChild, bar, 'bar appended last');
-    // Second call returns the SAME bar (no duplicates, one observer).
     assert.strictEqual(PanelCopy.ensurePanelFoot(panel), bar);
     assert.strictEqual(panel.querySelectorAll('.panel-time').length, 1);
-    // Content appended after the bar: the observer re-anchors the bar
-    // as the last child on the microtask queue.
     const late = doc.createElement('div');
     late.textContent = 'late content';
     panel.appendChild(late);
@@ -881,7 +702,6 @@ async function run() {
       bar,
       'bar must be re-anchored as the LAST child (bottom of the panel)',
     );
-    // A bar inside a NESTED panel is never mistaken for the parent's.
     const nested = doc.createElement('div');
     panel.insertBefore(nested, bar);
     const nestedBar = PanelCopy.ensurePanelFoot(nested);
@@ -890,10 +710,6 @@ async function run() {
     win.close();
   });
 
-  // -------------------------------------------------------------------
-  // 10. getRawText skips the whole footer bar (shared SKIP_CLASSES
-  //     contract): neither timestamp nor elapsed leaks.
-  // -------------------------------------------------------------------
   await test('getRawText skips the .panel-time bar and the .panel-ts badge', () => {
     const wv = makeWebview();
     const {PanelCopy} = wv.win;
@@ -904,7 +720,6 @@ async function run() {
       '<div class="panel-time"><span class="panel-ts">9:05 AM</span>' +
       '<span class="panel-elapsed">3.4s</span></div>';
     assert.strictEqual(PanelCopy.getRawText(panel), 'real content');
-    // A stray badge outside the bar is skipped too.
     const stray = doc.createElement('div');
     stray.innerHTML =
       '<span class="panel-ts">9:05 AM</span><div>real content</div>';
@@ -912,10 +727,6 @@ async function run() {
     wv.win.close();
   });
 
-  // -------------------------------------------------------------------
-  // 11. The stylesheet renders the footer as one flex bar: timestamp
-  //     left (in flow, not absolute) and time-spent pushed right.
-  // -------------------------------------------------------------------
   await test('main.css renders .panel-time as a flex bar with .panel-ts left and .panel-elapsed right', () => {
     const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
     const barRule = css.match(/\.panel-time\s*\{([^}]*)\}/);
@@ -936,8 +747,6 @@ async function run() {
       !/position:\s*absolute/.test(tsRule[1]),
       'the badge must be IN-FLOW in the bar, not absolute in the title row',
     );
-    // Collapsing a panel hides the whole bar (no stale .panel-ts
-    // exemption remains in the hide rules).
     assert.ok(
       /\.tc\.collapsed\s*>\s*:not\(\.tc-h,\s*\.panel-copy-btn\)/.test(css),
       'collapsed .tc panels hide everything but header and copy button',
@@ -952,20 +761,17 @@ async function run() {
       !/:not\([^)]*\.panel-ts/.test(css),
       'no stale .panel-ts exemptions in any :not() hide rule',
     );
-    // The remote web app restyles the SAME bar (shared media files).
     const remoteCss = fs.readFileSync(
       path.join(MEDIA, 'remote-codex.css'),
       'utf8',
     );
     assert.ok(
-      /body\.remote-chat\s+\.panel-time\s*\{/.test(remoteCss),
-      'remote-codex.css keeps its body.remote-chat .panel-time override',
+      !/\.panel-time/.test(remoteCss.replace(/\/\*[\s\S]*?\*\//g, '')),
+      'remote-codex.css must not restyle .panel-time: the remote ' +
+        'webapp inherits the extension look from main.css',
     );
   });
 
-  // ---------------------------------------------------------------------
-  // Summary
-  // ---------------------------------------------------------------------
   console.log('');
   if (failures.length === 0) {
     console.log(`All ${passed} panelEventTimestamp tests passed.`);

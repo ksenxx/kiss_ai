@@ -748,6 +748,12 @@ class TestSetReadyResetsRunningTabId(unittest.TestCase):
         anchors its ``t0``/``endTs`` to the agent-supplied wall-clock
         timestamps, without touching the active tab's UI state."""
         set_ready_src = _extract_function(self.js, "setReady")
+        # setReady delegates the per-tab running flag to the real
+        # setTabRunning helper, so evaluate that too.  Its only UI
+        # side-effect (renderStopButton) fires for the ACTIVE tab
+        # alone, so routing it into uiCalls keeps the "background
+        # completion must not touch active-tab UI" check honest.
+        set_tab_running_src = _extract_function(self.js, "setTabRunning")
         result = _run_node(_make_test_script(
             r"""
             var tabs = [
@@ -765,9 +771,11 @@ class TestSetReadyResetsRunningTabId(unittest.TestCase):
             function stopTimer() { uiCalls.push('stopTimer'); }
             function removeSpinner() { uiCalls.push('removeSpinner'); }
             function renderTabBar() {}
+            function renderStopButton() { uiCalls.push('renderStopButton'); }
             var statusText = { textContent: '' };
             var inp = { focus: function() {} };
             """
+            + set_tab_running_src
             + set_ready_src
             + r"""
             setReady('Done (4s)', 7, 1000, 5000);
@@ -958,7 +966,6 @@ class TestPerTabT0(unittest.TestCase):
             function removeSpinner() {}
             function applyChevronState() {}
             function focusInputWithRetry() {}
-            function clearDemoEndedUi() {}
             """
             + switch_src
             + r"""
@@ -991,6 +998,10 @@ class TestPerTabT0(unittest.TestCase):
         timestamps the existing ``t0`` is preserved and ``endTs``
         falls back to the local clock."""
         set_ready_src = _extract_function(self.js, "setReady")
+        # setReady clears the tab's running flag through the real
+        # setTabRunning helper; renderStopButton (its active-tab UI
+        # side-effect) is stubbed out.
+        set_tab_running_src = _extract_function(self.js, "setTabRunning")
         result = _run_node(_make_test_script(
             r"""
             var tabs = [{ id: 1, isRunning: true, t0: 111, endTs: 0 }];
@@ -1006,9 +1017,11 @@ class TestPerTabT0(unittest.TestCase):
             function stopTimer() { timerRunning = false; }
             function removeSpinner() {}
             function renderTabBar() {}
+            function renderStopButton() {}
             var statusText = { textContent: '' };
             var inp = { focus: function() {} };
             """
+            + set_tab_running_src
             + set_ready_src
             + r"""
             setReady('Done (4s)', 1, 1000, 5000);

@@ -70,13 +70,6 @@ def _run_node(script: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-# ---------------------------------------------------------------------------
-# Source-level guarantees: the ``case 'new_tab':`` handler does not
-# call ``createNewTab`` (which would switch ``activeTabId``) when the
-# event carries a ``parent_tab_id`` — i.e. when the new tab is a
-# sub-agent tab.
-# ---------------------------------------------------------------------------
-
 
 class TestSubagentNewTabHandlerSource(unittest.TestCase):
     """Source-level invariants on the ``new_tab`` handler."""
@@ -112,7 +105,6 @@ class TestSubagentNewTabHandlerSource(unittest.TestCase):
             "could not locate the sub-agent branch in case 'new_tab'"
         )
         start = m.end()
-        # Walk to matching closing brace.
         depth = 1
         i = start
         while i < len(block) and depth > 0:
@@ -168,7 +160,6 @@ class TestSubagentNewTabHandlerSource(unittest.TestCase):
         does not.
         """
         branch = self._subagent_branch()
-        # ``"newChat"`` would appear only as the payload type string.
         assert "'newChat'" not in branch and '"newChat"' not in branch, (
             "sub-agent branch of case 'new_tab' must not post "
             "'newChat' — it would mint a duplicate chat_id."
@@ -209,13 +200,6 @@ class TestSubagentNewTabHandlerSource(unittest.TestCase):
             "isSubagentTab=true before persistTabState() runs."
         )
 
-
-# ---------------------------------------------------------------------------
-# Behavioural guarantee: the real ``createBackgroundSubagentTab``
-# function executed in Node.js leaves ``activeTabId`` untouched, does
-# not post ``newChat`` / ``getWelcomeSuggestions``, and inserts the
-# new tab immediately after the parent.
-# ---------------------------------------------------------------------------
 
 
 def _extract_function(js: str, name: str) -> str:
@@ -320,11 +304,6 @@ class TestCreateBackgroundSubagentTabBehavior(unittest.TestCase):
           and the new sub tab is queued immediately to the right of
           its parent.
         """
-        # Re-create the case body in isolation.  The full handler is
-        # tangled into a giant ``switch`` in main.js; rather than try
-        # to evaluate the whole IIFE we re-execute the contract
-        # itself so this test passes/fails strictly on observable
-        # behaviour (activeTabId, posted messages, tabs order).
         result = _run_node(
             r"""
             var posted = [];

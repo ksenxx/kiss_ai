@@ -91,7 +91,6 @@ class TestInputBoxFeed:
 
     def test_escape_sequences_ignored(self) -> None:
         box = _make_box()
-        # Up arrow then "x" — the CSI sequence must be swallowed.
         box.feed(b"\x1b[Ax", lambda _s: None, lambda: None)
         assert box.buf == "x"
 
@@ -112,16 +111,11 @@ class TestInputBoxRender:
         box.status = " queued: 1 "
         box.redraw()
         text = out.getvalue()
-        # Rounded border glyphs and the input marker are present.
         assert "╭" in text and "╮" in text
         assert "╰" in text and "╯" in text
-        # The cyan chevron precedes the typed text (separated by ANSI
-        # codes), so assert both the marker and the text appear.
         assert "› " in text
         assert "do something" in text
         assert "queued: 1" in text
-        # No static caret glyph is drawn — the real blinking cursor is
-        # parked right after the typed text instead.
         assert "▏" not in text
         _row, col = body_cursor_col("do something", panel_cols())
         assert f";{col}H" in text
@@ -135,8 +129,6 @@ class TestInputBoxRender:
         assert "Add an instruction" in text
 
     def test_draw_parks_caret_after_chevron_when_empty(self) -> None:
-        # With an empty buffer the caret sits immediately after the ``› ``
-        # chevron, exactly like the idle sorcar prompt's blinking cursor.
         out = io.StringIO()
         box = _InputBox(threading.RLock(), out)
         box._active = True
@@ -148,9 +140,6 @@ class TestInputBoxRender:
 
 class TestStdoutProxyCaret:
     def test_output_restores_then_reparks_caret(self) -> None:
-        # While the box is active, agent output is wrapped so it lands in
-        # the scroll region (ESC8 restore / ESC7 save) and the blinking
-        # caret is returned to the box body afterwards.
         out = io.StringIO()
         box = _InputBox(threading.RLock(), out)
         box._active = True
@@ -158,11 +147,11 @@ class TestStdoutProxyCaret:
         proxy = _StdoutProxy(out, box.lock, box)
         proxy.write("agent says hello")
         text = out.getvalue()
-        assert "\x1b8" in text  # restore output position
+        assert "\x1b8" in text
         assert "agent says hello" in text
-        assert "\x1b7" in text  # re-save advanced output position
+        assert "\x1b7" in text
         _row, col = body_cursor_col("hi", panel_cols())
-        assert f";{col}H" in text  # caret re-parked in body
+        assert f";{col}H" in text
 
     def test_output_is_plain_when_box_inactive(self) -> None:
         out = io.StringIO()
@@ -181,7 +170,7 @@ class TestStdoutProxyCaret:
     def test_stop_noop_when_inactive(self) -> None:
         out = io.StringIO()
         box = _InputBox(threading.RLock(), out)
-        box.stop()  # must not raise or touch termios
+        box.stop()
         assert out.getvalue() == ""
 
 
@@ -230,7 +219,6 @@ class TestSteeringQueue:
             "User says: then steer right. "
             "Take the message into account and finish your task.",
         ]
-        # Drained messages are not re-injected on a second drain.
         assert state.pending_user_messages == []
 
     def test_ask_user_question_receives_submitted_line(self) -> None:
@@ -244,12 +232,10 @@ class TestSteeringQueue:
 
         t = threading.Thread(target=asker)
         t.start()
-        # Wait until the worker is parked waiting for an answer.
         assert session._question_pending.wait(timeout=5)
         session._on_submit("src/main.py")
         assert done.wait(timeout=5)
         assert answers == ["src/main.py"]
-        # The answered line must NOT be queued as a steering instruction.
         assert session.state.pending_user_messages == []
 
 
@@ -266,7 +252,6 @@ class _FakeRunAgent:
 
 class TestRunWithSteeringFallback:
     def test_supports_steering_false_without_tty(self) -> None:
-        # The pytest process has no controlling TTY on stdin/stdout.
         assert supports_steering() is False
 
     def test_falls_back_to_plain_run(self) -> None:
@@ -292,9 +277,6 @@ class TestInputBoxHistory:
         assert box.buf == "first"
 
     def test_up_with_typed_text_moves_caret_not_history(self) -> None:
-        # Webview parity: with non-empty typed text (and no browse in
-        # progress) Up moves the caret to the start of the line and
-        # never replaces the draft with a history entry.
         box = _make_box()
         box.history = ["first", "second"]
         box.feed(b"draft", lambda _s: None, lambda: None)
@@ -303,8 +285,6 @@ class TestInputBoxHistory:
         assert box.cursor == 0
 
     def test_down_returns_to_draft(self) -> None:
-        # A browse starts from an empty buffer (webview parity), so
-        # Down past the newest entry restores the empty draft.
         box = _make_box()
         box.history = ["first", "second"]
         box.feed(b"\x1b[A", lambda _s: None, lambda: None)
@@ -318,9 +298,6 @@ class TestInputBoxHistory:
         box.feed(b"\x1b[A", lambda _s: None, lambda: None)
         assert box.buf == "first"
         box.feed(b"x", lambda _s: None, lambda: None)
-        # After editing, the browse is over: Up moves the caret to the
-        # start of the (single-line) text instead of cycling history —
-        # matching the chat webview textbox.
         assert box.buf == "firstx"
         box.feed(b"\x1b[A", lambda _s: None, lambda: None)
         assert box.buf == "firstx"
@@ -338,10 +315,6 @@ class TestInputBoxCompletionMenu:
     """
 
     def test_tab_opens_menu_with_first_selected(self) -> None:
-        # With "complete while typing" the menu auto-opens as the user
-        # types so suggestions appear without an explicit Tab.  The
-        # first candidate is highlighted; ``buf`` is left untouched
-        # until the user accepts one with Tab.
         box = _make_box()
         box.completer_fn = lambda _buf: ["/help ", "/clear "]
         box.feed(b"/he", lambda _s: None, lambda: None)
@@ -351,8 +324,6 @@ class TestInputBoxCompletionMenu:
         assert box.buf == "/he"
 
     def test_enter_on_open_menu_submits_typed_text(self) -> None:
-        # Enter must NEVER accept the highlighted candidate: it
-        # dismisses the menu and submits exactly what the user typed.
         box = _make_box()
         box.completer_fn = lambda _buf: ["/help ", "/clear "]
         box.feed(b"/he", lambda _s: None, lambda: None)
@@ -364,8 +335,6 @@ class TestInputBoxCompletionMenu:
         assert box._menu_open is False
 
     def test_enter_after_menu_navigation_submits_typed_text(self) -> None:
-        # Even with a candidate highlighted via Down-arrow navigation,
-        # Enter submits the typed buffer — never the candidate.
         box = _make_box()
         box.completer_fn = lambda _buf: ["/help ", "/clear ", "/quit "]
         box.feed(b"/", lambda _s: None, lambda: None)
@@ -379,10 +348,6 @@ class TestInputBoxCompletionMenu:
         assert box._menu_open is False
 
     def test_enter_accepts_file_mention_in_at_picker(self) -> None:
-        # The @-mention file picker is the one menu where Enter still
-        # accepts: the buffer ends with an ``@<partial>`` token, so
-        # Enter replaces it with the highlighted candidate WITHOUT
-        # submitting; the next Enter submits the completed line.
         box = _make_box()
         box.completer_fn = lambda _buf: [
             "look at ./alpha.py ",
@@ -399,24 +364,14 @@ class TestInputBoxCompletionMenu:
         assert submitted == ["look at ./alpha.py "]
 
     def test_tab_accepts_highlighted_when_menu_open(self) -> None:
-        # Tab is the accept key: navigate with the arrows, Tab accepts
-        # the highlighted candidate (Enter would submit the typed text).
         box = _make_box()
         box.completer_fn = lambda _buf: ["/help ", "/clear ", "/quit "]
-        # Typing pops the menu at sel=0 via "complete while typing".
         box.feed(b"/", lambda _s: None, lambda: None)
         assert box._menu_open is True
         assert box._menu_sel == 0
-        # Down-arrow navigates; ``buf`` is untouched while navigating.
         box.feed(b"\x1b[B", lambda _s: None, lambda: None)
         assert box._menu_sel == 1
         assert box.buf == "/"
-        # Tab accepts the highlighted candidate.  On a slash-command
-        # line the accept chains: the completer is re-queried against
-        # the new buffer so the next-level menu pops immediately.  The
-        # just-accepted line itself is filtered out as a no-op
-        # candidate, so this constant completer re-opens the menu with
-        # the two remaining candidates at sel=0.
         box.feed(b"\t", lambda _s: None, lambda: None)
         assert box.buf == "/clear "
         assert box._menu_open is True
@@ -432,7 +387,6 @@ class TestInputBoxCompletionMenu:
         assert box._menu_sel == 1
         box.feed(b"\x1b[B", lambda _s: None, lambda: None)
         assert box._menu_sel == 2
-        # Past the last item wraps back to the first.
         box.feed(b"\x1b[B", lambda _s: None, lambda: None)
         assert box._menu_sel == 0
 
@@ -440,29 +394,20 @@ class TestInputBoxCompletionMenu:
         box = _make_box()
         box.completer_fn = lambda _buf: ["a", "b", "c"]
         box.feed(b"\t", lambda _s: None, lambda: None)
-        # Up from idx 0 wraps to the last candidate.
         box.feed(b"\x1b[A", lambda _s: None, lambda: None)
         assert box._menu_sel == 2
 
     def test_shift_tab_moves_selection_up(self) -> None:
         box = _make_box()
         box.completer_fn = lambda _buf: ["a", "b", "c"]
-        # Tab opens the menu; Down-arrow navigates to the second item
-        # (a second Tab would now ACCEPT the highlighted candidate).
         box.feed(b"\t", lambda _s: None, lambda: None)
         box.feed(b"\x1b[B", lambda _s: None, lambda: None)
         assert box._menu_sel == 1
-        # CSI Z (Shift+Tab) goes back.
         box.feed(b"\x1b[Z", lambda _s: None, lambda: None)
         assert box._menu_sel == 0
 
     def test_typing_to_no_matches_closes_menu(self) -> None:
-        # When typing extends the buffer past anything the completer
-        # matches, the menu must close so a stale candidate list does
-        # not linger above the new buffer.
         box = _make_box()
-        # Completer matches only the literal buffer "a"; any other
-        # input returns nothing so the menu must dismiss.
         box.completer_fn = lambda buf: ["alpha", "ant"] if buf == "a" else []
         box.feed(b"a", lambda _s: None, lambda: None)
         assert box._menu_open is True
@@ -471,9 +416,6 @@ class TestInputBoxCompletionMenu:
         assert box.buf == "ax"
 
     def test_backspace_shrinking_to_no_matches_closes_menu(self) -> None:
-        # A prefix-aware completer that only matches the full "ab"
-        # buffer; backspacing back to "a" yields no candidates, so the
-        # menu must close.
         box = _make_box()
         box.completer_fn = lambda buf: ["abacus", "abalone"] if buf == "ab" else []
         box.feed(b"ab", lambda _s: None, lambda: None)
@@ -507,7 +449,6 @@ class TestInputBoxCompletionMenu:
         box.feed(b"\x03", lambda _s: None, lambda: aborted.append(True))
         assert box._menu_open is False
         assert aborted == []
-        # A second Ctrl+C with the menu now closed propagates as abort.
         box.feed(b"\x03", lambda _s: None, lambda: aborted.append(True))
         assert aborted == [True]
 
@@ -521,7 +462,6 @@ class TestInputBoxCompletionMenu:
     def test_no_completer_drops_tab(self) -> None:
         box = _make_box()
         box.feed(b"a\tb", lambda _s: None, lambda: None)
-        # Tab without a completer is silently dropped — not typed.
         assert box.buf == "ab"
         assert box._menu_open is False
 
@@ -549,24 +489,17 @@ class TestInputBoxCompletionMenu:
         box = _InputBox(threading.RLock(), out)
         box.completer_fn = lambda _buf: ["/help ", "/history "]
         box._active = True
-        # Capture the rendered output produced purely from typing.
         box.feed(b"/", lambda _s: None, lambda: None)
         text = out.getvalue()
-        # Both candidates must appear in the painted output.
         assert "/help" in text, "first candidate missing from menu render"
         assert "/history" in text, "second candidate missing from menu render"
-        # The highlighted candidate carries the ❯ marker.
         assert "❯" in text, "no selection marker drawn on highlighted row"
-        # Menu attaches above the input box; the box's top border is
-        # painted at menu_top + 2 (two menu rows above it).
         rows, _ = _term_size()
         menu_top = _box_top_row(rows, _BOX_H + 2)
         assert f"\x1b[{menu_top};1H" in text
         assert f"\x1b[{menu_top + 1};1H" in text
         assert f"\x1b[{menu_top + 2};1H" in text
-        # DECSTBM scroll region is shrunk to leave room for the menu.
         assert f"\x1b[1;{max(rows - (_BOX_H + 2), 1)}r" in text
-        # buf stays as what the user typed — typing only previews.
         assert box.buf == "/"
         assert box._menu_open is True
 
@@ -581,20 +514,14 @@ class TestInputBoxCompletionMenu:
         box.completer_fn = lambda _buf: ["one", "two", "three"]
         box._active = True
         box.feed(b"\t", lambda _s: None, lambda: None)
-        # Drop the open-menu render; we only care about what is emitted
-        # by the close that follows.
         out.seek(0)
         out.truncate(0)
         box.feed(b"\x07", lambda _s: None, lambda: None)
         text = out.getvalue()
         rows, _ = _term_size()
-        # The rows that *were* menu rows must have been cleared (each
-        # gets an ESC[<r>;1H followed by ESC[2K) before the scroll
-        # region is restored to the unreserved height.
         old_top = _box_top_row(rows, _BOX_H + 3)
         for r in range(old_top, old_top + 3):
             assert f"\x1b[{r};1H\x1b[2K" in text, f"row {r} not cleared"
-        # And the DECSTBM region is widened back to the no-menu height.
         assert f"\x1b[1;{max(rows - _BOX_H, 1)}r" in text
 
 
@@ -615,16 +542,12 @@ class TestInputBoxCompletionMenuEdgeCases:
         box._active = True
         box.feed(b"\t", lambda _s: None, lambda: None)
         text = out.getvalue()
-        # The candidate payload contained an ESC byte; menu_row must
-        # have stripped it so the terminal cannot interpret the SGR
-        # change as a real colour escape.
         assert "\x1b[31m" not in text, (
             "raw candidate ANSI escape leaked into terminal output"
         )
         assert "\x1b[0m red" not in text, (
             "raw candidate reset escape leaked into terminal output"
         )
-        # The "second candidate" must still render normally.
         assert "plain candidate" in text
 
     def test_stop_while_menu_open_resets_menu_state(self) -> None:
@@ -635,14 +558,10 @@ class TestInputBoxCompletionMenuEdgeCases:
         out = io.StringIO()
         box = _InputBox(threading.RLock(), out)
         box.completer_fn = lambda _buf: ["alpha", "beta"]
-        # Forge an active start state without a real tty.
         box._active = True
         box._rows, _ = _term_size()
         box.feed(b"\t", lambda _s: None, lambda: None)
         assert box._menu_open is True
-        # stop() needs termios for tcsetattr; short-circuit by faking
-        # the saved tty state to None (the call early-returns the
-        # tcsetattr block).
         box._old_term = None
         box.stop()
         assert box._menu_open is False
@@ -650,9 +569,6 @@ class TestInputBoxCompletionMenuEdgeCases:
         assert box._drawn_menu_h == 0
 
     def test_bracketed_paste_refreshes_menu_or_dismisses(self) -> None:
-        # Paste with a prefix-aware completer that no longer matches
-        # the buffer after paste must dismiss the menu (C3 + C2:
-        # pasted content is treated like typing and re-queries).
         box = _make_box()
         box.completer_fn = lambda buf: ["alpha", "ant"] if buf == "" else []
         box.feed(b"\t", lambda _s: None, lambda: None)
@@ -666,8 +582,6 @@ class TestInputBoxCompletionMenuEdgeCases:
         assert box.buf.endswith("hello")
 
     def test_bracketed_paste_refreshes_menu_with_matches(self) -> None:
-        # When the pasted prefix still has candidates, the menu must
-        # refresh (not close) so the user immediately sees them.
         box = _make_box()
         box.completer_fn = lambda buf: (
             ["/help ", "/clear "] if buf.startswith("/") else []
@@ -692,7 +606,6 @@ class TestInputBoxCompletionMenuEdgeCases:
         box.completer_fn = lambda _buf: ["a", "b"]
         box.feed(b"\t", lambda _s: None, lambda: None)
         assert box._menu_open is True
-        # Force a tiny terminal: rows - _BOX_H - 1 == 0 → no room.
         monkeypatch.setattr(
             "kiss.ui.cli.cli_steering._term_size",
             lambda: (_BOX_H + 1, 80),
@@ -723,11 +636,8 @@ class TestInputBoxCompletionMenuEdgeCases:
 
         worker = threading.Thread(target=ask, daemon=True)
         worker.start()
-        # Wait until the worker has parked on the queue.
         assert session._question_pending.wait(timeout=2.0)
-        # By the time the title is flipped, the menu must be closed.
         assert box._menu_open is False
-        # Unblock the worker and finish.
         session._answer_q.put("done")
         worker.join(timeout=2.0)
         assert answers == ["done"]
@@ -755,7 +665,6 @@ class TestCompleteWhileTyping:
         assert box._menu_open is True
         assert box._menu_sel == 0
         assert box._menu_items == ["/help ", "/history "]
-        # Typing only previews; buf stays at exactly what was typed.
         assert box.buf == "/h"
 
     def test_typing_refreshes_menu_items(self) -> None:
@@ -776,7 +685,6 @@ class TestCompleteWhileTyping:
         assert box._menu_items == ["alpha", "ant"]
         assert box._menu_sel == 0
         box.feed(b"b", lambda _s: None, lambda: None)
-        # New keystroke re-queried the completer with the new buffer.
         assert calls[-1] == "ab"
         assert box._menu_items == ["abacus"]
         assert box._menu_sel == 0
@@ -819,12 +727,9 @@ class TestCompleteWhileTyping:
         box = _make_box()
         box.completer_fn = lambda _buf: ["/help "]
         box.feed(b"/h", lambda _s: None, lambda: None)
-        # buf stays at the typed prefix; the single candidate is just
-        # previewed in the menu.
         assert box.buf == "/h"
         assert box._menu_open is True
         assert box._menu_items == ["/help "]
-        # Tab on a single-candidate preview accepts directly.
         box.feed(b"\t", lambda _s: None, lambda: None)
         assert box.buf == "/help "
         assert box._menu_open is False
@@ -846,9 +751,7 @@ class TestCompleteWhileTyping:
         assert "/history" in text
         assert "❯" in text
         rows, _ = _term_size()
-        # DECSTBM region shrunk by the menu height (2 rows).
         assert f"\x1b[1;{max(rows - (_BOX_H + 2), 1)}r" in text
-        # Box top border row.
         menu_top = _box_top_row(rows, _BOX_H + 2)
         assert f"\x1b[{menu_top + 2};1H" in text
 
@@ -945,8 +848,6 @@ class TestRunSteeringLoop:
 
     def _build_repl(self) -> AnchoredRepl:
         repl = AnchoredRepl()
-        # Replace the real stdout-bound box with one writing to a
-        # StringIO so redraw() does not touch the terminal.
         repl.box = _InputBox(repl.lock, io.StringIO())
         return repl
 
@@ -1079,8 +980,6 @@ class TestConsolePrinterStdoutBypass:
         real_stdout = io.StringIO()
         box = _InputBox(threading.RLock(), real_stdout)
         box._active = True
-        # Match cli_client.run_client: the printer is constructed BEFORE
-        # the proxy is installed.
         printer = ConsolePrinter()
         proxy = _StdoutProxy(real_stdout, box.lock, box)
         return printer, box, proxy, real_stdout
@@ -1097,8 +996,6 @@ class TestConsolePrinterStdoutBypass:
             _sys.stdout = prev
         text = real_stdout.getvalue()
         assert "bash output line" in text
-        # Bug signature: bare "bash output line\n" with no ESC8 prefix
-        # means the write bypassed the proxy and landed in the box body.
         assert "\x1b8bash output line\n" in text, (
             "bash_stream output bypassed the proxy and landed in the "
             "input box body (no ESC 8 restore-output-cursor framing)"
@@ -1116,9 +1013,6 @@ class TestConsolePrinterStdoutBypass:
         finally:
             _sys.stdout = prev
         text = real_stdout.getvalue()
-        # The proxy frames its writes with ESC 8 (restore) ... ESC 7
-        # (re-save).  A direct write of "\n" to the original stdout has
-        # neither and lands in the input box body.
         assert "\x1b8\n" in text, (
             "_flush_newline bypassed the proxy and wrote a newline "
             "directly into the input box body"

@@ -19,6 +19,8 @@ import yaml
 from pydantic import BaseModel
 
 from kiss.agents.obsolete.gepa.template_utils import escape_invalid_template_field_names
+from kiss.agents.sorcar.relentless_agent import RelentlessAgent, _str_to_bool
+from kiss.agents.sorcar.relentless_agent import finish as relentless_finish
 from kiss.core import config as config_module
 from kiss.core.base import Base
 from kiss.core.config import Config, set_artifact_base_dir
@@ -26,8 +28,6 @@ from kiss.core.config_builder import add_config, build_config
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.print_to_console import ConsolePrinter
 from kiss.core.printer import parse_result_yaml
-from kiss.core.relentless_agent import RelentlessAgent, _str_to_bool
-from kiss.core.relentless_agent import finish as relentless_finish
 from kiss.core.utils import (
     config_to_dict,
 )
@@ -95,7 +95,7 @@ class UtilsRegression(unittest.TestCase):
         raw = utils_finish(False, True, "my summary")
         data = yaml.safe_load(raw)
         self.assertEqual(
-            data, {"success": False, "is_continue": True, "summary": "my summary"}
+            data, {"success": False, "is_continue": True, "summary": "<p>my summary</p>"}
         )
 
     def test_finish_defaults(self) -> None:
@@ -108,14 +108,14 @@ class UtilsRegression(unittest.TestCase):
         data = yaml.safe_load(
             utils_finish(cast(Any, "true"), cast(Any, "no"), "s")
         )
-        self.assertEqual(data, {"success": True, "is_continue": False, "summary": "s"})
+        self.assertEqual(data, {"success": True, "is_continue": False, "summary": "<p>s</p>"})
 
     def test_finish_output_recognized_by_parse_result_yaml(self) -> None:
         raw = utils_finish(True, False, "structured summary")
         parsed = parse_result_yaml(raw)
         self.assertIsNotNone(parsed)
         assert parsed is not None
-        self.assertEqual(parsed["summary"], "structured summary")
+        self.assertEqual(parsed["summary"], "<p>structured summary</p>")
         self.assertTrue(parsed["success"])
 
     def test_escape_keeps_valid_and_escapes_invalid(self) -> None:
@@ -440,11 +440,10 @@ class RelentlessRegression(unittest.TestCase):
             self.assertFalse(_str_to_bool(v))
 
     def test_finish_yaml_shape(self) -> None:
-        # ``finish`` tolerates string booleans at runtime; type them away.
         data = yaml.safe_load(
             relentless_finish(cast(Any, "true"), cast(Any, "false"), "sum"),
         )
-        self.assertEqual(data, {"success": True, "is_continue": False, "summary": "sum"})
+        self.assertEqual(data, {"success": True, "is_continue": False, "summary": "<p>sum</p>"})
         data2 = yaml.safe_load(relentless_finish(False))
         self.assertEqual(data2, {"success": False, "is_continue": False, "summary": ""})
 

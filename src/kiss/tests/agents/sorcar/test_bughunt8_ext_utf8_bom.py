@@ -40,7 +40,6 @@ def test_bom_command_file_frontmatter_is_parsed(isolated_homes: Path) -> None:
     project = isolated_homes / "project"
     cmd_dir = project / ".kiss" / "commands"
     cmd_dir.mkdir(parents=True)
-    # encoding="utf-8-sig" writes a real UTF-8 BOM, as Notepad does.
     (cmd_dir / "deploy.md").write_text(
         "---\ndescription: Deploy the app\nargument-hint: '[env]'\n---\n"
         "Deploy to $1.\n",

@@ -62,10 +62,8 @@ class TestPartialSaveConfigBudget(unittest.TestCase):
             {"type": "saveConfig", "config": {"use_web_browser": True}},
         )
 
-        # Disk still holds the user's budget (save_config merges) ...
         on_disk = json.loads(self._cfg_path.read_text())
         self.assertEqual(on_disk.get("max_budget"), 7)
-        # ... and the live process budget must agree with it.
         self.assertEqual(core_config.DEFAULT_CONFIG.max_budget, 7.0)
 
     def test_payload_with_budget_still_applies(self) -> None:

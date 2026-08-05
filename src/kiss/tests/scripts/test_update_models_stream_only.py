@@ -37,10 +37,6 @@ from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 from kiss.scripts import update_models as _update_models
 from kiss.scripts.update_models import _noop_token_callback, detect_thinking_level
 
-# Pytest collects any module-level callable named ``test_*`` as a test. The
-# probe helpers in ``update_models`` are named ``test_generate`` /
-# ``test_function_calling`` for historical reasons; rebind them under
-# non-``test_`` names so they aren't mistaken for pytest test functions.
 _probe_generate = _update_models.test_generate
 _probe_function_calling = _update_models.test_function_calling
 
@@ -231,7 +227,6 @@ def test_noop_token_callback_is_callable_with_string_token() -> None:
     callback everywhere ``test_generate`` / ``test_function_calling`` /
     ``detect_thinking_level`` plug it in.
     """
-    # Should not raise; return value is intentionally ``None``.
     _noop_token_callback("hello")
     _noop_token_callback("")
 
@@ -254,15 +249,8 @@ def test_update_models_probes_carry_token_callback_for_stream_only_servers(
     HTTP path; only the URL it points at is swapped out.
     """
     with _stream_only_server() as base_url:
-        # We construct the model exactly the same way ``test_generate`` does,
-        # except we plumb the base_url through ``model_config`` so the factory
-        # routes to our loopback server. The probes themselves are unchanged
-        # — they call ``create_model(name, token_callback=_noop_token_callback)``
-        # — but the public ``test_generate``/``test_function_calling`` helpers
-        # accept no model_config, so we re-build the same call here.
         from kiss.core.models.model_info import model as create_model
 
-        # 1. Bare generation probe — succeeds with the no-op callback.
         m = create_model(
             "stream-only-test",
             model_config={"base_url": base_url, "api_key": "dummy"},
@@ -272,8 +260,6 @@ def test_update_models_probes_carry_token_callback_for_stream_only_servers(
         text, _ = m.generate()
         assert text == "hello"
 
-        # 2. Tool probe — succeeds and reports a tool call. The handler
-        # responds with a function call to ``calculator``.
         def calculator(expression: str = "") -> str:
             """Compute a math expression.
 
@@ -291,8 +277,6 @@ def test_update_models_probes_carry_token_callback_for_stream_only_servers(
         calls, _, _ = m2.generate_and_process_with_tools({"calculator": calculator})
         assert len(calls) == 1
         call = calls[0]
-        # The call may be a dataclass (``call.name``) or a dict-like
-        # ({"name": ..., "function": {"name": ...}}); accept either shape.
         if isinstance(call, dict):
             name = call.get("name") or call.get("function", {}).get("name")
         else:
@@ -301,12 +285,6 @@ def test_update_models_probes_carry_token_callback_for_stream_only_servers(
             )
         assert name == "calculator"
 
-    # Sanity: the public probes still swallow errors for unknown model
-    # names (e.g. when no API key is configured) and never propagate the
-    # exception out of the test helper — the token_callback wiring must
-    # not have introduced a new exception path. ``unknown-vendor/...`` is
-    # an unrouted prefix so the factory raises ``KISSError`` immediately,
-    # without touching the network.
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     assert _probe_generate("unknown-vendor/does-not-exist") is False
     assert _probe_function_calling("unknown-vendor/does-not-exist") is False

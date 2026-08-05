@@ -117,7 +117,6 @@ def _run_render(
     """
     src = _MAIN_JS.read_text()
     fn = _extract_function(src, "renderRemoteUrl")
-    # Replace the local _buildRemoteUrlBar reference with the global stub.
     fn = fn.replace("_buildRemoteUrlBar(", "global._buildRemoteUrlBar(")
     ntfy_arg = "undefined" if ntfy is None else repr(ntfy)
     if tunnel_active is None:

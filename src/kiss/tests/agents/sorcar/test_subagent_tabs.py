@@ -54,10 +54,6 @@ class _CapturePrinter(JsonPrinter):
             self._record_event(event)
 
 
-# -----------------------------------------------------------------------
-# Backend integration tests: verify events from parallel sub-agents
-# -----------------------------------------------------------------------
-
 
 @skip_no_key
 class TestSubagentTabEvents:
@@ -92,9 +88,6 @@ class TestSubagentTabEvents:
 
         events = printer.events
 
-        # Task-centric contract: each spawned sub-agent broadcasts one
-        # ``new_tab`` event carrying its persisted ``task_id``; the
-        # frontend materialises the sub-agent tab from that.
         open_events = [e for e in events if e.get("type") == "new_tab"]
         assert len(open_events) >= 2, (
             f"Expected at least 2 new_tab events, got {len(open_events)}. "
@@ -110,10 +103,6 @@ class TestSubagentTabEvents:
             "Sub-agent task IDs must be unique"
         )
 
-        # One ``subagentDone`` per sub-task, carrying the deterministic
-        # backend routing id ``task-{parent}__sub_{idx}``.  A failed
-        # ``run_parallel`` attempt (LLM tool-arg error) still emits its
-        # cleanup ``subagentDone`` without a ``new_tab``, so ``>=``.
         done_events = [e for e in events if e.get("type") == "subagentDone"]
         assert len(done_events) >= len(open_events), (
             f"Expected >= {len(open_events)} subagentDone events, "
@@ -124,8 +113,6 @@ class TestSubagentTabEvents:
                 f"Unexpected subagentDone tab_id: {ev}"
             )
 
-        # Streaming events from the sub-agents are stamped with the
-        # sub-agent's own task id.
         sub_events = [
             e for e in events
             if e.get("taskId") in sub_task_ids

@@ -26,6 +26,8 @@ import shutil
 import tempfile
 from typing import Any
 
+import pytest
+
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent, summary
 from kiss.core.printer import Printer
 
@@ -94,21 +96,14 @@ def test_summary_guard_rejects_every_tool_until_summary() -> None:
 
     agent = ChatSorcarAgent("summary-guard-verify")
     guard = agent.tool_call_guard
-    # ``Any``-typed on purpose: the gate stores its ``_summary_due``
-    # state as a dynamic attribute on the per-session executor (same
-    # pattern as ``_summary_reminder_step``).
     executor: Any = KISSAgent("summary-guard-executor")
 
-    # No executor yet: everything is allowed.
     assert guard("Bash", {"command": "ls"}) is None
 
     agent._current_executor = executor
-    # Gate not armed: everything is allowed.
     assert guard("Bash", {"command": "ls"}) is None
     assert guard("finish", {"result": "done"}) is None
 
-    # Armed: every tool — including finish and custom tools — is
-    # blocked; the gate never opens by itself.
     executor._summary_due = True
     for _ in range(5):
         assert guard("Bash", {"command": "ls"}) == _SUMMARY_GATE_REJECTION
@@ -116,7 +111,6 @@ def test_summary_guard_rejects_every_tool_until_summary() -> None:
         assert guard("my_custom_tool", {}) == _SUMMARY_GATE_REJECTION
     assert executor._summary_due is True
 
-    # A summary call clears the gate; subsequent calls run again.
     assert guard("summary", {"description": "one. two. three."}) is None
     assert executor._summary_due is False
     assert guard("Bash", {"command": "ls"}) is None
@@ -170,7 +164,6 @@ def test_blocked_finish_is_not_terminal_and_prints_error() -> None:
     assert results[0][0] == "Error: call summary first."
     assert results[0][1].get("is_error") is True
 
-    # Unblocked, the same call executes and returns normally.
     name, response = executor._execute_tool(
         {"name": "finish", "arguments": {"result": "done"}}
     )
@@ -205,6 +198,7 @@ def _tool_calls_by_step(
     return calls
 
 
+@pytest.mark.slow
 def test_live_agent_calls_summary_on_every_step_divisible_by_5() -> None:
     """A real run calls summary exactly on steps 5, 10, 15, ....
 
@@ -247,27 +241,17 @@ def test_live_agent_calls_summary_on_every_step_divisible_by_5() -> None:
             "the agent never called the summary tool; tool calls were: "
             f"{calls}"
         )
-        # Every summary call must land on a step divisible by 5.
         off_boundary = [s for s in summary_steps if s % 5]
         assert not off_boundary, (
             f"summary called on steps not divisible by 5: {off_boundary}; "
             f"all calls: {calls}"
         )
-        # Every 5-step boundary reached before the final step must have
-        # a summary call (the run may finish before the last boundary).
         max_step = max(s for s, _ in calls)
         expected = list(range(5, max_step + 1, 5))
         missed = [b for b in expected if b not in summary_steps]
         assert not missed, (
             f"summary missing on boundary steps {missed}; all calls: {calls}"
         )
-        # The description must be a substantial natural-language summary.
-        # A live model phrases its digest nondeterministically — some
-        # runs use semicolons, arrows, or bullet fragments instead of
-        # period-terminated sentences — so counting "." separators alone
-        # is brittle.  Accept any description that has at least two
-        # sentence-like segments (split on ., !, ?, ;, or newlines) and
-        # is long enough to be a real summary rather than a stub.
         descriptions = [
             str((kwargs.get("tool_input") or {}).get("description", ""))
             for (etype, content, kwargs) in printer.events

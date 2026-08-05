@@ -153,7 +153,6 @@ class TestClientRequestReplyLoops(unittest.TestCase):
     def test_request_cli_info_roundtrip_filters_request_id(self) -> None:
         def on_cli_info(cmd: dict[str, Any]) -> list[dict[str, Any]]:
             return [
-                # A stale reply (wrong requestId) must be skipped.
                 {"type": "cliInfo", "subtype": cmd["subtype"],
                  "requestId": "stale", "text": "STALE"},
                 {"type": "cliInfo", "subtype": cmd["subtype"],
@@ -207,8 +206,6 @@ class TestClientRequestReplyLoops(unittest.TestCase):
         client = _connect_client(self.daemon)
         self.addCleanup(client.close)
         self.daemon.drop_connection()
-        # ``client._closed`` flips once the reader hits EOF; the wait
-        # must bail out early instead of sitting out the full 10 s.
         start = time.monotonic()
         models = _request_models(client)
         self.assertEqual(models, [])
@@ -254,8 +251,6 @@ class TestClientRequestReplyLoops(unittest.TestCase):
     def test_autocommit_timeout_and_disconnect_messages(self) -> None:
         client = _connect_client(self.daemon)
         self.addCleanup(client.close)
-        # Disconnect: the wait must abort with the connection-lost
-        # message, well before the 30 s commit-message budget.
         self.daemon.drop_connection()
         deadline = time.monotonic() + 5.0
         while (not client._closed.is_set()
@@ -301,15 +296,11 @@ class TestSubmitTaskArmReset(unittest.TestCase):
         self.assertFalse(run_cmd["useParallel"])
         self.assertTrue(run_cmd["autoCommit"])
         self.assertTrue(run_cmd["taskId"])
-        # After the submission the per-task dispatcher state is reset
-        # regardless of exit path.
         self.assertEqual(client.dispatcher.current_task_id, "")
         self.assertFalse(client.dispatcher.task_active.is_set())
         self.assertFalse(client.dispatcher.task_started.is_set())
 
     def test_submit_task_unacknowledged_resets_state(self) -> None:
-        # Daemon never acknowledges: the submitter must time out AND
-        # still reset the armed task id / latches in its finally.
         client = _connect_client(self.daemon)
         self.addCleanup(client.close)
         out = io.StringIO()
@@ -357,12 +348,9 @@ class TestSubmitTaskArmReset(unittest.TestCase):
                 _submit_task_anchored(
                     client, "anchored", repl, timeout_seconds=0.5,
                 )
-            except BaseException as exc:  # surfaced in the test thread
+            except BaseException as exc:
                 errors.append(exc)
 
-        # Hold the real dispatcher lock longer than the timeout.  The old
-        # ordering armed first and only then created the deadline, so the
-        # first steering-loop check must still report an active task.
         client.dispatcher.task_id_lock.acquire()
         worker = threading.Thread(target=submit)
         try:
@@ -391,10 +379,10 @@ class TestSteeringNavKeyParity(unittest.TestCase):
 
     def test_csi_and_ss3_cursor_moves_match(self) -> None:
         for left, right, home, end in (
-            (b"\x1b[D", b"\x1b[C", b"\x1b[H", b"\x1b[F"),   # CSI
-            (b"\x1bOD", b"\x1bOC", b"\x1bOH", b"\x1bOF"),   # SS3
-            (b"\x1b[D", b"\x1b[C", b"\x1b[1~", b"\x1b[4~"),  # tilde Home/End
-            (b"\x1b[D", b"\x1b[C", b"\x1b[7~", b"\x1b[8~"),  # rxvt Home/End
+            (b"\x1b[D", b"\x1b[C", b"\x1b[H", b"\x1b[F"),
+            (b"\x1bOD", b"\x1bOC", b"\x1bOH", b"\x1bOF"),
+            (b"\x1b[D", b"\x1b[C", b"\x1b[1~", b"\x1b[4~"),
+            (b"\x1b[D", b"\x1b[C", b"\x1b[7~", b"\x1b[8~"),
         ):
             box = self._box()
             box.buf = "hello"
@@ -519,8 +507,8 @@ class TestIdleReadLineFrame(unittest.TestCase):
 
     def test_panel_frame_and_returned_line(self) -> None:
         out = self._run_read_line("hello\n")
-        self.assertIn("╭─", out)   # top border
-        self.assertIn("╰", out)    # bottom border
+        self.assertIn("╭─", out)
+        self.assertIn("╰", out)
         self.assertIn("GOT='hello'", out)
 
     def test_backslash_continuation_joins_lines(self) -> None:

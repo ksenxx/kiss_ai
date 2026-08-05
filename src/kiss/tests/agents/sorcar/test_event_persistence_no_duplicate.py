@@ -83,7 +83,6 @@ class TestEventPersistenceNoDuplicate:
         events = loaded.get("events")
         assert isinstance(events, list)
 
-        # Each emitted event must appear in the DB exactly once.
         type_counts: dict[str, int] = {}
         for ev in events:
             type_counts[str(ev.get("type"))] = (
@@ -93,6 +92,4 @@ class TestEventPersistenceNoDuplicate:
         assert type_counts.get("tool_call") == 1, type_counts
         assert type_counts.get("tool_result") == 1, type_counts
         assert type_counts.get("result") == 1, type_counts
-        # And exactly four display events total (no extras, no
-        # duplicates).
         assert len(events) == len(broadcast_events), events

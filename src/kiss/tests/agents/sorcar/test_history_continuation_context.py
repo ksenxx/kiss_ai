@@ -88,9 +88,6 @@ def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]], threading.Lock]:
     printer = server.printer
 
     def capture(event: dict[str, Any]) -> None:
-        # Mirror the real ``JsonPrinter.broadcast`` side effects
-        # so ``peek_recording`` (used by ``_extract_result_summary``)
-        # and persistence see the event, just without the WSS transport.
         ev = printer._inject_task_id(event)
         with printer._lock:
             printer._record_event(ev)
@@ -117,12 +114,6 @@ class _PromptCapture:
         summary = (
             self.summaries.pop(0) if self.summaries else "done"
         )
-        # Emit a ``result`` event so the task runner's
-        # ``_extract_result_summary`` picks up a non-empty summary
-        # and persists it into ``task_history.result`` — matching
-        # the real LLM flow where the last result event carries the
-        # task summary that subsequent ``build_chat_prompt`` calls
-        # surface as "### Result N".
         if printer is not None and hasattr(printer, "broadcast"):
             cast(Any, printer).broadcast({
                 "type": "result",
@@ -181,16 +172,13 @@ class TestHistoryContinuationContext(unittest.TestCase):
     def test_new_task_after_history_load_includes_prior_context(
         self,
     ) -> None:
-        # Step 1: run the first task in a fresh chat tab.
         first_tab = "tab-first"
         _run_and_wait(self.server, first_tab, "remember the magic word: banana",
                       self.tmpdir)
         first_prompt = self.capture.prompts[0]
-        # New chat: prompt is just the task, no prior context.
         assert "Previous tasks and results" not in first_prompt
         assert "banana" in first_prompt
 
-        # Look up the persisted task to discover its chat_id and id.
         rows = th._load_history(limit=10)
         assert rows, "expected first task to be persisted"
         first_row = rows[0]
@@ -198,11 +186,6 @@ class TestHistoryContinuationContext(unittest.TestCase):
         task_id = cast(str, first_row["id"])
         assert chat_id, "expected non-empty chat_id"
 
-        # Step 2: simulate the user clicking the history row for that
-        # task.  The frontend's ``createNewTab()`` sends ``newChat``
-        # first, then ``resumeSession``.  The tab id allocated is a
-        # fresh uuid orthogonal to the chat id; the backend routes
-        # the chat lookup by chat_id from the ``resumeSession`` payload.
         history_tab = "tab_" + chat_id
         self.server._handle_command(
             {"type": "newChat", "tabId": history_tab}
@@ -214,19 +197,13 @@ class TestHistoryContinuationContext(unittest.TestCase):
             "tabId": history_tab,
         })
 
-        # After resumeSession the tab's chat_id must point at the
-        # resumed session.
         tab = self.server._get_tab(history_tab)
         assert tab.chat_id == chat_id, \
             f"tab.chat_id={tab.chat_id!r}, expected {chat_id!r}"
 
-        # Step 3: the user types and runs a follow-up task in the
-        # resumed tab.
         _run_and_wait(self.server, history_tab,
                       "what was the magic word?", self.tmpdir)
 
-        # Step 4: the captured prompt for the second run must
-        # contain the prior task and its result.
         assert len(self.capture.prompts) >= 2, \
             f"expected at least 2 runs, got {len(self.capture.prompts)}"
         second_prompt = self.capture.prompts[1]
@@ -238,10 +215,6 @@ class TestHistoryContinuationContext(unittest.TestCase):
             "second prompt should include the prior task text "
             f"'banana' but was:\n{second_prompt}"
         )
-        # The prior result row must appear (even when the task_runner
-        # post-task path was unable to extract a non-empty summary
-        # from the printer recording, the chat-history preamble must
-        # still surface a ``### Result 1`` row for the previous task).
         assert "### Result 1" in second_prompt, (
             "second prompt should include the prior result row "
             f"but was:\n{second_prompt}"
@@ -276,8 +249,6 @@ class TestHistoryContinuationWhenTabIdMismatch(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_followup_with_distinct_tab_id_keeps_context(self) -> None:
-        # First, run a task in a chat whose chat_id will not coincide
-        # with the follow-up's tab id.
         first_tab = "tab-original"
         _run_and_wait(self.server, first_tab,
                       "remember the magic word: pineapple",
@@ -287,12 +258,6 @@ class TestHistoryContinuationWhenTabIdMismatch(unittest.TestCase):
         chat_id = str(rows[0]["chat_id"])
         task_id = cast(str, rows[0]["id"])
 
-        # Simulate a viewer browser that allocates a DIFFERENT tab id
-        # to view this chat (e.g. a second viewer opening the row, or
-        # an existing chat tab whose id collides so the frontend mints
-        # a fresh uuid).  ``_replay_session`` sets the tab's chat_id
-        # but does NOT change the tab id; the follow-up run command
-        # carries the viewer's tab id, which differs from chat_id.
         history_tab = "tab-viewer"
         self.server._handle_command(
             {"type": "newChat", "tabId": history_tab}
@@ -307,7 +272,6 @@ class TestHistoryContinuationWhenTabIdMismatch(unittest.TestCase):
         assert tab.chat_id == chat_id, \
             f"replay should have populated chat_id; got {tab.chat_id!r}"
 
-        # Run a follow-up task in the viewer tab.
         _run_and_wait(self.server, history_tab,
                       "what was the magic word?", self.tmpdir)
         assert len(self.capture.prompts) >= 2

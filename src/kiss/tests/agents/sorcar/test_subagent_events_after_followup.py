@@ -28,10 +28,6 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.server.json_printer import JsonPrinter
 
-# ---------------------------------------------------------------------------
-# Fake OpenAI chat server
-# ---------------------------------------------------------------------------
-
 
 def _run_parallel_response() -> dict:
     return {
@@ -102,13 +98,6 @@ class _Handler(BaseHTTPRequestHandler):
             req = {}
         is_stream = req.get("stream", False)
         messages = req.get("messages", [])
-        # Sub-agent requests are identified by their TASK prompt (a
-        # user-role message containing "Compute").  Only user-role
-        # content is inspected: sub-agents inherit the parent's
-        # ``model_config`` (budget-distribution fix), so their system
-        # prompt — which mentions run_parallel — also reaches this
-        # server, and a whole-conversation heuristic would misroute
-        # them into infinite nested run_parallel spawning.
         user_text = " ".join(
             str(m.get("content", "")) for m in messages if m.get("role") == "user"
         )
@@ -193,10 +182,6 @@ def _start_server() -> tuple[ThreadingHTTPServer, str]:
     return srv, f"http://127.0.0.1:{srv.server_port}/v1"
 
 
-# ---------------------------------------------------------------------------
-# Printer that captures per-tab fan-out events
-# ---------------------------------------------------------------------------
-
 
 class _FanoutCapturePrinter(JsonPrinter):
     """Captures every event stamped with a specific tab id during fan-out.
@@ -214,7 +199,6 @@ class _FanoutCapturePrinter(JsonPrinter):
     def broadcast(self, event: dict[str, Any]) -> None:
         """Record, persist, and simulate fan-out."""
         if "tabId" in event:
-            # Targeted system event — deliver verbatim.
             tab_id = event.get("tabId", "")
             if tab_id:
                 with self._cap_lock:
@@ -236,10 +220,6 @@ class _FanoutCapturePrinter(JsonPrinter):
                 self.per_tab_events.setdefault(tab_id, []).append(stamped)
 
 
-# ---------------------------------------------------------------------------
-# DB helpers
-# ---------------------------------------------------------------------------
-
 
 def _redirect(tmpdir: str) -> tuple:
     from pathlib import Path
@@ -256,10 +236,6 @@ def _redirect(tmpdir: str) -> tuple:
 def _restore(saved: tuple) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved
 
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 
 class TestSubagentEventsAfterFollowup:
@@ -300,15 +276,12 @@ class TestSubagentEventsAfterFollowup:
 
         parent_task_key = str(parent._last_task_id)
 
-        # Events delivered to the parent tab via fan-out
         parent_events = printer.per_tab_events.get(parent_tab_id, [])
 
-        # Extract result events
         result_events = [
             e for e in parent_events if e.get("type") == "result"
         ]
 
-        # The parent tab should receive exactly ONE result: its own
         assert len(result_events) == 1, (
             f"Expected 1 result in parent tab fan-out, got {len(result_events)}: "
             f"{result_events}"
@@ -339,7 +312,6 @@ class TestSubagentEventsAfterFollowup:
         parent_task_key = str(parent._last_task_id)
         parent_events = printer.per_tab_events.get(parent_tab_id, [])
 
-        # Find the index of the parent's result event
         result_idx = None
         for i, ev in enumerate(parent_events):
             if ev.get("type") == "result" and ev.get("taskId") == parent_task_key:
@@ -348,7 +320,6 @@ class TestSubagentEventsAfterFollowup:
 
         assert result_idx is not None, "Parent result event not found"
 
-        # All events after the result should belong to the parent task
         post_result = parent_events[result_idx + 1:]
         for ev in post_result:
             task_id = ev.get("taskId", "")
@@ -377,13 +348,11 @@ class TestSubagentEventsAfterFollowup:
 
         parent_task_key = str(parent._last_task_id)
 
-        # Collect sub-agent tab events (any tab that is not the parent)
         sub_tab_ids = [
             tid for tid in printer.per_tab_events
             if tid != parent_tab_id and tid != ""
         ]
 
-        # Each sub-agent tab should have a result event
         for tid in sub_tab_ids:
             tab_events = printer.per_tab_events[tid]
             results = [e for e in tab_events if e.get("type") == "result"]

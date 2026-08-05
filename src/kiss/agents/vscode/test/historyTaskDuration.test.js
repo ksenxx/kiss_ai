@@ -2,33 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Integration test for the "time spent on the task" metric in the
-// History sidebar's per-task panel.
-//
-// Requirement driven by this test:
-//
-//   The ``.running-item-metrics`` line at the bottom of every history
-//   row must show the time spent on the task in ``hh:mm:ss`` format
-//   immediately AFTER the ``$<cost>`` figure (and before the date
-//   suffix when present), separated by `` • ``.
-//
-//   * Finished rows compute duration as ``endTs - startTs`` (both
-//     ms since epoch, already surfaced by the backend on every
-//     history session entry).
-//   * Running rows (``is_running=true`` or ``endTs==0``) compute
-//     duration as ``Date.now() - startTs`` so the user sees a live
-//     estimate at history-load time.
-//   * Rows with no usable startTs (or non-positive duration) omit
-//     the duration token entirely — no zero-time display.
-//
-// This test drives the production ``media/main.js`` (plus the real
-// ``media/chat.html`` markup and ``media/panelCopy.js``) inside jsdom,
-// exactly like ``historyWorkspaceFilter.test.js``.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/historyTaskDuration.test.js
 
 'use strict';
 
@@ -39,9 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-// Freeze Date.now to this instant so running-row duration is
-// deterministic.  Picked so a startTs that is 65_000 ms before this
-// instant yields exactly 00:01:05.
 const FROZEN_NOW_MS = 1_700_500_000_000;
 
 function makeWebview() {
@@ -61,8 +31,6 @@ function makeWebview() {
   win.Element.prototype.scrollTo = function () {};
   win.HTMLElement.prototype.scrollTo = function () {};
 
-  // Freeze Date.now in the webview's window so the running-row
-  // duration computed inside renderHistory is deterministic.
   const RealDate = win.Date;
   const FakeDate = function (...args) {
     if (args.length === 0) return new RealDate(FROZEN_NOW_MS);
@@ -87,7 +55,10 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
@@ -96,12 +67,6 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-// Each row uses a different duration to exercise hh:mm:ss formatting:
-//   * 10s          → 00:00:10
-//   * 65s          → 00:01:05
-//   * 3725s        → 01:02:05  (1h 2m 5s)
-//   * running, started 65s before FROZEN_NOW_MS → 00:01:05 live
-//   * no usable timestamps                        → no duration token
 const SESSIONS_FIXTURE = [
   {
     id: 'chatA',
@@ -152,7 +117,7 @@ const SESSIONS_FIXTURE = [
     is_favorite: false,
     work_dir: '',
     startTs: 1_700_000_200_000,
-    endTs: 1_700_000_200_000 + 3_725_000, // +1h 2m 5s
+    endTs: 1_700_000_200_000 + 3_725_000,
   },
   {
     id: 'chatD',
@@ -210,9 +175,6 @@ function metricsText(row) {
 
 function testDurationAppearsAfterCost() {
   const {win} = makeWebview();
-  // Filter checkboxes default would otherwise hide the running row
-  // when configWorkDir is empty.  Uncheck Workspace so all rows
-  // render regardless of work_dir.
   send(win, {
     type: 'configData',
     config: {work_dir: ''},
@@ -239,9 +201,6 @@ function testDurationAppearsAfterCost() {
   const d = metricsText(rows['still running task']);
   const e = metricsText(rows['legacy row with no timestamps']);
 
-  // Cost prefix + duration suffix sit next to each other, separated by
-  // " • ".  The duration MUST follow the cost (the requirement) and
-  // precede the date suffix (when present).
   assert.match(
     a,
     /\$0\.1234 • 00:00:10\b/,
@@ -264,8 +223,6 @@ function testDurationAppearsAfterCost() {
       `Date.now()-startTs; got: ${d}`,
   );
 
-  // Legacy row with no usable timestamps must NOT show "00:00:00" —
-  // we omit the duration token entirely.
   assert.ok(
     !/00:00:00/.test(e),
     `legacy row must omit duration when no usable timestamps; got: ${e}`,
@@ -293,16 +250,11 @@ function testDurationBeforeDateSuffix() {
   const rows = rowsByTitle(win);
   const c = metricsText(rows['long hour task']);
 
-  // The historic date suffix " • <localised date string>" follows
-  // the duration token.  We assert ordering: cost index < duration
-  // index < a date-ish token (4-digit year or 2-digit hour:minute).
   const costIdx = c.indexOf('$1.2345');
   const durIdx = c.indexOf('01:02:05');
   assert.ok(costIdx >= 0, `cost must appear; got: ${c}`);
   assert.ok(durIdx > costIdx, `duration must follow cost; got: ${c}`);
 
-  // Date suffix should still be there for finished rows whose
-  // backend ``timestamp`` is non-zero.
   const tail = c.slice(durIdx + '01:02:05'.length);
   assert.ok(
     / • /.test(tail),

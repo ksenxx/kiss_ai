@@ -44,10 +44,6 @@ from kiss.agents.sorcar.git_worktree import (
     _git,
 )
 
-# Mirrors the actual user file in the chat session that triggered the
-# bug (papers/kisssorcar/social/twitter_mimic.md): four large
-# "Options" with user wording tweaks inside Option A and Option D, and
-# an agent that keeps only Option D.
 ORIGINAL = (
     "# Twitter mimic — drafts\n"
     "\n"
@@ -185,7 +181,6 @@ class TestMergeWithDirtyBaselineRegion:
             GitWorktreeOps.remove(repo, wt_dir)
             GitWorktreeOps.prune(repo)
 
-            # Production flow: stash any dirty main state, then merge.
             assert GitWorktreeOps.stash_if_dirty(repo)
 
             result = GitWorktreeOps.squash_merge_from_baseline(
@@ -198,11 +193,6 @@ class TestMergeWithDirtyBaselineRegion:
                 "are semantically compatible."
             )
 
-            # The committed HEAD must reflect the agent's intent: Option D
-            # only.  The user's dirty wording at Option D is in the stash
-            # and will be restored on stash pop if it doesn't conflict
-            # with the merge — but that is a stash-pop concern, not a
-            # cherry-pick regression.
             committed = _git(
                 "show",
                 "HEAD:papers/kisssorcar/social/twitter_mimic.md",
@@ -215,7 +205,6 @@ class TestMergeWithDirtyBaselineRegion:
             assert "Option C" not in content
             assert "Option D" in content
 
-            # No leftover conflict markers in the index.
             assert "<<<<<<<" not in content
             assert "=======" not in content
             assert ">>>>>>>" not in content
@@ -226,9 +215,6 @@ class TestMergeWithDirtyBaselineRegion:
         """
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp) / "repo")
-            # An unrelated file (never touched by the agent) is the user's
-            # only dirty state.  twitter_mimic.md is left untouched and
-            # only the agent edits it on the worktree branch.
             (repo / "notes.txt").write_text("user scratch notes\n")
 
             branch = "kiss/wt-conflict-repro-2"
@@ -244,7 +230,6 @@ class TestMergeWithDirtyBaselineRegion:
             assert baseline is not None
             GitWorktreeOps.save_baseline_commit(repo, branch, baseline)
 
-            # Agent edits twitter_mimic.md only; never touches notes.txt.
             _agent_keeps_only_option_d(wt_dir)
 
             GitWorktreeOps.remove(repo, wt_dir)
@@ -262,10 +247,7 @@ class TestMergeWithDirtyBaselineRegion:
                 "restored cleanly after merge."
             )
 
-            # Unrelated dirty file restored intact.
             assert (repo / "notes.txt").read_text() == "user scratch notes\n"
-            # The commit captures only the agent's edit to twitter_mimic.md;
-            # notes.txt is not part of the commit (it stays dirty).
             committed_notes = _git("show", "HEAD:notes.txt", cwd=repo)
             assert committed_notes.returncode != 0
             target = (

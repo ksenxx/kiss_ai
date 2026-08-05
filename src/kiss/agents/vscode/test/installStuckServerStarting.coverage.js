@@ -2,17 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Coverage gate for ``daemonRestartVerify.js``: re-runs
-// ``installStuckServerStarting.test.js`` under V8's built-in coverage
-// (``NODE_V8_COVERAGE``) and FAILS unless every executable line of the
-// module was executed — i.e. the e2e suite exercises 100% of the fix
-// for the "KISS Sorcar Server is starting ..." hang after
-// ``./install.sh``.
-//
-// Run with:
-//
-//     node src/kiss/agents/vscode/test/installStuckServerStarting.coverage.js
 
 'use strict';
 
@@ -26,10 +15,6 @@ const MODULE_FILE = path.resolve(__dirname, '..', 'src',
   'daemonRestartVerify.js');
 const TEST_FILE = path.join(__dirname, 'installStuckServerStarting.test.js');
 
-// Paint one script instance's char coverage from its V8 ranges.
-// Ranges nest; applying them sorted by (startOffset asc, endOffset
-// desc) paints outer ranges first so inner ranges override, matching
-// V8 block-coverage semantics.
 function paintInstance(functions, length, painted) {
   const ranges = [];
   for (const fn of functions) for (const r of fn.ranges) ranges.push(r);
@@ -42,7 +27,6 @@ function paintInstance(functions, length, painted) {
     const end = Math.min(r.endOffset, length);
     for (let i = Math.max(0, r.startOffset); i < end; i++) instance[i] = v;
   }
-  // Merge: a char covered in ANY instance counts as covered.
   for (let i = 0; i < length; i++) if (instance[i]) painted[i] = 1;
 }
 

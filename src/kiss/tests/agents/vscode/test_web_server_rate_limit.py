@@ -88,10 +88,6 @@ class _ConfigSnapshot:
             CONFIG_PATH.unlink()
 
 
-# ---------------------------------------------------------------------------
-# Pure-helper unit tests
-# ---------------------------------------------------------------------------
-
 
 class TestIsRateLimitLine(unittest.TestCase):
     """``_is_rate_limit_line`` must match documented Cloudflare signals."""
@@ -127,7 +123,6 @@ class TestIsRateLimitLine(unittest.TestCase):
         self.assertFalse(_is_rate_limit_line(line))
 
     def test_does_not_match_other_4xx(self) -> None:
-        # 404, 500, etc. are not rate-limit signals.
         self.assertFalse(_is_rate_limit_line("status_code=404"))
         self.assertFalse(_is_rate_limit_line("status_code=503"))
 
@@ -154,7 +149,6 @@ class TestRateLimitBackoffSeconds(unittest.TestCase):
             self.assertLessEqual(_rate_limit_backoff_seconds(), ceiling)
 
     def test_baseline_meets_10_minute_minimum(self) -> None:
-        # The task spec mandates a "10+ minute" backoff.  600 seconds.
         self.assertGreaterEqual(
             ws_mod._TUNNEL_RATE_LIMIT_BACKOFF,
             600,
@@ -162,7 +156,6 @@ class TestRateLimitBackoffSeconds(unittest.TestCase):
         )
 
     def test_jitter_observed_across_calls(self) -> None:
-        # With a 300s jitter window, 40 trials should not all collide.
         values = {_rate_limit_backoff_seconds() for _ in range(40)}
         self.assertGreater(
             len(values),
@@ -172,9 +165,6 @@ class TestRateLimitBackoffSeconds(unittest.TestCase):
 
     def test_long_backoff_dominates_normal_backoff(self) -> None:
         """The rate-limit backoff is longer than the worst normal one."""
-        # _TUNNEL_BACKOFF_MAX (1800s) > baseline (900s) so this isn't
-        # a strict ordering, but for the typical first-few-failure
-        # case the rate-limit floor must dwarf the exponential one.
         normal_first = _tunnel_backoff_delay(1)
         normal_second = _tunnel_backoff_delay(2)
         self.assertGreater(
@@ -185,10 +175,6 @@ class TestRateLimitBackoffSeconds(unittest.TestCase):
         )
 
 
-# ---------------------------------------------------------------------------
-# Stderr reader rate_limit_flag plumbing
-# ---------------------------------------------------------------------------
-
 
 class TestStderrReaderLoopSignature(unittest.TestCase):
     """The optional ``rate_limit_flag`` parameter must be supported."""
@@ -196,7 +182,6 @@ class TestStderrReaderLoopSignature(unittest.TestCase):
     def test_stderr_reader_loop_accepts_rate_limit_flag(self) -> None:
         sig = inspect.signature(_stderr_reader_loop)
         self.assertIn("rate_limit_flag", sig.parameters)
-        # Default must be None so old call-sites keep working.
         self.assertIsNone(
             sig.parameters["rate_limit_flag"].default,
             "rate_limit_flag must default to None",
@@ -258,9 +243,6 @@ class TestReadUrlFromStderrFlag(unittest.TestCase):
             proc.wait(timeout=2)
 
     def test_flag_set_then_url_found(self) -> None:
-        # Even if a 1015 line arrives BEFORE a real URL (unlikely in
-        # practice but the loop must not be confused by it), both the
-        # URL and the flag must be reported.
         proc = self._spawn_bash(
             'echo "ERR error code: 1015 transient" >&2; '
             'echo "INF |  https://example-tunnel.trycloudflare.com  |" '
@@ -294,10 +276,6 @@ class TestReadUrlFromStderrFlag(unittest.TestCase):
             proc.wait(timeout=2)
 
 
-# ---------------------------------------------------------------------------
-# _start_quick_tunnel marks RemoteAccessServer when rate-limited
-# ---------------------------------------------------------------------------
-
 
 class TestStartQuickTunnelMarksRateLimit(IsolatedAsyncioTestCase):
     """Rate-limit lines on cloudflared stderr propagate to the server."""
@@ -307,9 +285,6 @@ class TestStartQuickTunnelMarksRateLimit(IsolatedAsyncioTestCase):
         save_config({"remote_password": "rl-test"})
         self._tmpdir = tempfile.mkdtemp()
         self._old_path = os.environ.get("PATH", "")
-        # Use a minimal PATH so any real cloudflared installed on the
-        # developer's machine (e.g. ~/.local/bin/cloudflared) cannot
-        # shadow our fake under full-suite test pollution.
         os.environ["PATH"] = self._tmpdir + ":/usr/bin:/bin"
         self.port = _find_free_port()
         self.server = RemoteAccessServer(
@@ -345,9 +320,6 @@ class TestStartQuickTunnelMarksRateLimit(IsolatedAsyncioTestCase):
 
     @pytest.mark.slow
     async def test_rate_limit_line_marks_server(self) -> None:
-        # Fake cloudflared that reproduces the user-reported failure:
-        # writes a 1015 / 429 line to stderr and exits ~1s later
-        # without emitting a tunnel URL.
         self._install_fake_cloudflared(
             'echo "ERR Error unmarshaling QuickTunnel response: '
             'error code: 1015 error=\\"invalid character e\\" '
@@ -366,7 +338,6 @@ class TestStartQuickTunnelMarksRateLimit(IsolatedAsyncioTestCase):
 
     @pytest.mark.slow
     async def test_clean_failure_does_not_mark_server(self) -> None:
-        # cloudflared writes nothing rate-limit-shaped, exits.
         self._install_fake_cloudflared(
             'echo "INF starting tunnel" >&2\n'
             'echo "ERR could not bind to port" >&2\n'
@@ -393,10 +364,6 @@ class TestStartQuickTunnelMarksRateLimit(IsolatedAsyncioTestCase):
         self.assertFalse(self.server._tunnel_rate_limited)
 
 
-# ---------------------------------------------------------------------------
-# _restart_tunnel_url applies the long backoff when rate-limited
-# ---------------------------------------------------------------------------
-
 
 class TestRestartTunnelUrlBackoff(IsolatedAsyncioTestCase):
     """``_restart_tunnel_url`` must use a long delay on rate-limit."""
@@ -405,15 +372,11 @@ class TestRestartTunnelUrlBackoff(IsolatedAsyncioTestCase):
         self._snap = _ConfigSnapshot().__enter__()
         save_config({"remote_password": "rl-bk"})
         self._tmpdir = tempfile.mkdtemp()
-        # Always-fail cloudflared so _start_tunnel returns None.
         cf = os.path.join(self._tmpdir, "cloudflared")
         with open(cf, "w") as f:
             f.write("#!/bin/bash\nexit 1\n")
         os.chmod(cf, 0o755)
         self._old_path = os.environ.get("PATH", "")
-        # Use a minimal PATH so any real cloudflared installed on the
-        # developer's machine (e.g. ~/.local/bin/cloudflared) cannot
-        # shadow our fake under full-suite test pollution.
         os.environ["PATH"] = self._tmpdir + ":/usr/bin:/bin"
         self.port = _find_free_port()
         self.server = RemoteAccessServer(
@@ -447,20 +410,21 @@ class TestRestartTunnelUrlBackoff(IsolatedAsyncioTestCase):
         self.server._tunnel_failure_count = 0
         before = time.monotonic()
         await self.server._restart_tunnel_url()
-        # Long-backoff path: at least baseline seconds, plus jitter.
+        after = time.monotonic()
         delay_floor = ws_mod._TUNNEL_RATE_LIMIT_BACKOFF
         delay_ceil = (
             ws_mod._TUNNEL_RATE_LIMIT_BACKOFF
             + ws_mod._TUNNEL_RATE_LIMIT_JITTER
         )
-        scheduled = self.server._tunnel_next_retry - before
-        self.assertGreaterEqual(scheduled, delay_floor - 1)
-        self.assertLessEqual(scheduled, delay_ceil + 5)
-        # Failure count still increments so consecutive non-rate
-        # failures eventually hit the regular cap.
+        self.assertGreaterEqual(
+            self.server._tunnel_next_retry,
+            before + delay_floor,
+        )
+        self.assertLessEqual(
+            self.server._tunnel_next_retry,
+            after + delay_ceil,
+        )
         self.assertEqual(self.server._tunnel_failure_count, 1)
-        # Flag must be cleared so a *second* failure that is NOT a
-        # rate-limit reverts to normal exponential backoff.
         self.assertFalse(self.server._tunnel_rate_limited)
 
     @pytest.mark.slow
@@ -470,7 +434,6 @@ class TestRestartTunnelUrlBackoff(IsolatedAsyncioTestCase):
         before = time.monotonic()
         await self.server._restart_tunnel_url()
         scheduled = self.server._tunnel_next_retry - before
-        # First non-rate failure schedules _TUNNEL_BACKOFF_INITIAL.
         self.assertGreaterEqual(
             scheduled, ws_mod._TUNNEL_BACKOFF_INITIAL - 1,
         )
@@ -483,15 +446,12 @@ class TestRestartTunnelUrlBackoff(IsolatedAsyncioTestCase):
     async def test_subsequent_non_rate_failure_uses_short_path(
         self,
     ) -> None:
-        # First a rate-limit failure (long backoff), flag clears.
         self.server._tunnel_rate_limited = True
         await self.server._restart_tunnel_url()
         self.assertFalse(self.server._tunnel_rate_limited)
-        # Second failure (no flag): exponential schedule resumes.
         before = time.monotonic()
         await self.server._restart_tunnel_url()
         scheduled = self.server._tunnel_next_retry - before
-        # _tunnel_failure_count is now 2 → 60 * 2**(2-1) = 120s.
         self.assertGreaterEqual(scheduled, 119)
         self.assertLess(scheduled, ws_mod._TUNNEL_RATE_LIMIT_BACKOFF)
 

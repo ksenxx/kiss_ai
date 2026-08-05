@@ -2,15 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Regression tests for the 'update_available' event rendering in
-// media/main.js: the settings-panel Update-button badge
-// (renderUpdateAvailableBadge) and the sticky "update available"
-// notification (renderUpdateAvailableNotification).  Locks in the
-// exact DOM so the badge's hand-built createElementNS SVG block can be
-// replaced by a string constant without any visible change.
-//
-//     node src/kiss/agents/vscode/test/simplify2_update_badge.test.js
 'use strict';
 
 const assert = require('assert');
@@ -22,7 +13,6 @@ function run() {
   const btn = doc.getElementById('cfg-update-btn');
   assert.ok(btn, 'settings panel has the #cfg-update-btn button');
 
-  // --- Update available: badge icon + tooltip + notification. ---
   send(win, {
     type: 'update_available',
     available: true,
@@ -60,7 +50,6 @@ function run() {
     'clicking Update posts {type: runUpdate}',
   );
 
-  // --- Re-broadcast must not stack badges or toasts. ---
   send(win, {
     type: 'update_available',
     available: true,
@@ -79,7 +68,6 @@ function run() {
     're-broadcast keeps exactly one notification',
   );
 
-  // --- No longer available: badge and notification are removed. ---
   send(win, {type: 'update_available', available: false});
   assert.ok(!btn.classList.contains('has-update'), 'has-update removed');
   assert.ok(!btn.getAttribute('title'), 'tooltip removed');

@@ -127,6 +127,5 @@ class TestJobDiscovery(TestCase):
         plain = Path(tempfile.mkdtemp(prefix="kiss_viz_plain_")) / "jobs"
         plain.mkdir(parents=True)
         _write_trajectory(plain, "job_2024_05_05_00_00_00_5", "Plain")
-        # A sibling artifact root must NOT be aggregated for a non-standard dir.
         names = {j["name"] for j in list_jobs(plain)}
         self.assertEqual(names, {"job_2024_05_05_00_00_00_5"})

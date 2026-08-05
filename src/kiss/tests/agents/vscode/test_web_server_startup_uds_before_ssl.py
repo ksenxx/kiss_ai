@@ -47,18 +47,8 @@ from unittest import IsolatedAsyncioTestCase
 import kiss.server.web_server as _wsmod
 from kiss.server.web_server import RemoteAccessServer
 
-# How long the artificially-slow SSL context build blocks for.  Chosen
-# to be well above realistic ``load_cert_chain`` + RSA keygen latency
-# (~0.5–2 s) so the test cleanly distinguishes "UDS bound before SSL
-# finished" from "UDS bound alongside a fast SSL build".
 _SSL_DELAY_SECS = 3.0
 
-# UDS must bind well within this budget even while ``_create_ssl_context``
-# is deliberately blocked for ``_SSL_DELAY_SECS``.  Pre-fix, UDS bind
-# happened AFTER the SSL context was built inside ``__init__`` — the
-# elapsed time to first UDS accept exceeded ``_SSL_DELAY_SECS``.  This
-# budget is comfortably below the SSL delay so the test's assertion is
-# unambiguous.
 _UDS_BUDGET_SECS = 1.5
 
 
@@ -79,10 +69,6 @@ class UdsBindsBeforeSslTest(IsolatedAsyncioTestCase):
         self.url_file = self.tmpdir / "remote-url.json"
         self.server: RemoteAccessServer | None = None
 
-        # Snapshot and monkey-patch ``_create_ssl_context`` at the
-        # ``web_server`` module so ``_setup_server`` picks up the slow
-        # variant (it references the module-level name, not a bound
-        # method).  Restored in ``asyncTearDown``.
         self._original_create_ssl = _wsmod._create_ssl_context
         self._ssl_call_started_at: float | None = None
         self._ssl_call_returned_at: float | None = None
@@ -129,7 +115,6 @@ class UdsBindsBeforeSslTest(IsolatedAsyncioTestCase):
             uds_path=self.uds_path,
         )
         ctor_returned = time.monotonic()
-        # 1. Ctor must not have called _create_ssl_context.
         assert self._ssl_call_started_at is None, (
             "_create_ssl_context was called during __init__; SSL work "
             "must be deferred to _setup_server so it does not delay "
@@ -141,12 +126,6 @@ class UdsBindsBeforeSslTest(IsolatedAsyncioTestCase):
             f"<{_UDS_BUDGET_SECS}s (SSL build must not run in ctor)"
         )
 
-        # 2. + 3. Start the server as a background task and race a
-        # UDS-connect poll against it — ``start_async`` awaits the full
-        # ``_setup_server`` including the slow SSL build, so blocking
-        # on it would defeat the whole point of the test.  We only
-        # care that the UDS file appears and accepts connections
-        # BEFORE the SSL build finishes.
         start_task = asyncio.create_task(self.server.start_async())
         uds_ready_at: float | None = None
         deadline = time.monotonic() + _SSL_DELAY_SECS + 5.0
@@ -178,9 +157,6 @@ class UdsBindsBeforeSslTest(IsolatedAsyncioTestCase):
             f"{_SSL_DELAY_SECS}s so this proves UDS is on the "
             f"critical path)"
         )
-        # 4. The SSL build must still be in flight — proves the UDS
-        # bind is genuinely ahead of SSL, not just fast because SSL
-        # happened to be quick.
         assert (
             self._ssl_call_started_at is not None
             and self._ssl_call_returned_at is None
@@ -190,9 +166,6 @@ class UdsBindsBeforeSslTest(IsolatedAsyncioTestCase):
             "longer distinguish the two orderings"
         )
 
-        # Sanity: wait for ``start_async`` (which awaits the SSL build
-        # and WSS bind) to finish so ``stop_async`` in teardown has a
-        # fully-initialised server.
         await asyncio.wait_for(
             start_task, timeout=_SSL_DELAY_SECS + 5.0,
         )

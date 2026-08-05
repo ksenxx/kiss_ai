@@ -45,15 +45,8 @@ from prompt_toolkit.output.plain_text import PlainTextOutput
 from kiss.ui.cli.cli_prompt import PtkLineReader, _prompt_continuation
 from kiss.ui.cli.cli_repl import CliCompleter
 
-# Fixed terminal geometry for the capturing output — wide enough that
-# the typed lines are never wrap-clipped (so each ``\\n`` becomes a
-# distinct visible row, not a wrap), and tall enough that the
-# ``reserve_space_for_menu=16`` setting still leaves room for the
-# multi-line input.
 _ROWS = 40
 _COLS = 80
-# ANSI SGR escape ``ESC[…m`` — stripped so the per-row assertions match
-# against the plain text the user actually sees.
 _SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
@@ -72,9 +65,6 @@ def _captured_drive(
     first, _, rest = keystrokes.partition("\x00")
     buf = io.StringIO()
     output = PlainTextOutput(buf)
-    # ``PlainTextOutput.get_size`` defaults to a tiny placeholder; pin a
-    # realistic terminal geometry so the rendered frame is large enough
-    # to accommodate a multi-line buffer plus the menu reservation.
     output.get_size = lambda: Size(rows=_ROWS, columns=_COLS)  # type: ignore[method-assign]
     with create_pipe_input() as pipe:
         def _send_rest() -> None:
@@ -110,9 +100,6 @@ def _final_input_rows(rendered: str) -> list[str]:
     rows = stripped.splitlines()
     while rows and rows[-1].strip() == "":
         rows.pop()
-    # Walk backwards through the trimmed rows until we hit an empty
-    # row: everything after that empty row is the final rendered
-    # frame the user sees on screen.
     last_block: list[str] = []
     for row in reversed(rows):
         if row.strip() == "":
@@ -151,13 +138,10 @@ def test_alt_enter_grows_input_textbox_height(tmp_path: Path) -> None:
     assert line == "one\ntwo\nthree\nfour\nfive"
     rows = _final_input_rows(rendered)
     cont_rows = _rows_starting_with_continuation(rows)
-    # Four continuation rows after the first ``> one`` row ⇒ five visible
-    # input rows total, matching the five buffer lines.
     assert len(cont_rows) >= 4, (
         f"expected ≥4 continuation rows for 5-line input, got "
         f"{len(cont_rows)} from {rows!r}"
     )
-    # Every typed line surfaces as plain text in the final frame.
     last_frame = "\n".join(rows)
     for chunk in ("one", "two", "three", "four", "five"):
         assert chunk in last_frame, (
@@ -238,11 +222,6 @@ def test_continuation_rows_carry_cyan_border_glyph(tmp_path: Path) -> None:
         f"expected ≥2 continuation rows for 3-line input, got "
         f"{len(cont_rows)} from {rows!r}"
     )
-    # Walk the continuation callable directly — the rendered output
-    # strips SGR escapes, but the callable returns the ANSI-styled
-    # string prompt_toolkit hands to the renderer.  Every ``│`` glyph
-    # must carry the ``ansicyan`` style attribute so the framed left
-    # border stays cyan on every continuation row.
     rendered_ansi = _prompt_continuation(_COLS, 1, 0)
     assert isinstance(rendered_ansi, ANSI)
     fragments = list(to_formatted_text(rendered_ansi))
@@ -272,9 +251,6 @@ def test_input_textbox_height_matches_buffer_line_count(tmp_path: Path) -> None:
     assert line == "x\ny\nz\nw"
     rows = _final_input_rows(rendered)
     cont_rows = _rows_starting_with_continuation(rows)
-    # The first input row is the prompt chevron row (``> x``); the
-    # remaining lines (``y``, ``z``, ``w``) each get their own
-    # continuation row ⇒ 3 continuation rows for a 4-line buffer.
     assert len(cont_rows) == 3, (
         f"expected exactly 3 continuation rows for 4-line buffer, got "
         f"{len(cont_rows)} from {rows!r}"

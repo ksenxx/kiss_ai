@@ -7,11 +7,11 @@
 When a remote (WSS) client connects and sends ``ready``, the web
 server's ``_handle_ready`` must report every task currently running in
 the backend with a targeted ``openRunningTasks`` message so the page
-can open one chat tab per running task and focus the tab running the
-LATEST task.  The message lists one entry per running top-level chat —
-``{chatId, taskId, title, startTs}`` — sorted by ``startTs`` ascending
-(oldest first), so the client's natural open-in-order loop ends focused
-on the newest task.
+can open one chat tab per running task.  Those tabs are opened in the
+background: a task that is still running never takes the user off the
+tab they are on.  The message lists one entry per running top-level
+chat — ``{chatId, taskId, title, startTs}`` — sorted by ``startTs``
+ascending (oldest first), so restored tabs appear in start order.
 
 These tests drive the real ``RemoteAccessServer`` over a real WebSocket
 connection, with real ``_RunningAgentState`` registry entries and real
@@ -53,9 +53,6 @@ class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
     """``ready`` from a WSS client reports running tasks to open."""
 
     async def asyncSetUp(self) -> None:
-        # Pin persistence to a fresh test-owned directory so the test
-        # neither reads nor pollutes the developer's real
-        # ~/.kiss/sorcar.db (same pattern as test_web_server.py).
         import kiss.agents.sorcar.persistence as _persistence
 
         self._saved_persistence = (
@@ -76,8 +73,6 @@ class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
             self._orig_config = CONFIG_PATH.read_text()
         save_config({"remote_password": ""})
 
-        # The registry is process-global: remember and restore its
-        # contents so this test stays independent of suite order.
         with _RunningAgentState._registry_lock:
             self._saved_registry = dict(
                 _RunningAgentState.running_agent_states,
@@ -199,7 +194,6 @@ class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
         events = await self._ready_replies({"type": "ready", "tabId": "t1"})
         types = [e.get("type") for e in events]
         self.assertNotIn("openRunningTasks", types)
-        # Sanity: the normal ready fan-out still happened.
         self.assertIn("models", types)
         self.assertIn("focusInput", types)
 
@@ -208,17 +202,13 @@ class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
         task_id, chat_id = self._register_running_task(
             "tab-main", "parent task", 1_500,
         )
-        # A parallel sub-agent sharing the parent's chat id must not
-        # produce a second row (the parent replay reopens its tab).
         self._register_running_task(
             "tab-sub", "sub-agent task", 1_600,
             is_subagent=True, chat_id=chat_id,
         )
-        # An idle (finished) state must not be reported.
         self._register_running_task(
             "tab-idle", "finished task", 1_700, is_task_active=False,
         )
-        # A second live viewer of the SAME chat collapses to one row.
         dup = _RunningAgentState(
             "tab-dup", "test-model", chat_id=chat_id, is_task_active=True,
         )

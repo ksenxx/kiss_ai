@@ -90,9 +90,6 @@ def test_alt_enter_inserts_newline_then_enter_submits(tmp_path: Path) -> None:
     Esc was interpreted as a plain Enter (the session was not
     multi-line) and the call returned just ``"hello"``.
     """
-    # ``\x1b\r`` is the Esc+Enter (a.k.a. Alt+Enter / Meta+Enter)
-    # sequence delivered by every terminal that does not also route
-    # Shift+Enter through a CSI-u / modifyOtherKeys binding.
     line = _drive(tmp_path, "hello\x00\x1b\rworld\r")
     assert "\n" in line, f"expected a newline in {line!r}"
     assert line == "hello\nworld"
@@ -317,9 +314,9 @@ def test_cmd_enter_inserts_newline_when_completion_selected(
     hist = tmp_path / "hist"
     with create_pipe_input() as pipe:
         def _send_keys() -> None:
-            pipe.send_text("\x1b[B")  # Down: highlight first candidate
-            pipe.send_text("\x1b[27;9;13~")  # Cmd+Enter (modifyOtherKeys)
-            pipe.send_text("end\r")  # Enter: submit
+            pipe.send_text("\x1b[B")
+            pipe.send_text("\x1b[27;9;13~")
+            pipe.send_text("end\r")
 
         timer = threading.Timer(0.5, _send_keys)
         pipe.send_text("@a")
@@ -359,12 +356,11 @@ def test_shift_enter_inserts_newline_when_completion_selected(
     hist = tmp_path / "hist"
     with create_pipe_input() as pipe:
         def _send_keys() -> None:
-            pipe.send_text("\x1b[B")  # Down: highlight first candidate
-            pipe.send_text("\x1b[27;2;13~")  # Shift+Enter (modifyOtherKeys)
-            pipe.send_text("rest\r")  # Enter: submit
+            pipe.send_text("\x1b[B")
+            pipe.send_text("\x1b[27;2;13~")
+            pipe.send_text("rest\r")
 
         timer = threading.Timer(0.5, _send_keys)
-        # ``@a`` filters the picker so a candidate is selectable.
         pipe.send_text("@a")
         timer.start()
         try:
@@ -373,9 +369,6 @@ def test_shift_enter_inserts_newline_when_completion_selected(
                 line = reader.read("> ")
         finally:
             timer.cancel()
-    # The highlighted completion must NOT be applied; the originally
-    # typed ``@a`` is preserved and a real newline separates it from
-    # the follow-up text.
     assert line == "@a\nrest", (
         f"expected '@a\\nrest' (no autocomplete), got {line!r}"
     )
@@ -396,9 +389,9 @@ def test_alt_enter_inserts_newline_when_completion_selected(
     hist = tmp_path / "hist"
     with create_pipe_input() as pipe:
         def _send_keys() -> None:
-            pipe.send_text("\x1b[B")  # Down: highlight first candidate
-            pipe.send_text("\x1b\r")  # Alt+Enter (Esc + CR)
-            pipe.send_text("more\r")  # Enter: submit
+            pipe.send_text("\x1b[B")
+            pipe.send_text("\x1b\r")
+            pipe.send_text("more\r")
 
         timer = threading.Timer(0.5, _send_keys)
         pipe.send_text("@a")
@@ -430,9 +423,9 @@ def test_ctrl_enter_inserts_newline_when_completion_selected(
     hist = tmp_path / "hist"
     with create_pipe_input() as pipe:
         def _send_keys() -> None:
-            pipe.send_text("\x1b[B")  # Down: highlight first candidate
-            pipe.send_text("\x1b[27;5;13~")  # Ctrl+Enter (modifyOtherKeys)
-            pipe.send_text("done\r")  # Enter: submit
+            pipe.send_text("\x1b[B")
+            pipe.send_text("\x1b[27;5;13~")
+            pipe.send_text("done\r")
 
         timer = threading.Timer(0.5, _send_keys)
         pipe.send_text("@a")
@@ -462,9 +455,9 @@ def test_ctrl_j_inserts_newline_when_completion_selected(
     hist = tmp_path / "hist"
     with create_pipe_input() as pipe:
         def _send_keys() -> None:
-            pipe.send_text("\x1b[B")  # Down: highlight first candidate
-            pipe.send_text("\n")  # Ctrl+J / LF
-            pipe.send_text("tail\r")  # Enter: submit
+            pipe.send_text("\x1b[B")
+            pipe.send_text("\n")
+            pipe.send_text("tail\r")
 
         timer = threading.Timer(0.5, _send_keys)
         pipe.send_text("@a")
@@ -492,10 +485,6 @@ def test_prompt_continuation_keeps_panel_left_border(tmp_path: Path) -> None:
     """
     hist = tmp_path / "hist"
     reader = PtkLineReader(CliCompleter(str(tmp_path)), hist)
-    # The PromptSession stores the continuation callable directly; it
-    # is the very same module-level function the production code wires
-    # in, so calling it here exercises the same code path prompt_toolkit
-    # uses for every wrapped / multi-line visual row.
     assert reader.session.prompt_continuation is _prompt_continuation
     rendered = _prompt_continuation(80, 1, 0)
     assert isinstance(rendered, ANSI)

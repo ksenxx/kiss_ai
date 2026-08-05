@@ -82,10 +82,6 @@ def _sample_tool(path: str, count: int = 3, tags: list[str] | None = None) -> st
     return path
 
 
-# ---------------------------------------------------------------------------
-# model_info: routing
-# ---------------------------------------------------------------------------
-
 
 def test_model_routing_by_prefix() -> None:
     """model() routes each name prefix to the documented provider class."""
@@ -120,7 +116,6 @@ def test_strip_provider_prefix() -> None:
     assert _strip_provider_prefix("openai/gpt-5.4") == "gpt-5.4"
     assert _strip_provider_prefix("anthropic/claude-opus-4-6") == "claude-opus-4-6"
     assert _strip_provider_prefix("google/gemini-2.5-pro") == "gemini-2.5-pro"
-    # KISS-owned prefixes are NOT stripped.
     assert _strip_provider_prefix("openai/gpt-oss-120b") == "openai/gpt-oss-120b"
     assert _strip_provider_prefix("openrouter/openai/gpt-4o") == "openrouter/openai/gpt-4o"
     assert _strip_provider_prefix("gpt-4o") == "gpt-4o"
@@ -163,10 +158,6 @@ def test_get_model_provider_labels() -> None:
     assert get_model_provider("something-else") == "Unknown"
 
 
-# ---------------------------------------------------------------------------
-# model_info: pricing / context lengths
-# ---------------------------------------------------------------------------
-
 
 def test_calculate_cost_basic_and_unknown() -> None:
     """Cost math is (tokens * price) / 1M; unknown models allow only zero usage."""
@@ -177,7 +168,6 @@ def test_calculate_cost_basic_and_unknown() -> None:
     info = MODEL_INFO[name]
     expected = (1000 * info.input_price_per_1M + 500 * info.output_price_per_1M) / 1e6
     assert calculate_cost(name, 1000, 500) == pytest.approx(expected)
-    # Provider-prefixed lookup falls back to the stripped name.
     assert calculate_cost(f"anthropic/{name}", 1000, 500) == pytest.approx(expected)
     assert calculate_cost("no-such-model", 0, 0) == 0.0
     with pytest.raises(KISSError, match="unknown model"):
@@ -284,10 +274,6 @@ def test_rank_model_suggestions() -> None:
     assert rank_model_suggestions("zzz", names) == []
 
 
-# ---------------------------------------------------------------------------
-# package __init__: lazy imports
-# ---------------------------------------------------------------------------
-
 
 def test_lazy_class_imports() -> None:
     """Every advertised model class is importable lazily; bad names raise."""
@@ -299,10 +285,6 @@ def test_lazy_class_imports() -> None:
         models_pkg.NoSuchModelClass  # noqa: B018
     assert issubclass(models_pkg.AnthropicModel, models_pkg.Model)
 
-
-# ---------------------------------------------------------------------------
-# model.py: text-based tool calling helpers
-# ---------------------------------------------------------------------------
 
 
 def test_parse_text_based_tool_calls() -> None:
@@ -338,10 +320,6 @@ def test_build_text_based_tools_prompt() -> None:
     assert '"tool_calls"' in prompt
 
 
-# ---------------------------------------------------------------------------
-# model.py: schema building helpers
-# ---------------------------------------------------------------------------
-
 
 def test_function_to_openai_tool_schema() -> None:
     """Signatures + docstrings convert to a full OpenAI tool schema."""
@@ -359,7 +337,6 @@ def test_function_to_openai_tool_schema() -> None:
         "type": "array", "items": {"type": "string"}, "description": "Optional tag list.",
     }
     assert fn["parameters"]["required"] == ["path"]
-    # Pre-built schemas pass through unchanged.
     assert m._resolve_openai_tools_schema({}, schema) is schema
     assert m._resolve_openai_tools_schema({"_sample_tool": _sample_tool}, None) == schema
 
@@ -373,15 +350,11 @@ def test_python_type_to_json_schema_variants() -> None:
     assert conv(float) == {"type": "number"}
     assert conv(int | None) == {"type": "integer"}
     assert conv(int | str) == {"anyOf": [{"type": "integer"}, {"type": "string"}]}
-    assert conv(list) == {"type": "string"}  # bare list has no origin -> fallback
+    assert conv(list) == {"type": "string"}
     assert conv(list[int]) == {"type": "array", "items": {"type": "integer"}}
     assert conv(dict[str, int]) == {"type": "object"}
     assert conv(object) == {"type": "string"}
 
-
-# ---------------------------------------------------------------------------
-# model.py: conversation helpers
-# ---------------------------------------------------------------------------
 
 
 def test_add_message_and_usage_info() -> None:
@@ -431,7 +404,6 @@ def test_find_tool_calls_from_responses_items() -> None:
         {"type": "function_call_output", "call_id": "c1", "output": "done"},
     ]
     assert m._find_tool_call_ids_from_last_assistant() == [("g", "c2")]
-    # Anthropic-style content-block tool_use ids are also found.
     m.conversation = [
         {"role": "assistant", "content": [
             {"type": "text", "text": "hi"},
@@ -465,10 +437,6 @@ def test_responses_items_to_chat_messages() -> None:
     assert out[2] == {"role": "tool", "tool_call_id": "c1", "content": "res"}
     assert out[3] == {"role": "assistant", "content": "already chat format"}
 
-
-# ---------------------------------------------------------------------------
-# model.py: attachments and content flattening
-# ---------------------------------------------------------------------------
 
 
 def test_binary_attachment_roundtrip() -> None:

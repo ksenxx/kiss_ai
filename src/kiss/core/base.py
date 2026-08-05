@@ -141,7 +141,7 @@ class Base:
             "tokens_used": self.total_tokens_used,
             "max_tokens": max_tokens,
             "step_count": self.step_count,
-            "max_steps": getattr(self, "max_steps", 100),
+            "max_steps": getattr(self, "max_steps", 10000),
             "command": " ".join(sys.argv),
         }
 

@@ -70,17 +70,13 @@ def test_repo_switch_merges_into_current_branch(tmp_path: Path) -> None:
     a branch that merely shares its name with repoA's original branch."""
     repo_a = _make_repo(tmp_path / "repoA", "develop")
     repo_b = _make_repo(tmp_path / "repoB", "main")
-    # repoB also has an unrelated stale 'develop' branch; HEAD is 'main'.
     _git("branch", "develop", cwd=repo_b)
 
     agent = WorktreeSorcarAgent("t")
 
-    # Task 1 runs in repoA (original branch 'develop').
     assert agent._try_setup_worktree(repo_a, None) is not None
     _commit_agent_work(agent, "a.txt")
 
-    # Task 2: the user switched work_dir to repoB (currently on 'main').
-    # Setting up the new worktree auto-releases (merges) the repoA one.
     assert agent._try_setup_worktree(repo_b, None) is not None
     assert agent._wt is not None
     assert agent._wt.original_branch == "main", (
@@ -93,7 +89,6 @@ def test_repo_switch_merges_into_current_branch(tmp_path: Path) -> None:
     msg = agent.merge()
     assert "Successfully merged" in msg, msg
 
-    # The work must land on repoB's 'main' and HEAD must stay on 'main'.
     assert GitWorktreeOps.current_branch(repo_b) == "main", (
         "merge() switched the user's repoB checkout to the wrong branch"
     )
@@ -104,7 +99,6 @@ def test_repo_switch_merges_into_current_branch(tmp_path: Path) -> None:
         "agent work was merged into repoB's unrelated 'develop' branch"
     )
 
-    # Task 1's work must still have been merged into repoA's develop.
     assert _git("show", "develop:a.txt", cwd=repo_a).returncode == 0
 
 

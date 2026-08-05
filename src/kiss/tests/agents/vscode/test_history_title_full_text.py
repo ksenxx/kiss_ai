@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """History sidebar items must carry the full task text so the
-``.running-item > .sidebar-item-text`` line-clamp (4 lines) in ``main.css``
+``.running-item > .sidebar-item-text`` line-clamp (3 lines) in ``main.css``
 can actually wrap multiple lines.
 
 The backend previously truncated ``title`` to 50 characters with an
@@ -28,7 +28,7 @@ _LONG_TASK = (
     "This is a deliberately very long task description that comfortably "
     "exceeds the previous 50 character truncation threshold and should "
     "wrap across multiple lines in the history sidebar so the user can "
-    "skim the first four lines of context before clicking in."
+    "skim the first three lines of context before clicking in."
 )
 
 
@@ -77,7 +77,6 @@ class TestHistoryTitleFullText(unittest.TestCase):
         s = sessions[0]
         self.assertEqual(s["title"], _LONG_TASK)
         self.assertEqual(s["preview"], _LONG_TASK)
-        # Ensure the previous 50-char + ellipsis truncation is gone.
         self.assertNotIn("...", s["title"])
         self.assertGreater(len(s["title"]), 50)
 
@@ -95,12 +94,13 @@ class TestHistoryTitleFullText(unittest.TestCase):
 
 class TestRunningItemLineClampCSS(unittest.TestCase):
     """The CSS that controls how many lines history rows can show
-    still pins ``-webkit-line-clamp`` to 4 on ``.running-item`` rows.
+    pins ``-webkit-line-clamp`` to 3 on ``.running-item`` rows, so a
+    collapsed history task panel shows at most three lines of task text.
     History items render with ``className = 'sidebar-item running-item'``
     in ``renderHistory`` so this selector applies to them too.
     """
 
-    def test_running_item_line_clamp_is_four(self) -> None:
+    def test_running_item_line_clamp_is_three(self) -> None:
         css_path = (
             Path(__file__).resolve().parents[3]
             / "agents"
@@ -109,17 +109,10 @@ class TestRunningItemLineClampCSS(unittest.TestCase):
             / "main.css"
         )
         css = css_path.read_text(encoding="utf-8")
-        # Block:
-        #   .running-item > .sidebar-item-text {
-        #     ...
-        #     -webkit-line-clamp: 4;
-        #     line-clamp: 4;
-        #     ...
-        #   }
         start = css.index(".running-item > .sidebar-item-text")
         block = css[start : start + 400]
-        self.assertIn("-webkit-line-clamp: 4;", block)
-        self.assertIn("line-clamp: 4;", block)
+        self.assertIn("-webkit-line-clamp: 3;", block)
+        self.assertIn("line-clamp: 3;", block)
 
 
 if __name__ == "__main__":

@@ -93,9 +93,5 @@ class TestRunParallelClosureUsesCoercion:
             t for t in tools if getattr(t, "__name__", "") == "run_parallel"
         )
 
-        # ``max_workers="0"`` coerces to ``int(0)`` and surfaces
-        # ``ValueError`` from ``ThreadPoolExecutor`` — but only AFTER
-        # ``_coerce_tasks`` wraps ``"hello world"`` into a single-element
-        # list.  Character iteration would not raise here.
         with pytest.raises(ValueError):
             run_parallel("hello world", max_workers="0")

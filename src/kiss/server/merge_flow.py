@@ -14,6 +14,7 @@ Split out of ``server.py`` for organisation.
 
 from __future__ import annotations
 
+import enum
 import json
 import logging
 import os
@@ -28,9 +29,12 @@ from kiss.agents.sorcar.git_worktree import (
     repo_lock,
 )
 from kiss.agents.sorcar.persistence import _append_chat_event
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.agents.sorcar.running_agent_state import (
+    _RunningAgentState,
+    _tab_busy,
+)
+from kiss.agents.sorcar.useful_tools import _stale_worktree_fallback
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.core.useful_tools import _stale_worktree_fallback
 from kiss.server.diff_merge import (
     _capture_untracked,
     _cleanup_merge_data,
@@ -38,12 +42,34 @@ from kiss.server.diff_merge import (
     _merge_data_dir,
     _prepare_merge_view,
 )
-from kiss.server.helpers import generate_commit_message_from_diff
+from kiss.server.helpers import (
+    generate_commit_message_from_diff,
+    tab_busy_with_other_task,
+)
 
 if TYPE_CHECKING:
     from kiss.server.json_printer import JsonPrinter
 
 logger = logging.getLogger(__name__)
+
+
+def _tab_task_key(tab: _RunningAgentState | None) -> str | None:
+    """Return the task id *tab* last ran, preferring the live agent's.
+
+    Args:
+        tab: The per-tab state to inspect, or ``None``.
+
+    Returns:
+        The task id, or ``None`` when the tab never ran a task.
+    """
+    if tab is None:
+        return None
+    task_id = tab.task_history_id
+    if task_id is None:
+        task_id = tab.last_task_id
+    if task_id is None and tab.agent is not None:
+        task_id = tab.agent._last_task_id
+    return task_id
 
 
 def _unquoted_name_lines(output: str) -> list[str]:
@@ -60,12 +86,6 @@ def _unquoted_name_lines(output: str) -> list[str]:
     Returns:
         List of unquoted relative file paths.
     """
-    # Split on ``\n`` only, WITHOUT stripping the whole output first:
-    # ``output.strip()`` would eat the leading spaces of the FIRST
-    # listed path (and trailing spaces of the last) — space-adjacent
-    # filenames are legal and not C-quoted by git.  ``splitlines`` is
-    # avoided too so a raw (unquoted, non-control) unicode
-    # line-separator byte sequence inside a name cannot split it.
     return [
         _unquote_git_path(line)
         for line in output.split("\n")
@@ -132,6 +152,45 @@ def _is_valid_baseline(git_dir: str, sha: str) -> bool:
     return check.returncode == 0 and check.stdout.strip() == "commit"
 
 
+class _PendingOutcome(enum.Enum):
+    """What a caller must do after inspecting a pending worktree.
+
+    A boolean cannot express the third case.  ``NOOP`` means the
+    pending worktree belongs to somebody else right now — a live task
+    writing into it, or a merge review the user is part-way through —
+    so the caller must leave it completely alone rather than fall back
+    to presenting a review (which could also auto-discard an empty
+    branch out from under a running task).
+    """
+
+    FINALIZED = "finalized"
+    """The worktree's fate was decided here (merged or discarded)."""
+
+    PRESENT = "present"
+    """Nothing was done; the caller should offer the merge review.
+
+    The caller does **not** own the worktree: the tab holds no pending
+    branch, or is not in worktree mode at all, so presenting is itself
+    harmless (and usually a no-op).
+    """
+
+    PRESENT_CLAIMED = "present_claimed"
+    """Like :attr:`PRESENT`, but ``is_merging`` was claimed for the caller.
+
+    Returned when the tab really does hold a pending worktree that the
+    user must be shown.  The claim is taken in the same locked section
+    that observed the worktree free, so a second resume arriving at the
+    same moment is turned away instead of opening a duplicate review.
+    The caller owns the flag and must release it — see
+    :meth:`_MergeFlowMixin._release_present_claim` — unless
+    :meth:`_MergeFlowMixin._present_pending_worktree` reports that a
+    review took it over.
+    """
+
+    NOOP = "noop"
+    """Another owner holds the worktree; the caller must not touch it."""
+
+
 class _MergeFlowMixin:
     """Merge-view, worktree-action, and autocommit methods."""
 
@@ -164,6 +223,48 @@ class _MergeFlowMixin:
             The agent stored on ``tab``, or ``None``.
         """
         return tab.agent
+
+    def _open_ui_mirror(self, tab_id: str, work_dir: str = "") -> None:
+        """Mirror *tab_id*'s interactive UI onto the other clients' tabs.
+
+        The merge review, the auto-commit prompt and the worktree
+        merge/discard strip all block the user until they are answered,
+        so every tab showing the same chat must show them — a question
+        the user cannot see in the window they happen to be looking at
+        is a question they cannot answer.  Tab ids are per-client, so
+        "the same chat elsewhere" means the tabs subscribed to this
+        tab's task.  A co-subscriber that has since started a task of
+        its own is skipped: the subscriber set of a finished task is
+        deliberately retained, and that tab's UI belongs to its own
+        task now.
+
+        Args:
+            tab_id: The tab that owns the UI.
+            work_dir: The owner's working directory, remembered so an
+                action arriving from a viewer is applied to the
+                owner's repository rather than the viewer's folder.
+        """
+        if not tab_id:
+            return
+        viewers: list[str] = []
+        with self._state_lock:
+            task_id = _tab_task_key(
+                _RunningAgentState.running_agent_states.get(tab_id),
+            )
+            task_key = self.printer._coerce_task_id(task_id)
+            if task_key:
+                for viewer_tab_id in self.printer._fanout_targets(task_key):
+                    viewer = _RunningAgentState.running_agent_states.get(
+                        viewer_tab_id,
+                    )
+                    if viewer is not None and tab_busy_with_other_task(
+                        viewer, task_key,
+                    ):
+                        continue
+                    viewers.append(viewer_tab_id)
+        self.printer.open_ui_mirror(
+            tab_id, viewers, work_dir or self.work_dir, task_key,
+        )
 
     def _start_merge_session(
         self, merge_json_path: str, tab_id: str = "", work_dir: str = "",
@@ -212,12 +313,17 @@ class _MergeFlowMixin:
                 if resolved_tab_id is not None:
                     merge_data_event["tabId"] = resolved_tab_id
                     merge_started_event["tabId"] = resolved_tab_id
-                self.printer.broadcast(merge_data_event)
-                self.printer.broadcast(merge_started_event)
+                    self._open_ui_mirror(
+                        resolved_tab_id, merge_data["work_dir"],
+                    )
+                self.printer.broadcast_tab_ui(merge_data_event)
+                self.printer.broadcast_tab_ui(merge_started_event)
             except BaseException:
                 with self._state_lock:
                     if resolved_tab is not None:
                         resolved_tab.is_merging = False
+                if resolved_tab_id is not None:
+                    self.printer.close_ui_mirror(resolved_tab_id)
                 raise
             return True
         except (OSError, json.JSONDecodeError, KeyError):
@@ -296,30 +402,6 @@ class _MergeFlowMixin:
             logger.debug("_finish_merge called without tab_id; ignoring")
             return
         tab = self._get_tab(tab_id)
-        # Keep ``is_merging`` claimed until the pending-worktree
-        # presentation (whose empty-worktree auto-discard runs a
-        # main-repo ``git checkout``) and the autocommit dirty-file
-        # scan are both done.  Clearing the flag first opened a window
-        # in which a task could start on this tab (the task-start
-        # guard consults ``is_merging``) — racing the discard's
-        # checkout, and letting the dirty scan report the NEW task's
-        # in-flight files as this merge's ``changedFiles``.
-        # ``try_merge_review=False`` guarantees no NEW merge session
-        # (which would re-claim the flag via ``_start_merge_session``)
-        # is started inside, so the unconditional clear in ``finally``
-        # cannot clobber one.
-        #
-        # ``merge_ended`` is broadcast in the ``finally``, AFTER the
-        # flag clears: the frontend closes the merge view and
-        # re-enables the input on ``merge_ended``, so broadcasting it
-        # first (while the claim spans real git work — the discard's
-        # checkout plus the full-tree dirty scan, up to seconds on
-        # large repos) opened a window in which a ``run`` submitted
-        # right after the view closed was rejected by
-        # ``_run_task_inner``'s ``is_merging`` guard and the prompt
-        # text was silently lost.  Broadcasting from the ``finally``
-        # also guarantees the view is closed even when the cleanup
-        # body raises.
         with self._state_lock:
             tab.is_merging = True
         try:
@@ -333,22 +415,21 @@ class _MergeFlowMixin:
             with self._state_lock:
                 tab.is_merging = False
             try:
-                self.printer.broadcast(
+                self.printer.broadcast_tab_ui(
                     {"type": "merge_ended", "tabId": tab_id}
                 )
             except Exception:
-                # A transport failure here must not mask an exception
-                # already propagating from the cleanup body above.
                 logger.debug(
                     "merge_ended broadcast failed for tab %s",
                     tab_id,
                     exc_info=True,
                 )
-        # If the user closed the tab while the merge view was open,
-        # dispose the now-idle _RunningAgentState.  No-op otherwise.
-        # Runs AFTER the clear above: the dispose guard refuses to pop
-        # a state whose ``is_merging`` is still raised.
-        self._dispose_if_closed(tab_id)
+            # Inside the finally (F4-30): an exception from
+            # _present_pending_worktree / _broadcast_autocommit_prompt
+            # must not skip the deferred disposal of a tab that was
+            # closed during the merge — no later lifecycle transition
+            # would ever dispose it.
+            self._dispose_if_closed(tab_id)
 
     def _main_dirty_files(self, work_dir: str = "") -> list[str]:
         """List modified, staged and untracked files in the main working tree.
@@ -395,7 +476,8 @@ class _MergeFlowMixin:
         """
         changed = self._main_dirty_files(work_dir)
         if changed:
-            self.printer.broadcast({
+            self._open_ui_mirror(tab_id, work_dir)
+            self.printer.broadcast_tab_ui({
                 "type": "autocommit_prompt",
                 "tabId": tab_id,
                 "changedFiles": changed,
@@ -431,7 +513,7 @@ class _MergeFlowMixin:
         }
         if commit_message is not None:
             event["commitMessage"] = commit_message
-        self.printer.broadcast(event)
+        self.printer.broadcast_tab_ui(event)
         return event
 
     def _handle_autocommit_action(
@@ -465,16 +547,6 @@ class _MergeFlowMixin:
             )
             return
         try:
-            # When ``work_dir`` lives under a now-deleted
-            # ``.kiss-worktrees/kiss_wt-*`` directory (the frontend
-            # stamped this tab's ``workDir`` from the agent's
-            # ``extra.work_dir`` during a worktree task, and the
-            # worktree directory was removed on merge/discard),
-            # rewrite it to the equivalent path inside the parent
-            # repo so the settings-panel "Git Commit" button can
-            # still commit the user's dirty main working tree
-            # instead of reporting a misleading "Not a git
-            # repository." error.
             work_path = Path(work_dir)
             if not work_path.exists():
                 fallback = _stale_worktree_fallback(work_path)
@@ -489,18 +561,13 @@ class _MergeFlowMixin:
                 )
                 return
             with repo_lock(repo):
-                self.printer.broadcast({
+                self.printer.broadcast_tab_ui({
                     "type": "autocommit_progress",
                     "message": "Staging changes…",
                     "tabId": tab_id,
                 })
                 add_result = _git(work_dir, "add", "-A")
                 if add_result.returncode != 0:
-                    # Staging failed (e.g. ``.git/index.lock`` held by
-                    # another git process).  Without this check, the
-                    # empty ``git diff --cached`` below would misreport
-                    # "Nothing to commit." with ``success=True`` while
-                    # the working tree still has uncommitted changes.
                     err = (add_result.stderr or "").strip()
                     first_line = err.splitlines()[0] if err else "git add failed"
                     self._broadcast_autocommit_done(
@@ -515,7 +582,7 @@ class _MergeFlowMixin:
                         message="Nothing to commit.",
                     )
                     return
-                self.printer.broadcast({
+                self.printer.broadcast_tab_ui({
                     "type": "autocommit_progress",
                     "message": "Generating commit message…",
                     "tabId": tab_id,
@@ -538,7 +605,7 @@ class _MergeFlowMixin:
                     )
                     or "Auto-commit"
                 )
-                self.printer.broadcast({
+                self.printer.broadcast_tab_ui({
                     "type": "autocommit_progress",
                     "message": "Committing…",
                     "tabId": tab_id,
@@ -554,37 +621,9 @@ class _MergeFlowMixin:
                 )
                 if tab_id:
                     with self._state_lock:
-                        tab = _RunningAgentState.running_agent_states.get(tab_id)
-                    task_id: str | None = None
-                    if tab is not None:
-                        # Prefer the in-flight task id: when the
-                        # "Auto commit" toggle is ON this handler runs
-                        # from the task thread's post-task cleanup
-                        # (``_run_task_inner``'s finally) BEFORE
-                        # ``_run_task``'s outer finally refreshes
-                        # ``last_task_id`` — so on a follow-up task in
-                        # the same tab, ``last_task_id`` still holds
-                        # the PREVIOUS task's id and the commit
-                        # confirmation would be persisted into the
-                        # prior task's event stream.
-                        # ``task_history_id`` is the current task's
-                        # row id while a task is in flight and ``None``
-                        # otherwise (user-clicked prompt after task
-                        # end), in which case ``last_task_id`` is
-                        # already up to date.
-                        task_id = tab.task_history_id
-                        if task_id is None:
-                            task_id = tab.last_task_id
-                        if task_id is None and tab.agent is not None:
-                            # Fallback for legacy callers that wire
-                            # the task id onto the agent (e.g. tests
-                            # that pre-seed ``tab.agent._last_task_id``
-                            # without populating the new
-                            # :class:`_RunningAgentState.last_task_id`
-                            # field).  Production sets both in
-                            # :meth:`_TaskRunnerMixin._run_task`'s
-                            # outer ``finally``.
-                            task_id = tab.agent._last_task_id
+                        task_id = _tab_task_key(
+                            _RunningAgentState.running_agent_states.get(tab_id),
+                        )
                     if task_id is not None:
                         _append_chat_event(done_event, task_id=task_id)
             else:
@@ -600,23 +639,202 @@ class _MergeFlowMixin:
             )
 
     def _emit_pending_worktree(self, tab_id: str = "") -> None:
-        """Emit merge review or ``worktree_done`` for a pending worktree branch.
+        """Finalize or present a pending worktree branch on session load.
 
         Worktrees are no longer associated with chat sessions, so
-        there is no cross-process restoration to perform here.  This
-        helper now simply delegates to :meth:`_present_pending_worktree`
-        (which itself no-ops unless the tab has ``use_worktree`` set
-        and its transient agent still holds a pending worktree).
+        there is no cross-process restoration to perform here.  What
+        happens to a still-pending worktree depends on the tab's
+        auto-commit toggle:
+
+        * **auto-commit ON** — the user asked not to be interrupted, so
+          the branch is merged (or discarded when it holds nothing)
+          silently via :meth:`_handle_worktree_action`.  Presenting a
+          hunk-by-hunk review here is the defect this branch fixes: a
+          post-task auto-merge that could not complete (conflict,
+          rejected pre-commit hook, ``git stash`` failure, ...) leaves
+          ``_wt_pending`` raised, and the next history click would pop
+          the diff/merge UI even though auto-commit was on.
+        * **auto-commit OFF** — delegate to
+          :meth:`_present_pending_worktree`, which starts the merge
+          review the user explicitly opted into.
+
+        Either way the call no-ops unless the tab has ``use_worktree``
+        set and its transient agent still holds a pending worktree.
+
+        Auto-commit ON does *not* always finalize.  Two owners outrank
+        the toggle and make this a complete no-op — neither finalizing
+        nor presenting:
+
+        * a merge review already in flight (F4-20): a session replay
+          must not regenerate the merge view and replace the registered
+          merge state, which would erase the user's accepted/rejected
+          hunk resolutions mid-review;
+        * a task still running on the tab: its agent is writing into
+          the worktree right now.
+
+        A third exception — the agent's ``_pending_review`` flag, set
+        for a task that failed or was stopped — declines the silent
+        finalize but still shows the review, because unverified work
+        must never be merged behind the user's back.  That case comes
+        back as :attr:`_PendingOutcome.PRESENT_CLAIMED`, carrying the
+        ownership claim the review is opened under; plain
+        :attr:`_PendingOutcome.PRESENT` means there was nothing to own.
 
         Args:
             tab_id: The tab to check for pending worktree.
         """
-        self._present_pending_worktree(tab_id, try_merge_review=True)
+        outcome = self._finalize_pending_worktree(tab_id)
+        if outcome is _PendingOutcome.PRESENT:
+            self._present_pending_worktree(tab_id, try_merge_review=True)
+            return
+        if outcome is not _PendingOutcome.PRESENT_CLAIMED:
+            return
+        # The claim is ours, so it is ours to release — unless the
+        # review took it over, in which case it stays raised until the
+        # user finishes.  The `finally` matters: an exception must not
+        # leave the tab permanently busy.
+        review_started = False
+        try:
+            review_started = self._present_pending_worktree(
+                tab_id, try_merge_review=True,
+            )
+        finally:
+            if not review_started:
+                self._release_present_claim(tab_id)
+
+    def _release_present_claim(self, tab_id: str) -> None:
+        """Drop the ownership claim taken for a merge review that never began.
+
+        :meth:`_finalize_pending_worktree` claims ``is_merging`` before
+        returning :attr:`_PendingOutcome.PRESENT_CLAIMED` so that only
+        one resume can open the review.  When no review started the claim
+        must go again, or the tab stays busy forever and every later
+        task, merge and discard on it is refused.
+
+        Only the caller that took the claim may drop it, and only when
+        :meth:`_present_pending_worktree` reported that nothing took it
+        over: a review that really started keeps the flag raised until
+        the user finishes it (:meth:`_start_merge_session` sets it,
+        :meth:`_finish_merge` clears it), and clearing it here would let
+        a task start on top of a live merge view.
+
+        Args:
+            tab_id: The tab whose speculative claim to release.
+        """
+        with self._state_lock:
+            tab = _RunningAgentState.running_agent_states.get(tab_id)
+            if tab is None:
+                return
+            tab.is_merging = False
+        self._dispose_if_closed(tab_id)
+
+    def _finalize_pending_worktree(self, tab_id: str) -> _PendingOutcome:
+        """Merge or discard a pending worktree without asking the user.
+
+        The auto-commit counterpart of :meth:`_present_pending_worktree`,
+        and the same decision the post-task fast path in
+        ``_run_task_inner`` makes: merge when the branch carries
+        changes, discard when it does not.
+
+        Returns :attr:`_PendingOutcome.NOOP` — the worktree already has
+        an owner, so the caller must leave it entirely alone — when:
+
+        * a merge review is already in flight (F4-20): regenerating it
+          would erase the user's accepted/rejected hunk resolutions;
+        * a task is still active on the tab.  Unlike the post-task
+          finalize — which runs on the very thread that owns
+          ``is_task_active`` — a history click is an unrelated thread,
+          and merging or discarding a worktree the agent is still
+          writing into would corrupt or delete its work.  Falling back
+          to the review is just as unsafe: it snapshots a half-written
+          tree, and its ``discard_if_empty`` path would delete a branch
+          the running task has not committed to yet;
+        * a task has been *submitted* but has not reached its worker
+          yet.  Ownership is therefore decided by the one shared
+          :func:`_tab_busy` predicate rather than by reading the two
+          flags directly: during that startup window both of them read
+          False, and claiming ``is_merging`` there makes the worker
+          refuse the run the user just typed ("Cannot run a task while
+          merge review is in progress").
+
+        Returns :attr:`_PendingOutcome.PRESENT` — nothing was done, and
+        the caller may offer the merge review without owning anything —
+        when the tab is not in worktree mode, or holds no pending
+        worktree.  Presenting is itself a no-op then, so no claim is
+        taken and none may be released.
+
+        Returns :attr:`_PendingOutcome.PRESENT_CLAIMED` — the caller
+        should offer the merge review and has been handed the
+        ``is_merging`` claim to do it under — when a pending worktree
+        really is there but must not be finalized silently:
+
+        * auto-commit is off, so the user asked to be shown the diff;
+        * the agent is in ``_pending_review`` state.  ``_run_task_inner``
+          raises that flag for a task that failed or was stopped, and
+          :meth:`WorktreeSorcarAgent._preserve_pending_worktree_for_review`
+          documents the contract it encodes: incomplete, unverified work
+          stays on its ``kiss/wt-*`` branch and is never merged into the
+          user's branch behind their back.  Auto-commit means "do not
+          interrupt me", not "publish work that never finished".
+
+        A merge that is attempted but still cannot complete — the main
+        tree may hold the very conflict that stranded the branch in the
+        first place — is reported through the normal ``worktree_result``
+        event and the branch is left pending, so work is never lost.
+
+        Args:
+            tab_id: The tab whose pending worktree to finalize.
+
+        Returns:
+            The :class:`_PendingOutcome` telling the caller what, if
+            anything, is left to do.
+        """
+        with self._state_lock:
+            tab = _RunningAgentState.running_agent_states.get(tab_id)
+            if tab is None or not tab.use_worktree:
+                return _PendingOutcome.PRESENT
+            if _tab_busy(tab):
+                return _PendingOutcome.NOOP
+            wt_agent = tab.agent
+            if wt_agent is None or not wt_agent._wt_pending:
+                return _PendingOutcome.PRESENT
+            if wt_agent._pending_review or not tab.auto_commit_mode:
+                # The caller will open the merge review.  Claim the
+                # worktree here too: `_present_pending_worktree` starts
+                # an unguarded review, so without a claim taken in the
+                # same locked section that observed `is_merging` clear,
+                # two simultaneous resumes both reach
+                # `_prepare_and_start_merge` and broadcast a merge view
+                # apiece for one branch (F4-20).
+                tab.is_merging = True
+                return _PendingOutcome.PRESENT_CLAIMED
+            # Claim the worktree before releasing the lock so a
+            # concurrent resume (remote commands run on a thread pool)
+            # cannot finalize the same branch twice.  The claim is held
+            # continuously across BOTH the changed-files probe and the
+            # action it selects: dropping it in between would reopen
+            # the very race it exists to close, and would also let the
+            # probe's answer go stale before it is acted on.
+            tab.is_merging = True
+        try:
+            changed = self._get_worktree_changed_files(tab_id)
+            action = "merge" if changed else "discard"
+            result = self._handle_worktree_action(
+                action, tab_id, already_claimed=True,
+            )
+        finally:
+            with self._state_lock:
+                tab.is_merging = False
+            self._dispose_if_closed(tab_id)
+        self.printer.broadcast_tab_ui(
+            {"type": "worktree_result", "tabId": tab_id, **result},
+        )
+        return _PendingOutcome.FINALIZED
 
     def _present_pending_worktree(
         self, tab_id: str, *, try_merge_review: bool,
         discard_if_empty: bool = True,
-    ) -> None:
+    ) -> bool:
         """Auto-discard, start merge review, or emit ``worktree_done``.
 
         Single source of truth for post-task / post-merge-review /
@@ -629,10 +847,11 @@ class _MergeFlowMixin:
           ``worktree_done``.
         - Worktree has changed files and *try_merge_review* is False
           (merge review already finished): broadcast ``worktree_done``.
-        - Worktree has no changes and *discard_if_empty* is True
-          and no non-wt task is running: auto-discard the empty
-          branch (BUG-66 — clean up stale resumed sessions and
-          finished merge reviews).
+        - Worktree has no changes and *discard_if_empty* is True:
+          auto-discard the empty branch (BUG-66 — clean up stale
+          resumed sessions and finished merge reviews).  A
+          concurrent non-worktree task does not block this: an
+          empty discard never touches the main working tree.
         - Worktree has no changes and *discard_if_empty* is False:
           preserve the branch and broadcast ``worktree_done``.
           The post-task path passes ``discard_if_empty=False``
@@ -651,69 +870,63 @@ class _MergeFlowMixin:
             discard_if_empty: When True (default), auto-discard the
                 branch if no files changed.  Post-task callers should
                 pass False to preserve the branch for manual action.
+
+        Returns:
+            True when a merge review was started and now owns the tab —
+            it holds ``is_merging`` until the user finishes it.  False
+            in every other case, including the ones that do nothing at
+            all.  Callers that claimed the tab before calling must
+            release the claim when this is False; see
+            :meth:`_emit_pending_worktree`.
         """
-        # Non-creating lookup: viewing a chat must never mint a
-        # ``_RunningAgentState`` (the C2/C3 invariant documented in
-        # ``_replay_session``, whose ``_emit_pending_worktree`` call
-        # lands here for every history click).  A tab without a
-        # registry entry cannot have a pending worktree — the agent
-        # holding the worktree state lives on the entry — so skipping
-        # is behaviourally identical to the old eager ``_get_tab``
-        # (which created an entry with ``use_worktree=False`` and
-        # returned on the next line) minus the phantom entry + agent.
         with self._state_lock:
             tab = _RunningAgentState.running_agent_states.get(tab_id)
         if tab is None or not tab.use_worktree:
-            return
+            return False
         wt_agent = tab.agent
         if wt_agent is None or not wt_agent._wt_pending:
-            return
+            return False
         changed = self._get_worktree_changed_files(tab_id)
         if changed and try_merge_review:
             wt_dir = wt_agent._wt_dir
             if wt_dir is not None and wt_dir.exists():
-                base_ref = wt_agent._baseline_commit or "HEAD"
+                # Resolve the fork point exactly like
+                # _get_worktree_changed_files does (F4-22): a plain
+                # "HEAD" fallback omits changes the agent already
+                # COMMITTED in the worktree from the hunk review.
+                base_ref = self._resolve_base_ref(
+                    str(wt_dir),
+                    wt_agent._baseline_commit,
+                    wt_agent._original_branch or "HEAD",
+                )
                 try:
                     if self._prepare_and_start_merge(
                         str(wt_dir), base_ref=base_ref, tab_id=tab_id,
                     ):
-                        return
+                        return True
                 except BaseException:
                     logger.debug("Worktree merge review error", exc_info=True)
         if not changed and discard_if_empty:
-            # Atomically (a) verify no non-worktree task is mutating
-            # the main tree and (b) CLAIM the main tree by raising
-            # ``tab.is_merging`` — mirroring ``_handle_worktree_action``
-            # (RACE-1/RACE-2).  ``discard()`` runs ``git checkout`` in
-            # the MAIN repository; without the claim, a non-wt task
-            # could start on another tab in the check→discard TOCTOU
-            # window and have HEAD flipped under it mid-write.  The
-            # prior flag value is restored (not blindly cleared) so a
-            # caller that already owns the claim — ``_finish_merge``
-            # holds ``is_merging`` across this call — keeps it.
+            # Discarding an EMPTY worktree removes its directory and
+            # its unmerged branch without touching the main working
+            # tree, so a concurrent non-worktree task is no reason to
+            # skip it — skipping leaks the worktree forever because
+            # nothing ever retries.
             with self._state_lock:
-                non_wt_busy = self._any_non_wt_running()
                 prev_merging = tab.is_merging
-                if not non_wt_busy:
-                    tab.is_merging = True
-            if not non_wt_busy:
-                try:
-                    wt_agent.discard()
-                finally:
-                    with self._state_lock:
-                        tab.is_merging = prev_merging
-                return
+                tab.is_merging = True
+            try:
+                wt_agent.discard()
+            finally:
+                with self._state_lock:
+                    tab.is_merging = prev_merging
+                # A close that arrived during the discard saw the
+                # tab busy and deferred disposal; nothing later
+                # would dispose it (F4-29).
+                self._dispose_if_closed(tab_id)
+            return False
         if not changed:
-            # Branch is preserved (discard_if_empty=False) but the
-            # worktree has no changes — there is nothing to merge,
-            # so suppress the "Auto-commit and merge or Discard?"
-            # prompt that the ``worktree_done`` frontend handler
-            # renders unconditionally.  The branch remains in
-            # ``git branch`` for manual inspection / cleanup, but
-            # the user is not bothered with a meaningless prompt.
-            return
-        # ``changed`` is provably non-empty here: both ``not changed``
-        # branches above return before reaching this point.
+            return False
         event: dict[str, Any] = {
             "type": "worktree_done",
             "branch": wt_agent._wt_branch,
@@ -723,7 +936,9 @@ class _MergeFlowMixin:
             "hasConflict": self._check_merge_conflict(tab_id),
             "tabId": tab_id,
         }
-        self.printer.broadcast(event)
+        self._open_ui_mirror(tab_id, str(wt_agent._wt_dir))
+        self.printer.broadcast_tab_ui(event)
+        return False
 
     def _check_merge_conflict(self, tab_id: str = "") -> bool:
         """Check if merging the worktree branch into original would conflict.
@@ -773,10 +988,6 @@ class _MergeFlowMixin:
                 return False
             orig_fork = wt_fork = mb.stdout.strip()
 
-        # ``--no-renames`` so a rename contributes BOTH paths to the
-        # overlap sets: merging the worktree branch deletes the old
-        # path from the main tree, so a dirty main-tree edit of the
-        # old path must still be detected as a conflict.
         orig_diff = _git(
             str(wt.repo_root), "diff", "--name-only", "--no-renames",
             orig_fork, wt.original_branch,
@@ -799,9 +1010,6 @@ class _MergeFlowMixin:
         with self._state_lock:
             if self._any_non_wt_running():
                 return False
-        # ``_diff_name_only`` uses NUL-separated (``-z``) output, so
-        # leading/trailing-space filenames survive byte-exact and can
-        # intersect ``wt_files``.
         dirty: set[str] = set()
         for extra_flags in ((), ("--cached",)):
             dirty.update(
@@ -868,28 +1076,39 @@ class _MergeFlowMixin:
             return []
         wt = wt_agent
         original_branch = wt._original_branch
-        assert original_branch is not None  # narrowed by the check above
+        assert original_branch is not None
         wt_dir = wt._wt_dir
         if wt_dir and wt_dir.exists():
             base_ref = self._resolve_base_ref(
                 str(wt_dir), wt._baseline_commit, original_branch,
             )
-            # ``--no-renames`` so a rename lists BOTH the old path
-            # (which the merge will delete from the main tree) and the
-            # new path, instead of collapsing into the new path only.
             tracked = _git(
                 str(wt_dir), "diff", "--name-only", "--no-renames", base_ref,
             )
             if tracked.returncode == 0:
                 files = _unquoted_name_lines(tracked.stdout)
             else:
+                # The diff query failed (e.g. the original branch was
+                # renamed/deleted so base_ref no longer resolves).  A
+                # clean ``status --porcelain`` alone must NOT be taken
+                # as "no changes" (F4-21): the worktree may hold
+                # COMMITTED task work, and callers auto-discard the
+                # branch when this returns [].  Also list files from
+                # commits unique to this worktree (not reachable from
+                # any other branch) so committed work is never
+                # mistaken for a clean worktree.
                 status = _git(str(wt_dir), "status", "--porcelain")
-                # ``rename_both_sides``: the primary path above uses
-                # ``--no-renames`` so a rename lists BOTH sides; the
-                # fallback must match.
                 files = _porcelain_paths(
                     status.stdout, rename_both_sides=True,
                 )
+                unique_args = ["log", "--pretty=format:", "--name-only",
+                               "--no-renames", "HEAD", "--not"]
+                if wt._wt_branch:
+                    unique_args.append(f"--exclude={wt._wt_branch}")
+                unique_args.append("--branches")
+                unique = _git(str(wt_dir), *unique_args)
+                if unique.returncode == 0:
+                    files.extend(_unquoted_name_lines(unique.stdout))
             files.extend(_capture_untracked(str(wt_dir)))
             return sorted(set(files))
         if not wt._wt_branch:
@@ -936,16 +1155,6 @@ class _MergeFlowMixin:
                 ),
             }
         if tab.is_merging:
-            # A merge review session or another worktree action is
-            # already in flight on this tab (e.g. a double click on
-            # the Merge button, or one click from each of two
-            # connected clients).  Without this check the second
-            # request passed the guard, queued behind ``repo_lock``,
-            # and re-ran ``wt.merge()`` / ``wt.discard()`` on the
-            # already-merged worktree — and whichever thread finished
-            # first cleared ``is_merging`` in its ``finally`` while
-            # the other was still merging, letting a non-worktree
-            # task start writing to the main tree mid-merge.
             return {
                 "success": False,
                 "message": (
@@ -969,6 +1178,7 @@ class _MergeFlowMixin:
         tab_id: str = "",
         *,
         internal: bool = False,
+        already_claimed: bool = False,
     ) -> dict[str, Any]:
         """Execute a worktree merge/discard/manual action.
 
@@ -983,11 +1193,24 @@ class _MergeFlowMixin:
                 auto-merge / auto-discard block (RACE-3 fix), which
                 runs on the same task thread that owns
                 ``tab.is_task_active = True`` and therefore would
-                otherwise be refused by its own guard.
+                otherwise be refused by its own guard.  A concurrent
+                non-worktree task on the main tree still blocks a
+                ``"merge"`` — but never a ``"discard"``, which does
+                not touch the main working tree.
+            already_claimed: When True, the caller has already set
+                ``tab.is_merging`` under ``_state_lock`` after checking
+                the busy conditions itself, and will clear it (and call
+                ``_dispose_if_closed``) when its own wider critical
+                section ends.  Implies *internal*.  This method must
+                therefore neither re-claim nor release the flag: doing
+                so would punch a hole in the caller's claim exactly
+                where :meth:`_finalize_pending_worktree` needs it to be
+                continuous.  The main-tree guard still applies.
 
         Returns:
             Dict with ``success`` bool and ``message`` string.
         """
+        internal = internal or already_claimed
         tab = self._get_tab(tab_id)
         if not tab.use_worktree:
             return {"success": False, "message": "Worktree mode is not enabled"}
@@ -1001,18 +1224,6 @@ class _MergeFlowMixin:
         verb = {"merge": "merging", "discard": "discarding"}.get(action)
         if verb is None:
             return {"success": False, "message": f"Unknown action: {action}"}
-        # RACE-1 / RACE-2 fix: atomically (a) verify nothing else is
-        # touching the main tree, (b) claim it for this tab by setting
-        # ``is_merging = True``.  Both happen under ``_state_lock`` so
-        # a concurrent non-wt task-start (whose guard is also under
-        # ``_state_lock``) sees the flag and refuses.  Holding
-        # ``repo_lock`` for the slow body additionally serializes
-        # with ``_try_setup_worktree``'s release phase and with any
-        # concurrent ``_handle_worktree_action`` invocation on a
-        # different tab pointed at the same repo.  ``is_merging`` is
-        # set BEFORE acquiring ``repo_lock`` so the flag is visible
-        # to non-wt task-start guards even when this thread is
-        # currently blocked on the lock.
         repo_root = wt._repo_root
         if repo_root is None:
             return {
@@ -1024,16 +1235,28 @@ class _MergeFlowMixin:
                 busy = self._check_worktree_busy(tab, verb)
                 if busy:
                     return busy
-            tab.is_merging = True
-        # "Lost slides" fix: the user has now explicitly chosen to
-        # merge or discard the worktree branch, so the post-task
-        # ``_pending_review`` flag (set by ``_run_task_inner`` when
-        # the task ended in failure / user-Stop) no longer applies —
-        # the subsequent tab teardown must use the regular
-        # ``_release_worktree`` path (a no-op when the action below
-        # already cleared ``_wt``) instead of the preserve-for-review
-        # path.  Cleared OUTSIDE ``_state_lock`` because it only
-        # guards lifecycle flags on the tab, not agent attributes.
+            elif action == "merge" and self._any_non_wt_running():
+                # internal=True only bypasses this tab's OWN
+                # is_task_active/is_merging flags (the post-task
+                # auto-finalize runs on the task thread that owns
+                # them).  It must NOT bypass the main-tree guard
+                # (F4-19): merging stashes/checkouts/merges the
+                # main working tree while a direct task on another
+                # tab is still writing it.  A DISCARD is exempt: it
+                # only removes .kiss-worktrees/<slug> and deletes the
+                # unmerged branch, touching neither the main working
+                # tree's files nor its HEAD, so refusing it would
+                # leak the worktree forever (nothing ever retries).
+                return {
+                    "success": False,
+                    "message": (
+                        "Another tab is running a task on the main "
+                        "working tree. Wait for it to finish before "
+                        f"{verb}."
+                    ),
+                }
+            if not already_claimed:
+                tab.is_merging = True
         wt._pending_review = False
         try:
             with repo_lock(repo_root):
@@ -1044,12 +1267,23 @@ class _MergeFlowMixin:
                     }
                     if tab_id:
                         progress_event["tabId"] = tab_id
-                    self.printer.broadcast(progress_event)
+                    self.printer.broadcast_tab_ui(progress_event)
                     msg = wt.merge()
                     success = "Successfully merged" in msg
                     return {"success": success, "message": msg}
                 msg = wt.discard()
-                return {"success": True, "message": msg}
+                # A partial discard (branch deletion failed) must not
+                # report success: the UI would close the workflow
+                # while an orphan branch remains (F4-24).
+                return {
+                    "success": "Partially discarded" not in msg,
+                    "message": msg,
+                }
         finally:
-            with self._state_lock:
-                tab.is_merging = False
+            if not already_claimed:
+                with self._state_lock:
+                    tab.is_merging = False
+                # A close that arrived during the merge/discard saw the
+                # tab busy and deferred disposal; without this call the
+                # backend tab state would leak indefinitely (F4-23).
+                self._dispose_if_closed(tab_id)

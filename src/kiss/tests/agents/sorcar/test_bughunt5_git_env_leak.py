@@ -148,10 +148,8 @@ class TestGitEnvLeak:
             assert _kiss_branches(repo_a) == [], (
                 "GIT_DIR env leaked: kiss branch created in repo A"
             )
-            # B's dirty edit was mirrored into the worktree.
             copied = (wt_work_dir / "README.md").read_text()
             assert copied == "# Test\nuser edit in B\n"
-            # A's tree was never mutated.
             status_a = subprocess.run(
                 ["git", "-C", str(repo_a), "status", "--porcelain"],
                 capture_output=True,

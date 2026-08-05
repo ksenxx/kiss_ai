@@ -2,20 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end chat-webview regression test: a stopped/failed task's
-// terminal Result panel must survive replay.  Drives the real
-// chat.html + panelCopy.js + main.js in jsdom.
-//
-// Backend context: task_runner's failure/stop paths broadcast their
-// terminal {"type":"result"} event stamped with tabId; before the fix
-// WebPrinter.broadcast never persisted tabId-stamped events, so the
-// task's persisted stream ended `tool_call -> task_stopped ->
-// followup_suggestion` with NO result row and every replay (webview
-// reload, history load, adjacent-task scroll) showed no Result panel.
-// The fix persists a tabId-stripped copy (with taskId) of that event;
-// these tests assert the webview renders it in every replay path and
-// documents the pre-fix symptom.
 
 'use strict';
 
@@ -55,7 +41,10 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   return win;
 }
 
@@ -65,8 +54,6 @@ function send(win, data) {
 
 const TASK_ID = 'stopped-task-1';
 
-// The persisted stream of a user-stopped task BEFORE the fix (mirrors
-// the real rows observed in ~/.kiss/sorcar.db): no result event.
 function stoppedTaskEventsWithoutResult() {
   return [
     {type: 'prompt', text: 'review the repo', ts: 1000, taskId: TASK_ID},
@@ -83,9 +70,6 @@ function stoppedTaskEventsWithoutResult() {
   ];
 }
 
-// The same stream AFTER the fix: the tabId-stripped terminal result
-// (exactly what task_runner broadcasts and WebPrinter now persists)
-// appears before the task_stopped marker.
 function stoppedTaskEventsWithResult() {
   const evs = stoppedTaskEventsWithoutResult();
   evs.splice(3, 0, {
@@ -106,9 +90,6 @@ function resultPanels(win) {
 }
 
 function testSymptomNoResultRowMeansNoPanel() {
-  // Documents the pre-fix persisted data: replaying a stopped task's
-  // stream WITHOUT a result row renders no Result panel — the exact
-  // "why is the result event panel not shown in the last task" bug.
   const win = makeWebview();
   send(win, {
     type: 'task_events',
@@ -141,8 +122,6 @@ function testHistoryReplayShowsStoppedResultPanel() {
 }
 
 function testLiveStopShowsResultPanel() {
-  // Live path: the tabId+taskId-stamped terminal result reaches the
-  // active tab after streaming events adopted the task id.
   const win = makeWebview();
   for (const ev of stoppedTaskEventsWithResult()) {
     send(win, Object.assign({}, ev));
@@ -154,8 +133,6 @@ function testLiveStopShowsResultPanel() {
 }
 
 function testAdjacentTaskReplayShowsStoppedResultPanel() {
-  // Adjacent-task overscroll uses the same persisted stream; the
-  // stopped task's Result panel must render inside the adjacent block.
   const win = makeWebview();
   send(win, {
     type: 'task_events',
@@ -201,10 +178,6 @@ function main() {
   console.log('stoppedTaskResultPanelReplay.test.js: all assertions passed.');
 }
 
-// Explicit exit: each jsdom window keeps main.js interval timers
-// alive, so without process.exit the node process (and the npm test
-// chain that runs this file) would hang forever after the assertions
-// pass.
 try {
   main();
   process.exit(0);

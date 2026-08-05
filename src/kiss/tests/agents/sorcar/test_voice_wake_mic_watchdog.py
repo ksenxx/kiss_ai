@@ -32,10 +32,10 @@ import subprocess
 import unittest
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parents[5]
 
-# One minute of audio per block: a real stream that can never deliver
-# a block within the ~1s watchdog window used by the test.
 SILENT_BLOCK_SIZE = 16000 * 60
 WATCHDOG_TIMEOUT_SECONDS = 1.0
 
@@ -58,15 +58,13 @@ def _have_input_device() -> bool:
 class TestMicWatchdog(unittest.TestCase):
     """A silent mic stream is detected, retried, and reported."""
 
+    @pytest.mark.slow
     def test_silent_stream_exits_nonzero_with_diagnostic(self) -> None:
         if not _have_input_device():
             self.skipTest("no audio input device available")
 
         env = dict(os.environ)
         env["KISS_VOICE_MIC_BLOCK_SIZE"] = str(SILENT_BLOCK_SIZE)
-        # Expected runtime: ~4 watchdog windows + 3 reopen delays +
-        # model load; the 120s cap guarantees the old no-timeout
-        # ``blocks.get()`` regression fails fast instead of hanging.
         proc = subprocess.run(
             [
                 "uv", "run", "python", "-m",
@@ -83,21 +81,14 @@ class TestMicWatchdog(unittest.TestCase):
         detail = f"stdout={proc.stdout!r}\nstderr={proc.stderr[-4000:]}"
         lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()]
 
-        # The first stream opened fine: READY was emitted exactly once
-        # (reopens must not re-emit it — the host counts on that).
         self.assertEqual(lines.count("READY"), 1, msg=detail)
 
-        # The watchdog noticed the stall and tried the capped number
-        # of reopens, logging each attempt.
         self.assertEqual(
             proc.stderr.count("reopening the input stream (attempt"),
             3,
             msg=detail,
         )
 
-        # After the reopened streams stayed silent it gave up with a
-        # diagnostic and a nonzero exit code, so the extension host
-        # reports an error state instead of a silently dead mic.
         self.assertIn("mic watchdog", proc.stderr, msg=detail)
         self.assertIn("giving up", proc.stderr, msg=detail)
         self.assertNotEqual(proc.returncode, 0, msg=detail)

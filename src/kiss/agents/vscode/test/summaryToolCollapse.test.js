@@ -2,28 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end tests: the chat webview's handling of the agent's no-op
-// ``summary`` tool.  When a ``summary`` tool_call event renders, the
-// webview must (a) move ALL the top-level event panels emitted since
-// the previous ``summary`` panel — or since the beginning of the
-// task — into the summary panel as sub-panels (SYSTEM.md: the digest
-// "recaps what you did after the last call to the 'summary' tool"),
-// (b) collapse the summary panel, and (c) keep the ``description``
-// argument FULLY visible while the panel is collapsed (no ellipsis
-// truncation).
-//
-// The tests exercise the real ``media/main.js`` against the real
-// ``media/chat.html`` in jsdom (same harness as
-// ``bashHeaderCyan.test.js``), covering the live streaming path, the
-// history replay path (``task_events``), boundary conditions
-// (.prompt / .system-prompt / .adjacent-task / an earlier
-// .tc-summary), sequential summaries, the collapse toggle, the
-// tool_result routing, and the CSS visibility contract.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/summaryToolCollapse.test.js
 
 'use strict';
 
@@ -41,10 +19,6 @@ const DESC =
   'Next it drafted the new feature behind a flag. It wired the flag ' +
   'into the CLI. Finally it re-ran the impacted tests and they passed.';
 
-/**
- * Build a jsdom window running the real chat webview (chat.html +
- * panelCopy.js + main.js).
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -75,16 +49,17 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   return {win, posted};
 }
 
-/** Dispatch a backend→webview event exactly like the extension does. */
 function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** Inject the real production stylesheet so computed styles resolve. */
 function injectCss(win) {
   const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
   const styleEl = win.document.createElement('style');
@@ -92,7 +67,6 @@ function injectCss(win) {
   win.document.head.appendChild(styleEl);
 }
 
-/** Emit *n* distinct tool_call panels (Read path-arg panels). */
 function sendToolPanels(win, n, offset) {
   const start = offset || 0;
   for (let i = start; i < start + n; i++) {
@@ -109,12 +83,9 @@ function summaryPanels(win) {
   return Array.from(output(win).querySelectorAll('.tc.tc-summary'));
 }
 
-/** Direct #output children (the top-level event panels, sans #welcome). */
 function topLevel(win) {
   return Array.from(output(win).children).filter(el => el.id !== 'welcome');
 }
-
-// ── tests ──────────────────────────────────────────────────────────
 
 function testSummaryPanelCreatedAndCollapsed() {
   const {win} = makeWebview();
@@ -162,13 +133,12 @@ function testDescriptionIsDirectChildWithFullText() {
 function testNestsAllPanelsBackToPromptInOrder() {
   const {win} = makeWebview();
   send(win, {type: 'prompt', text: 'go'});
-  // 7 tool panels + 1 Thoughts (llm) panel = 8 top-level event panels.
   sendToolPanels(win, 7);
   send(win, {type: 'thinking_start'});
   send(win, {type: 'thinking_delta', text: 'pondering...'});
   send(win, {type: 'thinking_end'});
   const before = topLevel(win);
-  const expectNested = before.slice(1); // everything after the prompt
+  const expectNested = before.slice(1);
   send(win, {type: 'tool_call', name: 'summary', description: DESC});
   const p = summaryPanels(win)[0];
   const sub = p.querySelector(':scope > .summary-sub');
@@ -192,7 +162,6 @@ function testNestsAllPanelsBackToPromptInOrder() {
     nested.some(el => el.classList.contains('llm-panel')),
     'Thoughts (llm-panel) panels count as event panels and must nest',
   );
-  // Only the prompt and the summary panel stay top-level.
   const after = topLevel(win);
   assert.strictEqual(
     after.length,
@@ -247,9 +216,6 @@ function testAdjacentTaskAndSystemPromptAreBoundaries() {
 }
 
 function testWelcomeBlockNeverAdopted() {
-  // No prompt event at all: the adopt walk reaches past the tool
-  // panels to the #welcome block, which is NOT an event panel and
-  // must act as a hard boundary.
   const {win} = makeWebview();
   sendToolPanels(win, 2);
   send(win, {type: 'tool_call', name: 'summary', description: DESC});
@@ -306,7 +272,6 @@ function testDescriptionFullyVisibleWhileCollapsedViaCss() {
     'none',
     'description must stay VISIBLE while the summary panel is collapsed',
   );
-  // Fully visible = no single-line ellipsis truncation.
   assert.notStrictEqual(
     st.getPropertyValue('white-space').trim(),
     'nowrap',
@@ -317,7 +282,6 @@ function testDescriptionFullyVisibleWhileCollapsedViaCss() {
     'ellipsis',
     'description must not be ellipsised',
   );
-  // The nested panels, by contrast, must be hidden while collapsed.
   const sub = p.querySelector(':scope > .summary-sub');
   assert.strictEqual(
     win.getComputedStyle(sub).getPropertyValue('display').trim(),
@@ -380,11 +344,6 @@ function testHeaderClickTogglesAndKeepsChildren() {
 }
 
 function testSecondSummaryStopsAtEarlierSummaryBoundary() {
-  // SYSTEM.md: each summary recaps "what you did after the last call
-  // to the 'summary' tool" — so a later summary must adopt ONLY the
-  // panels emitted after the previous summary, and the previous
-  // summary panel itself must stay a top-level sibling (a boundary),
-  // never be swallowed.
   const {win} = makeWebview();
   send(win, {type: 'prompt', text: 'go'});
   sendToolPanels(win, 8);
@@ -422,7 +381,6 @@ function testSecondSummaryStopsAtEarlierSummaryBoundary() {
     8,
     'the earlier summary keeps its own 8 nested panels',
   );
-  // Top level: prompt + first summary + second summary.
   const after = topLevel(win);
   assert.strictEqual(after.length, 3, 'prompt + two summary digests');
   win.close();
@@ -450,8 +408,6 @@ function testSummaryImmediatelyAfterSummaryNestsNothing() {
 }
 
 function testManyPanelsBetweenSummariesAllNest() {
-  // More than 6 panels between two summaries: the old 6-panel cap
-  // would leave 3 panels stranded at top level.
   const {win} = makeWebview();
   send(win, {type: 'prompt', text: 'go'});
   sendToolPanels(win, 2);
@@ -563,12 +519,6 @@ function testReplayPathNestsAndCollapses() {
   console.log('  ok - history replay (task_events) path behaves the same');
 }
 
-/**
- * True when *el* and every ancestor up to and including #output
- * computes display !== 'none'.  (#app above #output stays hidden in
- * this harness until the extension's init handshake — unrelated to
- * panel rendering.)
- */
 function isDisplayed(win, el) {
   for (let n = el; n && n.nodeType === 1; n = n.parentElement) {
     if (win.getComputedStyle(n).getPropertyValue('display').trim() === 'none')
@@ -578,7 +528,6 @@ function isDisplayed(win, el) {
   return true;
 }
 
-/** Replay a completed task containing a summary; return its window. */
 function replayCompletedSummaryTask(win) {
   const events = [{type: 'prompt', text: 'replayed task'}];
   for (let i = 0; i < 7; i++) {
@@ -601,10 +550,6 @@ function replayCompletedSummaryTask(win) {
 }
 
 function testReplayedSummaryStaysVisibleDespiteChevronCollapse() {
-  // Regression (review finding): the task-level "Collapse Chats"
-  // machinery (applyChevronState → .chv-hidden { display:none
-  // !important }) runs after a completed-task replay and used to hide
-  // the ENTIRE summary panel, defeating the always-visible digest.
   const {win} = makeWebview();
   injectCss(win);
   replayCompletedSummaryTask(win);
@@ -628,8 +573,6 @@ function testReplayedSummaryStaysVisibleDespiteChevronCollapse() {
     isDisplayed(win, desc),
     'the description must be fully visible after replay',
   );
-  // Ordinary top-level panels are still tucked away by the task-level
-  // collapse — the digest is the only thing that stays readable.
   const plainTc = topLevel(win)
     .flatMap(el =>
       el.classList && el.classList.contains('adjacent-task')
@@ -651,9 +594,6 @@ function testReplayedSummaryStaysVisibleDespiteChevronCollapse() {
 }
 
 function testAdoptedPanelsRevealAfterManualExpandPostReplay() {
-  // The adopted sub-panels must not carry chv-hidden either: after the
-  // user manually expands the replayed summary, its nested panels must
-  // actually appear.
   const {win} = makeWebview();
   injectCss(win);
   replayCompletedSummaryTask(win);
@@ -680,9 +620,6 @@ function testAdoptedPanelsRevealAfterManualExpandPostReplay() {
 }
 
 function testAdoptedPanelKeepsOwnCollapsePreview() {
-  // Regression (review finding): the old descendant selector
-  // ``.tc-summary .tc-h .collapse-preview`` also hid the header
-  // previews of panels ADOPTED into the summary.
   const {win} = makeWebview();
   injectCss(win);
   sendToolPanels(win, 6);
@@ -720,8 +657,6 @@ function testAdoptedPanelKeepsOwnCollapsePreview() {
 }
 
 function testReplayWithTwoSummariesSegmentsCorrectly() {
-  // History replay must reproduce the live segmentation: each summary
-  // adopts exactly its own segment, boundaries included.
   const {win} = makeWebview();
   const events = [{type: 'prompt', text: 'replayed task'}];
   for (let i = 0; i < 8; i++) {
@@ -798,9 +733,6 @@ function testRcResultPanelIsBoundary() {
 }
 
 function testAdjacentTaskAloneIsBoundary() {
-  // Unlike testAdjacentTaskAndSystemPromptAreBoundaries, ONLY an
-  // .adjacent-task block precedes the tool panels, proving it is a
-  // boundary in its own right.
   const {win} = makeWebview();
   const O = output(win);
   const adj = win.document.createElement('div');

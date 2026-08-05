@@ -86,14 +86,11 @@ class TestFavoriteDoesNotFlipClassification(_TempDbTestBase):
 
     def test_star_regular_row_stays_visible(self) -> None:
         task_id, chat_id = _add_task("plain row", extra={"model": "m"})
-        # Pre-condition: classified as regular task.
         assert "plain row" in [e["task"] for e in _load_history()]
         assert not self._row(task_id)["parent_task_id"]
 
         assert _set_task_favorite(task_id, True)
 
-        # The starred row must remain visible and stay classified
-        # as a regular (non-sub-agent) task.
         assert "plain row" in [e["task"] for e in _load_history()]
         assert "plain row" in [
             e["task"] for e in _search_history("plain")
@@ -116,8 +113,6 @@ class TestFavoriteDoesNotFlipClassification(_TempDbTestBase):
         assert not self._is_favorite(task_id)
 
     def test_star_preserves_displayed_metadata(self) -> None:
-        # Toggling favourite must not corrupt the flat metadata columns
-        # used by the history sidebar.
         task_id, chat_id = _add_task(
             "row with meta",
             extra={"model": "m", "work_dir": "/tmp/x", "cost": 1.5},
@@ -136,8 +131,6 @@ class TestFavoriteDoesNotFlipClassification(_TempDbTestBase):
         assert row["is_favorite"] == 1
 
     def test_star_valid_subagent_row_stays_hidden(self) -> None:
-        # A REAL sub-agent row (parent_task_id set) keeps its sub-agent
-        # classification through a favourite toggle and stays hidden.
         parent_id, chat = _add_task("parent task")
         sub_id, _ = _add_task(
             "fanned-out subtask",

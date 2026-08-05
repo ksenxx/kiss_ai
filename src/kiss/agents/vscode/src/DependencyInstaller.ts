@@ -2,11 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-/**
- * Auto-installation of binary dependencies for the KISS Sorcar extension.
- * Ensures uv, git, Node.js, VS Code CLI, Python environment, and Playwright
- * Chromium are available.  Called during extension activation.
- */
 
 import * as vscode from 'vscode';
 import * as path from 'path';
@@ -38,12 +33,6 @@ const MIN_PYTHON_MINOR = 13;
 const UV_VERSION = '0.11.2';
 const NODE_VERSION = 'v22.16.0';
 
-/**
- * Escape a string so it is safe to embed inside an XML ``<string>``
- * element (e.g. macOS LaunchAgent plist).  Without escaping a path
- * containing ``&`` or ``<`` produces malformed XML and ``launchctl``
- * silently rejects the unit.
- */
 function xmlEscape(s: string): string {
   return s
     .replace(/&/g, '&amp;')
@@ -53,29 +42,10 @@ function xmlEscape(s: string): string {
     .replace(/'/g, '&apos;');
 }
 
-/**
- * Escape a string so it is safe to embed inside a systemd unit value.
- * Backslashes and newlines must not appear unescaped — they otherwise
- * silently corrupt the unit.
- */
 function unitEscape(s: string): string {
   return s.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/%/g, '%%');
 }
 
-/**
- * Download a URL into ``destPath`` using the Node ``https`` module.
- * Follows up to 5 redirects.  Resolves only after the response has been
- * fully written to disk.  Never spawns a shell.
- *
- * A mid-body failure (connection reset, server truncation) MUST settle
- * the promise: ``pipe`` does not propagate source errors to the write
- * stream, and once the socket is destroyed the inactivity timeout can
- * never fire — without explicit ``error``/``aborted`` handlers on the
- * response the promise hung forever, wedging the "Setting up" progress
- * notification and leaving a partial file behind.  Exported for the
- * e2e test, which serves a truncated body from a real TLS server and
- * asserts the promise rejects promptly.
- */
 export function downloadFile(
   url: string,
   destPath: string,
@@ -109,9 +79,6 @@ export function downloadFile(
           });
         };
         res.on('error', fail);
-        // Legacy 'aborted' fires (without 'error' on some Node
-        // versions) when the server closes the connection before the
-        // advertised Content-Length was delivered.
         res.on('aborted', () =>
           fail(new Error(`Connection aborted downloading ${u}`)),
         );
@@ -130,27 +97,11 @@ export function downloadFile(
   });
 }
 
-/**
- * Compute the lowercase-hex SHA256 digest of a file on disk.
- */
 function sha256OfFile(filePath: string): string {
   const buf = fs.readFileSync(filePath);
   return crypto.createHash('sha256').update(buf).digest('hex');
 }
 
-/**
- * Best-effort integrity check for a downloaded asset against a vendor-
- * published SHA256 file (e.g. ``<url>.sha256`` for uv, ``SHASUMS256.txt``
- * for nodejs.org).  When ``expectedHashHex`` is given and does not match,
- * the file is unlinked and an error is thrown.  When omitted (vendor
- * does not publish a hash), the function logs a warning and returns —
- * we do not silently skip integrity for binaries we know how to verify.
- *
- * Pinning the digest in the extension source is preferable but requires
- * release-time bookkeeping; this helper at minimum compares against the
- * SHA256 file fetched from the same release URL, defending against
- * CDN/mirror corruption and accidental wrong-asset downloads.
- */
 function verifyDownloadHash(
   filePath: string,
   expectedHashHex: string | null,
@@ -166,9 +117,7 @@ function verifyDownloadHash(
   if (got.toLowerCase() !== expectedHashHex.toLowerCase()) {
     try {
       fs.unlinkSync(filePath);
-    } catch {
-      /* ignore */
-    }
+    } catch {}
     throw new Error(
       `SHA256 mismatch for ${path.basename(filePath)}: ` +
         `expected ${expectedHashHex}, got ${got}`,
@@ -178,30 +127,34 @@ function verifyDownloadHash(
 }
 
 /**
- * Fetch ``<assetUrl>.sha256`` (uv-style sidecar) and return the hex digest,
- * or null when the sidecar isn't available.
+ * GET *url* over HTTPS and return the response body as UTF-8 text.
+ *
+ * Returns null on any failure (non-200 status, network error, abort,
+ * 15s timeout, or a malformed/non-HTTPS URL).  Redirects are not
+ * followed.  Shared transport for the SHA-256 manifest fetchers
+ * below, which previously duplicated this boilerplate.
  */
-function fetchUvStyleSha256(assetUrl: string): Promise<string | null> {
+export function httpsGetText(url: string): Promise<string | null> {
   return new Promise(resolve => {
-    const req = https.get(assetUrl + '.sha256', {timeout: 15000}, res => {
-      if ((res.statusCode || 0) !== 200) {
-        res.resume();
-        resolve(null);
-        return;
-      }
-      const chunks: Buffer[] = [];
-      res.on('data', d => chunks.push(d));
-      res.on('end', () => {
-        const text = Buffer.concat(chunks).toString('utf-8').trim();
-        // sidecar is "<hex>  filename"
-        const m = /^([0-9a-fA-F]{64})/.exec(text);
-        resolve(m ? m[1] : null);
+    let req: ReturnType<typeof https.get>;
+    try {
+      req = https.get(url, {timeout: 15000}, res => {
+        if ((res.statusCode || 0) !== 200) {
+          res.resume();
+          resolve(null);
+          return;
+        }
+        const chunks: Buffer[] = [];
+        res.on('data', d => chunks.push(d));
+        res.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+        res.on('error', () => resolve(null));
+        res.on('aborted', () => resolve(null));
       });
-      // A mid-body reset would otherwise leave the promise pending
-      // forever (no 'end', and the destroyed socket never times out).
-      res.on('error', () => resolve(null));
-      res.on('aborted', () => resolve(null));
-    });
+    } catch {
+      // e.g. malformed URL or non-HTTPS protocol throws synchronously.
+      resolve(null);
+      return;
+    }
     req.on('error', () => resolve(null));
     req.on('timeout', () => {
       req.destroy();
@@ -211,55 +164,41 @@ function fetchUvStyleSha256(assetUrl: string): Promise<string | null> {
 }
 
 /**
- * Fetch ``https://nodejs.org/dist/<NODE_VERSION>/SHASUMS256.txt`` and find
- * the hash for ``assetName``.  Returns null on any error.
+ * Fetch the uv-style `<assetUrl>.sha256` manifest and return the
+ * leading 64-hex-digit digest, or null when unavailable.
  */
-function fetchNodeSha256(assetName: string): Promise<string | null> {
-  const url = `https://nodejs.org/dist/${NODE_VERSION}/SHASUMS256.txt`;
-  return new Promise(resolve => {
-    const req = https.get(url, {timeout: 15000}, res => {
-      if ((res.statusCode || 0) !== 200) {
-        res.resume();
-        resolve(null);
-        return;
-      }
-      const chunks: Buffer[] = [];
-      res.on('data', d => chunks.push(d));
-      res.on('end', () => {
-        const text = Buffer.concat(chunks).toString('utf-8');
-        for (const line of text.split('\n')) {
-          const m = /^([0-9a-fA-F]{64})\s+(.+?)\s*$/.exec(line);
-          if (m && m[2] === assetName) {
-            resolve(m[1]);
-            return;
-          }
-        }
-        resolve(null);
-      });
-      // A mid-body reset would otherwise leave the promise pending
-      // forever (no 'end', and the destroyed socket never times out).
-      res.on('error', () => resolve(null));
-      res.on('aborted', () => resolve(null));
-    });
-    req.on('error', () => resolve(null));
-    req.on('timeout', () => {
-      req.destroy();
-      resolve(null);
-    });
-  });
+export async function fetchUvStyleSha256(
+  assetUrl: string,
+): Promise<string | null> {
+  const text = await httpsGetText(assetUrl + '.sha256');
+  if (text === null) return null;
+  const m = /^([0-9a-fA-F]{64})/.exec(text.trim());
+  return m ? m[1] : null;
 }
 
-/** Synchronous sleep that neither spawns a process nor spins the CPU. */
+/**
+ * Look up *assetName*'s digest in the Node.js SHASUMS256.txt manifest
+ * for NODE_VERSION, or null when unavailable or unlisted.
+ */
+export async function fetchNodeSha256(
+  assetName: string,
+  manifestUrl?: string,
+): Promise<string | null> {
+  const url =
+    manifestUrl || `https://nodejs.org/dist/${NODE_VERSION}/SHASUMS256.txt`;
+  const text = await httpsGetText(url);
+  if (text === null) return null;
+  for (const line of text.split('\n')) {
+    const m = /^([0-9a-fA-F]{64})\s+(.+?)\s*$/.exec(line);
+    if (m && m[2] === assetName) return m[1];
+  }
+  return null;
+}
+
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-/**
- * Core no-shell process runner: spawn ``cmd`` with ``args``, capture
- * stdout and stderr, and resolve on exit (any code).  ``timeoutMs = 0``
- * disables the kill timer.  Rejects only on spawn failure or timeout.
- * Shared by :func:`spawnPromise` and :func:`runAsync`.
- */
 function spawnCollect(
   cmd: string,
   args: string[],
@@ -300,11 +239,6 @@ function spawnCollect(
   });
 }
 
-/**
- * Run a child process without invoking a shell and resolve with the
- * trimmed stdout on exit code 0.  Used for ``tar``, ``mv``, etc. where
- * a shell would be required only to interpolate user-controlled paths.
- */
 async function spawnPromise(
   cmd: string,
   args: string[],
@@ -318,28 +252,17 @@ async function spawnPromise(
   );
 }
 
-/** Guard against concurrent ensureDependencies calls. */
 let pendingDeps: Promise<void> | null = null;
 
-/**
- * Write a timestamped message to ~/.kiss/install.log and the developer console.
- */
 function log(message: string): void {
   const line = `[${new Date().toISOString()}] ${message}`;
   console.log('[KISS Sorcar]', message);
   try {
     fs.mkdirSync(LOG_DIR, {recursive: true});
     fs.appendFileSync(LOG_FILE, line + '\n');
-  } catch {
-    /* ignore write errors */
-  }
+  } catch {}
 }
 
-/**
- * Prepend *dir* to ``process.env.PATH`` so binaries in it are found by
- * all child processes.  Safe to call multiple times — skips if already
- * present.
- */
 function prependToProcessPath(dir: string): void {
   const parts = (process.env.PATH || '').split(path.delimiter);
   if (!parts.includes(dir)) {
@@ -347,20 +270,11 @@ function prependToProcessPath(dir: string): void {
   }
 }
 
-/**
- * Prepend ~/.local/bin to process.env.PATH so that binaries installed by
- * the extension (uv, node, sorcar) are found by all child processes.
- */
 export function ensureLocalBinInPath(): void {
   if (!HOME_DIR) return;
   prependToProcessPath(path.join(HOME_DIR, '.local', 'bin'));
 }
 
-/**
- * Windows install helper: download a zip with PowerShell, extract it
- * into ``destDir``, run any ``extraPsCommands`` (e.g. Move-Item
- * cleanup), and delete the zip — all in one PowerShell invocation.
- */
 function windowsZipInstall(
   url: string,
   zipPath: string,
@@ -376,78 +290,40 @@ function windowsZipInstall(
   );
 }
 
-/**
- * Find the actual Node.js directory inside the base install dir on Windows.
- * Node.js extracts to a nested subdirectory like node-v22.16.0-win-x64/.
- * Returns the nested directory containing node.exe, or baseDir as fallback.
- */
 function findNodeDirWindows(baseDir: string): string {
   try {
     for (const entry of fs.readdirSync(baseDir)) {
       const candidate = path.join(baseDir, entry);
       if (fs.existsSync(path.join(candidate, 'node.exe'))) return candidate;
     }
-  } catch {
-    /* ignore */
-  }
+  } catch {}
   return baseDir;
 }
 
-/**
- * Pure-TypeScript replica of Python's ``get_default_model()`` priority
- * order from ``kiss.core.models.model_info``.  Used as a fallback when
- * the .venv is not yet available (first-time setup) so the model
- * picker is never rendered blank.
- *
- * Priority order (must match Python):
- *   Anthropic > OpenAI > Gemini > OpenRouter > Together AI >
- *   Claude Code CLI > Codex CLI > ``"No model"``.
- *
- * Keep the strings in sync with ``get_default_model`` in
- * ``src/kiss/core/models/model_info.py``.
- */
 export function getFallbackDefaultModel(): string {
   const env = process.env;
   if (env.ANTHROPIC_API_KEY) return 'claude-opus-4-7';
-  if (env.OPENAI_API_KEY) return 'gpt-5.5';
-  if (env.GEMINI_API_KEY) return 'gemini-3.1-pro-preview';
+  if (env.OPENAI_API_KEY) return 'gpt-5.6-luna';
+  if (env.GEMINI_API_KEY) return 'gemini-3.6-flash';
   if (env.OPENROUTER_API_KEY) return 'openrouter/anthropic/claude-opus-4.7';
-  if (env.TOGETHER_API_KEY) return 'Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8';
+  if (env.TOGETHER_API_KEY) return 'moonshotai/Kimi-K3';
   const whichCmd = process.platform === 'win32' ? 'where' : 'which';
   try {
     execFileSync(whichCmd, ['claude'], {stdio: 'ignore', timeout: 2_000});
     return 'cc/opus';
-  } catch {
-    /* not installed */
-  }
+  } catch {}
   try {
     execFileSync(whichCmd, ['codex'], {stdio: 'ignore', timeout: 2_000});
     return 'codex/default';
-  } catch {
-    /* not installed */
-  }
+  } catch {}
   return 'No model';
 }
 
-/**
- * Return the best default model name by calling Python's canonical
- * ``get_default_model()`` from ``kiss.core.models.model_info``.
- *
- * Requires ``uv`` and the KISS project ``.venv`` to be available.
- * When the Python call fails (e.g. during first-time setup before
- * dependencies are installed), falls back to a pure-TypeScript
- * replica that checks the same API-key env vars and CLI executables.
- * This guarantees the model picker never renders blank on a fresh
- * install — the backend still overrides the value via the ``models``
- * event once the daemon is up.
- */
 export function getDefaultModel(): string {
   const uvPath = findUvPath();
   const kissProject = findKissProject();
   if (!uvPath || !kissProject) return getFallbackDefaultModel();
   try {
-    // H1 — argv-form so quotes / shell metacharacters in either path
-    // (both come from user-controlled HOME / settings) cannot inject.
     const out = execFileSync(
       uvPath,
       [
@@ -467,20 +343,6 @@ export function getDefaultModel(): string {
   }
 }
 
-/**
- * Run the post-install finalization steps: install the ``sorcar`` CLI
- * wrapper, install cloudflared, restart the kiss-web daemon, persist
- * PATH entries to the user's shell rc file, and prompt for any missing
- * API keys.  Returns whether at least one API key (or the Claude CLI)
- * is available.
- *
- * When called with a non-null ``progress`` reporter this function
- * publishes brief sub-step messages so the surrounding "KISS Sorcar:
- * Setting up" notification stays visible continuously from the first
- * install step until the completion message is shown.  Passing ``null``
- * skips the progress reports (used on the fast path, which has no
- * progress notification to annotate).
- */
 async function runFinalization(
   progress: vscode.Progress<{message?: string; increment?: number}> | null,
   kissProjectPath: string,
@@ -491,25 +353,13 @@ async function runFinalization(
     installCliScript(kissProjectPath, uvPath);
   }
 
-  // MODEL_INFO.json is intentionally NOT copied into ``~/.kiss/``;
-  // see the docstring on ``installModelInfoJson`` below for the
-  // rationale.  User overrides live in ``~/.kiss/MY_MODELS.json``,
-  // auto-seeded by ``kiss.core.models.model_info`` on first import.
   installModelInfoJson(kissProjectPath);
-  // INJECTIONS.md is intentionally NOT copied into ``~/.kiss/``; see
-  // the docstring on ``installMarkdownAssets`` below for the
-  // rationale.  ``MY_INJECTION.md`` is lazily seeded by
-  // ``ensureUserAssetFromDefault`` on the first ``getTricks()`` call.
   installMarkdownAssets(kissProjectPath);
 
   if (progress) progress.report({message: 'Checking cloudflared...'});
   await installCloudflaredIfNeeded();
 
   if (progress) progress.report({message: 'Restarting kiss-web daemon...'});
-  // Point the kiss-web daemon's WorkingDirectory (its process getcwd, and
-  // therefore the default task work_dir) at the VS Code workspace root —
-  // i.e. USER_PWD, the directory the user ran install.sh from.  Falls back
-  // to kissProjectPath when no folder is open (preserving prior behavior).
   const webWorkDir =
     vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || kissProjectPath;
   await restartKissWebDaemon(kissProjectPath, webWorkDir);
@@ -545,12 +395,6 @@ async function runFinalization(
   return apiKeysReady;
 }
 
-/**
- * Ensure all required dependencies are installed.
- * Shows a progress notification during first-time installation.
- * Safe to call multiple times — uses a concurrency guard so overlapping
- * calls reuse the in-flight check instead of racing.
- */
 export function ensureDependencies(): Promise<void> {
   if (pendingDeps) return pendingDeps;
   pendingDeps = ensureDependenciesImpl().finally(() => {
@@ -575,10 +419,6 @@ async function ensureDependenciesImpl(): Promise<void> {
   }
   log(`KISS project: ${kissProjectPath}`);
 
-  // Early exit: when all dependencies are fully installed, the daemon is
-  // running, and no extension update is pending, skip all setup work.
-  // This avoids the 162 MB Playwright re-download, daemon restart, and
-  // CLI script rewrite that previously ran on every VS Code activation.
   const updateMarker = path.join(LOG_DIR, '.extension-updated');
   if (
     findUvPath() &&
@@ -596,9 +436,6 @@ async function ensureDependenciesImpl(): Promise<void> {
   let uvPath = findUvPath();
   let venvExists = fs.existsSync(path.join(kissProjectPath, '.venv'));
 
-  // If .venv exists but Python is genuinely too old, remove it so uv sync
-  // recreates it.  Transient errors (timeout, spawn failure) must NOT delete
-  // .venv — that causes unnecessary slow-path rebuilds on every activation.
   if (uvPath && venvExists) {
     const pyStatus = checkPythonVersion(uvPath, kissProjectPath);
     if (pyStatus === 'too_old') {
@@ -608,39 +445,26 @@ async function ensureDependenciesImpl(): Promise<void> {
           recursive: true,
           force: true,
         });
-      } catch {
-        /* ignored */
-      }
+      } catch {}
       venvExists = false;
     } else if (pyStatus === 'error') {
       log('Python version check failed (transient) — keeping .venv');
     }
   }
 
-  // Check if build-extension.sh just ran (marker file written by the script).
-  // When the marker exists, always show the restart notification — even on
-  // the fast path where uv + .venv are already present.
-  // (updateMarker is declared above for the early-exit guard.)
   let showRestartNotification = false;
-  // ``apiKeysReady`` is set by ``runFinalization`` in either the fast
-  // or slow path below.  Declared up here so the post-progress
-  // restart-notification block below can read it regardless of which
-  // path was taken.
   let apiKeysReady = false;
   if (fs.existsSync(updateMarker)) {
     showRestartNotification = true;
     try {
       fs.unlinkSync(updateMarker);
-    } catch {
-      /* ignore */
-    }
+    } catch {}
     log('Extension-updated marker found — will show restart notification');
   }
 
-  // Fast path: everything looks ready, ensure playwright in background
   if (uvPath && venvExists) {
     log('Fast path: uv and .venv present, ensuring Playwright in background');
-    const uv = uvPath; // capture narrowed non-null type for closure
+    const uv = uvPath;
     runAsync(
       uv,
       ['run', 'python', '-m', 'playwright', 'install', 'chromium'],
@@ -659,16 +483,12 @@ async function ensureDependenciesImpl(): Promise<void> {
         log(
           `Fast-path Playwright install failed: ${err instanceof Error ? err.message : err}`,
         );
-        // Only warn the user if Chromium is genuinely missing.  Playwright
-        // browsers are cached system-wide (outside .venv), so a transient
-        // background update failure is benign when chromium is already cached.
         if (!isChromiumInstalled()) {
           showWarningNotification(
             'KISS Sorcar: Chromium browser update failed in background. See ~/.kiss/install.log for details.',
           );
         }
       });
-    // Ensure git, Node.js, and VS Code CLI are available even on fast path
     if (!gitWorks()) {
       void installGit().then(installed => {
         if (!installed) {
@@ -690,16 +510,8 @@ async function ensureDependenciesImpl(): Promise<void> {
     if (!commandExists('code')) {
       void installCodeCli();
     }
-    // Fast-path finalization: when we did not enter the slow-path
-    // withProgress block we still need to run the finalization
-    // steps.  The fast path does NOT show a progress notification
-    // (because there was no "installing" notification to keep
-    // visible to begin with), so the user-visible UX gap that
-    // motivated wrapping finalization in withProgress does not
-    // apply here.
     apiKeysReady = await runFinalization(null, kissProjectPath, uvPath);
   } else {
-    // Slow path: show progress bar and install missing deps
     const result = await withWebviewNotificationProgress(
       {
         location: vscode.ProgressLocation.Notification,
@@ -707,9 +519,7 @@ async function ensureDependenciesImpl(): Promise<void> {
         cancellable: false,
       },
       async progress => {
-        // 1. Install uv if needed
         if (!uvPath) {
-          // curl and tar are required to download and extract uv
           if (process.platform !== 'win32') {
             for (const bin of ['curl', 'tar']) {
               if (!commandExists(bin)) {
@@ -734,7 +544,6 @@ async function ensureDependenciesImpl(): Promise<void> {
           progress.report({increment: 20});
         }
 
-        // 2. Install git if needed
         if (!gitWorks()) {
           progress.report({message: 'Installing git...'});
           const gitInstalled = await installGit();
@@ -745,7 +554,6 @@ async function ensureDependenciesImpl(): Promise<void> {
           }
         }
 
-        // 3. Install Node.js if needed (provides node, npm, npx for agent tasks)
         if (!commandExists('node')) {
           progress.report({message: 'Installing Node.js...'});
           const nodeInstalled = await installNode();
@@ -758,7 +566,6 @@ async function ensureDependenciesImpl(): Promise<void> {
           }
         }
 
-        // 4. Ensure VS Code CLI is on PATH
         if (!commandExists('code')) {
           progress.report({message: 'Setting up VS Code CLI...'});
           const codeInstalled = await installCodeCli();
@@ -767,7 +574,6 @@ async function ensureDependenciesImpl(): Promise<void> {
           }
         }
 
-        // 5. Set up Python environment (installs Python 3.13+ and all pip dependencies)
         if (!venvExists) {
           progress.report({
             message:
@@ -777,7 +583,6 @@ async function ensureDependenciesImpl(): Promise<void> {
           progress.report({increment: 50});
         }
 
-        // 6. Verify Python version meets minimum requirement
         if (checkPythonVersion(uvPath, kissProjectPath) !== 'ok') {
           showErrorNotification(
             `KISS Sorcar requires Python ${MIN_PYTHON_MAJOR}.${MIN_PYTHON_MINOR}+. ` +
@@ -786,7 +591,6 @@ async function ensureDependenciesImpl(): Promise<void> {
           return {success: false, apiKeysReady: false};
         }
 
-        // 7. Install Playwright Chromium
         progress.report({message: 'Installing dependencies...'});
         await runAsync(
           uvPath,
@@ -806,14 +610,6 @@ async function ensureDependenciesImpl(): Promise<void> {
         }
         progress.report({increment: 30});
 
-        // Finalization runs INSIDE the withProgress callback so the
-        // "KISS Sorcar: Setting up" notification stays visible
-        // continuously from the first install step until the
-        // completion message is shown.  Previously these steps ran
-        // after the callback returned, leaving a visible gap between
-        // "Installing dependencies..." and the final notification
-        // (often several seconds — much longer when ensureApiKeys
-        // had to prompt the user for an API key).
         progress.report({message: 'Finalizing setup...'});
         const finalizedKeys = await runFinalization(
           progress,
@@ -824,43 +620,15 @@ async function ensureDependenciesImpl(): Promise<void> {
       },
     );
 
-    // A FAILED slow-path install must never announce "Installation
-    // complete" — even when the ``.extension-updated`` marker had armed
-    // the notification above.  The user just saw the specific error
-    // notification (e.g. "Failed to install uv"); following it with a
-    // completion message is contradictory and hides the failure.
     showRestartNotification = !!result.success;
     apiKeysReady = result.apiKeysReady;
   }
 
   log('=== Dependency check finished ===');
 
-  // Post-install notification.  A VS Code window reload is NOT
-  // required here:
-  //
-  //   * When a new VSIX was installed while VS Code was running, the
-  //     ``fs.watchFile`` watchers in ``extension.ts`` (on ``out/
-  //     extension.js`` and on ``~/.kiss/.extension-updated``) already
-  //     fired ``workbench.action.reloadWindow`` BEFORE this function
-  //     ran in the new activation — the extension code in memory is
-  //     already current.
-  //   * For a from-scratch install (slow path), the current Node host
-  //     already has the updated ``process.env.PATH`` (set by
-  //     ``ensureLocalBinInPath()`` at activation start) and the API
-  //     keys (set by ``ensureApiKeys`` / ``loadApiKeysFromShellRc``),
-  //     the Python venv exists on disk, and the kiss-web daemon was
-  //     just (re)started.  Child processes spawned for chat tasks
-  //     inherit all of this.
-  //
-  // The only thing a reload would refresh is already-open integrated
-  // terminals — and opening a new terminal achieves the same effect
-  // without disrupting an in-flight chat task.  So we now show a
-  // non-prompting info message instead of forcing a reload.
   if (showRestartNotification) {
     if (apiKeysReady) {
-      showInformationNotification(
-        'KISS Sorcar: Installation complete! Starting server in less than a minute ... ',
-      );
+      showInformationNotification('KISS Sorcar: Installation complete!');
     } else {
       showWarningNotification(
         'KISS Sorcar: Installation complete, but at least one of Claude Code, ANTHROPIC_API_KEY, or OPENAI_API_KEY is required. ' +
@@ -870,31 +638,6 @@ async function ensureDependenciesImpl(): Promise<void> {
   }
 }
 
-/**
- * Reliably kill every process listening on ``port``.
- *
- * Sends SIGTERM first, polls up to 3 s for graceful exit, then SIGKILLs
- * any stragglers.  Returns silently when nothing is listening.
- *
- * Used in place of ``pkill -x kiss-web``: kiss-web is a Python shebang
- * script, so the kernel's ``comm`` field is the truncated interpreter
- * path rather than the literal ``kiss-web``, making name-based pkill
- * unreliable on macOS.  Killing by listening port works on both macOS
- * and Linux without relying on process-name heuristics.
- *
- * @param port - TCP port whose listening processes should be killed.
- */
-/**
- * PIDs of processes LISTENING on *port* (empty when none / lsof fails).
- *
- * The ``-sTCP:LISTEN`` filter is load-bearing: a bare ``lsof -ti :port``
- * also returns TCP *clients* of the port — cloudflared proxying the
- * remote-access tunnel, or a browser holding a WebSocket to
- * localhost:8787 — and ``killProcessOnPort`` would SIGTERM/SIGKILL them
- * along with the daemon (burning the tunnel URL mid-request).  Exported
- * for the e2e test, which spawns a real listener plus a real client and
- * asserts only the listener PID is returned.
- */
 export function pidsOnPort(port: number): string[] {
   try {
     return execFileSync('lsof', ['-ti', `tcp:${port}`, '-sTCP:LISTEN'], {
@@ -910,49 +653,25 @@ export function pidsOnPort(port: number): string[] {
   }
 }
 
-/** Send *signal* to every PID, ignoring already-gone processes. */
 function killPids(pids: string[], signal: NodeJS.Signals): void {
   for (const pid of pids) {
     try {
       process.kill(parseInt(pid, 10), signal);
-    } catch {
-      /* already gone */
-    }
+    } catch {}
   }
 }
 
 function killProcessOnPort(port: number): void {
   const pids = pidsOnPort(port);
-  if (pids.length === 0) return; // Nothing listening — ok.
+  if (pids.length === 0) return;
   killPids(pids, 'SIGTERM');
-  // Wait up to ~3 s for the port to free up.
   for (let i = 0; i < 6; i++) {
-    if (pidsOnPort(port).length === 0) return; // Port is free.
+    if (pidsOnPort(port).length === 0) return;
     sleepSync(500);
   }
-  // Force-kill any survivors.
   killPids(pidsOnPort(port), 'SIGKILL');
 }
 
-/**
- * Start the kiss-web daemon directly as a detached background process.
- *
- * Fallback for Linux environments that have no usable systemd **user**
- * session — most notably Docker containers (where PID 1 is not systemd
- * and ``$DBUS_SESSION_BUS_ADDRESS`` / ``$XDG_RUNTIME_DIR`` are unset), as
- * well as minimal VMs and some WSL setups.  In those environments
- * ``systemctl --user`` fails, so without this fallback the daemon never
- * starts, ``~/.kiss/sorcar.sock`` is never created, and the extension can
- * never run a task.
- *
- * The child is detached and ``unref``-ed so it survives the extension host
- * exiting, inherits the current environment (API keys, etc.), runs with
- * ``cwd = workDir``, and appends its output to the same log files the
- * systemd/launchd units use.
- *
- * @param kissWebBin - Absolute path to ``.venv/bin/kiss-web``.
- * @param workDir - Working directory (process ``getcwd()``) for the daemon.
- */
 function spawnKissWebDirect(kissWebBin: string, workDir: string): void {
   const binDir = path.join(HOME_DIR, '.local', 'bin');
   try {
@@ -982,36 +701,11 @@ function spawnKissWebDirect(kissWebBin: string, workDir: string): void {
   }
 }
 
-/**
- * Restart the kiss-web remote access daemon.
- *
- * Always restarts the daemon so that code changes from an editable install
- * are picked up (the Python code is loaded at process start time).  Kills
- * any existing kiss-web and cloudflared processes, waits for port 8787 to
- * be free, then (re-)creates the service definition and starts it.
- *
- * On macOS uses ``~/Library/LaunchAgents/com.kiss.web-server.plist``
- * with ``KeepAlive`` and ``RunAtLoad``.
- * On Linux uses ``~/.config/systemd/user/kiss-web.service`` with
- * ``Restart=always`` and enables lingering.
- *
- * @param kissProjectPath - Absolute path to the KISS project directory.
- *   The ``kiss-web`` binary is always taken from
- *   ``${kissProjectPath}/.venv/bin/kiss-web``.
- * @param workDir - Absolute path used as the daemon's ``WorkingDirectory``
- *   (the process ``getcwd()``).  This is the VS Code workspace root (i.e.
- *   ``USER_PWD`` — the directory the user ran ``install.sh`` from), so that
- *   the web app's default task work_dir resolves to the user's project
- *   instead of the embedded ``kiss_project`` bundled inside the VSIX.
- *   ``web_server.py`` launches kiss-web with no ``--workdir``, so its
- *   ``os.getcwd()`` (= this ``WorkingDirectory``) becomes the fallback
- *   work_dir for sessions that don't send an explicit ``workDir``.
- */
 async function restartKissWebDaemon(
   kissProjectPath: string,
   workDir: string,
 ): Promise<void> {
-  if (process.platform === 'win32') return; // Not supported on Windows
+  if (process.platform === 'win32') return;
 
   const kissWebBin = path.join(kissProjectPath, '.venv', 'bin', 'kiss-web');
   if (!fs.existsSync(kissWebBin)) {
@@ -1021,18 +715,6 @@ async function restartKissWebDaemon(
 
   const binDir = path.join(HOME_DIR, '.local', 'bin');
 
-  // Skip the kill+restart when the kiss-web binary and the editable
-  // kiss source tree are byte-for-byte identical to the last time the
-  // daemon was started AND the daemon is currently healthy on port
-  // 8787.  This preserves any running ``cloudflared`` quick-tunnel
-  // across VS Code window reloads / re-activations, which would
-  // otherwise mint a brand-new random ``*.trycloudflare.com`` URL
-  // every time the extension activates.
-  //
-  // The fingerprint changes whenever the user rebuilds, reinstalls,
-  // or edits any Python source under ``src/kiss/`` — so the
-  // editable-install code-pickup behavior is preserved on real
-  // changes.
   const fpFile = path.join(LOG_DIR, '.kiss-web.fingerprint');
   const currentFp = computeKissWebFingerprint(
     kissProjectPath,
@@ -1042,53 +724,18 @@ async function restartKissWebDaemon(
   let savedFp = '';
   try {
     savedFp = fs.readFileSync(fpFile, 'utf-8').trim();
-  } catch {
-    /* missing or unreadable — treat as mismatch */
-  }
+  } catch {}
   const sockPath = path.join(HOME_DIR, '.kiss', 'sorcar.sock');
 
-  // Tri-state TCP probe.  The OLD implementation here was::
-  //
-  //     try { execSync('lsof -i :8787 -t', {timeout: 2000});
-  //           return fs.existsSync(sockPath); }
-  //     catch { return false; }
-  //
-  // — which conflates "no listener" with "lsof slow under load".
-  // On a heavily-loaded host the 2 s ``lsof`` timeout would fire,
-  // the catch returned ``false``, the guard fell through, and the
-  // installer SIGTERMed a perfectly healthy daemon that was mid-task.
-  // ``probeDaemonHealth`` returns ``'alive' | 'dead' | 'unknown'`` so
-  // the guard can treat a transient probe failure as "do not restart"
-  // when the fingerprint matches.
   const health = await probeDaemonHealth(8787, 1500);
   const sockExists = fs.existsSync(sockPath);
 
-  // Ask the live daemon whether any agent tasks are in flight.  The
-  // SIGTERM regression report shows the kill happened with
-  // ``active_tasks=[ad4ecb65(task=74)]`` on the daemon's own log — i.e.
-  // the restart logic had no awareness of in-flight work at all.  When
-  // the daemon reports tasks, defer the restart unconditionally (even
-  // on a fingerprint change): the new code will be picked up on the
-  // next activation once the running task has finished.
-  //
-  // ALWAYS run ``daemonHasActiveTasks`` when ``health !== 'dead'`` so
-  // the ``sock-missing`` reason flows through to ``decideRestart``'s
-  // ``unreachable-uds`` branch — the Update-button hang fix.  Without
-  // this, when ``install.sh`` races with the LaunchAgent respawn and
-  // ends up deleting the freshly-respawned daemon's UDS file, the
-  // probe early-returned with ``reason: 'not-probed'`` (i.e. the
-  // generic ``alive-uncertain`` skip) instead of the specific
-  // ``sock-missing`` signal ``decideRestart`` needs to force the
-  // recovery restart.  ``daemonHasActiveTasks`` itself short-circuits
-  // on a missing socket path so this is cheap.
-  let activeTasks:
-    {ok: true; count: number; tabs: string[]} | {ok: false; reason: string} = {
-    ok: false,
-    reason: 'not-probed',
-  };
-  if (health !== 'dead') {
-    activeTasks = await daemonHasActiveTasks(sockPath, 1500);
-  }
+  // Always query the UDS, even when the TCP listener looks dead: the task
+  // worker can be alive behind a transiently refused HTTP port, and
+  // decideRestart() protects any reported active task regardless of health.
+  const activeTasks:
+    {ok: true; count: number; tabs: string[]} | {ok: false; reason: string} =
+    await daemonHasActiveTasks(sockPath, 1500);
 
   const decision = decideRestart({
     fingerprintMatches: !!currentFp && currentFp === savedFp,
@@ -1102,10 +749,6 @@ async function restartKissWebDaemon(
           'active task(s) — deferring restart to avoid aborting in-flight work',
       );
     } else if (decision.reason.startsWith('alive-uncertain')) {
-      // The daemon's TCP probe says ``alive`` but the UDS active-tasks
-      // round-trip could not be completed.  Deferring is the safe
-      // call: SIGTERMing an alive daemon whose task status is unknown
-      // is exactly what aborted task_history row 3192 mid-flight.
       log(
         'kiss-web alive but active-tasks probe inconclusive ' +
           `(${decision.reason}) — deferring restart to next activation`,
@@ -1126,30 +769,8 @@ async function restartKissWebDaemon(
       `${activeTasks.ok ? activeTasks.count : 'unknown(' + activeTasks.reason + ')'}`,
   );
 
-  // Kill the existing kiss-web process before restarting.  ``kiss-web``
-  // is a Python shebang script, so the kernel's ``comm`` field is the
-  // (15-char-truncated) interpreter path — NOT the literal string
-  // ``kiss-web``.  ``pkill -x kiss-web`` is therefore a silent no-op
-  // on macOS; killing by listening port is the only reliable approach
-  // that works across both macOS and Linux.
-  //
-  // ``cloudflared`` is intentionally NOT killed here: the Python
-  // ``web_server`` adopts the existing cloudflared on startup
-  // (matching pid in ``~/.kiss/cloudflared.pid`` and a healthy
-  // metrics endpoint), keeping the same public URL across kiss-web
-  // restarts.  When the kiss-web binary genuinely changed we still
-  // restart kiss-web; the surviving cloudflared keeps forwarding to
-  // ``https://localhost:8787``, which the new kiss-web re-binds.
   killProcessOnPort(8787);
 
-  // Re-invocable restart action handed to ``verifyDaemonStartup`` below.
-  // Re-running the FULL platform (re)start sequence — not just a
-  // kickstart — is what heals the launchctl bootout→bootstrap race:
-  // the first ``bootstrap`` can fail with EEXIST while the old job
-  // instance is still draining (the ``load -w`` fallback silently
-  // no-ops), leaving NOTHING loaded, so the daemon never respawns and
-  // the webview hangs forever on the "KISS Sorcar Server is
-  // starting ..." overlay.
   let reissueRestart: (() => void | Promise<void>) | null = null;
 
   if (process.platform === 'darwin') {
@@ -1160,9 +781,6 @@ async function restartKissWebDaemon(
     log('Restarting kiss-web macOS LaunchAgent...');
     try {
       fs.mkdirSync(plistDir, {recursive: true});
-      // XML-escape every interpolated path so that paths containing
-      // ``&``, ``<``, ``>``, ``"`` or ``'`` cannot corrupt the plist
-      // structure or inject alternate ProgramArguments via XML entities.
       const xLabel = xmlEscape(plistLabel);
       const xBin = xmlEscape(kissWebBin);
       const xProj = xmlEscape(workDir);
@@ -1203,22 +821,7 @@ async function restartKissWebDaemon(
 
       fs.writeFileSync(plistFile, plistContent);
 
-      // Unload existing service if present, then bootstrap the new one.
-      // H1 — pass paths as separate argv entries via execFileSync so a
-      // plistFile path containing single/double quotes or shell
-      // metacharacters (HOME_DIR is user-controlled) cannot inject
-      // arbitrary shell commands.
       const uid = execFileSync('id', ['-u'], {encoding: 'utf-8'}).trim();
-      // Drain-aware launchctl sequence (macLaunchd.js): bootout, POLL
-      // until launchd has really removed the service, THEN bootstrap
-      // (with retry) + kickstart.  The old back-to-back
-      // bootout→bootstrap→kickstart sequence lost the fresh
-      // registration whenever the old instance was still draining —
-      // the pending bootout removed the whole service when the old
-      // process finally exited, so NOTHING was loaded and every
-      // post-update launch burned verifyDaemonStartup's full 15s
-      // re-restart delay plus launchd's 10s respawn throttle (~26s
-      // observed from SIGTERM to "Server starting" on every restart).
       reissueRestart = async () => {
         const res = await restartLaunchAgent({
           serviceTarget: `gui/${uid}/${plistLabel}`,
@@ -1248,8 +851,6 @@ async function restartKissWebDaemon(
     let systemdOk = false;
     try {
       fs.mkdirSync(systemdDir, {recursive: true});
-      // unit-escape every interpolated path so that backslashes / newlines
-      // / percent signs in user paths cannot corrupt the unit.
       const uBin = unitEscape(kissWebBin);
       const uProj = unitEscape(workDir);
       const uPath = unitEscape(`${binDir}:/usr/local/bin:/usr/bin:/bin`);
@@ -1281,18 +882,13 @@ WantedBy=default.target
         stdio: 'ignore',
         timeout: 10000,
       });
-      // Enable lingering so service runs without active login session
       const username = os.userInfo().username;
       try {
-        // H1 — argv-form so a username with shell metacharacters cannot
-        // inject commands.
         execFileSync('loginctl', ['enable-linger', username], {
           stdio: 'ignore',
           timeout: 5000,
         });
-      } catch {
-        /* may require elevated privileges — non-fatal */
-      }
+      } catch {}
       log(`kiss-web systemd user service restarted: ${serviceFile}`);
       systemdOk = true;
       reissueRestart = () => {
@@ -1308,33 +904,12 @@ WantedBy=default.target
           'falling back to direct background spawn',
       );
     }
-    // Environments without a usable systemd user session (Docker
-    // containers, minimal VMs, some WSL setups) reach here.  Start the
-    // daemon directly so the UDS socket is created and tasks can run.
     if (!systemdOk) {
       reissueRestart = () => spawnKissWebDirect(kissWebBin, workDir);
-      // Synchronous callback — ``void`` documents that there is no
-      // promise to await here (the union type allows async callbacks).
       void reissueRestart();
     }
   }
 
-  // Verify the daemon actually came back up — the restart commands
-  // above are fire-and-forget (``stdio: 'ignore'``) and two real
-  // production races leave the daemon down with no recovery path,
-  // stranding the user on the "KISS Sorcar Server is starting ..."
-  // overlay after ``./install.sh``:
-  //
-  //   1. ``launchctl bootstrap`` fails (EEXIST) while the old job
-  //      instance is still draining → nothing is loaded → no respawn.
-  //   2. A concurrent ``code --install-extension --force`` wipes the
-  //      extension venv, so launchd's exec of ``kiss-web`` fails
-  //      silently on every KeepAlive tick until the venv is rebuilt
-  //      (observed 2 m 16 s outage on 2026-07-19).
-  //
-  // ``verifyDaemonStartup`` polls the real daemon state (TCP probe +
-  // UDS socket file) and re-issues the full restart while the port is
-  // provably dead and the binary exists.
   const verdict = await verifyDaemonStartup({
     binPath: kissWebBin,
     sockPath,
@@ -1343,9 +918,6 @@ WantedBy=default.target
     log,
   });
   if (!verdict.ok) {
-    // Do NOT record the fingerprint: the next activation must see a
-    // mismatch and retry the restart instead of skipping it as
-    // "healthy-unchanged".
     log(
       `kiss-web daemon did NOT come up within ${verdict.waitedMs}ms of the ` +
         `restart (reason=${verdict.reason}, extra restart attempts=` +
@@ -1364,9 +936,6 @@ WantedBy=default.target
         : ''),
   );
 
-  // Record the fingerprint so the next activation can skip the
-  // restart when nothing has changed.  Best-effort: a write failure
-  // simply forces an unconditional restart next time, which is safe.
   try {
     fs.writeFileSync(fpFile, currentFp + '\n');
   } catch (err) {
@@ -1376,25 +945,6 @@ WantedBy=default.target
   }
 }
 
-/**
- * Compute a fingerprint of the installed kiss-web binary and the
- * editable kiss source tree.
- *
- * The fingerprint is the SHA-256 of:
- *   - the bytes of the ``kiss-web`` entrypoint script, and
- *   - the latest mtime (in nanoseconds) across all ``*.py`` files
- *     under ``${kissProjectPath}/src/kiss/``, excluding ``__pycache__``
- *     and ``tests/`` directories.
- *
- * This changes whenever the user rebuilds kiss-web, reinstalls the
- * package, edits any source file picked up by the editable install, or
- * opens a different workspace (``workDir`` changes the daemon's
- * ``WorkingDirectory``) — exactly the situations where the daemon needs
- * to restart, either to pick up new code or to re-point its default
- * work_dir at the new workspace root.  Returns ``""`` if the fingerprint
- * cannot be computed (caller treats this as a mismatch and restarts
- * unconditionally).
- */
 function computeKissWebFingerprint(
   kissProjectPath: string,
   kissWebBin: string,
@@ -1422,9 +972,7 @@ function computeKissWebFingerprint(
           try {
             const st = fs.statSync(full, {bigint: true});
             if (st.mtimeNs > latestMtimeNs) latestMtimeNs = st.mtimeNs;
-          } catch {
-            /* skip unreadable file */
-          }
+          } catch {}
         }
       }
     };
@@ -1439,36 +987,7 @@ function computeKissWebFingerprint(
   }
 }
 
-/**
- * No-op install step retained for log narrative.
- *
- * ``INJECTIONS.md`` is **intentionally NOT copied** into
- * ``~/.kiss/``.  The bundled ``src/kiss/INJECTIONS.md`` is read
- * directly from the installed package at runtime by
- * ``kiss.server.tricks.read_tricks`` (Python, daemon) and
- * ``getTricks`` in ``SorcarTab.ts`` (TypeScript, extension), so every
- * version upgrade automatically delivers the latest bundled tricks
- * without clobbering user edits.
- *
- * User-curated tricks live in ``~/.kiss/MY_INJECTION.md`` —
- * auto-seeded on first read with the single ``## Trick`` starter
- * ("Write end-to-end 100% coverage tests for the feature first.  Then
- * implement the feature.") — matching the ``MY_TASK_TEMPLATES.md`` /
- * ``SAMPLE_TASKS.md`` pattern.
- *
- * ``SAMPLE_TASKS.md`` is similarly NOT copied: the welcome-screen
- * chip loader (``readSampleTasks`` in ``SorcarTab.ts``) reads the
- * bundled package copy directly, while user-curated chips live in
- * ``~/.kiss/MY_TASK_TEMPLATES.md``.
- *
- * The function is preserved (as a no-op) so the call site in
- * ``runFinalization`` keeps documenting why no markdown asset copy
- * happens at install time.
- */
 function installMarkdownAssets(kissProjectPath: string): void {
-  // Reference kissProjectPath so TypeScript does not flag the
-  // documented parameter as unused while we keep the install-time
-  // narrative comment alive for future maintainers.
   void kissProjectPath;
   if (!HOME_DIR) return;
   log(
@@ -1477,21 +996,6 @@ function installMarkdownAssets(kissProjectPath: string): void {
   );
 }
 
-/**
- * ``MODEL_INFO.json`` is intentionally NOT copied into ``~/.kiss/``.
- *
- * The bundled ``src/kiss/core/models/MODEL_INFO.json`` is the runtime
- * source of truth for shipped model pricing/context tables; the Python
- * loader in ``kiss.core.models.model_info`` reads it directly from the
- * installed package.  User-curated overrides / extensions live in
- * ``~/.kiss/MY_MODELS.json`` instead, auto-seeded on first import with
- * a short documentation block and a commented-out example entry —
- * matching the ``MY_INJECTION.md`` / ``MY_TASK_TEMPLATES.md`` pattern.
- *
- * The function is preserved (as a no-op) so the call site in
- * ``runFinalization`` keeps documenting why no MODEL_INFO.json copy
- * happens at install time.
- */
 function installModelInfoJson(kissProjectPath: string): void {
   void kissProjectPath;
   if (!HOME_DIR) return;
@@ -1502,17 +1006,11 @@ function installModelInfoJson(kissProjectPath: string): void {
   );
 }
 
-/**
- * Install a `sorcar` CLI wrapper script in ~/.local/bin/ so users can
- * invoke the agent from any terminal after the extension is installed.
- * The wrapper calls `uv run sorcar` from the bundled kiss_project directory.
- */
 function installCliScript(kissProjectPath: string, uvPath: string): void {
   if (!HOME_DIR) return;
 
   const binDir = path.join(HOME_DIR, '.local', 'bin');
 
-  // Resolve uv to an absolute path for the wrapper script
   let absUvPath = uvPath;
   if (uvPath === 'uv' || !path.isAbsolute(uvPath)) {
     try {
@@ -1528,14 +1026,6 @@ function installCliScript(kissProjectPath: string, uvPath: string): void {
   try {
     fs.mkdirSync(binDir, {recursive: true});
 
-    // ``uv run --directory <kissProjectPath>`` changes the child
-    // process's working directory to the bundled project before the
-    // CLI starts, so the CLI's ``Path.cwd()`` would otherwise report
-    // the project directory instead of the user's shell directory.
-    // Capture the launch directory in ``KISS_WORKDIR`` *before* uv
-    // runs so the CLI can recover it (see ``_launch_work_dir`` in
-    // ``cli_helpers.py``) and default the task ``work_dir`` to where
-    // the user actually invoked ``sorcar``.
     if (process.platform === 'win32') {
       const cmdPath = path.join(binDir, 'sorcar.cmd');
       const script =
@@ -1560,10 +1050,6 @@ function installCliScript(kissProjectPath: string, uvPath: string): void {
   }
 }
 
-/**
- * Map Node.js platform/arch to the uv GitHub release asset triplet.
- * Returns [archName, platformSuffix, extension] or null if unsupported.
- */
 function uvAssetInfo(): {
   archName: string;
   triplet: string;
@@ -1590,10 +1076,6 @@ function uvAssetInfo(): {
   return null;
 }
 
-/**
- * Install uv from a pinned GitHub binary release and return its path, or null on failure.
- * Downloads the platform-specific binary from releases.astral.sh and extracts to ~/.local/bin/.
- */
 async function installUv(): Promise<string | null> {
   const asset = uvAssetInfo();
   if (!asset) {
@@ -1609,11 +1091,9 @@ async function installUv(): Promise<string | null> {
   log(`Downloading uv ${UV_VERSION} from ${url}`);
 
   try {
-    // Ensure install directory exists
     fs.mkdirSync(installDir, {recursive: true});
 
     if (process.platform === 'win32') {
-      // Windows: download zip and extract with PowerShell
       const zipPath = path.join(installDir, `${assetName}.zip`);
       await windowsZipInstall(
         url,
@@ -1624,39 +1104,27 @@ async function installUv(): Promise<string | null> {
           `Remove-Item -Recurse -Force '${path.join(installDir, assetName)}'; `,
       );
     } else {
-      // macOS/Linux: download tar.gz and extract with tar (no shell so
-      // that ``HOME`` containing single-quotes can never inject shell
-      // commands).  Verify SHA256 against the vendor sidecar before
-      // extracting so a corrupted/MITM'd download is rejected.
       const tarPath = path.join(installDir, `${assetName}.${asset.ext}`);
       await downloadFile(url, tarPath);
       const expectedHash = await fetchUvStyleSha256(url);
       verifyDownloadHash(tarPath, expectedHash);
-      // Extract with argv-form spawn — no shell.
       await spawnPromise('tar', ['xzf', tarPath, '-C', installDir]);
-      // Move uv / uvx into installDir, then remove the extracted folder.
       const extractedDir = path.join(installDir, assetName);
       for (const bin of ['uv', 'uvx']) {
         const src = path.join(extractedDir, bin);
         const dst = path.join(installDir, bin);
         try {
           fs.unlinkSync(dst);
-        } catch {
-          /* not present */
-        }
+        } catch {}
         fs.renameSync(src, dst);
         fs.chmodSync(dst, 0o755);
       }
       try {
         fs.rmSync(extractedDir, {recursive: true, force: true});
-      } catch {
-        /* ignore */
-      }
+      } catch {}
       try {
         fs.unlinkSync(tarPath);
-      } catch {
-        /* ignore */
-      }
+      } catch {}
     }
 
     log('uv installed successfully');
@@ -1667,29 +1135,16 @@ async function installUv(): Promise<string | null> {
   }
 }
 
-/**
- * Check that the Python version in the project's .venv is >= MIN_PYTHON.
- * Runs `uv run python --version` and parses the output (e.g. "Python 3.13.2").
- *
- * Returns ``'ok'`` when the version meets the requirement, ``'too_old'``
- * when a valid version was parsed but is below the minimum, and ``'error'``
- * when the check itself failed (timeout, spawn error, etc.).  Callers
- * should only delete `.venv` on ``'too_old'`` — transient errors must not
- * destroy a potentially valid environment.
- */
 function checkPythonVersion(
   uvPath: string,
   cwd: string,
 ): 'ok' | 'too_old' | 'error' {
   try {
-    // H1 — argv-form so a uvPath containing quotes or shell
-    // metacharacters cannot inject commands.
     const output = execFileSync(uvPath, ['run', 'python', '--version'], {
       cwd,
       encoding: 'utf-8',
       timeout: 30_000,
     }).trim();
-    // Output format: "Python 3.13.2"
     const match = output.match(/Python\s+(\d+)\.(\d+)/);
     if (!match) return 'error';
     const major = parseInt(match[1], 10);
@@ -1706,9 +1161,6 @@ function checkPythonVersion(
   }
 }
 
-/**
- * Return the Playwright browsers cache directory for the current platform.
- */
 function playwrightBrowsersPath(): string {
   const env = process.env.PLAYWRIGHT_BROWSERS_PATH;
   if (env) return env;
@@ -1723,36 +1175,12 @@ function playwrightBrowsersPath(): string {
   return path.join(HOME_DIR, '.cache', 'ms-playwright');
 }
 
-/**
- * Check if the kiss-web daemon is fully running by probing **both**
- * the TCP listener on port 8787 and the Unix-domain socket at
- * ``~/.kiss/sorcar.sock``.  Requiring both endpoints ensures the
- * extension never treats a half-started daemon (e.g. TCP bound but
- * UDS not yet created, or vice-versa) as healthy — the model-list
- * and agent RPCs need the UDS, while the remote-access / tunnel path
- * needs the TCP port.
- *
- * Returns true only when both are present (macOS/Linux).
- * On Windows the daemon is not supported, so always returns false.
- *
- * The TCP probe is retried up to 3 times with 300 ms gaps before
- * returning false.  A single probe races with the LaunchAgent's
- * ~1-3 s respawn window after a previous kiss-web restart; without
- * the retry the extension would nuke a healthy daemon that was merely
- * mid-startup, burning the current Cloudflare tunnel URL on every
- * VS Code activation that lost that race.
- *
- * Uses the non-blocking ``net`` probe from ``daemonHealth`` instead of
- * shelling out to ``lsof`` — the old lsof+timeout pattern could block
- * extension activation for up to ~10 s on a loaded host.
- */
 async function isDaemonRunning(): Promise<boolean> {
   if (process.platform === 'win32') return false;
   const sockPath = path.join(HOME_DIR, '.kiss', 'sorcar.sock');
   for (let attempt = 0; attempt < 3; attempt++) {
     const health = await probeDaemonHealth(8787);
     if (health === 'alive' && fs.existsSync(sockPath)) return true;
-    // TCP not up (or UDS missing — daemon still initialising); retry.
     if (attempt < 2) {
       await new Promise(r => setTimeout(r, 300));
     }
@@ -1760,10 +1188,6 @@ async function isDaemonRunning(): Promise<boolean> {
   return false;
 }
 
-/**
- * Check if Playwright Chromium is already installed in the browser cache.
- * Returns true if any chromium-* directory exists in the cache.
- */
 function isChromiumInstalled(): boolean {
   try {
     const cacheDir = playwrightBrowsersPath();
@@ -1774,13 +1198,8 @@ function isChromiumInstalled(): boolean {
   }
 }
 
-/**
- * Check if a command is available on the system.
- */
 function commandExists(cmd: string): boolean {
   try {
-    // H1 — argv-form so a caller-supplied ``cmd`` containing shell
-    // metacharacters cannot inject extra commands.
     execFileSync(process.platform === 'win32' ? 'where' : 'which', [cmd], {
       stdio: 'ignore',
     });
@@ -1790,10 +1209,6 @@ function commandExists(cmd: string): boolean {
   }
 }
 
-/**
- * Check if git is functional (not just a macOS shim that triggers a CLT dialog).
- * Returns true only if `git --version` actually succeeds and outputs a version string.
- */
 function gitWorks(): boolean {
   try {
     const output = execSync('git --version', {
@@ -1807,9 +1222,6 @@ function gitWorks(): boolean {
   }
 }
 
-/**
- * Return a user-facing hint for how to install git manually on the current platform.
- */
 function gitInstallHint(): string {
   if (process.platform === 'darwin') {
     return 'Run "xcode-select --install" in Terminal, or install Homebrew (https://brew.sh) and run "brew install git".';
@@ -1821,19 +1233,10 @@ function gitInstallHint(): string {
   return 'Download Git from https://git-scm.com';
 }
 
-/**
- * Attempt to install git from prebuilt binaries.
- * Returns true if git is available after the attempt.
- *
- * macOS: tries Homebrew (binary bottles), then triggers Xcode Command Line Tools.
- * Linux: tries common package managers with non-interactive sudo.
- * Windows: downloads MinGit portable from Git for Windows releases.
- */
 async function installGit(): Promise<boolean> {
   log('Git not found, attempting to install...');
 
   if (process.platform === 'darwin') {
-    // Try Homebrew first — downloads a prebuilt bottle, no user interaction needed
     if (commandExists('brew')) {
       log('Installing git via Homebrew...');
       try {
@@ -1849,26 +1252,18 @@ async function installGit(): Promise<boolean> {
       }
     }
 
-    // Fall back to Xcode Command Line Tools (installs Apple's prebuilt git binary)
     try {
       execSync('xcode-select -p', {stdio: 'ignore'});
-      // CLT already installed but git not working — unusual, nothing more we can do
       log('Xcode CLT present but git not working');
       return false;
-    } catch {
-      // CLT not installed — trigger the system installer dialog
-    }
+    } catch {}
 
     log('Triggering Xcode Command Line Tools installation...');
     try {
       execSync('xcode-select --install', {stdio: 'ignore', timeout: 5_000});
-    } catch {
-      // Expected: opens a system dialog and may exit non-zero
-    }
+    } catch {}
 
-    // Poll for git to become available while the user completes the CLT dialog
     for (let i = 0; i < 120; i++) {
-      // up to 10 minutes
       await new Promise(resolve => setTimeout(resolve, 5_000));
       if (gitWorks()) {
         log('Git installed via Xcode Command Line Tools');
@@ -1877,7 +1272,6 @@ async function installGit(): Promise<boolean> {
     }
     return false;
   } else if (process.platform === 'linux') {
-    // Try common package managers with non-interactive sudo (-n)
     const attempts: [string, string][] = [
       [
         'apt-get',
@@ -1910,10 +1304,6 @@ async function installGit(): Promise<boolean> {
   return false;
 }
 
-/**
- * Download MinGit (portable git for Windows) from Git for Windows releases
- * and extract it to ~/.local/git/. Adds the git cmd directory to PATH.
- */
 async function installMinGitWindows(): Promise<boolean> {
   const GIT_VERSION = '2.49.0';
   const archSuffix = process.arch === 'arm64' ? 'arm64' : '64';
@@ -1929,7 +1319,6 @@ async function installMinGitWindows(): Promise<boolean> {
     const zipPath = path.join(gitDir, `${assetName}.zip`);
     await windowsZipInstall(url, zipPath, gitDir);
 
-    // Add MinGit's cmd directory to PATH so git.exe is found
     const gitCmdDir = path.join(gitDir, 'cmd');
     if (fs.existsSync(path.join(gitCmdDir, 'git.exe'))) {
       prependToProcessPath(gitCmdDir);
@@ -1945,11 +1334,6 @@ async function installMinGitWindows(): Promise<boolean> {
   return false;
 }
 
-/**
- * Install cloudflared from the official release asset when it is missing.
- * This is best-effort: the local web UI still works without a tunnel, so
- * failures are logged instead of blocking extension setup.
- */
 async function installCloudflaredIfNeeded(): Promise<boolean> {
   if (process.platform === 'win32') return false;
   if (commandExists('cloudflared')) return true;
@@ -1983,9 +1367,7 @@ async function installCloudflaredIfNeeded(): Promise<boolean> {
       await spawnPromise('tar', ['xzf', tarPath, '-C', binDir]);
       try {
         fs.unlinkSync(tarPath);
-      } catch {
-        /* ignore */
-      }
+      } catch {}
     } else if (process.platform === 'linux') {
       const url = `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}`;
       const dst = path.join(binDir, 'cloudflared');
@@ -2008,11 +1390,6 @@ async function installCloudflaredIfNeeded(): Promise<boolean> {
   }
 }
 
-/**
- * Install Node.js from the official binary tarball and return true on success.
- * Downloads a platform-specific archive and extracts to ~/.local/ so that
- * node, npm, and npx are available on PATH via ~/.local/bin/.
- */
 async function installNode(): Promise<boolean> {
   const archMap: Record<string, string> = {arm64: 'arm64', x64: 'x64'};
   const arch = archMap[process.arch];
@@ -2030,7 +1407,6 @@ async function installNode(): Promise<boolean> {
       fs.mkdirSync(installDir, {recursive: true});
       const zipPath = path.join(installDir, `${assetName}.zip`);
       await windowsZipInstall(url, zipPath, installDir);
-      // Add node directory to PATH
       const nodeDir = path.join(installDir, assetName);
       if (fs.existsSync(path.join(nodeDir, 'node.exe'))) {
         prependToProcessPath(nodeDir);
@@ -2045,7 +1421,6 @@ async function installNode(): Promise<boolean> {
     return false;
   }
 
-  // macOS / Linux: download tar.gz and extract to ~/.local/
   const osName = process.platform === 'darwin' ? 'darwin' : 'linux';
   const assetName = `node-${NODE_VERSION}-${osName}-${arch}`;
   const url = `https://nodejs.org/dist/${NODE_VERSION}/${assetName}.tar.gz`;
@@ -2054,9 +1429,6 @@ async function installNode(): Promise<boolean> {
   try {
     const installDir = path.join(HOME_DIR, '.local');
     fs.mkdirSync(installDir, {recursive: true});
-    // Download with the Node ``https`` module (no shell), verify the
-    // SHA256 against ``SHASUMS256.txt`` from nodejs.org, and extract
-    // with argv-form ``tar`` (no shell).
     const tarPath = path.join(installDir, `${assetName}.tar.gz`);
     await downloadFile(url, tarPath);
     const expectedHash = await fetchNodeSha256(`${assetName}.tar.gz`);
@@ -2070,9 +1442,7 @@ async function installNode(): Promise<boolean> {
     ]);
     try {
       fs.unlinkSync(tarPath);
-    } catch {
-      /* ignore */
-    }
+    } catch {}
     log('Node.js installed successfully');
     return commandExists('node');
   } catch (err) {
@@ -2083,13 +1453,6 @@ async function installNode(): Promise<boolean> {
   }
 }
 
-/**
- * Ensure the VS Code CLI (`code`) is available on PATH.
- * On macOS, symlinks from the app bundle to ~/.local/bin/code.
- * On Linux, attempts snap or apt installation.
- * On Windows, VS Code's installer normally adds `code` to PATH.
- * Returns true if `code` is available after the attempt.
- */
 async function installCodeCli(): Promise<boolean> {
   if (commandExists('code')) return true;
 
@@ -2103,9 +1466,7 @@ async function installCodeCli(): Promise<boolean> {
         const linkPath = path.join(binDir, 'code');
         try {
           fs.unlinkSync(linkPath);
-        } catch {
-          /* doesn't exist */
-        }
+        } catch {}
         fs.symlinkSync(vscodeApp, linkPath);
         log('VS Code CLI symlinked to ~/.local/bin/code');
         return true;
@@ -2116,7 +1477,6 @@ async function installCodeCli(): Promise<boolean> {
       }
     }
   } else if (process.platform === 'linux') {
-    // Try snap first, then apt with Microsoft repo
     if (commandExists('snap')) {
       try {
         await execPromise('sudo -n snap install --classic code');
@@ -2145,13 +1505,9 @@ async function installCodeCli(): Promise<boolean> {
       }
     }
   }
-  // Windows: VS Code installer normally adds `code` to PATH; nothing to do.
   return commandExists('code');
 }
 
-/**
- * Run a command with args and return a promise that resolves on exit code 0.
- */
 async function runAsync(
   cmd: string,
   args: string[],
@@ -2161,8 +1517,6 @@ async function runAsync(
   log(`Running: ${cmdLine}`);
   let r: {code: number | null; stdout: string; stderr: string};
   try {
-    // timeoutMs: 0 — installs (uv sync, Playwright download) can
-    // legitimately run for many minutes; never kill them.
     r = await spawnCollect(cmd, args, {
       cwd,
       env: {...process.env, PYTHONUNBUFFERED: '1'},
@@ -2181,9 +1535,6 @@ async function runAsync(
   throw new Error(`${cmdLine} failed (exit code ${r.code}): ${output}`);
 }
 
-/**
- * Execute a shell command and return stdout.
- */
 function execPromise(cmd: string): Promise<string> {
   return new Promise((resolve, reject) => {
     exec(cmd, {timeout: 300_000}, (err, stdout) => {
@@ -2193,18 +1544,10 @@ function execPromise(cmd: string): Promise<string> {
   });
 }
 
-// ---------------------------------------------------------------------------
-// API Key Setup
-// ---------------------------------------------------------------------------
-
-/**
- * Get the path to the user's shell rc file based on the SHELL environment variable.
- */
 function getShellRcPath(): string {
   const homeDir = process.env.HOME || process.env.USERPROFILE || '';
 
   if (process.platform === 'win32') {
-    // PowerShell profile
     const docsDir = path.join(homeDir, 'Documents', 'PowerShell');
     return path.join(docsDir, 'Microsoft.PowerShell_profile.ps1');
   }
@@ -2219,10 +1562,6 @@ function getShellRcPath(): string {
   }
 }
 
-/**
- * Validate an Anthropic API key by calling the /v1/models endpoint.
- * Returns true if the key is valid (HTTP 200), false otherwise.
- */
 function validateAnthropicKey(key: string): Promise<boolean> {
   return new Promise(resolve => {
     const req = https.request(
@@ -2238,7 +1577,7 @@ function validateAnthropicKey(key: string): Promise<boolean> {
       },
       res => {
         resolve(res.statusCode === 200);
-        res.resume(); // consume response body
+        res.resume();
       },
     );
     req.on('error', () => resolve(false));
@@ -2250,10 +1589,6 @@ function validateAnthropicKey(key: string): Promise<boolean> {
   });
 }
 
-/**
- * Read the content of a shell rc file, creating its parent directory if needed.
- * Returns an empty string if the file doesn't exist yet.
- */
 function readShellRc(rcPath: string): string {
   try {
     return fs.readFileSync(rcPath, 'utf-8');
@@ -2263,9 +1598,6 @@ function readShellRc(rcPath: string): string {
   }
 }
 
-/**
- * Write content to a shell rc file, ensuring a trailing newline.
- */
 function writeShellRc(rcPath: string, content: string): void {
   if (content.length > 0 && !content.endsWith('\n')) {
     content += '\n';
@@ -2273,10 +1605,6 @@ function writeShellRc(rcPath: string, content: string): void {
   fs.writeFileSync(rcPath, content);
 }
 
-/**
- * Add an environment variable export line to a shell rc file.
- * If the variable already exists in the file, replaces it. Otherwise appends.
- */
 function addToShellRc(rcPath: string, envName: string, value: string): void {
   const isPs1 = rcPath.endsWith('.ps1');
   const isFish = rcPath.endsWith('config.fish');
@@ -2288,7 +1616,6 @@ function addToShellRc(rcPath: string, envName: string, value: string): void {
 
   let content = readShellRc(rcPath);
 
-  // Check if an export for this variable already exists
   const linePattern = isPs1
     ? new RegExp(`^\\s*\\$env:${envName}\\s*=.*$`, 'gm')
     : isFish
@@ -2296,7 +1623,7 @@ function addToShellRc(rcPath: string, envName: string, value: string): void {
       : new RegExp(`^\\s*export\\s+${envName}=.*$`, 'gm');
 
   if (linePattern.test(content)) {
-    linePattern.lastIndex = 0; // reset after test() so replace() starts from beginning
+    linePattern.lastIndex = 0;
     content = content.replace(linePattern, exportLine);
   } else {
     if (content.length > 0 && !content.endsWith('\n')) {
@@ -2308,15 +1635,9 @@ function addToShellRc(rcPath: string, envName: string, value: string): void {
   writeShellRc(rcPath, content);
 }
 
-/**
- * Ensure a directory is on PATH in the user's shell rc file.
- * Adds an idempotent PATH export/prepend line if not already present.
- * Uses $HOME instead of a hardcoded path for portability.
- */
 function ensurePathInShellRc(rcPath: string, dirPath: string): void {
   const isPs1 = rcPath.endsWith('.ps1');
   const isFish = rcPath.endsWith('config.fish');
-  // Use $HOME-relative form for portability
   const homeDir = process.env.HOME || process.env.USERPROFILE || '';
   let dirRef = dirPath;
   if (homeDir && dirPath.startsWith(homeDir)) {
@@ -2325,7 +1646,6 @@ function ensurePathInShellRc(rcPath: string, dirPath: string): void {
 
   let content = readShellRc(rcPath);
 
-  // Check if the directory is already referenced in a PATH line
   const escaped = dirRef
     .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     .replace('\\$HOME', '(\\$HOME|~)');
@@ -2353,12 +1673,6 @@ function ensurePathInShellRc(rcPath: string, dirPath: string): void {
   log(`Added ${dirRef} to PATH in ${rcPath}`);
 }
 
-/**
- * Prompt the user for an API key. If a validate function is provided,
- * the key is validated and the user is re-prompted if invalid.
- * When optional is true, the prompt indicates the key can be skipped with Esc.
- * Returns the key string, or undefined if the user cancelled.
- */
 async function promptForApiKey(
   displayName: string,
   placeholder: string,
@@ -2392,7 +1706,7 @@ async function promptForApiKey(
 
     const trimmed = key.trim();
     if (!trimmed) {
-      continue; // Empty input — re-prompt
+      continue;
     }
 
     if (validate) {
@@ -2421,12 +1735,6 @@ async function promptForApiKey(
   }
 }
 
-/**
- * Load API keys from the user's shell rc file into process.env.
- * VS Code launched from macOS Dock/Spotlight does not source ~/.zshrc,
- * so API keys set there are invisible to process.env.  This function
- * reads the rc file and populates any missing env vars.
- */
 function loadApiKeysFromShellRc(): void {
   const rcPath = getShellRcPath();
   const content = readShellRc(rcPath);
@@ -2434,7 +1742,6 @@ function loadApiKeysFromShellRc(): void {
 
   const isPs1 = rcPath.endsWith('.ps1');
   const isFish = rcPath.endsWith('config.fish');
-  // Match uncommented export lines per shell syntax
   const pattern = isPs1
     ? /^\s*\$env:(\w+)\s*=\s*(.+)$/gm
     : isFish
@@ -2445,7 +1752,6 @@ function loadApiKeysFromShellRc(): void {
   while ((match = pattern.exec(content)) !== null) {
     const name = match[1];
     let value = match[2].trim();
-    // Strip surrounding quotes
     if (
       (value.startsWith('"') && value.endsWith('"')) ||
       (value.startsWith("'") && value.endsWith("'"))
@@ -2458,23 +1764,7 @@ function loadApiKeysFromShellRc(): void {
   }
 }
 
-/**
- * Ensure at least one LLM API key is configured.
- * Loads existing keys from the shell rc file (needed on macOS Dock launch),
- * then skips prompting if any key is already set.  Otherwise prompts the
- * user for each provider until at least one key is provided.
- * Validates the Anthropic key if the user enters one.
- * Saves provided keys to the user's shell rc file and current process env.
- *
- * Uses a marker file (~/.kiss/.api-keys-prompted) to suppress re-prompting
- * for additional keys on subsequent VS Code restarts once at least one key
- * has been collected.
- *
- * Returns true when at least one API key is available.
- */
 async function ensureApiKeys(): Promise<boolean> {
-  // Load keys from shell rc into process.env so that keys saved in
-  // ~/.zshrc are picked up even when VS Code wasn't launched from a shell.
   loadApiKeysFromShellRc();
 
   const keys = [
@@ -2495,18 +1785,15 @@ async function ensureApiKeys(): Promise<boolean> {
   const hasAnyKey = () =>
     hasClaudeCli || keys.some(k => !!process.env[k.envName]);
 
-  // If claude CLI or at least one key is already set, no prompting needed
   if (hasAnyKey()) return true;
 
   const markerPath = path.join(LOG_DIR, '.api-keys-prompted');
   const alreadyPrompted = fs.existsSync(markerPath);
   const rcPath = getShellRcPath();
 
-  // Prompt for keys until at least one is provided
   while (true) {
     for (const {envName, displayName, placeholder, validate} of keys) {
       if (process.env[envName]) continue;
-      // Once we have at least one key and were already prompted, skip remaining
       if (hasAnyKey() && alreadyPrompted) break;
 
       const key = await promptForApiKey(
@@ -2524,7 +1811,6 @@ async function ensureApiKeys(): Promise<boolean> {
 
     if (hasAnyKey()) break;
 
-    // No key provided — warn and offer retry
     const choice = await showWarningNotification(
       'KISS Sorcar requires Claude Code, ANTHROPIC_API_KEY, or OPENAI_API_KEY to work.',
       'Enter Key',
@@ -2533,31 +1819,17 @@ async function ensureApiKeys(): Promise<boolean> {
     if (choice !== 'Enter Key') break;
   }
 
-  // Write marker so additional keys aren't re-prompted on next restart
   if (!alreadyPrompted) {
     try {
       fs.mkdirSync(LOG_DIR, {recursive: true});
       fs.writeFileSync(markerPath, new Date().toISOString() + '\n');
       log('API key prompt marker written');
-    } catch {
-      /* ignore */
-    }
+    } catch {}
   }
 
   return hasAnyKey();
 }
 
-/**
- * Read ``~/.kiss/config.json`` and return the parsed object, or an empty
- * object when the file is missing / unreadable.
- *
- * Retries up to ``RETRIES`` times with a small backoff to defend against
- * a concurrent writer (the Python ``save_config`` or ``install.sh``)
- * briefly truncating the file mid-write.  Only ``ENOENT`` (file does
- * not exist) short-circuits without retrying — every other failure
- * mode (empty file, ``SyntaxError`` from a half-written JSON document,
- * EBUSY, etc.) is treated as transient.
- */
 function readKissConfigOnce():
   | {
       ok: true;
@@ -2605,12 +1877,10 @@ function readKissConfig(): Record<string, unknown> {
       return last.value;
     }
     if (last.reason === 'missing') {
-      // The file genuinely does not exist — no point retrying.
       log(`readKissConfig: ${configPath} does not exist`);
       return {};
     }
     if (attempt < RETRIES - 1) {
-      // Wait briefly (without spinning) for a concurrent writer to finish.
       sleepSync(BACKOFF_MS);
     }
   }
@@ -2636,11 +1906,6 @@ function readKissConfig(): Record<string, unknown> {
   return {};
 }
 
-/**
- * Write ``cfg`` to ``~/.kiss/config.json`` atomically: stage in a
- * sibling temp file and then ``rename`` into place so that concurrent
- * readers never observe an empty or half-written ``config.json``.
- */
 function writeKissConfig(cfg: Record<string, unknown>): void {
   fs.mkdirSync(LOG_DIR, {recursive: true});
   const target = path.join(LOG_DIR, 'config.json');
@@ -2652,10 +1917,6 @@ function writeKissConfig(cfg: Record<string, unknown>): void {
   fs.renameSync(tmp, target);
 }
 
-/**
- * Return the ``remote_password`` value from ``~/.kiss/config.json``,
- * or an empty string when it is missing / not a non-empty string.
- */
 function getStoredRemotePassword(): string {
   const cfg = readKissConfig();
   const existing = cfg['remote_password'];
@@ -2665,28 +1926,12 @@ function getStoredRemotePassword(): string {
   return '';
 }
 
-/**
- * Ensure the remote-access password for the KISS Sorcar web / mobile app
- * is configured.  Reads ``remote_password`` from ``~/.kiss/config.json``;
- * if it is empty or missing, prompts the user to set one.
- *
- * To guard against transient file-read failures (e.g. a concurrent
- * writer holding the file or the daemon restart briefly truncating it),
- * the config is re-read after a short delay before prompting the user.
- *
- * When the user provides a password it is persisted to ``config.json``.
- * When the user cancels, an informational message tells them the password
- * can be set later from the KISS Sorcar settings panel.
- */
 async function ensureRemotePassword(): Promise<void> {
-  // First read — fast path when password is already set.
   if (getStoredRemotePassword()) {
     log('ensureRemotePassword: password already set — skipping prompt');
     return;
   }
 
-  // The daemon was just restarted; config.json may be mid-write by a
-  // concurrent process (install.sh or kiss-web).  Wait briefly and retry.
   log(
     'ensureRemotePassword: password not found on first read — retrying after 2 s',
   );
@@ -2715,8 +1960,6 @@ async function ensureRemotePassword(): Promise<void> {
     return;
   }
 
-  // Re-read config before writing so we don't clobber keys added by
-  // a concurrent process between our read and this write.
   const cfg = readKissConfig();
   cfg['remote_password'] = password.trim();
   writeKissConfig(cfg);

@@ -139,9 +139,7 @@ class TestEmptyResponseSilentDeath:
                     },
                 )
             msg = str(excinfo.value).lower()
-            # Diagnostic must mention emptiness so the user can act
             assert "empty" in msg
-            # Should have stopped within MAX_CONSECUTIVE_NO_TOOL_CALLS
             assert agent.step_count <= 2, (
                 f"Agent took {agent.step_count} steps; expected ≤2 before "
                 f"raising on consecutive empty responses"
@@ -169,15 +167,12 @@ class TestEmptyResponseSilentDeath:
                 idx = call_count[0]
                 call_count[0] += 1
                 if idx == 0:
-                    # First call: model issues a non-finish tool call
-                    # (use a built-in tool the agent will execute).
                     resp = _tool_call_response(
                         "call_ls",
                         "Bash",
                         {"command": "echo hi", "description": "test"},
                     )
                 else:
-                    # All subsequent turns: empty assistant turn
                     resp = _empty_assistant_response()
                 body = json.dumps(resp).encode()
                 self.send_response(200)
@@ -215,8 +210,6 @@ class TestEmptyResponseSilentDeath:
                 )
             msg = str(excinfo.value).lower()
             assert "empty" in msg
-            # Expected: step 1 = tool call (resets counter), step 2 = empty
-            # (counter=1), step 3 = empty (counter=2, raise).
             assert agent.step_count <= 3, (
                 f"Agent took {agent.step_count} steps; expected ≤3"
             )

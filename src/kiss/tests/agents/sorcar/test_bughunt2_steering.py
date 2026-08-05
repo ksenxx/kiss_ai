@@ -56,10 +56,6 @@ def _cmd(template: str) -> CustomCommand:
     )
 
 
-# ---------------------------------------------------------------------------
-# Bug 1: injected content must never be re-scanned by later passes
-# ---------------------------------------------------------------------------
-
 
 def test_file_content_shell_marker_not_executed() -> None:
     """``!`cmd``` inside an @{file}'s CONTENTS must not be executed."""
@@ -84,10 +80,7 @@ def test_file_content_placeholders_not_expanded() -> None:
         notes = Path(wd) / "notes.md"
         notes.write_text("price is $1 per unit, see $ARGUMENTS", encoding="utf-8")
         out = expand_command(_cmd("Notes: @{notes.md}"), "foo bar", wd)
-        # File contents verbatim — never substituted with the args.
         assert "price is $1 per unit, see $ARGUMENTS" in out
-        # The template itself has no placeholder, so the args must
-        # still be appended after two newlines.
         assert out.endswith("\n\nfoo bar")
 
 
@@ -112,10 +105,6 @@ def test_file_injection_and_placeholders_still_work_together() -> None:
         )
         assert out == "a=FILE b=SHELL c=one d=one two"
 
-
-# ---------------------------------------------------------------------------
-# Bug 2: AnchoredRepl.__enter__ must not leak proxied streams on failure
-# ---------------------------------------------------------------------------
 
 _ENTER_LEAK_SCRIPT = r"""
 import sys

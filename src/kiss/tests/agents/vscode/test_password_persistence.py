@@ -100,9 +100,6 @@ class TestShimUsesLocalStorageForPassword(unittest.TestCase):
 
     def test_password_never_uses_session_storage(self) -> None:
         """The password key must not appear in any sessionStorage call."""
-        # sessionStorage is still used for sorcar-state (per-tab webview
-        # state), so we just check that no sessionStorage line mentions
-        # the password key.
         for line in _WS_SHIM_JS.splitlines():
             if "sorcar-remote-pwd" in line:
                 self.assertNotIn(
@@ -156,7 +153,6 @@ class TestCustomAuthModal(unittest.TestCase):
     def test_auth_modal_input_is_password_type(self) -> None:
         """The password input must be masked (``type="password"``)."""
         html = _build_html()
-        # Locate the input declaration and confirm it is type=password.
         self.assertRegex(
             html,
             r'<input\s+type="password"\s+id="auth-modal-input"',
@@ -165,8 +161,6 @@ class TestCustomAuthModal(unittest.TestCase):
     def test_shim_invokes_custom_auth_modal(self) -> None:
         """The auth_required handler must drive ``_showAuthModal``."""
         self.assertIn("_showAuthModal", _WS_SHIM_JS)
-        # The auth_required branch should call _showAuthModal(...).then(...)
-        # — not the bare prompt() that produced the elongated dialog.
         self.assertRegex(_WS_SHIM_JS, r"_showAuthModal\(\)\.then\(")
 
     def test_shim_keeps_prompt_only_as_fallback(self) -> None:
@@ -184,9 +178,6 @@ class TestCustomAuthModal(unittest.TestCase):
             "Shim must contain a modal-presence guard before falling "
             "back to prompt().",
         )
-        # Every actual prompt('...') invocation (i.e. with a string
-        # literal argument — not a doc-comment mention) must appear
-        # after the modal-presence guard line.
         import re
         for match in re.finditer(r"""prompt\(['"]""", _WS_SHIM_JS):
             self.assertGreater(
@@ -262,7 +253,6 @@ class TestCachedPasswordReauthenticates(IsolatedAsyncioTestCase):
                 "Server must signal the shim to clear/replace the cached "
                 "password when it no longer matches.",
             )
-            # Shim would prompt the user, then resend with the new value.
             await ws.send(
                 json.dumps({"type": "auth", "password": "correct-horse-battery-staple"})
             )

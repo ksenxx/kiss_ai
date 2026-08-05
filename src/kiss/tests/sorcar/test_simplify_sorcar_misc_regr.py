@@ -103,7 +103,6 @@ class TestCopyDirtyStateRename:
         repo = _init_repo(tmp_path)
         _run_git(repo, "mv", "a.txt", "b.txt")
         _branch, wt_dir = _make_worktree(repo)
-        # Simulate the worktree's old path being a directory.
         (wt_dir / "a.txt").unlink()
         (wt_dir / "a.txt").mkdir()
         (wt_dir / "a.txt" / "junk").write_text("x")
@@ -137,7 +136,6 @@ class TestCopyDirtyStateRename:
         assert GitWorktreeOps.copy_dirty_state(repo, wt_dir) is True
         assert not (wt_dir / "a.txt").is_symlink()
         assert not (wt_dir / "a.txt").exists()
-        # The symlink target itself must be untouched.
         assert target.is_dir()
 
     def test_clean_repo_returns_false(self, tmp_path: Path) -> None:
@@ -195,22 +193,16 @@ class TestPreserveForReview:
         repo = _init_repo(tmp_path)
         branch, wt_dir = _make_worktree(repo)
         agent = _make_agent(repo, branch, wt_dir)
-        # fixer3-F14: with auto-commit disabled the preserve path must
-        # honor the ``--no-auto-commit`` contract — never force-commit
-        # the user's reviewable changes via the late-arriver retry.
-        # The worktree directory is preserved intact for manual review.
         agent.auto_commit_enabled = False
         agent._pending_review = True
         (wt_dir / "partial.txt").write_text("partial work\n")
         assert agent._preserve_pending_worktree_for_review() is True
         assert agent._wt is None
         assert agent._pending_review is False
-        # Worktree dir survives with the change still uncommitted.
         assert wt_dir.exists()
         porcelain = _run_git(wt_dir, "status", "--porcelain")
         assert "partial.txt" in porcelain
         assert "partial.txt" not in _run_git(repo, "ls-files")
-        # No forced "late-arriving" commit landed on the branch.
         log = _run_git(repo, "log", "-1", "--format=%s", branch)
         assert "late-arriving" not in log
 
@@ -241,7 +233,6 @@ class TestMergeDiscardRelease:
         assert (repo / "agent.txt").read_text() == "agent work\n"
         assert not GitWorktreeOps.branch_exists(repo, branch)
         assert GitWorktreeOps.current_branch(repo) == original
-        # Squash-merge commit reuses the branch HEAD message.
         assert _run_git(repo, "log", "-1", "--format=%s").strip() == (
             "agent: did work"
         )
@@ -345,9 +336,6 @@ class TestPureHelpers:
         )
 
     def test_merge_fix_steps(self) -> None:
-        # ``-D`` (force): after a squash merge the branch is never an
-        # ancestor of the original branch, so ``-d`` would always
-        # refuse — see test_worktree_manual_fix_steps.py.
         steps = _merge_fix_steps(self._wt(None), "    git commit\n")
         assert steps == (
             "    cd /repo\n"
@@ -369,7 +357,6 @@ class TestPureHelpers:
             )
         assert exc_info.value.code == 2
         err = capsys.readouterr().err
-        # Deduplicated, order-preserving flag list.
         assert "--worktree, --auto-commit" in err
 
     def test_strip_worktree_suffix(self) -> None:

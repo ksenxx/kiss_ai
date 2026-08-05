@@ -248,8 +248,6 @@ class TestNonWorktreeFailureWithAutocommit(_Base):
             f"HEAD must not advance when task fails with autoCommit=True; "
             f"pre={pre_head} post={post_head}, events={self._types()}"
         )
-        # The agent's untracked file should still exist on disk for
-        # the user to inspect via the merge view.
         assert (Path(self.repo) / "agent_out.txt").exists()
 
         types = self._types()
@@ -280,7 +278,6 @@ class TestWorktreeSuccessAutoMergeRegression(_Base):
             f"Successful task with autoCommit=True must auto-merge "
             f"the worktree; events: {types}"
         )
-        # After a successful auto-merge the branch is cleaned up.
         branches = _list_kiss_wt_branches(self.repo)
         assert branches == [], (
             f"Auto-merge should delete the kiss/wt-* branch after "

@@ -91,15 +91,6 @@ class TestBashStreamInResultPanel(unittest.TestCase):
 
     def test_bash_output_appears_between_result_rules(self) -> None:
         p, buf = _make()
-        # Simulate the exact sequence the agentic loop emits for a
-        # real Bash tool call: ``tool_call`` first (the blue Bash
-        # panel), then a stream of ``bash_stream`` chunks as the
-        # child process prints output, finally a ``tool_result``
-        # carrying the full captured output for the model.  Use a
-        # unique marker for the streamed output that does NOT appear
-        # in the rendered command, so position checks don't get
-        # confused with the command echoed back inside the tool_call
-        # blue panel.
         marker = "STREAMED_BASH_BODY_MARKER_xyz"
         p.print(
             "Bash",
@@ -110,13 +101,8 @@ class TestBashStreamInResultPanel(unittest.TestCase):
         p.print(marker + "\n", type="tool_result", tool_name="Bash")
 
         out = buf.getvalue()
-        # The streamed content must be visible on the terminal.
         assert marker in out, out
-        # The opening ``RESULT`` rule must be present.
         assert "RESULT" in out, out
-        # And critically: the streamed output must appear AFTER the
-        # opening ``RESULT`` rule, not before it — i.e. inside the
-        # result panel body.
         result_idx = out.index("RESULT")
         marker_idx = out.index(marker)
         assert marker_idx > result_idx, (
@@ -142,8 +128,6 @@ class TestBashStreamInResultPanel(unittest.TestCase):
         out = buf.getvalue()
         result_idx = out.index("RESULT")
         for line in ("a", "b", "c"):
-            # Each chunk must appear AT LEAST once after the opening
-            # ``RESULT`` rule.
             assert line in out[result_idx:], (
                 f"streamed chunk {line!r} not present inside the "
                 "Result panel body.\nFull output:\n" + out

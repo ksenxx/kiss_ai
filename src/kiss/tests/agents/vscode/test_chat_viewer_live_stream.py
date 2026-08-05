@@ -205,8 +205,6 @@ class TestChatViewerLiveStream(unittest.TestCase):
         chat_id = self.server._get_tab(tab_a).chat_id
         assert chat_id
 
-        # Tab B (simulating a tab in ANOTHER window) opens the chat
-        # from history while no task is running.
         self._open_chat_in_tab(tab_b, chat_id)
         replays = [e for e in self._events_since(0)
                    if e.get("type") == "task_events"
@@ -217,7 +215,6 @@ class TestChatViewerLiveStream(unittest.TestCase):
         self._run_and_wait(tab_a, "follow-up task")
 
         post = self._events_since(mark)
-        # 1. The live task event reached BOTH the launcher and the viewer.
         delta_tabs = self._live_delta_tab_ids(mark)
         assert tab_a in delta_tabs, (
             f"launcher tab lost its own live stream: {post}"
@@ -226,9 +223,6 @@ class TestChatViewerLiveStream(unittest.TestCase):
             "viewer tab that opened the chat BEFORE the task started "
             f"did not receive the live stream: {post}"
         )
-        # 2. The viewer got 'clear' (reset replayed content) and a
-        #    running status (spinner / stop button), mirroring the
-        #    launcher's start sequence.
         clears_b = [e for e in post if e.get("type") == "clear"
                     and e.get("tabId") == tab_b]
         assert clears_b and clears_b[0].get("chat_id") == chat_id, (
@@ -238,8 +232,6 @@ class TestChatViewerLiveStream(unittest.TestCase):
                      and e.get("running") is True and e.get("tabId") == tab_b]
         assert running_b, f"viewer tab missing status running=True: {post}"
         assert int(running_b[0].get("startTs") or 0) > 0
-        # 3. The launcher's start sequence is not duplicated: exactly
-        #    one running status for tab A for this run.
         running_a = [e for e in post if e.get("type") == "status"
                      and e.get("running") is True and e.get("tabId") == tab_a]
         assert len(running_a) == 1, f"launcher status duplicated: {running_a}"
@@ -251,13 +243,6 @@ class TestChatViewerLiveStream(unittest.TestCase):
         self._run_and_wait(tab_a, "first task")
         chat_id = self.server._get_tab(tab_a).chat_id
 
-        # ``ready``-style restore: resumeSession without prior newChat.
-        # ``_replay_session`` deliberately does not associate the chat
-        # with registry state it did not find (C2/C3); the entry that
-        # ``_emit_pending_worktree`` → ``_get_tab`` lazily creates at
-        # the tail of the replay carries an EMPTY ``chat_id`` — so the
-        # registry alone cannot route this viewer, only the
-        # ``_tab_chat_views`` map can.
         self._open_chat_in_tab(tab_c, chat_id, with_new_chat=False)
         state = _RunningAgentState.running_agent_states.get(tab_c)
         assert state is None or state.chat_id == "", (
@@ -278,7 +263,6 @@ class TestChatViewerLiveStream(unittest.TestCase):
         chat_id = self.server._get_tab(tab_a).chat_id
         parent_task_id = self.server._get_tab(tab_a).last_task_id
 
-        # Persist a sub-agent row in the same chat and open it in tab D.
         sub_task_id, _ = th._add_task(
             "sub task", chat_id=chat_id,
             extra={"subagent": {"parent_task_id": parent_task_id,
@@ -304,7 +288,6 @@ class TestChatViewerLiveStream(unittest.TestCase):
 
         self._open_chat_in_tab(tab_b, chat_id)
         self._open_chat_in_tab(tab_c, chat_id)
-        # Tab B navigates to a fresh chat; tab C is closed.
         self.server._handle_command({"type": "newChat", "tabId": tab_b})
         self.server._handle_command({"type": "closeTab", "tabId": tab_c})
 

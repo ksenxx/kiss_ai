@@ -237,9 +237,6 @@ class TestMergeReplayOnReconnect(IsolatedAsyncioTestCase):
         Path(self.tmpdir, "work").mkdir(exist_ok=True)
         merge_data = _build_merge_data(Path(self.tmpdir) / "work")
 
-        # Open the review through the real broadcast path (this is what
-        # ``_start_merge_session`` does); the printer callback registers
-        # the server-side ``_WebMergeState``.
         self.server._printer.broadcast({
             "type": "merge_data",
             "tabId": tab_id,
@@ -249,8 +246,6 @@ class TestMergeReplayOnReconnect(IsolatedAsyncioTestCase):
         with self.server._merge_states_lock:
             self.assertIn(tab_id, self.server._merge_states)
 
-        # User resolves one hunk through the real action handler, then
-        # the browser reloads mid-review.
         await self.server._handle_web_merge_action(
             {"type": "mergeAction", "action": "accept", "tabId": tab_id},
         )
@@ -307,13 +302,6 @@ class TestMergeReplayOnReconnect(IsolatedAsyncioTestCase):
         })
 
         ws = await self._connect_ok()
-        # This is the shape sent by the real remote webapp on refresh:
-        # ``tabId`` is the active restored tab, and persisted tabs with
-        # backend chat ids are also listed in ``restoredTabs``.  The old
-        # server replayed the same in-flight merge review once for the
-        # active ``tabId`` and then again for the restored entry.  The
-        # frontend appended two diff panels; merge_nav only updated the
-        # most recent one, leaving the first panel as stale merge/diff UI.
         await ws.send(json.dumps({
             "type": "ready",
             "tabId": tab_id,

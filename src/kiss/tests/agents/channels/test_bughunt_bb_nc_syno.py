@@ -115,10 +115,6 @@ def _restore_config(path: Path, backup: str | None) -> None:
         path.unlink()
 
 
-# ---------------------------------------------------------------------------
-# BlueBubbles
-# ---------------------------------------------------------------------------
-
 _BB_MSG_PENDING = {
     "guid": "m-guid-1",
     "text": "hello agent",
@@ -231,10 +227,6 @@ class TestBlueBubbles:
         assert json.loads(req["body"])["message"] == "hi"
 
 
-# ---------------------------------------------------------------------------
-# Nextcloud Talk
-# ---------------------------------------------------------------------------
-
 _NC_API_PREFIX = "/ocs/v2.php/apps/spreed/api/v4"
 
 
@@ -336,7 +328,6 @@ class TestNextcloudTalk:
         assert chat_reqs
         assert chat_reqs[-1]["query"].get("lookIntoFuture") == ["0"]
         assert "lastKnownMessageId" not in chat_reqs[-1]["query"]
-        # Client-side filter: ids <= cursor are not returned again.
         messages2, cursor2 = backend.poll_messages("roomtok", cursor, limit=10)
         assert messages2 == []
         assert cursor2 == "7"
@@ -380,10 +371,6 @@ class TestNextcloudTalk:
         assert join_reqs[0]["method"] == "POST"
 
 
-# ---------------------------------------------------------------------------
-# Synology Chat
-# ---------------------------------------------------------------------------
-
 
 class TestSynologyChat:
     """Synology Chat backend: webhook form parsing, send body, poll drain."""
@@ -426,7 +413,6 @@ class TestSynologyChat:
                 "text": "hello bot",
             }
         )
-        # A message with a wrong token must be dropped.
         self._post_webhook({"token": "wrong", "user_id": "13", "text": "spoofed"})
         messages, _ = self._backend.poll_messages("", "0", limit=10)
         assert len(messages) == 1

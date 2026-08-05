@@ -80,8 +80,6 @@ class _UdsHarness(unittest.TestCase):
         self.loop_thread.start()
 
         self.server = RemoteAccessServer(uds_path=self.sock_path)
-        # ``_send_to_ws_clients`` / ``_run_cmd`` need the loops set the
-        # way ``start_async`` would set them.
         self.server._printer._loop = self.loop
         self.server._loop = self.loop
 
@@ -193,9 +191,6 @@ class TestFanoutCliStatusCarriesTaskId(_UdsHarness):
         )
         task_id_str = str(task_id)
 
-        # Phase 1: the CLI process announces the running task over UDS
-        # (exercises the merged cliTaskStart/cliTaskEnd dispatch branch
-        # and ``_validated_cli_task_id``).
         cli_writer, _cli_received, _cli_got = self._open_conn()
         self._send_line(
             cli_writer, {"type": "cliTaskStart", "taskId": task_id_str},
@@ -205,8 +200,6 @@ class TestFanoutCliStatusCarriesTaskId(_UdsHarness):
             "cliTaskStart never registered the task as running",
         )
 
-        # Phase 2: a viewer tab clicks the running task in the History
-        # panel — the production subscription path.
         _viewer_writer, received, got = self._open_conn()
         viewer_tab = "fanout-taskid-tab"
         self.server._vscode_server._replay_session(
@@ -218,13 +211,10 @@ class TestFanoutCliStatusCarriesTaskId(_UdsHarness):
             ),
             "viewer tab never subscribed to the CLI task",
         )
-        # Drain the replay burst before watching for the end event.
         time.sleep(0.2)
         received.clear()
         got.clear()
 
-        # Phase 3: the CLI ends the task; the fanned-out status event
-        # must carry running=False, the viewer's tabId AND the taskId.
         self._send_line(
             cli_writer, {"type": "cliTaskEnd", "taskId": task_id_str},
         )
@@ -261,7 +251,7 @@ class TestPromptTruncationIsByteBased(_UdsHarness):
     def test_multibyte_prompt_truncated_to_byte_cap(self) -> None:
         """A 400k-char (1.2 MB) '€' prompt is truncated to <= 1 MB."""
         n_chars = 400_000
-        prompt = "\u20ac" * n_chars  # 3 bytes each → 1.2 MB > 1 MB cap
+        prompt = "\u20ac" * n_chars
         self.assertGreater(
             len(prompt.encode("utf-8")), _MAX_PROMPT_BYTES,
             "test prompt must exceed the byte cap",
@@ -273,9 +263,6 @@ class TestPromptTruncationIsByteBased(_UdsHarness):
         )
 
         writer, received, got = self._open_conn()
-        # Empty tabId: ``_handle_submit`` broadcasts the setTaskText
-        # echo first, then the translated ``run`` is dropped by
-        # ``_cmd_run``'s empty-tabId guard — no real agent starts.
         self._send_line(writer, {
             "type": "submit",
             "prompt": prompt,
@@ -302,8 +289,6 @@ class TestPromptTruncationIsByteBased(_UdsHarness):
             f"setTaskText echo is {len(encoded)} bytes — the prompt cap "
             "must be enforced in BYTES, not characters",
         )
-        # The cut must never split inside a character: the result is
-        # exactly the longest whole-character prefix under the cap.
         self.assertEqual(text, "\u20ac" * (_MAX_PROMPT_BYTES // 3))
 
     def test_lone_surrogate_prompt_does_not_kill_transport(self) -> None:
@@ -347,7 +332,7 @@ class TestVersionHelpersStrict(unittest.TestCase):
         self.assertIsNone(_version_tuple("2026.+1"))
         self.assertIsNone(_version_tuple("1_0"))
         self.assertIsNone(_version_tuple("2026.1_0"))
-        self.assertIsNone(_version_tuple("\u0661.\u0662"))  # ١.٢
+        self.assertIsNone(_version_tuple("\u0661.\u0662"))
         self.assertIsNone(_version_tuple("1.-2"))
         self.assertIsNone(_version_tuple(" "))
 

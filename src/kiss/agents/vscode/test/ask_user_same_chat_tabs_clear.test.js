@@ -2,17 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression test: when the same backend chat/task is open
-// in multiple local webview tabs, answering an ask-user prompt in any
-// one of those tabs must close the ask-user modal for every local tab
-// that has the same backend chat id.  Otherwise switching to a sibling
-// tab after answering exposes a stale ask window whose answer would be
-// submitted to an already-resolved question.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/ask_user_same_chat_tabs_clear.test.js
 
 'use strict';
 
@@ -23,12 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom window running the production chat webview: the real
- * ``chat.html`` body (placeholders blanked), ``panelCopy.js`` and
- * ``main.js`` evaluated in the window, and a recording
- * ``acquireVsCodeApi`` stub (the only host API the webview has).
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -63,17 +46,18 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
 
-/** Dispatch a backend→webview event exactly like the extension does. */
 function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** Click a real tab-bar element to drive the production switchToTab flow. */
 function clickTab(win, tabId) {
   const tabEl = win.document.querySelector(
     `.chat-tab[data-tab-id="${tabId}"]`,
@@ -90,8 +74,8 @@ function visibleAskText(win) {
 
 function testAnswerClearsSiblingTabsWithSameBackendChatId() {
   const {win, posted} = makeWebview();
-  const api = win._demoApi;
-  assert.ok(api, '_demoApi must be exposed by main.js');
+  const api = win._testApi;
+  assert.ok(api, '_testApi must be exposed by main.js');
 
   const firstTab = api.getActiveTabId();
   assert.ok(firstTab, 'initial tab id must exist');
@@ -107,10 +91,15 @@ function testAnswerClearsSiblingTabsWithSameBackendChatId() {
     question: 'Question from the shared chat?',
     tabId: firstTab,
   });
-  assert.strictEqual(api.getActiveTabId(), firstTab, 'first ask switches active tab');
-  assert.ok(
-    visibleAskText(win).includes('Question from the shared chat?'),
-    'first tab must show its ask-user prompt',
+  assert.strictEqual(
+    api.getActiveTabId(),
+    secondTab,
+    'a background ask must not steal the active tab',
+  );
+  assert.strictEqual(
+    visibleAskText(win),
+    '',
+    'a background ask must not pop a modal over the active tab',
   );
 
   send(win, {
@@ -118,7 +107,11 @@ function testAnswerClearsSiblingTabsWithSameBackendChatId() {
     question: 'Same shared chat question in sibling tab?',
     tabId: secondTab,
   });
-  assert.strictEqual(api.getActiveTabId(), secondTab, 'second ask switches active tab');
+  assert.strictEqual(
+    api.getActiveTabId(),
+    secondTab,
+    'an ask for the active tab keeps it active',
+  );
 
   const modal = win.document.getElementById('ask-user-modal');
   const input = modal.querySelector('.ask-user-input');
@@ -160,7 +153,7 @@ function testAnswerClearsSiblingTabsWithSameBackendChatId() {
 
 function testAnswerKeepsDifferentBackendChatIdPromptOpen() {
   const {win} = makeWebview();
-  const api = win._demoApi;
+  const api = win._testApi;
   const firstTab = api.getActiveTabId();
 
   send(win, {type: 'clear', chat_id: 'chat-a', tabId: firstTab});

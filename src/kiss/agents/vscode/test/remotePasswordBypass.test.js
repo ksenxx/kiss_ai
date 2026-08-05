@@ -2,50 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression test for the REMOTE-PASSWORD BYPASS in the
-// remote webapp shell (``_WS_SHIM_JS`` inside ``web_server.py``).
-//
-// Bug being locked in:
-//
-//   The remote webapp is served over the public cloudflared tunnel and
-//   is protected by ``remote_password``.  The WebSocket handshake
-//   enforces the password (``_authenticate_ws`` on the server, and the
-//   shim only ``_ws.send``s commands once ``_authenticated`` is true).
-//
-//   BUT the password check was bypassable at the UI layer:
-//
-//     * On ``auth_required`` the shim dispatches
-//       ``daemonStatus connected:true`` so ``media/main.js`` reveals
-//       ``#app`` — necessary because the auth modal is a *child* of
-//       ``#app`` and cannot render while its parent is display:none.
-//     * The auth modal (``#auth-modal``) is a full-viewport backdrop
-//       that blocks the revealed app WHILE IT IS OPEN.
-//     * When the user CANCELS or presses ESCAPE, the modal hides
-//       (display:none) — but ``#app`` stays revealed and the loading
-//       overlay stays hidden.  The unauthenticated visitor now has the
-//       full, interactive webapp in front of them without ever having
-//       entered the remote password.
-//
-//   The fix: when the auth modal is dismissed without authenticating,
-//   the shim re-gates the app by dispatching
-//   ``daemonStatus connected:false`` (re-showing the loading overlay
-//   over a re-hidden ``#app``).  A second, defense-in-depth fix drops
-//   any server data frame that arrives while ``_authenticated`` is
-//   false so an unauthenticated client can never act on backend data.
-//
-// This test drives the LIVE ``_WS_SHIM_JS`` extracted from
-// ``web_server.py`` inside jsdom with a controllable fake WebSocket and
-// a faithful copy of main.js's ``daemonStatus`` overlay contract.  The
-// shim is eval'd with a ``//# sourceURL=ws-shim.js`` pragma so V8's
-// built-in coverage attributes its execution; the companion
-// ``remotePasswordBypass.coverage.js`` re-runs this file under
-// ``NODE_V8_COVERAGE`` and enforces 100% line coverage of the shim.
-//
-// Run with:
-//
-//     node src/kiss/agents/vscode/test/remotePasswordBypass.test.js
-//     node src/kiss/agents/vscode/test/remotePasswordBypass.coverage.js
 
 'use strict';
 
@@ -66,9 +22,6 @@ function readShimJs() {
   return m[1];
 }
 
-// Evaluate the shim inside the jsdom window.  The sourceURL pragma
-// names the eval'd script ``ws-shim.js`` in V8 coverage output so the
-// coverage gate can find and measure it.
 function evalShim(window, shimJs) {
   window.eval(shimJs + '\n//# sourceURL=ws-shim.js');
 }
@@ -83,17 +36,6 @@ function fail(msg, err) {
   process.exit(1);
 }
 
-// A DOM that mirrors the elements the shim + daemonStatus contract
-// touch: the loading overlay (with its message node), the hidden #app,
-// and the auth modal (a child of #app, matching the chat.html
-// template).  Options:
-//   opaqueOrigin — no ``url``, so sessionStorage/localStorage access
-//                  throws SecurityError (covers the storage catches).
-//   noModal      — omit the auth modal AND the overlay message node
-//                  (covers the prompt() fallback and the
-//                  ``_updateLoadingMsg`` missing-node early return).
-//   silent       — swallow jsdom "not implemented" noise (needed for
-//                  the ``window.location.reload()`` reconnect path).
 function buildDom(opts) {
   opts = opts || {};
   const modal = opts.noModal ? '' : `
@@ -120,11 +62,10 @@ function buildDom(opts) {
   return new JSDOM(html, jsdomOpts);
 }
 
-// Controllable fake WebSocket recording sends + driving lifecycle.
 function installFakeWebSocket(window, sockets) {
   function FakeWebSocket(url) {
     this.url = url;
-    this.readyState = 0; // CONNECTING
+    this.readyState = 0;
     this.sent = [];
     this.onopen = null;
     this.onmessage = null;
@@ -160,9 +101,6 @@ function installFakeWebSocket(window, sockets) {
   return FakeWebSocket;
 }
 
-// Faithful copy of media/main.js's daemonStatus -> setServerLoading
-// contract: a window 'message' event with data.type === 'daemonStatus'
-// toggles the overlay and #app.
 function wireOverlayContract(window) {
   function setServerLoading(loading) {
     const overlay = window.document.getElementById('kiss-server-loading');
@@ -180,8 +118,6 @@ function isVisible(el) {
   return el.style.display !== 'none';
 }
 
-// Wait one macrotask so the shim's ``_showAuthModal().then(...)``
-// (a resolved Promise) settles before we assert.
 function tick() {
   return new Promise((resolve) => setTimeout(resolve, 5));
 }
@@ -193,8 +129,6 @@ function sleep(ms) {
 async function run() {
   const shimJs = readShimJs();
 
-  // Sanity: the shim we are about to fix must actually enforce the
-  // password on the SEND path (commands must queue while unauth).
   {
     const dom = buildDom();
     const {window} = dom;
@@ -205,9 +139,7 @@ async function run() {
     const sock = sockets[0];
     sock.fireOpen();
     sock.fireMessage({type: 'auth_required'});
-    // Clear the auto-sent auth frame.
     sock.sent.length = 0;
-    // An unauthenticated visitor issues a backend command.
     window.acquireVsCodeApi().postMessage({type: 'runTask', prompt: 'x'});
     try {
       assert.deepStrictEqual(
@@ -221,10 +153,6 @@ async function run() {
     window.close();
   }
 
-  // ---------------------------------------------------------------
-  // Core regression: CANCEL of the auth modal must NOT leave the
-  // webapp exposed to an unauthenticated visitor.
-  // ---------------------------------------------------------------
   {
     const dom = buildDom();
     const {window} = dom;
@@ -241,14 +169,10 @@ async function run() {
     const app = window.document.getElementById('app');
     const modal = window.document.getElementById('auth-modal');
 
-    // While the modal is open, #app is revealed (so the modal, its
-    // child, can render) and the modal's full-viewport backdrop blocks
-    // interaction.  This matches the loading-overlay contract test.
     assert.ok(isVisible(app), 'app revealed while auth modal is open');
     assert.ok(isVisible(modal), 'auth modal is open on auth_required');
     ok('auth_required opens the modal over a revealed #app');
 
-    // User dismisses the prompt (Cancel button).
     window.document.getElementById('auth-modal-cancel').click();
     await tick();
 
@@ -270,9 +194,6 @@ async function run() {
     window.close();
   }
 
-  // ---------------------------------------------------------------
-  // ESCAPE key dismissal must re-gate identically to Cancel.
-  // ---------------------------------------------------------------
   {
     const dom = buildDom();
     const {window} = dom;
@@ -302,10 +223,6 @@ async function run() {
     window.close();
   }
 
-  // ---------------------------------------------------------------
-  // Happy path: entering the correct password authenticates, reveals
-  // the app for good, and flushes queued commands.
-  // ---------------------------------------------------------------
   {
     const dom = buildDom();
     const {window} = dom;
@@ -317,10 +234,8 @@ async function run() {
     sock.fireOpen();
     sock.fireMessage({type: 'auth_required'});
 
-    // Unauth visitor queues a command.
     window.acquireVsCodeApi().postMessage({type: 'runTask', prompt: 'hi'});
 
-    // Enter the password and submit.
     const input = window.document.getElementById('auth-modal-input');
     input.value = 'hunter2';
     sock.sent.length = 0;
@@ -337,7 +252,6 @@ async function run() {
       fail('modal OK did not send the auth frame', err);
     }
 
-    // Server accepts.
     sock.sent.length = 0;
     sock.fireMessage({type: 'auth_ok'});
     await tick();
@@ -358,10 +272,6 @@ async function run() {
     window.close();
   }
 
-  // ---------------------------------------------------------------
-  // Defense in depth: a server data frame that somehow arrives while
-  // unauthenticated must NOT be forwarded to the app.
-  // ---------------------------------------------------------------
   {
     const dom = buildDom();
     const {window} = dom;
@@ -378,7 +288,6 @@ async function run() {
     evalShim(window, shimJs);
     const sock = sockets[0];
     sock.fireOpen();
-    // No auth_ok yet — deliver a data frame.
     sock.fireMessage({type: 'history', items: [{secret: 'leak'}]});
     await tick();
     try {
@@ -391,7 +300,6 @@ async function run() {
       fail('unauthenticated data frame was forwarded to the app', err);
     }
 
-    // After auth_ok, the same data frame IS forwarded.
     sock.fireMessage({type: 'auth_ok'});
     await tick();
     sock.fireMessage({type: 'history', items: [{ok: 1}]});
@@ -408,17 +316,9 @@ async function run() {
     window.close();
   }
 
-  // ---------------------------------------------------------------
-  // Full reconnect lifecycle: saved password, pinned work-dir replay,
-  // state persistence, reconnect backoff + wake-up listeners, and the
-  // reload-on-reauth path.  Together with the blocks above this
-  // exercises every line of the shim (enforced by the coverage gate).
-  // ---------------------------------------------------------------
   {
     const dom = buildDom({silent: true});
     const {window} = dom;
-    // Simulate a page that reloaded mid-reconnect with a previously
-    // saved password and persisted UI state.
     window.sessionStorage.setItem('sorcar-state', '{"foo":1}');
     window.sessionStorage.setItem('sorcar-reconnect-pending', '1');
     window.localStorage.setItem('sorcar-remote-pwd', 'savedpw');
@@ -440,8 +340,6 @@ async function run() {
 
     const api = window.acquireVsCodeApi();
     try {
-      // JSON-compare: the state object comes from the jsdom realm, so
-      // deepStrictEqual would reject its foreign Object.prototype.
       assert.strictEqual(JSON.stringify(api.getState()), '{"foo":1}');
       api.setState({bar: 2});
       assert.strictEqual(
@@ -451,12 +349,10 @@ async function run() {
       fail('vscode-api state persistence broken', err);
     }
 
-    // Pin a work dir while still unauthenticated: persisted AND queued.
     api.postMessage({type: 'setWorkDir', workDir: '/w'});
     assert.strictEqual(
       window.sessionStorage.getItem('sorcar-work-dir'), '/w');
 
-    // Wake-up while the socket is still CONNECTING must not disturb it.
     const s0 = sockets[0];
     window.dispatchEvent(new window.Event('focus'));
     assert.strictEqual(sockets.length, 1, 'no reconnect while CONNECTING');
@@ -489,18 +385,15 @@ async function run() {
       fail('work-dir replay on auth_ok broken', err);
     }
 
-    // A pin with no workDir clears the persisted value (`|| ''`).
     api.postMessage({type: 'setWorkDir'});
     assert.strictEqual(
       window.sessionStorage.getItem('sorcar-work-dir'), '');
 
-    // Wake-up listeners while OPEN are no-ops.
     window.dispatchEvent(new window.Event('pageshow'));
     window.dispatchEvent(new window.Event('online'));
     window.document.dispatchEvent(new window.Event('visibilitychange'));
     assert.strictEqual(sockets.length, 1, 'no reconnect while OPEN');
 
-    // Server restart: authenticated socket drops.
     const overlay = window.document.getElementById('kiss-server-loading');
     s0.fireClose();
     try {
@@ -516,26 +409,18 @@ async function run() {
       fail('disconnect handling broken', err);
     }
 
-    // A duplicate close must not schedule a second reconnect timer.
     s0.fireClose();
     assert.strictEqual(sockets.length, 1, 'no eager reconnect');
 
-    // The backoff timer (250ms on the first attempt) fires -> reconnect.
     await sleep(400);
     assert.strictEqual(sockets.length, 2, 'backoff timer reconnects');
     const s1 = sockets[1];
 
-    // Wake-up while the reconnect is in flight (CONNECTING) is a no-op.
     window.dispatchEvent(new window.Event('online'));
     assert.strictEqual(sockets.length, 2);
 
-    // The reconnect attempt itself fails before authenticating ...
     s1.fireOpen();
     s1.fireClose();
-    // Sabotage the dead socket and clearTimeout so the shim's
-    // defensive catches (handler-nulling / close() in connect()'s
-    // neutralisation, clearTimeout in _reconnectNowIfNeeded) are
-    // exercised: hostile/broken environments must not break reconnect.
     Object.defineProperty(s1, 'onopen', {
       set() { throw new Error('handler nulling blocked'); },
       get() { return null; },
@@ -544,18 +429,14 @@ async function run() {
     window.clearTimeout = function () {
       throw new Error('clearTimeout blocked');
     };
-    // ... and a wake-up event short-circuits the (longer) backoff.
     window.dispatchEvent(new window.Event('focus'));
     assert.strictEqual(sockets.length, 3, 'wake-up short-circuits backoff');
     ok('backoff timer and wake-up listeners drive reconnects');
 
     const s2 = sockets[2];
     s2.fireOpen();
-    s2.onerror(); // the shim installs a no-op error handler
+    s2.onerror();
     s2.sent.length = 0;
-    // Re-auth after a previously completed handshake must reload the
-    // page (jsdom: "not implemented", swallowed) and NOT mark the
-    // socket authenticated in the stale JS world.
     s2.fireMessage({type: 'auth_ok'});
     api.postMessage({type: 'runTask', prompt: 'stale'});
     try {
@@ -574,11 +455,6 @@ async function run() {
     window.close();
   }
 
-  // ---------------------------------------------------------------
-  // Isolation fallbacks: no modal nodes -> prompt(); no overlay msg
-  // node -> label update is a no-op; opaque origin -> every
-  // sessionStorage/localStorage access throws and is swallowed.
-  // ---------------------------------------------------------------
   {
     const dom = buildDom({opaqueOrigin: true, noModal: true});
     const {window} = dom;
@@ -616,10 +492,8 @@ async function run() {
     sock.sent.length = 0;
     sock.fireMessage({type: 'auth_ok'});
     const api = window.acquireVsCodeApi();
-    // Unreadable sessionStorage at load left the persisted state null.
     assert.strictEqual(api.getState(), null, 'state starts null');
     api.postMessage({type: 'setWorkDir', workDir: '/x'});
-    // A pin with no workDir falls back to '' (the `|| ''` operand).
     api.postMessage({type: 'setWorkDir'});
     api.setState({x: 1});
     try {
@@ -632,17 +506,11 @@ async function run() {
       fail('opaque-origin storage handling broken', err);
     }
 
-    // Authenticated disconnect with no overlay message node.
     sock.fireClose();
     ok('disconnect with missing overlay message node is harmless');
     window.close();
   }
 
-  // ---------------------------------------------------------------
-  // Enter-key submit + submit racing a dead socket: the password is
-  // saved for the next connect but nothing is sent on a closed socket.
-  // Also: an unauthenticated disconnect keeps the cold-start label.
-  // ---------------------------------------------------------------
   {
     const dom = buildDom();
     const {window} = dom;
@@ -652,13 +520,10 @@ async function run() {
     evalShim(window, shimJs);
     const sock = sockets[0];
     sock.fireOpen();
-    // A throwing focus() (some embedded browsers) must not break the
-    // modal: the shim's deferred-focus catch swallows it.
     const focusInput = window.document.getElementById('auth-modal-input');
     focusInput.focus = function () { throw new Error('focus blocked'); };
     sock.fireMessage({type: 'auth_required'});
 
-    // The socket dies while the modal is open.
     sock.fireClose();
     const msgEl = window.document.getElementById('kiss-server-loading-msg');
     try {
@@ -695,17 +560,6 @@ async function run() {
     window.close();
   }
 
-  // ---------------------------------------------------------------
-  // Rate-limit lockout (``auth_locked``): the server refuses a locked
-  // IP with an explanation instead of a silent close.  The shim must
-  // (a) show WHY on the overlay, (b) keep that label across the
-  // ensuing close (not overwrite it with "starting ..."), (c) skip the
-  // fast reconnect backoff and wait out ``retry_after``, and (d)
-  // re-prompt for the password on the post-lockout reconnect.
-  // Previously the silent close left every tunnel visitor staring at
-  // a promptless spinner forever ("the webapp doesn't ask for a
-  // password").
-  // ---------------------------------------------------------------
   {
     const dom = buildDom();
     const {window} = dom;
@@ -735,9 +589,6 @@ async function run() {
       fail('auth_locked overlay explanation missing', err);
     }
 
-    // The server closes right after auth_locked.  Sabotage
-    // clearTimeout so the locked path's defensive catch is exercised
-    // (hostile/broken environments must not break the delayed retry).
     window.clearTimeout = function () {
       throw new Error('clearTimeout blocked');
     };
@@ -755,8 +606,6 @@ async function run() {
       fail('lockout label overwritten by the close handler', err);
     }
 
-    // No reconnect on the fast backoff (250ms): the shim must wait
-    // out the server-provided lockout (1s) before retrying.
     await sleep(400);
     try {
       assert.strictEqual(
@@ -778,7 +627,6 @@ async function run() {
       fail('post-lockout reconnect missing', err);
     }
 
-    // The post-lockout handshake finally re-prompts for the password.
     const s1 = sockets[1];
     s1.fireOpen();
     s1.fireMessage({type: 'auth_required'});
@@ -792,11 +640,6 @@ async function run() {
     window.close();
   }
 
-  // ---------------------------------------------------------------
-  // auth_locked hardening: a missing/invalid ``retry_after`` falls
-  // back to 60s, and a DOM without the overlay message node makes the
-  // lockout label a harmless no-op.
-  // ---------------------------------------------------------------
   {
     const dom = buildDom({noModal: true});
     const {window} = dom;
@@ -806,7 +649,6 @@ async function run() {
     evalShim(window, shimJs);
     const sock = sockets[0];
     sock.fireOpen();
-    // No retry_after at all -> Number(undefined) is NaN -> 60s default.
     sock.fireMessage({type: 'auth_locked'});
     sock.fireClose();
     await sleep(400);

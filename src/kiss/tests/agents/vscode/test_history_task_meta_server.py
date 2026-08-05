@@ -181,10 +181,7 @@ class TestHistoryMetaFieldsSurfaced:
         server._get_history(query=None)
 
         s = _history_sessions(events)[0]
-        # ``None`` is not a string → empty model is kept; the
-        # frontend will skip rendering the meta line for this row.
         assert s["model"] == ""
-        # The booleans round-trip independently.
         assert s["is_worktree"] is True
         assert s["is_parallel"] is True
         assert s["auto_commit_mode"] is True

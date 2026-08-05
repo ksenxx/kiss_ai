@@ -33,9 +33,6 @@ from kiss.core.models.model_info import model
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 from kiss.tests.conftest import requires_openai_api_key
 
-# An Anthropic-format conversation exactly as AnthropicModel stores it:
-# assistant content is a block list with thinking + tool_use blocks, and the
-# tool result comes back as a user message with a tool_result block.
 _ANTHROPIC_STYLE_CONVERSATION: list[dict[str, Any]] = [
     {"role": "user", "content": "Use the add tool to compute 2 + 3, then report the sum."},
     {
@@ -320,8 +317,6 @@ class TestXhighAliasHandoffWire:
         assert tool_msg["role"] == "tool"
         assert tool_msg["tool_call_id"] == "toolu_01"
         assert tool_msg["content"] == "5"
-        # The capture server is an unknown (unregistered) endpoint, so the
-        # transport keeps reasoning_effort optimistically (adaptive probe).
         assert body["reasoning_effort"] == "xhigh"
 
     def test_generate_request_is_normalized_with_xhigh_effort(
@@ -352,7 +347,6 @@ class TestXhighAliasHandoffWire:
         _assert_no_anthropic_blocks_on_wire(body)
         assistant_msg = body["messages"][1]
         assert assistant_msg["role"] == "assistant"
-        # Thinking block dropped; only the OpenAI-valid text part remains.
         assert assistant_msg["content"] == [{"type": "text", "text": "ready"}]
 
 

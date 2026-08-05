@@ -53,10 +53,6 @@ def _write(path: Path, text: str) -> None:
     path.write_text(text)
 
 
-# ---------------------------------------------------------------------------
-# Discovery
-# ---------------------------------------------------------------------------
-
 def test_discovers_user_and_project_commands(kiss_home: Path, tmp_path: Path) -> None:
     """User and project .md files both become commands with right source."""
     _write(kiss_home / "commands" / "greet.md", "Say hello.")
@@ -169,10 +165,6 @@ def test_claude_commands_namespace_and_frontmatter(
     assert cmd.argument_hint == "[title]"
 
 
-# ---------------------------------------------------------------------------
-# Expansion
-# ---------------------------------------------------------------------------
-
 def _command(kiss_home: Path, work_dir: Path, body: str):
     _write(kiss_home / "commands" / "c.md", body)
     return discover_commands(str(work_dir))["c"]
@@ -258,10 +250,6 @@ def test_shell_escaped_args_in_positional(kiss_home: Path, tmp_path: Path) -> No
     assert out == 'Use it"s.'
 
 
-# ---------------------------------------------------------------------------
-# Listing
-# ---------------------------------------------------------------------------
-
 def test_format_command_listing(kiss_home: Path, tmp_path: Path) -> None:
     """The listing shows /name, hint, source, and description aligned."""
     _write(
@@ -284,10 +272,6 @@ def test_format_command_listing_empty_hint(kiss_home: Path, tmp_path: Path) -> N
     assert ".kiss/commands" in listing
 
 
-# ---------------------------------------------------------------------------
-# Completion
-# ---------------------------------------------------------------------------
-
 def test_completer_includes_custom_commands(kiss_home: Path, tmp_path: Path) -> None:
     """Typing /<prefix> Tab offers matching custom command names."""
     _write(kiss_home / "commands" / "greet.md", "Say hello.")
@@ -302,5 +286,3 @@ def test_completer_builtins_before_custom(kiss_home: Path, tmp_path: Path) -> No
     completer = CliCompleter(str(tmp_path))
     matches = completer._build_matches("/hel")
     assert matches.index("/help ") < matches.index("/helper ")
-
-

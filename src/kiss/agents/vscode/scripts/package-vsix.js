@@ -3,10 +3,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Package the VS Code extension without invoking vsce's implicit
-// `vscode:prepublish` hook.  Install/update scripts run the build steps
-// explicitly before this helper so progress is clear and work is not repeated.
 
 'use strict';
 

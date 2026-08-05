@@ -277,9 +277,6 @@ class TestWebBrowserToggle:
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
-        # ``CONFIG_DIR``/``CONFIG_PATH`` are PEP 562 lazy attributes;
-        # ``setattr`` would pin the computed (stale tmp) Path at
-        # teardown.  ``setitem`` deletes the pin instead.
         import kiss.core.vscode_config as _vc
 
         monkeypatch.setitem(vars(_vc), "CONFIG_DIR", fake_home / ".kiss")
@@ -301,9 +298,6 @@ class TestApiKeySetupAndDeletion:
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
-        # ``CONFIG_DIR``/``CONFIG_PATH`` are PEP 562 lazy attributes;
-        # ``setattr`` would pin the computed (stale tmp) Path at
-        # teardown.  ``setitem`` deletes the pin instead.
         import kiss.core.vscode_config as _vc
 
         monkeypatch.setitem(vars(_vc), "CONFIG_DIR", fake_home / ".kiss")
@@ -322,7 +316,6 @@ class TestApiKeySetupAndDeletion:
         save_api_key_to_shell("GEMINI_API_KEY", "gem-test-123")
         assert os.environ["GEMINI_API_KEY"] == "gem-test-123"
         rc = Path.home() / ".zshrc"
-        # H3 fix uses shlex.quote which omits quotes for shell-safe values.
         assert (
             f"export GEMINI_API_KEY={shlex.quote('gem-test-123')}"
             in rc.read_text()

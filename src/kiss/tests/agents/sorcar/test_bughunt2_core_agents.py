@@ -77,10 +77,6 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
-# ---------------------------------------------------------------------------
-# Fake OpenAI-compatible server (always returns a ``finish`` tool call)
-# ---------------------------------------------------------------------------
-
 
 def _finish_body() -> bytes:
     return json.dumps(
@@ -141,10 +137,6 @@ def _start_server() -> tuple[ThreadingHTTPServer, str]:
     return srv, f"http://127.0.0.1:{srv.server_port}/v1"
 
 
-# ---------------------------------------------------------------------------
-# DB redirect helpers (same convention as the other sorcar tests)
-# ---------------------------------------------------------------------------
-
 
 def _redirect(tmpdir: str) -> tuple[Any, Any, Any]:
     old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
@@ -187,10 +179,6 @@ def _git(repo: Path, *args: str) -> None:
         },
     )
 
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 
 class TestIsWorktreeExtraFlag:
@@ -237,7 +225,7 @@ class TestIsWorktreeExtraFlag:
         work = Path(self.tmpdir) / "notgit"
         work.mkdir()
         agent = WorktreeSorcarAgent("fallback")
-        self._run(agent, work_dir=str(work))  # use_worktree defaults True
+        self._run(agent, work_dir=str(work))
         task_id = agent._last_task_id
         assert task_id is not None
         assert _load_is_worktree(task_id) is False
@@ -270,10 +258,6 @@ class TestIsWorktreeExtraFlag:
         assert task_id is not None
         assert _load_is_worktree(task_id) is True
 
-
-# ---------------------------------------------------------------------------
-# Bug 2: set_model must swap the LIVE model so the next LLM call uses it
-# ---------------------------------------------------------------------------
 
 
 class _SetModelHandler(BaseHTTPRequestHandler):
@@ -388,10 +372,5 @@ class TestSetModelSwapsLiveModel:
         models = list(self.srv.request_models)  # type: ignore[attr-defined]
         assert len(models) >= 2
         assert models[0] == "gpt-4o-mini"
-        # The bug: the second request still went to gpt-4o-mini because
-        # set_model only touched the relentless parent (which has no
-        # live model), never the executor actually making the calls.
         assert models[1] == "swapped-model"
-        # The parent's model_name must also reflect the change so any
-        # subsequent sub-session stays on the new model.
         assert agent.model_name == "swapped-model"

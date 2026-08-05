@@ -140,24 +140,14 @@ class TestShutdownPersistsUninterruptibleWorker(TestCase):
             "precondition: row must start with the sentinel"
         )
 
-        # Tell the worker when to stop AFTER the assertion runs.  This
-        # is independent of the cooperative stop event because the
-        # worker deliberately ignores both KeyboardInterrupt and the
-        # stop event — that is the point of this test.
         cleanup = threading.Event()
 
         def _uninterruptible_worker() -> None:
-            # Mimic an agent wedged inside an LLM API call that does
-            # not honour ``KeyboardInterrupt``.  Each ``time.sleep`` is
-            # interruptible at the Python level; swallowing the
-            # exception keeps the worker alive past the shutdown
-            # helper's join timeout, exactly like a real C-level
-            # blocking call would.
             while not cleanup.is_set():
                 try:
                     time.sleep(0.02)
                 except KeyboardInterrupt:
-                    pass  # swallow — emulate uninterruptible C code
+                    pass
 
         tab = vscode._get_tab(tab_id)
         tab.chat_id = chat_id
@@ -169,8 +159,6 @@ class TestShutdownPersistsUninterruptibleWorker(TestCase):
         tab.is_task_active = True
         worker.start()
         try:
-            # Wait for the worker to actually be running so the
-            # shutdown helper's ``thread.is_alive()`` filter accepts it.
             for _ in range(100):
                 if worker.is_alive():
                     break
@@ -181,17 +169,10 @@ class TestShutdownPersistsUninterruptibleWorker(TestCase):
             remote._stop_active_agent_tasks(timeout=0.5)
             elapsed = time.monotonic() - start
 
-            # The helper joins with a bounded timeout.  It must not
-            # block significantly longer than the configured timeout
-            # even though the worker is still alive.
             assert elapsed < 3.0, (
                 f"helper hung past its timeout: {elapsed:.2f}s"
             )
 
-            # The critical assertion: even though the worker swallowed
-            # KeyboardInterrupt and is still running (= will be killed
-            # abruptly at process exit), the DB row already carries
-            # the truthful restart/shutdown result.
             result = _row_result(task_id)
             assert result == "Task interrupted by server restart/shutdown", (
                 "regression: pre-emptive shutdown persistence did not "
@@ -200,11 +181,6 @@ class TestShutdownPersistsUninterruptibleWorker(TestCase):
                 f"would perceive the agent as killed; got {result!r}"
             )
 
-            # The shutdown helper must also have flagged the tab so the
-            # task_runner's outer ``except KeyboardInterrupt`` would
-            # classify this as a restart/shutdown rather than a user
-            # stop click — same path the responsive-worker test
-            # exercises.
             assert tab.interrupted_by_shutdown is True, (
                 "shutdown helper must set interrupted_by_shutdown on "
                 "in-flight tabs"
@@ -280,9 +256,6 @@ class TestShutdownPersistsUninterruptibleWorker(TestCase):
         chat_id = "shutdown-uninterruptible-chat-4"
         task_id = _insert_sentinel_row(chat_id)
 
-        # Build a minimal agent-like object that carries _last_task_id
-        # but no working ``run`` — we never call it because we drive
-        # the registry directly.
         class _MiniAgent:
             _last_task_id = task_id
 
@@ -298,8 +271,6 @@ class TestShutdownPersistsUninterruptibleWorker(TestCase):
         tab = vscode._get_tab(tab_id)
         tab.chat_id = chat_id
         tab.agent = _MiniAgent()  # type: ignore[assignment]
-        # Deliberately leave ``tab.task_history_id`` at ``None`` to
-        # exercise the agent-level fallback path.
         tab.task_history_id = None
         tab.stop_event = threading.Event()
         tab.user_answer_queue = queue.Queue()
@@ -326,7 +297,5 @@ class TestShutdownPersistsUninterruptibleWorker(TestCase):
         finally:
             cleanup.set()
             worker.join(timeout=2)
-            # Reset registry state to avoid bleeding into other tests
-            # in the same process.
             with _RunningAgentState._registry_lock:
                 tab.is_task_active = False

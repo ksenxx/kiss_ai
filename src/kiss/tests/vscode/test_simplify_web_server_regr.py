@@ -93,7 +93,6 @@ class TestWebMergeState(unittest.TestCase):
         self.assertEqual(state.total_hunks, 0)
         self.assertEqual(state.remaining, 0)
         self.assertIsNone(state.current())
-        # Navigation on an empty review must be a no-op, not a crash.
         state.advance()
         state.go_prev()
         self.assertIsNone(state.current())
@@ -112,14 +111,11 @@ class TestWebMergeState(unittest.TestCase):
         self.assertEqual(state.current(), (0, 1))
         self.assertEqual(state.remaining, 2)
         state.go_prev()
-        # (0, 0) is resolved so prev wraps to the previous UNRESOLVED.
         self.assertEqual(state.current(), (1, 0))
         self.assertEqual(state.unresolved_in_file(0), [1])
         self.assertEqual(state.all_unresolved(), [(0, 1), (1, 0)])
         self.assertTrue(state.is_resolved(0, 0))
         self.assertFalse(state.is_resolved(0, 1))
-        # Resolve everything: current() must become None, not point at
-        # the last (now-resolved) hunk.
         state.mark_resolved(0, 1, "rejected")
         state.mark_resolved(1, 0, "accepted")
         self.assertEqual(state.remaining, 0)
@@ -189,13 +185,10 @@ class TestMergeActionCompletion(unittest.TestCase):
         asyncio.run(drive())
         self.assertNotIn(tab_id, self.server._merge_states)
         self.assertNotIn(tab_id, self.server._merge_action_locks)
-        # The rejected hunk (file a, hunk 1) restored base content on
-        # disk while the accepted hunk (0) kept the agent's content.
         self.assertEqual(
             (self.tmpdir / "a.txt").read_text(),
             "ONE\ntwo\nthree\nfour\n",
         )
-        # File b's single hunk was accepted — agent content kept.
         self.assertEqual((self.tmpdir / "b.txt").read_text(), "beta\n")
 
     def test_unknown_tab_action_is_noop(self) -> None:
@@ -348,7 +341,6 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.server._snapshot_cli_running_task_ids(), {"task-42"},
         )
-        # Bad task ids are ignored without dropping the connection.
         await self._send(writer, {"type": "cliTaskStart", "taskId": 7})
         await self._send(writer, {"type": "cliTaskEnd", "taskId": ""})
         await self._send(
@@ -359,7 +351,6 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
                 break
             await asyncio.sleep(0.02)
         self.assertFalse(self.server._is_cli_task_running("task-42"))
-        # Connection still alive: a ready round-trips a focusInput.
         await self._send(
             writer,
             {"type": "ready", "tabId": "cli-tab", "restoredTabs": []},
@@ -411,8 +402,6 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         def req(path: str) -> Request:
             return Request(path, Headers({"Host": "localhost"}))
 
-        # ``_process_request`` never touches the connection for these
-        # routes; pass a typed-away None instead of a real socket.
         conn = cast(Any, None)
 
         resp = await self.server._process_request(conn, req("/"))
@@ -422,7 +411,6 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         resp = await self.server._process_request(conn, req(""))
         assert resp is not None
         self.assertEqual(resp.status_code, 200)
-        # /ws lets the WebSocket handshake proceed.
         self.assertIsNone(
             await self.server._process_request(conn, req("/ws")),
         )
@@ -436,7 +424,6 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         resp = await self.server._process_request(conn, req("/nope"))
         assert resp is not None
         self.assertEqual(resp.status_code, 404)
-        # Query strings are stripped before routing.
         parsed = urlsplit("/media/main.css?v=abc")
         self.assertEqual(parsed.path, "/media/main.css")
         resp = await self.server._process_request(
@@ -448,7 +435,6 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
     async def test_broadcast_reaches_uds_and_stops_after_removal(self) -> None:
         """Tab-stamped broadcasts fan out to UDS writers until removed."""
         reader, writer = await self._connect_uds()
-        # Identify the server-side writer for this connection.
         writers: list[Any] = []
         for _ in range(100):
             with self.server._printer._ws_lock:
@@ -462,7 +448,6 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         )
         msg = await self._drain_until(reader, "notice")
         self.assertEqual(msg.get("text"), "hello")
-        # After removal, broadcasts no longer reach the peer.
         self.server._printer.remove_uds_writer(writers[0])
         self.server._printer.broadcast(
             {"type": "notice", "text": "gone", "tabId": "t1"},

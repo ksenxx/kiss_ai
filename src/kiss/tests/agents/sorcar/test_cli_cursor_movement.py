@@ -128,7 +128,7 @@ def test_paste_inserts_at_cursor(box: _InputBox) -> None:
 
 def test_history_recall_places_cursor_at_end(box: _InputBox) -> None:
     box.history = ["first task"]
-    _feed(box, b"\x1b[A")  # Up arrow recalls history
+    _feed(box, b"\x1b[A")
     assert box.buf == "first task"
     assert box.cursor == len("first task")
     _feed(box, b"!")
@@ -163,11 +163,8 @@ def test_body_cursor_col_tracks_mid_buffer_cursor() -> None:
     base = 3 + display_width(PROMPT_MARKER)
     assert body_cursor_col("hello", 80, 3) == (0, base + 3)
     assert body_cursor_col("hello", 80, 0) == (0, base)
-    # Multi-line: cursor on the first line of "ab\ncd".
     assert body_cursor_col("ab\ncd", 80, 1) == (0, base + 1)
-    # Cursor on the second line.
     assert body_cursor_col("ab\ncd", 80, 4) == (1, base + 1)
-    # Default (no cursor) keeps the legacy end-of-buffer behaviour.
     assert body_cursor_col("ab\ncd", 80) == (1, base + 2)
 
 
@@ -183,11 +180,7 @@ def test_caret_visible_when_cursor_scrolled_off_left_edge() -> None:
     buf = "x" * 100
     row, col = body_cursor_col(buf, cols, 5)
     assert row == 0
-    # The caret column must lie inside the panel body (between the
-    # borders), never past the right edge.
     assert 3 <= col <= cols - 1
-    # The rendered body row must contain the char right after the
-    # cursor so the user can see where the insertion point is.
     rows, _ = panel_body(buf, cols, cursor=5)
     assert rows[0].strip("| ").startswith(PROMPT_MARKER.strip())
 
@@ -197,9 +190,6 @@ def test_long_line_render_shows_window_around_cursor() -> None:
     buf = "abcdefghijklmnopqrstuvwxyz0123456789"
     rows, is_placeholder = panel_body(buf, cols, cursor=0)
     assert not is_placeholder
-    # Cursor at start: the visible window must include the head of the
-    # buffer (chars "abc"), not only the tail.
     assert "abc" in rows[0]
-    # Legacy behaviour (no cursor): tail is shown.
     rows_tail, _ = panel_body(buf, cols)
     assert "789" in rows_tail[0]

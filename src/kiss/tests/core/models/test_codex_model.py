@@ -172,12 +172,9 @@ class TestBuildCliArgs:
         assert "--dangerously-bypass-approvals-and-sandbox" in args
 
     def test_no_read_only_sandbox(self) -> None:
-        # Regression: --sandbox read-only previously blocked codex from
-        # making any file modifications when KISS asked it to fix code.
         m = CodexModel("codex/default")
         args = m._build_cli_args()
         assert "read-only" not in args
-        # The sandbox flag must not be present at all; bypass replaces it.
         assert "--sandbox" not in args
 
 
@@ -269,9 +266,6 @@ class TestParseStreamEvents:
         assert err is None
 
     def test_command_execution_started_streams_command(self) -> None:
-        # Regression: previously item.started events were ignored, so the
-        # user saw nothing while codex was running shell commands and
-        # appeared to wait silently for a long time.
         tokens: list[str] = []
         thinking_states: list[bool] = []
         m = CodexModel(
@@ -293,11 +287,8 @@ class TestParseStreamEvents:
         content, _result, err = m._parse_stream_events(iter(lines))
         assert content == "done"
         assert err is None
-        # Command-line text was streamed before the final answer.
         assert any("/bin/zsh -lc ls" in t for t in tokens)
-        # Command output was streamed too.
         assert any("file1" in t for t in tokens)
-        # Streaming was wrapped in thinking-callback pairs.
         assert thinking_states.count(True) == thinking_states.count(False)
         assert thinking_states.count(True) >= 2
 
@@ -363,7 +354,6 @@ class TestModelRouting:
         assert m._cli_model == "gpt-5-codex"
 
 
-#: Codex models currently shipped in the bundled MODEL_INFO.json catalog.
 _CODEX_MODEL_NAMES = (
     "codex/codex-auto-review",
     "codex/default",
@@ -468,8 +458,6 @@ class TestGenerateIntegration:
             "report the output."
         )
         m.generate()
-        # The shell command should have been streamed via the token
-        # callback while codex was executing it.
         assert any("ls" in t for t in tokens), (
             "Expected shell command progress to be streamed, but token "
             f"callback only saw: {tokens!r}"

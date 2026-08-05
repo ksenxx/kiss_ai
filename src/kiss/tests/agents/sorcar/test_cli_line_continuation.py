@@ -31,7 +31,6 @@ class TestEndsWithLineContinuation:
     def test_single_trailing_backslash_continues(self) -> None:
         cont, keep = ends_with_line_continuation("hello \\")
         assert cont is True
-        # Prefix kept = everything except the outermost backslash.
         assert keep == len("hello ")
         assert "hello \\"[:keep] == "hello "
 
@@ -39,7 +38,6 @@ class TestEndsWithLineContinuation:
         buf = "hello \\   "
         cont, keep = ends_with_line_continuation(buf)
         assert cont is True
-        # Both the trailing whitespace AND the backslash are removed.
         assert buf[:keep] == "hello "
 
     def test_backslash_followed_by_trailing_tabs_continues(self) -> None:
@@ -49,8 +47,6 @@ class TestEndsWithLineContinuation:
         assert buf[:keep] == "hello "
 
     def test_escaped_backslash_submits_literal(self) -> None:
-        # ``\\\\`` (two backslashes) is an escape for a literal ``\`` —
-        # Enter submits, both backslashes remain in the buffer.
         buf = "hello \\\\"
         cont, keep = ends_with_line_continuation(buf)
         assert cont is False
@@ -60,22 +56,19 @@ class TestEndsWithLineContinuation:
     def test_odd_count_of_three_backslashes_continues_retaining_even(
         self,
     ) -> None:
-        # ``\\\\\\`` (three backslashes): the outermost consumed as the
-        # continuation marker, leaving an EVEN count (2) of literal
-        # backslashes in the buffer.
         buf = "hello \\\\\\"
         cont, keep = ends_with_line_continuation(buf)
         assert cont is True
         assert buf[:keep] == "hello \\\\"
 
     def test_odd_count_five_continues_retaining_four(self) -> None:
-        buf = "x\\\\\\\\\\"  # five backslashes
+        buf = "x\\\\\\\\\\"
         cont, keep = ends_with_line_continuation(buf)
         assert cont is True
-        assert buf[:keep] == "x\\\\\\\\"  # four backslashes
+        assert buf[:keep] == "x\\\\\\\\"
 
     def test_even_count_four_submits_literal(self) -> None:
-        buf = "x\\\\\\\\"  # four backslashes
+        buf = "x\\\\\\\\"
         cont, keep = ends_with_line_continuation(buf)
         assert cont is False
         assert keep == len(buf)
@@ -91,8 +84,6 @@ class TestEndsWithLineContinuation:
         assert keep == 0
 
     def test_only_whitespace_submits(self) -> None:
-        # Whitespace-only buffer with no backslash: not a continuation
-        # (there is nothing to continue), keep the whole buffer.
         buf = "   "
         cont, keep = ends_with_line_continuation(buf)
         assert cont is False
@@ -101,29 +92,18 @@ class TestEndsWithLineContinuation:
     def test_backslash_followed_by_newline_is_not_a_continuation(
         self,
     ) -> None:
-        # The helper never strips embedded newlines — a buffer ending
-        # in ``\\\n`` has an embedded newline AFTER the backslash, so
-        # the tail-strip loop stops on the ``\n`` and the last char
-        # ``\n`` (not ``\``) means there is no continuation marker to
-        # detect.
         buf = "hello \\\n"
         cont, keep = ends_with_line_continuation(buf)
         assert cont is False
         assert keep == len(buf)
 
     def test_multi_line_buffer_with_final_line_continuation(self) -> None:
-        # An already-multi-line buffer whose last line ends in ``\\``
-        # continues on the next Enter.
         buf = "first line\nsecond line \\"
         cont, keep = ends_with_line_continuation(buf)
         assert cont is True
-        # The embedded ``\n`` in the middle of the buffer is preserved;
-        # only the trailing continuation marker is stripped.
         assert buf[:keep] == "first line\nsecond line "
 
     def test_backslash_in_middle_of_buffer_does_not_continue(self) -> None:
-        # A backslash somewhere in the middle followed by more text is
-        # just a literal character — no continuation.
         buf = "before \\ after"
         cont, keep = ends_with_line_continuation(buf)
         assert cont is False

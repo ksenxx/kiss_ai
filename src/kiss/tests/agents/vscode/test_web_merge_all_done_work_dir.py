@@ -57,7 +57,6 @@ class TestWebAllDoneForwardsWorkDir(unittest.IsolatedAsyncioTestCase):
         """Completing a web merge review forwards the merge state's
         ``work_dir`` on the synthesised ``all-done`` command."""
         repo = Path(tempfile.mkdtemp())
-        # Daemon work_dir is a *different* folder than the tab's repo.
         daemon_dir = tempfile.mkdtemp()
         server = RemoteAccessServer(
             host="127.0.0.1", port=0, work_dir=daemon_dir,

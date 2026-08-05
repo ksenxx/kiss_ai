@@ -48,17 +48,12 @@ _MEDIA_DIR = (
 _HTML = _MEDIA_DIR / "chat.html"
 _CSS = _MEDIA_DIR / "main.css"
 
-# Distinctive sub-strings of the Lucide ``syringe`` icon's path data.
-# The icon has six short ``<path>`` elements; these three are
-# unmistakable signatures that only appear in a syringe glyph.
 _SYRINGE_PATH_SIGNATURES = (
-    "M19 9 8.7 19.3",   # the long needle / barrel diagonal
-    "m18 2 4 4",        # the small plunger tab at the top-right
-    "m14 4 6 6",        # the cross-piece between barrel and plunger
+    "M19 9 8.7 19.3",
+    "m18 2 4 4",
+    "m14 4 6 6",
 )
 
-# Distinctive sub-strings of the OLD lightbulb-style ``Inject
-# instruction`` icon — must NOT be present after the fix.
 _OLD_LIGHTBULB_PATH_SIGNATURES = (
     "M9 18h6",
     "M10 22h4",
@@ -97,7 +92,6 @@ def _render_chat_html() -> str:
         "MARKED_SRC": "about:blank",
         "PANEL_COPY_SRC": "about:blank",
         "MAIN_SRC": "about:blank",
-        "DEMO_SRC": "about:blank",
         "SHIM_SCRIPT": "",
         "TRICKS_JSON": "[]",
     }
@@ -124,11 +118,6 @@ def _page(_browser):
     try:
         page = context.new_page()
         page.set_content(_render_chat_html(), wait_until="domcontentloaded")
-        # Make #app visible — the template starts it ``display:none`` and
-        # only main.js flips it on once the server is ready.  Without
-        # main.js loaded in this synthetic page we toggle it ourselves
-        # so layout queries (e.g. ``offsetParent``) report meaningful
-        # values for the toolbar buttons.
         page.evaluate(
             "document.getElementById('app').style.display = 'block';",
         )
@@ -305,5 +294,3 @@ def test_inject_instruction_button_is_visible(_page) -> None:
         "#tricks-btn is in the DOM but renders with zero width/"
         "height — the Inject-instruction button must stay visible."
     )
-
-

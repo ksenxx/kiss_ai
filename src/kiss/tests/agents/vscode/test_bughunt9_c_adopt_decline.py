@@ -142,13 +142,17 @@ class TestAdoptDecline(unittest.TestCase):
         )
 
     def test_none_probe_reprobes_then_adopts(self) -> None:
-        """Transient no-information probes re-probe; adoption succeeds."""
-        # First two /ready replies are garbage (probe -> None), then the
-        # endpoint reports a healthy tunnel.  Pre-fix the first None
-        # probe declined adoption outright.
+        """Transient no-information probes re-probe; adoption succeeds.
+
+        A *non-503* HTTP error is the "no information" reply: real
+        cloudflared answers ``/ready`` with 503 + a JSON body exactly
+        when the tunnel has zero ready connections, so a 503 is a
+        *confirmed* not-ready signal (see
+        ``test_probe_ready_http_503.py``), not a transient one.
+        """
         httpd, port = _start_metrics_server([
-            (503, "not json"),
-            (503, "not json"),
+            (500, "not json"),
+            (500, "not json"),
             (200, json.dumps({"readyConnections": 4})),
         ])
         self._httpds.append(httpd)

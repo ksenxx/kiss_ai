@@ -176,7 +176,6 @@ class _StrayStatusDaemon:
                 tab = str(cmd.get("tabId", ""))
                 task = str(cmd.get("taskId", ""))
                 self.got_run.set()
-                # The stray untagged end — no ``taskId`` key at all.
                 conn.sendall(json.dumps({
                     "type": "status", "running": False, "tabId": tab,
                 }).encode() + b"\n")
@@ -259,7 +258,7 @@ class TestW3F4PrinterGcMidTaskStillEndsTask(unittest.TestCase):
         tid = uuid.uuid4().hex
         env = dict(os.environ)
         env["KISS_SORCAR_SOCK"] = str(sock)
-        env["KISS_HOME"] = tmp  # isolate the chat-DB side effects
+        env["KISS_HOME"] = tmp
         try:
             proc = subprocess.run(
                 [sys.executable, "-c", _F4_CHILD, tid],
@@ -300,15 +299,10 @@ class TestW3F6CtrlCSameChunkLineSurvives(unittest.TestCase):
 
         closer = threading.Timer(0.3, close_writer)
         try:
-            repl = AnchoredRepl()  # box never start()ed: redraw no-ops
-            # One chunk: an Enter-terminated line followed by Ctrl+C.
+            repl = AnchoredRepl()
             os.write(write_fd, b"deploy\r\x03")
             with self.assertRaises(KeyboardInterrupt):
                 repl.read_idle_line()
-            # Unblock the buggy code path (which dropped the line and
-            # would otherwise block on stdin forever) by closing the
-            # writer shortly; the fixed code serves the buffered line
-            # without touching stdin at all.
             closer.start()
             line = repl.read_idle_line()
             self.assertEqual(
@@ -341,7 +335,6 @@ class TestW3C1NoFdLeakOnFailedConnect(unittest.TestCase):
     def test_no_resource_warning_when_daemon_absent(self) -> None:
         tmp = tempfile.mkdtemp()
         env = dict(os.environ)
-        # Point the bridge at a socket path that cannot exist.
         env["KISS_SORCAR_SOCK"] = str(Path(tmp) / "no" / "daemon.sock")
         proc = subprocess.run(
             [sys.executable, "-W", "error::ResourceWarning", "-c", _C1_CHILD],

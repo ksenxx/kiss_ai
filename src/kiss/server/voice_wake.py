@@ -100,10 +100,6 @@ import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-# The per-attempt audio API timeout policy is single-sourced in
-# ``kiss.core.speech_synthesis`` (core must not depend on the server
-# layer); the names are re-exported here for this module's historical
-# importers (translation worker, tests).
 from kiss.core.speech_synthesis import (  # noqa: F401 — re-exported
     DEFAULT_AUDIO_TIMEOUT_SECONDS,
     _env_timeout_seconds,
@@ -113,14 +109,6 @@ from kiss.core.speech_synthesis import (  # noqa: F401 — re-exported
 if TYPE_CHECKING:
     import sounddevice
 
-# In-vocabulary phrases that sound like "Sorcar" and act as the
-# detection grammar.  Common standalone English words ("soccer",
-# "circa", "so car", "saw car") are deliberately NOT aliases, keeping
-# the grammar to genuinely Sorcar-shaped phrases; real human "Sorcar"
-# decodes to "sir car"/"sore car"/"sar car" (verified live).  A
-# sound-alike word spoken in isolation with a pause can still
-# force-fit onto an alias and wake the listener — that is inherent to
-# phonetic wake words — but ordinary sentences never do.
 WAKE_ALIASES = [
     "sorcar",
     "sir car",
@@ -129,91 +117,47 @@ WAKE_ALIASES = [
 ]
 
 MODEL_NAME = "vosk-model-small-en-us-0.15"
-# Official Vosk model mirror.  ``{}`` is the model name (which is
-# also the extracted directory and the remote zip's basename) — the
-# single source for the download-URL spelling used by
-# ``_ensure_downloaded_model``.
 MODEL_ZIP_URL_TEMPLATE = "https://alphacephei.com/vosk/models/{}.zip"
-# Vosk speaker-identification model: turns an utterance into a
-# 128-dim x-vector embedding; embeddings of the same voice are close
-# in cosine distance, different voices are far apart.
 SPK_MODEL_NAME = "vosk-model-spk-0.4"
-DEFAULT_MODELS_DIR = Path.home() / ".kiss" / "models"
+
+
+def default_models_dir() -> Path:
+    """Return the voice-model cache dir under the active KISS home.
+
+    Resolved lazily on every call (via the repository-wide
+    :func:`kiss.core.config.kiss_home` contract) so a ``KISS_HOME``
+    override — profile isolation, tests — is honoured instead of
+    always downloading hundreds of MB of models into the real
+    ``~/.kiss/models``.
+    """
+    from kiss.core.config import kiss_home
+
+    return kiss_home() / "models"
+
+
+def __getattr__(name: str) -> Path:
+    """Resolve the legacy ``DEFAULT_MODELS_DIR`` module constant lazily.
+
+    Kept as a PEP 562 attribute so existing importers (e.g.
+    ``web_server.py``) still work while the value now respects
+    ``$KISS_HOME`` at access time instead of being frozen to the real
+    home directory at import time.
+    """
+    if name == "DEFAULT_MODELS_DIR":
+        return default_models_dir()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 SAMPLE_RATE = 16000
-BLOCK_SIZE = 4000  # frames per audio block (250ms at 16kHz)
+BLOCK_SIZE = 4000
 COOLDOWN_SECONDS = 2.0
-# Stream-health watchdog: on macOS, PortAudio input streams can
-# silently stop delivering callbacks after an audio device/route
-# change while the stream object still looks alive (confirmed live:
-# listeners blocked forever on an empty block queue while a freshly
-# opened stream heard audio fine).  When no block arrives within this
-# many seconds, the stream is closed and reopened; after
-# MIC_MAX_REOPEN_ATTEMPTS consecutive reopens that still yield no
-# audio the listener exits nonzero so the supervisor can surface the
-# failure instead of a silently deaf microphone.
 MIC_WATCHDOG_TIMEOUT_SECONDS = 5.0
 MIC_MAX_REOPEN_ATTEMPTS = 3
 MIC_REOPEN_DELAY_SECONDS = 0.5
-# Blocks at or above this normalized RMS count as speech (shared by
-# wake-word pause gating and post-wake speech endpointing).
 SPEECH_RMS_THRESHOLD = 0.01
-# Wake-word sensitivity (0..100, settings-panel slider).  The value
-# scales the two tunable detection gates linearly — the per-word
-# confidence floor and the post-alias pause — and, at or above
-# SUFFIX_MATCH_SENSITIVITY, additionally accepts utterances that END
-# with an alias ("hey there Sorcar" decodes to "[unk] sore car",
-# measured live).  Sensitivity 50 reproduces the historical gates
-# (conf 0.4, pause 0.2s); the default of 80 is deliberately more
-# sensitive (conf 0.16, pause at the 0.1s floor, trailing-alias
-# matching enabled).  Exact whole-utterance matching is never relaxed
-# into substring matching: mid-utterance aliases
-# ("[unk] sir car [unk]") stay rejected at every sensitivity.
 DEFAULT_SENSITIVITY = 80
 SUFFIX_MATCH_SENSITIVITY = 75
-# Floor for the sensitivity-scaled pause gate: without any pause a
-# partial result would fire mid-word during continuous speech.
 MIN_WAKE_PAUSE_SECONDS = 0.1
-# The low-latency partial path FORCES a final result once the pause
-# gate opens (Vosk's own endpoint needs ~0.8s of silence).  Word
-# confidences on such flushed finals are uninformative: a sound-alike
-# "soccer" force-fit that scores 0.6-0.84 on a naturally endpointed
-# final scores a perfect 1.0 when the final is forced mid-silence
-# (measured live), so NO confidence floor can reject it there.  A
-# sensitivity strict enough that its floor exceeds this ceiling is
-# relying on confidences to reject force-fits and therefore must not
-# consume forced finals at all — it waits for Vosk's natural
-# endpoint, whose posteriors are informative.  The price is latency:
-# at low sensitivity the wake fires only after a real ~0.8s pause.
 FORCED_FINAL_MAX_CONF_FLOOR = 0.5
-# Minimum Vosk per-word confidence for a wake alias.  Grammar-mode
-# confidences from the small English model are posteriors in [0, 1],
-# but they do not separate true wakes from sound-alikes: TTS "Sorcar"
-# scores 1.0, yet a real human "Sorcar" scored 0.53 in live testing
-# (a stricter 0.85 gate caused false negatives) while a sound-alike
-# "soccer" force-fit scored 0.55.  The gate is therefore only a
-# sanity net that rejects egregious low-confidence force-fits; the
-# real strictness comes from exact whole-utterance matching and the
-# post-alias pause.  Values above 1.0 would be raw acoustic
-# likelihoods on a different scale and are not gated.
 MIN_WORD_CONF = 0.4
-# A partial result only fires the wake word after a short stretch of
-# quiet audio right after the alias: proof the utterance really ended
-# with the wake word instead of continuing ("soccer is my favorite
-# sport").  The required pause scales with the sensitivity slider
-# (see sensitivity_wake_pause_seconds).
-#
-# Softly spoken "Sorcar" decodes with a brief leading ``[unk]``: the
-# breathy onset of quiet speech is not silence, so the grammar emits
-# a short noise token before the alias ("[unk] sore car", [unk] span
-# ~60ms, measured live with whispered speech) and exact
-# whole-utterance matching rejected it — users had to speak loudly to
-# get a clean "sore car" decode.  Utterances whose only prefix is
-# [unk] noise totaling at most this many seconds therefore also wake
-# (see wake_with_leading_noise).  Spoken-word prefixes are unaffected:
-# real words decode to [unk] spans of ~0.5s and up ("hey there" 0.61s,
-# "he wrecked his" 0.60s, "she sells a" 0.51s, measured), so
-# "hey there Sorcar" still needs the high-sensitivity trailing-alias
-# mode, and an alias followed by more speech still never wakes.
 MAX_LEADING_NOISE_SECONDS = 0.35
 
 
@@ -274,39 +218,9 @@ def sensitivity_value(raw: str) -> int:
     return value
 
 
-# Two x-vectors within this cosine distance are the same voice.
-# Vosk x-vectors of the same speaker typically land 0.2-0.5 apart
-# while different speakers exceed ~0.7, so 0.6 splits the two modes.
 SPEAKER_DISTANCE_THRESHOLD = 0.6
 
-# Post-wake speech is transcribed by a KISS (Sorcar) agent — one
-# non-agentic KISSAgent run of a gpt-audio chat model that consumes
-# the audio directly and reports the English text together with the
-# spoken language.  Prompting matters: with a system-prompt-only
-# instruction gpt-audio tends to *answer* the speech (or refuse), so
-# the audio content part is placed FIRST in the user message and the
-# dictation instruction text AFTER it, alongside a
-# dictation-transcriber system prompt.  This was empirically
-# validated (23/24 exact across EN/FR/ES/DE probes); gpt-audio-1.5
-# remains unreliable under every prompting strategy tried (JSON
-# wrappers, empty outputs, answering questions) and must not be used.
 DEFAULT_AUDIO_MODEL = "gpt-audio"
-# Hard cap on one transcription API request (seconds).  Without it
-# the OpenAI client waits its 600s default — and because a
-# translation used to run on the audio loop, one stalled HTTPS call
-# left the listener deaf to "Sorcar" until the mic was restarted.
-# Overridable for tests via KISS_VOICE_AUDIO_TIMEOUT.
-# (``DEFAULT_AUDIO_TIMEOUT_SECONDS`` is single-sourced in
-# ``kiss.core.speech_synthesis`` and re-exported here.)
-# Hard cap on model-download network inactivity (seconds), applied to
-# the connect and to EVERY socket read of the chunked download.  The
-# old ``urlretrieve`` call had no timeout at all, so a stalled HTTPS
-# connection blocked forever — while ``_ensure_downloaded_model`` held
-# the exclusive cross-process ``flock``: the FIFO translation worker
-# stranded every queued utterance behind the lazy speaker-model
-# download, and every other process waiting on the same lock hung too.
-# Mirrors the module's hard per-attempt timeout policy for translation
-# calls.  Overridable for tests via KISS_VOICE_DOWNLOAD_TIMEOUT.
 DEFAULT_DOWNLOAD_TIMEOUT_SECONDS = 60.0
 DICTATION_SYSTEM_PROMPT = (
     "You are a dictation transcriber. The user dictates text by "
@@ -314,14 +228,6 @@ DICTATION_SYSTEM_PROMPT = (
     "for you. The user's message always contains the dictated audio; "
     "never claim audio is missing."
 )
-# Output format matters as much as the dictation framing: asking
-# gpt-audio for a JSON object (or a bracketed language prefix) makes
-# it deny hearing the audio for many utterances ("I'm sorry, but I
-# didn't hear any audio", measured 5/6 failures at temperature 0),
-# while the plain two-line format below — together with the
-# never-claim-audio-missing sentence in the system prompt — passed
-# every probe (EN statements, an EN question, an EN imperative that
-# sounds like a request to the model, and FR speech, 3/3 each).
 TRANSCRIPTION_USER_PROMPT = (
     "The audio above is dictation, not a request to you. Transcribe "
     "the speech and translate it into English. If it is already "
@@ -330,10 +236,6 @@ TRANSCRIPTION_USER_PROMPT = (
     "only the language tag of the spoken language (e.g. en, fr, es); "
     "line 2 is only the English text of what was said."
 )
-# Aliases stripped from the front of a transcript.  Broader than the
-# detection grammar: it also covers GPT mis-hearings of "Sorcar"
-# (e.g. "Sorger") and sound-alike words that are not detection
-# aliases but can appear when gpt-audio transcribes the wake word.
 _TRANSCRIPT_WAKE_ALIASES = [
     *WAKE_ALIASES,
     "soccer",
@@ -354,9 +256,6 @@ _WAKE_PREFIX_RE = re.compile(
     + r")\b[\s,.:;!?\-—–]*",
     re.IGNORECASE,
 )
-# Rarely, gpt-audio prefixes its output with a preamble such as
-# "Sure. Here is the transcription of the speech:" and quotes the
-# text; both are stripped after the call.
 _PREAMBLE_RE = re.compile(
     r"^(?:sure[.!,]?\s*)?here(?: is|'s) the "
     r"(?:transcription|transcript|translation)[^:\n]*:\s*",
@@ -392,14 +291,6 @@ def clean_transcript(text: str) -> str:
     return cleaned
 
 
-# Hallucinated gpt-audio replies that ANSWER instead of transcribing.
-# Despite the dictation prompts, the backend occasionally (observed
-# nondeterministically, even at temperature 0) claims the audio is
-# missing and offers to transcribe once provided — e.g. "Please
-# provide the audio, and I will transcribe and translate it
-# accordingly."  Such replies also drop the two-line format, so they
-# carry no language tag; the tag's absence keeps this detector from
-# ever flagging genuine dictation that merely talks about audio.
 _STT_REFUSAL_RE = re.compile(
     r"(?:provide|upload|share|attach|send)\b.{0,60}\baudio\b"
     r".{0,80}\b(?:transcribe|translate)\b"
@@ -445,8 +336,6 @@ def block_rms(data: bytes) -> float:
     return math.sqrt(mean_square) / 32768.0
 
 
-# Audio kept after the last loud block when trailing silence is
-# trimmed from a captured utterance (see trim_trailing_silence).
 TRAILING_SILENCE_KEEP_SECONDS = 0.3
 
 
@@ -507,9 +396,9 @@ class SpeechCapture:
     was heard, or the captured PCM once the utterance ended.
     """
 
-    END_SILENCE_SECONDS = 2.0  # trailing silence that ends the speech
-    NO_SPEECH_TIMEOUT_SECONDS = 5.0  # silence after wake with no speech
-    MAX_CAPTURE_SECONDS = 30.0  # hard cap on the captured utterance
+    END_SILENCE_SECONDS = 2.0
+    NO_SPEECH_TIMEOUT_SECONDS = 5.0
+    MAX_CAPTURE_SECONDS = 30.0
 
     def __init__(self) -> None:
         self._blocks: list[bytes] = []
@@ -593,13 +482,7 @@ def _download_url_to_file(url: str, dest: Path) -> None:
         shutil.copyfileobj(response, out)
 
 
-# A plausible language tag returned by the transcription agent:
-# a 2-3 letter primary subtag with optional short subtags ("en",
-# "fr", "en-us", "zh-hant").  Anything else ("English", junk, empty)
-# is dropped to None rather than propagated to the supervisor.
 _LANGUAGE_TAG_RE = re.compile(r"[a-z]{2,3}(?:-[a-z0-9]{2,8})*")
-# Markdown code fences around the agent's JSON reply ("```json ...
-# ```" or bare "``` ... ```"), stripped before parsing.
 _FENCE_RE = re.compile(
     r"^```[a-zA-Z0-9_-]*\s*\n?(.*?)\n?\s*```$", re.DOTALL
 )
@@ -632,6 +515,9 @@ def parse_transcription_reply(reply: str) -> tuple[str, str | None]:
     This parser accepts all of those shapes and degrades gracefully:
 
     - Markdown fences are stripped.
+    - A "Here is the transcription:"-style preamble is stripped
+      BEFORE parsing, so a preamble line never masks the language
+      tag line that follows it.
     - A JSON object (tried from the first ``{`` to the last ``}``)
       yields its string ``text`` value (else ``""``) and normalized
       ``language`` value.
@@ -639,8 +525,8 @@ def parse_transcription_reply(reply: str) -> tuple[str, str | None]:
       language tag and more lines follow, the tag and the remaining
       lines are returned (the observed two-line shape, including
       trailing spaces on the tag line).
-    - Anything else falls back to the whole stripped reply as the
-      text with no language.
+    - Anything else falls back to the fence- and preamble-stripped
+      reply as the text with no language.
 
     Args:
         reply: The raw text reply of the transcription agent.
@@ -652,6 +538,7 @@ def parse_transcription_reply(reply: str) -> tuple[str, str | None]:
     stripped = reply.strip()
     fenced = _FENCE_RE.match(stripped)
     candidate = fenced.group(1).strip() if fenced else stripped
+    candidate = _PREAMBLE_RE.sub("", candidate).strip()
     start = candidate.find("{")
     end = candidate.rfind("}")
     if 0 <= start < end:
@@ -668,7 +555,10 @@ def parse_transcription_reply(reply: str) -> tuple[str, str | None]:
         language = _normalize_language_tag(first)
         if language is not None:
             return rest.strip(), language
-    return stripped, None
+    # Fall back to the fence-/preamble-stripped candidate — returning
+    # the raw ``stripped`` here would forward literal ``` fences as
+    # part of the user's dictated command.
+    return candidate, None
 
 
 def speaker_prefixed_text(
@@ -739,8 +629,6 @@ def transcribe_pcm(
         were recognized, or the agent call fails (errors are reported
         on stderr); ``language`` is ``None`` whenever it is unknown.
     """
-    # Trailing silence makes gpt-audio deny hearing the audio (see
-    # trim_trailing_silence); all-silent audio skips the API call.
     pcm = trim_trailing_silence(pcm)
     if not pcm:
         return {"text": "", "language": None}
@@ -753,14 +641,6 @@ def transcribe_pcm(
             "modalities": ["text"],
             "timeout": audio_timeout_seconds(),
         }
-        # Honor the standard OpenAI SDK environment override: the raw
-        # OpenAI client reads OPENAI_BASE_URL, and the listener used to
-        # inherit that behavior before the transcription moved onto a
-        # KISS agent — whose model routing pins the vendor's hardcoded
-        # base URL and silently ignored the override, sending audio to
-        # api.openai.com no matter what the environment said (tests
-        # point it at a local stalled/refusing server; users at a
-        # proxy).  Passing base_url via model_config bypasses routing.
         base_url = os.environ.get("OPENAI_BASE_URL", "").strip()
         if base_url and audio_model.startswith("gpt-"):
             from kiss.core import config as config_module
@@ -770,12 +650,6 @@ def transcribe_pcm(
                 os.environ.get("OPENAI_API_KEY", "")
                 or config_module.DEFAULT_CONFIG.OPENAI_API_KEY
             )
-        # The backend occasionally hallucinates a refusal instead of
-        # transcribing (see looks_like_stt_refusal) — nondeterministic
-        # even at temperature 0, so one retry usually recovers the
-        # real transcription; a persistent refusal degrades to
-        # NO_SPEECH rather than submitting the hallucination as the
-        # user's dictated command.
         for attempt in range(2):
             agent = KISSAgent("voice-transcriber")
             reply = agent.run(
@@ -805,9 +679,6 @@ def transcribe_pcm(
         return {"text": "", "language": None}
 
 
-# Guards stdout event lines: translations report from worker threads
-# while WAKE prints from the audio loop, and interleaved partial lines
-# would corrupt the supervisor protocol.
 _EMIT_LOCK = threading.Lock()
 
 
@@ -842,9 +713,6 @@ class WakeSession:
         self._capture: SpeechCapture | None = None
         self._pending: queue.Queue[bytes] = queue.Queue()
         self._worker: threading.Thread | None = None
-        # Speaker identification is built lazily on the worker thread
-        # (the spk model may need a one-time download); after a
-        # construction failure it stays off for the whole session.
         self._speaker_identifier: SpeakerIdentifier | None = None
         self._speaker_id_broken = models_dir is None
         self.wakes = 0
@@ -852,11 +720,6 @@ class WakeSession:
     def process(self, data: bytes) -> None:
         """Route one audio block to wake detection or speech capture."""
         if self._capture is not None:
-            # The recognizer does not hear capture audio, but the
-            # detector's cooldown/pause clocks must keep ticking:
-            # freezing them made a "Sorcar" spoken right after a
-            # capture look like it was inside the previous wake's
-            # cooldown and get suppressed.
             self._detector.track_only(data)
             captured = self._capture.feed(data)
             if captured is not None:
@@ -897,15 +760,7 @@ class WakeSession:
     def _finish_capture(self, pcm: bytes) -> None:
         self._capture = None
         if pcm:
-            # Tell the supervisor the gpt-audio call is starting so the
-            # UI can show a "transcribing" indicator; silence skips
-            # straight to NO_SPEECH without an API call.
             emit("TRANSCRIBING")
-        # Translate on a background worker: the API call may take (or
-        # hang for) many seconds, and running it here used to deafen
-        # the listener — no audio reached the wake detector until the
-        # call returned, so the wake word "stopped working" after a
-        # transcription whenever the network stalled.
         if self._worker is None:
             self._worker = threading.Thread(
                 target=self._translate_loop, daemon=True
@@ -919,10 +774,6 @@ class WakeSession:
             try:
                 self._translate_and_report(pcm)
             except Exception as err:  # noqa: BLE001 — worker must survive
-                # The API path already catches its own errors; this
-                # guards the reporting path (e.g. a broken stdout
-                # pipe).  A dead worker would strand queued utterances
-                # and hang finalize() on queue.join() forever.
                 try:
                     print(
                         f"translation report failed: {err}",
@@ -1005,8 +856,6 @@ def _ensure_downloaded_model(
     lock_path = models_dir / f".{model_name}.lock"
     with open(lock_path, "w", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
-        # Another process/thread may have completed the download while
-        # we waited on the lock.
         if model_dir.is_dir():
             return model_dir
         if url is None:
@@ -1015,17 +864,12 @@ def _ensure_downloaded_model(
         tmp_zip = models_dir / f".{model_name}.{os.getpid()}.zip.tmp"
         extract_dir = models_dir / f".{model_name}.{os.getpid()}.extract"
         try:
-            # W3-D1: hard network timeout — a stalled download must
-            # fail fast instead of blocking forever while this
-            # process holds the exclusive cross-process flock.
             _download_url_to_file(url, tmp_zip)
             extract_dir.mkdir(exist_ok=True)
             with zipfile.ZipFile(tmp_zip) as zf:
                 zf.extractall(extract_dir)
             extracted = extract_dir / model_name
             if not extracted.is_dir():
-                # Zip without the expected top-level folder: accept a
-                # single extracted directory as the model root.
                 entries = [p for p in extract_dir.iterdir() if p.is_dir()]
                 if len(entries) != 1:
                     raise RuntimeError(
@@ -1033,8 +877,6 @@ def _ensure_downloaded_model(
                         f"{sorted(p.name for p in extract_dir.iterdir())}",
                     )
                 extracted = entries[0]
-            # Atomic publish: the fully-extracted tree becomes visible
-            # under its final name in one rename.
             extracted.rename(model_dir)
         finally:
             tmp_zip.unlink(missing_ok=True)
@@ -1066,13 +908,6 @@ def ensure_spk_model(models_dir: Path) -> Path:
     return _ensure_downloaded_model(models_dir, SPK_MODEL_NAME)
 
 
-# W3-D5: one shared Vosk acoustic model per model directory per
-# process.  WakeDetector (audio loop) and SpeakerIdentifier (worker
-# thread) both need the same ~40MB wake model; each used to load its
-# own full copy, roughly doubling the listener's acoustic-model RSS
-# for no behavioral gain.  ``vosk.Model`` objects are read-only after
-# loading and are shareable across ``KaldiRecognizer`` instances and
-# threads, so the process caches one instance per directory forever.
 _VOSK_MODEL_CACHE: dict[str, Any] = {}
 _VOSK_MODEL_CACHE_LOCK = threading.Lock()
 
@@ -1133,7 +968,7 @@ class SpeakerRegistry:
         self, threshold: float = SPEAKER_DISTANCE_THRESHOLD
     ) -> None:
         self._threshold = threshold
-        self._embeddings: list[list[float]] = []  # index i = speaker i+1
+        self._embeddings: list[list[float]] = []
 
     def identify(self, embedding: list[float]) -> int:
         """Return the speaker number for *embedding* (starting from 1).
@@ -1168,8 +1003,6 @@ class SpeakerIdentifier:
         from vosk import KaldiRecognizer, SetLogLevel, SpkModel
 
         SetLogLevel(-1)
-        # W3-D5: reuse the process-wide acoustic model (WakeDetector
-        # already holds it) instead of loading a second ~40MB copy.
         self._recognizer = KaldiRecognizer(
             load_shared_vosk_model(ensure_model(models_dir)), SAMPLE_RATE
         )
@@ -1356,23 +1189,10 @@ class WakeDetector:
         )
         SetLogLevel(-1)
         grammar = json.dumps([*WAKE_ALIASES, "[unk]"])
-        # W3-D5: shared per-process model — SpeakerIdentifier reuses it.
         self._recognizer = KaldiRecognizer(
             load_shared_vosk_model(model_dir), SAMPLE_RATE, grammar
         )
-        # Word-level confidences for final results.  SetPartialWords
-        # must stay OFF: with vosk 0.3.44 in grammar mode it all but
-        # suppresses partial emission (measured: 14 mostly-late
-        # partials vs 68 timely ones on identical audio), which killed
-        # the low-latency partial wake path — a "Sorcar" followed by
-        # continued speech within ~0.8s was lost entirely.  Partials
-        # are matched on text only; word confidences and timings come
-        # from a forced final result (see feed).
         self._recognizer.SetWords(True)
-        # Cooldown runs on the audio clock (seconds of audio fed), not
-        # wall time: WAV-mode processing is faster than real time, so a
-        # wall clock would suppress genuine wakes that are many audio
-        # seconds — but few wall milliseconds — apart.
         self._audio_seconds = 0.0
         self._last_wake = -COOLDOWN_SECONDS
         self._quiet_seconds = 0.0
@@ -1397,24 +1217,10 @@ class WakeDetector:
         """Process one audio block; return True when the wake word fired."""
         self.track_only(data)
         if self._recognizer.AcceptWaveform(data):
-            # Vosk endpointed the utterance itself (it needs ~0.8s of
-            # trailing silence): gate the final result directly.
             result = json.loads(self._recognizer.Result())
             return self._gate_result(result, forced=False)
-        # Low-latency partial path: Vosk's own endpointing is far
-        # slower than the sensitivity pause gate, so a wake followed
-        # quickly by more speech ("Sorcar <dictated command>") never
-        # yields an alias-only final.  When the speaker has paused
-        # long enough right after alias-shaped partial text, FORCE a
-        # final result — grammar-mode partials carry no word entries
-        # (see partial_alias_shaped), while the forced final brings
-        # the confidences and [unk] timings the strict gates need.
         if self._quiet_seconds < self._wake_pause_seconds:
             return False
-        # Strict sensitivities rely on the confidence floor to reject
-        # sound-alike force-fits, and forced finals score force-fits
-        # at a perfect 1.0 (see FORCED_FINAL_MAX_CONF_FLOOR): only
-        # naturally endpointed finals may wake there.
         if self._min_word_conf > FORCED_FINAL_MAX_CONF_FLOOR:
             return False
         partial = json.loads(
@@ -1452,16 +1258,10 @@ class WakeDetector:
                 self._quiet_seconds = 0.0
             return False
         if self._audio_seconds - self._last_wake < COOLDOWN_SECONDS:
-            # Reset here too: a cooldown-suppressed match leaves the
-            # alias as leftover decoder state, which keeps matching on
-            # every subsequent quiet block — the instant the cooldown
-            # expires the detector would fire a phantom WAKE from that
-            # stale audio, seconds after the user actually spoke.
             self._recognizer.Reset()
             self._quiet_seconds = 0.0
             return False
         self._last_wake = self._audio_seconds
-        # Reset so leftover decoder state cannot re-trigger after cooldown.
         self._recognizer.Reset()
         self._quiet_seconds = 0.0
         return True
@@ -1548,7 +1348,6 @@ def open_mic_stream(
         if status and not status_logged:
             status_logged = True
             print(f"mic stream status: {status}", file=sys.stderr, flush=True)
-        # ``indata`` is a CFFI buffer; copy it before the driver reuses it.
         blocks.put(bytes(indata))
 
     stream = sounddevice.RawInputStream(
@@ -1609,13 +1408,6 @@ def run_mic(
             try:
                 data = blocks.get(timeout=watchdog_timeout)
             except queue.Empty:
-                # Treat the missing callback window as silence for the
-                # session's state machines.  Otherwise a route-change
-                # stall during/after a wake freezes SpeechCapture and
-                # WakeDetector's audio-clock cooldown; the first real
-                # "Sorcar" after a successful reopen can be swallowed
-                # as stale capture audio or rejected as still inside
-                # the old cooldown despite many wall seconds passing.
                 session.process_silence(watchdog_timeout)
                 if failed_reopens >= MIC_MAX_REOPEN_ATTEMPTS:
                     print(
@@ -1665,7 +1457,7 @@ def main() -> int:
     parser.add_argument(
         "--models-dir",
         type=Path,
-        default=DEFAULT_MODELS_DIR,
+        default=default_models_dir(),
         help="Directory caching downloaded Vosk models",
     )
     parser.add_argument(

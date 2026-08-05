@@ -48,10 +48,6 @@ def make_v2(model_name: str = MODEL, **kw: Any) -> OpenAICompatibleModel2:
     return OpenAICompatibleModel2(model_name, BASE_URL, API_KEY, **kw)
 
 
-# ---------------------------------------------------------------------------
-# Module-level helpers (v1)
-# ---------------------------------------------------------------------------
-
 
 def test_provider_model_name() -> None:
     assert _provider_model_name("openrouter/foo/bar") == "foo/bar"
@@ -123,10 +119,6 @@ def test_tool_result_block_text() -> None:
     assert _tool_result_block_text({"content": 42}) == "42"
 
 
-# ---------------------------------------------------------------------------
-# v1: message normalization
-# ---------------------------------------------------------------------------
-
 
 def test_normalize_message_for_api_plain_and_whitespace() -> None:
     n = OpenAICompatibleModel._normalize_message_for_api
@@ -166,10 +158,6 @@ def test_normalize_message_for_api_anthropic_tool_result() -> None:
     )
     assert msgs == [{"role": "tool", "tool_call_id": "t1", "content": "ok"}]
 
-
-# ---------------------------------------------------------------------------
-# v1: tool-call list building / stream finalization
-# ---------------------------------------------------------------------------
 
 
 def test_build_tool_call_lists_and_accum() -> None:
@@ -233,10 +221,6 @@ def test_v1_cache_control_openrouter_anthropic() -> None:
     assert kwargs3 == {}
 
 
-# ---------------------------------------------------------------------------
-# v1: chat -> responses conversion helpers
-# ---------------------------------------------------------------------------
-
 
 def test_chat_parts_to_responses_parts() -> None:
     parts = OpenAICompatibleModel._chat_parts_to_responses_parts(
@@ -282,10 +266,6 @@ def test_chat_message_to_responses_items() -> None:
     assert conv({"role": "user", "content": "hi"}) == [{"role": "user", "content": "hi"}]
     assert conv({"role": "user", "content": "  "}) == []
 
-
-# ---------------------------------------------------------------------------
-# v2: schema / config shaping helpers
-# ---------------------------------------------------------------------------
 
 
 def test_flatten_tools_schema() -> None:
@@ -409,24 +389,17 @@ def test_shape_responses_kwargs() -> None:
     assert kwargs2["tool_choice"] == {"type": "function", "name": "f"}
     assert kwargs2["parallel_tool_calls"] is True
 
-    # max_completion_tokens wins over max_tokens.
     m2 = make_v2(model_config={"max_tokens": 5, "max_completion_tokens": 9})
     assert m2._shape_responses_kwargs(input_items=msgs, tools=None)["max_output_tokens"] == 9
 
-    # Empty conversation raises.
     with pytest.raises(KISSError):
         m._shape_responses_kwargs(input_items=[{"role": "user", "content": " "}], tools=None)
 
-    # Caller config never mutated.
     m3 = make_v2(model_config={"reasoning": {"summary": "auto"}, "reasoning_effort": "low"})
     out3 = m3._shape_responses_kwargs(input_items=msgs, tools=None)
     assert out3["reasoning"] == {"summary": "auto", "effort": "low"}
     assert m3.model_config["reasoning"] == {"summary": "auto"}
 
-
-# ---------------------------------------------------------------------------
-# v2: function-call conversation contract
-# ---------------------------------------------------------------------------
 
 
 def _fc(call_id: str, name: str = "f") -> dict[str, Any]:
@@ -467,7 +440,6 @@ def test_add_function_results_mismatch_rolls_back() -> None:
 
 
 def test_add_function_results_fallback_unanswered() -> None:
-    # Restored conversation: no pending queue, unanswered call in conversation.
     m = make_v2()
     m.initialize("hi")
     m.conversation.append(_fc("c9", "g"))
@@ -512,10 +484,6 @@ def test_ensure_no_pending_function_calls_raises() -> None:
     with pytest.raises(KISSError):
         m._build_request_kwargs(tools=None)
 
-
-# ---------------------------------------------------------------------------
-# v2: non-streaming response parsing
-# ---------------------------------------------------------------------------
 
 
 def _dict_response(output: list[dict[str, Any]], status: str = "completed") -> dict[str, Any]:
@@ -591,10 +559,6 @@ def test_v2_extract_token_counts_dict_usage() -> None:
     assert m.extract_input_output_token_counts_from_response(resp) == (70, 7, 30, 0)
     assert m.extract_input_output_token_counts_from_response({}) == (0, 0, 0, 0)
 
-
-# ---------------------------------------------------------------------------
-# v2: streaming (_consume_stream with real event objects)
-# ---------------------------------------------------------------------------
 
 
 def _completed(output: list[dict[str, Any]]) -> SimpleNamespace:
@@ -735,10 +699,6 @@ def test_consume_stream_failed_event_raises() -> None:
     with pytest.raises(KISSError, match="kaboom"):
         m._consume_stream(events)
 
-
-# ---------------------------------------------------------------------------
-# v1: conversation init & attachments
-# ---------------------------------------------------------------------------
 
 
 def test_v1_initialize_with_system_instruction() -> None:

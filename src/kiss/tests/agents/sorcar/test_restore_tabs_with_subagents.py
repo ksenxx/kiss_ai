@@ -139,8 +139,6 @@ class TestRestoreParentTabWithSubagents:
         parent_id, sub_ids = _seed_parent_with_subagents(chat_id)
         server, events = _make_server()
         parent_tab_id = "tab-restored-parent"
-        # This is exactly what ``_cmd_resume_session`` does for the
-        # webview's post-restart ``resumeSession {chatId, tabId}``.
         server._cmd_resume_session({
             "type": "resumeSession",
             "chatId": chat_id,

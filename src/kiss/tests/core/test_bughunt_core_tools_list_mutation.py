@@ -86,8 +86,6 @@ def test_run_does_not_mutate_caller_tools_list(
         "run() mutated the caller's tools list: " f"{shared_tools!r}"
     )
 
-    # A second agent reusing the same list must register ITS OWN finish
-    # (the first agent's bound finish must not have leaked into the list).
     agent2 = KISSAgent("bughunt-tools-mutation-2")
     result2 = agent2.run(
         model_name="cc/opus",

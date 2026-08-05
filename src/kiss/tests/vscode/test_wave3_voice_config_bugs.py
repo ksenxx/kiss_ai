@@ -52,13 +52,6 @@ import pytest
 import kiss.core.vscode_config as vc
 import kiss.server.voice_wake as voice_wake
 
-# ---------------------------------------------------------------------------
-# D1 — model download must have a hard network timeout
-# ---------------------------------------------------------------------------
-
-# How long the stalling server keeps the connection open.  The fixed
-# download (1s env-overridden timeout) must give up long before this;
-# the unfixed ``urlretrieve`` blocked for the full window.
 _STALL_WINDOW_SECONDS = 30.0
 
 
@@ -70,7 +63,7 @@ class _StallingHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/zip")
         self.send_header("Content-Length", str(1024 * 1024))
         self.end_headers()
-        self.wfile.write(b"PK\x03\x04")  # partial body, then stall
+        self.wfile.write(b"PK\x03\x04")
         self.wfile.flush()
         cast(Any, self.server).release.wait(_STALL_WINDOW_SECONDS)
 
@@ -129,10 +122,7 @@ class TestD1DownloadTimeout:
                 f"download must fail within the hard timeout, took "
                 f"{elapsed:.1f}s (no network timeout?)"
             )
-            # No staging temp files may be left behind.
             assert _non_lock_leftovers(models_dir) == []
-            # The exclusive flock must have been released so other
-            # processes/threads are not stranded behind the failure.
             with open(models_dir / ".stall-model.lock", "w") as lock_file:
                 fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 fcntl.flock(lock_file, fcntl.LOCK_UN)
@@ -162,10 +152,6 @@ class TestD1DownloadTimeout:
             httpd.shutdown()
 
 
-# ---------------------------------------------------------------------------
-# D2 — source_shell_env must import keys even when the RC exits nonzero
-# ---------------------------------------------------------------------------
-
 
 @pytest.mark.skipif(
     not Path("/bin/bash").exists(), reason="requires /bin/bash",
@@ -179,7 +165,7 @@ class TestD2SourceShellEnvRcExitStatus:
         home.mkdir()
         (home / ".bashrc").write_text(
             "export OPENAI_API_KEY=wave3-d2-imported\n"
-            "false\n"  # a perfectly normal RC whose last command fails
+            "false\n"
         )
         monkeypatch.setenv("HOME", str(home))
         monkeypatch.setenv("SHELL", "/bin/bash")
@@ -208,10 +194,6 @@ class TestD2SourceShellEnvRcExitStatus:
         assert os.environ.get("TOGETHER_API_KEY") == "wave3-d2-happy"
 
 
-# ---------------------------------------------------------------------------
-# D3 — staged temp files must not leak on error paths
-# ---------------------------------------------------------------------------
-
 
 class TestD3TempFileLeaks:
     def test_save_config_replace_failure_leaves_no_temp(self) -> None:
@@ -222,8 +204,6 @@ class TestD3TempFileLeaks:
         try:
             if cfg_path.is_file():
                 cfg_path.unlink()
-            # A directory at the destination makes the real os.replace
-            # raise IsADirectoryError after the temp file was staged.
             cfg_path.mkdir()
             (cfg_path / "child").write_text("occupied")
             with pytest.raises(OSError):
@@ -260,10 +240,6 @@ class TestD3TempFileLeaks:
         )
 
 
-# ---------------------------------------------------------------------------
-# D5 — one shared Vosk acoustic model per process
-# ---------------------------------------------------------------------------
-
 _WAKE_DIR = voice_wake.DEFAULT_MODELS_DIR / voice_wake.MODEL_NAME
 _SPK_DIR = voice_wake.DEFAULT_MODELS_DIR / voice_wake.SPK_MODEL_NAME
 
@@ -285,12 +261,9 @@ class TestD5SharedVoskModel:
         identifier = voice_wake.SpeakerIdentifier(
             voice_wake.DEFAULT_MODELS_DIR
         )
-        # Constructing the identifier must NOT load a second copy of
-        # the wake acoustic model.
         assert len(voice_wake._VOSK_MODEL_CACHE) == 1
         assert voice_wake.load_shared_vosk_model(_WAKE_DIR) is shared
 
-        # Both recognizers must keep working off the shared model.
         silence = b"\x00\x00" * voice_wake.BLOCK_SIZE
         assert detector.feed(silence) is False
         result = identifier.speaker_of(silence * 8)

@@ -79,11 +79,6 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp()
         self.sock_path = str(Path(self.tmpdir) / "sorcar.sock")
 
-        # Point persistence at a temp sqlite DB so the ``task_history``
-        # rows we create here don't pollute the user's real ``~/.kiss``.
-        # ``_replay_session`` early-returns when the events lookup
-        # returns nothing, so an actual row + at least one event must
-        # be persisted before the resume click flow runs.
         self._saved_persistence = (th._DB_PATH, th._db_conn, th._KISS_DIR)
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
@@ -98,7 +93,6 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
         self.loop_thread.start()
 
         self.server = RemoteAccessServer(uds_path=self.sock_path)
-        # ``_send_to_ws_clients`` needs the printer's loop set.
         self.server._printer._loop = self.loop
 
         self.uds_server: asyncio.Server = asyncio.run_coroutine_threadsafe(
@@ -140,9 +134,6 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.loop_thread.join(timeout=5)
         self.loop.close()
-        # Restore persistence globals before deleting the temp tree
-        # so any background flushes that race teardown don't write
-        # to a path we are about to remove.
         th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_persistence
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -231,13 +222,6 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
         subscribed to the live event stream and (b) be told the task
         is running so the tab title shows the blinking green circle.
         """
-        # In production the CLI's ``ChatSorcarAgent.run`` allocates a
-        # ``task_history`` row before broadcasting any events, and
-        # the ``RecordingConsolePrinter`` then persists each event
-        # under that row.  Mirror this exactly: ``_replay_session``
-        # looks the chat events up by task_id and early-returns
-        # when none exist, so we need both a real row and at least
-        # one persisted event for the resume click flow to run.
         task_id, chat_id = _add_task(
             task="streamed CLI task", chat_id="",
         )
@@ -246,33 +230,12 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
             task_id=task_id,
         )
 
-        # Phase 1: CLI process announces it is running ``task_id``.
-        # In production the announcement is emitted by
-        # ``RecordingConsolePrinter`` on the first event of a fresh
-        # taskId; we exercise that same path here so the daemon side
-        # is exactly the production state when the user later clicks
-        # the row in the History panel.
         cli_printer = RecordingConsolePrinter()
         cli_printer._thread_local.task_id = str(task_id)
         cli_printer.broadcast({"type": "text_delta", "text": "before-click"})
         self._wait_for_cli_running(task_id)
 
-        # Phase 2: a fresh chat webview opens and clicks the running
-        # task in the History panel.  Frontend → ``_replay_session``
-        # via the WS / UDS dispatcher.  This is the line under fix:
-        # without it the new tab would have NO subscription, NO live
-        # stream, and a static (non-blinking) tab title.
         received, got = self._open_viewer()
-        # The CLI bridge connection opened by ``cli_printer.broadcast``
-        # in Phase 1 is ALSO registered as a UDS writer by
-        # ``_uds_handler`` (before ``cliTaskStart`` is dispatched, so
-        # it is guaranteed registered once ``_wait_for_cli_running``
-        # returned).  Waiting for just 1 writer therefore returns
-        # before the viewer's own writer is registered, and the
-        # one-shot ``status``/``task_events`` burst broadcast by
-        # ``_replay_session`` below would miss the viewer.  Production
-        # never races this way: ``resumeSession`` arrives ON the
-        # viewer's own (already registered) connection.
         self._wait_for_writers(2)
 
         viewer_tab = "history-click-tab"
@@ -282,9 +245,6 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
             task_id=task_id,
         )
 
-        # Phase 3: the viewer must now be subscribed to the live
-        # stream and must have received a ``status:running=true``
-        # event stamped with its tabId (the blinking green circle).
         with self.server._printer._lock:
             subscribers = self.server._printer._subscribers.get(
                 str(task_id), set(),
@@ -296,8 +256,6 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
         assert got.wait(timeout=30.0), (
             f"viewer received NO data after history click; got: {received}"
         )
-        # Give the broadcast burst a small drain window so we catch
-        # both ``status`` and ``task_events`` in one pass.
         time.sleep(0.1)
         decoded = self._decoded(received)
         running_evs = [
@@ -312,10 +270,6 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
             f"received: {decoded}"
         )
 
-        # Phase 4: with the subscription in place, a fresh CLI event
-        # for the SAME task id must now reach this viewer LIVE
-        # (this is the original bug from the user — clicking the
-        # history row must light up live streaming, not just history).
         received.clear()
         got.clear()
         cli_printer.broadcast({"type": "text_delta", "text": "after-click"})
@@ -336,10 +290,6 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
             f"its tabId; got: {decoded}"
         )
 
-        # Phase 5: CLI announces the task is done.  The daemon must
-        # both drop the task from ``_cli_running_tasks`` AND fan out
-        # ``status:running=false`` so the blinking green circle
-        # stops on every still-subscribed tab.
         received.clear()
         got.clear()
         cli_printer.broadcast({
@@ -374,10 +324,6 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
         """
         task_id = "9999cccccccccccccccccccccccccccc"
 
-        # Open a dedicated UDS connection that we will close abruptly
-        # below.  Using the bridge directly is what the CLI does, but
-        # we want to control the close, so use ``open_unix_connection``
-        # and send the envelope ourselves.
         async def _open_and_send() -> asyncio.StreamWriter:
             reader, writer = await asyncio.open_unix_connection(
                 self.sock_path,
@@ -395,7 +341,6 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
         ).result(timeout=5)
         self._wait_for_cli_running(task_id)
 
-        # Now drop the connection without sending ``cliTaskEnd``.
         async def _abrupt_close() -> None:
             writer.close()
             await writer.wait_closed()
@@ -404,7 +349,6 @@ class TestCliHistoryClickResumesLiveStream(unittest.TestCase):
             _abrupt_close(), self.loop,
         ).result(timeout=5)
 
-        # The UDS handler's ``finally`` must drop the leaked task id.
         self._wait_for_cli_not_running(task_id)
 
 

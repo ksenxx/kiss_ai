@@ -76,10 +76,6 @@ def _pop_tabs(*tab_ids: str) -> None:
         _RunningAgentState.running_agent_states.pop(tab_id, None)
 
 
-# ---------------------------------------------------------------------------
-# F2 — multi-<task> prompts: every subtask row must be fully persisted
-# ---------------------------------------------------------------------------
-
 
 class _ScriptedAgent(WorktreeSorcarAgent):
     """Real agent subclass whose ``run`` allocates a real task row.
@@ -179,14 +175,9 @@ def test_f2_every_subtask_row_gets_result_and_extra(tmp_path: Path) -> None:
         rows = _fetch_rows(["w2f2 alpha one", "w2f2 beta two"])
         assert set(rows) == {"w2f2 alpha one", "w2f2 beta two"}
         for task_text, (result, start_ts, end_ts, tokens, cost) in rows.items():
-            # Pre-fix: the FIRST subtask's row had result == "" and
-            # start_ts == end_ts == 0 (no extra payload at all).
             assert result == f"done {task_text}", task_text
             assert start_ts > 0, task_text
             assert end_ts >= start_ts, task_text
-            # Pre-fix: tokens were 0 on the first row and the agent's
-            # CUMULATIVE 200 on the last row.  Each subtask consumed
-            # exactly 100 tokens / $0.25.
             assert tokens == 100, task_text
             assert cost == pytest.approx(0.25), task_text
     finally:
@@ -206,15 +197,10 @@ def test_f2_single_task_persistence_unchanged(tmp_path: Path) -> None:
         assert end_ts >= start_ts
         assert tokens == 100
         assert cost == pytest.approx(0.25)
-        # The followup hook still fires exactly once for the task.
         assert len(server.followups) == 1
     finally:
         _pop_tabs(tab_id)
 
-
-# ---------------------------------------------------------------------------
-# F6 — cleanup reset() must not clobber the shared "" fallback bash state
-# ---------------------------------------------------------------------------
 
 
 def test_f6_task_cleanup_leaves_fallback_bash_state_alone(
@@ -227,8 +213,6 @@ def test_f6_task_cleanup_leaves_fallback_bash_state_alone(
             pytest.skip("no models configured in this environment")
         printer = _CapturePrinter()
         server = _NoFollowupServer(printer)
-        # Seed the shared fallback ("" key) bash state as a task-less
-        # broadcaster would: buffered output awaiting its timer flush.
         fallback = _BashState()
         fallback.generation = 7
         fallback.buffer.append("pending task-less output")
@@ -242,19 +226,11 @@ def test_f6_task_cleanup_leaves_fallback_bash_state_alone(
             "workDir": str(tmp_path),
             "model": models[0],
         })
-        # Pre-fix: the cleanup's printer.reset() ran on the worker
-        # thread AFTER its thread-local task_id was cleared to "", so
-        # it bumped the fallback state's generation and discarded its
-        # buffered text.
         assert fallback.generation == 7
         assert fallback.buffer == ["pending task-less output"]
     finally:
         _pop_tabs(tab_id)
 
-
-# ---------------------------------------------------------------------------
-# F5 — a slow broadcast must not block other tasks' bash streaming
-# ---------------------------------------------------------------------------
 
 
 class _BlockingBroadcastPrinter(JsonPrinter):
@@ -281,8 +257,6 @@ def test_f5_slow_broadcast_does_not_block_other_tasks() -> None:
 
     def task_a() -> None:
         printer._thread_local.task_id = "w2f5-a"
-        # ``last_flush`` starts at 0.0 so the first chunk takes the
-        # inline (immediate) flush path straight into broadcast.
         printer.print("AAA", type="bash_stream")
 
     thread_a = threading.Thread(target=task_a, daemon=True)
@@ -299,8 +273,6 @@ def test_f5_slow_broadcast_does_not_block_other_tasks() -> None:
     thread_b = threading.Thread(target=task_b, daemon=True)
     thread_b.start()
     try:
-        # Pre-fix: task A's stalled broadcast held the printer-global
-        # ``_bash_lock``, so task B's print() wedged behind it.
         assert done_b.wait(timeout=1.0), (
             "another task's bash_stream blocked behind a slow broadcast"
         )
@@ -309,7 +281,6 @@ def test_f5_slow_broadcast_does_not_block_other_tasks() -> None:
         thread_a.join(timeout=5)
         thread_b.join(timeout=5)
     assert not thread_a.is_alive()
-    # Task A's flush is still delivered once released.
     assert any(
         e.get("type") == "system_output" and "AAA" in e.get("text", "")
         for e in printer.events
@@ -335,10 +306,6 @@ def test_f5_reset_during_inflight_flush_still_discards_stale_text() -> None:
     printer._flush_bash()
     assert all(e.get("type") != "system_output" for e in printer.events)
 
-
-# ---------------------------------------------------------------------------
-# F9 — the agent must wait on the SAME queue it drained and registered
-# ---------------------------------------------------------------------------
 
 
 class _AskUserGatePrinter(_CapturePrinter):
@@ -383,15 +350,8 @@ def test_f9_ask_user_question_waits_on_registered_queue() -> None:
         worker = threading.Thread(target=agent_thread, daemon=True)
         worker.start()
         assert printer.ask_user_sent.wait(timeout=5)
-        # The question was drained + registered against q1.
         with server._state_lock:
             assert server._pending_user_answer_tasks.get(id(q1)) == task_key
-        # While the askUser broadcast is still in flight, the owner tab
-        # is disposed and re-created (closeTab + reopen): its state now
-        # carries a brand-new queue.  Pre-fix,
-        # ``_await_user_response``'s RE-resolution picked up this new
-        # queue, so the answer delivered to the registered queue never
-        # woke the agent.
         q2: queue.Queue[str] = queue.Queue(maxsize=1)
         tab.user_answer_queue = q2
         printer.release_ask_user.set()
@@ -402,16 +362,11 @@ def test_f9_ask_user_question_waits_on_registered_queue() -> None:
             "drained and registered"
         )
         assert outcome.get("answer") == "yes-go-ahead"
-        # The registration was cleaned up on exit.
         with server._state_lock:
             assert id(q1) not in server._pending_user_answer_tasks
     finally:
         _pop_tabs(tab_id)
 
-
-# ---------------------------------------------------------------------------
-# F13 — saveConfig work_dir change must mirror setWorkDir's discipline
-# ---------------------------------------------------------------------------
 
 
 class _WorkDirPrinter(_CapturePrinter):
@@ -432,8 +387,6 @@ def test_f13_save_config_work_dir_syncs_cache_and_printer(
     server._file_cache["stale"] = ["old.py"]
     server._cmd_save_config({"config": {"work_dir": new_dir}})
     assert server.work_dir == new_dir
-    # Pre-fix: the printer kept reporting the old folder and the stale
-    # @-mention cache survived the switch.
     assert printer.work_dir == new_dir
     assert server._file_cache == {}
 
@@ -466,16 +419,11 @@ def test_f13_concurrent_save_config_is_serialised(tmp_path: Path) -> None:
     for t in threads:
         t.join(timeout=10)
     assert all(not t.is_alive() for t in threads)
-    # Whichever save won last, server / printer / config agree.
     cfg = load_config()
     assert server.work_dir in dirs
     assert printer.work_dir == server.work_dir
     assert cfg.get("work_dir") == server.work_dir
 
-
-# ---------------------------------------------------------------------------
-# F12 — concurrent model downloads must be serialised and atomic
-# ---------------------------------------------------------------------------
 
 
 def _make_model_zip(src_dir: Path, model_name: str) -> Path:
@@ -520,10 +468,8 @@ def test_f12_concurrent_model_download_is_safe(tmp_path: Path) -> None:
     assert len(results) == 6
     model_dir = models_dir / model_name
     assert all(r == model_dir for r in results)
-    # The published model is complete.
     assert (model_dir / "conf" / "model.conf").read_text() == "ok"
     assert (model_dir / "README").read_text() == "marker"
-    # No temp zips, temp extract dirs, or leftover archives remain.
     leftovers = [
         p.name
         for p in models_dir.iterdir()

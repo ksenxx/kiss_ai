@@ -71,7 +71,6 @@ class TestFilesEventCarriesPrefix(unittest.TestCase):
                 f"files event must echo the requested prefix: {ev!r}",
             )
             self.assertEqual(ev["prefix"], "ut")
-        # The post-scan reply must actually contain the matching file.
         populated = [e for e in files_events if e.get("files")]
         self.assertTrue(populated, f"no populated files reply: {files_events!r}")
         texts = [f["text"] for f in populated[-1]["files"]]

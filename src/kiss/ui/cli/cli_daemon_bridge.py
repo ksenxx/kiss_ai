@@ -35,19 +35,7 @@ from kiss.agents.sorcar.persistence import _default_kiss_dir
 
 _LOCK = threading.Lock()
 _WRITER: socket.socket | None = None
-# Connect / send timeout (seconds) applied to the cached UDS socket.
-# The bridge is best-effort by contract: a daemon that accepted the
-# connection but stopped reading (wedged event loop, paused process)
-# must NOT freeze the CLI forever once the kernel socket buffer
-# fills.  ``socket.timeout`` is an ``OSError`` subclass, so a timed-out
-# send flows through the existing drop-and-reconnect error path.
 _SEND_TIMEOUT = 2.0
-# UDS path the cached ``_WRITER`` is connected to.  ``_sock_path()``
-# re-reads ``KISS_SORCAR_SOCK`` on every call (its documented
-# contract), so ``_send_envelope`` must compare the cached
-# connection's path against the current one and reconnect when they
-# differ — otherwise events emitted after the env var changed would
-# keep flowing to the OLD daemon socket.
 _WRITER_PATH: Path | None = None
 
 
@@ -79,8 +67,6 @@ def _connect() -> socket.socket | None:
         s.settimeout(_SEND_TIMEOUT)
         s.connect(str(path))
     except OSError:
-        # Close the already-created socket object so a daemon-less CLI
-        # run does not leak one fd per broadcast until GC (w3 C-1).
         if s is not None:
             s.close()
         return None
@@ -101,9 +87,6 @@ def _send_envelope(envelope: dict[str, Any]) -> None:
     with _LOCK:
         path = _sock_path()
         if _WRITER is not None and _WRITER_PATH != path:
-            # ``KISS_SORCAR_SOCK`` changed since the connection was
-            # cached: drop the stale writer so this event reaches the
-            # daemon now listening at the new path.
             try:
                 _WRITER.close()
             except OSError:

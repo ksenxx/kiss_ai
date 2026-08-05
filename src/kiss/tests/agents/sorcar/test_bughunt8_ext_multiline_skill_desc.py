@@ -60,7 +60,6 @@ def test_block_scalar_description_is_one_line(isolated_homes: Path) -> None:
     assert skill.description == (
         "Reviews pull requests carefully and suggests focused improvements."
     )
-    # The /skills listing stays one entry per line.
     listing = format_skill_listing({"multi": skill})
     assert len(listing.splitlines()) == 1
 

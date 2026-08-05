@@ -300,10 +300,6 @@ class TestBug15ConcurrentReleaseUsesLocking:
             "repo_lock must return different locks for different repos"
         )
 
-        # ``repo_lock`` returns a re-entrant ``threading.RLock``
-        # (RACE-2 fix: same thread can re-acquire across
-        # ``_try_setup_worktree`` → ``_release_worktree`` →
-        # ``_do_merge`` without deadlock).
         assert lock1.acquire(blocking=False)
         try:
             assert lock1.acquire(blocking=False), (

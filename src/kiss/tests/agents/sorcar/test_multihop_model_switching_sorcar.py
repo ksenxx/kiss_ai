@@ -74,10 +74,6 @@ def _find_tool(tools: list, name: str) -> Any:
     raise AssertionError(f"Tool {name!r} not found")
 
 
-# ---------------------------------------------------------------------------
-# Fixtures — isolate config and the sorcar DB so tests never touch real state.
-# ---------------------------------------------------------------------------
-
 @pytest.fixture(autouse=True)
 def _isolate_config(tmp_path: Path) -> Any:
     """Redirect vscode_config writes to a temp directory."""
@@ -127,7 +123,6 @@ class TestSorcarSetModelMultiHopLive:
         assert f"to {model_name}" in result, result
         assert agent.model_name == model_name
         assert agent.model.model_name == model_name
-        # The cached tools schema must be rebuilt against the new model.
         assert agent._cached_tools_schema is not old_schema
         names = {
             entry["function"]["name"]
@@ -136,6 +131,7 @@ class TestSorcarSetModelMultiHopLive:
         }
         assert "reveal_secret" in names
 
+    @pytest.mark.slow
     def test_five_hop_chain_via_set_model_tool(self) -> None:
         """gpt-4o -> gpt-5.5 (Responses) -> Claude -> Gemini -> gpt-5.5,
         each hop making a live tool call; the final model recalls all
@@ -145,8 +141,6 @@ class TestSorcarSetModelMultiHopLive:
         tools = agent._get_tools()
         set_model = _find_tool(tools, "set_model")
 
-        # Hop 1: live OpenAI Chat Completions model, exactly as a running
-        # executor would hold it (real endpoint, real key via routing).
         agent.model = model_factory("gpt-4o")
         agent.model_name = "gpt-4o"
         agent.model.initialize(
@@ -165,10 +159,6 @@ class TestSorcarSetModelMultiHopLive:
             1,
         )
 
-        # Hop 2: OpenAI reasoning model.  The factory auto-defaults
-        # reasoning_effort from MODEL_INFO, and with tools attached the
-        # request is delegated to /v1/responses — the effort must survive
-        # the set_model config reconstruction.
         self._switch(agent, set_model, "gpt-5.5")
         assert isinstance(agent.model, OpenAICompatibleModel)
         assert agent.model.base_url.startswith("https://api.openai.com")
@@ -180,9 +170,6 @@ class TestSorcarSetModelMultiHopLive:
             2,
         )
 
-        # Hop 3: Anthropic.  Regression hotspot: set_model must NOT carry
-        # the OpenAI base_url into the factory config, otherwise this
-        # builds an OpenAICompatibleModel pointing Claude at OpenAI.
         self._switch(agent, set_model, "claude-haiku-4-5")
         assert isinstance(agent.model, AnthropicModel), (
             f"set_model built {type(agent.model).__name__} for a Claude "
@@ -195,7 +182,6 @@ class TestSorcarSetModelMultiHopLive:
             3,
         )
 
-        # Hop 4: Gemini on top of chat + Responses + Anthropic history.
         self._switch(agent, set_model, "gemini-2.5-flash")
         assert isinstance(agent.model, GeminiModel)
         _run_tool_turn(
@@ -205,8 +191,6 @@ class TestSorcarSetModelMultiHopLive:
             4,
         )
 
-        # Hop 5: back to the OpenAI reasoning model; tools must still work
-        # on the four-provider history.
         self._switch(agent, set_model, "gpt-5.5")
         assert isinstance(agent.model, OpenAICompatibleModel)
         _run_tool_turn(
@@ -216,8 +200,6 @@ class TestSorcarSetModelMultiHopLive:
             1,
         )
 
-        # Semantic losslessness: the final model can only list all four
-        # secrets if every hop's tool result survived every conversion.
         agent.model.add_message_to_conversation(
             "user",
             "List ALL the secret words that were revealed by the "
@@ -230,7 +212,6 @@ class TestSorcarSetModelMultiHopLive:
                 f"final model failed to recall {secret!r}; got: {content!r}"
             )
 
-        # Structural losslessness in the handed-off conversation.
         serialized = json.dumps(agent.model.conversation, default=str)
         for secret in _SECRETS.values():
             assert secret in serialized
@@ -242,6 +223,7 @@ class TestSorcarSetModelMultiHopLive:
 class TestSorcarAgentRunMultiHopLive:
     """Full SorcarAgent.run loop switching providers mid-task via set_model."""
 
+    @pytest.mark.slow
     def test_agent_run_switches_models_and_recalls_secrets(
         self, tmp_path: Path
     ) -> None:
@@ -286,7 +268,6 @@ class TestSorcarAgentRunMultiHopLive:
             assert word in result, (
                 f"secret {word!r} missing from agent result: {result!r}"
             )
-        # The last set_model call must have stuck on the agent's bookkeeping.
         assert agent.model_name == "gemini-2.5-flash"
 
 
@@ -394,8 +375,6 @@ class TestSetModelResponsesFlagToClaudeLive:
         )
         set_model("claude-haiku-4-5")
         assert isinstance(agent.model, AnthropicModel)
-        # The flag itself is carried (harmless bookkeeping) — it must simply
-        # never reach the Anthropic API call.
         agent.model.add_message_to_conversation(
             "user", "Reply with exactly: OK"
         )

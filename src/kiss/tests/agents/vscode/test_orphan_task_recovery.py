@@ -46,11 +46,6 @@ def _make_server() -> Any:
     from kiss.server.server import VSCodeServer
 
     server = VSCodeServer()
-    # The sweep runs on a background thread (so daemon startup is
-    # never delayed by SQLite lock contention — see
-    # ``test_web_server_startup_orphan_sweep_nonblocking.py``).  Join
-    # it so the assertions below observe the post-sweep state
-    # deterministically.
     thread = server._orphan_sweep_thread
     if thread is not None:
         thread.join(timeout=30)
@@ -119,12 +114,9 @@ class TestOrphanTaskRecovery(TestCase):
             extra={"model": "m", "work_dir": "/tmp", "version": "test",
                    "is_parallel": False, "is_worktree": False},
         )
-        # Overwrite the sentinel to simulate a normally-completed
-        # task.
         _persistence._save_task_result(
             "Task completed successfully", task_id=ok_id,
         )
-        # And a deliberately-stopped task — the user clicked Stop.
         stopped_id, _ = _persistence._add_task(
             "user-stopped task",
             chat_id="recovery-test-chat-3",
@@ -172,8 +164,6 @@ class TestOrphanTaskRecovery(TestCase):
         """Boot-time call when the table has no sentinel rows must
         be a no-op (rowcount 0) and not raise.
         """
-        # Construct a server once to flush any pre-existing orphans
-        # from prior tests in the same process.
         _make_server()
         n = _persistence._recover_orphaned_tasks(set())
         assert n == 0, f"expected zero updates, got {n}"

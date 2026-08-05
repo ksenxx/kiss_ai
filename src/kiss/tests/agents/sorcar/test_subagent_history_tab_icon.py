@@ -108,7 +108,6 @@ class TestBackendIsDoneSignal:
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect(self.tmpdir)
-        # Ensure no leaked entries from prior tests poison this one.
         ChatSorcarAgent.running_agents.clear()
 
     def teardown_method(self) -> None:
@@ -128,7 +127,6 @@ class TestBackendIsDoneSignal:
             description="Completed sub-task",
         )
         server, events = _make_server()
-        # running_agents is empty → sub-agent is NOT running.
         assert task_id not in ChatSorcarAgent.running_agents
 
         server._replay_session(
@@ -150,8 +148,6 @@ class TestBackendIsDoneSignal:
             description="Running sub-task",
         )
         server, events = _make_server()
-        # Simulate "sub-agent thread is running": register a dummy
-        # entry in running_agents under the sub-agent's own task id.
         ChatSorcarAgent.running_agents[task_id] = object()  # type: ignore[assignment]
         try:
             server._replay_session(
@@ -187,8 +183,11 @@ class TestFrontendHandlerHonorsIsDone:
         m_done = re.search(
             r"subTab\.isDone\s*=\s*([^;]+);", body,
         )
+        # The handler sets the running state through setTabRunning(),
+        # which also drops any pending-stop state along with it
+        # (reports/stop_button_delay_2026-08-05.html).
         m_running = re.search(
-            r"subTab\.isRunning\s*=\s*([^;]+);", body,
+            r"setTabRunning\(subTab,\s*([^)]+)\)", body,
         )
         assert m_done is not None, body
         assert m_running is not None, body
@@ -208,4 +207,3 @@ class TestFrontendHandlerHonorsIsDone:
             or "ev.isDone === true" in body
         )
         assert coerce, body
-

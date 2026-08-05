@@ -23,11 +23,6 @@ from kiss.agents.sorcar.persistence import (
 )
 from kiss.core.models.model_info import MODEL_INFO, get_available_models
 from kiss.server.helpers import (
-    # ``SUGGESTION_LIMIT`` caps the fast-complete dropdown items
-    # emitted to the webview per ``complete`` request.  Single-sourced
-    # in helpers.py and shared with the @-mention file picker so the
-    # dropdown stays scrollable without UI tuning differences between
-    # the two pickers.
     SUGGESTION_LIMIT as _COMPLETIONS_LIMIT,
 )
 from kiss.server.helpers import (
@@ -45,16 +40,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Trailing word / dot-chain token of a query (e.g. ``self.met`` at the
-# end of ``call self.met``) — the piece identifier completion extends.
-# ``\Z`` (not ``$``): Python's ``$`` also matches immediately before a
-# final newline.  Completion must inspect the text at the actual cursor
-# position; a query ending in ``"name\n"`` is on a fresh line and has no
-# trailing identifier to extend.
 _TRAILING_IDENT_RE = re.compile(r"([\w][\w.]*)\Z")
 
-# Identifier completion reads at most this many characters of the
-# active file so huge buffers cannot stall a per-keystroke request.
 _ACTIVE_FILE_READ_CAP = 50000
 
 
@@ -188,8 +175,6 @@ def _ghost_suffix(query: str, completions: list[dict[str, str]]) -> str:
     elif kind == "trick":
         prefix = current_sentence_partial(query)
     else:
-        # ``identifier`` — the only other kind ``_complete_many``
-        # produces.
         m = _TRAILING_IDENT_RE.search(query)
         prefix = m.group(1) if m else ""
     if not prefix or not text.startswith(prefix):
@@ -205,17 +190,18 @@ class _AutocompleteMixin:
         work_dir: str
         _state_lock: threading.RLock
         _complete_queue: (
-            queue.Queue[tuple[str, int, str, str, str, str]] | None
+            queue.Queue[tuple[str, int, str, str, str, str, str]] | None
         )
         _complete_worker: threading.Thread | None
         _complete_seq_latest: dict[str, int]
         _file_cache: dict[str, list[str]]
+        _files_latest_request: dict[str, object]
 
     def _active_file_identifier_matches(
         self,
         query: str,
         snapshot_file: str = "",
-        snapshot_content: str = "",
+        snapshot_content: str | None = None,
         chat_id: str = "",
     ) -> list[str]:
         """Return every identifier from the active file/chat context.
@@ -235,9 +221,16 @@ class _AutocompleteMixin:
         the leading non-token portion of the query with each
         identifier.
         """
-        content = snapshot_content
-        if not content and snapshot_file:
+        if snapshot_content is not None:
+            # A live editor snapshot was supplied — honour it verbatim,
+            # INCLUDING the empty string (an open but empty document).
+            # Falling back to the on-disk file here would resurrect
+            # identifiers the user has deleted from the unsaved buffer.
+            content = snapshot_content
+        elif snapshot_file:
             content = read_active_file_head(snapshot_file)
+        else:
+            content = ""
         partial = trailing_identifier(query)
         if not partial:
             return []
@@ -246,9 +239,6 @@ class _AutocompleteMixin:
             return []
         combined = content + ("\n" + chat_text if chat_text else "")
         matches = identifier_prefix_matches(combined, partial)
-        # Longest-first so the dropdown's auto-selected first item is
-        # the most informative completion.  Tie-breaker is
-        # alphabetical for stable ordering across runs.
         matches.sort(key=lambda c: (-len(c), c))
         return matches
 
@@ -267,20 +257,16 @@ class _AutocompleteMixin:
         assert self._complete_queue is not None
         q = self._complete_queue
         while True:
-            query, seq, snapshot_file, snapshot_content, chat_id, conn_id = (
-                q.get()
-            )
+            (
+                query, seq, snapshot_file, snapshot_content, chat_id,
+                conn_id, tab_id,
+            ) = q.get()
             try:
                 self._complete(
                     query, seq, snapshot_file, snapshot_content, chat_id,
-                    conn_id,
+                    conn_id, tab_id,
                 )
             except Exception:
-                # This worker is a lazily-started singleton with no
-                # restart path (``_ensure_complete_worker`` sees the
-                # dead thread object as "already started"), so one
-                # poisoned request must never kill ghost-text
-                # autocomplete for the daemon's remaining lifetime.
                 logger.debug("autocomplete request failed", exc_info=True)
 
     def _complete(
@@ -288,9 +274,10 @@ class _AutocompleteMixin:
         query: str,
         seq: int = -1,
         snapshot_file: str = "",
-        snapshot_content: str = "",
+        snapshot_content: str | None = None,
         chat_id: str = "",
         conn_id: str = "",
+        tab_id: str = "",
     ) -> None:
         """Ghost text autocomplete via fast local prefix matching.
 
@@ -309,37 +296,43 @@ class _AutocompleteMixin:
                 direct callers).  Staleness is judged per connection so
                 concurrent typing in another VS Code window never
                 cancels this request.
+            tab_id: Chat tab the request came from (``""`` for direct
+                callers).  Echoed on both replies so the webview can
+                tell whether the suggestion still belongs to the
+                conversation on screen.
         """
         if seq >= 0:
             with self._state_lock:
                 if seq != self._complete_seq_latest.get(conn_id, -1):
                     return
         if not query or len(query) < 2:
-            self._emit_ghost("", query, conn_id)
-            self._emit_completions([], query, conn_id)
+            self._emit_ghost("", query, conn_id, tab_id)
+            self._emit_completions([], query, conn_id, tab_id)
             return
 
         completions = self._complete_many(
             query, snapshot_file, snapshot_content, chat_id,
         )
-        # Inline ghost text: derive the suffix from the top completion
-        # so the legacy overlay keeps working for users who prefer to
-        # accept with Tab without opening the dropdown.  Completions
-        # are raw suggestions — a history task starts with ``query``
-        # in full, a trick starts with the current sentence partial,
-        # and an identifier starts with the trailing token — so the
-        # ghost suffix is derived per source.  ``clip_autocomplete_
-        # suggestion`` then normalises the cursor-to-ghost gap.
+        # Re-check freshness AFTER the (potentially slow) computation:
+        # a newer request on the same connection may have advanced the
+        # sequence while this one was doing file/DB work, and emitting
+        # now would overwrite the newer request's result with a stale
+        # one (the frontend only compares the echoed query text, which
+        # can be identical across the two requests).
+        if seq >= 0:
+            with self._state_lock:
+                if seq != self._complete_seq_latest.get(conn_id, -1):
+                    return
         fast = _ghost_suffix(query, completions)
         fast = clip_autocomplete_suggestion(query, fast)
-        self._emit_ghost(fast, query, conn_id)
-        self._emit_completions(completions, query, conn_id)
+        self._emit_ghost(fast, query, conn_id, tab_id)
+        self._emit_completions(completions, query, conn_id, tab_id)
 
     def _complete_many(
         self,
         query: str,
         snapshot_file: str = "",
-        snapshot_content: str = "",
+        snapshot_content: str | None = None,
         chat_id: str = "",
     ) -> list[dict[str, str]]:
         """Gather every fast-complete candidate for *query*.
@@ -407,6 +400,7 @@ class _AutocompleteMixin:
         completions: list[dict[str, str]],
         query: str,
         conn_id: str,
+        tab_id: str = "",
     ) -> None:
         """Emit one ``completions`` event for the fast-complete picker.
 
@@ -420,6 +414,7 @@ class _AutocompleteMixin:
             completions: List of ``{"type", "text"}`` items.
             query: The query string this list answers.
             conn_id: Requesting connection id (``""`` for direct callers).
+            tab_id: Requesting chat tab (``""`` for direct callers).
         """
         event: dict[str, Any] = {
             "type": "completions",
@@ -428,26 +423,37 @@ class _AutocompleteMixin:
         }
         if conn_id:
             event["connId"] = conn_id
+        if tab_id:
+            event["tabId"] = tab_id
         self.printer.broadcast(event)
 
-    def _emit_ghost(self, suggestion: str, query: str, conn_id: str) -> None:
+    def _emit_ghost(
+        self, suggestion: str, query: str, conn_id: str, tab_id: str = "",
+    ) -> None:
         """Emit one ``ghost`` autocomplete event.
 
         Stamped with the requesting connection's ``conn_id`` (when
         non-empty) so the suggestion is delivered only to the VS Code
         window that is typing — never to a sibling window whose input
-        happens to hold the same text.
+        happens to hold the same text.  ``tab_id`` narrows that one
+        window down to the chat tab that typed: the webview keeps a
+        single ghost overlay and a single picker, so a reply with no
+        tab of its own would render over whichever conversation the
+        user has since switched to.
 
         Args:
             suggestion: The ghost-text suffix to suggest (may be ``""``).
             query: The query string this suggestion answers.
             conn_id: Requesting connection id (``""`` for direct callers).
+            tab_id: Requesting chat tab (``""`` for direct callers).
         """
         event: dict[str, Any] = {
             "type": "ghost", "suggestion": suggestion, "query": query,
         }
         if conn_id:
             event["connId"] = conn_id
+        if tab_id:
+            event["tabId"] = tab_id
         self.printer.broadcast(event)
 
     def _ensure_complete_worker(self) -> None:
@@ -482,18 +488,36 @@ class _AutocompleteMixin:
         """
         return work_dir or self.work_dir
 
+    def _files_request_map(self) -> dict[str, object]:
+        """Return the per-connection latest file-picker request map.
+
+        Maps a connection id to a unique token identifying its most
+        recent ``getFiles`` request.  Entries are SHORT-LIVED: each is
+        removed as soon as the request it names has been answered (see
+        :meth:`_get_files` and :meth:`_refresh_file_cache`), so the map
+        never accumulates departed connections and needs no teardown
+        wiring.  Created lazily on first use (the daemon's ``__init__``
+        predates this guard).  Callers must hold ``_state_lock``.
+        """
+        reqs = getattr(self, "_files_latest_request", None)
+        if reqs is None:
+            reqs = {}
+            self._files_latest_request = reqs
+        return reqs
+
     def _refresh_file_cache(
         self,
         then_emit_for_prefix: str | None = None,
         work_dir: str = "",
         conn_id: str = "",
+        tab_id: str = "",
     ) -> None:
         """Refresh the file cache for *work_dir* in a background thread.
 
         When ``then_emit_for_prefix`` is set, broadcasts a ``files``
         event ranked for that prefix once the scan finishes.  This lets
-        callers (``_get_files``) kick off a non-blocking refresh and
-        still deliver suggestions to the UI.
+        the only caller (``_get_files``) kick off a non-blocking
+        refresh and still deliver suggestions to the UI.
 
         ``work_dir`` selects which directory to scan; an empty value
         defaults to ``self.work_dir`` so existing callers that omit it
@@ -501,38 +525,54 @@ class _AutocompleteMixin:
         entry in ``self._file_cache`` (keyed by the resolved path) so
         tabs with different working directories never share file lists.
 
-        Race protection: when invoked from ``_get_files`` (i.e.
-        ``then_emit_for_prefix is not None``, meaning the cache was
-        empty at the call site), this preserves the original double-
-        check pattern from commit ``e49d867c`` — the scan result is
-        only published if the cache is still empty when the scan
-        finishes.  This prevents a slow scan from clobbering a fresher
-        result published by a concurrent refresh thread.  Explicit
-        refresh requests (``then_emit_for_prefix is None``) overwrite
-        unconditionally, matching their callers' intent (the user just
-        asked for a refresh).
+        Race protection (two layers):
+
+        * Cache publication preserves the double-check pattern from
+          commit ``e49d867c`` — the scan result is only published if
+          the cache is still empty when the scan finishes, so a slow
+          scan never clobbers a fresher result published by a
+          concurrent refresh thread.
+        * Emission is guarded by the per-connection request token
+          captured at call time: if the connection has since issued a
+          newer ``getFiles`` (e.g. the same typed prefix from a
+          different tab/work_dir), the stale scan's reply is dropped
+          instead of overwriting the newer picker contents.  When the
+          reply IS still the latest, its token entry is removed — the
+          request is answered, so the map stays empty for idle
+          connections (no per-connection teardown needed).
+
+        ``tab_id`` is carried through to the deferred ``files`` event
+        so the late reply still names the chat tab that typed ``@``.
         """
         from kiss.server.diff_merge import _scan_files
 
         wd = self._resolve_work_dir(work_dir)
-        only_if_empty = then_emit_for_prefix is not None
+        with self._state_lock:
+            request_token = self._files_request_map().get(conn_id)
 
         def _do_refresh() -> None:
             result = _scan_files(wd)
             with self._state_lock:
                 existing = self._file_cache.get(wd)
-                if only_if_empty and existing is not None:
-                    # A concurrent writer published a fresher value
-                    # while we were scanning — emit theirs, not ours.
+                if existing is not None:
                     result = existing
                 else:
                     self._file_cache[wd] = result
-            if then_emit_for_prefix is not None:
+                reqs = self._files_request_map()
+                stale = reqs.get(conn_id) is not request_token
+                if not stale:
+                    reqs.pop(conn_id, None)
+            if then_emit_for_prefix is not None and not stale:
                 usage = _load_file_usage()
                 ranked = rank_file_suggestions(
                     result, then_emit_for_prefix, usage,
                 )
-                self._emit_files(ranked, conn_id, prefix=then_emit_for_prefix)
+                self._emit_files(
+                    ranked,
+                    conn_id,
+                    prefix=then_emit_for_prefix,
+                    tab_id=tab_id,
+                )
 
         threading.Thread(target=_do_refresh, daemon=True).start()
 
@@ -549,15 +589,17 @@ class _AutocompleteMixin:
 
         This hook is invoked by :meth:`_TaskRunnerMixin._run_task_inner`
         at the tail of every task's cleanup ``finally``.  It rescans
-        *work_dir* in a background thread (no caller blocking) and:
+        *work_dir* in a background thread (no caller blocking) and
+        only updates the cache when the *set* of files actually
+        changed — pure modifications never alter the picker's list so
+        the rescan is a no-op.  The next ``getFiles`` (every picker
+        keystroke issues one) serves the refreshed list.
 
-        * only updates the cache when the *set* of files actually
-          changed — pure modifications never alter the picker's list
-          so the rescan is a no-op; and
-        * broadcasts a fresh ``files`` event (with no ``connId`` so
-          every connected client receives it) only when the list
-          changed, so any open ``@``-mention picker UI refreshes
-          without further user action.
+        No ``files`` event is broadcast: an unsolicited reply stamped
+        ``conn_id="", prefix=""`` would be accepted by every client
+        whose picker shows a bare ``@`` — including windows whose tab
+        roots at a DIFFERENT work_dir — overwriting their picker with
+        files from this task's workspace (fixer-5 F5-03/R5-03).
 
         When *work_dir* has no cache entry (no ``@``-mention picker
         has ever opened there) the hook is a no-op: there is nothing
@@ -577,23 +619,11 @@ class _AutocompleteMixin:
         def _do_refresh() -> None:
             result = _scan_files(wd)
             if set(result) == cached_set:
-                # Only modifications (or no change at all) — nothing
-                # to publish.  The cached list is still accurate so
-                # no overwrite is needed either.
                 return
             with self._state_lock:
                 if self._file_cache.get(wd) is not cached:
-                    # A concurrent writer (explicit refresh or
-                    # ``setWorkDir``) published a fresher scan while
-                    # ours was running — keep theirs (already
-                    # broadcast) instead of clobbering it with our
-                    # potentially staler result.  Mirrors the
-                    # double-check in ``_refresh_file_cache``.
                     return
                 self._file_cache[wd] = result
-            usage = _load_file_usage()
-            ranked = rank_file_suggestions(result, "", usage)
-            self._emit_files(ranked, conn_id="", prefix="")
 
         threading.Thread(target=_do_refresh, daemon=True).start()
 
@@ -603,6 +633,7 @@ class _AutocompleteMixin:
         conn_id: str,
         loading: bool = False,
         prefix: str = "",
+        tab_id: str = "",
     ) -> None:
         """Emit one ``files`` event for the ``@``-mention picker.
 
@@ -625,6 +656,10 @@ class _AutocompleteMixin:
             loading: True for the immediate empty reply sent while a
                 background directory scan is still running.
             prefix: The ``@``-mention query this reply was ranked for.
+            tab_id: Requesting chat tab (``""`` for direct callers).  A
+                window can show several chat tabs over one connection,
+                and they share a single picker element, so the tab is
+                what actually identifies the owner of the reply.
         """
         event: dict[str, Any] = {
             "type": "files", "files": ranked, "prefix": prefix,
@@ -633,10 +668,16 @@ class _AutocompleteMixin:
             event["loading"] = True
         if conn_id:
             event["connId"] = conn_id
+        if tab_id:
+            event["tabId"] = tab_id
         self.printer.broadcast(event)
 
     def _get_files(
-        self, prefix: str, work_dir: str = "", conn_id: str = "",
+        self,
+        prefix: str,
+        work_dir: str = "",
+        conn_id: str = "",
+        tab_id: str = "",
     ) -> None:
         """Send file list for the ``@``-mention picker, scoped to *work_dir*.
 
@@ -654,14 +695,27 @@ class _AutocompleteMixin:
         results without the caller blocking.
         """
         wd = self._resolve_work_dir(work_dir)
+        token: object = object()
         with self._state_lock:
+            reqs = self._files_request_map()
+            reqs[conn_id] = token
             cache = self._file_cache.get(wd)
         if cache is None:
             self._refresh_file_cache(
-                then_emit_for_prefix=prefix, work_dir=wd, conn_id=conn_id,
+                then_emit_for_prefix=prefix,
+                work_dir=wd,
+                conn_id=conn_id,
+                tab_id=tab_id,
             )
-            self._emit_files([], conn_id, loading=True, prefix=prefix)
+            self._emit_files(
+                [], conn_id, loading=True, prefix=prefix, tab_id=tab_id,
+            )
             return
         usage = _load_file_usage()
         ranked = rank_file_suggestions(cache, prefix, usage)
-        self._emit_files(ranked, conn_id, prefix=prefix)
+        self._emit_files(ranked, conn_id, prefix=prefix, tab_id=tab_id)
+        with self._state_lock:
+            # This request is answered; drop its token so the map only
+            # ever holds connections with a scan still in flight.
+            if reqs.get(conn_id) is token:
+                del reqs[conn_id]

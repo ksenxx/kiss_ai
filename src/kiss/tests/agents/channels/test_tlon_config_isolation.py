@@ -114,13 +114,11 @@ def test_check_auth_unauthenticated_survives_leftover_ephemeral_config() -> None
         base = f"http://127.0.0.1:{server.server_address[1]}"
         _config.save({"ship_url": base, "code": "lidlut-tabwed", "ship": "~zod"})
 
-        # Leftover config makes a fresh agent look authenticated...
         agent = TlonAgent()
         agent.web_use_tool = None
         tools = {t.__name__: t for t in agent._get_tools()}
         assert json.loads(tools["check_tlon_auth"]())["ok"] is True
 
-        # ...but the shared auth-check test now resets it and passes.
         _run_check_auth_unauthenticated(_TLON_INFO)
     finally:
         backup.restore()

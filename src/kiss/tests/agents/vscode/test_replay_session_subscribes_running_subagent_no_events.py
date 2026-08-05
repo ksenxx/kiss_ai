@@ -122,9 +122,6 @@ class TestReplaySessionRunningSubagentNoEvents:
         chat_id = "chat-parallel-A"
         parent_id, _ = th._add_task("parent", chat_id=chat_id)
         sub_id, _ = th._add_task("sub task body", chat_id=chat_id)
-        # Mark as sub-agent in ``extra`` so ``_replay_session`` sees
-        # the ``subagent`` payload and converts the new tab into a
-        # sub-agent tab via ``openSubagentTab``.
         th._save_task_extra(
             {
                 "model": "m",
@@ -138,19 +135,10 @@ class TestReplaySessionRunningSubagentNoEvents:
             },
             task_id=sub_id,
         )
-        # IMPORTANT: do NOT append any events for ``sub_id`` — this
-        # is the precise condition that triggered the original bug
-        # (sub-agent just started, events not flushed yet).
 
-        # NOTE: ``VSCodeServer.__init__`` clears
-        # ``_RunningAgentState.running_agent_states`` for test
-        # isolation, so the server must be built BEFORE the live
-        # running-state entries are inserted.
         printer = _SubscribeCapturingPrinter()
         server = VSCodeServer(printer=printer)
 
-        # Register the parent and the sub-agent as live running
-        # tasks (the printer disambiguates by ``task_history_id``).
         parent_state = _RunningAgentState("tab-parent", "test-model")
         parent_state.chat_id = chat_id
         parent_state.task_history_id = parent_id
@@ -167,18 +155,11 @@ class TestReplaySessionRunningSubagentNoEvents:
             sub_state
         )
 
-        # Simulate the frontend → backend round trip after the
-        # ``new_tab`` broadcast: the freshly allocated tab posts
-        # ``resumeSession`` with the sub-agent's task_id.
         new_tab_id = "tab-fresh-from-new_tab"
         server._replay_session(
             chat_id=chat_id, tab_id=new_tab_id, task_id=sub_id,
         )
 
-        # 1) The new tab MUST be subscribed to the sub-agent's live
-        #    event stream (keyed by ``task_history_id``), not the
-        #    parent's.  Before the fix this assertion failed because
-        #    ``_replay_session`` returned early on empty events.
         assert (sub_id, new_tab_id) in printer.subscribe_calls, (
             f"subscribe_tab was not called for the live sub-agent; "
             f"got {printer.subscribe_calls!r}"
@@ -187,35 +168,20 @@ class TestReplaySessionRunningSubagentNoEvents:
             "new tab must not be subscribed to the parent's stream"
         )
 
-        # 2) The printer's internal subscriber map must reflect the
-        #    subscription — this is what ``WebPrinter.broadcast``
-        #    consults via ``_fanout_targets`` to fan live events out
-        #    to the new tab.
         assert new_tab_id in printer._fanout_targets(sub_id)
         assert new_tab_id not in printer._fanout_targets(parent_id)
 
-        # 3) ``openSubagentTab`` must fire so the new tab gets the
-        #    purple sub-agent styling.
         opens = [e for e in printer.events if e.get("type") == "openSubagentTab"]
         assert len(opens) == 1, (
             f"expected one openSubagentTab broadcast, got {opens!r}"
         )
         assert opens[0].get("tab_id") == new_tab_id
 
-        # 4) ``status running=true`` must fire BEFORE ``task_events``
-        #    so the webview's ``isRunning`` flag is set before
-        #    ``replayTaskEvents`` runs (mirrors the live-task ordering).
         types = [e.get("type") for e in printer.events]
         assert "status" in types
         assert "task_events" in types
         assert types.index("status") < types.index("task_events")
 
-        # 5) Now simulate a live broadcast from the sub-agent's
-        #    worker thread (its own ``thread_local.task_id`` is set
-        #    to ``sub_id``).  The printer's ``_inject_task_id``
-        #    stamps the event with ``taskId=sub_id``, and
-        #    ``_fanout_targets(sub_id)`` returns ``[new_tab_id]`` →
-        #    the WebPrinter would fan the event out to the new tab.
         printer._thread_local.task_id = str(sub_id)
         targets = printer._fanout_targets(sub_id)
         assert new_tab_id in targets, (

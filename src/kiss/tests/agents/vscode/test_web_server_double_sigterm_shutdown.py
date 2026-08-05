@@ -37,12 +37,6 @@ import time
 import unittest
 from pathlib import Path
 
-# Driver executed in a fresh subprocess.  It mirrors the structure of
-# RemoteAccessServer.start(): install the real signal handlers, then run
-# the blocking section inside try/except KeyboardInterrupt/finally cleanup.
-# A SIGTERM-ignoring child stands in for cloudflared so that
-# _stop_tunnel() -> _terminate_tunnel_proc() -> proc.wait(timeout=5)
-# blocks long enough for a second SIGTERM to land mid-cleanup.
 _DRIVER = r"""
 import os, signal, subprocess, sys, time
 from pathlib import Path
@@ -120,24 +114,14 @@ class TestDoubleSigtermShutdown(unittest.TestCase):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                # New process group so we signal only the driver, not
-                # the pytest runner.
                 start_new_session=True,
             )
 
-            # Wait for the driver to finish setup and print READY.
             ready = self._wait_for_line(proc, "READY", timeout=30.0)
             self.assertTrue(ready, "driver never reached READY")
 
-            # First SIGTERM: unwinds the blocking loop into the finally
-            # cleanup, where _stop_tunnel() begins blocking in
-            # subprocess.wait(timeout=5).
             proc.send_signal(signal.SIGTERM)
-            # Give the driver a beat to enter the cleanup / proc.wait.
             time.sleep(0.5)
-            # Second SIGTERM: lands while subprocess.wait is sleeping.
-            # Pre-fix this re-raised KeyboardInterrupt and crashed the
-            # process; post-fix it is ignored.
             proc.send_signal(signal.SIGTERM)
 
             try:

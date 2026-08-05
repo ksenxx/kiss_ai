@@ -2,45 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test for the per-id copy buttons in the History sidebar's
-// task-row ids line.
-//
-// Requirement driven by this test:
-//
-//   The ids line of every History row (``.running-item-ids``) renders
-//   a small copy-to-clipboard button IMMEDIATELY AFTER the chat id and
-//   IMMEDIATELY AFTER the task id.  Clicking the chat-id button copies
-//   JUST the raw chat id string to the system clipboard; clicking the
-//   task-id button copies JUST the raw task id string.
-//
-//   * The buttons carry the classes ``ids-copy-btn ids-copy-chat`` and
-//     ``ids-copy-btn ids-copy-task`` respectively.
-//   * A row with no chat id renders no chat-copy button; a row with no
-//     task id renders no task-copy button; a row with neither renders
-//     no buttons at all (and, when the parent id is also missing, no
-//     ids span at all — pre-existing behaviour).
-//   * Clicking a copy button must NOT bubble into the row's own click
-//     handler: no new tab is created and no ``resumeSession`` message
-//     is posted to the extension host.
-//   * After a successful copy the button icon flips to a check mark
-//     and the button gains the ``copied`` class for visual feedback,
-//     then reverts after 1.5 s.
-//   * When ``navigator.clipboard.writeText`` is unavailable the button
-//     falls back to the textarea + ``document.execCommand('copy')``
-//     path (same fallback as every other copy button in the webview).
-//   * The buttons contribute NO text of their own (icon-only), so the
-//     ids line's ``textContent`` stays exactly
-//     ``chat <id> • task <id> [• parent <id>]`` — the format asserted
-//     by historyTaskIds.test.js.
-//
-// This test drives the production ``media/main.js`` (plus the real
-// ``media/chat.html`` markup and ``media/panelCopy.js``) inside jsdom,
-// exactly like ``historyTaskIds.test.js``.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/historyIdsCopyButtons.test.js
 
 'use strict';
 
@@ -68,7 +29,6 @@ function makeWebview() {
   win.Element.prototype.scrollTo = function () {};
   win.HTMLElement.prototype.scrollTo = function () {};
 
-  // Record every clipboard write made through the async clipboard API.
   const clipboardWrites = [];
   Object.defineProperty(win.navigator, 'clipboard', {
     configurable: true,
@@ -93,7 +53,10 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted, clipboardWrites};
 }
@@ -219,7 +182,6 @@ function testButtonsRenderPerId() {
   const e = rows['copy row E — parent only'];
   assert.ok(a && b && c && d && e, 'all five fixture rows must render');
 
-  // Rows A and B: both buttons present, chat button before task button.
   for (const [label, row] of [
     ['A', a],
     ['B', b],
@@ -235,7 +197,6 @@ function testButtonsRenderPerId() {
         win.Node.DOCUMENT_POSITION_FOLLOWING,
       `row ${label}: the chat copy button must precede the task copy button`,
     );
-    // Icon-only buttons: they must not add any text to the ids line.
     assert.strictEqual(
       chatBtn.textContent,
       '',
@@ -256,8 +217,6 @@ function testButtonsRenderPerId() {
     );
   }
 
-  // The ids-line text format asserted by historyTaskIds.test.js must
-  // be preserved exactly even with the buttons injected.
   assert.strictEqual(
     a.querySelector('.running-item-ids').textContent,
     'chat chat-a • task task-a • parent parent-a',
@@ -269,7 +228,6 @@ function testButtonsRenderPerId() {
     'row B ids text must be unchanged by the copy buttons',
   );
 
-  // Row C: chat only → chat button, no task button.
   const cIds = c.querySelector('.running-item-ids');
   assert.ok(
     cIds.querySelector('.ids-copy-chat'),
@@ -281,7 +239,6 @@ function testButtonsRenderPerId() {
     'row C (chat only) must NOT render a task-id copy button',
   );
 
-  // Row D: task only → task button, no chat button.
   const dIds = d.querySelector('.running-item-ids');
   assert.strictEqual(
     dIds.querySelector('.ids-copy-chat'),
@@ -293,7 +250,6 @@ function testButtonsRenderPerId() {
     'row D (task only) must render a task-id copy button',
   );
 
-  // Row E: parent only → no copy buttons at all.
   const eIds = e.querySelector('.running-item-ids');
   assert.ok(eIds, 'row E must still render the ids line (parent id)');
   assert.strictEqual(
@@ -328,8 +284,6 @@ async function testChatCopyButtonCopiesChatId() {
       `clipboard got: ${JSON.stringify(clipboardWrites)}`,
   );
 
-  // The click must not bubble into the row handler: no new tab, no
-  // resumeSession message.
   assert.strictEqual(
     tabCount(win),
     tabsBefore,
@@ -341,7 +295,6 @@ async function testChatCopyButtonCopiesChatId() {
     'clicking the chat copy button must not post resumeSession',
   );
 
-  // Visual feedback: check icon + ``copied`` class.
   assert.ok(
     chatBtn.classList.contains('copied'),
     'chat copy button must gain the "copied" class after a copy',
@@ -398,8 +351,6 @@ async function testTaskCopyButtonCopiesTaskId() {
 }
 
 async function testNumericTaskIdCopiesAsString() {
-  // task_id often arrives as a NUMBER from the backend (SQLite integer
-  // primary key).  The button must copy its decimal string form.
   const ctx = makeWebview();
   disableWorkspaceFilter(ctx.win);
   send(ctx.win, {
@@ -438,8 +389,6 @@ async function testFallbackCopyPathWithoutClipboardApi() {
   const ctx = makeWebview();
   const {win} = ctx;
 
-  // Remove the async clipboard API to force the textarea +
-  // execCommand('copy') fallback.
   Object.defineProperty(win.navigator, 'clipboard', {
     configurable: true,
     value: undefined,
@@ -474,10 +423,6 @@ async function testFallbackCopyPathWithoutClipboardApi() {
 }
 
 async function testRejectedClipboardFallsBackToExecCommand() {
-  // When ``navigator.clipboard.writeText`` REJECTS (e.g. the webview
-  // lost focus or the permission was denied) the button must fall
-  // back to the textarea + ``document.execCommand('copy')`` path so
-  // the id is still copied.
   const ctx = makeWebview();
   const {win} = ctx;
 
@@ -499,8 +444,6 @@ async function testRejectedClipboardFallsBackToExecCommand() {
   assert.ok(chatBtn, 'row A chat copy button must exist');
 
   click(win, chatBtn);
-  // Two ticks: one for the rejected promise, one for the rejection
-  // handler's fallback + flash.
   await new Promise(r => setTimeout(r, 0));
   await new Promise(r => setTimeout(r, 0));
 
@@ -521,9 +464,6 @@ async function testRejectedClipboardFallsBackToExecCommand() {
 }
 
 async function testRepeatedClicksRestartFlashTimer() {
-  // Two quick clicks must keep the "copied" feedback visible for a
-  // full 1.5 s after the SECOND click (the first click's timer must
-  // be cleared, not allowed to end the feedback early).
   const ctx = makeWebview();
   const rows = loadHistory(ctx);
   const {win} = ctx;
@@ -539,15 +479,10 @@ async function testRepeatedClicksRestartFlashTimer() {
     'first click must flash the "copied" feedback',
   );
 
-  // Second click ~1.2 s after the first: the first timer (due at
-  // 1.5 s) must be cancelled so the feedback survives past it.
   await new Promise(r => setTimeout(r, 1200));
   click(win, chatBtn);
   await new Promise(r => setTimeout(r, 0));
 
-  // 0.5 s after the second click (1.7 s after the first): had the
-  // first timer not been cleared it would already have removed the
-  // class; with the fix the feedback is still visible.
   await new Promise(r => setTimeout(r, 500));
   assert.ok(
     chatBtn.classList.contains('copied'),
@@ -555,7 +490,6 @@ async function testRepeatedClicksRestartFlashTimer() {
       'click\'s "copied" feedback early',
   );
 
-  // And it still reverts eventually (1.5 s after the second click).
   await new Promise(r => setTimeout(r, 1200));
   assert.ok(
     !chatBtn.classList.contains('copied'),
@@ -567,10 +501,6 @@ async function testRepeatedClicksRestartFlashTimer() {
 }
 
 function testCopyButtonCss() {
-  // jsdom never loads the external ``main.css`` stylesheet, so read
-  // the CSS file directly and assert a dedicated rule exists for the
-  // ids copy buttons (so they render as small inline icon buttons and
-  // are not styled as full-size native buttons).
   const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
   const re = /\.ids-copy-btn\s*\{([^}]*)\}/;
   const m = re.exec(css);

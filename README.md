@@ -2,7 +2,7 @@
 
 ![KISS Framework](assets/KISS-Sorcar.png)
 
-[![Version](https://img.shields.io/badge/version-2026.7.32-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.8.0-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -61,7 +61,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~2850** | Unknown | Unknown |
-| **Models in bundled catalog** | 542 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 601 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -222,30 +222,30 @@ These agents live in `src/kiss/agents/third_party_agents/`.
 
 ## 🤖 Models Supported
 
-KISS Sorcar ships a catalog of **542 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
+KISS Sorcar ships a catalog of **601 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
 
 | Provider category | Catalog entries |
 |---|---:|
-| OpenAI | 84 |
+| OpenAI | 105 |
 | Anthropic | 15 |
 | Gemini / Google | 27 |
-| Together AI | 79 |
+| Together AI | 85 |
 | Z.AI | 8 |
-| Moonshot AI | 7 |
-| OpenRouter | 310 |
+| Moonshot AI | 10 |
+| OpenRouter | 339 |
 | Claude Code CLI (`cc/*`) | 3 |
 | Codex CLI (`codex/*`) | 9 |
 
 Current catalog capability totals:
 
-- **525** generation-capable models
-- **373** function-calling-capable models
+- **584** generation-capable models
+- **426** function-calling-capable models
 - **8** embedding models
 
 Full model list:
 
 <details>
-<summary><strong>OpenAI (84)</strong></summary>
+<summary><strong>OpenAI (105)</strong></summary>
 
 - `computer-use-preview`
 - `computer-use-preview-2025-03-11`
@@ -388,7 +388,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Together AI (79)</strong></summary>
+<summary><strong>Together AI (85)</strong></summary>
 
 - `arcee-ai/trinity-mini`
 - `BAAI/bge-base-en-v1.5`
@@ -438,6 +438,10 @@ Full model list:
 - `moonshotai/Kimi-K2.5`
 - `moonshotai/Kimi-K2.6`
 - `moonshotai/Kimi-K2.7-Code`
+- `moonshotai/Kimi-K3`
+- `moonshotai/Kimi-K3-high`
+- `moonshotai/Kimi-K3-low`
+- `moonshotai/Kimi-K3-max`
 - `nvidia/Llama-3.1-Nemotron-70B-Instruct-HF`
 - `nvidia/nemotron-3-ultra-550b-a55b`
 - `nvidia/NVIDIA-Nemotron-Nano-9B-v2`
@@ -487,12 +491,15 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Moonshot AI (7)</strong></summary>
+<summary><strong>Moonshot AI (10)</strong></summary>
 
 - `kimi-k2.5`
 - `kimi-k2.6`
 - `kimi-k2.7-code`
 - `kimi-k3`
+- `kimi-k3-high`
+- `kimi-k3-low`
+- `kimi-k3-max`
 - `moonshot-v1-128k`
 - `moonshot-v1-32k`
 - `moonshot-v1-8k`
@@ -500,7 +507,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (310)</strong></summary>
+<summary><strong>OpenRouter (339)</strong></summary>
 
 - `openrouter/ai21/jamba-large-1.7`
 - `openrouter/aion-labs/aion-2.0`
@@ -634,6 +641,9 @@ Full model list:
 - `openrouter/moonshotai/kimi-k2.6`
 - `openrouter/moonshotai/kimi-k2.7-code`
 - `openrouter/moonshotai/kimi-k3`
+- `openrouter/moonshotai/kimi-k3-high`
+- `openrouter/moonshotai/kimi-k3-low`
+- `openrouter/moonshotai/kimi-k3-max`
 - `openrouter/morph/morph-v3-fast`
 - `openrouter/morph/morph-v3-large`
 - `openrouter/nex-agi/nex-n2-mini`

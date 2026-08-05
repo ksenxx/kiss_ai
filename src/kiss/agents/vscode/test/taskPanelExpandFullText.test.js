@@ -2,39 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end tests: the pinned task panel (#task-panel) in the chat
-// webview after the removal of the "Collapse/Uncollapse Chats" button.
-//
-// Features under test:
-//
-//   1. The "Collapse/Uncollapse Chats" button (#task-panel-collapse-btn
-//      + #task-panel-collapse-label) is GONE — from the DOM of both the
-//      VS Code extension webview and the remote web app.
-//   2. Clicking the "Expand task panel" toggle on the collapsed task
-//      drawer expands the panel so it shows the ENTIRE task text: the
-//      text wraps (pre-wrap, no ellipsis) and its height limit is
-//      viewport-relative (max-height in vh <= 100vh) so the panel
-//      grows with the task text while always remaining within the
-//      chat webview — overlong tasks scroll inside the panel
-//      (overflow-y auto) instead of pushing the chat off screen.
-//      The old fixed three-line clamp
-//      (calc(var(--vscode-editor-font-size) * 1.6 * 3)) is gone.
-//   3. The task-panel-driven collapse pass (applyChevronState) still
-//      works without the button: at task end it tucks finished
-//      panels away (.chv-hidden) while exempting result panels,
-//      ``summary`` digests, panels adopted inside a summary, and
-//      panels of the running task — and it still closes a hidden
-//      run_parallel fan-out's sub-agent tabs.
-//
-// This drives the production chat.html + panelCopy.js + main.js in
-// jsdom with the REAL main.css (and remote-codex.css for remote mode)
-// attached — jsdom resolves the stylesheet cascade for
-// getComputedStyle, so the clamping assertions exercise the real CSS.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/taskPanelExpandFullText.test.js
 
 'use strict';
 
@@ -45,7 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-// A task text that is far taller than the old three-line clamp.
 const LONG_TASK = Array.from(
   {length: 12},
   (_, i) =>
@@ -53,15 +19,6 @@ const LONG_TASK = Array.from(
     'with plenty of detail about what the agent must do',
 ).join('\n');
 
-/**
- * Build a jsdom window running the production chat webview with the
- * real stylesheets attached.
- *
- * @param {object} [opts]
- * @param {boolean} [opts.remote=false] add class="remote-chat" to body
- *     and layer remote-codex.css over main.css (the web app cascade).
- * @returns {{win: object, posted: Array}}
- */
 function makeWebview(opts) {
   const {remote = false} = opts || {};
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
@@ -80,8 +37,6 @@ function makeWebview(opts) {
   win.Element.prototype.scrollTo = function () {};
   win.HTMLElement.prototype.scrollTo = function () {};
 
-  // Attach the REAL stylesheet cascade so getComputedStyle resolves
-  // the task-panel rules exactly as a browser would.
   const style = win.document.createElement('style');
   style.textContent = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
   win.document.head.appendChild(style);
@@ -107,34 +62,29 @@ function makeWebview(opts) {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  // The sourceURL pragma names this eval instance in V8 coverage
-  // output so taskPanelExpandFullText.coverage.js can locate main.js
-  // and enforce 100% line coverage of the chevron-coverage region.
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
       '\n//# sourceURL=taskpanel-main.js',
   );
   return {win, posted};
 }
 
-/** Dispatch a backend→webview event exactly like the extension does. */
 function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** Click element *id* like a user would. */
 function click(win, id) {
   const el = win.document.getElementById(id);
   assert.ok(el, `element #${id} must exist`);
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
-/** getComputedStyle shorthand. */
 function cs(win, id) {
   return win.getComputedStyle(win.document.getElementById(id));
 }
 
-/** Show the pinned task panel with *task*, as the daemon replay does. */
 function showTaskPanel(win, posted, task) {
   const ready = posted.find(m => m.type === 'ready');
   assert.ok(ready && ready.tabId, 'webview must post ready with a tabId');
@@ -152,12 +102,6 @@ function showTaskPanel(win, posted, task) {
   return ready.tabId;
 }
 
-/**
- * Assert the expanded task panel shows the ENTIRE task text while
- * remaining within the chat webview: wrapped text, no ellipsis, a
- * viewport-relative height bound (vh) and inner scrolling as the
- * within-the-webview fallback for overlong tasks.
- */
 function assertFullTextPanel(win, why) {
   const textCs = cs(win, 'task-panel-text');
   assert.strictEqual(
@@ -194,7 +138,6 @@ function assertFullTextPanel(win, why) {
   );
 }
 
-// ── 1. The Collapse/Uncollapse Chats button is gone ─────────────────
 function testCollapseChatsButtonGone(remote) {
   const {win, posted} = makeWebview({remote});
   showTaskPanel(win, posted, LONG_TASK);
@@ -215,7 +158,6 @@ function testCollapseChatsButtonGone(remote) {
     ),
     `no Collapse/Uncollapse Chats text may remain (remote=${remote})`,
   );
-  // The two surviving task-panel controls are untouched.
   assert.ok(
     d.getElementById('task-panel-drawer-btn'),
     'the drawer toggle must survive the removal',
@@ -227,7 +169,6 @@ function testCollapseChatsButtonGone(remote) {
   win.close();
 }
 
-// ── 2. "Expand task panel" reveals the ENTIRE task text ─────────────
 function testExpandTaskPanelShowsEntireTask(remote) {
   const {win, posted} = makeWebview({remote});
   showTaskPanel(win, posted, LONG_TASK);
@@ -235,12 +176,9 @@ function testExpandTaskPanelShowsEntireTask(remote) {
   const panel = d.getElementById('task-panel');
   const btn = d.getElementById('task-panel-drawer-btn');
 
-  // Collapse the drawer: the slim bar clamps the task to one line and
-  // the toggle now offers "Expand task panel".
-  click(win, 'task-panel-drawer-btn');
   assert.ok(
     panel.classList.contains('drawer-collapsed'),
-    'clicking the toggle must collapse the task drawer',
+    'the task drawer opens collapsed',
   );
   assert.strictEqual(
     btn.getAttribute('aria-label'),
@@ -253,7 +191,6 @@ function testExpandTaskPanelShowsEntireTask(remote) {
     'collapsed task drawer must clamp the task text to one line',
   );
 
-  // Click "Expand task panel": the panel grows to show the WHOLE task.
   click(win, 'task-panel-drawer-btn');
   assert.ok(
     !panel.classList.contains('drawer-collapsed'),
@@ -273,30 +210,42 @@ function testExpandTaskPanelShowsEntireTask(remote) {
   win.close();
 }
 
-// ── 3. The default (expanded) panel already shows the full task ─────
-function testDefaultExpandedPanelShowsEntireTask() {
+// The panel opens collapsed, so the whole task is in the DOM but clamped to
+// one line. One click on the chevron and all of it is on screen.
+function testCollapsedPanelKeepsTheWholeTaskOneClickAway() {
   const {win, posted} = makeWebview();
   showTaskPanel(win, posted, LONG_TASK);
+  const text = win.document.getElementById('task-panel-text');
   assert.strictEqual(
-    win.document.getElementById('task-panel-text').textContent,
+    text.textContent,
     LONG_TASK,
-    'the default expanded panel must hold the entire task text',
+    'the collapsed panel must still hold the entire task text',
   );
-  assertFullTextPanel(win, 'default expanded state');
+  assert.strictEqual(
+    cs(win, 'task-panel-text').textOverflow,
+    'ellipsis',
+    'the collapsed panel ellipsizes what does not fit on its one line',
+  );
+
+  click(win, 'task-panel-drawer-btn');
+  assert.strictEqual(
+    text.textContent,
+    LONG_TASK,
+    'expanding must hold the entire task text',
+  );
+  assertFullTextPanel(win, 'expanded from the default collapsed state');
   win.close();
 }
 
-// ── 4. The chevron collapse pass still works without the button ─────
 function testChevronPassWorksWithoutButton() {
   const {win, posted} = makeWebview();
   const d = win.document;
   const ready = posted.find(m => m.type === 'ready');
   const parentId = ready.tabId;
-  win._demoApi.hideWelcome();
+  win._testApi.hideWelcome();
   send(win, {type: 'status', running: true, tabId: parentId, startTs: 1});
   send(win, {type: 'setTaskText', text: 'live task', tabId: parentId});
 
-  // Plain tool panels + a summary digest that adopts them.
   send(win, {type: 'tool_call', name: 'Bash', command: 'ls', tabId: parentId});
   send(win, {
     type: 'tool_result',
@@ -311,7 +260,6 @@ function testChevronPassWorksWithoutButton() {
     tabId: parentId,
   });
   send(win, {type: 'tool_call', name: 'Read', path: '/tmp/a', tabId: parentId});
-  // A run_parallel fan-out with one live sub-agent tab.
   send(win, {
     type: 'tool_call',
     name: 'run_parallel',
@@ -351,14 +299,11 @@ function testChevronPassWorksWithoutButton() {
   const adopted = summaryPanel.querySelector('.summary-sub .collapsible');
   assert.ok(adopted, 'the summary must adopt the earlier panels');
 
-  // While RUNNING, the streaming consistency pass leaves the running
-  // task's panels visible (no chv-hidden).
   assert.ok(
     !rpPanel.classList.contains('chv-hidden'),
     'running-task panels must not be tucked away',
   );
 
-  // Task end: the collapse pass tucks finished panels away.
   send(win, {
     type: 'result',
     tabId: parentId,
@@ -366,8 +311,6 @@ function testChevronPassWorksWithoutButton() {
     success: true,
   });
   send(win, {type: 'status', running: false, tabId: parentId});
-  // A trailing post-task event (the daemon streams usage_info after
-  // the result) re-runs the consistency pass with isRunning=false.
   send(win, {type: 'usage_info', tabId: parentId});
 
   const rc = O.querySelector('.rc');
@@ -407,9 +350,6 @@ function testChevronPassWorksWithoutButton() {
     'hiding the run_parallel panel must close its sub-agent tabs',
   );
 
-  // Scrolling up to an ADJACENT (previously completed) task replays it
-  // into an .adjacent-task container; the pass targets only THAT
-  // task's panels and leaves the other tasks' panels untouched.
   send(win, {
     type: 'adjacent_task_events',
     direction: 'prev',
@@ -438,7 +378,7 @@ function runTests() {
     () => testCollapseChatsButtonGone(true),
     () => testExpandTaskPanelShowsEntireTask(false),
     () => testExpandTaskPanelShowsEntireTask(true),
-    testDefaultExpandedPanelShowsEntireTask,
+    testCollapsedPanelKeepsTheWholeTaskOneClickAway,
     testChevronPassWorksWithoutButton,
   ];
   const names = [
@@ -446,7 +386,7 @@ function runTests() {
     'testCollapseChatsButtonGone(remote)',
     'testExpandTaskPanelShowsEntireTask(vscode)',
     'testExpandTaskPanelShowsEntireTask(remote)',
-    'testDefaultExpandedPanelShowsEntireTask',
+    'testCollapsedPanelKeepsTheWholeTaskOneClickAway',
     'testChevronPassWorksWithoutButton',
   ];
   for (let i = 0; i < tests.length; i++) {

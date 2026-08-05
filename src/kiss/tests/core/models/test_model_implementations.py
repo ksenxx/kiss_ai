@@ -228,9 +228,8 @@ class TestCachePricing:
             assert info.cache_write_1h_price_per_1M == pytest.approx(info.input_price_per_1M * 2.0)
 
     def test_openai_model_has_cache_read_pricing(self):
-        # gpt-4.1 family caches at 0.25x input; OpenAI never charges for writes.
         info = MODEL_INFO["gpt-4.1-mini"]
-        assert info.cache_read_price_per_1M == pytest.approx(0.10)  # 0.25 * 0.40
+        assert info.cache_read_price_per_1M == pytest.approx(0.10)
         assert info.cache_write_price_per_1M == 0.0
 
     def test_openai_gpt41_and_o3_cache_read_is_quarter(self):
@@ -259,32 +258,26 @@ class TestCachePricing:
         assert _openai_cache_read_multiplier("gpt-4o") == 0.50
 
     def test_gemini_cache_pricing(self):
-        # Direct Gemini context cache read = 0.1x input; no separate write cost.
         for name in ("gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.1-pro-preview"):
             info = MODEL_INFO[name]
             assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.1)
             assert info.cache_write_price_per_1M == 0.0
 
     def test_openrouter_provider_cache_pricing(self):
-        # OpenRouter Gemini implicit caching reads at 0.25x.
         g = MODEL_INFO["openrouter/google/gemini-2.5-pro"]
         assert g.cache_read_price_per_1M == pytest.approx(g.input_price_per_1M * 0.25)
-        # OpenRouter passthrough OpenAI mirrors OpenAI per-model rates.
         assert MODEL_INFO["openrouter/openai/gpt-5.5"].cache_read_price_per_1M == pytest.approx(
             MODEL_INFO["openrouter/openai/gpt-5.5"].input_price_per_1M * 0.1
         )
         assert MODEL_INFO["openrouter/openai/gpt-4o"].cache_read_price_per_1M == pytest.approx(
             MODEL_INFO["openrouter/openai/gpt-4o"].input_price_per_1M * 0.5
         )
-        # DeepSeek V4: cache-hit pricing is much cheaper than the old 0.1x rule.
         d = MODEL_INFO["openrouter/deepseek/deepseek-v4-flash"]
         assert d.cache_read_price_per_1M == pytest.approx(d.input_price_per_1M * 0.02)
         assert d.cache_write_price_per_1M == pytest.approx(d.input_price_per_1M)
-        # Qwen implicit cache reads at 0.2x; writes remain explicit-cache 1.25x.
         q = MODEL_INFO["openrouter/qwen/qwen3-max"]
         assert q.cache_read_price_per_1M == pytest.approx(q.input_price_per_1M * 0.2)
         assert q.cache_write_price_per_1M == pytest.approx(q.input_price_per_1M * 1.25)
-        # Moonshot / Grok: read 0.25x, no write cost.
         for name in ("openrouter/moonshotai/kimi-k2.5", "openrouter/x-ai/grok-4.3"):
             info = MODEL_INFO[name]
             assert info.cache_read_price_per_1M == pytest.approx(info.input_price_per_1M * 0.25)
@@ -302,9 +295,6 @@ class TestCachePricing:
         assert info.cache_write_price_per_1M is None
 
     def test_undocumented_providers_have_no_cache_pricing(self):
-        # Providers without a documented cache discount fall back to full input price.
-        # (glm-4.x/glm-5.x DO have documented cached-input pricing on docs.z.ai,
-        # but glm-4-32b-0414-128k is listed with no cached-input price.)
         for name in ("glm-4-32b-0414-128k", "deepseek-ai/DeepSeek-V3-0324", "Qwen/Qwen3.6-Plus"):
             info = MODEL_INFO[name]
             assert info.cache_read_price_per_1M is None, f"{name} should not have cache pricing"
@@ -322,21 +312,17 @@ class TestCachePricing:
         assert calculate_cost("unknown-model-xyz", 0, 0, 0, 0) == 0.0
 
     def test_calculate_cost_numeric_per_family(self):
-        # 1M cache-read tokens -> price equals the per-1M cache-read rate in USD.
         assert calculate_cost("gpt-5.5", 0, 0, 1_000_000, 0) == pytest.approx(1.00)
         assert calculate_cost("gpt-4o", 0, 0, 1_000_000, 0) == pytest.approx(1.25)
         assert calculate_cost("o3", 0, 0, 1_000_000, 0) == pytest.approx(0.50)
         assert calculate_cost("gemini-2.5-pro", 0, 0, 1_000_000, 0) == pytest.approx(0.25)
-        # Anthropic cache writes distinguish 5-minute (1.25x) and 1-hour (2.0x).
         assert calculate_cost("claude-opus-4-8", 0, 0, 0, 1_000_000) == pytest.approx(6.25)
         assert calculate_cost("claude-opus-4-8", 0, 0, 0, 0, 1_000_000) == pytest.approx(10.00)
-        # Combined: gpt-5.4 applies long-context tiers above 200k tokens.
         assert calculate_cost("gpt-5.4", 1_000_000, 1_000_000, 1_000_000, 0) == pytest.approx(
             5.0 + 22.5 + 0.5
         )
 
     def test_calculate_cost_strips_provider_prefix(self):
-        # Harbor-style provider prefix resolves to the same pricing.
         assert calculate_cost("openai/gpt-5.5", 0, 0, 1_000_000, 0) == pytest.approx(1.00)
 
     def test_apply_cache_pricing_respects_existing_prices(self):

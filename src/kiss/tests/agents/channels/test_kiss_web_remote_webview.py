@@ -94,8 +94,6 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
             uds_path=self.sock_path, work_dir=self.repo,
         )
         self.server._printer._loop = self.loop
-        # ``_run_cmd`` (used by the UDS dispatcher for webview
-        # commands) requires the server loop.
         self.server._loop = self.loop
 
         self.uds_server: asyncio.Server = asyncio.run_coroutine_threadsafe(
@@ -252,9 +250,6 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
 
         def stub_run(self_agent: Any, **kwargs: Any) -> str:
             started.set()
-            # Poll the tab's pending_user_messages like the real
-            # pre-step hook would, so the interaction assertion sees
-            # the message from the agent's side of the queue.
             deadline = time.time() + 30
             while time.time() < deadline and not release.is_set():
                 tab_id = getattr(self_agent, "_tab_id", "")
@@ -293,12 +288,9 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
 
         self._parent_class.run = stub_run
 
-        # 1. A remote webview connects BEFORE the task starts.
         _writer, received, _got = self._open_viewer()
         self._wait_for_uds_writer(1)
 
-        # 2. Launch a third-party agent via the API-based launcher
-        # against the SAME daemon the webview is connected to.
         agent = SlackAgent()
         out: dict[str, Any] = {}
 
@@ -315,9 +307,6 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
         try:
             assert started.wait(timeout=30), "agent run never started"
 
-            # The API launch registered its tab on the daemon; find it
-            # via the live registry (the tab id is minted by
-            # ``kiss.server.sorcar.run``).
             tab_id = ""
             deadline = time.time() + 10
             while time.time() < deadline and not tab_id:
@@ -331,8 +320,6 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
                 time.sleep(0.02)
             assert tab_id, "API launch never appeared in the registry"
 
-            # 3. OPEN: the remote webview must receive the task's live
-            # events stamped with the launch's tab id.
             deadline = time.time() + 10
             while time.time() < deadline:
                 if self._events_for_tab(received, tab_id, "status"):
@@ -355,14 +342,12 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
                 for e in prompt_events
             ), "remote webview never saw the task's prompt event"
 
-            # 4. INTERACT: send appendUserMessage from the webview.
             self._send_from_viewer({
                 "type": "appendUserMessage",
                 "tabId": tab_id,
                 "prompt": "follow-up from the webview",
             })
 
-            # The running agent must observe the queued message.
             deadline = time.time() + 10
             while time.time() < deadline and not drained_messages:
                 time.sleep(0.05)
@@ -371,7 +356,6 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
                 "the running third-party agent's message queue"
             )
 
-            # And the webview gets the prompt echo for its message.
             echoes: list[dict[str, Any]] = []
             deadline = time.time() + 10
             while time.time() < deadline:
@@ -397,7 +381,6 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
         parsed = yaml.safe_load(out.get("result") or "")
         assert parsed and parsed.get("success") is True
         assert parsed.get("summary") == STUB_SUMMARY
-        # After completion the webview sees the task end.
         ended: list[dict[str, Any]] = []
         deadline = time.time() + 10
         while time.time() < deadline:

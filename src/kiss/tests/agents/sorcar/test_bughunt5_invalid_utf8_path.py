@@ -33,7 +33,7 @@ from pathlib import Path
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 
-_INVALID_NAME = b"caf\xe9.txt"  # 0xE9 is invalid as UTF-8
+_INVALID_NAME = b"caf\xe9.txt"
 
 
 def _make_repo(path: Path) -> Path:
@@ -122,12 +122,10 @@ class TestInvalidUtf8Path:
             agent = WorktreeSorcarAgent("bh5-invalid-utf8")
             try:
                 wt_work_dir = agent._try_setup_worktree(repo, None)
-            except UnicodeDecodeError as exc:  # the pre-fix crash
+            except UnicodeDecodeError as exc:
                 raise AssertionError(
                     f"_try_setup_worktree crashed on non-UTF-8 path: {exc}"
                 ) from exc
-            # Either a working worktree or a clean fallback is fine;
-            # a crash is not.
             if wt_work_dir is not None:
                 assert agent._wt is not None
                 assert (

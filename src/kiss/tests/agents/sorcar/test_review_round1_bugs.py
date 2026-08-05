@@ -63,8 +63,6 @@ def _make_legacy_db(path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Persist#1 — migration is atomic (BEGIN IMMEDIATE / ROLLBACK)
-# ---------------------------------------------------------------------------
 
 
 def test_persist_bug1_migration_rolls_back_on_failure(
@@ -77,7 +75,6 @@ def test_persist_bug1_migration_rolls_back_on_failure(
     column) must still be reachable, not a half-converted hybrid.
     """
     _make_legacy_db(temp_db)
-    # Seed one legacy row.
     conn = sqlite3.connect(str(temp_db), isolation_level=None)
     conn.execute(
         "INSERT INTO task_history (timestamp, task, result, extra) "
@@ -86,9 +83,6 @@ def test_persist_bug1_migration_rolls_back_on_failure(
     )
     conn.close()
 
-    # Patch ``json.loads`` (used inside the migration's per-row
-    # parse) to raise a non-JSON exception — escapes the inner
-    # try/except and aborts the migration, triggering ROLLBACK.
     original_loads = persistence.json.loads
 
     def _crash_loads(s: str, *a: Any, **kw: Any) -> Any:
@@ -102,9 +96,6 @@ def test_persist_bug1_migration_rolls_back_on_failure(
     monkeypatch.undo()
     persistence._close_db()
 
-    # Direct sqlite check: the legacy table must still exist with its
-    # original INTEGER id and ``extra`` column.  The __new tables may
-    # remain (idempotent CREATE will drop them on retry).
     conn = sqlite3.connect(str(temp_db), isolation_level=None)
     cols = {
         r[1]: (r[2] or "").upper()
@@ -131,10 +122,6 @@ def test_persist_bug2_migration_is_idempotent_after_prior_crash(
         "VALUES (?, ?, ?, ?)",
         (1.0, "legacy", "ok", "{}"),
     )
-    # Drop a stale ``task_history__new`` to mimic a crashed prior
-    # migration.  Use a minimal schema; the DROP IF EXISTS preamble
-    # in ``_migrate_old_schema_if_needed`` doesn't care about its
-    # shape.
     conn.execute(
         "CREATE TABLE task_history__new (id TEXT PRIMARY KEY)"
     )
@@ -143,7 +130,6 @@ def test_persist_bug2_migration_is_idempotent_after_prior_crash(
     )
     conn.close()
 
-    # Should not raise — must drop the stale tables and migrate.
     db = persistence._get_db()
     rows = db.execute(
         "SELECT id, task, result FROM task_history"
@@ -167,22 +153,16 @@ def test_persist_bug3_migration_handles_missing_events_table(
     conn.execute("DROP TABLE events")
     conn.close()
 
-    # Must not raise.
     db = persistence._get_db()
     rows = db.execute("SELECT id, task FROM task_history").fetchall()
     assert len(rows) == 1
     assert persistence.is_task_history_id(rows[0]["id"])
-    # Events table must have been re-created in the new schema.
     cols = {
         r[1]: (r[2] or "").upper()
         for r in db.execute("PRAGMA table_info(events)").fetchall()
     }
     assert cols.get("task_id", "").upper() == "TEXT"
 
-
-# ---------------------------------------------------------------------------
-# Persist#11 — _add_task / _save_task_extra reject non-UUID parent_task_id
-# ---------------------------------------------------------------------------
 
 
 def test_persist_bug11_add_task_rejects_legacy_int_parent_task_id(
@@ -191,7 +171,7 @@ def test_persist_bug11_add_task_rejects_legacy_int_parent_task_id(
     """A legacy integer ``parent_task_id`` must NOT be written as ``"123"``.
 
     The new column is UUID-hex; a numeric string would never match any
-    real id, silently breaking ``_subagent_child_ids`` lookups.
+    real id, silently breaking parent/child sub-agent row lookups.
     """
     task_id, _ = persistence._add_task(
         "child task", "", extra={"subagent": {"parent_task_id": 123}}
@@ -201,7 +181,6 @@ def test_persist_bug11_add_task_rejects_legacy_int_parent_task_id(
         "SELECT parent_task_id FROM task_history WHERE id = ?",
         (task_id,),
     ).fetchone()
-    # Reject — the column must be empty, not "123".
     assert row["parent_task_id"] == ""
 
 
@@ -239,10 +218,6 @@ def test_persist_bug11_save_task_extra_rejects_bogus_parent(
     assert row["parent_task_id"] == ""
 
 
-# ---------------------------------------------------------------------------
-# Persist#14 — _history_row_to_dict exposes typed columns
-# ---------------------------------------------------------------------------
-
 
 def test_persist_bug14_history_dict_exposes_typed_columns(
     temp_db: Path,
@@ -259,15 +234,10 @@ def test_persist_bug14_history_dict_exposes_typed_columns(
     assert e["model"] == "gpt-5"
     assert e["cost"] == pytest.approx(1.25)
     assert e["tokens"] == 4242
-    # Legacy ``extra`` JSON synthesis must still be present.
     assert "extra" in e
     extra_parsed = json.loads(cast(str, e["extra"]))
     assert extra_parsed["model"] == "gpt-5"
 
-
-# ---------------------------------------------------------------------------
-# VS#1 — server.py _replay_session sub-agent parent linking accepts str
-# ---------------------------------------------------------------------------
 
 
 def test_vs_bug1_replay_uses_str_parent_task_id() -> None:
@@ -293,10 +263,6 @@ def test_vs_bug1_replay_uses_str_parent_task_id() -> None:
     assert _coerce_id([5]) is None
 
 
-# ---------------------------------------------------------------------------
-# VS#2 — web_server.py shutdown safety net accepts UUID-str task ids
-# ---------------------------------------------------------------------------
-
 
 def test_vs_bug2_shutdown_helper_accepts_uuid_strings() -> None:
     """``active_task_history_ids`` must be a ``set[str]`` — no ``int(...)``.
@@ -316,16 +282,12 @@ def test_vs_bug2_shutdown_helper_accepts_uuid_strings() -> None:
     assert "active_task_history_ids.add(str(th_id))" in src
 
 
-# ---------------------------------------------------------------------------
-# VS#3 — commands.py rejects non-string taskId payloads
-# ---------------------------------------------------------------------------
-
 
 def test_vs_bug3_commands_reject_non_string_taskid() -> None:
     """A non-string ``taskId`` payload must be dropped before SQL.
 
     The previous pattern ``str(raw_task_id) if raw_task_id else None``
-    accepted dicts and lists and stringified them.  All four relevant
+    accepted dicts and lists and stringified them.  All three relevant
     handlers now validate through the shared ``_opt_str`` guard, which
     rejects every non-string payload.
     """
@@ -335,8 +297,8 @@ def test_vs_bug3_commands_reject_non_string_taskid() -> None:
         "src/kiss/server/commands.py"
     ).read_text()
     occurrences = src.count('task_id = _opt_str(cmd.get("taskId"))')
-    assert occurrences == 4, (
-        f"expected 4 hardened taskId guards, found {occurrences}"
+    assert occurrences == 3, (
+        f"expected 3 hardened taskId guards, found {occurrences}"
     )
     assert _opt_str({"a": 1}) is None
     assert _opt_str([1]) is None
@@ -344,10 +306,6 @@ def test_vs_bug3_commands_reject_non_string_taskid() -> None:
     assert _opt_str("") is None
     assert _opt_str("tid") == "tid"
 
-
-# ---------------------------------------------------------------------------
-# VS#4 — web_server.py cliTaskStart/End reject non-string taskId
-# ---------------------------------------------------------------------------
 
 
 def test_vs_bug4_cli_task_envelopes_reject_non_string_taskid() -> None:
@@ -368,10 +326,6 @@ def test_vs_bug4_cli_task_envelopes_reject_non_string_taskid() -> None:
     assert validate({"type": "cliTaskEnd", "taskId": "abc123"}) == "abc123"
 
 
-# ---------------------------------------------------------------------------
-# Sorcar#1 — cli_printer is_task_history_id contract & lowercase normalize
-# ---------------------------------------------------------------------------
-
 
 def test_sorcar_bug1_is_task_history_id_contract() -> None:
     """``is_task_history_id`` is the canonical id-shape predicate."""
@@ -379,11 +333,9 @@ def test_sorcar_bug1_is_task_history_id_contract() -> None:
     assert not persistence.is_task_history_id("")
     assert not persistence.is_task_history_id(None)
     assert not persistence.is_task_history_id(123)
-    # Uppercase hex is NOT accepted (cli_printer lowercases first).
     assert not persistence.is_task_history_id(
         uuid.uuid4().hex.upper()
     )
-    # Hyphenated UUID is NOT accepted.
     assert not persistence.is_task_history_id(str(uuid.uuid4()))
 
 
@@ -396,16 +348,10 @@ def test_sorcar_bug1_cli_printer_normalizes_case() -> None:
     from kiss.ui.cli import cli_printer
 
     src = Path(str(cli_printer.__file__)).read_text()
-    # Heuristic gone.
     assert "0123456789abcdef" not in src
-    # New contract in place.
     assert "is_task_history_id" in src
     assert ".lower()" in src
 
-
-# ---------------------------------------------------------------------------
-# Sorcar#3 — _run_tasks_parallel must not leak "task-None__sub_*" keys
-# ---------------------------------------------------------------------------
 
 
 def test_sorcar_bug3_run_tasks_parallel_guards_none_parent() -> None:
@@ -415,11 +361,6 @@ def test_sorcar_bug3_run_tasks_parallel_guards_none_parent() -> None:
     src = Path(
         "src/kiss/agents/sorcar/chat_sorcar_agent.py"
     ).read_text()
-    # Session 12 split the value into ``persisted_parent_task_id``
-    # (real or "") and ``routing_parent_key`` (real OR a fresh uuid
-    # hex synthesised when no real parent exists).  The guard runs
-    # BEFORE the ``sub_tab_id`` f-string is built so the literal
-    # ``task-None__sub_*`` cannot leak.
     guard_idx = src.find(
         "routing_parent_key = uuid.uuid4().hex"
     )

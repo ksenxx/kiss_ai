@@ -30,14 +30,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model_info import calculate_cost
-from kiss.core.relentless_agent import RelentlessAgent
 
-# Per-call usage that the fake server reports back. Picked small enough
-# that several summarizer + executor calls comfortably fit under
-# ``max_budget`` (so the summarizer actually runs and is not short-
-# circuited by ``summarizer_budget <= 0``).
 _PROMPT_TOKENS = 1000
 _COMPLETION_TOKENS = 100
 _MODEL = "gpt-4o-mini"
@@ -106,9 +102,6 @@ def _summarizer_finish_response() -> dict:
     }
 
 
-# Per-server counters mutated by the request handler thread(s). Module-
-# level so the fixture can hand them to the test, which reads the totals
-# after the agent finishes.
 _call_counts: dict[str, int] = {"executor": 0, "summarizer": 0}
 _call_counts_lock = threading.Lock()
 
@@ -122,10 +115,6 @@ class _RelentlessBudgetHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", 0))
         body_bytes = self.rfile.read(content_length) if content_length else b""
 
-        # Distinguish summarizer from executor by inspecting the prompt
-        # body: the executor sends ``TASK_PROMPT`` (no "Summarizer"
-        # token), while the summarizer sends ``SUMMARIZER_PROMPT`` whose
-        # first heading is "# Summarizer".
         is_summarizer = "Summarizer" in body_bytes.decode(errors="ignore")
 
         with _call_counts_lock:
@@ -207,8 +196,6 @@ class TestRelentlessAgentSummarizerBudgetIncluded:
             executor_calls = _call_counts["executor"]
             summarizer_calls = _call_counts["summarizer"]
 
-        # Sanity: the summarizer branch must have been exercised at all
-        # for this test to be meaningful.
         assert executor_calls > 0, "executor never called the model"
         assert summarizer_calls > 0, (
             "summarizer never called the model — the test cannot prove the "
@@ -219,9 +206,6 @@ class TestRelentlessAgentSummarizerBudgetIncluded:
         expected_budget = (executor_calls + summarizer_calls) * cost_per_call
         executor_only_budget = executor_calls * cost_per_call
 
-        # If the bug is present, ``agent.budget_used`` ≈ ``executor_only_budget``
-        # and the summarizer's cost is silently lost. After the fix,
-        # ``agent.budget_used`` ≈ ``expected_budget``.
         assert agent.budget_used == pytest.approx(expected_budget, rel=1e-6), (
             f"budget undercount detected: agent.budget_used="
             f"${agent.budget_used:.6f} but expected ${expected_budget:.6f} "

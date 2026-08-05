@@ -82,9 +82,6 @@ class _ServerTestBase(IsolatedAsyncioTestCase):
             url_file=Path(self.tmpdir) / "remote-url.json",
         )
         self.server._loop = asyncio.get_running_loop()
-        # Record (instead of executing) backend commands and broadcasts
-        # so the tests stay hermetic: ``getModels`` / ``resumeSession``
-        # would otherwise hit the model registry / persistence layer.
         self.run_cmds: list[dict[str, Any]] = []
 
         async def record_cmd(cmd: dict[str, Any]) -> None:
@@ -95,12 +92,6 @@ class _ServerTestBase(IsolatedAsyncioTestCase):
         self.server._printer.broadcast = self.broadcasts.append  # type: ignore[method-assign, assignment]
 
     async def asyncTearDown(self) -> None:
-        # Join the orphan-task-sweep daemon thread BEFORE closing the
-        # per-thread sqlite connection, restoring persistence paths, and
-        # deleting the temp dir that holds the DB.  Otherwise the sweep
-        # thread can still be executing ``db.execute`` against a
-        # connection whose backing file is being removed, which crashes
-        # the interpreter with a segfault inside the sqlite3 C layer.
         sweep = self.server._vscode_server._orphan_sweep_thread
         if sweep is not None and sweep.is_alive():
             await asyncio.to_thread(sweep.join, 30)
@@ -131,8 +122,7 @@ class TestReadyMalformedRestoredTabs(_ServerTestBase):
             "connId": "c1",
             "restoredTabs": ["x"],
         }
-        await self.server._handle_ready(cmd, endpoint)  # must not raise
-        # The connection still got its focusInput reply.
+        await self.server._handle_ready(cmd, endpoint)
         self.assertTrue(
             any('"focusInput"' in s for s in endpoint.sent),
             f"focusInput not sent; sent={endpoint.sent}",

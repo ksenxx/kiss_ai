@@ -42,7 +42,7 @@ from kiss.ui.cli.cli_steering import _InputBox
 class _SinkOut(io.StringIO):
     """Real writable text stream for the box's terminal output."""
 
-    def flush(self) -> None:  # StringIO.flush is a no-op already
+    def flush(self) -> None:
         return
 
 
@@ -68,11 +68,8 @@ class TestTabWithRaisingCompleter:
             raise RuntimeError("completer boom")
 
         box.completer_fn = raising_completer
-        # The typing path is documented as resilient and must stay so.
         _feed(box, b"a")
         assert box.buf == "a"
-        # Tab must be exactly as resilient: no exception, menu closed,
-        # buffer untouched.
         _feed(box, b"\t")
         assert box.buf == "a"
         assert not box._menu_open
@@ -80,15 +77,10 @@ class TestTabWithRaisingCompleter:
     def test_single_item_requery_tab_survives_raising_completer(self) -> None:
         """The Tab-on-single-item re-query path must be guarded too."""
         box = _make_box()
-        # A healthy completer opens a single-item preview menu while
-        # typing (the real "complete while typing" path).
         box.completer_fn = lambda buf: [buf + "x"]
         _feed(box, b"a")
         assert box._menu_open
         assert box._menu_items == ["ax"]
-        # The backend starts failing before the user presses Tab
-        # (e.g. the history DB went away).  Tab re-queries the
-        # completer before accepting — it must not crash the pump.
         def raising_completer(buf: str) -> list[str]:
             raise RuntimeError("completer boom")
 
@@ -102,7 +94,6 @@ class TestTabWithRaisingCompleter:
         box = _make_box()
         box.completer_fn = lambda buf: [buf + "x", buf + "y"]
         _feed(box, b"a")
-        # Close the typing-preview menu, then re-open via Tab.
         box._reset_completion_state()
         _feed(box, b"\t")
         assert box._menu_open
@@ -182,9 +173,6 @@ class TestDispatcherNullCoercion:
 
     def test_result_with_null_totals_still_renders(self, capsys) -> None:
         d = self._dispatcher()
-        # Pre-fix this raised TypeError (None + int) inside the
-        # printer; in the live client the loop thread swallowed it and
-        # the user's Result panel silently vanished.
         d.dispatch({
             "type": "result",
             "text": "bughunt-cli-result-body",

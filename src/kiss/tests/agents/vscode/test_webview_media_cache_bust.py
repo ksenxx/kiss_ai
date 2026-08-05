@@ -49,7 +49,6 @@ class TestWebviewMediaCacheBust(unittest.TestCase):
             "marked.min.js",
             "panelCopy.js",
             "main.js",
-            "demo.js",
         ):
             urls = _asset_urls(html, name)
             self.assertEqual(urls, [f"/media/{name}?v={_asset_hash(name)}"])

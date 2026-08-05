@@ -51,10 +51,8 @@ class _CapturePrinter(JsonPrinter):
             self._record_event(event)
 
 
-# A fixed fake task id the mock sub-agent will "allocate" during run().
 _FAKE_SUB_TASK_ID = "99999"
 
-# The frontend-generated tab id (simulates what createNewTab() produces).
 _FRONTEND_TAB_ID = "frontend-random-abc123"
 
 
@@ -105,17 +103,11 @@ class TestSubagentDoneTabIdMatchesViewerTab(unittest.TestCase):
         agent._last_task_id = "10000000000000000000000000000000"
         agent.printer = printer  # type: ignore[assignment]
 
-        # Register the parent agent state so _run_tasks_parallel can
-        # resolve parent_tab_id.
         parent_tab_id = "parent-tab-xyz"
         parent_state = _RunningAgentState(parent_tab_id, "test-model")
         parent_state.agent = agent  # type: ignore[assignment]
         _RunningAgentState.register(parent_tab_id, parent_state)
 
-        # Patch run() on the ChatSorcarAgent CLASS so the sub-agent
-        # (a fresh ChatSorcarAgent instance created by _run_single)
-        # uses our mock that sets _last_task_id and subscribes the
-        # frontend viewer tab.
         original_run = ChatSorcarAgent.run
         ChatSorcarAgent.run = _patched_run  # type: ignore[assignment]
         try:
@@ -123,7 +115,6 @@ class TestSubagentDoneTabIdMatchesViewerTab(unittest.TestCase):
         finally:
             ChatSorcarAgent.run = original_run  # type: ignore[assignment]
 
-        # Collect all subagentDone events
         done_events = [
             e for e in printer.events if e.get("type") == "subagentDone"
         ]
@@ -133,12 +124,6 @@ class TestSubagentDoneTabIdMatchesViewerTab(unittest.TestCase):
             f"All events: {[e.get('type') for e in printer.events]}"
         )
 
-        # The subagentDone event(s) must include the frontend viewer
-        # tab id.  Before the fix, only the backend's internal
-        # sub_tab_id ("task-100__sub_0") was broadcast — this id does
-        # NOT match the frontend tab's randomly-generated id, so the
-        # frontend handler ``tabs.find(t => t.id === ev.tab_id)``
-        # returned undefined and isDone was never set.
         done_tab_ids = {e.get("tab_id") for e in done_events}
         self.assertIn(
             _FRONTEND_TAB_ID,
@@ -179,7 +164,6 @@ class TestSubagentDoneTabIdMatchesViewerTab(unittest.TestCase):
         ]
 
         done_tab_ids = {e.get("tab_id") for e in done_events}
-        # The backend's sub_tab_id is "task-<parent_task_id>__sub_<idx>"
         backend_sub_tab_id = f"task-{agent._last_task_id}__sub_0"
         self.assertIn(
             backend_sub_tab_id,

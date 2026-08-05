@@ -43,6 +43,7 @@ from kiss.server.web_server import RemoteAccessServer
 
 _VSCODE_DIR = Path(__file__).resolve().parents[3] / "agents" / "vscode"
 _MAIN_JS = _VSCODE_DIR / "media" / "main.js"
+_API_JS = _VSCODE_DIR / "media" / "api.js"
 
 
 def _extract_fn_body(src: str, header: str) -> str:
@@ -84,6 +85,7 @@ def _run_config_form_harness(
     backend — as a dict.
     """
     src = _MAIN_JS.read_text()
+    api_src = _API_JS.read_text()
     populate = _extract_fn_body(src, "function populateConfigForm(")
     collect = _extract_fn_body(src, "function collectConfigForm()")
     save = _extract_fn_body(src, "function saveSettingsIfPopulated()")
@@ -113,7 +115,8 @@ const sessionStorage = {{
 }};
 const posted = [];
 const vscode = {{postMessage: m => posted.push(m)}};
-let demoMode = false;
+{api_src}
+const api = createSorcarApi(m => vscode.postMessage(m));
 let configFormPopulated = false;
 // Module-scope declaration (main.js line 165) that the extracted
 // populateConfigForm/getCurrentWorkDir bodies assign to and read.
@@ -277,8 +280,6 @@ class TestWorkDirConfigRoundTrip(IsolatedAsyncioTestCase):
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect_persistence(self.tmpdir)
 
-        # Isolate config.json so this test never sees (or pollutes)
-        # values saved by other tests in the same process.
         self._orig_cfg_dir = vc.CONFIG_DIR
         self._orig_cfg_path = vc.CONFIG_PATH
         vc.CONFIG_DIR = Path(self.tmpdir) / "config"

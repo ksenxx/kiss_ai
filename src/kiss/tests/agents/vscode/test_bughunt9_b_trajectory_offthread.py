@@ -9,7 +9,7 @@ walk the jobs root and parse trajectory YAML from disk.  Like the
 neighbouring ``/voice-model.tar.gz`` and ``/media/`` branches, that work
 must run via ``asyncio.to_thread`` so a large or slow jobs root does not
 stall the event loop for every other client.  The test wraps the real
-``list_jobs`` / ``load_job_trajectories`` functions (and the template
+``list_jobs`` / validated-directory trajectory loader functions (and the template
 ``Path``) with thin recorders that note which thread executes them, then
 asserts none of them ran on the server's event-loop thread while the
 responses stay byte-for-byte correct.
@@ -23,11 +23,13 @@ import ssl
 import tempfile
 import threading
 from pathlib import Path
+from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 import yaml
 
 from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.server import sorcar as sorcar_api
 from kiss.server import web_server
 from kiss.server.web_server import RemoteAccessServer
 
@@ -91,11 +93,10 @@ class TestTrajectoryEndpointsOffThread(IsolatedAsyncioTestCase):
         self._orig_get_jobs_root = web_server.get_jobs_root
         web_server.get_jobs_root = lambda *a, **k: self._jobs_root
 
-        # Wrap the real helpers with thin recorders (identical behavior).
         self._list_threads: list[int] = []
         self._load_threads: list[int] = []
         self._orig_list_jobs = web_server.list_jobs
-        self._orig_load = web_server.load_job_trajectories
+        self._orig_load = sorcar_api._load_trajectories_from_dir
         orig_list, orig_load = self._orig_list_jobs, self._orig_load
         list_threads, load_threads = self._list_threads, self._load_threads
 
@@ -103,12 +104,12 @@ class TestTrajectoryEndpointsOffThread(IsolatedAsyncioTestCase):
             list_threads.append(threading.get_ident())
             return orig_list(artifact_dir)
 
-        def recording_load(artifact_dir: Path, job_name: str) -> list[dict]:
+        def recording_load(job_dir: Path) -> list[dict[str, Any]]:
             load_threads.append(threading.get_ident())
-            return orig_load(artifact_dir, job_name)
+            return orig_load(job_dir)
 
         web_server.list_jobs = recording_list_jobs
-        web_server.load_job_trajectories = recording_load
+        sorcar_api._load_trajectories_from_dir = recording_load
 
         self._orig_template = web_server.TRAJECTORY_TEMPLATE
         _ThreadRecordingPath.recorded = []
@@ -122,14 +123,13 @@ class TestTrajectoryEndpointsOffThread(IsolatedAsyncioTestCase):
             work_dir=tempfile.mkdtemp(),
         )
         await self.server.start_async()
-        # IsolatedAsyncioTestCase runs the server on this very loop/thread.
         self._loop_thread = threading.get_ident()
 
     async def asyncTearDown(self) -> None:
         await self.server.stop_async()
         web_server.get_jobs_root = self._orig_get_jobs_root
         web_server.list_jobs = self._orig_list_jobs
-        web_server.load_job_trajectories = self._orig_load
+        sorcar_api._load_trajectories_from_dir = self._orig_load
         web_server.TRAJECTORY_TEMPLATE = self._orig_template
         if self._orig_config is not None:
             CONFIG_PATH.write_text(self._orig_config)

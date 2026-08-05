@@ -2,18 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Coverage gate for the drawer-widget feature code in
-// ``media/main.js``: re-runs ``drawerPanels.test.js`` under V8's
-// built-in coverage (``NODE_V8_COVERAGE``) and FAILS unless every
-// non-blank line between the ``// drawer-coverage:start`` /
-// ``// drawer-coverage:end`` markers was executed.  The test evals
-// main.js with a ``//# sourceURL=drawer-main.js`` pragma, which is how
-// the coverage JSON entries for main.js are identified here.
-//
-// Run with:
-//
-//     node src/kiss/agents/vscode/test/drawerPanels.coverage.js
 
 'use strict';
 
@@ -29,10 +17,6 @@ const SOURCE_URL = 'drawer-main.js';
 const START_MARK = '// drawer-coverage:start';
 const END_MARK = '// drawer-coverage:end';
 
-/**
- * Return the [startLine, endLine] (1-based, exclusive of the marker
- * lines themselves) of every drawer-coverage region in main.js.
- */
 function findRegions(lines) {
   const regions = [];
   let start = -1;
@@ -43,7 +27,7 @@ function findRegions(lines) {
       start = i + 1;
     } else if (t === END_MARK) {
       assert.ok(start >= 0, 'drawer-coverage:end without start');
-      regions.push([start + 1, i]); // exclusive of both marker lines
+      regions.push([start + 1, i]);
       start = -1;
     }
   }
@@ -52,10 +36,6 @@ function findRegions(lines) {
   return regions;
 }
 
-// Paint one eval-instance's char coverage from its V8 ranges.  Ranges
-// nest; applying them sorted by (startOffset asc, endOffset desc)
-// paints outer ranges first so inner ranges override, matching V8
-// block-coverage semantics.
 function paintInstance(functions, length) {
   const painted = new Uint8Array(length);
   const ranges = [];
@@ -88,10 +68,6 @@ function main() {
     process.exit(res.status || 1);
   }
 
-  // A char is covered if ANY eval instance executed it.  The eval'd
-  // source carries the appended sourceURL pragma line; coverage
-  // offsets index that eval text, whose first src.length chars match
-  // the file exactly.
   const covered = new Uint8Array(src.length);
   let instances = 0;
   for (const f of fs.readdirSync(covDir)) {
@@ -110,8 +86,6 @@ function main() {
       'eval-ing main.js with the sourceURL pragma?',
   );
 
-  // Line gate: every non-blank line inside every drawer-coverage
-  // region must have at least one covered non-whitespace character.
   let offset = 0;
   const lineStart = new Array(lines.length);
   for (let n = 0; n < lines.length; n++) {

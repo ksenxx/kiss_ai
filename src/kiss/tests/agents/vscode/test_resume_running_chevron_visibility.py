@@ -91,7 +91,6 @@ class TestStatusHandlerRefreshesChevron:
             "running=true transition"
         )
         guarded = body[m.end():]
-        # The next applyChevronState mention must be inside this guard.
         next_call = guarded.find("applyChevronState")
         assert next_call >= 0, (
             "case 'status' must call applyChevronState inside the "
@@ -102,9 +101,6 @@ class TestStatusHandlerRefreshesChevron:
         """The refresh must scope to ``currentTaskName`` (per-task
         chevron map)."""
         body = _extract_status_case_body(_read_main_js())
-        # Slice from the applyChevronState CALL (not a comment mention)
-        # to the end of the case block so the assertions only inspect
-        # the refresh call's surrounding context.
         acs = body.rfind("applyChevronState(")
         assert acs >= 0, "Could not find applyChevronState call in status case"
         refresh_region = body[acs : acs + 400]
@@ -157,7 +153,6 @@ class TestApplyChevronStateInRunningBranchUnhidesPanels:
             "running-task panels are kept visible even when the "
             "collapse pass runs"
         )
-        # The collapse pass must remove chv-hidden when inRunning.
         assert "remove('chv-hidden')" in body, (
             "applyChevronState must remove chv-hidden from "
             "running-task panels (its `inRunning` arm)"
