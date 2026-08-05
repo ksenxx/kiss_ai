@@ -11,7 +11,7 @@ in isolation: that ``Shift+Enter`` inserts a real ``\\n`` and that the
 bordered box grows to one body row per buffer line.  Those tests run
 with an ``io.StringIO`` substitute for the terminal and never engage the
 ``termios`` raw-mode, ``DECSTBM`` scroll-region, ``_StdoutProxy`` and
-``_RunningAgentState`` -> ``pre_step_hook`` plumbing that production
+``pending_user_messages`` -> ``pre_step_hook`` plumbing that production
 code uses to deliver a multi-line follow-up instruction to a live
 agent.
 

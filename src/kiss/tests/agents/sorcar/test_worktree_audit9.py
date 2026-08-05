@@ -53,6 +53,7 @@ from kiss.agents.sorcar.worktree_sorcar_agent import (
     WorktreeSorcarAgent,
     _manual_merge_cmd,
 )
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -60,7 +61,7 @@ def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
     """Create a bare-minimum git repo with one commit."""
     repo = tmp_path / name
     repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, capture_output=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
         cwd=repo, capture_output=True,
@@ -134,27 +135,35 @@ class TestBug41Red6Fix:
         """When tab_id is passed explicitly, is_merging is set correctly
         even if thread-local tab_id is None (replay path)."""
         server = VSCodeServer()
-        tab = server._get_tab("replay-tab")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        assert not tab.is_merging
-
-        merge_dir = tmp_path / "merge"
-        merge_dir.mkdir()
-        merge_json = merge_dir / "pending-merge.json"
-        merge_json.write_text(json.dumps({
-            "files": [{
-                "path": "test.txt",
-                "hunks": [{"old_start": 1, "new_start": 1}],
-            }],
-        }))
-
-        result = server._start_merge_session(
-            str(merge_json), tab_id="replay-tab",
+        st = agent_state.AgentState(
+            "task-bug41-replay",
+            agent=WorktreeSorcarAgent("Sorcar VS Code"),
+            tab_id="replay-tab",
+            server_owned=True,
         )
-        assert result is True
-        assert tab.is_merging, (
-            "is_merging must be True when tab_id is passed explicitly"
-        )
+        agent_state.register(st)
+        try:
+            assert not st.is_merging
+
+            merge_dir = tmp_path / "merge"
+            merge_dir.mkdir()
+            merge_json = merge_dir / "pending-merge.json"
+            merge_json.write_text(json.dumps({
+                "files": [{
+                    "path": "test.txt",
+                    "hunks": [{"old_start": 1, "new_start": 1}],
+                }],
+            }))
+
+            result = server._start_merge_session(
+                str(merge_json), tab_id="replay-tab",
+            )
+            assert result is True
+            assert st.is_merging, (
+                "is_merging must be True when tab_id is passed explicitly"
+            )
+        finally:
+            agent_state.unregister("task-bug41-replay", st)
 
 
 
@@ -274,20 +283,28 @@ class TestInc6Fix:
 
         server = VSCodeServer()
         server.work_dir = str(repo)
-        tab = server._get_tab("inc6-tab")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        tab.agent._wt = GitWorktree(
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch="main",
             wt_dir=wt_dir,
         )
-
-        has_conflict = server._check_merge_conflict("inc6-tab")
-        assert has_conflict, (
-            "INC-6 fix: staged file overlap must be detected"
+        st = agent_state.AgentState(
+            "task-inc6",
+            agent=agent,
+            tab_id="inc6-tab",
+            server_owned=True,
         )
+        st.use_worktree = True
+        agent_state.register(st)
+        try:
+            has_conflict = server._check_merge_conflict("inc6-tab")
+            assert has_conflict, (
+                "INC-6 fix: staged file overlap must be detected"
+            )
+        finally:
+            agent_state.unregister("task-inc6", st)
 
         subprocess.run(["git", "reset", "HEAD", "init.txt"], cwd=repo, capture_output=True)
         subprocess.run(["git", "checkout", "--", "init.txt"], cwd=repo, capture_output=True)

@@ -17,7 +17,7 @@ ALREADY subscribed to the task's chat id (see
 
 Pre-fix step (3) was broken for CLI-launched tasks: ``_replay_session``
 calls ``_reattach_running_chat`` which scans the in-process
-``_RunningAgentState`` registry, and CLI tasks never have an entry
+agent-state registry, and CLI tasks never have an entry
 there (the agent runs in the CLI process, not the daemon).  As a
 result the newly-opened tab was never subscribed to the task id and
 no ``status:running=true`` event was broadcast — so the tab silently

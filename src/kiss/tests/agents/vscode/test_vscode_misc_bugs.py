@@ -43,6 +43,7 @@ from typing import Any
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import get_available_models
+from kiss.server import agent_state
 from kiss.server.diff_merge import _scan_files, _write_base_copy
 from kiss.server.server import VSCodeServer
 
@@ -147,6 +148,7 @@ class _TempDbTestCase(unittest.TestCase):
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
     def tearDown(self) -> None:
+        agent_state.agent_states.clear()
         th._close_db()
         th._DB_PATH = self._orig_db_path  # type: ignore[attr-defined]
         shutil.rmtree(self._tmp, ignore_errors=True)
@@ -162,9 +164,14 @@ class TestRunningTaskNotMarkedFailed(_TempDbTestCase):
         worker = threading.Thread(target=release.wait, daemon=True)
         worker.start()
         try:
-            tab = self.server._get_tab("c3-tab")
-            tab.task_history_id = task_id
-            tab.task_thread = worker
+            state = agent_state.AgentState(
+                str(task_id),
+                tab_id="c3-tab",
+                server_owned=True,
+                task_thread=worker,
+                is_task_active=True,
+            )
+            agent_state.register(state)
 
             self.server._handle_command({"type": "getHistory"})
         finally:
@@ -211,10 +218,15 @@ class TestSubtaskFailureStepCount(_TempDbTestCase):
             self.skipTest("no model API key configured")
 
         tab_id = "c4-tab"
-        tab = self.server._get_tab(tab_id)
         agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.agent = agent
-        tab.chat_id = ""
+        state = agent_state.AgentState(
+            "task-c4",
+            agent=agent,
+            tab_id=tab_id,
+            server_owned=True,
+            stop_event=threading.Event(),
+        )
+        agent_state.register(state)
 
         def fake_run(**kwargs: Any) -> str:
             agent.total_tokens_used = 11

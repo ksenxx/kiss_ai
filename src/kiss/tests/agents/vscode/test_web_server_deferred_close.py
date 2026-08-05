@@ -9,20 +9,20 @@ before the window closes (``beforeunload`` / ``pagehide`` writes are
 commonly dropped), and the WS drop itself carries no per-tab
 identity.  ``RemoteAccessServer`` therefore arms a grace timer for
 every tab id seen on a connection when that connection drops; if a
-reconnect within :data:`_TAB_CLOSE_GRACE` seconds re-claims the
-tab id (current ``tabId`` or any entry in ``restoredTabs``), the
-pending close is cancelled.  Otherwise the timer fires a real
-``closeTab`` through :class:`VSCodeServer._close_tab`, which either
-disposes the idle ``_RunningAgentState`` immediately OR flips
-``frontend_closed=True`` so the existing
+reconnect within ``_TAB_CLOSE_GRACE`` seconds re-claims the tab id
+(current ``tabId`` or any entry in ``restoredTabs``), the pending
+close is cancelled.  Otherwise the timer fires a real ``closeTab``
+through :class:`VSCodeServer._close_tab`, which either unregisters
+the idle tab's :class:`kiss.server.agent_state.AgentState`
+immediately OR flips ``frontend_closed=True`` so the existing
 :meth:`VSCodeServer._dispose_if_closed` hook tears it down once the
 running agent finishes — never interrupting the live task.
 
 The tests pin this contract end-to-end against ``RemoteAccessServer``
-without mocks: a real asyncio loop drives ``loop.call_later``, a real
-:class:`VSCodeServer` owns the ``_running_agent_states`` map, and the pending
-timers are exercised through the public-on-the-class helpers
-``_schedule_tab_close`` / ``_cancel_pending_tab_close``.
+without mocks: a real asyncio loop drives ``loop.call_later``, the
+task-keyed ``kiss.server.agent_state`` registry holds the tab states,
+and the pending timers are exercised through the public-on-the-class
+helpers ``_schedule_tab_close`` / ``_cancel_pending_tab_close``.
 """
 
 from __future__ import annotations
@@ -32,16 +32,12 @@ import shutil
 import tempfile
 import threading
 from pathlib import Path
+from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
-import pytest
-
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.server.web_server import (
-    _TAB_CLOSE_GRACE,
-    RemoteAccessServer,
-)
+from kiss.server import agent_state
+from kiss.server.web_server import RemoteAccessServer
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
@@ -59,9 +55,30 @@ def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
 
 
+def _noop_broadcast(event: dict[str, Any]) -> None:
+    """No-op broadcast target for quiet tests."""
+
+
 def _silence_broadcasts(server: RemoteAccessServer) -> None:
     """Replace the printer's broadcast with a no-op for quiet tests."""
-    server._printer.broadcast = lambda event: None  # type: ignore[assignment]
+    server._printer.broadcast = _noop_broadcast  # type: ignore[assignment]
+
+
+def _register_tab_state(
+    task_id: str,
+    tab_id: str,
+    *,
+    is_task_active: bool = False,
+) -> agent_state.AgentState:
+    """Register a server-owned tab state exactly like a UI-launched run."""
+    state = agent_state.AgentState(
+        task_id,
+        tab_id=tab_id,
+        server_owned=True,
+        is_task_active=is_task_active,
+    )
+    agent_state.register(state)
+    return state
 
 
 class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
@@ -74,6 +91,8 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
 
         self._orig_grace = ws._TAB_CLOSE_GRACE
         ws._TAB_CLOSE_GRACE = 0.05
+
+        agent_state.agent_states.clear()
 
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
@@ -101,6 +120,8 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
         import kiss.server.web_server as ws
         ws._TAB_CLOSE_GRACE = self._orig_grace
 
+        agent_state.agent_states.clear()
+
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
@@ -121,14 +142,14 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
             await asyncio.sleep(0.01)
 
     async def _wait_disposed(self, tab_id: str, timeout: float = 2.0) -> None:
-        """Wait until the underlying ``VSCodeServer._running_agent_states`` no
-        longer contains *tab_id* (the deferred ``closeTab`` task has
-        finished executing in the thread-pool executor)."""
+        """Wait until the ``agent_state`` registry no longer holds a state
+        for *tab_id* (the deferred ``closeTab`` task has finished
+        executing in the thread-pool executor)."""
         deadline = asyncio.get_event_loop().time() + timeout
-        while tab_id in _RunningAgentState.running_agent_states:
+        while agent_state.find_by_tab(tab_id) is not None:
             if asyncio.get_event_loop().time() >= deadline:
                 raise AssertionError(
-                    f"_running_agent_states[{tab_id!r}] not disposed in {timeout}s",
+                    f"agent state for {tab_id!r} not disposed in {timeout}s",
                 )
             await asyncio.sleep(0.01)
 
@@ -142,13 +163,13 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
         """``_cancel_pending_tab_close`` removes the pending entry and
         prevents the timer from firing.
         """
-        self.server._vscode_server._get_tab("tab-B")
+        _register_tab_state("task-B", "tab-B")
         self.server._schedule_tab_close("tab-B")
         self.server._cancel_pending_tab_close("tab-B")
         with self.server._pending_tab_closes_lock:
             self.assertNotIn("tab-B", self.server._pending_tab_closes)
         await asyncio.sleep(0.15)
-        self.assertIn("tab-B", _RunningAgentState.running_agent_states)
+        self.assertIsNotNone(agent_state.find_by_tab("tab-B"))
 
     async def test_unknown_and_empty_ids_are_safe(self) -> None:
         """Empty / unknown tab ids cause no errors and arm no timers."""
@@ -161,56 +182,56 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
     async def test_grace_period_disposes_idle_tab(self) -> None:
         """After the grace window, an idle tab is fully disposed."""
         tab_id = "tab-idle"
-        self.server._vscode_server._get_tab(tab_id)
+        _register_tab_state("task-idle", tab_id)
         self.server._schedule_tab_close(tab_id)
         await self._wait_pending_clear(tab_id)
         await self._wait_disposed(tab_id)
 
     async def test_grace_period_defers_running_tab(self) -> None:
-        """A tab whose task is still running has its ``_RunningAgentState`` kept
+        """A tab whose task is still running has its ``AgentState`` kept
         alive but flagged ``frontend_closed=True`` for later disposal.
         """
         tab_id = "tab-running"
-        tab = self.server._vscode_server._get_tab(tab_id)
+        state = _register_tab_state("task-running", tab_id, is_task_active=True)
 
         release = threading.Event()
-        tab.is_task_active = True
 
         def fake_task() -> None:
             release.wait(timeout=5)
 
         thr = threading.Thread(target=fake_task, daemon=True)
-        tab.task_thread = thr
+        state.task_thread = thr
         thr.start()
 
         try:
             self.server._schedule_tab_close(tab_id)
             await self._wait_pending_clear(tab_id)
             for _ in range(100):
-                if tab.frontend_closed:
+                if state.frontend_closed:
                     break
                 await asyncio.sleep(0.01)
-            self.assertIn(tab_id, _RunningAgentState.running_agent_states)
-            self.assertTrue(tab.frontend_closed)
+            self.assertIsNotNone(agent_state.find_by_tab(tab_id))
+            self.assertTrue(state.frontend_closed)
 
             release.set()
             thr.join(timeout=5)
-            with self.server._vscode_server._state_lock:
-                tab.task_thread = None
-                tab.is_task_active = False
+            with agent_state.STATE_LOCK:
+                state.task_thread = None
+                state.is_task_active = False
             self.server._vscode_server._dispose_if_closed(tab_id)
-            self.assertNotIn(tab_id, _RunningAgentState.running_agent_states)
+            self.assertIsNone(agent_state.find_by_tab(tab_id))
         finally:
             release.set()
             thr.join(timeout=5)
 
-    @pytest.mark.slow
     async def test_reconnect_via_handle_ready_cancels_close(self) -> None:
         """A ``ready`` reconnect cancels the pending close for both the
         current ``tabId`` and every entry in ``restoredTabs``.
         """
+        import kiss.server.web_server as ws
+
         for tab_id in ("tab-X", "tab-Y", "tab-Z"):
-            self.server._vscode_server._get_tab(tab_id)
+            _register_tab_state(f"task-{tab_id}", tab_id)
             self.server._schedule_tab_close(tab_id)
         with self.server._pending_tab_closes_lock:
             self.assertEqual(
@@ -225,29 +246,25 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
         with self.server._pending_tab_closes_lock:
             self.assertEqual(self.server._pending_tab_closes, {})
 
-        await asyncio.sleep(_TAB_CLOSE_GRACE + 0.05)
+        await asyncio.sleep(ws._TAB_CLOSE_GRACE + 0.1)
         for tab_id in ("tab-X", "tab-Y", "tab-Z"):
-            self.assertIn(tab_id, _RunningAgentState.running_agent_states)
+            self.assertIsNotNone(agent_state.find_by_tab(tab_id))
 
-    async def test_resume_session_clears_frontend_closed_flag(self) -> None:
-        """If the grace timer fired during a slow reload and flagged a
-        running tab as ``frontend_closed=True``, the subsequent
-        ``_replay_session`` from the reconnected ``ready`` MUST clear
-        the flag so the post-task ``_dispose_if_closed`` does not
-        tear down the re-claimed state.
+    async def test_dispose_if_closed_ignores_unflagged_state(self) -> None:
+        """``_dispose_if_closed`` must not tear down a state whose
+        ``frontend_closed`` flag was cleared by a reconnect (a
+        re-claimed tab survives the post-task disposal hook).
         """
         tab_id = "tab-reload"
-        tab = self.server._vscode_server._get_tab(tab_id)
-        tab.frontend_closed = True
+        state = _register_tab_state("task-reload", tab_id)
+        state.frontend_closed = True
 
-        from kiss.server.server import VSCodeServer
-        assert isinstance(self.server._vscode_server, VSCodeServer)
-        with self.server._vscode_server._state_lock:
-            tab.frontend_closed = False
+        with agent_state.STATE_LOCK:
+            state.frontend_closed = False
 
-        self.assertFalse(tab.frontend_closed)
+        self.assertFalse(state.frontend_closed)
         self.server._vscode_server._dispose_if_closed(tab_id)
-        self.assertIn(tab_id, _RunningAgentState.running_agent_states)
+        self.assertIsNotNone(agent_state.find_by_tab(tab_id))
 
     async def test_replay_session_clears_frontend_closed(self) -> None:
         """End-to-end: a real ``_replay_session`` call clears the
@@ -255,34 +272,22 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
         earlier deferred ``_close_tab``.
         """
         tab_id = "tab-replay"
-        tab = self.server._vscode_server._get_tab(tab_id)
-        tab.frontend_closed = True
+        state = _register_tab_state("task-replay", tab_id)
+        state.frontend_closed = True
 
-        import kiss.server.server as srv
+        # The chat id is unknown in the (temp) DB, so the replay takes
+        # the no-events path — which must still clear the flag for the
+        # re-claimed tab.
+        self.server._vscode_server._replay_session("chat-stub", tab_id)
 
-        orig_loader = srv._load_latest_chat_events_by_chat_id
-
-        def fake_loader(chat_id: str) -> dict[str, object]:
-            return {
-                "events": [{"type": "noop"}],
-                "task": "stub task",
-                "task_id": None,
-                "extra": "",
-            }
-        srv._load_latest_chat_events_by_chat_id = fake_loader  # type: ignore[assignment]
-        try:
-            self.server._vscode_server._replay_session("chat-stub", tab_id)
-        finally:
-            srv._load_latest_chat_events_by_chat_id = orig_loader  # type: ignore[assignment]
-
-        self.assertFalse(tab.frontend_closed)
+        self.assertFalse(state.frontend_closed)
         self.server._vscode_server._dispose_if_closed(tab_id)
-        self.assertIn(tab_id, _RunningAgentState.running_agent_states)
+        self.assertIsNotNone(agent_state.find_by_tab(tab_id))
 
     async def test_double_schedule_replaces_existing_timer(self) -> None:
         """Re-scheduling the same tab id cancels the prior timer."""
         tab_id = "tab-respawn"
-        self.server._vscode_server._get_tab(tab_id)
+        _register_tab_state("task-respawn", tab_id)
         self.server._schedule_tab_close(tab_id)
         with self.server._pending_tab_closes_lock:
             h1 = self.server._pending_tab_closes[tab_id]
@@ -295,7 +300,7 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
     async def test_stop_async_cancels_pending(self) -> None:
         """``stop_async`` cancels every armed deferred-close timer."""
         for tab_id in ("a", "b", "c"):
-            self.server._vscode_server._get_tab(tab_id)
+            _register_tab_state(f"task-{tab_id}", tab_id)
             self.server._schedule_tab_close(tab_id)
         with self.server._pending_tab_closes_lock:
             self.assertEqual(len(self.server._pending_tab_closes), 3)

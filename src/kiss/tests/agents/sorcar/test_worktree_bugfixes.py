@@ -27,7 +27,9 @@ from kiss.agents.sorcar.git_worktree import (
 def _make_repo(path: Path) -> Path:
     """Create a git repo with one initial commit at *path*."""
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", str(path)], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "init", "-b", "main", str(path)], capture_output=True, check=True
+    )
     subprocess.run(
         ["git", "-C", str(path), "config", "user.email", "t@t.com"],
         capture_output=True, check=True,

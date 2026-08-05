@@ -29,6 +29,7 @@ import unittest
 from pathlib import Path
 
 import kiss.server.merge_flow as _merge_flow_module
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -67,7 +68,19 @@ class _ServerHarness(unittest.TestCase):
 
     def tearDown(self) -> None:
         _merge_flow_module.generate_commit_message_from_diff = self._orig_gen
+        agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _register_tab(
+        self, tab_id: str, *, use_worktree: bool = False,
+    ) -> agent_state.AgentState:
+        """Register a server-owned tab state like a UI-launched run."""
+        state = agent_state.AgentState(
+            f"task-{tab_id}", tab_id=tab_id, server_owned=True,
+        )
+        state.use_worktree = use_worktree
+        agent_state.register(state)
+        return state
 
     def _types(self) -> list[str]:
         return [e["type"] for e in self.events]
@@ -85,9 +98,7 @@ class TestFinishMergeEmitsAutocommitPrompt(_ServerHarness):
 
     def test_prompt_with_unstaged_modification(self) -> None:
         """Modifying a tracked file fires autocommit_prompt with the file."""
-        tab = self.server._get_tab("t1")
-        tab.use_worktree = False
-        tab.is_merging = True
+        self._register_tab("t1")
         Path(self.tmpdir, "seed.txt").write_text("modified\n")
         self.server._finish_merge("t1")
 
@@ -97,9 +108,7 @@ class TestFinishMergeEmitsAutocommitPrompt(_ServerHarness):
 
     def test_prompt_with_untracked_file(self) -> None:
         """Untracked files trigger the prompt too."""
-        tab = self.server._get_tab("t2")
-        tab.use_worktree = False
-        tab.is_merging = True
+        self._register_tab("t2")
         Path(self.tmpdir, "new.txt").write_text("hi\n")
         self.server._finish_merge("t2")
 
@@ -109,9 +118,7 @@ class TestFinishMergeEmitsAutocommitPrompt(_ServerHarness):
 
     def test_no_prompt_when_clean(self) -> None:
         """No autocommit_prompt when working tree is clean."""
-        tab = self.server._get_tab("t3")
-        tab.use_worktree = False
-        tab.is_merging = True
+        self._register_tab("t3")
         self.server._finish_merge("t3")
 
         assert "autocommit_prompt" not in self._types()
@@ -119,9 +126,7 @@ class TestFinishMergeEmitsAutocommitPrompt(_ServerHarness):
     def test_no_prompt_for_worktree_tab(self) -> None:
         """Worktree tabs keep their own merge/discard flow; the
         non-worktree prompt must not fire for them."""
-        tab = self.server._get_tab("t4")
-        tab.use_worktree = True
-        tab.is_merging = True
+        self._register_tab("t4", use_worktree=True)
         Path(self.tmpdir, "seed.txt").write_text("x\n")
         self.server._finish_merge("t4")
 
@@ -139,9 +144,7 @@ class TestFinishMergeEmitsAutocommitPrompt(_ServerHarness):
         non_git = tempfile.mkdtemp()
         try:
             self.server.work_dir = non_git
-            tab = self.server._get_tab("t5")
-            tab.use_worktree = False
-            tab.is_merging = True
+            self._register_tab("t5")
             Path(non_git, "loose.txt").write_text("x\n")
             self.server._finish_merge("t5")
             assert "autocommit_prompt" not in self._types()
@@ -157,9 +160,7 @@ class TestFinishMergeEmitsAutocommitPrompt(_ServerHarness):
         submitted right after the merge view closed was rejected by
         the ``is_merging`` task-start guard and silently lost.
         """
-        tab = self.server._get_tab("t6")
-        tab.use_worktree = False
-        tab.is_merging = True
+        self._register_tab("t6")
         Path(self.tmpdir, "foo.txt").write_text("foo\n")
         self.server._finish_merge("t6")
 
@@ -176,7 +177,6 @@ class TestAutocommitActionSkip(_ServerHarness):
     def test_skip_leaves_working_tree_dirty(self) -> None:
         Path(self.tmpdir, "seed.txt").write_text("modified\n")
         Path(self.tmpdir, "new.txt").write_text("new\n")
-        self.server._get_tab("t1").use_worktree = False
 
         self.server._handle_autocommit_action("skip", "t1")
 
@@ -191,7 +191,6 @@ class TestAutocommitActionSkip(_ServerHarness):
 
     def test_skip_does_not_create_commit(self) -> None:
         Path(self.tmpdir, "seed.txt").write_text("modified\n")
-        self.server._get_tab("t1").use_worktree = False
         before = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
 
         self.server._handle_autocommit_action("skip", "t1")
@@ -221,7 +220,6 @@ class TestAutocommitActionCommit(_ServerHarness):
     def test_commit_stages_and_commits_tracked_and_untracked(self) -> None:
         Path(self.tmpdir, "seed.txt").write_text("updated seed\n")
         Path(self.tmpdir, "new.txt").write_text("brand new\n")
-        self.server._get_tab("t1").use_worktree = False
 
         before = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
         self.server._handle_autocommit_action("commit", "t1")
@@ -248,7 +246,6 @@ class TestAutocommitActionCommit(_ServerHarness):
     def test_commit_with_only_untracked(self) -> None:
         """Commit handles the case with only untracked files."""
         Path(self.tmpdir, "only_new.txt").write_text("hi\n")
-        self.server._get_tab("t1").use_worktree = False
 
         self.server._handle_autocommit_action("commit", "t1")
 
@@ -265,7 +262,6 @@ class TestAutocommitActionCommit(_ServerHarness):
     def test_commit_when_nothing_to_commit(self) -> None:
         """If there's nothing to commit (race), broadcast success with
         ``committed: False`` instead of failing."""
-        self.server._get_tab("t1").use_worktree = False
         before = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
 
         self.server._handle_autocommit_action("commit", "t1")
@@ -281,7 +277,6 @@ class TestAutocommitActionCommit(_ServerHarness):
         non_git = tempfile.mkdtemp()
         try:
             self.server.work_dir = non_git
-            self.server._get_tab("t1").use_worktree = False
             self.server._handle_autocommit_action("commit", "t1")
             evt = self._event("autocommit_done")
             assert evt["success"] is False
@@ -345,9 +340,7 @@ class TestAutocommitPromptRoundtrip(_ServerHarness):
     repo untouched."""
 
     def test_full_auto_commit_flow(self) -> None:
-        tab = self.server._get_tab("t1")
-        tab.use_worktree = False
-        tab.is_merging = True
+        self._register_tab("t1")
         Path(self.tmpdir, "seed.txt").write_text("delta\n")
         Path(self.tmpdir, "extra.txt").write_text("extra\n")
 
@@ -375,9 +368,7 @@ class TestAutocommitPromptRoundtrip(_ServerHarness):
         ).stdout.strip() == ""
 
     def test_full_do_nothing_flow(self) -> None:
-        tab = self.server._get_tab("t1")
-        tab.use_worktree = False
-        tab.is_merging = True
+        self._register_tab("t1")
         Path(self.tmpdir, "seed.txt").write_text("untouched dirty\n")
 
         self.server._finish_merge("t1")

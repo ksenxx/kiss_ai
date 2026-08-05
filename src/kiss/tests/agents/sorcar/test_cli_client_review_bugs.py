@@ -40,8 +40,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.core.print_to_console import ConsolePrinter
+from kiss.server import agent_state
 from kiss.tests.agents.sorcar.test_cli_client import (
     CliClientBase,
     _DaemonHarness,
@@ -71,21 +71,22 @@ class TestCostRegression(CliClientBase):
     """Review #1 — ``/cost`` must read budget/tokens from ``tab.agent``."""
 
     def test_cost_reads_budget_and_tokens_from_tab_agent(self) -> None:
-        tab = _RunningAgentState(
+        state = agent_state.AgentState(
+            "task-cost-regression",
             tab_id=self.client.tab_id,
-            default_model="anything",
+            server_owned=True,
         )
-        tab.agent = SimpleNamespace(  # type: ignore[assignment]
+        state.agent = SimpleNamespace(  # type: ignore[assignment]
             budget_used=1.2345,
             total_tokens_used=4321,
             chat_id="stale-agent-chat-id",
         )
-        tab.chat_id = "chat-abc"
-        _RunningAgentState.register(self.client.tab_id, tab)
+        state.chat_id = "chat-abc"
+        agent_state.register(state)
         try:
             reply = _request_cli_info(self.client, "cost")
         finally:
-            _RunningAgentState.unregister(self.client.tab_id)
+            agent_state.unregister(state.task_id, state)
         text = reply.get("text", "")
         self.assertIn("$1.2345", text, f"Cost missing: {text!r}")
         self.assertIn("4321", text, f"Token count missing: {text!r}")
@@ -153,12 +154,10 @@ class TestModelCurrentPerClient(unittest.TestCase):
                             "tabId": self.client_b.tab_id})
 
         def _both_applied() -> bool:
-            tabs = _RunningAgentState.running_agent_states
-            tab_a = tabs.get(self.client_a.tab_id)
-            tab_b = tabs.get(self.client_b.tab_id)
-            return (
-                tab_a is not None and tab_a.selected_model == m_a
-                and tab_b is not None and tab_b.selected_model == m_b
+            models_map = self.harness.server._vscode_server._tab_models
+            return bool(
+                models_map.get(self.client_a.tab_id) == m_a
+                and models_map.get(self.client_b.tab_id) == m_b
             )
 
         self.assertTrue(_wait_for(_both_applied, timeout=3.0),

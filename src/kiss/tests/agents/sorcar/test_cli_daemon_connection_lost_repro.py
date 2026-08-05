@@ -56,8 +56,8 @@ import uuid
 from pathlib import Path
 
 from kiss.agents.sorcar import persistence as th
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.core.print_to_console import ConsolePrinter
+from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
 from kiss.ui.cli import cli_daemon_bridge
 from kiss.ui.cli.cli_client import CliClient, _submit_task
@@ -96,7 +96,7 @@ class TestDaemonConnectionLostRepro(unittest.TestCase):
         th._DB_PATH = kiss_dir / "sorcar.db"
         th._db_conn = None
         self.addCleanup(self._restore_persistence)
-        self.addCleanup(_RunningAgentState.running_agent_states.clear)
+        self.addCleanup(agent_state.agent_states.clear)
 
         self._saved_env = os.environ.get("KISS_SORCAR_SOCK")
         os.environ["KISS_SORCAR_SOCK"] = self.sock_path

@@ -25,20 +25,15 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, _git
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
 def _agent(server: VSCodeServer, tab_id: str = "0") -> WorktreeSorcarAgent:
-    """Return the per-tab agent, asserting it is not ``None`` for mypy.
-
-    ``VSCodeServer._get_tab`` lazy-allocates the per-tab agent slot so
-    callers from inside tests always see a non-``None`` instance even
-    though the static type is ``WorktreeSorcarAgent | None`` to model
-    the transient-between-tasks behaviour.
-    """
-    tab = server._get_tab(tab_id)
-    assert tab.agent is not None
-    return tab.agent
+    """Return the tab's registered agent, asserting it exists for mypy."""
+    state = agent_state.find_by_tab(tab_id)
+    assert state is not None and state.agent is not None
+    return state.agent
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -131,8 +126,15 @@ def _file_in_repo(repo: Path, filename: str) -> bool:
 
 def _make_server(repo: Path) -> tuple[VSCodeServer, list[dict]]:
     server = VSCodeServer()
-    server._get_tab("0").use_worktree = True
     server.work_dir = str(repo)
+    state = agent_state.AgentState(
+        "task-0",
+        agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        tab_id="0",
+        server_owned=True,
+    )
+    state.use_worktree = True
+    agent_state.register(state)
     events: list[dict] = []
 
     def capture(event: dict) -> None:
@@ -361,6 +363,7 @@ class TestServerWorktreeWorkflow:
         _unpatch_super_run(self.original_run)
         _restore_db(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+        agent_state.agent_states.clear()
 
     def _setup_pending_worktree(
         self, server: VSCodeServer, *, with_changes: bool = True,
@@ -770,10 +773,9 @@ class TestServerWorktreeWorkflow:
         assert len(wt_done) == 1
         assert len(wt_done[0].get("changedFiles", [])) > 0
 
-        tab = server._get_tab("0")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        if tab.agent._wt_pending:
-            tab.agent.discard()
+        agent = _agent(server)
+        if agent._wt_pending:
+            agent.discard()
 
     def test_worktree_merge_review_shown_on_stop_with_changes(self) -> None:
         """Merge/diff review UI is shown when user stops after agent made changes.
@@ -811,7 +813,6 @@ class TestServerWorktreeWorkflow:
         stopped = [e for e in events if e["type"] == "task_stopped"]
         assert len(stopped) == 1
 
-        tab = server._get_tab("0")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        if tab.agent._wt_pending:
-            tab.agent.discard()
+        agent = _agent(server)
+        if agent._wt_pending:
+            agent.discard()

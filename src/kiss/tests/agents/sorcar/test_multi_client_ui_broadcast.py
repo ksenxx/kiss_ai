@@ -28,8 +28,8 @@ from typing import Any, cast
 
 import kiss.server.merge_flow as merge_flow_module
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 from kiss.server.task_runner import _TaskRunnerMixin
 from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
@@ -67,10 +67,10 @@ class TestMultiClientUiBroadcast(unittest.TestCase):
         self.printer = MemoryPrinter()
         self.server = VSCodeServer(printer=self.printer)
         self.server.work_dir = self.tmpdir
-        self.owner = self.server._get_tab(OWNER_TAB)
-        self.owner.use_worktree = False
-        self.owner.task_history_id = TASK_ID
-        self.viewer = self.server._get_tab(VIEWER_TAB)
+        self.owner = agent_state.AgentState(
+            TASK_ID, tab_id=OWNER_TAB, server_owned=True,
+        )
+        agent_state.register(self.owner)
         self.printer.subscribe_tab(TASK_ID, OWNER_TAB)
         self.printer.subscribe_tab(TASK_ID, VIEWER_TAB)
         self._orig_gen = merge_flow_module.generate_commit_message_from_diff
@@ -83,8 +83,8 @@ class TestMultiClientUiBroadcast(unittest.TestCase):
     def tearDown(self) -> None:
         """Undo the module patch and drop all per-test global state."""
         merge_flow_module.generate_commit_message_from_diff = self._orig_gen
-        with _RunningAgentState._registry_lock:
-            _RunningAgentState.running_agent_states.clear()
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _tabs_for(self, event_type: str) -> set[str]:
@@ -193,15 +193,20 @@ class TestMultiClientUiBroadcast(unittest.TestCase):
 
     def test_viewer_running_another_task_is_not_mirrored(self) -> None:
         """A co-subscribed tab busy with its own task keeps its own UI."""
-        self.viewer.is_task_active = True
-        self.viewer.agent = cast(WorktreeSorcarAgent, _OtherTaskAgent())
+        viewer_state = agent_state.AgentState(
+            "some-other-task",
+            tab_id=VIEWER_TAB,
+            server_owned=True,
+            is_task_active=True,
+        )
+        viewer_state.agent = cast(WorktreeSorcarAgent, _OtherTaskAgent())
+        agent_state.register(viewer_state)
         self._start_merge()
         self.assertEqual(self._tabs_for("merge_data"), {OWNER_TAB})
 
     def test_client_joining_mid_review_is_caught_up(self) -> None:
         """A tab opened while the review is pending still gets the UI."""
         self._start_merge()
-        self.server._get_tab("late-tab")
         self.printer.subscribe_tab(TASK_ID, "late-tab")
         self.assertEqual(
             self._tabs_for("merge_data"),

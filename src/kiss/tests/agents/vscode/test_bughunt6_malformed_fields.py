@@ -55,7 +55,7 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar.persistence import _close_db
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -114,7 +114,7 @@ class TestMalformedFields(unittest.TestCase):
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def test_nonstring_tab_id_does_not_raise(self) -> None:
         payloads = [
@@ -132,8 +132,11 @@ class TestMalformedFields(unittest.TestCase):
         ]
         for p in payloads:
             self.server._handle_command(dict(p))
-        for key in _RunningAgentState.running_agent_states:
+        for key, state in agent_state.agent_states.items():
             assert isinstance(key, str), f"non-string registry key {key!r}"
+            assert isinstance(state.tab_id, str), (
+                f"non-string state tab_id {state.tab_id!r}"
+            )
 
     def test_nonstring_model_does_not_corrupt_default(self) -> None:
         before = self.server._default_model
@@ -143,10 +146,10 @@ class TestMalformedFields(unittest.TestCase):
         assert self.server._default_model == before, (
             f"_default_model corrupted to {self.server._default_model!r}"
         )
-        tab = _RunningAgentState.running_agent_states.get("t1")
-        if tab is not None:
-            assert isinstance(tab.selected_model, str), (
-                f"selected_model corrupted to {tab.selected_model!r}"
+        tab_model = self.server._tab_models.get("t1")
+        if tab_model is not None:
+            assert isinstance(tab_model, str), (
+                f"selected model corrupted to {tab_model!r}"
             )
 
     def test_nonstring_work_dir_does_not_corrupt_state(self) -> None:

@@ -41,13 +41,14 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import uuid
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps, _git
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -120,40 +121,31 @@ def _make_wt_with_commit(
     return wt
 
 
-class _RecordingPrinter:
-    """Concrete printer that records broadcast calls (not a mock)."""
-
-    def __init__(self) -> None:
-        self.events: list[dict[str, Any]] = []
-        self._thread_local = threading.local()
-        self._persist_agents: dict[str, Any] = {}
-        self._bash_buffers: dict[str, Any] = {}
-
-    def broadcast(self, event: dict[str, Any]) -> None:
-        self.events.append(event)
-
-    def cleanup_tab(self, tab_id: str) -> None:
-        self._persist_agents.pop(tab_id, None)
-        self._bash_buffers.pop(tab_id, None)
-
-    def start_recording(self) -> None:
-        pass
-
-    def stop_recording(self) -> None:
-        pass
-
-    def peek_recording(self) -> list[dict[str, Any]]:
-        return []
-
-    def reset(self) -> None:
-        pass
-
-
-def _server(repo: Path) -> VSCodeServer:
+def _server(repo: Path) -> tuple[VSCodeServer, list[dict[str, Any]]]:
+    """Real server whose printer broadcasts are captured into a list."""
     server = VSCodeServer()
     server.work_dir = str(repo)
-    server.printer = cast(Any, _RecordingPrinter())
-    return server
+    events: list[dict[str, Any]] = []
+
+    def capture(event: dict[str, Any]) -> None:
+        events.append(event)
+
+    server.printer.broadcast = capture  # type: ignore[assignment]
+    return server, events
+
+
+def _register_tab_state(
+    tab_id: str, agent: WorktreeSorcarAgent,
+) -> agent_state.AgentState:
+    """Register a server-owned idle state for *tab_id* with *agent*."""
+    state = agent_state.AgentState(
+        uuid.uuid4().hex,
+        agent=agent,
+        tab_id=tab_id,
+        server_owned=True,
+    )
+    agent_state.register(state)
+    return state
 
 
 class TestBug1IsTaskActiveLeaks:
@@ -165,31 +157,36 @@ class TestBug1IsTaskActiveLeaks:
         self.repo = _make_repo(Path(self.tmpdir) / "repo")
 
     def teardown_method(self) -> None:
+        agent_state.agent_states.clear()
         _restore_db(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_is_task_active_reset_on_wt_merge_block(self) -> None:
         """is_task_active must be False after a non-wt task is rejected."""
-        server = _server(self.repo)
+        server, _events = _server(self.repo)
 
-        tab_a = server._get_tab("tab-a")
-        tab_a.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab_a.use_worktree = True
-        tab_a.is_merging = True
+        state_a = _register_tab_state(
+            "tab-a", WorktreeSorcarAgent("Sorcar VS Code"),
+        )
+        state_a.use_worktree = True
+        state_a.is_merging = True
 
-        tab_b = server._get_tab("tab-b")
-        tab_b.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab_b.stop_event = threading.Event()
-        tab_b.user_answer_queue = queue.Queue(maxsize=1)
-        tab_b.task_thread = threading.Thread(target=lambda: None)
+        state_b = _register_tab_state(
+            "tab-b", WorktreeSorcarAgent("Sorcar VS Code"),
+        )
+        state_b.stop_event = threading.Event()
+        state_b.user_answer_queue = queue.Queue(maxsize=1)
 
-        server._run_task_inner({
-            "tabId": "tab-b",
-            "prompt": "do something",
-            "useWorktree": False,
-        })
+        try:
+            server._run_task_inner({
+                "tabId": "tab-b",
+                "prompt": "do something",
+                "useWorktree": False,
+            })
+        finally:
+            server.printer._thread_local.stop_event = None
 
-        assert tab_b.is_task_active is False, (
+        assert state_b.is_task_active is False, (
             "BUG 1: is_task_active leaked True after non-wt task was "
             "rejected by worktree-merge guard"
         )
@@ -256,6 +253,7 @@ class TestBug3AutoCommitNoLLMFallback:
         self.repo = _make_repo(Path(self.tmpdir) / "repo")
 
     def teardown_method(self) -> None:
+        agent_state.agent_states.clear()
         _restore_db(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -303,21 +301,22 @@ class TestBug4CloseTabOrphansWorktree:
         self.repo = _make_repo(Path(self.tmpdir) / "repo")
 
     def teardown_method(self) -> None:
+        agent_state.agent_states.clear()
         _restore_db(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_close_tab_releases_pending_worktree(self) -> None:
         """Closing a tab must auto-merge the pending worktree."""
-        server = _server(self.repo)
+        server, _events = _server(self.repo)
         tab_id = "tab-close-test"
-        tab = server._get_tab(tab_id)
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        state = _register_tab_state(tab_id, agent)
+        state.use_worktree = True
 
         branch = "kiss/wt-close-test"
-        wt = _make_wt_with_commit(self.repo, branch, tab.agent)
+        wt = _make_wt_with_commit(self.repo, branch, agent)
 
-        assert tab.agent._wt_pending
+        assert agent._wt_pending
 
         server._close_tab(tab_id)
 
@@ -331,24 +330,24 @@ class TestBug4CloseTabOrphansWorktree:
 
     def test_close_tab_no_changes_discards(self) -> None:
         """Closing a tab with a no-change worktree should discard it."""
-        server = _server(self.repo)
+        server, _events = _server(self.repo)
         tab_id = "tab-close-empty"
-        tab = server._get_tab(tab_id)
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        state = _register_tab_state(tab_id, agent)
+        state.use_worktree = True
 
         branch = "kiss/wt-close-empty"
         slug = branch.replace("/", "_")
         wt_dir = self.repo / ".kiss-worktrees" / slug
         assert GitWorktreeOps.create(self.repo, branch, wt_dir)
         GitWorktreeOps.save_original_branch(self.repo, branch, "main")
-        tab.agent._wt = GitWorktree(
+        agent._wt = GitWorktree(
             repo_root=self.repo,
             branch=branch,
             original_branch="main",
             wt_dir=wt_dir,
         )
-        assert tab.agent._wt_pending
+        assert agent._wt_pending
 
         server._close_tab(tab_id)
 
@@ -358,22 +357,22 @@ class TestBug4CloseTabOrphansWorktree:
 
     def test_close_tab_active_task_no_cleanup(self) -> None:
         """Closing a tab with an active task must NOT clean up worktree."""
-        server = _server(self.repo)
+        server, _events = _server(self.repo)
         tab_id = "tab-active"
-        tab = server._get_tab(tab_id)
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        tab.is_task_active = True
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        state = _register_tab_state(tab_id, agent)
+        state.use_worktree = True
+        state.is_task_active = True
 
         branch = "kiss/wt-active-test"
-        _make_wt_with_commit(self.repo, branch, tab.agent)
+        _make_wt_with_commit(self.repo, branch, agent)
 
         server._close_tab(tab_id)
 
-        assert tab_id in _RunningAgentState.running_agent_states
+        assert agent_state.get(state.task_id) is state
         assert GitWorktreeOps.branch_exists(self.repo, branch)
 
-        tab.is_task_active = False
-        GitWorktreeOps.remove(self.repo, tab.agent._wt.wt_dir)  # type: ignore[union-attr]
+        state.is_task_active = False
+        GitWorktreeOps.remove(self.repo, agent._wt.wt_dir)  # type: ignore[union-attr]
         GitWorktreeOps.prune(self.repo)
         GitWorktreeOps.delete_branch(self.repo, branch)

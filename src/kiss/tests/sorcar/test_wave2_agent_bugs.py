@@ -131,12 +131,10 @@ class _Base(unittest.TestCase):
         _PARENT_CLASS.run = self._original_parent_run
         wt_module._generate_commit_message = self._original_commit_msg_fn
 
-        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+        from kiss.server import agent_state
 
-        with _RunningAgentState._registry_lock:
-            _RunningAgentState.running_agent_states.clear()
-        with ChatSorcarAgent._running_agents_lock:
-            ChatSorcarAgent.running_agents.clear()
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
 
         if _persistence._db_conn is not None:
             try:

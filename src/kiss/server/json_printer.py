@@ -19,6 +19,7 @@ payload are treated as "system" events targeted at a specific tab and
 are forwarded directly without recording or persistence.
 """
 
+import logging
 import threading
 import time
 from functools import partial
@@ -33,16 +34,33 @@ from kiss.core.printer import (
     parse_result_yaml,
     truncate_result,
 )
+from kiss.server import agent_state
 
-_DISPLAY_EVENT_TYPES = frozenset({
-    "clear", "thinking_start", "thinking_delta", "thinking_end",
-    "text_delta", "text_end", "tool_call", "tool_result",
-    "system_output", "result", "system_prompt", "prompt",
-    "task_done", "task_error", "task_stopped", "task_interrupted",
-    "followup_suggestion",
-    "autocommit_done",
-    "warning",
-})
+logger = logging.getLogger(__name__)
+
+_DISPLAY_EVENT_TYPES = frozenset(
+    {
+        "clear",
+        "thinking_start",
+        "thinking_delta",
+        "thinking_end",
+        "text_delta",
+        "text_end",
+        "tool_call",
+        "tool_result",
+        "system_output",
+        "result",
+        "system_prompt",
+        "prompt",
+        "task_done",
+        "task_error",
+        "task_stopped",
+        "task_interrupted",
+        "followup_suggestion",
+        "autocommit_done",
+        "warning",
+    }
+)
 
 
 def stamp_event_ts(event: dict[str, Any]) -> None:
@@ -101,7 +119,11 @@ class _BashState:
     """
 
     __slots__ = (
-        "buffer", "timer", "generation", "last_flush", "streamed",
+        "buffer",
+        "timer",
+        "generation",
+        "last_flush",
+        "streamed",
         "flush_lock",
     )
 
@@ -123,9 +145,7 @@ _UI_CLOSE_EVENTS: dict[str, tuple[str, ...]] = {
     "worktree_result": ("worktree_done",),
 }
 _UI_OPEN_EVENTS: frozenset[str] = frozenset(
-    event_type
-    for closed in _UI_CLOSE_EVENTS.values()
-    for event_type in closed
+    event_type for closed in _UI_CLOSE_EVENTS.values() for event_type in closed
 )
 
 
@@ -161,7 +181,8 @@ class _UiMirror:
 
 
 def _orphaned_ui_close_events(
-    owner_tab_id: str, mirror: _UiMirror,
+    owner_tab_id: str,
+    mirror: _UiMirror,
 ) -> list[dict[str, Any]]:
     """Return the events that take *mirror*'s UI off the viewers' screens.
 
@@ -271,7 +292,10 @@ class JsonPrinter(Printer):
         self._budget_offsets: dict[str, float] = {}
         self._steps_offsets: dict[str, int] = {}
         self._recordings: dict[str, list[dict[str, Any]]] = {}
-        self._persist_agents: dict[str, Any] = {}
+        # task id → (tab_id, conn_id) of the UI tab the task was
+        # launched from; set via register_task_ui when a task runs in
+        # a UI tab.
+        self._task_ui: dict[str, tuple[str, str]] = {}
         self._subscribers: dict[str, set[str]] = {}
         self._subscriber_expiry: dict[str, float] = {}
         # Tabs whose picker currently shows a running agent's model
@@ -341,8 +365,191 @@ class JsonPrinter(Printer):
         for event in pending_ui:
             self.broadcast(event)
 
+    def register_task_ui(
+        self,
+        task_id: Any,
+        tab_id: str,
+        conn_id: str = "",
+    ) -> None:
+        """Attach the UI tab (and its connection) running *task_id*.
+
+        Called by the server when a task is launched from a UI tab:
+        the tab id and the connection id of the launching client are
+        recorded on the printer so the task's event stream is fanned
+        out to that tab (via :meth:`subscribe_tab`) and the owning
+        connection stays identifiable for the task's whole life.
+
+        Args:
+            task_id: The task identifier.
+            tab_id: The frontend tab id the task runs in.
+            conn_id: The id of the client connection that launched the
+                task (``""`` for direct callers / tests).
+        """
+        key = self._coerce_task_id(task_id)
+        if not key or not tab_id:
+            return
+        with self._lock:
+            self._task_ui[key] = (tab_id, conn_id)
+        self.subscribe_tab(task_id, tab_id)
+
+    def task_ui(self, task_id: Any) -> tuple[str, str]:
+        """Return the ``(tab_id, conn_id)`` registered for *task_id*.
+
+        Args:
+            task_id: The task identifier.
+
+        Returns:
+            The launching tab and connection ids, or ``("", "")`` when
+            the task was not launched from a UI tab.
+        """
+        key = self._coerce_task_id(task_id)
+        with self._lock:
+            return self._task_ui.get(key, ("", ""))
+
+    def agent_task_allocated(
+        self,
+        agent: Any,
+        task_id: Any,
+        chat_id: str = "",
+    ) -> None:
+        """Register (or re-key) *agent*'s run under its allocated task id.
+
+        Duck-typed bridge called by ``ChatSorcarAgent.run`` the moment
+        the run's ``task_history`` row id exists.  When the server
+        pre-registered a state for this agent (a UI-launched run), the
+        state is re-keyed to the persisted id; otherwise (parallel
+        sub-agents, standalone runs) a fresh state is created from the
+        calling thread's context.
+
+        Args:
+            agent: The live agent instance.
+            task_id: The freshly allocated ``task_history`` row id.
+            chat_id: The chat id the run belongs to.
+        """
+        key = self._coerce_task_id(task_id)
+        if not key:
+            return
+        with agent_state.STATE_LOCK:
+            state = agent_state.find_by_agent(agent)
+            if state is None:
+                sub_info = getattr(agent, "_subagent_info", None)
+                parent_task_id: str | None = None
+                if isinstance(sub_info, dict):
+                    parent_task_id = str(sub_info.get("parent_task_id") or "")
+                state = agent_state.AgentState(
+                    key,
+                    agent=agent,
+                    tab_id=str(getattr(agent, "_tab_id", "") or ""),
+                    parent_task_id=parent_task_id,
+                    stop_event=stop_signal.get_thread_stop_event(),
+                    task_thread=threading.current_thread(),
+                    is_task_active=True,
+                )
+                agent_state.register(state)
+            else:
+                agent_state.rekey(state, key)
+                state.is_task_active = True
+                if state.stop_event is None:
+                    state.stop_event = stop_signal.get_thread_stop_event()
+                if state.task_thread is None:
+                    state.task_thread = threading.current_thread()
+            if chat_id:
+                state.chat_id = chat_id
+
+    def agent_task_finished(self, agent: Any, task_id: Any) -> None:
+        """Mark *agent*'s run as finished and drop non-server states.
+
+        Duck-typed bridge called from ``ChatSorcarAgent.run``'s
+        ``finally``.  Server-owned states (UI-launched runs) are left
+        entirely to the server's own task lifecycle — the task runner
+        still does persistence / autocommit / worktree post-processing
+        after ``run()`` returns, so flipping ``is_task_active`` here
+        would open a window where a concurrent merge/discard races the
+        runner.  States the bridge created itself (sub-agents,
+        standalone runs) are deactivated and removed here.
+
+        Args:
+            agent: The live agent instance.
+            task_id: The task id the run was registered under.
+        """
+        key = self._coerce_task_id(task_id)
+        with agent_state.STATE_LOCK:
+            state = agent_state.get(key)
+            if state is None or state.agent is not agent:
+                state = agent_state.find_by_agent(agent)
+            if state is None or state.server_owned:
+                return
+            state.is_task_active = False
+            state.task_thread = None
+            agent_state.unregister(state.task_id, state)
+
+    def drain_pending_user_messages(self) -> list[str]:
+        """Return and clear the current task's queued follow-up prompts.
+
+        Duck-typed bridge called by the agent's pre-step hook.  Also
+        emits a durable ``recordOnly`` prompt echo for every message
+        whose live echo could not be attributed to a task id at
+        queueing time, so the echo lands in the correct trajectory.
+
+        Returns:
+            The queued user messages, oldest first.  Empty when the
+            calling thread has no task or nothing is queued.
+        """
+        state = agent_state.get(self._task_key())
+        if state is None:
+            return []
+        with agent_state.STATE_LOCK:
+            queued = list(state.pending_user_messages)
+            state.pending_user_messages.clear()
+            deferred = list(state.unattributed_prompt_echoes)
+            state.unattributed_prompt_echoes.clear()
+        for msg in deferred:
+            try:
+                self.broadcast(
+                    {"type": "prompt", "text": msg, "recordOnly": True},
+                )
+            except Exception:
+                # Requeue so the durable echo is retried on the next
+                # drain instead of being lost forever.
+                logger.debug(
+                    "recordOnly prompt echo broadcast failed",
+                    exc_info=True,
+                )
+                with agent_state.STATE_LOCK:
+                    state.unattributed_prompt_echoes.append(msg)
+        return queued
+
+    def has_pending_user_messages(self) -> bool:
+        """True when the current task has undrained follow-up prompts.
+
+        Duck-typed bridge consulted by the agent's ``finish`` guard so
+        a follow-up the user typed mid-step is injected before the
+        task is allowed to end.
+        """
+        state = agent_state.get(self._task_key())
+        if state is None:
+            return False
+        with agent_state.STATE_LOCK:
+            return bool(state.pending_user_messages)
+
+    def live_worktree_branches(self) -> set[str]:
+        """Return the ``kiss/wt-*`` branches owned by live agents.
+
+        Duck-typed bridge used by ``WorktreeSorcarAgent`` so its
+        orphaned-worktree reclaim pass never adopts a branch another
+        live agent is still using.
+        """
+        branches: set[str] = set()
+        for state in agent_state.snapshot():
+            wt = getattr(state.agent, "_wt", None) if state.agent else None
+            if wt is not None:
+                branches.add(wt.branch)
+        return branches
+
     def _join_ui_mirrors(
-        self, task_key: str, tab_id: str,
+        self,
+        task_key: str,
+        tab_id: str,
     ) -> list[dict[str, Any]]:
         """Show *tab_id* the interactive UIs already open on *task_key*.
 
@@ -436,11 +643,7 @@ class JsonPrinter(Printer):
             # still displaying the review this phase follows.  Closed
             # tabs are removed by cleanup_tab, so nothing accumulates.
             for tab_id in viewer_tab_ids:
-                if (
-                    tab_id
-                    and tab_id != owner_tab_id
-                    and tab_id not in mirror.viewer_tab_ids
-                ):
+                if tab_id and tab_id != owner_tab_id and tab_id not in mirror.viewer_tab_ids:
                     mirror.viewer_tab_ids.append(tab_id)
 
     def close_ui_mirror(self, owner_tab_id: str) -> None:
@@ -541,7 +744,9 @@ class JsonPrinter(Printer):
             self.broadcast(copy)
 
     def _track_ui_event(
-        self, owner_tab_id: str, event: dict[str, Any],
+        self,
+        owner_tab_id: str,
+        event: dict[str, Any],
     ) -> list[str]:
         """Record what *owner_tab_id* has on screen and return the targets.
 
@@ -679,9 +884,10 @@ class JsonPrinter(Printer):
     def _persist_event(self, event: dict[str, Any]) -> None:
         """Persist a display event to the database if applicable.
 
-        Looks up the agent registered for ``event["taskId"]`` and, when
-        present with a non-None ``_last_task_id``, enqueues the event
-        for asynchronous persistence via ``_queue_chat_event``.
+        Looks up the agent state registered for ``event["taskId"]``
+        and, when its agent carries a non-None ``_last_task_id``,
+        enqueues the event for asynchronous persistence via
+        ``_queue_chat_event``.
 
         Args:
             event: The event dictionary (must already have ``taskId``
@@ -692,8 +898,8 @@ class JsonPrinter(Printer):
         key = self._coerce_task_id(event.get("taskId"))
         if not key:
             return
-        with self._lock:
-            agent = self._persist_agents.get(key)
+        state = agent_state.get(key)
+        agent = state.agent if state is not None else None
         if agent is None:
             return
         task_id = getattr(agent, "_last_task_id", None)
@@ -803,7 +1009,9 @@ class JsonPrinter(Printer):
             )
 
     def cleanup_task(
-        self, task_id: Any, subscriber_linger_seconds: float = 300.0,
+        self,
+        task_id: Any,
+        subscriber_linger_seconds: float = 300.0,
     ) -> None:
         """Remove all per-task state for *task_id* to free memory.
 
@@ -860,15 +1068,13 @@ class JsonPrinter(Printer):
             self._tokens_offsets.pop(key, None)
             self._budget_offsets.pop(key, None)
             self._steps_offsets.pop(key, None)
-            self._persist_agents.pop(key, None)
+            self._task_ui.pop(key, None)
             if key in self._subscribers:
                 if subscriber_linger_seconds <= 0:
                     self._subscribers.pop(key, None)
                     self._subscriber_expiry.pop(key, None)
                 else:
-                    self._subscriber_expiry[key] = (
-                        time.monotonic() + subscriber_linger_seconds
-                    )
+                    self._subscriber_expiry[key] = time.monotonic() + subscriber_linger_seconds
             self._sweep_expired_subscribers()
 
     def _sweep_expired_subscribers(self) -> None:
@@ -1030,8 +1236,7 @@ class JsonPrinter(Printer):
         ``self._lock`` held.
         """
         key = self._coerce_task_id(
-            event.get("taskId")
-            or getattr(self._thread_local, "task_id", None),
+            event.get("taskId") or getattr(self._thread_local, "task_id", None),
         )
         if not key:
             return
@@ -1169,7 +1374,8 @@ class JsonPrinter(Printer):
                 elif bs.timer is None:
                     owner_task = getattr(self._thread_local, "task_id", None)
                     bs.timer = threading.Timer(
-                        0.1, partial(self._timer_flush_for_task, owner_task),
+                        0.1,
+                        partial(self._timer_flush_for_task, owner_task),
                     )
                     bs.timer.daemon = True
                     bs.timer.start()
@@ -1213,13 +1419,15 @@ class JsonPrinter(Printer):
             total_tokens = raw_tokens + self.tokens_offset
             total_steps = raw_steps + self.steps_offset
             total_cost = self._cost_with_offset(raw_cost)
-            self.broadcast({
-                "type": "usage_info",
-                "text": str(content),
-                "total_tokens": total_tokens,
-                "cost": total_cost,
-                "total_steps": total_steps,
-            })
+            self.broadcast(
+                {
+                    "type": "usage_info",
+                    "text": str(content),
+                    "total_tokens": total_tokens,
+                    "cost": total_cost,
+                    "total_steps": total_steps,
+                }
+            )
             return ""
         if type == "result":
             self.broadcast({"type": "text_end"})
@@ -1355,16 +1563,11 @@ class JsonPrinter(Printer):
                 for block in message.content
                 if hasattr(block, "is_error") and hasattr(block, "content")
             ]
-            shared_input = (
-                kwargs.get("tool_input") if len(blocks) == 1 else None
-            )
+            shared_input = kwargs.get("tool_input") if len(blocks) == 1 else None
             for block in blocks:
                 self._emit_tool_result(
                     block.content,
-                    tool_name=(
-                        getattr(block, "tool_name", "")
-                        or kwargs.get("tool_name", "")
-                    ),
+                    tool_name=(getattr(block, "tool_name", "") or kwargs.get("tool_name", "")),
                     is_error=bool(block.is_error),
                     tool_input=shared_input,
                 )

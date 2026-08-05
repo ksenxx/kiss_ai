@@ -74,8 +74,8 @@ from typing import Any
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 
 
 def _finish_body() -> bytes:
@@ -186,7 +186,7 @@ class TestIsWorktreeExtraFlag:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-bughunt2-core-")
         self.saved = _redirect(self.tmpdir)
         self.srv, self.url = _start_server()
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def teardown_method(self) -> None:
         self.srv.shutdown()
@@ -195,7 +195,7 @@ class TestIsWorktreeExtraFlag:
             th._db_conn = None
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def _run(self, agent: ChatSorcarAgent, **kwargs: Any) -> str:
         cfg = {"base_url": self.url, "api_key": "test-key"}
@@ -341,7 +341,7 @@ class TestSetModelSwapsLiveModel:
         self.srv.state_lock = threading.Lock()  # type: ignore[attr-defined]
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         self.url = f"http://127.0.0.1:{self.srv.server_port}/v1"
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def teardown_method(self) -> None:
         self.srv.shutdown()
@@ -350,7 +350,7 @@ class TestSetModelSwapsLiveModel:
             th._db_conn = None
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def test_next_llm_call_uses_swapped_model(self) -> None:
         """After the agent calls ``set_model('swapped-model')`` mid-run, the

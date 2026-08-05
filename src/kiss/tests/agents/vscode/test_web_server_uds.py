@@ -284,28 +284,23 @@ class TestUdsListener(IsolatedAsyncioTestCase):
     async def test_active_tasks_query_reports_running_tab(self) -> None:
         """When a tab claims to be running a task, the query reports it.
 
-        Reproduces the SIGTERM regression by injecting a fake active
-        ``_RunningAgentState`` into the registry and verifying the UDS
+        Reproduces the SIGTERM regression by registering an active
+        ``AgentState`` in the registry and verifying the UDS
         query returns ``count=1`` plus a ``"<tab_id>(task=<id>)"``
         descriptor — the same shape the SIGTERM log line prints.  This
         is the signal the extension uses to defer the restart.
         """
-        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-
-        class _FakeTab:
-            def __init__(self, tid: str) -> None:
-                self.is_task_active = True
-                self.task_history_id = tid
-                self.last_task_id = tid
+        from kiss.server import agent_state
+        from kiss.server.agent_state import AgentState
 
         fake_tab_id = "ad4ecb65-2878-4c2c-9736-3bb9be18814a"
-        fake = _FakeTab("74")
-        from typing import cast
-
-        with _RunningAgentState._registry_lock:
-            _RunningAgentState.running_agent_states[fake_tab_id] = cast(
-                _RunningAgentState, fake,
-            )
+        state = AgentState(
+            "74",
+            tab_id=fake_tab_id,
+            server_owned=True,
+            is_task_active=True,
+        )
+        agent_state.register(state)
         try:
             reader, writer = await asyncio.open_unix_connection(
                 str(self.uds_path),
@@ -333,8 +328,7 @@ class TestUdsListener(IsolatedAsyncioTestCase):
                 except Exception:
                     pass
         finally:
-            with _RunningAgentState._registry_lock:
-                _RunningAgentState.running_agent_states.pop(fake_tab_id, None)
+            agent_state.unregister("74", state)
 
     async def test_stop_async_removes_socket(self) -> None:
         """``stop_async`` unlinks the socket file on shutdown."""

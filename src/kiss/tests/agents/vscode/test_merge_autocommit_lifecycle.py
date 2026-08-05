@@ -24,7 +24,7 @@ import unittest
 from pathlib import Path
 
 import kiss.server.merge_flow as _merge_flow_module
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 from kiss.server.task_runner import _TaskRunnerMixin
 
@@ -44,6 +44,18 @@ def _init_repo(repo: str) -> None:
     Path(repo, "README.md").write_text("# Hello\n\nSome content\n")
     _git(repo, "add", "README.md")
     _git(repo, "commit", "-q", "-m", "initial commit")
+
+
+def _register_tab(
+    tab_id: str, *, use_worktree: bool = False,
+) -> agent_state.AgentState:
+    """Register a server-owned AgentState for *tab_id* and return it."""
+    state = agent_state.AgentState(
+        f"task-{tab_id}", tab_id=tab_id, server_owned=True,
+    )
+    state.use_worktree = use_worktree
+    agent_state.register(state)
+    return state
 
 
 def _make_server(work_dir: str) -> tuple[VSCodeServer, list[dict]]:
@@ -95,6 +107,7 @@ class _LifecycleHarness(unittest.TestCase):
     def tearDown(self) -> None:
         _merge_flow_module.generate_commit_message_from_diff = self._orig_gen
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+        agent_state.agent_states.clear()
 
 
 class TestMergeLaunchedAfterFileModification(_LifecycleHarness):
@@ -104,8 +117,7 @@ class TestMergeLaunchedAfterFileModification(_LifecycleHarness):
     def test_merge_events_after_modification(self) -> None:
         """Modifying README.md triggers merge_data and merge_started."""
         tab_id = "test-tab-1"
-        tab = self.server._get_tab(tab_id)
-        tab.use_worktree = False
+        state = _register_tab(tab_id)
 
         from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
@@ -149,13 +161,12 @@ class TestMergeLaunchedAfterFileModification(_LifecycleHarness):
         ms_event = _find_event(self.events, "merge_started")
         assert ms_event["tabId"] == tab_id
 
-        assert tab.is_merging is True
+        assert state.is_merging is True
 
     def test_merge_events_after_new_file(self) -> None:
         """Adding a new untracked file triggers merge_data."""
         tab_id = "test-tab-2"
-        tab = self.server._get_tab(tab_id)
-        tab.use_worktree = False
+        _register_tab(tab_id)
 
         from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
@@ -191,8 +202,7 @@ class TestAutocommitPromptAfterMergeReview(_LifecycleHarness):
     def test_autocommit_prompt_after_merge_all_done(self) -> None:
         """Full flow: modify file → merge → all-done → autocommit_prompt."""
         tab_id = "test-tab-3"
-        tab = self.server._get_tab(tab_id)
-        tab.use_worktree = False
+        state = _register_tab(tab_id)
 
         from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
@@ -233,7 +243,7 @@ class TestAutocommitPromptAfterMergeReview(_LifecycleHarness):
         assert ac_event["tabId"] == tab_id
         assert "README.md" in ac_event["changedFiles"]
 
-        assert tab.is_merging is False
+        assert state.is_merging is False
 
 
 class TestAutocommitActionAfterPrompt(_LifecycleHarness):
@@ -242,8 +252,7 @@ class TestAutocommitActionAfterPrompt(_LifecycleHarness):
 
     def _setup_merge_complete(self, tab_id: str) -> None:
         """Run the full lifecycle up to autocommit_prompt."""
-        tab = self.server._get_tab(tab_id)
-        tab.use_worktree = False
+        _register_tab(tab_id)
 
         from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
@@ -308,8 +317,7 @@ class TestMergeNotLaunchedWhenNoChanges(_LifecycleHarness):
 
     def test_no_merge_when_no_changes(self) -> None:
         tab_id = "test-tab-noop"
-        tab = self.server._get_tab(tab_id)
-        tab.use_worktree = False
+        _register_tab(tab_id)
 
         from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
@@ -341,8 +349,7 @@ class TestMergeLaunchedAfterAgentCommit(_LifecycleHarness):
     def test_merge_after_agent_commit(self) -> None:
         """Agent modifies, stages, and commits — merge should still appear."""
         tab_id = "test-tab-commit-detect"
-        tab = self.server._get_tab(tab_id)
-        tab.use_worktree = False
+        _register_tab(tab_id)
 
         from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
@@ -387,8 +394,7 @@ class TestMergeWithPreExistingDirtyFiles(_LifecycleHarness):
         Path(self.tmpdir, "README.md").write_text("# Pre-existing dirty\n")
 
         tab_id = "test-tab-predirty"
-        tab = self.server._get_tab(tab_id)
-        tab.use_worktree = False
+        _register_tab(tab_id)
 
         from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
@@ -425,9 +431,8 @@ class TestAutocommitPromptNotShownForCleanWorkTree(_LifecycleHarness):
 
     def test_no_prompt_when_clean_after_merge(self) -> None:
         tab_id = "test-tab-clean"
-        tab = self.server._get_tab(tab_id)
-        tab.use_worktree = False
-        tab.is_merging = True
+        state = _register_tab(tab_id)
+        state.is_merging = True
 
         self.server._finish_merge(tab_id)
 
@@ -438,19 +443,19 @@ class TestAutocommitPromptNotShownForCleanWorkTree(_LifecycleHarness):
 
 class TestFinishMergeTabMissing(_LifecycleHarness):
     """BUG REPRODUCTION: when _finish_merge is called on a process that
-    doesn't have the tab in _running_agent_states (e.g., merge-action was routed
+    doesn't have any agent state for the tab (e.g., merge-action was routed
     to the service process after the task process was disposed), the
     autocommit_prompt must still be emitted for dirty non-worktree tabs.
 
     This reproduces the bug where merge buttons and autocommit were not
-    shown because the tab was missing from _running_agent_states.
+    shown because the tab had no registered agent state.
     """
 
     def test_autocommit_prompt_when_tab_not_in_states(self) -> None:
         """_finish_merge must send autocommit_prompt even when the tab
-        is not pre-existing in _running_agent_states."""
+        has no registered agent state."""
         tab_id = "missing-tab-id"
-        assert tab_id not in _RunningAgentState.running_agent_states
+        assert agent_state.find_by_tab(tab_id) is None
 
         Path(self.tmpdir, "README.md").write_text("# Modified\n")
 
@@ -459,14 +464,14 @@ class TestFinishMergeTabMissing(_LifecycleHarness):
         types = _event_types(self.events)
         assert "merge_ended" in types, f"merge_ended not found: {types}"
         assert "autocommit_prompt" in types, (
-            "autocommit_prompt should be sent even when the tab is missing "
-            f"from _running_agent_states. Got: {types}"
+            "autocommit_prompt should be sent even when the tab has no "
+            f"registered agent state. Got: {types}"
         )
 
     def test_merge_ended_still_sent_when_tab_missing(self) -> None:
         """merge_ended must always be broadcast, even when tab is missing."""
         tab_id = "missing-tab-2"
-        assert tab_id not in _RunningAgentState.running_agent_states
+        assert agent_state.find_by_tab(tab_id) is None
 
         self.server._finish_merge(tab_id)
 
@@ -481,8 +486,7 @@ class TestMergeStartSessionEventContent(_LifecycleHarness):
     def test_merge_data_has_required_fields(self) -> None:
         """merge_data event must have tabId, data.files, and hunk_count."""
         tab_id = "test-tab-fields"
-        tab = self.server._get_tab(tab_id)
-        tab.use_worktree = False
+        _register_tab(tab_id)
 
         from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 
@@ -530,8 +534,7 @@ class TestAutocommitPromptForBinaryOnlyChanges(_LifecycleHarness):
         """Modifying only a binary file starts a merge review session
         so the user can accept or reject the binary change."""
         tab_id = "test-tab-binary"
-        tab = self.server._get_tab(tab_id)
-        tab.use_worktree = False
+        _register_tab(tab_id)
 
         pdf_path = Path(self.tmpdir, "output.pdf")
         pdf_path.write_bytes(b"%PDF-1.4 original content\x00\xff\xd8")
@@ -577,8 +580,7 @@ class TestAutocommitPromptForBinaryOnlyChanges(_LifecycleHarness):
         """When both binary and text files change, the text changes get
         a merge review and autocommit_prompt comes via _finish_merge."""
         tab_id = "test-tab-mixed"
-        tab = self.server._get_tab(tab_id)
-        tab.use_worktree = False
+        _register_tab(tab_id)
 
         pdf_path = Path(self.tmpdir, "output.pdf")
         pdf_path.write_bytes(b"%PDF-1.4 original\x00\xff")
@@ -655,12 +657,13 @@ class TestAutocommitUsesCommandWorkDir(unittest.TestCase):
         _merge_flow_module.generate_commit_message_from_diff = self._orig_gen
         shutil.rmtree(self.repo, ignore_errors=True)
         shutil.rmtree(self.nongit, ignore_errors=True)
+        agent_state.agent_states.clear()
 
     def test_commit_uses_command_work_dir(self) -> None:
         """A dirty git repo passed via ``workDir`` commits successfully
         even though ``self.work_dir`` is a non-git folder."""
         tab_id = "t-wd"
-        self.server._get_tab(tab_id)
+        _register_tab(tab_id)
         Path(self.repo, "new.txt").write_text("hello\n")
 
         self.server._handle_command({
@@ -680,7 +683,7 @@ class TestAutocommitUsesCommandWorkDir(unittest.TestCase):
         """Without a ``workDir`` the handler falls back to the non-git
         ``self.work_dir`` and reports the original failure."""
         tab_id = "t-nowd"
-        self.server._get_tab(tab_id)
+        _register_tab(tab_id)
         self.server._handle_command({
             "type": "autocommitAction",
             "action": "commit",
@@ -714,6 +717,7 @@ class TestCommitMessageUsesCommandWorkDir(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.repo, ignore_errors=True)
         shutil.rmtree(self.nongit, ignore_errors=True)
+        agent_state.agent_states.clear()
 
     def test_no_git_error_with_command_work_dir(self) -> None:
         """A git repo passed via ``workDir`` is recognised even though
@@ -775,6 +779,7 @@ class TestMainDirtyFilesUsesCommandWorkDir(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.repo, ignore_errors=True)
         shutil.rmtree(self.nongit, ignore_errors=True)
+        agent_state.agent_states.clear()
 
     def test_scan_uses_command_work_dir(self) -> None:
         """A dirty file in the command repo is reported even though
@@ -808,12 +813,13 @@ class TestFinishMergeUsesCommandWorkDir(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.repo, ignore_errors=True)
         shutil.rmtree(self.nongit, ignore_errors=True)
+        agent_state.agent_states.clear()
 
     def test_broadcast_prompt_uses_command_work_dir(self) -> None:
         """A dirty command repo yields an ``autocommit_prompt`` even
         though ``self.work_dir`` is a non-git folder."""
         tab_id = "t-fm"
-        self.server._get_tab(tab_id)
+        _register_tab(tab_id)
         Path(self.repo, "new.txt").write_text("hello\n")
         self.server._broadcast_autocommit_prompt(tab_id, self.repo)
         prompt = _find_event(self.events, "autocommit_prompt")
@@ -823,7 +829,7 @@ class TestFinishMergeUsesCommandWorkDir(unittest.TestCase):
         """Without a work_dir the scan falls back to the non-git
         ``self.work_dir`` and no prompt is emitted."""
         tab_id = "t-fm2"
-        self.server._get_tab(tab_id)
+        _register_tab(tab_id)
         Path(self.repo, "new.txt").write_text("hello\n")
         self.server._broadcast_autocommit_prompt(tab_id)
         assert not any(
@@ -834,8 +840,7 @@ class TestFinishMergeUsesCommandWorkDir(unittest.TestCase):
         """``_finish_merge`` forwards ``work_dir`` so the dirty-file scan
         runs against the tab's repo, emitting an ``autocommit_prompt``."""
         tab_id = "t-fm3"
-        tab = self.server._get_tab(tab_id)
-        tab.use_worktree = False
+        _register_tab(tab_id)
         Path(self.repo, "new.txt").write_text("hello\n")
         self.server._finish_merge(tab_id, work_dir=self.repo)
         _find_event(self.events, "merge_ended")
@@ -846,8 +851,7 @@ class TestFinishMergeUsesCommandWorkDir(unittest.TestCase):
         """Without a ``work_dir`` ``_finish_merge`` falls back to the
         non-git ``self.work_dir`` and emits no ``autocommit_prompt``."""
         tab_id = "t-fm4"
-        tab = self.server._get_tab(tab_id)
-        tab.use_worktree = False
+        _register_tab(tab_id)
         Path(self.repo, "new.txt").write_text("hello\n")
         self.server._finish_merge(tab_id)
         _find_event(self.events, "merge_ended")
@@ -873,13 +877,13 @@ class TestMergeActionDispatchForwardsWorkDir(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.repo, ignore_errors=True)
         shutil.rmtree(self.nongit, ignore_errors=True)
+        agent_state.agent_states.clear()
 
     def test_all_done_command_forwards_work_dir(self) -> None:
         """An ``all-done`` command carrying ``workDir`` triggers an
         ``autocommit_prompt`` for the tab's dirty repo."""
         tab_id = "t-md"
-        tab = self.server._get_tab(tab_id)
-        tab.use_worktree = False
+        _register_tab(tab_id)
         Path(self.repo, "new.txt").write_text("hello\n")
         self.server._handle_command({
             "type": "mergeAction",
@@ -900,8 +904,7 @@ class TestStartMergeSessionStampsWorkDir(_LifecycleHarness):
         """The broadcast ``merge_data`` event's ``data`` includes the
         repository ``work_dir`` passed to ``_prepare_and_start_merge``."""
         tab_id = "test-tab-wd"
-        tab = self.server._get_tab(tab_id)
-        tab.use_worktree = False
+        _register_tab(tab_id)
 
         from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 

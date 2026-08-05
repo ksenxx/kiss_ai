@@ -22,8 +22,8 @@ from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     repo_lock,
 )
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 from kiss.server.diff_merge import (
     _merge_data_dir,
     _parse_diff_hunks,
@@ -52,7 +52,10 @@ def _restore_db(saved: tuple) -> None:
 
 def _make_repo(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", str(path)], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "init", "-b", "main", str(path)],
+        capture_output=True, check=True,
+    )
     subprocess.run(
         ["git", "-C", str(path), "config", "user.email", "test@test.com"],
         capture_output=True, check=True,
@@ -232,22 +235,20 @@ class TestFix3MainTreeBusyGuard:
         _restore_db(self._saved)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_tab_state_has_is_running_non_wt(self) -> None:
-        """_RunningAgentState should have is_running_non_wt attribute."""
-        tab = _RunningAgentState("t1", "gpt-4")
-        assert hasattr(tab, "is_running_non_wt")
-        assert tab.is_running_non_wt is False
-
     def test_any_non_wt_running_detects_running_tab(self) -> None:
-        """_any_non_wt_running returns True when a tab has the flag set."""
+        """_any_non_wt_running returns True when a state has the flag set."""
         server = VSCodeServer()
-        tab = server._get_tab("t1")
-        with server._state_lock:
-            assert not server._any_non_wt_running()
-            tab.is_running_non_wt = True
-            assert server._any_non_wt_running()
-            tab.is_running_non_wt = False
-            assert not server._any_non_wt_running()
+        state = agent_state.AgentState("t1", tab_id="t1", server_owned=True)
+        agent_state.register(state)
+        try:
+            with server._state_lock:
+                assert not server._any_non_wt_running()
+                state.is_running_non_wt = True
+                assert server._any_non_wt_running()
+                state.is_running_non_wt = False
+                assert not server._any_non_wt_running()
+        finally:
+            agent_state.unregister(state.task_id, state)
 
     def test_worktree_merge_blocked_when_non_wt_running(self) -> None:
         """_handle_worktree_action('merge') should refuse when non-wt running."""
@@ -260,19 +261,26 @@ class TestFix3MainTreeBusyGuard:
         wt_work = wt_agent._try_setup_worktree(repo, str(repo))
         assert wt_work is not None
 
-        wt_tab = server._get_tab("wt_tab")
-        wt_tab.agent = wt_agent
-        wt_tab.use_worktree = True
+        wt_state = agent_state.AgentState(
+            "task-wt", agent=wt_agent, tab_id="wt_tab", server_owned=True,
+        )
+        wt_state.use_worktree = True
+        agent_state.register(wt_state)
 
-        non_wt_tab = server._get_tab("non_wt_tab")
-        non_wt_tab.is_running_non_wt = True
+        non_wt_state = agent_state.AgentState(
+            "task-non-wt", tab_id="non_wt_tab", server_owned=True,
+        )
+        non_wt_state.is_running_non_wt = True
+        agent_state.register(non_wt_state)
 
-        result = server._handle_worktree_action("merge", "wt_tab")
-        assert result["success"] is False
-        assert "running" in result["message"].lower()
-
-        non_wt_tab.is_running_non_wt = False
-        wt_agent.discard()
+        try:
+            result = server._handle_worktree_action("merge", "wt_tab")
+            assert result["success"] is False
+            assert "running" in result["message"].lower()
+        finally:
+            agent_state.unregister(non_wt_state.task_id, non_wt_state)
+            agent_state.unregister(wt_state.task_id, wt_state)
+            wt_agent.discard()
 
     def test_check_merge_conflict_suppressed_when_non_wt_running(self) -> None:
         """_check_merge_conflict returns False when non-wt agent is running."""
@@ -303,28 +311,36 @@ class TestFix3MainTreeBusyGuard:
 
         (repo / "shared.py").write_text("non-wt agent edit\n")
 
-        wt_tab = server._get_tab("wt_tab")
-        wt_tab.agent = wt_agent
-        wt_tab.use_worktree = True
-
-        non_wt_tab = server._get_tab("non_wt_tab")
-
-        non_wt_tab.is_running_non_wt = False
-        conflict_before = server._check_merge_conflict("wt_tab")
-        assert conflict_before is True, (
-            "sanity: dirty file does cause conflict when no non-wt running"
+        wt_state = agent_state.AgentState(
+            "task-wt-2", agent=wt_agent, tab_id="wt_tab", server_owned=True,
         )
+        wt_state.use_worktree = True
+        agent_state.register(wt_state)
 
-        non_wt_tab.is_running_non_wt = True
-        conflict_after = server._check_merge_conflict("wt_tab")
-        assert conflict_after is False, (
-            "Fix 3: dirty files from non-wt agent must not cause false conflict"
+        non_wt_state = agent_state.AgentState(
+            "task-non-wt-2", tab_id="non_wt_tab", server_owned=True,
         )
+        agent_state.register(non_wt_state)
 
-        non_wt_tab.is_running_non_wt = False
-        GitWorktreeOps.remove(repo, wt.wt_dir)
-        GitWorktreeOps.prune(repo)
-        GitWorktreeOps.delete_branch(repo, wt.branch)
+        try:
+            non_wt_state.is_running_non_wt = False
+            conflict_before = server._check_merge_conflict("wt_tab")
+            assert conflict_before is True, (
+                "sanity: dirty file does cause conflict when no non-wt running"
+            )
+
+            non_wt_state.is_running_non_wt = True
+            conflict_after = server._check_merge_conflict("wt_tab")
+            assert conflict_after is False, (
+                "Fix 3: dirty files from non-wt agent must not cause "
+                "false conflict"
+            )
+        finally:
+            agent_state.unregister(non_wt_state.task_id, non_wt_state)
+            agent_state.unregister(wt_state.task_id, wt_state)
+            GitWorktreeOps.remove(repo, wt.wt_dir)
+            GitWorktreeOps.prune(repo)
+            GitWorktreeOps.delete_branch(repo, wt.branch)
 
 
 
@@ -336,34 +352,50 @@ class TestFix4SymmetricGuard:
     def test_non_wt_blocked_when_wt_merging(self) -> None:
         """A non-wt task should not start when a worktree merge is active."""
         server = VSCodeServer()
-        wt_tab = server._get_tab("wt_tab")
-        wt_tab.is_merging = True
-        wt_tab.use_worktree = True
-
-        non_wt_tab = server._get_tab("non_wt")
-        non_wt_tab.use_worktree = False
-
-        with server._state_lock:
-            would_block = any(
-                t.is_merging and t.use_worktree
-                for t in _RunningAgentState.running_agent_states.values()
-            )
-        assert would_block, (
-            "Fix 4: non-wt task must be blocked when wt merge is active"
+        wt_state = agent_state.AgentState(
+            "task-wt-merging", tab_id="wt_tab", server_owned=True,
         )
+        wt_state.is_merging = True
+        wt_state.use_worktree = True
+        agent_state.register(wt_state)
+
+        non_wt_state = agent_state.AgentState(
+            "task-non-wt-idle", tab_id="non_wt", server_owned=True,
+        )
+        non_wt_state.use_worktree = False
+        agent_state.register(non_wt_state)
+
+        try:
+            with server._state_lock:
+                would_block = any(
+                    t.is_merging and t.use_worktree
+                    for t in agent_state.snapshot()
+                )
+            assert would_block, (
+                "Fix 4: non-wt task must be blocked when wt merge is active"
+            )
+        finally:
+            agent_state.unregister(non_wt_state.task_id, non_wt_state)
+            agent_state.unregister(wt_state.task_id, wt_state)
 
     def test_non_wt_allowed_when_non_wt_merging(self) -> None:
         """A non-wt merge review should NOT block another non-wt task start."""
         server = VSCodeServer()
-        tab1 = server._get_tab("tab1")
-        tab1.is_merging = True
-        tab1.use_worktree = False
-
-        with server._state_lock:
-            would_block = any(
-                t.is_merging and t.use_worktree
-                for t in _RunningAgentState.running_agent_states.values()
-            )
-        assert not would_block, (
-            "Fix 4: non-wt merge should not block another non-wt task"
+        state1 = agent_state.AgentState(
+            "task-non-wt-merging", tab_id="tab1", server_owned=True,
         )
+        state1.is_merging = True
+        state1.use_worktree = False
+        agent_state.register(state1)
+
+        try:
+            with server._state_lock:
+                would_block = any(
+                    t.is_merging and t.use_worktree
+                    for t in agent_state.snapshot()
+                )
+            assert not would_block, (
+                "Fix 4: non-wt merge should not block another non-wt task"
+            )
+        finally:
+            agent_state.unregister(state1.task_id, state1)

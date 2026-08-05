@@ -111,14 +111,14 @@ class _WorktreeNoAutocommitBase(unittest.TestCase):
     def tearDown(self) -> None:
         self._parent_class.run = self._original_run
 
-        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-        for tab in list(_RunningAgentState.running_agent_states.values()):
-            if tab.agent is not None and tab.agent._wt_pending:
+        from kiss.server import agent_state
+        for state in agent_state.snapshot():
+            if state.agent is not None and state.agent._wt_pending:
                 try:
-                    tab.agent.discard()
+                    state.agent.discard()
                 except Exception:  # pragma: no cover — cleanup best-effort
                     pass
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
         if _persistence._db_conn is not None:
             _persistence._db_conn.close()

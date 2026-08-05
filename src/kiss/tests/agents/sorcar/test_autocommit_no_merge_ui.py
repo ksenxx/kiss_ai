@@ -65,8 +65,8 @@ from pathlib import Path
 from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as _persistence
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 from kiss.server.task_runner import _release_worktree_without_merging
 
@@ -155,13 +155,13 @@ class _Base(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._parent_class.run = self._original_run
-        for tab in list(_RunningAgentState.running_agent_states.values()):
-            if tab.agent is not None and tab.agent._wt_pending:
+        for state in agent_state.snapshot():
+            if state.agent is not None and state.agent._wt_pending:
                 try:
-                    tab.agent.discard()
+                    state.agent.discard()
                 except Exception:  # pragma: no cover — cleanup best-effort
                     pass
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         if _persistence._db_conn is not None:
             _persistence._db_conn.close()
         (
@@ -184,8 +184,14 @@ class _Base(unittest.TestCase):
 
         self._parent_class.run = stub_run
 
+    def _tab(self, tab_id: str) -> agent_state.AgentState:
+        """Return the registered agent state for *tab_id* (must exist)."""
+        state = agent_state.find_by_tab(tab_id)
+        assert state is not None, f"no agent state registered for {tab_id!r}"
+        return state
+
     def _run_task(self, tab_id: str, *, auto_commit: bool) -> None:
-        self.server._run_task_inner({
+        self.server._run_task({
             "prompt": "make a change",
             "workDir": self.repo,
             "tabId": tab_id,
@@ -193,6 +199,17 @@ class _Base(unittest.TestCase):
             "autoCommit": auto_commit,
             "model": "",
         })
+        # In production the run's worker thread dies when `_run_task`
+        # returns, so `AgentState.thread_alive()` reads False.  A direct
+        # synchronous call leaves the *test* thread installed as
+        # `task_thread` (the run's `finally` looks the state up by the
+        # pre-rekey `_state_key` and misses it), which would keep the
+        # state `busy()` forever.  Reproduce the post-run idle state.
+        with agent_state.STATE_LOCK:
+            state = agent_state.find_by_tab(tab_id)
+            if state is not None and state.task_thread is threading.current_thread():
+                state.task_thread = None
+                state.is_task_active = False
 
     def _types(self) -> list[str]:
         return [str(e.get("type", "")) for e in self.events]
@@ -237,7 +254,7 @@ class _Base(unittest.TestCase):
         they would hold with the fix reverted too.  Asserting the
         preconditions keeps the regression honest.
         """
-        tab = self.server._get_tab(tab_id)
+        tab = self._tab(tab_id)
         assert tab.use_worktree, "the tab must be in worktree mode"
         assert not tab.is_merging, (
             "a review already owns the worktree; resume is a deliberate "
@@ -289,7 +306,7 @@ class TestAutoCommitSuppressesMergeUIOnResume(_Base):
 
         # The state a failing post-task auto-merge leaves behind: the
         # branch is still pending and the toolbar toggle is on.
-        tab = self.server._get_tab(tab_id)
+        tab = self._tab(tab_id)
         tab.auto_commit_mode = True
         self._assert_resume_reaches_the_decision(tab_id)
 
@@ -329,7 +346,7 @@ class TestAutoCommitSuppressesMergeUIOnResume(_Base):
         row = self._latest_row()
         self._resume(tab_id, str(row["chat_id"]), str(row["id"]))
 
-        tab = self.server._get_tab(tab_id)
+        tab = self._tab(tab_id)
         assert tab.auto_commit_mode is True, (
             "resuming a chat must not turn the tab's auto-commit off"
         )
@@ -346,7 +363,7 @@ class TestAutoCommitSuppressesMergeUIOnResume(_Base):
         self._run_task(tab_id, auto_commit=False)
         self._finish_open_review(tab_id)
 
-        tab = self.server._get_tab(tab_id)
+        tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending, (
             "auto-commit OFF must leave the worktree pending for review"
@@ -378,7 +395,7 @@ class TestAutoCommitFinalizesPendingWorktreeOnResume(_Base):
         self._run_task(tab_id, auto_commit=False)
         self._finish_open_review(tab_id)
 
-        tab = self.server._get_tab(tab_id)
+        tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending
         assert _kiss_wt_branches(self.repo), "a task branch should exist"
@@ -418,7 +435,7 @@ class TestSilentFinalizeRefusesUnsafeState(_Base):
         self._run_task(tab_id, auto_commit=False)
         self._finish_open_review(tab_id)
 
-        tab = self.server._get_tab(tab_id)
+        tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending
         # Exactly what a failed/stopped task leaves behind.
@@ -462,7 +479,7 @@ class TestSilentFinalizeRefusesUnsafeState(_Base):
         self._run_task(tab_id, auto_commit=False)
         self._finish_open_review(tab_id)
 
-        tab = self.server._get_tab(tab_id)
+        tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending
         branches_before = _kiss_wt_branches(self.repo)
@@ -515,7 +532,7 @@ class TestSilentFinalizeRefusesUnsafeState(_Base):
         self._run_task(tab_id, auto_commit=False)
         self._finish_open_review(tab_id)
 
-        tab = self.server._get_tab(tab_id)
+        tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending
         # An agent that has not written anything yet.  The file cannot
@@ -579,7 +596,7 @@ class TestSilentFinalizeRefusesUnsafeState(_Base):
         self._run_task(tab_id, auto_commit=False)
         self._finish_open_review(tab_id)
 
-        tab = self.server._get_tab(tab_id)
+        tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending
         branches_before = _kiss_wt_branches(self.repo)
@@ -642,7 +659,7 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         self._run_task(tab_id, auto_commit=False)
         self._finish_open_review(tab_id)
 
-        tab = self.server._get_tab(tab_id)
+        tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending
         # Exactly what a failed or stopped task leaves behind.
@@ -677,7 +694,7 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         self._run_task(tab_id, auto_commit=False)
         self._finish_open_review(tab_id)
 
-        tab = self.server._get_tab(tab_id)
+        tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending
         agent._pending_review = True
@@ -714,7 +731,7 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         self._run_task(tab_id, auto_commit=False)
         self._finish_open_review(tab_id)
 
-        tab = self.server._get_tab(tab_id)
+        tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending
         agent._pending_review = True
@@ -763,7 +780,7 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         self._patch_run()
         self._run_task(tab_id, auto_commit=False)
         self._finish_open_review(tab_id)
-        agent = self.server._get_tab(tab_id).agent
+        agent = self._tab(tab_id).agent
         assert agent is not None and agent._wt_pending
         agent._pending_review = True
         wt_dir = agent._wt_dir
@@ -822,7 +839,7 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         """
         tab_id = "tab-blocked-main"
         wt_dir = self._strand_the_worktree(tab_id)
-        agent = self.server._get_tab(tab_id).agent
+        agent = self._tab(tab_id).agent
         assert agent is not None
         branch = agent._wt_branch
 
@@ -864,7 +881,7 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         self._patch_run()
         self._run_task(tab_id, auto_commit=False)
         self._finish_open_review(tab_id)
-        agent = self.server._get_tab(tab_id).agent
+        agent = self._tab(tab_id).agent
         assert agent is not None and agent._wt_pending
         agent._pending_review = True
 
@@ -918,7 +935,7 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         self._patch_run()
         self._run_task(tab_id, auto_commit=False)
         self._finish_open_review(tab_id)
-        agent = self.server._get_tab(tab_id).agent
+        agent = self._tab(tab_id).agent
         assert agent is not None
 
         stale_dir = Path(self.tmpdir) / "an-older-worktree"
@@ -960,7 +977,7 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         self._run_task(tab_id, auto_commit=False)
         self._finish_open_review(tab_id)
 
-        tab = self.server._get_tab(tab_id)
+        tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending
         assert not agent._pending_review, (
@@ -1030,7 +1047,7 @@ class TestConcurrentResumesClaimTheWorktreeOnce(_Base):
         self._run_task(tab_id, auto_commit=False)
         self._finish_open_review(tab_id)
 
-        tab = self.server._get_tab(tab_id)
+        tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending
         assert not tab.is_merging, "the fixture must start with a free worktree"
@@ -1070,7 +1087,7 @@ class TestConcurrentResumesClaimTheWorktreeOnce(_Base):
         self._run_task(tab_id, auto_commit=False)
         self._finish_open_review(tab_id)
 
-        tab = self.server._get_tab(tab_id)
+        tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending
         assert not tab.is_merging
@@ -1127,7 +1144,7 @@ class TestConcurrentResumesClaimTheWorktreeOnce(_Base):
         self._run_task(tab_id, auto_commit=False)
         self._finish_open_review(tab_id)
 
-        tab = self.server._get_tab(tab_id)
+        tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending
         tab.auto_commit_mode = True
@@ -1139,14 +1156,14 @@ class TestConcurrentResumesClaimTheWorktreeOnce(_Base):
 
         def instrumented_probe(probe_tab_id: str = "") -> list[str]:
             """Record the claim at the opening edge of the window."""
-            probes.append(self.server._get_tab(tab_id).is_merging)
+            probes.append(self._tab(tab_id).is_merging)
             return real_probe(probe_tab_id)
 
         def instrumented_action(
             action: str, action_tab_id: str = "", **kwargs: Any,
         ) -> dict[str, Any]:
             """Record the claim at the closing edge of the window."""
-            actions.append(self.server._get_tab(tab_id).is_merging)
+            actions.append(self._tab(tab_id).is_merging)
             return real_action(action, action_tab_id, **kwargs)
 
         self.server._get_worktree_changed_files = instrumented_probe  # type: ignore[assignment,method-assign]

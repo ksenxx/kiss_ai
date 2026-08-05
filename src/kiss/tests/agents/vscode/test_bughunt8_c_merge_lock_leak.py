@@ -39,7 +39,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
 
 
@@ -47,7 +47,7 @@ class TestMergeActionLockLeak(unittest.TestCase):
     """Finished / bogus merge reviews must not leak per-tab locks."""
 
     def setUp(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         self.tmpdir = Path(tempfile.mkdtemp(prefix="kiss-bh8c-mergelock-"))
         self.server = RemoteAccessServer(
             url_file=self.tmpdir / "remote-url.json",
@@ -55,7 +55,7 @@ class TestMergeActionLockLeak(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _register_single_hunk_review(self, tab_id: str) -> None:

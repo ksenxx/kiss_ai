@@ -28,9 +28,9 @@ from __future__ import annotations
 import unittest
 from typing import Any
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.core import config as config_module
 from kiss.core.vscode_config import DEFAULTS, apply_config_to_env
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -42,7 +42,7 @@ class TestJunkBudgetDoesNotRaise(unittest.TestCase):
 
     def tearDown(self) -> None:
         config_module.DEFAULT_CONFIG.max_budget = self._saved_budget
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def test_apply_config_junk_string_falls_back_to_default(self) -> None:
         apply_config_to_env({"max_budget": "abc"})

@@ -4,15 +4,14 @@
 # add your name here
 """End-to-end regression tests for Wave2-Fixer-7 findings (real repos, no mocks).
 
-F1  ``_MergeFlowMixin._present_pending_worktree`` must claim the main
-    tree (``tab.is_merging = True``) before auto-discarding an empty
+F1  ``_MergeFlowMixin._present_pending_worktree`` must claim the tab
+    (``state.is_merging = True``) before auto-discarding an empty
     worktree — ``discard()`` runs ``git checkout`` in the MAIN
     repository, so a non-wt task starting in the TOCTOU window would
     race the checkout.  The discard itself is never skipped: an empty
     worktree changes no files and the checkout is a no-op onto the
-    branch the tree is already on, so bailing out merely leaked the
-    worktree (see ``test_worktree_leak_when_main_tree_busy.py``).
-F3  ``_MergeFlowMixin._finish_merge`` must keep ``tab.is_merging``
+    branch the tree is already on.
+F3  ``_MergeFlowMixin._finish_merge`` must keep ``state.is_merging``
     claimed until the pending-worktree presentation and the autocommit
     dirty-file scan are done — clearing it first lets a task start on
     the tab mid-scan, so the prompt could list the NEW task's in-flight
@@ -43,9 +42,10 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.vscode_config import source_shell_env
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.server.diff_merge import _prepare_merge_view, _scan_files
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.merge_flow import _MergeFlowMixin
@@ -74,6 +74,13 @@ def _make_repo(repo: Path) -> None:
     _run_git(repo, "commit", "-m", "initial")
 
 
+def _register_tab_state(tab_id: str) -> AgentState:
+    """Register a server-owned :class:`AgentState` for *tab_id* and return it."""
+    state = AgentState(f"task-{tab_id}", tab_id=tab_id, server_owned=True)
+    agent_state.register(state)
+    return state
+
+
 class _RecordingPrinter(JsonPrinter):
     """Real JsonPrinter subclass recording broadcast events in a list."""
 
@@ -91,10 +98,9 @@ class _RecordingPrinter(JsonPrinter):
 class _Host(_MergeFlowMixin):
     """Concrete merge-flow host with the server state the mixin expects.
 
-    Implements the same ``_get_tab`` / ``_any_non_wt_running``
-    contracts as ``VSCodeServer`` (get-or-create under ``_state_lock``;
-    "any tab has ``is_running_non_wt``"), against the real
-    ``_RunningAgentState`` registry.
+    Implements the same ``_any_non_wt_running`` / ``_dispose_if_closed``
+    contracts as ``VSCodeServer`` against the real task-keyed
+    ``kiss.server.agent_state`` registry.
     """
 
     def __init__(self, work_dir: str, printer: JsonPrinter | None = None) -> None:
@@ -102,58 +108,45 @@ class _Host(_MergeFlowMixin):
         self._state_lock = threading.RLock()
         self.printer = printer or _RecordingPrinter()
 
-    def _get_tab(self, tab_id: str) -> _RunningAgentState:
-        """Get or create per-tab state (mirrors ``VSCodeServer._get_tab``)."""
-        with self._state_lock:
-            tab = _RunningAgentState.running_agent_states.get(tab_id)
-            if tab is None:
-                tab = _RunningAgentState(tab_id, "test-model")
-                _RunningAgentState.running_agent_states[tab_id] = tab
-            return tab
-
     def _any_non_wt_running(self) -> bool:
-        """True if any tab runs a non-worktree task (real server semantics)."""
-        return any(
-            t.is_running_non_wt
-            for t in _RunningAgentState.running_agent_states.values()
-        )
+        """True if any state runs a non-worktree task (real server semantics)."""
+        return any(st.is_running_non_wt for st in agent_state.snapshot())
 
     def _dispose_if_closed(self, tab_id: str) -> None:
-        """Mirror the server: pop only closed, fully-idle tabs (no-op here)."""
-        with self._state_lock:
-            tab = _RunningAgentState.running_agent_states.get(tab_id)
-            if tab is not None and tab.frontend_closed and not (
-                tab.is_task_active or tab.is_merging
+        """Mirror the server: unregister only closed, fully-idle states."""
+        with agent_state.STATE_LOCK:
+            state = agent_state.find_by_tab(tab_id)
+            if state is not None and state.frontend_closed and not (
+                state.is_task_active or state.is_merging
             ):
-                _RunningAgentState.running_agent_states.pop(tab_id, None)
+                agent_state.unregister(state.task_id, state)
 
 
 class _MergingFlagRecordingAgent(WorktreeSorcarAgent):
-    """Real agent subclass recording ``tab.is_merging`` at ``discard()`` time.
+    """Real agent subclass recording ``state.is_merging`` at ``discard()`` time.
 
-    The F1 contract is that the main tree is CLAIMED (``is_merging``
-    set, atomically with the non-wt-running check) before ``discard()``
+    The F1 contract is that the tab is CLAIMED (``is_merging`` set,
+    atomically with observing the worktree free) before ``discard()``
     runs its main-repo ``git checkout``; this recorder observes the
     flag exactly when the production discard begins.
     """
 
-    def __init__(self, name: str, host: _Host, tab_id: str) -> None:
+    def __init__(self, name: str, tab_id: str) -> None:
         super().__init__(name)
-        self._test_host = host
         self._test_tab_id = tab_id
         self.observed_merging_during_discard: bool | None = None
 
     def discard(self) -> str:
-        """Record the owning tab's ``is_merging`` flag, then really discard."""
-        host = self._test_host
-        with host._state_lock:
-            tab = _RunningAgentState.running_agent_states[self._test_tab_id]
-            self.observed_merging_during_discard = tab.is_merging
+        """Record the owning state's ``is_merging`` flag, then really discard."""
+        with agent_state.STATE_LOCK:
+            state = agent_state.find_by_tab(self._test_tab_id)
+            assert state is not None
+            self.observed_merging_during_discard = state.is_merging
         return super().discard()
 
 
 class _AutocommitFlagPrinter(_RecordingPrinter):
-    """Recorder that snapshots ``tab.is_merging`` at broadcast time.
+    """Recorder that snapshots ``state.is_merging`` at broadcast time.
 
     Used for F3: the autocommit dirty-file scan (whose result is the
     ``autocommit_prompt`` broadcast) must run while the merge session
@@ -163,35 +156,34 @@ class _AutocommitFlagPrinter(_RecordingPrinter):
 
     def __init__(self) -> None:
         super().__init__()
-        self.tab: _RunningAgentState | None = None
+        self.state: AgentState | None = None
         self.merging_at_prompt: bool | None = None
         self.merging_at_merge_ended: bool | None = None
 
     def broadcast(self, event: dict[str, Any]) -> None:
-        """Record the event plus the tab's live ``is_merging`` flag."""
-        if self.tab is not None:
+        """Record the event plus the state's live ``is_merging`` flag."""
+        if self.state is not None:
             if event.get("type") == "autocommit_prompt":
-                self.merging_at_prompt = self.tab.is_merging
+                self.merging_at_prompt = self.state.is_merging
             elif event.get("type") == "merge_ended":
-                self.merging_at_merge_ended = self.tab.is_merging
+                self.merging_at_merge_ended = self.state.is_merging
         super().broadcast(event)
-
 
 
 class TestEmptyWorktreeDiscardClaimsMainTree:
     def test_discard_runs_with_is_merging_claimed(self, tmp_path: Path) -> None:
-        """``discard()`` must see ``tab.is_merging`` True (tree claimed)."""
+        """``discard()`` must see ``state.is_merging`` True (tab claimed)."""
         repo = tmp_path / "repo"
         _make_repo(repo)
         tab_id = "w2f7-f1-tab"
         host = _Host(str(repo))
-        agent = _MergingFlagRecordingAgent("wave2-f1", host, tab_id)
+        agent = _MergingFlagRecordingAgent("wave2-f1", tab_id)
         try:
             assert agent._try_setup_worktree(repo, str(repo)) is not None
             assert agent._wt_pending
-            tab = host._get_tab(tab_id)
-            tab.use_worktree = True
-            tab.agent = agent
+            state = _register_tab_state(tab_id)
+            state.use_worktree = True
+            state.agent = agent
 
             host._present_pending_worktree(tab_id, try_merge_review=True)
 
@@ -200,12 +192,14 @@ class TestEmptyWorktreeDiscardClaimsMainTree:
             )
             assert not agent._wt_pending
             assert agent.observed_merging_during_discard is True, (
-                "discard() ran without claiming tab.is_merging — a "
+                "discard() ran without claiming state.is_merging — a "
                 "non-wt task could start and race the main-repo checkout"
             )
-            assert tab.is_merging is False
+            assert state.is_merging is False
         finally:
-            _RunningAgentState.running_agent_states.pop(tab_id, None)
+            if agent._wt_pending:
+                agent.discard()
+            agent_state.agent_states.clear()
 
     def test_discard_still_claims_the_tree_while_non_wt_task_running(
         self, tmp_path: Path,
@@ -214,35 +208,33 @@ class TestEmptyWorktreeDiscardClaimsMainTree:
 
         Discarding an EMPTY worktree does not modify the main working
         tree's files and leaves it on the branch it was already on, so
-        skipping the discard only leaked the worktree forever.  It now
-        runs regardless, and must still hold ``tab.is_merging`` while
-        it does.
+        skipping the discard only leaked the worktree forever.  It runs
+        regardless, and must still hold ``state.is_merging`` while it
+        does.
         """
         repo = tmp_path / "repo"
         _make_repo(repo)
         tab_id = "w2f7-f1b-tab"
         other_id = "w2f7-f1b-other"
         host = _Host(str(repo))
-        agent = _MergingFlagRecordingAgent("wave2-f1b", host, tab_id)
+        agent = _MergingFlagRecordingAgent("wave2-f1b", tab_id)
         try:
             assert agent._try_setup_worktree(repo, str(repo)) is not None
-            tab = host._get_tab(tab_id)
-            tab.use_worktree = True
-            tab.agent = agent
-            other = host._get_tab(other_id)
+            state = _register_tab_state(tab_id)
+            state.use_worktree = True
+            state.agent = agent
+            other = _register_tab_state(other_id)
             other.is_running_non_wt = True
 
             host._present_pending_worktree(tab_id, try_merge_review=True)
 
             assert agent.observed_merging_during_discard is True
             assert not agent._wt_pending
-            assert tab.is_merging is False
+            assert state.is_merging is False
         finally:
             if agent._wt_pending:
                 agent.discard()
-            for tid in (tab_id, other_id):
-                _RunningAgentState.running_agent_states.pop(tid, None)
-
+            agent_state.agent_states.clear()
 
 
 class TestFinishMergeHoldsClaimThroughCleanup:
@@ -257,10 +249,9 @@ class TestFinishMergeHoldsClaimThroughCleanup:
         printer = _AutocommitFlagPrinter()
         host = _Host(str(repo), printer)
         try:
-            tab = host._get_tab(tab_id)
-            tab.use_worktree = False
-            tab.is_merging = True
-            printer.tab = tab
+            state = _register_tab_state(tab_id)
+            state.use_worktree = False
+            printer.state = state
 
             host._finish_merge(tab_id, work_dir=str(repo))
 
@@ -276,9 +267,9 @@ class TestFinishMergeHoldsClaimThroughCleanup:
                 "is_merging was cleared before the autocommit dirty scan "
                 "— a task starting in that window races the scan"
             )
-            assert tab.is_merging is False
+            assert state.is_merging is False
         finally:
-            _RunningAgentState.running_agent_states.pop(tab_id, None)
+            agent_state.agent_states.clear()
 
     def test_clean_tree_ends_merge_without_prompt(self, tmp_path: Path) -> None:
         repo = tmp_path / "repo"
@@ -287,25 +278,23 @@ class TestFinishMergeHoldsClaimThroughCleanup:
         printer = _AutocommitFlagPrinter()
         host = _Host(str(repo), printer)
         try:
-            tab = host._get_tab(tab_id)
-            tab.is_merging = True
-            printer.tab = tab
+            state = _register_tab_state(tab_id)
+            printer.state = state
 
             host._finish_merge(tab_id, work_dir=str(repo))
 
             types = [e.get("type") for e in printer.events]
             assert "merge_ended" in types
             assert "autocommit_prompt" not in types
-            assert tab.is_merging is False
+            assert state.is_merging is False
         finally:
-            _RunningAgentState.running_agent_states.pop(tab_id, None)
+            agent_state.agent_states.clear()
 
     def test_missing_tab_id_is_noop(self, tmp_path: Path) -> None:
         host = _Host(str(tmp_path))
         host._finish_merge("", work_dir=str(tmp_path))
         assert isinstance(host.printer, _RecordingPrinter)
         assert host.printer.events == []
-
 
 
 class TestScanFilesCapCoversDirectories:
@@ -332,7 +321,6 @@ class TestScanFilesCapCoversDirectories:
         assert "f.txt" in paths
         assert "sub/" in paths
         assert "sub/g.txt" in paths
-
 
 
 class TestEmptyNewFileVisibleInMergeReview:
@@ -389,7 +377,6 @@ class TestEmptyNewFileVisibleInMergeReview:
             {"bs": 0, "bc": 0, "cs": 0, "cc": 2},
         ]
         assert not by_name["new.py"].get("binary")
-
 
 
 @pytest.mark.skipif(

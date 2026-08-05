@@ -33,7 +33,6 @@ from kiss.agents.sorcar.persistence import (
     _save_task_result,
     _task_has_events,
 )
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
     _attribute_sub_usage,
@@ -56,7 +55,7 @@ class _SubagentStopEvent(threading.Event):
 
     Each parallel sub-agent worker gets its own instance so the user
     can stop ONLY that sub-agent's task (``VSCodeServer._stop_task``
-    resolves the sub-agent's ``_RunningAgentState.stop_event`` and
+    resolves the sub-agent's registered ``stop_event`` and
     calls :meth:`set`, which flips just this event).  At the same time
     a stop of the PARENT task must keep killing the whole fan-out, so
     :meth:`is_set` and :meth:`wait` also observe the parent event —
@@ -228,9 +227,6 @@ class ChatSorcarAgent(SorcarAgent):
     with previous session context — replicating the stateful workflow
     from the VS Code extension as a standalone reusable agent.
     """
-
-    running_agents: dict[str, ChatSorcarAgent] = {}
-    _running_agents_lock: threading.RLock = threading.RLock()
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
@@ -440,77 +436,6 @@ class ChatSorcarAgent(SorcarAgent):
         if task_id:
             self._context_task_id = task_id
 
-    def _register_running_state(self) -> bool:
-        """Publish ``self`` in :attr:`_RunningAgentState.running_agent_states` for this chat.
-
-        Maintains the *registered-with-the-server* invariant: every
-        live :class:`ChatSorcarAgent` instance must be discoverable
-        through some entry of
-        :attr:`_RunningAgentState.running_agent_states` whose
-        ``state.agent is self``.  Consumers that rely on this
-        invariant include
-        :meth:`VSCodeServer._reattach_running_chat`,
-        :meth:`VSCodeServer._get_running_task_ids` (the History-
-        sidebar running indicator), and the parent-tab-id scan inside
-        :meth:`ChatSorcarAgent._run_tasks_parallel`.
-
-        Skips registration when an entry whose ``chat_id`` matches
-        ``self._chat_id`` is already present: the VS Code server
-        pre-populates a ``_RunningAgentState`` keyed by the frontend
-        tab id ahead of run-start (with ``chat_id`` set on the
-        state); :class:`WorktreeSorcarAgent.run` registers its own
-        entry before delegating to :meth:`ChatSorcarAgent.run`; and
-        :meth:`ChatSorcarAgent._run_tasks_parallel` registers each
-        sub-agent's per-thread state before invoking its ``run()``.
-        Re-registering on top of any of those would either clobber
-        lifecycle flags (server flow) or shadow the per-tab routing
-        key (worktree / sub-agent flow).  In CLI / third-party
-        invocations of plain :class:`ChatSorcarAgent` (no
-        pre-population), this method adds the missing entry keyed by
-        ``self._chat_id``.
-
-        Returns:
-            ``True`` when a fresh entry was added (and the caller
-            must remove it in its own ``finally``); ``False`` when an
-            entry was already present (the existing owner is
-            responsible for cleanup).
-        """
-        with _RunningAgentState._registry_lock:
-            for state in _RunningAgentState.running_agent_states.values():
-                if state.chat_id == self._chat_id and (
-                    state.agent is None or state.agent is self
-                ):
-                    return False
-            state = _RunningAgentState(
-                self._chat_id,
-                getattr(self, "model_name", "") or "",
-                agent=self,  # type: ignore[arg-type]
-            )
-            state.chat_id = self._chat_id
-            state.is_task_active = True
-            _RunningAgentState.register(self._chat_id, state)
-            return True
-
-    def _unregister_running_state(self) -> None:
-        """Remove ``self``'s entry from :attr:`_RunningAgentState.running_agent_states`.
-
-        Only removes the entry we ourselves added (matched by both
-        ``state.agent is self`` and ``state.chat_id == self._chat_id``).
-        A different code path (e.g. the VS Code server) may have
-        replaced it mid-run; in that case the new owner is
-        responsible for its own cleanup.
-        """
-        with _RunningAgentState._registry_lock:
-            target_key: str | None = None
-            for key, state in _RunningAgentState.running_agent_states.items():
-                if state.agent is self and state.chat_id == self._chat_id:
-                    target_key = key
-                    break
-            if target_key is not None:
-                current = _RunningAgentState.running_agent_states[target_key]
-                current.is_task_active = False
-                _RunningAgentState.running_agent_states.pop(target_key, None)
-
     def build_chat_prompt(self, prompt: str) -> str:
         """Load chat context and augment prompt with previous tasks/results.
 
@@ -654,12 +579,7 @@ class ChatSorcarAgent(SorcarAgent):
         else:
             routing_parent_key = uuid.uuid4().hex
         parent_task_id = routing_parent_key
-        parent_tab_id = ""
-        with _RunningAgentState._registry_lock:
-            for tid, state in _RunningAgentState.running_agent_states.items():
-                if state.agent is self:
-                    parent_tab_id = tid
-                    break
+        parent_tab_id = str(getattr(self, "_tab_id", "") or "")
         printer = self.printer
         if self._subagent_info is not None and printer is not None:
             fanout = getattr(printer, "_fanout_targets", None)
@@ -702,18 +622,6 @@ class ChatSorcarAgent(SorcarAgent):
                 "parent_task_id": sub_persisted_parent,
                 "parent_tab_id": parent_tab_id,
             }
-            sub_state = _RunningAgentState(
-                sub_tab_id,
-                model or "",
-                agent=agent,  # type: ignore[arg-type]
-                chat_id=chat_id,
-                is_subagent=True,
-                parent_task_id=sub_persisted_parent,
-                is_task_active=True,
-                stop_event=sub_stop_event,
-            )
-            sub_state.task_thread = threading.current_thread()
-            _RunningAgentState.register(sub_tab_id, sub_state)
             try:
                 result: str = agent.run(
                     prompt_template=task,
@@ -739,8 +647,6 @@ class ChatSorcarAgent(SorcarAgent):
             except Exception as exc:
                 return _yaml_failure(exc)
             finally:
-                with _RunningAgentState._registry_lock:
-                    sub_state.task_thread = None
                 # _live_agent_usage (not _agent_usage): an interrupted
                 # child never folds its in-flight executor session's
                 # spend into its totals, so the folded-only read would
@@ -760,7 +666,6 @@ class ChatSorcarAgent(SorcarAgent):
                         )
                     except Exception:
                         pass
-                _RunningAgentState.unregister(sub_tab_id, sub_state)
                 # Pool workers are reused across fan-outs, and the
                 # binding is per THREAD (it is what lets a model stream
                 # see a stop), so leaving it behind would let an
@@ -833,70 +738,54 @@ class ChatSorcarAgent(SorcarAgent):
             YAML string with 'success' and 'summary' keys.
         """
         skip_persistence = kwargs.pop("_skip_persistence", False)
-        subscribe_tab_id = kwargs.pop("_subscribe_tab_id", "")
         on_task_id_allocated = kwargs.pop("_on_task_id_allocated", None)
         if self._chat_id == "":
             self._chat_id = _allocate_chat_id()
         with self._task_id_lock:
             self._last_task_id = None
-            registered_here = self._register_running_state()
 
-        try:
-            self._last_user_prompt = prompt_template
-            self._last_result_summary = ""
+        self._last_user_prompt = prompt_template
+        self._last_result_summary = ""
 
-            agent_prompt = self.build_chat_prompt(prompt_template)
+        agent_prompt = self.build_chat_prompt(prompt_template)
 
-            explicit_worktree = kwargs.pop("use_worktree", None)
-            if explicit_worktree is not None:
-                is_worktree = bool(explicit_worktree)
-            else:
-                is_worktree = self.uses_worktree and _dir_inside_worktree(
-                    kwargs.get("work_dir", "") or "",
-                    getattr(self, "_wt_dir", None),
-                )
-
-            early_extra = self._build_extra_payload(
-                model=kwargs.get("model_name", "") or "",
-                work_dir=kwargs.get("work_dir", "") or "",
-                is_parallel=bool(kwargs.get("is_parallel", False)),
-                is_worktree=is_worktree,
+        explicit_worktree = kwargs.pop("use_worktree", None)
+        if explicit_worktree is not None:
+            is_worktree = bool(explicit_worktree)
+        else:
+            is_worktree = self.uses_worktree and _dir_inside_worktree(
+                kwargs.get("work_dir", "") or "",
+                getattr(self, "_wt_dir", None),
             )
 
-            task_id, self._chat_id = _add_task(
-                prompt_template, chat_id=self._chat_id, extra=early_extra,
-            )
-        except BaseException:
-            if registered_here:
-                self._unregister_running_state()
-            raise
+        early_extra = self._build_extra_payload(
+            model=kwargs.get("model_name", "") or "",
+            work_dir=kwargs.get("work_dir", "") or "",
+            is_parallel=bool(kwargs.get("is_parallel", False)),
+            is_worktree=is_worktree,
+        )
+
+        task_id, self._chat_id = _add_task(
+            prompt_template, chat_id=self._chat_id, extra=early_extra,
+        )
         with self._task_id_lock:
             self._last_task_id = task_id
         printer = kwargs.get("printer") or getattr(self, "printer", None)
         task_key = str(task_id)
         result_summary = ""
         result_raw = ""
-        run_started = False
-        with ChatSorcarAgent._running_agents_lock:
-            ChatSorcarAgent.running_agents[task_id] = self
-        # From this point on, BOTH registries hold entries for this run,
-        # so every remaining setup step (printer wiring, subscription,
-        # frequent-task recording, ...) must run inside the try below:
-        # an exception in any of them would otherwise bypass the cleanup
-        # and leave a permanently "running" task behind (F-14).
+        # Every remaining setup step (state registration, printer
+        # wiring, frequent-task recording, ...) must run inside the try
+        # below: an exception in any of them would otherwise bypass the
+        # cleanup and leave a permanently "running" task behind (F-14).
         try:
-            if self._subagent_info is not None:
-                with _RunningAgentState._registry_lock:
-                    for state in (
-                        _RunningAgentState.running_agent_states.values()
-                    ):
-                        if state.agent is self:
-                            state.task_history_id = task_id
-                            break
             if printer is not None:
                 tl = getattr(printer, "_thread_local", None)
                 if tl is not None:
                     tl.task_id = task_key
+                allocated = getattr(printer, "agent_task_allocated", None)
+                if allocated is not None:
+                    allocated(self, task_id, self._chat_id)
                 if self._subagent_info is not None:
                     broadcast = getattr(printer, "broadcast", None)
                     if broadcast is not None:
@@ -913,17 +802,6 @@ class ChatSorcarAgent(SorcarAgent):
                             })
                         except Exception:
                             pass
-                persist_map = getattr(printer, "_persist_agents", None)
-                if persist_map is not None:
-                    printer_lock = getattr(printer, "_lock", None)
-                    if printer_lock is not None:
-                        with printer_lock:
-                            persist_map[task_key] = self
-                    else:
-                        persist_map[task_key] = self
-                subscribe = getattr(printer, "subscribe_tab", None)
-                if subscribe is not None and subscribe_tab_id:
-                    subscribe(task_id, subscribe_tab_id)
                 start_rec = getattr(printer, "start_recording", None)
                 if start_rec is not None:
                     start_rec()
@@ -945,7 +823,6 @@ class ChatSorcarAgent(SorcarAgent):
             if self._subagent_info is None:
                 _record_frequent_task(prompt_template)
 
-            run_started = True
             result = super().run(prompt_template=agent_prompt, **kwargs)
             result_raw = result if isinstance(result, str) else ""
             result_summary = _extract_result_summary(result)
@@ -958,28 +835,17 @@ class ChatSorcarAgent(SorcarAgent):
             raise
         finally:
             self._last_result_summary = result_summary
-            with ChatSorcarAgent._running_agents_lock:
-                ChatSorcarAgent.running_agents.pop(task_id, None)
-            if registered_here:
-                self._unregister_running_state()
             if printer is not None:
-                if not run_started:
-                    # Setup failed before the run started: nothing else
-                    # will ever remove the persist-agent registration we
-                    # installed above, so drop it here (identity-checked)
-                    # to avoid a stale strong reference in the printer.
-                    persist_map = getattr(printer, "_persist_agents", None)
-                    if (
-                        persist_map is not None
-                        and persist_map.get(task_key) is self
-                    ):
-                        printer_lock = getattr(printer, "_lock", None)
-                        if printer_lock is not None:
-                            with printer_lock:
-                                if persist_map.get(task_key) is self:
-                                    persist_map.pop(task_key, None)
-                        else:
-                            persist_map.pop(task_key, None)
+                finished = getattr(printer, "agent_task_finished", None)
+                if finished is not None:
+                    try:
+                        finished(self, task_key)
+                    except Exception:
+                        logging.getLogger(__name__).warning(
+                            "agent_task_finished(%r) raised",
+                            task_key,
+                            exc_info=True,
+                        )
                 stop_rec = getattr(printer, "stop_recording", None)
                 if stop_rec is not None:
                     try:

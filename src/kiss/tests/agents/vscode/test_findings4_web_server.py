@@ -183,16 +183,16 @@ class TestFindings4WebServer(IsolatedAsyncioTestCase):
 
     async def test_f406_submit_refused_after_shutdown_started(self) -> None:
         """_handle_submit must not start tasks once shutdown began."""
-        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+        from kiss.server import agent_state
 
         self.server._shutdown_initiated = True
         try:
             await self.server._handle_submit(
                 {"tabId": "f406-tab", "prompt": "do work"},
             )
-            tab = _RunningAgentState.running_agent_states.get("f406-tab")
+            state = agent_state.find_by_tab("f406-tab")
             self.assertTrue(
-                tab is None or not tab.is_task_active,
+                state is None or not state.is_task_active,
                 "a task was started after shutdown was initiated; the "
                 "worker sweep already ran and this task would be "
                 "killed abruptly at process exit",

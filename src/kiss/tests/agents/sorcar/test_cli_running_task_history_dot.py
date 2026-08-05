@@ -15,7 +15,7 @@ indicator (CSS class ``sidebar-item-running``, keyframes
 Pre-fix the running indicator was never set for CLI-launched tasks:
 ``VSCodeServer._get_history`` builds the ``is_running`` flag from
 ``_get_running_task_ids()`` which only scans the in-process
-``_RunningAgentState`` registry.  The CLI agent runs in a separate
+in-process ``kiss.server.agent_state`` registry.  The CLI agent runs in a separate
 Python process and never has a registry entry on the daemon, so
 its rows came back with ``is_running=False`` even while the agent
 was actively producing events — no pulsing dot in History.

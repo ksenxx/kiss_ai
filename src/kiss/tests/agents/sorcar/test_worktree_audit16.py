@@ -45,6 +45,7 @@ RED-10: The three post-task pending-worktree handling blocks in
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
 
@@ -52,13 +53,25 @@ import pytest
 
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
+
+
+@pytest.fixture(autouse=True)
+def _clean_registry() -> Iterator[None]:
+    agent_state.agent_states.clear()
+    yield
+    agent_state.agent_states.clear()
 
 
 def _make_repo(path: Path) -> Path:
     """Create a minimal git repo with one initial commit."""
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", str(path)], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "init", "-b", "main", str(path)],
+        capture_output=True, check=True,
+    )
     subprocess.run(
         ["git", "-C", str(path), "config", "user.email", "t@t.com"],
         capture_output=True,
@@ -78,6 +91,19 @@ def _make_repo(path: Path) -> Path:
         capture_output=True, check=True,
     )
     return path
+
+
+def _register_wt_tab(task_id: str, tab_id: str) -> AgentState:
+    """Register a server-owned worktree-mode state with a real agent."""
+    state = AgentState(
+        task_id,
+        agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        tab_id=tab_id,
+        server_owned=True,
+    )
+    state.use_worktree = True
+    agent_state.register(state)
+    return state
 
 
 def _create_wt(
@@ -107,6 +133,12 @@ class _RecordingPrinter:
     def broadcast(self, event: dict[str, Any]) -> None:
         self.events.append(event)
 
+    def broadcast_tab_ui(self, event: dict[str, Any]) -> None:
+        self.events.append(event)
+
+    def print(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
 
 class TestBug68FinishMergeNoBroadcastOnEmptyNonWtBusy:
     """``_finish_merge`` with no worktree changes and a concurrent
@@ -130,16 +162,16 @@ class TestBug68FinishMergeNoBroadcastOnEmptyNonWtBusy:
         server.printer = cast(Any, printer)
 
         tab_id = "tab-bug68a"
-        tab = server._get_tab(tab_id)
-        tab.use_worktree = True
-        tab.is_merging = True
+        state = _register_wt_tab("task-bug68a", tab_id)
+        state.is_merging = True
 
-        agent = cast(WorktreeSorcarAgent, tab.agent)
+        agent = cast(WorktreeSorcarAgent, state.agent)
         branch = "kiss/wt-bug68a-1"
         wt = _create_wt(repo, branch, agent)
 
-        other = server._get_tab("other-bug68a")
+        other = AgentState("task-other-68a", tab_id="other-bug68a")
         other.is_running_non_wt = True
+        agent_state.register(other)
 
         server._finish_merge(tab_id)
 
@@ -174,11 +206,10 @@ class TestBug68FinishMergeNoBroadcastOnEmptyNonWtBusy:
         server.printer = cast(Any, printer)
 
         tab_id = "tab-bug68b"
-        tab = server._get_tab(tab_id)
-        tab.use_worktree = True
-        tab.is_merging = True
+        state = _register_wt_tab("task-bug68b", tab_id)
+        state.is_merging = True
 
-        agent = cast(WorktreeSorcarAgent, tab.agent)
+        agent = cast(WorktreeSorcarAgent, state.agent)
         _create_wt(repo, "kiss/wt-bug68b-1", agent)
 
         server._finish_merge(tab_id)
@@ -213,10 +244,9 @@ class TestBug70UntrackedFileConflict:
         server.printer = cast(Any, printer)
 
         tab_id = "tab-bug70"
-        tab = server._get_tab(tab_id)
-        tab.use_worktree = True
+        state = _register_wt_tab("task-bug70", tab_id)
 
-        agent = cast(WorktreeSorcarAgent, tab.agent)
+        agent = cast(WorktreeSorcarAgent, state.agent)
         branch = "kiss/wt-bug70-1"
         wt = _create_wt(repo, branch, agent)
 
@@ -259,10 +289,9 @@ class TestBug70UntrackedFileConflict:
         server.printer = cast(Any, printer)
 
         tab_id = "tab-bug70b"
-        tab = server._get_tab(tab_id)
-        tab.use_worktree = True
+        state = _register_wt_tab("task-bug70b", tab_id)
 
-        agent = cast(WorktreeSorcarAgent, tab.agent)
+        agent = cast(WorktreeSorcarAgent, state.agent)
         wt = _create_wt(repo, "kiss/wt-bug70-2", agent)
 
         (wt.wt_dir / "foo.py").write_text("agent content\n")

@@ -17,7 +17,6 @@ import io
 import threading
 from typing import Any
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.ui.cli.cli_panel import (
     _term_size,
@@ -175,54 +174,46 @@ class TestStdoutProxyCaret:
 
 
 class TestSteeringQueue:
-    def _session(self) -> tuple[SteeringSession, _RunningAgentState, SorcarAgent]:
+    def _session(self) -> tuple[SteeringSession, SorcarAgent]:
         agent = SorcarAgent("steer-test")
         chat_id = "steer-chat-1"
-        state = _RunningAgentState(chat_id, "", agent=None)
-        state.chat_id = chat_id
-        state.is_task_active = True
-        session = SteeringSession(agent, state, chat_id)
-        return session, state, agent
+        session = SteeringSession(agent, chat_id)
+        return session, agent
 
     def test_submit_queues_instruction(self) -> None:
-        session, state, _ = self._session()
+        session, agent = self._session()
         session._on_submit("please add tests")
-        assert state.pending_user_messages == ["please add tests"]
+        assert agent.pending_user_messages == ["please add tests"]
 
     def test_submit_strips_and_skips_blank(self) -> None:
-        session, state, _ = self._session()
+        session, agent = self._session()
         session._on_submit("   ")
         session._on_submit("  real one  ")
-        assert state.pending_user_messages == ["real one"]
+        assert agent.pending_user_messages == ["real one"]
 
     def test_queued_count_reflected_in_status(self) -> None:
-        session, _state, _ = self._session()
+        session, _agent = self._session()
         session._on_submit("a")
         session._on_submit("b")
         assert "2" in session.box.status
 
     def test_queue_then_agent_drain_injects_messages(self) -> None:
         """End-to-end: a queued line is injected before the next step."""
-        session, state, agent = self._session()
-        agent._tab_id = state.chat_id  # type: ignore[attr-defined]
-        _RunningAgentState.register(state.chat_id, state)
-        try:
-            session._on_submit("steer left")
-            session._on_submit("then steer right")
-            model = _RecordingModel()
-            agent._drain_pending_user_messages(model)
-        finally:
-            _RunningAgentState.unregister(state.chat_id)
+        session, agent = self._session()
+        session._on_submit("steer left")
+        session._on_submit("then steer right")
+        model = _RecordingModel()
+        agent._drain_pending_user_messages(model)
         assert [m["content"] for m in model.conversation] == [
             "User says: steer left. "
             "Take the message into account and finish your task.",
             "User says: then steer right. "
             "Take the message into account and finish your task.",
         ]
-        assert state.pending_user_messages == []
+        assert agent.pending_user_messages == []
 
     def test_ask_user_question_receives_submitted_line(self) -> None:
-        session, _state, _ = self._session()
+        session, _agent = self._session()
         answers: list[str] = []
         done = threading.Event()
 
@@ -236,7 +227,7 @@ class TestSteeringQueue:
         session._on_submit("src/main.py")
         assert done.wait(timeout=5)
         assert answers == ["src/main.py"]
-        assert session.state.pending_user_messages == []
+        assert session.agent.pending_user_messages == []
 
 
 class _FakeRunAgent:
@@ -620,10 +611,9 @@ class TestInputBoxCompletionMenuEdgeCases:
         answer rather than picking a stale candidate.
         """
         agent = SorcarAgent("steer-test")
-        state = _RunningAgentState("chat-id", "", agent=None)
         box = _make_box()
         session = SteeringSession(
-            agent, state, "chat-id", box=box,
+            agent, "chat-id", box=box,
         )
         box.completer_fn = lambda _buf: ["one", "two"]
         box.feed(b"\t", lambda _s: None, lambda: None)
@@ -789,11 +779,8 @@ class TestSteeringSessionSharedBox:
     def test_shared_box_marks_session_as_non_owner(self) -> None:
         box = _make_box()
         agent = SorcarAgent("steer-test")
-        state = _RunningAgentState("c", "", agent=None)
-        state.chat_id = "c"
-        state.is_task_active = True
         session = SteeringSession(
-            agent, state, "c",
+            agent, "c",
             box=box,
             lock=threading.RLock(),
             real_stdout=io.StringIO(),
@@ -804,10 +791,7 @@ class TestSteeringSessionSharedBox:
 
     def test_default_session_owns_box(self) -> None:
         agent = SorcarAgent("steer-test")
-        state = _RunningAgentState("c", "", agent=None)
-        state.chat_id = "c"
-        state.is_task_active = True
-        session = SteeringSession(agent, state, "c")
+        session = SteeringSession(agent, "c")
         assert session._owns_box is True
 
 

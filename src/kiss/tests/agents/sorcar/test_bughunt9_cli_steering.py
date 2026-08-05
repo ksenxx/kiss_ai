@@ -32,7 +32,6 @@ from __future__ import annotations
 import io
 import threading
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.ui.cli.cli_steering import (
     SteeringSession,
@@ -41,14 +40,11 @@ from kiss.ui.cli.cli_steering import (
 )
 
 
-def _make_session(chat_id: str) -> tuple[SteeringSession, _RunningAgentState]:
+def _make_session(chat_id: str) -> tuple[SteeringSession, SorcarAgent]:
     """Build a real SteeringSession the way the CLI does (no PTY needed)."""
     agent = SorcarAgent("bh9-steering")
-    state = _RunningAgentState(chat_id, "", agent=None)
-    state.chat_id = chat_id
-    state.is_task_active = True
-    session = SteeringSession(agent, state, chat_id)
-    return session, state
+    session = SteeringSession(agent, chat_id)
+    return session, agent
 
 
 class TestAskUserStaleAnswer:
@@ -62,7 +58,7 @@ class TestAskUserStaleAnswer:
         ``get()`` returning and its ``finally`` clearing the flag), so
         the line lands in ``_answer_q`` with no waiter to consume it.
         """
-        session, _state = _make_session("bh9-ask-chat")
+        session, _agent = _make_session("bh9-ask-chat")
         session._question_pending.set()
         session._on_submit("stale answer from previous question")
         session._question_pending.clear()
@@ -84,7 +80,7 @@ class TestAskUserStaleAnswer:
 
     def test_fresh_question_still_gets_normal_answer(self) -> None:
         """Regression guard: the drain must not break the normal flow."""
-        session, _state = _make_session("bh9-ask-chat2")
+        session, agent = _make_session("bh9-ask-chat2")
         answers: list[str] = []
 
         def _worker() -> None:
@@ -98,7 +94,7 @@ class TestAskUserStaleAnswer:
         assert not thread.is_alive()
         assert answers == ["blue"]
         session._on_submit("follow-up instruction")
-        assert _state.pending_user_messages == ["follow-up instruction"]
+        assert agent.pending_user_messages == ["follow-up instruction"]
 
 
 class TestMenuAutoDismissClearsReplacements:

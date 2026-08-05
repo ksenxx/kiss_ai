@@ -37,6 +37,8 @@ from kiss.agents.sorcar.cli_helpers import (
 )
 from kiss.agents.sorcar.git_worktree import GitWorktree
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent, _generate_commit_message
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
 
@@ -178,26 +180,43 @@ class TestFormatToolCallBranches:
         assert "extras" in ev
 
 
+def _register_worktree_state(tab_id: str) -> AgentState:
+    """Register a server-owned worktree state for *tab_id* and return it."""
+    state = AgentState(
+        f"task-{tab_id}",
+        agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        tab_id=tab_id,
+        server_owned=True,
+    )
+    state.use_worktree = True
+    agent_state.register(state)
+    return state
+
+
 class TestVSCodeServerUncoveredBranches:
     """Cover remaining uncovered branches in VSCodeServer."""
 
     def test_check_merge_conflict_no_branches(self) -> None:
         """_check_merge_conflict returns False when no wt_branch (line 733)."""
         server = VSCodeServer()
-        tab = server._get_tab("0")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        tab.agent._wt = None  # type: ignore[attr-defined]
-        assert server._check_merge_conflict() is False
+        state = _register_worktree_state("0")
+        try:
+            assert state.agent is not None
+            state.agent._wt = None
+            assert server._check_merge_conflict("0") is False
+        finally:
+            agent_state.unregister(state.task_id, state)
 
     def test_get_worktree_changed_files_no_branches(self) -> None:
         """_get_worktree_changed_files returns [] when no branches."""
         server = VSCodeServer()
-        tab = server._get_tab("0")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        tab.agent._wt = None  # type: ignore[attr-defined]
-        assert server._get_worktree_changed_files() == []
+        state = _register_worktree_state("0")
+        try:
+            assert state.agent is not None
+            state.agent._wt = None
+            assert server._get_worktree_changed_files("0") == []
+        finally:
+            agent_state.unregister(state.task_id, state)
 
     def test_check_merge_conflict_dirty_worktree(self, tmp_path: Path) -> None:
         """_check_merge_conflict detects dirty files that overlap with merge."""
@@ -205,7 +224,10 @@ class TestVSCodeServerUncoveredBranches:
         try:
             repo = tmp_path / "repo"
             repo.mkdir()
-            subprocess.run(["git", "init"], cwd=repo, capture_output=True, check=True)
+            subprocess.run(
+                ["git", "init", "-b", "main"],
+                cwd=repo, capture_output=True, check=True,
+            )
             subprocess.run(
                 ["git", "config", "user.email", "t@t.com"],
                 cwd=repo, capture_output=True,
@@ -235,17 +257,19 @@ class TestVSCodeServerUncoveredBranches:
             )
 
             server = VSCodeServer()
-            tab = server._get_tab("0")
-            tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-            tab.use_worktree = True
-            tab.agent._wt = GitWorktree(
+            state = _register_worktree_state("0")
+            assert state.agent is not None
+            state.agent._wt = GitWorktree(
                 repo_root=repo, branch="test-wt",
                 original_branch="main",
                 wt_dir=wt_dir,
             )
             server.work_dir = str(repo)
 
-            assert server._check_merge_conflict("0") is True
+            try:
+                assert server._check_merge_conflict("0") is True
+            finally:
+                agent_state.unregister(state.task_id, state)
         finally:
             _restore_db(saved)
 

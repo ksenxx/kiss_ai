@@ -25,7 +25,6 @@ R1 fix: dead ``is not None`` guard removed from ``_cmd_user_answer``.
 from __future__ import annotations
 
 import json
-import queue
 import tempfile
 import threading
 import unittest
@@ -39,6 +38,7 @@ from kiss.core.vscode_config import (
     load_config,
     save_config,
 )
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -146,7 +146,6 @@ class TestIsTaskActiveClearedOnSnapshotFailure(TestCase):
         """When pre-snapshot capture fails, is_task_active must be False."""
         server, events = _make_server()
         tab_id = "snap-fail-tab"
-        tab = server._get_tab(tab_id)
 
         cmd: dict[str, Any] = {
             "type": "run",
@@ -157,18 +156,19 @@ class TestIsTaskActiveClearedOnSnapshotFailure(TestCase):
             "workDir": "/nonexistent/dir/that/will/fail",
         }
 
-        tab.stop_event = threading.Event()
-        tab.user_answer_queue = queue.Queue(maxsize=1)
-        server.printer._thread_local.task_id = tab_id
-
         try:
-            server._run_task(cmd)
-        except (FileNotFoundError, OSError):
-            pass
+            try:
+                server._run_task(cmd)
+            except (FileNotFoundError, OSError):
+                pass
 
-        assert tab.is_task_active is False, (
-            "B2 FIX: is_task_active should be False after snapshot failure"
-        )
+            state = agent_state.get(cmd.get("_state_key", ""))
+            assert state is not None, "run never registered an agent state"
+            assert state.is_task_active is False, (
+                "B2 FIX: is_task_active should be False after snapshot failure"
+            )
+        finally:
+            agent_state.agent_states.clear()
 
 
 
@@ -223,7 +223,6 @@ class TestIsRunningNonWtClearedOnSnapshotFailure(TestCase):
     def test_is_running_non_wt_cleared(self) -> None:
         server, events = _make_server()
         tab_id = "nwt-fail-tab"
-        tab = server._get_tab(tab_id)
 
         cmd: dict[str, Any] = {
             "type": "run",
@@ -234,18 +233,19 @@ class TestIsRunningNonWtClearedOnSnapshotFailure(TestCase):
             "workDir": "/nonexistent/dir/that/will/fail",
         }
 
-        tab.stop_event = threading.Event()
-        tab.user_answer_queue = queue.Queue(maxsize=1)
-        server.printer._thread_local.task_id = tab_id
-
         try:
-            server._run_task(cmd)
-        except (FileNotFoundError, OSError):
-            pass
+            try:
+                server._run_task(cmd)
+            except (FileNotFoundError, OSError):
+                pass
 
-        assert tab.is_running_non_wt is False, (
-            "is_running_non_wt should be False after snapshot failure"
-        )
+            state = agent_state.get(cmd.get("_state_key", ""))
+            assert state is not None, "run never registered an agent state"
+            assert state.is_running_non_wt is False, (
+                "is_running_non_wt should be False after snapshot failure"
+            )
+        finally:
+            agent_state.agent_states.clear()
 
 
 if __name__ == "__main__":

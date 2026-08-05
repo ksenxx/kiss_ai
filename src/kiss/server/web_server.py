@@ -1472,43 +1472,38 @@ def _print_url() -> None:
 
 
 def _snapshot_active_tabs() -> list[str]:
-    """Return ``"<tabId>(task=<task_id>)"`` strings for active tabs.
+    """Return ``"<tabId>(task=<task_id>)"`` strings for active tasks.
 
-    Snapshots the running-agent registry under its lock before
-    iterating so a concurrent worker thread mutating
-    ``running_agent_states`` (registering a fresh tab, disposing a
-    finished one) cannot race the iterator and raise ``RuntimeError:
-    dictionary changed size during iteration``.  ``_registry_lock`` is
-    a :class:`threading.RLock`, so re-entry from the same thread is
-    safe even when called from a signal handler that interrupted a
-    lock holder.  Falls back to a best-effort unlocked snapshot if the
-    lock itself is unusable (e.g. during interpreter shutdown), and
-    skips malformed tab entries rather than propagating, so callers —
-    the shutdown-signal logger and the ``activeTasksQuery`` handler —
-    always get a usable (possibly partial) report.
+    Snapshots the agent-state registry under its lock before iterating
+    so a concurrent worker thread mutating it cannot race the iterator.
+    The lock is a :class:`threading.RLock`, so re-entry from the same
+    thread is safe even when called from a signal handler that
+    interrupted a lock holder.  Falls back to a best-effort unlocked
+    snapshot if the lock itself is unusable (e.g. during interpreter
+    shutdown), and skips malformed entries rather than propagating, so
+    callers — the shutdown-signal logger and the ``activeTasksQuery``
+    handler — always get a usable (possibly partial) report.
     """
-    from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+    from kiss.server import agent_state
 
     try:
-        with _RunningAgentState._registry_lock:
-            items = list(_RunningAgentState.running_agent_states.items())
+        states = agent_state.snapshot()
     except Exception:
         try:
-            items = list(_RunningAgentState.running_agent_states.items())
+            states = list(agent_state.agent_states.values())
         except Exception:
             logger.debug(
                 "unlocked registry snapshot failed", exc_info=True,
             )
-            items = []
+            states = []
     active_tabs: list[str] = []
-    for tab_id, tab in items:
+    for state in states:
         try:
-            if tab.is_task_active:
-                task_id = tab.task_history_id or tab.last_task_id
-                active_tabs.append(f"{tab_id}(task={task_id})")
+            if state.is_task_active:
+                active_tabs.append(f"{state.tab_id}(task={state.task_id})")
         except Exception:
             logger.debug(
-                "skipping malformed tab entry in active-task snapshot",
+                "skipping malformed entry in active-task snapshot",
                 exc_info=True,
             )
     return active_tabs
@@ -1517,9 +1512,9 @@ def _snapshot_active_tabs() -> list[str]:
 def _snapshot_running_task_rows() -> list[dict[str, Any]]:
     """Return one ``{chatId, taskId, title, startTs}`` dict per running chat.
 
-    Snapshots :attr:`_RunningAgentState.running_agent_states` (under its
-    registry lock — same discipline as :func:`_snapshot_active_tabs`)
-    and keeps only top-level running tasks:
+    Snapshots the agent-state registry (same discipline as
+    :func:`_snapshot_active_tabs`) and keeps only top-level running
+    tasks:
 
     * ``is_task_active`` must be true (a task is actually in flight);
     * sub-agent states are skipped — their chats are reopened by the
@@ -1541,14 +1536,13 @@ def _snapshot_running_task_rows() -> list[dict[str, Any]]:
     ``resumeSession`` replay repaints the tab with the real events.
     """
     from kiss.agents.sorcar.persistence import _get_task_start_ts
-    from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+    from kiss.server import agent_state
 
     try:
-        with _RunningAgentState._registry_lock:
-            states = list(_RunningAgentState.running_agent_states.values())
+        states = agent_state.snapshot()
     except Exception:
         try:
-            states = list(_RunningAgentState.running_agent_states.values())
+            states = list(agent_state.agent_states.values())
         except Exception:
             logger.debug(
                 "unlocked registry snapshot failed", exc_info=True,
@@ -1563,7 +1557,7 @@ def _snapshot_running_task_rows() -> list[dict[str, Any]]:
             chat_id = state.chat_id
             if not chat_id or chat_id in seen_chats:
                 continue
-            task_id = str(state.task_history_id or state.last_task_id or "")
+            task_id = state.task_id
             rows.append({
                 "chatId": chat_id,
                 "taskId": task_id,
@@ -3905,7 +3899,7 @@ class RemoteAccessServer:
         Pops the merge state (if any) for *tab_id* and dispatches the
         ``closeTab`` command through :meth:`_run_cmd`, which routes
         through :class:`VSCodeServer._close_tab`.  When the tab is
-        idle, ``_close_tab`` disposes the ``_RunningAgentState`` immediately;
+        idle, ``_close_tab`` disposes the tab's agent state immediately;
         when a task or merge review is still in flight, it flips
         ``frontend_closed=True`` and lets the existing deferred-
         disposal hook (:meth:`VSCodeServer._dispose_if_closed`) tear
@@ -6584,21 +6578,17 @@ class RemoteAccessServer:
             ctypes.py_object,
         ]
 
-        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+        from kiss.server import agent_state
 
         active: list[tuple[str, threading.Event | None, threading.Thread]] = []
         active_task_history_ids: set[str] = set()
-        with _RunningAgentState._registry_lock:
-            for tab_id, tab in _RunningAgentState.running_agent_states.items():
-                thread = tab.task_thread
-                if tab.is_task_active and thread is not None and thread.is_alive():
-                    tab.interrupted_by_shutdown = True
-                    active.append((tab_id, tab.stop_event, thread))
-                    th_id = tab.task_history_id
-                    if th_id is None and tab.agent is not None:
-                        th_id = getattr(tab.agent, "_last_task_id", None)
-                    if th_id:
-                        active_task_history_ids.add(str(th_id))
+        with agent_state.STATE_LOCK:
+            for task_id, state in agent_state.agent_states.items():
+                thread = state.task_thread
+                if state.is_task_active and thread is not None and thread.is_alive():
+                    state.interrupted_by_shutdown = True
+                    active.append((task_id, state.stop_event, thread))
+                    active_task_history_ids.add(task_id)
 
         if not active:
             return

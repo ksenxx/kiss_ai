@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -106,26 +107,32 @@ class TestWorktreeProgressRouted(unittest.TestCase):
         from kiss.agents.sorcar.git_worktree import GitWorktree
 
         server, events = _make_server()
-        tab = server._get_tab("t-13")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        with tempfile.TemporaryDirectory() as td:
-            tab.agent._wt = GitWorktree(
-                repo_root=_Path(td),
-                branch="kiss/wt-x",
-                original_branch="main",
-                wt_dir=_Path(td) / ".kiss-worktrees" / "kiss_wt-x",
-            )
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        state = agent_state.AgentState(
+            "routing-t13", agent=agent, tab_id="t-13", server_owned=True,
+        )
+        state.use_worktree = True
+        agent_state.register(state)
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                agent._wt = GitWorktree(
+                    repo_root=_Path(td),
+                    branch="kiss/wt-x",
+                    original_branch="main",
+                    wt_dir=_Path(td) / ".kiss-worktrees" / "kiss_wt-x",
+                )
 
-            def fake_merge() -> str:
-                return "Successfully merged"
+                def fake_merge() -> str:
+                    return "Successfully merged"
 
-            tab.agent.merge = fake_merge  # type: ignore[assignment]
+                agent.merge = fake_merge  # type: ignore[assignment]
 
-            result = server._handle_worktree_action(
-                "merge", tab_id="t-13",
-            )
-            assert result["success"] is True
+                result = server._handle_worktree_action(
+                    "merge", tab_id="t-13",
+                )
+                assert result["success"] is True
+        finally:
+            agent_state.agent_states.clear()
 
         wp = [e for e in events if e.get("type") == "worktree_progress"]
         assert len(wp) == 1
@@ -148,7 +155,6 @@ class TestAdjacentTaskRouted(unittest.TestCase):
     def test_cmd_handler_propagates_tab_id(self) -> None:
         """`_cmd_get_adjacent_task` forwards cmd.tabId into the event."""
         server, events = _make_server()
-        server._get_tab("t-19")
         server._cmd_get_adjacent_task({
             "type": "getAdjacentTask",
             "tabId": "t-19",

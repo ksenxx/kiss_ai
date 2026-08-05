@@ -32,6 +32,7 @@ from kiss.agents.sorcar.git_worktree import (
     repo_lock,
 )
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -189,7 +190,13 @@ class TestBug21CheckoutReturnsTuple:
         tmpdir = tempfile.mkdtemp()
         try:
             repo = _make_repo(Path(tmpdir) / "repo")
-            result = GitWorktreeOps.checkout(repo, "main")
+            current = subprocess.run(
+                ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            result = GitWorktreeOps.checkout(repo, current)
             assert isinstance(result, tuple)
             assert len(result) == 2
             ok, err = result
@@ -237,11 +244,15 @@ class TestBug22ConflictMissesStaged:
 
         server = VSCodeServer()
         server.work_dir = str(repo)
-        tab = server._get_tab("t22")
-        tab.agent = agent
-        tab.use_worktree = True
-
-        has_conflict = server._check_merge_conflict("t22")
+        state = agent_state.AgentState(
+            "task-t22", agent=agent, tab_id="t22", server_owned=True,
+        )
+        state.use_worktree = True
+        agent_state.register(state)
+        try:
+            has_conflict = server._check_merge_conflict("t22")
+        finally:
+            agent_state.unregister(state.task_id, state)
         assert has_conflict is True
 
 
@@ -326,10 +337,11 @@ class TestBug24SilentDiscardOnGitFailure:
 
             server = VSCodeServer()
             server.work_dir = str(repo)
-            tab = server._get_tab("t24")
-            tab.agent = agent
-            tab.use_worktree = True
-
+            state = agent_state.AgentState(
+                "task-t24", agent=agent, tab_id="t24", server_owned=True,
+            )
+            state.use_worktree = True
+            agent_state.register(state)
             agent._wt = GitWorktree(
                 repo_root=wt.repo_root,
                 branch=wt.branch,
@@ -338,7 +350,10 @@ class TestBug24SilentDiscardOnGitFailure:
                 baseline_commit="0000000000000000000000000000000000000000",
             )
 
-            changed_after = server._get_worktree_changed_files("t24")
+            try:
+                changed_after = server._get_worktree_changed_files("t24")
+            finally:
+                agent_state.unregister(state.task_id, state)
             assert "important.txt" in changed_after
 
         finally:

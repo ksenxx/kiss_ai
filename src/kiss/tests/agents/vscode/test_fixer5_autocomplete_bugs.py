@@ -30,8 +30,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-from kiss.server.task_runner import _RunningAgentState
 
 
 class _AutocompleteHarness(unittest.TestCase):
@@ -45,7 +45,7 @@ class _AutocompleteHarness(unittest.TestCase):
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment]
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         self._tmp.cleanup()
 
 

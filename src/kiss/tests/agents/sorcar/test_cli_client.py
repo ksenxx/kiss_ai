@@ -58,9 +58,9 @@ from typing import Any
 from unittest.mock import patch
 
 from kiss.agents.sorcar import persistence as th
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.core import vscode_config
 from kiss.core.print_to_console import ConsolePrinter
+from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
 from kiss.ui.cli import cli_daemon_bridge
 from kiss.ui.cli.cli_client import (
@@ -203,7 +203,7 @@ class _DaemonHarness:
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.loop_thread.join(timeout=5)
         self.loop.close()
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_persistence
         saved_dir, saved_path = self._saved_config_override
         if saved_dir is None:

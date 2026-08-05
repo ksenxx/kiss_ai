@@ -25,8 +25,8 @@ from kiss.agents.sorcar.persistence import (
     _record_file_usage,
     _record_model_usage,
 )
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-from kiss.server.helpers import tab_owns_answer_queue
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 
 if TYPE_CHECKING:
     from kiss.server.json_printer import JsonPrinter
@@ -53,12 +53,12 @@ def _kiss_home_is_default() -> bool:
         return False
 
 
-def _owner_task_id(state: _RunningAgentState) -> str:
+def _owner_task_id(state: AgentState) -> str:
     """Return the persisted task id of *state*'s live agent, or ``""``.
 
     Reads ``state.agent._last_task_id`` — the ``task_history`` row id
     the agent allocated for its current run.  MUST be called while
-    holding :attr:`_RunningAgentState._registry_lock` (the server's
+    holding :data:`agent_state.STATE_LOCK` (the server's
     ``_state_lock``): task teardown replaces/clears ``state.agent``
     under that lock, so capturing the id inside the same critical
     section that queued a pending user message guarantees the id
@@ -97,7 +97,7 @@ def _owner_task_id(state: _RunningAgentState) -> str:
     return task_id if isinstance(task_id, str) else ""
 
 
-def _task_accepts_input(state: _RunningAgentState | None) -> bool:
+def _task_accepts_input(state: AgentState | None) -> bool:
     """True when *state* has a live task that can drain queued input.
 
     The worker thread raises ``is_task_active`` only AFTER
@@ -106,13 +106,13 @@ def _task_accepts_input(state: _RunningAgentState | None) -> bool:
     (S3-05).  Treating an alive worker thread as live closes the
     window; the same predicate is used by the reattachment logic in
     ``server.py``.  MUST be called while holding
-    :attr:`_RunningAgentState._registry_lock`.
+    :data:`agent_state.STATE_LOCK`.
 
     Args:
-        state: The per-tab state to inspect (``None`` accepted).
+        state: The agent state to inspect (``None`` accepted).
 
     Returns:
-        True when the tab's task is active or its worker thread is
+        True when the state's task is active or its worker thread is
         still alive.
     """
     if state is None:
@@ -234,14 +234,13 @@ class _CommandsMixin:
         _last_active_content: dict[str, str]
         _file_cache: dict[str, list[str]]
         _tab_chat_views: dict[str, str]
-        _pending_user_answer_tasks: dict[int, str]
+        _tab_models: dict[str, str]
 
-        def _get_tab(self, tab_id: str) -> _RunningAgentState: ...
         def _run_task(self, cmd: dict[str, Any]) -> None: ...
         def _stop_task(self, tab_id: str = "") -> None: ...
-        def _find_source_tab_for_viewer(
+        def _find_viewer_task_states(
             self, viewer_tab_id: str,
-        ) -> str | None: ...
+        ) -> list[AgentState]: ...
         def _get_models(self, conn_id: str = "") -> None: ...
         def _get_history(
             self,
@@ -317,13 +316,25 @@ class _CommandsMixin:
         inject_prompt: str | None = None
         inject_task = ""
         thread: threading.Thread | None = None
+        state: AgentState | None = None
         chat_id = ""
         with self._state_lock:
-            tab = _RunningAgentState.running_agent_states.get(tab_id)
-            if tab is None:
-                tab = _RunningAgentState(tab_id, self._default_model)
-                _RunningAgentState.running_agent_states[tab_id] = tab
-            if tab.task_thread is not None:
+            prev = agent_state.find_by_tab(tab_id)
+            if prev is not None and prev.is_merging:
+                # An open merge review owns the tab's state (and its
+                # worktree agent); replacing it would orphan the
+                # review.  Refuse the run instead.
+                self.printer.broadcast(
+                    {
+                        "type": "error",
+                        "text": "Cannot run a task while merge review"
+                        " is in progress. Accept or reject all"
+                        " changes first.",
+                        "tabId": tab_id,
+                    }
+                )
+                return
+            if prev is not None and prev.task_thread is not None:
                 prompt = cmd.get("prompt", "")
                 # S3-05: queue the prompt whenever a task thread is
                 # installed.  The worker sets ``is_task_active`` only
@@ -332,29 +343,45 @@ class _CommandsMixin:
                 # submitted during the startup window in which the
                 # thread was alive but the flag not yet raised.
                 if isinstance(prompt, str) and prompt.strip():
-                    tab.pending_user_messages.append(prompt)
+                    prev.pending_user_messages.append(prompt)
                     inject_prompt = prompt
-                    inject_task = _owner_task_id(tab)
+                    inject_task = _owner_task_id(prev)
                     if not inject_task:
-                        tab.unattributed_prompt_echoes.append(prompt)
+                        prev.unattributed_prompt_echoes.append(prompt)
             else:
-                tab.stop_event = threading.Event()
-                tab.user_answer_queue = queue.Queue(maxsize=1)
-                if not tab.chat_id:
-                    requested_chat_id = cmd.get("chatId", "")
-                    resumed_chat_id = self._tab_chat_views.get(tab_id, "")
-                    if isinstance(requested_chat_id, str) and requested_chat_id:
-                        tab.chat_id = requested_chat_id
-                    elif resumed_chat_id:
-                        tab.chat_id = resumed_chat_id
-                    else:
-                        tab.chat_id = uuid.uuid4().hex
-                chat_id = tab.chat_id
+                requested_chat_id = cmd.get("chatId", "")
+                resumed_chat_id = self._tab_chat_views.get(tab_id, "")
+                if prev is not None and prev.chat_id:
+                    chat_id = prev.chat_id
+                elif isinstance(requested_chat_id, str) and requested_chat_id:
+                    chat_id = requested_chat_id
+                elif resumed_chat_id:
+                    chat_id = resumed_chat_id
+                else:
+                    chat_id = uuid.uuid4().hex
                 self._tab_chat_views[tab_id] = chat_id
+                state_key = uuid.uuid4().hex
+                cmd["_state_key"] = state_key
+                state = AgentState(
+                    state_key,
+                    chat_id=chat_id,
+                    tab_id=tab_id,
+                    conn_id=str(cmd.get("connId", "") or ""),
+                    server_owned=True,
+                    stop_event=threading.Event(),
+                )
+                state.user_answer_queue = queue.Queue(maxsize=1)
+                if prev is not None:
+                    # Carry the previous task's agent (it may hold a
+                    # pending worktree) over to the new run's state.
+                    state.agent = prev.agent
+                    state.frontend_closed = prev.frontend_closed
+                    agent_state.unregister(prev.task_id, prev)
                 thread = threading.Thread(
                     target=self._run_task, args=(cmd,), daemon=True
                 )
-                tab.task_thread = thread
+                state.task_thread = thread
+                agent_state.register(state)
         if thread is None:
             if inject_prompt is not None:
                 self._echo_injected_prompt(
@@ -370,10 +397,10 @@ class _CommandsMixin:
             thread.start()
         except BaseException:
             with self._state_lock:
-                if tab.task_thread is thread:
-                    tab.task_thread = None
-                    tab.stop_event = None
-                    tab.user_answer_queue = None
+                if state is not None and state.task_thread is thread:
+                    state.task_thread = None
+                    state.stop_event = None
+                    state.user_answer_queue = None
             raise
 
     def _cmd_stop(self, cmd: dict[str, Any]) -> None:
@@ -387,11 +414,9 @@ class _CommandsMixin:
     def _cmd_select_model(self, cmd: dict[str, Any]) -> None:
         """Update the selected model for a tab.
 
-        An empty ``tabId`` (malformed payload) must not mint a phantom
-        registry entry keyed ``""`` via ``_get_tab`` — such an entry
-        could never be disposed because ``_cmd_close_tab`` guards
-        against empty ids.  In that case only the daemon-wide default
-        model is updated (when a model was actually supplied).
+        An empty ``tabId`` (malformed payload) updates only the
+        daemon-wide default model (when a model was actually
+        supplied).
         """
         tab_id = cmd.get("tabId", "")
         model = cmd.get("model", "")
@@ -399,10 +424,9 @@ class _CommandsMixin:
             model = ""
         with self._state_lock:
             if tab_id:
-                tab = self._get_tab(tab_id)
                 if not model:
-                    model = tab.selected_model
-                tab.selected_model = model
+                    model = self._tab_models.get(tab_id, "") or self._default_model
+                self._tab_models[tab_id] = model
             if not model:
                 return
             self._default_model = model
@@ -498,11 +522,12 @@ class _CommandsMixin:
         """
         ans_tab = cmd.get("tabId", "")
         with self._state_lock:
-            q = self._resolve_user_answer_queue(ans_tab)
-            if q is None:
+            owner = self._resolve_user_answer_state(ans_tab)
+            q = owner.user_answer_queue if owner is not None else None
+            if owner is None or q is None:
                 logger.debug("userAnswer dropped: no queue for tabId=%s", ans_tab)
                 return
-            answered_task_id = self._pending_user_answer_tasks.pop(id(q), "")
+            answered_task_id = owner.task_id
             while not q.empty():
                 try:
                     q.get_nowait()
@@ -558,65 +583,53 @@ class _CommandsMixin:
             tabs.add(ans_tab)
         return sorted(tabs)
 
-    def _resolve_user_answer_queue(
+    def _resolve_user_answer_state(
         self, ans_tab: str,
-    ) -> queue.Queue[str] | None:
-        """Locate the answer queue an ``ask_user_question`` is waiting on.
+    ) -> AgentState | None:
+        """Locate the agent state an ``ask_user_question`` is waiting on.
 
         Routing precedence:
 
-        1. The frontend tab id ``ans_tab`` itself, when its
-           ``_RunningAgentState`` holds a non-None ``user_answer_queue``.
+        1. The state launched from the frontend tab ``ans_tab``
+           itself, when it holds a non-None ``user_answer_queue``.
            This is the common path: a single-window user answers from
            the same tab that launched the task.
 
-        2. Otherwise, the queue of any tab that shares a task
-           subscription with ``ans_tab``.  This covers the multi-viewer
-           case where one tab (e.g. a browser viewer of a chat owned by
-           the VS Code extension's tab) renders the askUser modal and
-           submits the answer: the broadcast was fan-stamped with the
-           viewer's tab id, but the live ``user_answer_queue`` lives on
-           the task-owner tab.  Without this fallback, the answer is
-           silently dropped and the agent thread waits forever (or
-           until the stop event eventually fires) — surfaced by users
-           as "the answer was not delivered immediately".  A
-           co-subscriber that is actively running a DIFFERENT task
-           than the shared one is skipped: its live queue belongs to
-           that unrelated task, and returning it would hijack that
-           task's ``ask_user_question``.
+        2. Otherwise, the state of any task that ``ans_tab`` is
+           subscribed to.  This covers the multi-viewer case where one
+           tab (e.g. a browser viewer of a chat owned by the VS Code
+           extension's tab) renders the askUser modal and submits the
+           answer: the broadcast was fan-stamped with the viewer's tab
+           id, but the live ``user_answer_queue`` lives on the state
+           of the task itself.  Resolving through the task id makes a
+           cross-task answer hijack structurally impossible.
 
         Args:
             ans_tab: Frontend tab id carried by the ``userAnswer``
                 command.
 
         Returns:
-            The resolved answer queue, or ``None`` when no live
+            The resolved agent state, or ``None`` when no live
             ``ask_user_question`` waiter can be associated with the
             command.  Must be called with ``_state_lock`` held.
         """
-        ans_state = _RunningAgentState.running_agent_states.get(ans_tab)
+        ans_state = agent_state.find_by_tab(ans_tab)
         if ans_state is not None and ans_state.user_answer_queue is not None:
-            return ans_state.user_answer_queue
+            return ans_state
         printer_lock = getattr(self.printer, "_lock", None)
         subs_map = getattr(self.printer, "_subscribers", {})
         if printer_lock is None:
             return None
         with printer_lock:
-            candidates: list[tuple[str, str]] = [
-                (self.printer._coerce_task_id(task_id), tab_id)
+            task_keys = [
+                self.printer._coerce_task_id(task_id)
                 for task_id, viewers in subs_map.items()
                 if ans_tab in viewers
-                for tab_id in viewers
             ]
-        for task_key, tab_id in candidates:
-            if tab_id == ans_tab:
-                continue
-            state = _RunningAgentState.running_agent_states.get(tab_id)
-            if state is None or state.user_answer_queue is None:
-                continue
-            if not tab_owns_answer_queue(state, task_key):
-                continue
-            return state.user_answer_queue
+        for task_key in task_keys:
+            state = agent_state.get(task_key)
+            if state is not None and state.user_answer_queue is not None:
+                return state
         return None
 
     def _echo_injected_prompt(
@@ -643,7 +656,7 @@ class _CommandsMixin:
         — the narrow window between ``run()`` entry and ``_add_task``)
         the echo is emitted WITHOUT the stamp so the user still sees
         their message immediately; the caller ALSO queued the prompt
-        on ``_RunningAgentState.unattributed_prompt_echoes``, and the
+        on the state's ``unattributed_prompt_echoes`` list, and the
         drain hook (``SorcarAgent._drain_pending_user_messages``)
         later records + persists a durable copy under the task that
         actually consumed the message (a ``recordOnly`` broadcast — it
@@ -672,17 +685,17 @@ class _CommandsMixin:
         When the user types into the task-input textbox while a task is
         still running, the frontend forwards the prompt here instead of
         silently dropping it.  We append the text to the tab's
-        :attr:`_RunningAgentState.pending_user_messages` list under
-        :attr:`_RunningAgentState._registry_lock` so the live agent's
+        :attr:`AgentState.pending_user_messages` list under
+        :data:`agent_state.STATE_LOCK` so the live agent's
         pre-step hook can drain and inject the messages into the model
         conversation before the next model call.
 
         When the tab itself has no live task (the common case for a
         VIEWER tab opened from the history sidebar while a task runs
-        in ANOTHER tab — the viewer is subscribed to the source tab's
-        event stream but the live agent runs in the source tab's
-        ``_RunningAgentState``) the prompt is routed to the source
-        tab's queue via the printer's per-task subscriber map.  This
+        in ANOTHER tab — the viewer is subscribed to the running
+        task's event stream but the live agent belongs to that task's
+        own state) the prompt is routed to the running task's state
+        via the printer's per-task subscriber map.  This
         is what makes a history-resumed viewer tab accept follow-up
         input while the underlying task is still running: without it,
         the typed text would be silently dropped (because the viewer
@@ -703,31 +716,21 @@ class _CommandsMixin:
         if not isinstance(prompt, str) or not prompt.strip():
             return
         with self._state_lock:
-            tab = _RunningAgentState.running_agent_states.get(tab_id)
-            if _task_accepts_input(tab) and tab is not None:
-                tab.pending_user_messages.append(prompt)
-                owner = tab
-            else:
-                source_tab_id = self._find_source_tab_for_viewer(tab_id)
-                if not source_tab_id:
-                    logger.debug(
-                        "appendUserMessage dropped: tab %s has no "
-                        "live task and is not a viewer of one",
-                        tab_id,
-                    )
-                    return
-                source = _RunningAgentState.running_agent_states.get(
-                    source_tab_id,
+            owner = agent_state.find_by_tab(tab_id)
+            if not _task_accepts_input(owner):
+                owner = None
+                for candidate in self._find_viewer_task_states(tab_id):
+                    if _task_accepts_input(candidate):
+                        owner = candidate
+                        break
+            if owner is None:
+                logger.debug(
+                    "appendUserMessage dropped: tab %s has no "
+                    "live task and is not a viewer of one",
+                    tab_id,
                 )
-                if not _task_accepts_input(source) or source is None:
-                    logger.debug(
-                        "appendUserMessage dropped: viewer tab %s "
-                        "source tab %s has no live task",
-                        tab_id, source_tab_id,
-                    )
-                    return
-                source.pending_user_messages.append(prompt)
-                owner = source
+                return
+            owner.pending_user_messages.append(prompt)
             owner_task = _owner_task_id(owner)
             if not owner_task:
                 owner.unattributed_prompt_echoes.append(prompt)
@@ -829,9 +832,9 @@ class _CommandsMixin:
         with self._state_lock:
             chat_id = ""
             if tab_id:
-                tab = _RunningAgentState.running_agent_states.get(tab_id)
-                if tab is not None:
-                    chat_id = tab.chat_id
+                state = agent_state.find_by_tab(tab_id)
+                if state is not None:
+                    chat_id = state.chat_id
                 if not chat_id:
                     chat_id = self._tab_chat_views.get(tab_id, "")
             if active_file:
@@ -869,17 +872,16 @@ class _CommandsMixin:
         unambiguously handles duplicate task texts within a chat.
 
         Pure-viewer tabs (opened from the history sidebar by
-        ``_replay_session``) deliberately have NO
-        ``_RunningAgentState`` registry entry (C2/C3 fix) — only a
-        ``_tab_chat_views`` association.  Resolve the chat id from the
+        ``_replay_session``) deliberately have NO registry entry
+        (C2/C3 fix) — only a ``_tab_chat_views`` association.  Resolve the chat id from the
         registry entry when one exists, falling back to the
         chat-viewer map, and never CREATE a registry entry here:
         navigation is a read-only view operation.
         """
         tab_id = cmd.get("tabId", "")
         with self._state_lock:
-            adj_tab = _RunningAgentState.running_agent_states.get(tab_id)
-            chat_id = adj_tab.chat_id if adj_tab is not None else ""
+            adj_state = agent_state.find_by_tab(tab_id)
+            chat_id = adj_state.chat_id if adj_state is not None else ""
             if not chat_id:
                 chat_id = self._tab_chat_views.get(tab_id, "")
         task_id = _opt_str(cmd.get("taskId"))
@@ -1174,11 +1176,11 @@ class _CommandsMixin:
             )
             return
         elif subtype == "cost":
-            tab = _RunningAgentState.running_agent_states.get(tab_id)
-            agent_obj = getattr(tab, "agent", None) if tab is not None else None
+            state = agent_state.find_by_tab(tab_id)
+            agent_obj = state.agent if state is not None else None
             budget = float(getattr(agent_obj, "budget_used", 0.0) or 0.0)
             tokens = int(getattr(agent_obj, "total_tokens_used", 0) or 0)
-            chat_id = (tab.chat_id or "") if tab is not None else ""
+            chat_id = (state.chat_id or "") if state is not None else ""
             if not chat_id and agent_obj is not None:
                 chat_id = getattr(agent_obj, "chat_id", "") or ""
             if not chat_id and tab_id:
@@ -1192,8 +1194,7 @@ class _CommandsMixin:
             extra["cost"] = budget
             extra["tokens"] = tokens
         elif subtype == "modelCurrent":
-            tab = _RunningAgentState.running_agent_states.get(tab_id)
-            current = tab.selected_model if tab is not None else self._default_model
+            current = self._tab_models.get(tab_id, "") or self._default_model
             text = f"Current model: {current}"
             extra["model"] = current
         elif subtype == "expandCommand":

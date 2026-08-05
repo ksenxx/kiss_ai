@@ -21,8 +21,38 @@ import pytest
 
 from kiss.agents.sorcar.git_worktree import GitWorktree
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.server.helpers import model_vendor
 from kiss.server.server import VSCodeServer
+
+
+@pytest.fixture(autouse=True)
+def _clean_registry():
+    """Keep the process-global agent-state registry clean per test."""
+    agent_state.agent_states.clear()
+    yield
+    agent_state.agent_states.clear()
+
+
+def _register_wt_state(
+    tab_id: str,
+    *,
+    agent: WorktreeSorcarAgent | None = None,
+    use_worktree: bool = True,
+    is_merging: bool = False,
+) -> AgentState:
+    """Register a server-owned AgentState for *tab_id* and return it."""
+    state = AgentState(
+        f"task-{tab_id}",
+        agent=agent,
+        tab_id=tab_id,
+        server_owned=True,
+    )
+    state.use_worktree = use_worktree
+    state.is_merging = is_merging
+    agent_state.register(state)
+    return state
 
 
 def _set_agent_wt(agent: object, repo: Path, branch: str, original: str) -> None:
@@ -351,7 +381,7 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp()
         self.repo = Path(self.tmpdir) / "repo"
         self.repo.mkdir()
-        self._git("init")
+        self._git("init", "-b", "main")
         self._git("config", "user.email", "test@test.com")
         self._git("config", "user.name", "Test")
         (self.repo / "file.txt").write_text("hello")
@@ -378,15 +408,15 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("commit", "-m", "add merged")
         self._git("checkout", "main")
 
-        tab = self.server._get_tab("0")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        _set_agent_wt(tab.agent, self.repo, "kiss/merge-test", "main")
+        state = _register_wt_state(
+            "0", agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        )
+        _set_agent_wt(state.agent, self.repo, "kiss/merge-test", "main")
 
         result = self.server._handle_worktree_action("merge", "0")
         assert result["success"] is True
         assert "Successfully merged" in result["message"]
-        after_agent = self.server._get_tab("0").agent
+        after_agent = state.agent
         assert after_agent is not None
         assert after_agent._wt_branch is None
 
@@ -395,15 +425,15 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("checkout", "-b", "kiss/discard-test")
         self._git("checkout", "main")
 
-        tab = self.server._get_tab("0")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        _set_agent_wt(tab.agent, self.repo, "kiss/discard-test", "main")
+        state = _register_wt_state(
+            "0", agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        )
+        _set_agent_wt(state.agent, self.repo, "kiss/discard-test", "main")
 
         result = self.server._handle_worktree_action("discard", "0")
         assert result["success"] is True
         assert "Discarded" in result["message"]
-        after_agent = self.server._get_tab("0").agent
+        after_agent = state.agent
         assert after_agent is not None
         assert after_agent._wt_branch is None
 
@@ -415,9 +445,10 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("commit", "-m", "add route")
         self._git("checkout", "main")
 
-        self.server._get_tab("0").use_worktree = True
-        wt_agent = self.server._get_tab("0").agent
-        _set_agent_wt(wt_agent, self.repo, "kiss/route-test", "main")
+        state = _register_wt_state(
+            "0", agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        )
+        _set_agent_wt(state.agent, self.repo, "kiss/route-test", "main")
 
         self.server._handle_command({"type": "worktreeAction", "action": "merge", "tabId": "0"})
         wt_events = [e for e in self.events if e["type"] == "worktree_result"]
@@ -432,10 +463,10 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("commit", "-m", "add progress")
         self._git("checkout", "main")
 
-        tab = self.server._get_tab("0")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        _set_agent_wt(tab.agent, self.repo, "kiss/progress-test", "main")
+        state = _register_wt_state(
+            "0", agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        )
+        _set_agent_wt(state.agent, self.repo, "kiss/progress-test", "main")
 
         self.server._handle_command({"type": "worktreeAction", "action": "merge", "tabId": "0"})
         progress_events = [e for e in self.events if e["type"] == "worktree_progress"]
@@ -450,10 +481,10 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("checkout", "-b", "kiss/no-progress-test")
         self._git("checkout", "main")
 
-        tab = self.server._get_tab("0")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        _set_agent_wt(tab.agent, self.repo, "kiss/no-progress-test", "main")
+        state = _register_wt_state(
+            "0", agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        )
+        _set_agent_wt(state.agent, self.repo, "kiss/no-progress-test", "main")
 
         self.server._handle_command({"type": "worktreeAction", "action": "discard", "tabId": "0"})
         progress_events = [e for e in self.events if e["type"] == "worktree_progress"]
@@ -479,30 +510,6 @@ class TestAgentToggle(unittest.TestCase):
         cls._js = cls._JS_PATH.read_text()
         cls._ts = cls._TS_PATH.read_text()
 
-    def test_server_agent_is_worktree_sorcar_agent(self) -> None:
-        """Server agent is a single WorktreeSorcarAgent regardless of toggle.
-
-        ``WorktreeSorcarAgent`` subclasses ``ChatSorcarAgent`` and
-        internally falls back to the stateful code path when
-        ``use_worktree=False`` is passed to ``run()``.  One instance
-        per tab is therefore sufficient.
-        """
-        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-        from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-
-        server = VSCodeServer()
-        tab = server._get_tab("0")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        assert tab.use_worktree is False
-        assert isinstance(tab.agent, WorktreeSorcarAgent)
-        assert isinstance(tab.agent, ChatSorcarAgent)
-        original = tab.agent
-        tab.use_worktree = True
-        assert tab.agent is original
-
-
-
-
     def test_worktree_action_rejected_when_not_enabled(self) -> None:
         """Worktree action fails gracefully when worktree mode is off."""
         server = VSCodeServer()
@@ -517,17 +524,6 @@ class TestAgentToggle(unittest.TestCase):
 
 
 
-
-
-
-
-class TestServerParallelToggle(unittest.TestCase):
-    """Tests for parallel toggle in VSCodeServer."""
-
-    def test_server_defaults_parallel_on(self) -> None:
-        """use_parallel is True by default on new tab state."""
-        server = VSCodeServer()
-        assert server._get_tab("0").use_parallel is True
 
 
 
@@ -632,9 +628,9 @@ class TestMergeSession(unittest.TestCase):
 
     def test_merge_action_unknown_is_noop(self) -> None:
         """Non-'all-done' actions are no-ops on the Python side."""
-        self.server._get_tab("0").is_merging = True
+        state = _register_wt_state("0", is_merging=True)
         self.server._handle_command({"type": "mergeAction", "action": "accept", "tabId": "0"})
-        assert self.server._get_tab("0").is_merging is True
+        assert state.is_merging is True
 
     def test_finish_merge_cleans_up_data_dir(self) -> None:
         """_finish_merge removes the merge data directory for the tab."""
@@ -657,7 +653,7 @@ class TestMergeSession(unittest.TestCase):
 
     def test_merging_blocks_same_tab(self) -> None:
         """Cannot start a task on the same tab that has a merge in progress."""
-        self.server._get_tab("5").is_merging = True
+        _register_wt_state("5", use_worktree=False, is_merging=True)
         self.server._run_task_inner({"prompt": "test", "model": "", "tabId": "5"})
         errors = [e for e in self.events if e["type"] == "error"]
         assert any("merge review" in e["text"] for e in errors)
@@ -665,7 +661,7 @@ class TestMergeSession(unittest.TestCase):
     @pytest.mark.slow
     def test_merging_does_not_block_other_tabs(self) -> None:
         """A merge on one tab does not block tasks on other tabs."""
-        self.server._get_tab("5").is_merging = True
+        _register_wt_state("5", use_worktree=False, is_merging=True)
         self.events.clear()
         self.server._run_task_inner({"prompt": "test", "model": "", "tabId": "99"})
         errors = [e for e in self.events if e["type"] == "error"]
@@ -841,7 +837,7 @@ class TestWorktreeActionExceptionHandling(unittest.TestCase):
         self.repo = Path(self.tmpdir) / "repo"
         self.repo.mkdir()
         subprocess.run(
-            ["git", "init"], cwd=self.repo, capture_output=True,
+            ["git", "init", "-b", "main"], cwd=self.repo, capture_output=True,
         )
         subprocess.run(
             ["git", "config", "user.email", "test@test.com"],
@@ -874,7 +870,7 @@ class TestWorktreeActionExceptionHandling(unittest.TestCase):
 
     def test_merge_exception_still_broadcasts_result(self) -> None:
         """worktree_result is broadcast even when merge raises RuntimeError."""
-        self.server._get_tab("0").use_worktree = True
+        _register_wt_state("0", agent=WorktreeSorcarAgent("Sorcar VS Code"))
         self.server._handle_command({"type": "worktreeAction", "action": "merge", "tabId": "0"})
         results = [e for e in self.events if e["type"] == "worktree_result"]
         assert len(results) == 1
@@ -883,7 +879,7 @@ class TestWorktreeActionExceptionHandling(unittest.TestCase):
 
     def test_discard_exception_still_broadcasts_result(self) -> None:
         """worktree_result is broadcast even when discard raises RuntimeError."""
-        self.server._get_tab("0").use_worktree = True
+        _register_wt_state("0", agent=WorktreeSorcarAgent("Sorcar VS Code"))
         self.server._handle_command({"type": "worktreeAction", "action": "discard", "tabId": "0"})
         results = [e for e in self.events if e["type"] == "worktree_result"]
         assert len(results) == 1
@@ -908,11 +904,10 @@ class TestWorktreeActionExceptionHandling(unittest.TestCase):
             cwd=self.repo, capture_output=True,
         )
 
-        self.server._get_tab("0").use_worktree = True
-        _set_agent_wt(
-            self.server._get_tab("0").agent,
-            self.repo, "kiss/exc-test", "main",
+        state = _register_wt_state(
+            "0", agent=WorktreeSorcarAgent("Sorcar VS Code"),
         )
+        _set_agent_wt(state.agent, self.repo, "kiss/exc-test", "main")
 
         self.server._handle_command({"type": "worktreeAction", "action": "merge", "tabId": "0"})
         results = [e for e in self.events if e["type"] == "worktree_result"]

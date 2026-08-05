@@ -47,6 +47,7 @@ import threading
 import typing
 import unittest
 
+from kiss.server import agent_state
 from kiss.server.diff_merge import (
     _cleanup_merge_data,
     _merge_data_dir,
@@ -112,7 +113,11 @@ class TestCloseTabMergeDataCleanup(unittest.TestCase):
         """Behavioral: merge data directory is removed after tab close."""
         server, _ = _make_server()
         tab_id = "leak-test-tab"
-        server._get_tab(tab_id)
+        state = agent_state.AgentState(
+            "task-" + tab_id, tab_id=tab_id, server_owned=True,
+        )
+        agent_state.register(state)
+        self.addCleanup(agent_state.agent_states.clear)
 
         merge_dir = _merge_data_dir(tab_id)
         merge_dir.mkdir(parents=True, exist_ok=True)
@@ -127,6 +132,9 @@ class TestCloseTabMergeDataCleanup(unittest.TestCase):
             )
             assert not merge_dir.exists(), (
                 "B5 fix: merge_dir should be removed after _close_tab"
+            )
+            assert agent_state.find_by_tab(tab_id) is None, (
+                "closed idle tab must be unregistered"
             )
         finally:
             if merge_dir.exists():

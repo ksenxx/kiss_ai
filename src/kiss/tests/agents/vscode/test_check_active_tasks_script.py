@@ -34,11 +34,10 @@ import sys
 import tempfile
 import threading
 from pathlib import Path
-from typing import cast
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
@@ -62,21 +61,6 @@ def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:
 
 def _restore_persistence(saved: tuple[Path, object, Path]) -> None:
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved  # type: ignore[assignment]
-
-
-class _FakeActiveTab:
-    """Duck-typed stand-in for a real ``_RunningAgentState``.
-
-    ``_handle_active_tasks_query`` only reads three attributes from a
-    registry entry: ``is_task_active``, ``task_history_id``, and
-    ``last_task_id``.  Defining a tiny class avoids spinning up an
-    entire agent worker just to satisfy the type contract.
-    """
-
-    def __init__(self, task_id: str) -> None:
-        self.is_task_active = True
-        self.task_history_id = task_id
-        self.last_task_id = task_id
 
 
 def _run_helper(sock_path: Path, timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
@@ -113,18 +97,14 @@ class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
             uds_path=self.uds_path,
         )
         await self.server.start_async()
-        with _RunningAgentState._registry_lock:
-            self._registry_snapshot = dict(
-                _RunningAgentState.running_agent_states,
-            )
-            _RunningAgentState.running_agent_states.clear()
+        with agent_state.STATE_LOCK:
+            self._registry_snapshot = dict(agent_state.agent_states)
+            agent_state.agent_states.clear()
 
     async def asyncTearDown(self) -> None:
-        with _RunningAgentState._registry_lock:
-            _RunningAgentState.running_agent_states.clear()
-            _RunningAgentState.running_agent_states.update(
-                self._registry_snapshot,
-            )
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
+            agent_state.agent_states.update(self._registry_snapshot)
         await self.server.stop_async()
         if th._db_conn is not None:
             th._db_conn.close()
@@ -160,18 +140,19 @@ class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
         helper returns 1.
         """
         fake_tab_id = "ad4ecb65-2878-4c2c-9736-3bb9be18814a"
-        fake = _FakeActiveTab("3233")
-        with _RunningAgentState._registry_lock:
-            _RunningAgentState.running_agent_states[fake_tab_id] = cast(
-                _RunningAgentState, fake,
-            )
+        active = agent_state.AgentState(
+            "3233",
+            tab_id=fake_tab_id,
+            server_owned=True,
+            is_task_active=True,
+        )
+        agent_state.register(active)
         try:
             result = await asyncio.get_event_loop().run_in_executor(
                 None, _run_helper, self.uds_path,
             )
         finally:
-            with _RunningAgentState._registry_lock:
-                _RunningAgentState.running_agent_states.pop(fake_tab_id, None)
+            agent_state.unregister("3233", active)
         self.assertEqual(
             result.returncode, 1,
             f"helper failed to refuse on active tasks: exit={result.returncode}\n"

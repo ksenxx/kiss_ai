@@ -8,8 +8,7 @@ While a task runs in the terminal the user can keep typing follow-up
 instructions into a bordered input box pinned to the bottom of the
 screen.  Submitted lines are queued exactly the way the VS Code
 frontend's ``appendUserMessage`` command queues them — appended to the
-owning :class:`~kiss.agents.sorcar.running_agent_state._RunningAgentState`'s
-``pending_user_messages`` list under ``_registry_lock`` so the live
+agent's own ``pending_user_messages`` list so the live
 agent's pre-step hook
 (:meth:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent._drain_pending_user_messages`)
 injects them into the model conversation before the next model step.
@@ -50,7 +49,6 @@ from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any, cast
 
 from kiss.agents.sorcar.persistence import _allocate_chat_id
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.ui.cli.cli_line_continuation import (
     ends_with_line_continuation,
 )
@@ -1375,15 +1373,14 @@ class SteeringSession:
     """Runs an agent task while accepting queued follow-up instructions.
 
     Attributes:
-        agent: The live agent instance.
-        state: The agent's registry entry (holds ``pending_user_messages``).
+        agent: The live agent instance (its ``pending_user_messages``
+            list receives lines queued during the task).
         lock: Shared terminal lock.
     """
 
     def __init__(
         self,
         agent: SorcarAgent,
-        state: _RunningAgentState,
         chat_id: str,
         *,
         box: _InputBox | None = None,
@@ -1393,7 +1390,6 @@ class SteeringSession:
     ) -> None:
         del chat_id
         self.agent = agent
-        self.state = state
         self.lock = lock if lock is not None else threading.RLock()
         self._real_stdout = (
             real_stdout if real_stdout is not None else sys.stdout
@@ -1457,8 +1453,7 @@ class SteeringSession:
         text = line.strip()
         if not text:
             return
-        with _RunningAgentState._registry_lock:
-            self.state.pending_user_messages.append(text)
+        self.agent.pending_user_messages.append(text)
         self._queued_count += 1
         with self.lock:
             self.box.status = QUEUED_STATUS_FMT.format(n=self._queued_count)
@@ -1584,6 +1579,10 @@ class SteeringSession:
                     self.box.status = prev_status
                     if self.box._active:
                         self.box.redraw()
+        # Undrained lines die with the session (matching the old
+        # per-run registry state) so they never leak into the next
+        # task run on this reusable agent instance.
+        self.agent.pending_user_messages.clear()
         if self._aborted.is_set():
             raise KeyboardInterrupt
         if self._error is not None:
@@ -1602,7 +1601,7 @@ class AnchoredRepl:
     The box stays pinned at the bottom of the screen for both idle
     reads (the next instruction the user wants to dispatch) and task
     execution (queueing follow-up instructions into
-    ``state.pending_user_messages`` exactly the way the VS Code
+    ``agent.pending_user_messages`` exactly the way the VS Code
     extension's ``appendUserMessage`` command queues them).  The
     scroll region above the box scrolls agent output as usual, so the
     input bar behaves like Claude Code's fullscreen TUI mode — visible
@@ -1613,7 +1612,7 @@ class AnchoredRepl:
 
         with AnchoredRepl(completer_fn=fn, history=h) as repl:
             line = repl.read_idle_line()
-            repl.run_task(agent, state, chat_id, run_kwargs)
+            repl.run_task(agent, chat_id, run_kwargs)
 
     Attributes:
         lock: Shared terminal lock guarding stdout/box writes.
@@ -1789,7 +1788,6 @@ class AnchoredRepl:
     def run_task(
         self,
         agent: SorcarAgent,
-        state: _RunningAgentState,
         chat_id: str,
         run_kwargs: dict[str, Any],
     ) -> str:
@@ -1802,9 +1800,8 @@ class AnchoredRepl:
         of the task, then back to idle once it ends.
 
         Args:
-            agent: The live agent to run.
-            state: The registry entry whose ``pending_user_messages``
-                receives lines queued during the task.
+            agent: The live agent to run (its ``pending_user_messages``
+                list receives lines queued during the task).
             chat_id: The chat identifier (forwarded for symmetry).
             run_kwargs: Keyword arguments forwarded to ``agent.run``.
 
@@ -1812,7 +1809,7 @@ class AnchoredRepl:
             The agent's YAML result string.
         """
         session = SteeringSession(
-            agent, state, chat_id,
+            agent, chat_id,
             box=self.box, lock=self.lock,
             real_stdout=self._real_stdout, real_stderr=self._real_stderr,
         )
@@ -1826,11 +1823,10 @@ def run_with_steering(
 ) -> str:
     """Run *agent* with a Claude-CLI-style steering input box when possible.
 
-    When the terminal supports it, registers a transient
-    :class:`_RunningAgentState` so the agent's pre-step hook can drain
-    instructions the user queues in the box, then runs the task with the
-    box pinned to the bottom of the screen.  Falls back to a plain
-    ``agent.run`` otherwise.
+    When the terminal supports it, runs the task with the box pinned
+    to the bottom of the screen; submitted lines land on the agent's
+    ``pending_user_messages`` list, which the agent's pre-step hook
+    drains.  Falls back to a plain ``agent.run`` otherwise.
 
     Args:
         agent: The agent to run.
@@ -1847,22 +1843,7 @@ def run_with_steering(
     agent._chat_id = chat_id  # type: ignore[attr-defined]
     agent._tab_id = chat_id  # type: ignore[attr-defined]
 
-    state = _RunningAgentState(
-        chat_id,
-        getattr(agent, "model_name", "") or "",
-        agent=cast(Any, agent),
-    )
-    state.chat_id = chat_id
-    state.is_task_active = True
-    _RunningAgentState.register(chat_id, state)
-
-    session = SteeringSession(agent, state, chat_id)
+    session = SteeringSession(agent, chat_id)
     kwargs = dict(run_kwargs)
     kwargs["ask_user_question_callback"] = session.ask_user_question
-    try:
-        return session.run(kwargs)
-    finally:
-        with _RunningAgentState._registry_lock:
-            if _RunningAgentState.running_agent_states.get(chat_id) is state:
-                state.is_task_active = False
-                _RunningAgentState.unregister(chat_id)
+    return session.run(kwargs)

@@ -41,7 +41,6 @@ from typing import Any, cast
 import yaml
 
 import kiss.agents.sorcar.persistence as _persistence
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent, run_tasks_parallel
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server.json_printer import JsonPrinter
@@ -95,12 +94,10 @@ class _Base(unittest.TestCase):
     def tearDown(self) -> None:
         _PARENT_CLASS.run = self._original_parent_run
 
-        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+        from kiss.server import agent_state
 
-        with _RunningAgentState._registry_lock:
-            _RunningAgentState.running_agent_states.clear()
-        with ChatSorcarAgent._running_agents_lock:
-            ChatSorcarAgent.running_agents.clear()
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
 
         if _persistence._db_conn is not None:
             try:

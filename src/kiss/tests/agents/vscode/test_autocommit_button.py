@@ -63,7 +63,6 @@ class TestAutocommitButtonBackend(unittest.TestCase):
         server, events = _make_server()
         server.work_dir = "/tmp/nonexistent"
         tab_id = "test-tab-ac"
-        server._get_tab(tab_id)
 
         server._handle_autocommit_action("commit", tab_id)
 
@@ -75,7 +74,6 @@ class TestAutocommitButtonBackend(unittest.TestCase):
         """Sending autocommitAction with action=skip broadcasts done with committed=False."""
         server, events = _make_server()
         tab_id = "test-tab-skip"
-        server._get_tab(tab_id)
 
         server._handle_autocommit_action("skip", tab_id)
 

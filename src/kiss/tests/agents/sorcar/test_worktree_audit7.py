@@ -12,9 +12,10 @@ BUG-31 FIX: Both merge() and _release_worktree now distinguish
         MERGE_FAILED from CONFLICT, giving correct diagnostic messages
         for commit failures (e.g. pre-commit hook rejection).
 
-BUG-32 FIX: _finish_merge only calls _cleanup_merge_data when NO tab
-        is still merging, preventing one tab's finish from destroying
-        another tab's merge review data.
+BUG-32 FIX: merge data is isolated per tab
+        (``_merge_data_dir(tab_id)``) and ``_finish_merge`` cleans only
+        the finishing tab's directory, preventing one tab's finish from
+        destroying another tab's merge review data.
 
 BUG-33 FIX: copy_dirty_state now unquotes C-style quoted filenames
         from git status --porcelain, correctly handling files with
@@ -39,6 +40,7 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 from kiss.server.diff_merge import _merge_data_dir
 from kiss.server.server import VSCodeServer
 
@@ -62,7 +64,11 @@ def _restore_db(saved: tuple) -> None:
 
 def _make_repo(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", str(path)], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "init", "-b", "main", str(path)],
+        capture_output=True,
+        check=True,
+    )
     subprocess.run(
         ["git", "-C", str(path), "config", "user.email", "test@test.com"],
         capture_output=True,
@@ -244,8 +250,9 @@ class TestBug31Fix:
 
 
 class TestBug32Fix:
-    """BUG-32 FIX: _finish_merge only cleans up merge data when NO tab
-    is still merging, preserving concurrent tab's merge review data.
+    """BUG-32 FIX: merge data is per tab and ``_finish_merge`` cleans
+    only the finishing tab's directory, preserving a concurrent tab's
+    merge review data.
     """
 
     def setup_method(self) -> None:
@@ -253,15 +260,26 @@ class TestBug32Fix:
         self._saved = _redirect_db(self._tmpdir)
         self._saved_project_dir = kiss_config._PROJECT_DIR
         kiss_config._PROJECT_DIR = Path(self._tmpdir)
+        agent_state.agent_states.clear()
 
     def teardown_method(self) -> None:
+        agent_state.agent_states.clear()
         kiss_config._PROJECT_DIR = self._saved_project_dir
         _restore_db(self._saved)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
+    @staticmethod
+    def _register_merging_tab(tab_id: str) -> agent_state.AgentState:
+        state = agent_state.AgentState(
+            f"{tab_id}-key", tab_id=tab_id, server_owned=True,
+        )
+        state.is_merging = True
+        agent_state.register(state)
+        return state
+
     def test_cleanup_skipped_when_other_tab_merging(self) -> None:
-        """BUG-32 FIX: Merge data survives when another tab is still merging."""
-        merge_dir = _merge_data_dir()
+        """BUG-32 FIX: Merge data survives another tab's finish."""
+        merge_dir = _merge_data_dir("tab_a")
         merge_dir.mkdir(parents=True, exist_ok=True)
 
         pending = merge_dir / "pending-merge.json"
@@ -275,12 +293,8 @@ class TestBug32Fix:
         (merge_temp / "a.py").write_text("base content")
 
         server = VSCodeServer()
-
-        tab_a = server._get_tab("tab_a")
-        tab_b = server._get_tab("tab_b")
-        with server._state_lock:
-            tab_a.is_merging = True
-            tab_b.is_merging = True
+        self._register_merging_tab("tab_a")
+        self._register_merging_tab("tab_b")
 
         server._finish_merge("tab_b")
 
@@ -294,8 +308,8 @@ class TestBug32Fix:
         if merge_dir.exists():
             shutil.rmtree(merge_dir)
 
-    def test_cleanup_runs_when_no_tab_merging(self) -> None:
-        """BUG-32 FIX: Merge data is cleaned when no tab is merging."""
+    def test_cleanup_runs_for_finishing_tab(self) -> None:
+        """BUG-32 FIX: The finishing tab's own merge data is cleaned."""
         merge_dir = _merge_data_dir("tab_a")
         merge_dir.mkdir(parents=True, exist_ok=True)
 
@@ -306,15 +320,12 @@ class TestBug32Fix:
         }))
 
         server = VSCodeServer()
-
-        tab_a = server._get_tab("tab_a")
-        with server._state_lock:
-            tab_a.is_merging = True
+        self._register_merging_tab("tab_a")
 
         server._finish_merge("tab_a")
 
         assert not pending.exists(), (
-            "BUG-32 NOT fixed: merge data not cleaned when no tab is merging"
+            "BUG-32 NOT fixed: finishing tab's merge data was not cleaned"
         )
 
     def test_finish_merge_functional_preserves_concurrent_data(self) -> None:
@@ -325,14 +336,10 @@ class TestBug32Fix:
         server = VSCodeServer()
         server.work_dir = str(repo)
 
-        tab_a = server._get_tab("tab_a")
-        tab_b = server._get_tab("tab_b")
+        self._register_merging_tab("tab_a")
+        self._register_merging_tab("tab_b")
 
-        with server._state_lock:
-            tab_a.is_merging = True
-            tab_b.is_merging = True
-
-        md = _merge_data_dir()
+        md = _merge_data_dir("tab_a")
         md.mkdir(parents=True, exist_ok=True)
         pending = md / "pending-merge.json"
         pending.write_text(json.dumps({

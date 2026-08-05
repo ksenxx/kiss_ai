@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import queue
 import shutil
 import tempfile
 import threading
@@ -234,10 +233,10 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
         ``_run_task`` explicitly supports for tests) so no LLM call is
         made, and a fake API key so a model is "available".
         """
-        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
         from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
         from kiss.core import config as config_module
         from kiss.core.models.model_info import get_available_models
+        from kiss.server import agent_state
 
         keys = config_module.DEFAULT_CONFIG
         saved_key = keys.ANTHROPIC_API_KEY
@@ -248,8 +247,6 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
             model = next(m for m in available if m.startswith("claude-"))
 
             tab_id = "tab-parity-autocommit"
-            vscode = self.server._vscode_server
-            tab = vscode._get_tab(tab_id)
             agent = WorktreeSorcarAgent("Sorcar VS Code")
             ran = threading.Event()
 
@@ -257,9 +254,17 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                 ran.set()
 
             agent.run = fake_run  # type: ignore[assignment]
-            tab.agent = agent
-            tab.stop_event = threading.Event()
-            tab.user_answer_queue = queue.Queue()
+            # Pre-register an idle state carrying the stub agent;
+            # _cmd_run carries the previous state's agent over to the
+            # new run's state (the pattern _run_task supports for
+            # tests).
+            seed = agent_state.AgentState(
+                "parity-autocommit-seed",
+                agent=agent,
+                tab_id=tab_id,
+                server_owned=True,
+            )
+            agent_state.register(seed)
 
             work_dir = Path(self.tmpdir) / "work"
             work_dir.mkdir(parents=True, exist_ok=True)
@@ -287,15 +292,11 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                 )
                 deadline = time.monotonic() + 5.0
                 while time.monotonic() < deadline:
-                    with _RunningAgentState._registry_lock:
-                        live = _RunningAgentState.running_agent_states.get(
-                            tab_id,
-                        )
+                    live = agent_state.find_by_tab(tab_id)
                     if live is not None and live.auto_commit_mode:
                         break
                     await asyncio.sleep(0.05)
-                with _RunningAgentState._registry_lock:
-                    live = _RunningAgentState.running_agent_states.get(tab_id)
+                live = agent_state.find_by_tab(tab_id)
                 assert live is not None
                 self.assertTrue(
                     live.auto_commit_mode,
@@ -309,3 +310,4 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                     pass
         finally:
             keys.ANTHROPIC_API_KEY = saved_key
+            agent_state.agent_states.clear()

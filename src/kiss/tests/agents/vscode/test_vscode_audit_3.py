@@ -11,17 +11,10 @@ integration test using real objects.
 
 Bugs
 ----
-N1: ``_timer_flush`` inner closure uses type annotation ``tid: int | None``
-    but tab_id values are always ``str | None``.
-N2: ``_await_user_response`` reads ``self._running_agent_states`` without holding
-    ``_state_lock``, racing with ``_close_tab`` which mutates the dict
-    under the lock.
 N3: ``_scan_files`` depth check ``len(rel_root.parts) - 1 > 3`` was
     written assuming ``PurePath('.').parts == ('.',)`` but it is ``()``,
     causing an off-by-one that allows one extra nesting level (depth 4
     sub-directories instead of the intended 3).
-N4: Comment in ``_run_task_inner`` is truncated:
-    ``# BUG-B fix: if this worktree tab has a pending branch from a``
 N5: ``_capture_pre_snapshot`` passes ``tab_id`` through to
     ``_save_untracked_base`` and ``_prepare_and_start_merge`` passes it
     to ``_merge_data_dir`` without guarding against empty string.
@@ -33,79 +26,16 @@ N5: ``_capture_pre_snapshot`` passes ``tab_id`` through to
 from __future__ import annotations
 
 import os
-import queue
 import shutil
 import tempfile
-import threading
 import unittest
 from pathlib import Path, PurePath
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.server.diff_merge import (
     _merge_data_dir,
     _scan_files,
     _untracked_base_dir,
 )
-from kiss.server.server import VSCodeServer
-
-
-def _make_server() -> tuple[VSCodeServer, list[dict]]:
-    """Create a VSCodeServer with broadcast capture (no stdout)."""
-    server = VSCodeServer()
-    events: list[dict] = []
-    lock = threading.Lock()
-
-    def capture(event: dict) -> None:
-        with lock:
-            events.append(event)
-        with server.printer._lock:
-            server.printer._record_event(event)
-
-    server.printer.broadcast = capture  # type: ignore[assignment]
-    return server, events
-
-
-
-
-class TestAwaitUserResponseNoLock(unittest.TestCase):
-    """N2: ``_await_user_response`` reads ``self._running_agent_states.get(tab_id)``
-    without holding ``_state_lock``, creating a data race with
-    ``_close_tab`` which pops the entry under the lock.
-    """
-
-
-
-    def test_behavioral_race_scenario(self) -> None:
-        """Behavioral: demonstrate the race window.
-
-        Thread A (task): calls ``_await_user_response`` and reads
-        ``_running_agent_states.get("t1")``.
-
-        Thread B (main): calls ``_close_tab("t1")`` which pops the
-        entry under the lock.
-
-        If A reads after B pops, A gets None and the user's answer is
-        silently dropped.
-        """
-        server, _ = _make_server()
-        tab = server._get_tab("t1")
-        tab.stop_event = threading.Event()
-        tab.user_answer_queue = queue.Queue(maxsize=1)
-
-        tab.user_answer_queue.put("yes")
-
-        server.printer._thread_local.stop_event = tab.stop_event
-        server.printer._thread_local.task_id = "t1"
-        pre_close_tab = _RunningAgentState.running_agent_states.get("t1")
-        assert pre_close_tab is not None, "Tab exists before close"
-
-        with server._state_lock:
-            _RunningAgentState.running_agent_states.pop("t1", None)
-
-        post_close_tab = _RunningAgentState.running_agent_states.get("t1")
-        assert post_close_tab is None, (
-            "N2: after close, unlocked read returns None — answer is lost"
-        )
 
 
 class TestScanFilesDepthOffByOne(unittest.TestCase):

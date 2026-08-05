@@ -49,7 +49,6 @@ from pathlib import Path
 
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.cli_helpers import _build_arg_parser
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.ui.cli import cli_daemon_bridge
 from kiss.ui.cli.cli_repl import (
@@ -212,8 +211,7 @@ class TestF5TitleStatusLockDiscipline(unittest.TestCase):
 
     def _session(self) -> SteeringSession:
         agent = SorcarAgent("w2-steer-test")
-        state = _RunningAgentState("w2-chat", "", agent=None)
-        return SteeringSession(agent, state, "w2-chat")
+        return SteeringSession(agent, "w2-chat")
 
     def test_title_and_status_stable_while_lock_held(self) -> None:
         session = self._session()
@@ -260,8 +258,7 @@ class TestF6InterruptWorker(unittest.TestCase):
 
     def _session(self) -> SteeringSession:
         agent = SorcarAgent("w2-interrupt-test")
-        state = _RunningAgentState("w2-chat-int", "", agent=None)
-        return SteeringSession(agent, state, "w2-chat-int")
+        return SteeringSession(agent, "w2-chat-int")
 
     def test_live_worker_receives_keyboard_interrupt(self) -> None:
         session = self._session()

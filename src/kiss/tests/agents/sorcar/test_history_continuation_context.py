@@ -49,6 +49,7 @@ from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -145,7 +146,9 @@ def _run_and_wait(server: VSCodeServer, tab_id: str, prompt: str,
         "model": "claude-opus-4-6", "workDir": work_dir,
         "tabId": tab_id,
     })
-    t = server._get_tab(tab_id).task_thread
+    state = agent_state.find_by_tab(tab_id)
+    assert state is not None
+    t = state.task_thread
     assert t is not None
     t.join(timeout=10)
     assert not t.is_alive()
@@ -166,6 +169,8 @@ class TestHistoryContinuationContext(unittest.TestCase):
 
     def tearDown(self) -> None:
         _unpatch_parent_run(self.original_run)
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -197,9 +202,9 @@ class TestHistoryContinuationContext(unittest.TestCase):
             "tabId": history_tab,
         })
 
-        tab = self.server._get_tab(history_tab)
-        assert tab.chat_id == chat_id, \
-            f"tab.chat_id={tab.chat_id!r}, expected {chat_id!r}"
+        viewed_chat = self.server._tab_chat_views.get(history_tab, "")
+        assert viewed_chat == chat_id, \
+            f"tab chat view={viewed_chat!r}, expected {chat_id!r}"
 
         _run_and_wait(self.server, history_tab,
                       "what was the magic word?", self.tmpdir)
@@ -229,10 +234,9 @@ class TestHistoryContinuationWhenTabIdMismatch(unittest.TestCase):
     fresh uuid instead of the preset chat id), the new task must still
     carry the prior chat context.
 
-    This reproduces the bug where ``_cmd_run`` overwrites the
-    ``_RunningAgentState.chat_id`` set by ``_replay_session`` with the
-    incoming ``tabId``, breaking the link to the persisted chat
-    session.
+    This reproduces the bug where ``_cmd_run`` overwrites the chat id
+    set by ``_replay_session`` with the incoming ``tabId``, breaking
+    the link to the persisted chat session.
     """
 
     def setUp(self) -> None:
@@ -245,6 +249,8 @@ class TestHistoryContinuationWhenTabIdMismatch(unittest.TestCase):
 
     def tearDown(self) -> None:
         _unpatch_parent_run(self.original_run)
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -268,9 +274,9 @@ class TestHistoryContinuationWhenTabIdMismatch(unittest.TestCase):
             "taskId": task_id,
             "tabId": history_tab,
         })
-        tab = self.server._get_tab(history_tab)
-        assert tab.chat_id == chat_id, \
-            f"replay should have populated chat_id; got {tab.chat_id!r}"
+        viewed_chat = self.server._tab_chat_views.get(history_tab, "")
+        assert viewed_chat == chat_id, \
+            f"replay should have populated chat view; got {viewed_chat!r}"
 
         _run_and_wait(self.server, history_tab,
                       "what was the magic word?", self.tmpdir)

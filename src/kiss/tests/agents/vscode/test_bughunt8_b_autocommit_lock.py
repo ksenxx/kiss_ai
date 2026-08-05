@@ -25,7 +25,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -59,7 +59,7 @@ class TestAutocommitStagingFailure(unittest.TestCase):
         self.tab_id = "t-ac-lock"
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.pop(self.tab_id, None)
+        agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_index_lock_reports_failure_not_nothing_to_commit(self) -> None:

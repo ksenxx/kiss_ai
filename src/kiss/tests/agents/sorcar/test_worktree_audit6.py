@@ -48,6 +48,7 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -210,8 +211,11 @@ class TestBug28StartMergeSessionThreadLocal:
             server.work_dir = str(repo)
 
             tab_id = "t28"
-            tab = server._get_tab(tab_id)
+            tab = agent_state.AgentState(
+                "task-t28", tab_id=tab_id, server_owned=True,
+            )
             tab.use_worktree = True
+            agent_state.register(tab)
 
             if hasattr(server.printer._thread_local, "tab_id"):
                 delattr(server.printer._thread_local, "tab_id")
@@ -229,13 +233,16 @@ class TestBug28StartMergeSessionThreadLocal:
                 }],
             }))
 
-            started = server._start_merge_session(str(merge_json))
-            assert started, "Merge session should start"
+            try:
+                started = server._start_merge_session(str(merge_json))
+                assert started, "Merge session should start"
 
-            assert tab.is_merging is False, (
-                "BUG-28 appears fixed: is_merging is now set without "
-                "thread-local tab_id"
-            )
+                assert tab.is_merging is False, (
+                    "BUG-28 appears fixed: is_merging is now set without "
+                    "thread-local tab_id"
+                )
+            finally:
+                agent_state.unregister(tab.task_id, tab)
 
         finally:
             _restore_db(saved)

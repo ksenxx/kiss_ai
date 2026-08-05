@@ -43,12 +43,12 @@ from typing import Any, cast
 import yaml
 
 from kiss.agents.sorcar import persistence as _persistence
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._kiss_web_launcher import (
     run_agent_via_kiss_web,
 )
 from kiss.core import vscode_config
+from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
 
 STUB_SUMMARY = "remote webview stub done"
@@ -146,7 +146,7 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.loop_thread.join(timeout=5)
         self.loop.close()
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
         if _persistence._db_conn is not None:
             _persistence._db_conn.close()
@@ -253,10 +253,8 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
             deadline = time.time() + 30
             while time.time() < deadline and not release.is_set():
                 tab_id = getattr(self_agent, "_tab_id", "")
-                with _RunningAgentState._registry_lock:
-                    state = _RunningAgentState.running_agent_states.get(
-                        tab_id,
-                    )
+                with agent_state.STATE_LOCK:
+                    state = agent_state.find_by_tab(tab_id)
                     if state is not None and state.pending_user_messages:
                         drained_messages.extend(
                             state.pending_user_messages,
@@ -310,13 +308,10 @@ class TestRemoteWebviewInteraction(unittest.TestCase):
             tab_id = ""
             deadline = time.time() + 10
             while time.time() < deadline and not tab_id:
-                with _RunningAgentState._registry_lock:
-                    for tid, st in (
-                        _RunningAgentState.running_agent_states.items()
-                    ):
-                        if tid.startswith("api-") and st.is_task_active:
-                            tab_id = tid
-                            break
+                for st in agent_state.snapshot():
+                    if st.tab_id.startswith("api-") and st.is_task_active:
+                        tab_id = st.tab_id
+                        break
                 time.sleep(0.02)
             assert tab_id, "API launch never appeared in the registry"
 

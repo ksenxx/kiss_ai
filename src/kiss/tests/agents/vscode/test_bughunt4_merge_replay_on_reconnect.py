@@ -49,7 +49,7 @@ from websockets.asyncio.client import ClientConnection, connect
 
 import kiss.agents.sorcar.persistence as th
 import kiss.core.vscode_config as vc
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
@@ -121,10 +121,8 @@ class TestMergeReplayOnReconnect(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-bughunt4-mrgreplay-")
         self.saved = _redirect_persistence(self.tmpdir)
-        with _RunningAgentState._registry_lock:
-            self._saved_running_agent_states = dict(
-                _RunningAgentState.running_agent_states,
-            )
+        with agent_state.STATE_LOCK:
+            self._saved_agent_states = dict(agent_state.agent_states)
         self._orig_cfg_dir = vc.CONFIG_DIR
         self._orig_cfg_path = vc.CONFIG_PATH
         vc.CONFIG_DIR = Path(self.tmpdir) / "config"
@@ -158,11 +156,9 @@ class TestMergeReplayOnReconnect(IsolatedAsyncioTestCase):
         if th._db_conn is not None:
             th._db_conn.close()
         _restore_persistence(self.saved)
-        with _RunningAgentState._registry_lock:
-            _RunningAgentState.running_agent_states.clear()
-            _RunningAgentState.running_agent_states.update(
-                self._saved_running_agent_states,
-            )
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
+            agent_state.agent_states.update(self._saved_agent_states)
         vc.CONFIG_DIR = self._orig_cfg_dir
         vc.CONFIG_PATH = self._orig_cfg_path
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -347,12 +343,16 @@ class TestMergeReplayOnReconnect(IsolatedAsyncioTestCase):
             "data": merge_data,
             "hunk_count": 3,
         })
-        self.server._vscode_server._get_tab(tab_id)
         with self.server._vscode_server._state_lock:
-            tab = _RunningAgentState.running_agent_states[tab_id]
-            tab.chat_id = chat_id
-            tab.is_merging = True
-            tab.use_worktree = True
+            state = agent_state.AgentState(
+                str(task_id),
+                tab_id=tab_id,
+                chat_id=chat_id,
+                server_owned=True,
+            )
+            state.is_merging = True
+            state.use_worktree = True
+            agent_state.register(state)
         with self.server._merge_states_lock:
             self.assertIn(tab_id, self.server._merge_states)
 

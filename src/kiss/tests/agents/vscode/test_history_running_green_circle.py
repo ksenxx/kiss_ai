@@ -50,7 +50,7 @@ import pytest
 from playwright.sync_api import sync_playwright
 
 from kiss.agents.sorcar import persistence as th
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 _MEDIA_DIR = (
@@ -271,8 +271,8 @@ def _history_event_from_real_backend(
     """Persist one task and return the real ``getHistory`` broadcast.
 
     When *fake_running_task_id* is set, a synthetic
-    :class:`_RunningAgentState` whose ``task_history_id`` matches the
-    persisted task and whose ``task_thread`` is an alive daemon thread
+    :class:`agent_state.AgentState` keyed by the persisted task's row
+    id and whose ``task_thread`` is an alive daemon thread
     is registered before the ``getHistory`` call.  This drives the
     real :meth:`VSCodeServer._get_running_task_ids` to flag the row as
     running — proving the backend → ``is_running`` plumbing works
@@ -317,10 +317,9 @@ def _history_event_from_real_backend(
                 task_id if fake_running_task_id == "-1"
                 else fake_running_task_id
             )
-            state = _RunningAgentState(
-                tab_id=fake_tab_id, default_model="test-model",
+            state = agent_state.AgentState(
+                str(resolved), tab_id=fake_tab_id, server_owned=True,
             )
-            state.task_history_id = resolved
             worker = threading.Thread(
                 target=stop.wait, name="kiss-test-fake-worker", daemon=True,
             )
@@ -330,7 +329,7 @@ def _history_event_from_real_backend(
                     break
                 time.sleep(0.01)
             state.task_thread = worker
-            _RunningAgentState.register(fake_tab_id, state)
+            agent_state.register(state)
 
         if fake_cli_running_ids is not None:
             cli_ids: set[str] = set(fake_cli_running_ids)
@@ -351,7 +350,7 @@ def _history_event_from_real_backend(
         if worker is not None:
             stop.set()
             worker.join(timeout=2.0)
-        _RunningAgentState.unregister(fake_tab_id)
+        agent_state.agent_states.clear()
         th._close_db()
         th._DB_PATH = orig_db_path  # type: ignore[attr-defined]
         shutil.rmtree(tmp, ignore_errors=True)
@@ -374,19 +373,18 @@ def test_backend_marks_alive_thread_as_running() -> None:
         server.work_dir = tmp
         task_id, _ = th._add_task("alive thread task")
 
-        state = _RunningAgentState(
-            tab_id=fake_tab_id, default_model="test-model",
+        state = agent_state.AgentState(
+            str(task_id), tab_id=fake_tab_id, server_owned=True,
         )
-        state.task_history_id = task_id
         worker = threading.Thread(
             target=stop.wait, name="kiss-test-fake-worker", daemon=True,
         )
         worker.start()
         state.task_thread = worker
-        _RunningAgentState.register(fake_tab_id, state)
+        agent_state.register(state)
 
         running = server._get_running_task_ids()
-        assert task_id in running, (
+        assert str(task_id) in running, (
             f"backend must flag alive-thread row {task_id} as running; "
             f"got: {running}"
         )
@@ -395,7 +393,7 @@ def test_backend_marks_alive_thread_as_running() -> None:
         worker.join(timeout=2.0)
         assert not worker.is_alive(), "test worker must have stopped"
         running_after = server._get_running_task_ids()
-        assert task_id not in running_after, (
+        assert str(task_id) not in running_after, (
             f"backend must drop row {task_id} once its thread dies; "
             f"got: {running_after}"
         )
@@ -403,7 +401,7 @@ def test_backend_marks_alive_thread_as_running() -> None:
         if worker is not None:
             stop.set()
             worker.join(timeout=2.0)
-        _RunningAgentState.unregister(fake_tab_id)
+        agent_state.agent_states.clear()
         th._close_db()
         th._DB_PATH = orig_db_path  # type: ignore[attr-defined]
         shutil.rmtree(tmp, ignore_errors=True)

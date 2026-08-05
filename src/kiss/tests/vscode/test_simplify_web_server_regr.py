@@ -43,7 +43,7 @@ from urllib.parse import urlsplit
 from websockets.datastructures import Headers
 from websockets.http11 import Request
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.web_server import (
     RemoteAccessServer,
     _compare_versions,
@@ -155,7 +155,7 @@ class TestMergeActionCompletion(unittest.TestCase):
     """Completing a review must pop state AND the per-tab action lock."""
 
     def setUp(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         self.tmpdir = Path(tempfile.mkdtemp(prefix="kiss-simp-mac-"))
         self.server = RemoteAccessServer(
             url_file=self.tmpdir / "remote-url.json",
@@ -163,7 +163,7 @@ class TestMergeActionCompletion(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_accept_and_reject_flow_completes_and_cleans_up(self) -> None:
@@ -270,7 +270,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
     """E2E tests over a real running RemoteAccessServer (WSS + UDS)."""
 
     async def asyncSetUp(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-simp-live-")
         self.saved = _redirect_persistence(self.tmpdir)
         self.uds_path = Path(self.tmpdir) / "sorcar.sock"
@@ -289,7 +289,7 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
         if th._db_conn is not None:
             th._db_conn.close()
         _restore_persistence(self.saved)
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def _connect_uds(

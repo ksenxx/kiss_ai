@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
+from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.web_server import WebPrinter
 
@@ -90,11 +91,14 @@ class _PersistenceHarness:
 
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
+        self._registered_task_ids: list[str] = []
         th._flush_chat_events()
         self.saved = _redirect(self.tmpdir)
 
     def teardown_method(self):
         th._flush_chat_events()
+        for tid in self._registered_task_ids:
+            agent_state.unregister(tid)
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
@@ -102,11 +106,16 @@ class _PersistenceHarness:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _register_task(self, task: str) -> str:
-        """Create a real task row and register its agent with the printer."""
+        """Create a real task row and register its agent in the task registry."""
         task_id, _ = th._add_task(task, chat_id="chat-1")
         th._flush_chat_events()
-        with self.printer._lock:
-            self.printer._persist_agents[str(task_id)] = _AgentStub(task_id)
+        st = agent_state.AgentState(
+            str(task_id),
+            agent=_AgentStub(task_id),  # type: ignore[arg-type]
+            chat_id="chat-1",
+        )
+        agent_state.register(st)
+        self._registered_task_ids.append(str(task_id))
         return str(task_id)
 
     def _persisted_events(self, task_id: str) -> list:

@@ -31,7 +31,7 @@ D4  ``JsonPrinter._handle_message`` (message-object path) emitted
 
 No mocks/patches/fakes: real :class:`JsonPrinter` /
 :class:`VSCodeServer` / :class:`WorktreeSorcarAgent` /
-:class:`_RunningAgentState` subclasses (the same technique the wave-2
+:class:`AgentState` subclasses (the same technique the wave-2
 regression tests use), real threads, real git repos, and the real
 sqlite persistence layer.
 """
@@ -48,9 +48,10 @@ import pytest
 
 from kiss.agents.sorcar import persistence
 from kiss.agents.sorcar.persistence import _add_task
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import get_available_models
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.merge_flow import _MergeFlowMixin
 from kiss.server.server import VSCodeServer
@@ -98,10 +99,18 @@ class _RecordingPrinter(JsonPrinter):
             return [e.get("type", "") for e in self.events]
 
 
-def _pop_tabs(*tab_ids: str) -> None:
-    """Remove test-created entries from the global tab registry."""
-    for tab_id in tab_ids:
-        _RunningAgentState.running_agent_states.pop(tab_id, None)
+def _register_tab_state(task_id: str, tab_id: str) -> AgentState:
+    """Register a server-owned agent state for a test tab."""
+    state = AgentState(task_id, tab_id=tab_id, server_owned=True)
+    agent_state.register(state)
+    return state
+
+
+def _pop_states(*task_ids: str) -> None:
+    """Remove test-created entries from the global task registry."""
+    with agent_state.STATE_LOCK:
+        for task_id in task_ids:
+            agent_state.agent_states.pop(task_id, None)
 
 
 
@@ -116,7 +125,7 @@ class _MergeEndedFlagPrinter(_RecordingPrinter):
 
     def __init__(self) -> None:
         super().__init__()
-        self.tab: _RunningAgentState | None = None
+        self.tab: AgentState | None = None
         self.merging_at_merge_ended: bool | None = None
         self.merging_at_prompt: bool | None = None
 
@@ -133,40 +142,31 @@ class _MergeEndedFlagPrinter(_RecordingPrinter):
 class _MergeHost(_MergeFlowMixin):
     """Concrete merge-flow host with the server state the mixin expects.
 
-    Implements the same ``_get_tab`` / ``_any_non_wt_running``
+    Implements the same ``_any_non_wt_running`` / ``_dispose_if_closed``
     contracts as ``VSCodeServer`` against the real
-    ``_RunningAgentState`` registry (mirrors the wave-2 harness).
+    :mod:`kiss.server.agent_state` registry (mirrors the wave-2 harness).
     """
 
     def __init__(self, work_dir: str, printer: JsonPrinter | None = None) -> None:
         self.work_dir = work_dir
-        self._state_lock = threading.RLock()
+        self._state_lock = agent_state.STATE_LOCK
         self.printer = printer or _RecordingPrinter()
 
-    def _get_tab(self, tab_id: str) -> _RunningAgentState:
-        """Get or create per-tab state (mirrors ``VSCodeServer._get_tab``)."""
-        with self._state_lock:
-            tab = _RunningAgentState.running_agent_states.get(tab_id)
-            if tab is None:
-                tab = _RunningAgentState(tab_id, "test-model")
-                _RunningAgentState.running_agent_states[tab_id] = tab
-            return tab
-
     def _any_non_wt_running(self) -> bool:
-        """True if any tab runs a non-worktree task (real server semantics)."""
+        """True if any task runs on the main tree (real server semantics)."""
         return any(
-            t.is_running_non_wt
-            for t in _RunningAgentState.running_agent_states.values()
+            s.is_running_non_wt
+            for s in agent_state.agent_states.values()
         )
 
     def _dispose_if_closed(self, tab_id: str) -> None:
-        """Mirror the server: pop only closed, fully-idle tabs."""
+        """Mirror the server: pop only closed, fully-idle task states."""
         with self._state_lock:
-            tab = _RunningAgentState.running_agent_states.get(tab_id)
-            if tab is not None and tab.frontend_closed and not (
-                tab.is_task_active or tab.is_merging
+            state = agent_state.find_by_tab(tab_id)
+            if state is not None and state.frontend_closed and not (
+                state.is_task_active or state.is_merging
             ):
-                _RunningAgentState.running_agent_states.pop(tab_id, None)
+                agent_state.unregister(state.task_id, state)
 
 
 class _RaisingPendingAgent(WorktreeSorcarAgent):
@@ -199,7 +199,7 @@ class TestMergeEndedBroadcastAfterGuardCleared:
         printer = _MergeEndedFlagPrinter()
         host = _MergeHost(str(repo), printer)
         try:
-            tab = host._get_tab(tab_id)
+            tab = _register_tab_state("w3f3-b1-task", tab_id)
             tab.use_worktree = False
             tab.is_merging = True
             printer.tab = tab
@@ -220,7 +220,7 @@ class TestMergeEndedBroadcastAfterGuardCleared:
             )
             assert tab.is_merging is False
         finally:
-            _pop_tabs(tab_id)
+            _pop_states("w3f3-b1-task")
 
     def test_clean_tree_still_ends_merge(self, tmp_path: Path) -> None:
         """No dirty files: merge_ended still fires, guard already down."""
@@ -230,7 +230,7 @@ class TestMergeEndedBroadcastAfterGuardCleared:
         printer = _MergeEndedFlagPrinter()
         host = _MergeHost(str(repo), printer)
         try:
-            tab = host._get_tab(tab_id)
+            tab = _register_tab_state("w3f3-b1b-task", tab_id)
             tab.is_merging = True
             printer.tab = tab
 
@@ -242,7 +242,7 @@ class TestMergeEndedBroadcastAfterGuardCleared:
             assert printer.merging_at_merge_ended is False
             assert tab.is_merging is False
         finally:
-            _pop_tabs(tab_id)
+            _pop_states("w3f3-b1b-task")
 
     def test_merge_ended_still_fires_when_cleanup_raises(
         self, tmp_path: Path,
@@ -258,7 +258,7 @@ class TestMergeEndedBroadcastAfterGuardCleared:
         printer = _MergeEndedFlagPrinter()
         host = _MergeHost(str(repo), printer)
         try:
-            tab = host._get_tab(tab_id)
+            tab = _register_tab_state("w3f3-b1c-task", tab_id)
             tab.use_worktree = True
             tab.agent = _RaisingPendingAgent("w3f3-b1c")
             tab.is_merging = True
@@ -272,7 +272,7 @@ class TestMergeEndedBroadcastAfterGuardCleared:
             assert printer.merging_at_merge_ended is False
             assert tab.is_merging is False
         finally:
-            _pop_tabs(tab_id)
+            _pop_states("w3f3-b1c-task")
 
     def test_missing_tab_id_is_noop(self, tmp_path: Path) -> None:
         host = _MergeHost(str(tmp_path))
@@ -314,20 +314,20 @@ class _ScriptedAgent(WorktreeSorcarAgent):
         )
 
 
-class _PreLoopFailTab(_RunningAgentState):
-    """Real per-tab state whose armed prompt-recording write fails.
+class _PreLoopFailTab(AgentState):
+    """Real agent state whose armed prompt-recording write fails.
 
-    ``_run_task_inner``'s subtask loop writes ``tab.last_user_prompt``
-    BEFORE capturing the per-subtask metric baselines, so an armed
-    failure here lands the run in the cleanup ``finally`` exactly as a
-    transport / subtask-preparation error would: after the ``try:``
-    began, before the first baseline capture.
+    ``_run_task_inner``'s subtask loop writes ``state.last_user_prompt``
+    BEFORE the per-subtask work begins, so an armed failure here lands
+    the run in the cleanup ``finally`` exactly as a transport /
+    subtask-preparation error would: after the ``try:`` began, before
+    the first ``agent.run`` call.
     """
 
-    def __init__(self, tab_id: str, model: str) -> None:
+    def __init__(self, task_id: str, tab_id: str) -> None:
         self._prompt_backing = ""
         self.fail_next_prompt_write = False
-        super().__init__(tab_id, model)
+        super().__init__(task_id, tab_id=tab_id, server_owned=True)
 
     @property
     def last_user_prompt(self) -> str:  # pyright: ignore[reportIncompatibleVariableOverride]
@@ -383,8 +383,8 @@ def test_b2_preloop_failure_does_not_inherit_lifetime_metrics(
     probe_prompt = "w3f3-b2 preloop-failure probe"
     printer = _RecordingPrinter()
     server = _NoFollowupServer(printer)
-    tab = _PreLoopFailTab(tab_id, models[0])
-    _RunningAgentState.running_agent_states[tab_id] = tab
+    tab = _PreLoopFailTab("w3f3-b2-task", tab_id)
+    agent_state.register(tab)
     agent = _ScriptedAgent("Sorcar VS Code")
     tab.agent = agent
     try:
@@ -417,7 +417,7 @@ def test_b2_preloop_failure_does_not_inherit_lifetime_metrics(
         assert cost == pytest.approx(0.0)
         assert steps == 0
     finally:
-        _pop_tabs(tab_id)
+        _pop_states("w3f3-b2-task")
 
 
 def test_b2_warm_agent_second_run_still_attributes_own_metrics(
@@ -432,8 +432,7 @@ def test_b2_warm_agent_second_run_still_attributes_own_metrics(
     second_prompt = "w3f3-b2b second run"
     printer = _RecordingPrinter()
     server = _NoFollowupServer(printer)
-    tab = _RunningAgentState(tab_id, models[0])
-    _RunningAgentState.running_agent_states[tab_id] = tab
+    tab = _register_tab_state("w3f3-b2b-task", tab_id)
     agent = _ScriptedAgent("Sorcar VS Code")
     tab.agent = agent
     try:
@@ -453,7 +452,7 @@ def test_b2_warm_agent_second_run_still_attributes_own_metrics(
             assert tokens == 100, prompt
             assert cost == pytest.approx(0.25), prompt
     finally:
-        _pop_tabs(tab_id)
+        _pop_states("w3f3-b2b-task")
 
 
 

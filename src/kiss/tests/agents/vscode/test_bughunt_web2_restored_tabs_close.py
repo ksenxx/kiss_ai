@@ -7,7 +7,7 @@
 ``RemoteAccessServer._ws_handler``'s ``finally`` block documents the
 deferred-disposal contract: it schedules a deferred ``closeTab`` "for
 every tab id this connection touched", so a browser that goes away
-for good cannot leak backend ``_RunningAgentState`` entries.  Tab ids
+for good cannot leak backend per-tab state.  Tab ids
 are collected per-connection in ``tabs_seen`` by
 ``_dispatch_client_command`` — but only from each command's own
 ``tabId`` field.

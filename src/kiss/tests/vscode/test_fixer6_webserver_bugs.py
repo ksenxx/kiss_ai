@@ -43,7 +43,7 @@ from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
 import kiss.server.web_server as ws_mod
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 from kiss.server.web_server import RemoteAccessServer
 
@@ -66,7 +66,7 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
     """E2E tests over a real running RemoteAccessServer (UDS)."""
 
     async def asyncSetUp(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-fixer6-live-")
         self.saved = _redirect_persistence(self.tmpdir)
         self.uds_path = Path(self.tmpdir) / "sorcar.sock"
@@ -83,7 +83,7 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
         if th._db_conn is not None:
             th._db_conn.close()
         _restore_persistence(self.saved)
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def _connect_uds(

@@ -14,8 +14,8 @@ chat — ``{chatId, taskId, title, startTs}`` — sorted by ``startTs``
 ascending (oldest first), so restored tabs appear in start order.
 
 These tests drive the real ``RemoteAccessServer`` over a real WebSocket
-connection, with real ``_RunningAgentState`` registry entries and real
-``task_history`` rows in a test-owned sqlite database — no mocks.
+connection, with real ``kiss.server.agent_state`` registry entries and
+real ``task_history`` rows in a test-owned sqlite database — no mocks.
 """
 
 from __future__ import annotations
@@ -31,8 +31,8 @@ from unittest import IsolatedAsyncioTestCase
 
 from websockets.asyncio.client import connect
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
 
 
@@ -73,11 +73,9 @@ class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
             self._orig_config = CONFIG_PATH.read_text()
         save_config({"remote_password": ""})
 
-        with _RunningAgentState._registry_lock:
-            self._saved_registry = dict(
-                _RunningAgentState.running_agent_states,
-            )
-            _RunningAgentState.running_agent_states.clear()
+        with agent_state.STATE_LOCK:
+            self._saved_registry = dict(agent_state.agent_states)
+            agent_state.agent_states.clear()
 
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -88,11 +86,9 @@ class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         await self.server.stop_async()
-        with _RunningAgentState._registry_lock:
-            _RunningAgentState.running_agent_states.clear()
-            _RunningAgentState.running_agent_states.update(
-                self._saved_registry,
-            )
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
+            agent_state.agent_states.update(self._saved_registry)
         if self._orig_config is not None:
             CONFIG_PATH.write_text(self._orig_config)
         elif CONFIG_PATH.exists():
@@ -132,16 +128,16 @@ class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
         task_id, chat_id = _persistence._add_task(
             prompt, chat_id=chat_id, extra={"startTs": start_ts},
         )
-        state = _RunningAgentState(
-            tab_id,
-            "test-model",
+        state = agent_state.AgentState(
+            str(task_id),
             chat_id=chat_id,
-            is_subagent=is_subagent,
+            tab_id=tab_id,
+            parent_task_id="parent-task" if is_subagent else None,
+            server_owned=True,
             is_task_active=is_task_active,
         )
-        state.task_history_id = task_id
         state.last_user_prompt = prompt
-        _RunningAgentState.register(tab_id, state)
+        agent_state.register(state)
         return task_id, chat_id
 
     async def _ready_replies(
@@ -209,12 +205,15 @@ class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
         self._register_running_task(
             "tab-idle", "finished task", 1_700, is_task_active=False,
         )
-        dup = _RunningAgentState(
-            "tab-dup", "test-model", chat_id=chat_id, is_task_active=True,
+        dup = agent_state.AgentState(
+            f"{task_id}-dup",
+            chat_id=chat_id,
+            tab_id="tab-dup",
+            server_owned=True,
+            is_task_active=True,
         )
-        dup.task_history_id = task_id
         dup.last_user_prompt = "parent task"
-        _RunningAgentState.register("tab-dup", dup)
+        agent_state.register(dup)
 
         events = await self._ready_replies({"type": "ready", "tabId": "t1"})
         opens = [e for e in events if e.get("type") == "openRunningTasks"]

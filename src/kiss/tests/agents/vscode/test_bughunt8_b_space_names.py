@@ -35,8 +35,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.server.diff_merge import _capture_untracked, _prepare_merge_view
 from kiss.server.server import VSCodeServer
 
@@ -123,10 +124,15 @@ class TestWorktreeLeadingSpaceChangedFiles(unittest.TestCase):
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment]
 
         self.tab_id = "t-wt-space"
-        self.tab = self.server._get_tab(self.tab_id)
-        self.tab.use_worktree = True
         self.agent = WorktreeSorcarAgent("wt-space-test")
-        self.tab.agent = self.agent
+        self.state = AgentState(
+            "task-t-wt-space",
+            agent=self.agent,
+            tab_id=self.tab_id,
+            server_owned=True,
+        )
+        self.state.use_worktree = True
+        agent_state.register(self.state)
         wt_work_dir = self.agent._try_setup_worktree(Path(self.repo), self.repo)
         assert wt_work_dir is not None
         assert self.agent._wt is not None
@@ -138,7 +144,7 @@ class TestWorktreeLeadingSpaceChangedFiles(unittest.TestCase):
                 self.agent.discard()
         except Exception:
             pass
-        _RunningAgentState.running_agent_states.pop(self.tab_id, None)
+        agent_state.unregister(self.state.task_id, self.state)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_changed_files_keep_leading_space(self) -> None:

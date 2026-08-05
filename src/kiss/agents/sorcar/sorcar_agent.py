@@ -638,6 +638,11 @@ class SorcarAgent(RelentlessAgent):
         self.docker_manager: Any = None
         self._use_web_tools: bool = True
         self._is_parallel: bool = False
+        # Follow-up prompts queued directly on the agent by embedding
+        # UIs that own the agent instance (e.g. the CLI steering box).
+        # Server-launched runs queue through the printer bridge
+        # instead; the pre-step drain consumes both sources.
+        self.pending_user_messages: list[str] = []
 
     def _subagent_budget_share(self, num_tasks: int) -> float | None:
         """Return the ``max_budget`` each parallel sub-agent may spend.
@@ -1229,89 +1234,42 @@ class SorcarAgent(RelentlessAgent):
 
         Called once at the top of every model step (wired in via
         :attr:`kiss.core.kiss_agent.KISSAgent.pre_step_hook`).  Drains
-        the owning :class:`_RunningAgentState`'s
-        ``pending_user_messages`` list under
-        :attr:`_RunningAgentState._registry_lock` (to keep the drain
-        atomic against concurrent ``appendUserMessage`` commands from
-        the frontend) and pushes each entry into *model*'s
+        the run's queued follow-up prompts through the printer's
+        duck-typed ``drain_pending_user_messages`` bridge (the server
+        keeps them on the task's registered agent state, keyed by the
+        calling thread's task id) and pushes each entry into *model*'s
         conversation as a ``user`` role message.  Each entry is
         wrapped as ``User says: <message>. Take the message into
         account and finish your task.`` so the model treats it as a
         mid-task steering instruction rather than a bare trajectory
-        line.  The list is emptied on every drain so the same queued
-        message is never injected twice.
-
-        Messages whose ``prompt`` echo could not be attributed to a
-        task id at queueing time (``unattributed_prompt_echoes`` —
-        the narrow window between ``run()`` entry and ``_add_task``)
-        get a durable copy HERE: a ``recordOnly`` broadcast from the
-        agent thread, where the printer's thread-local task id names
-        the task that actually consumed the message, so the echo is
-        recorded and persisted into the correct trajectory instead of
-        being lost on replay.  The copy is NOT re-sent live (the
-        command handler already emitted a transient echo at queueing
-        time — see ``_echo_injected_prompt`` — so a live re-send
-        would render a duplicate prompt panel).
+        line.  The bridge empties the queue on every drain so the same
+        queued message is never injected twice, and emits a durable
+        ``recordOnly`` echo for any message whose live echo could not
+        be attributed to a task id at queueing time.
 
         Args:
             model: The live model whose conversation receives the
                 queued user messages.
         """
-        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-
-        tab_id = getattr(self, "_tab_id", "") or ""
-        if not tab_id:
-            return
-        with _RunningAgentState._registry_lock:
-            tab = _RunningAgentState.running_agent_states.get(tab_id)
-            if tab is None or (tab.agent is not None and tab.agent is not self):
-                # Ownership check: register() explicitly allows a different
-                # state to replace this key (tab reuse), so a stale agent
-                # must never consume the replacement's queued input.
-                return
-            if not tab.pending_user_messages and not tab.unattributed_prompt_echoes:
-                return
-            queued = list(tab.pending_user_messages)
-            tab.pending_user_messages.clear()
-            deferred = list(tab.unattributed_prompt_echoes)
-            tab.unattributed_prompt_echoes.clear()
+        queued: list[str] = []
+        while True:
+            try:
+                queued.append(self.pending_user_messages.pop(0))
+            except IndexError:
+                break
+        drain = getattr(
+            getattr(self, "printer", None),
+            "drain_pending_user_messages",
+            None,
+        )
+        if drain is not None:
+            queued.extend(drain())
         for msg in queued:
             model.add_message_to_conversation(
                 "user",
                 f"User says: {msg}. "
                 "Take the message into account and finish your task.",
             )
-        # The recordOnly echoes are emitted AFTER the queued messages
-        # entered the model conversation, and each broadcast is guarded:
-        # a broken printer must never lose the (already cleared) steering
-        # input or abort the task from this best-effort persistence hook.
-        if deferred:
-            broadcast = getattr(
-                getattr(self, "printer", None), "broadcast", None,
-            )
-            if broadcast is not None:
-                for msg in deferred:
-                    try:
-                        broadcast({
-                            "type": "prompt",
-                            "text": msg,
-                            "recordOnly": True,
-                        })
-                    except Exception:
-                        # Requeue so the durable echo is retried on the
-                        # next drain instead of being lost forever.
-                        logger.debug(
-                            "recordOnly prompt echo broadcast failed",
-                            exc_info=True,
-                        )
-                        with _RunningAgentState._registry_lock:
-                            owner = _RunningAgentState.running_agent_states.get(
-                                tab_id
-                            )
-                            if owner is not None and (
-                                owner.agent is None or owner.agent is self
-                            ):
-                                owner.unattributed_prompt_echoes.append(msg)
 
     def _block_finish_when_user_message_pending(
         self, name: str, args: dict[str, Any],
@@ -1338,20 +1296,14 @@ class SorcarAgent(RelentlessAgent):
         del args
         if name != "finish":
             return None
-        tab_id = getattr(self, "_tab_id", "") or ""
-        if not tab_id:
-            return None
-        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-
-        with _RunningAgentState._registry_lock:
-            tab = _RunningAgentState.running_agent_states.get(tab_id)
-            pending = (
-                tab is not None
-                and (tab.agent is None or tab.agent is self)
-                and bool(tab.pending_user_messages)
+        if not self.pending_user_messages:
+            has_pending = getattr(
+                getattr(self, "printer", None),
+                "has_pending_user_messages",
+                None,
             )
-        if not pending:
-            return None
+            if has_pending is None or not has_pending():
+                return None
         return (
             "Error: finish rejected — the user sent a new message while "
             "you were working. It will be appended to the conversation "

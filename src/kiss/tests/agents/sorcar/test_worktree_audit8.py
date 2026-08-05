@@ -54,6 +54,7 @@ from kiss.agents.sorcar.git_worktree import (
     _git,
 )
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 from kiss.server.diff_merge import (
     _capture_untracked,
     _merge_data_dir,
@@ -83,7 +84,10 @@ def _restore_db(saved: tuple) -> None:
 
 def _make_repo(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", str(path)], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "init", "-b", "main", str(path)],
+        capture_output=True, check=True,
+    )
     subprocess.run(
         ["git", "-C", str(path), "config", "user.email", "test@test.com"],
         capture_output=True,
@@ -366,20 +370,25 @@ class TestBug37FalseConflictFromNonWorktreeAgent:
 
         (repo / "shared.py").write_text("non-wt agent modified content\n")
 
-        tab = server._get_tab("wt_tab")
-        tab.agent = wt_agent
-        tab.use_worktree = True
-
-        has_conflict = server._check_merge_conflict("wt_tab")
-
-        assert has_conflict is True, (
-            "BUG-37 confirmed: non-worktree agent's dirty file causes "
-            "false conflict detection for worktree merge"
+        state = agent_state.AgentState(
+            "task-wt-audit8", agent=wt_agent, tab_id="wt_tab",
+            server_owned=True,
         )
+        state.use_worktree = True
+        agent_state.register(state)
 
-        GitWorktreeOps.remove(repo, wt.wt_dir)
-        GitWorktreeOps.prune(repo)
-        GitWorktreeOps.delete_branch(repo, wt.branch)
+        try:
+            has_conflict = server._check_merge_conflict("wt_tab")
+
+            assert has_conflict is True, (
+                "BUG-37 confirmed: non-worktree agent's dirty file causes "
+                "false conflict detection for worktree merge"
+            )
+        finally:
+            agent_state.unregister(state.task_id, state)
+            GitWorktreeOps.remove(repo, wt.wt_dir)
+            GitWorktreeOps.prune(repo)
+            GitWorktreeOps.delete_branch(repo, wt.branch)
 
 
 class TestBug38SharedMergeDataDir:

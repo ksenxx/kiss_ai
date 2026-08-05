@@ -750,24 +750,23 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         """Return the set of ``kiss/wt-*`` branches owned by live agents.
 
         Union of *self*'s current worktree branch (if any) and every
-        other tab's live agent branch as tracked by
-        :attr:`_RunningAgentState.running_agent_states`.  Used by
+        other live agent's branch as tracked by the server's
+        task-keyed agent-state registry, reached through the printer's
+        duck-typed ``live_worktree_branches`` bridge.  Used by
         :meth:`_try_setup_worktree` to build the ``exclude_branches``
         argument for
         :meth:`GitWorktreeOps.reclaim_orphaned_worktrees` so a
-        concurrent tab's active worktree is never adopted, merged, or
-        removed by our reclaim pass.
+        concurrent live agent's active worktree is never adopted,
+        merged, or removed by our reclaim pass.
         """
         branches: set[str] = set()
         if self._wt is not None:
             branches.add(self._wt.branch)
-        # Local import to avoid a circular import at module load time.
-        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-        for state in list(_RunningAgentState.running_agent_states.values()):
-            agent = getattr(state, "agent", None)
-            wt = getattr(agent, "_wt", None) if agent is not None else None
-            if wt is not None:
-                branches.add(wt.branch)
+        live = getattr(
+            getattr(self, "printer", None), "live_worktree_branches", None,
+        )
+        if live is not None:
+            branches.update(live())
         return branches
 
     def _retire_previous_worktree(self) -> str | None:
@@ -1064,51 +1063,24 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         """
         if self._chat_id == "":
             self._chat_id = _allocate_chat_id()
-        registered_here = self._register_running_state()
 
-        try:
-            wt_work_dir: Path | None = None
-            if kwargs.pop("use_worktree", True):
-                work_dir_str = kwargs.get("work_dir")
-                discovery_dir = Path(work_dir_str) if work_dir_str else Path.cwd()
-                repo = GitWorktreeOps.discover_repo(discovery_dir)
-                if repo is None:
-                    logger.warning("Not a git repo, running task directly")
-                else:
-                    wt_work_dir = self._try_setup_worktree(repo, work_dir_str)
+        wt_work_dir: Path | None = None
+        if kwargs.pop("use_worktree", True):
+            work_dir_str = kwargs.get("work_dir")
+            discovery_dir = Path(work_dir_str) if work_dir_str else Path.cwd()
+            repo = GitWorktreeOps.discover_repo(discovery_dir)
+            if repo is None:
+                logger.warning("Not a git repo, running task directly")
+            else:
+                wt_work_dir = self._try_setup_worktree(repo, work_dir_str)
 
-            printer = kwargs.get("printer")
-            self._flush_warnings(printer)
-            if wt_work_dir is None:
-                try:
-                    return super().run(
-                        prompt_template=prompt_template, **kwargs
-                    )
-                except KISSError:
-                    raise
-                except Exception as exc:
-                    return str(
-                        yaml.dump(
-                            {
-                                "success": False,
-                                "summary": f"Task failed with error: {exc}",
-                            }
-                        )
-                    )
-
-            if printer and hasattr(printer, "broadcast"):
-                printer.broadcast(
-                    {
-                        "type": "worktree_created",
-                        "worktreeDir": str(self._wt_dir),
-                        "branch": self._wt_branch,
-                    }
-                )
-
-            kwargs["work_dir"] = str(wt_work_dir)
-
+        printer = kwargs.get("printer")
+        self._flush_warnings(printer)
+        if wt_work_dir is None:
             try:
-                return super().run(prompt_template=prompt_template, **kwargs)
+                return super().run(
+                    prompt_template=prompt_template, **kwargs
+                )
             except KISSError:
                 raise
             except Exception as exc:
@@ -1120,9 +1092,31 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                         }
                     )
                 )
-        finally:
-            if registered_here:
-                self._unregister_running_state()
+
+        if printer and hasattr(printer, "broadcast"):
+            printer.broadcast(
+                {
+                    "type": "worktree_created",
+                    "worktreeDir": str(self._wt_dir),
+                    "branch": self._wt_branch,
+                }
+            )
+
+        kwargs["work_dir"] = str(wt_work_dir)
+
+        try:
+            return super().run(prompt_template=prompt_template, **kwargs)
+        except KISSError:
+            raise
+        except Exception as exc:
+            return str(
+                yaml.dump(
+                    {
+                        "success": False,
+                        "summary": f"Task failed with error: {exc}",
+                    }
+                )
+            )
 
 
     def merge(self) -> str:

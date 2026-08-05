@@ -34,6 +34,7 @@ from pathlib import Path
 
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 from kiss.server.diff_merge import (
     _capture_untracked,
     _parse_diff_hunks,
@@ -41,6 +42,21 @@ from kiss.server.diff_merge import (
     _snapshot_files,
 )
 from kiss.server.server import VSCodeServer
+
+
+def _register_wt_state(
+    tab_id: str, agent: WorktreeSorcarAgent,
+) -> agent_state.AgentState:
+    """Register a worktree-task agent state for *tab_id*."""
+    state = agent_state.AgentState(
+        f"task-{tab_id}",
+        agent=agent,
+        tab_id=tab_id,
+        server_owned=True,
+    )
+    state.use_worktree = True
+    agent_state.register(state)
+    return state
 
 
 def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
@@ -60,6 +76,10 @@ def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
     subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
     subprocess.run(
         ["git", "commit", "-m", "init"],
+        cwd=repo, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "branch", "-M", "main"],
         cwd=repo, capture_output=True,
     )
     return repo
@@ -144,22 +164,24 @@ class TestBug56ConflictCheckBaselineValidation:
 
         server = VSCodeServer()
         server.work_dir = str(repo)
-        tab = server._get_tab("bug56a-tab")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        tab.agent._wt = GitWorktree(
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch="main",
             wt_dir=wt_dir,
             baseline_commit=bogus,
         )
+        state = _register_wt_state("bug56a-tab", agent)
 
-        has_conflict = server._check_merge_conflict("bug56a-tab")
-        assert has_conflict is True, (
-            "BUG-56: _check_merge_conflict returned False with invalid "
-            "baseline despite a real conflict — both sides edited init.txt"
-        )
+        try:
+            has_conflict = server._check_merge_conflict("bug56a-tab")
+            assert has_conflict is True, (
+                "BUG-56: _check_merge_conflict returned False with invalid "
+                "baseline despite a real conflict — both sides edited init.txt"
+            )
+        finally:
+            agent_state.unregister(state.task_id, state)
 
         _cleanup(repo, branch, wt_dir)
 
@@ -186,21 +208,23 @@ class TestBug56ConflictCheckBaselineValidation:
 
         server = VSCodeServer()
         server.work_dir = str(repo)
-        tab = server._get_tab("bug56b-tab")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        tab.agent._wt = GitWorktree(
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch="main",
             wt_dir=wt_dir,
             baseline_commit=baseline,
         )
+        state = _register_wt_state("bug56b-tab", agent)
 
-        has_conflict = server._check_merge_conflict("bug56b-tab")
-        assert has_conflict is True, (
-            "Regression: valid baseline should still detect conflicts"
-        )
+        try:
+            has_conflict = server._check_merge_conflict("bug56b-tab")
+            assert has_conflict is True, (
+                "Regression: valid baseline should still detect conflicts"
+            )
+        finally:
+            agent_state.unregister(state.task_id, state)
 
         _cleanup(repo, branch, wt_dir)
 
@@ -214,19 +238,21 @@ class TestBug56ConflictCheckBaselineValidation:
 
         server = VSCodeServer()
         server.work_dir = str(repo)
-        tab = server._get_tab("bug56c-tab")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        tab.agent._wt = GitWorktree(
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch="main",
             wt_dir=wt_dir,
             baseline_commit=baseline,
         )
+        state = _register_wt_state("bug56c-tab", agent)
 
-        has_conflict = server._check_merge_conflict("bug56c-tab")
-        assert has_conflict is False
+        try:
+            has_conflict = server._check_merge_conflict("bug56c-tab")
+            assert has_conflict is False
+        finally:
+            agent_state.unregister(state.task_id, state)
 
         _cleanup(repo, branch, wt_dir)
 

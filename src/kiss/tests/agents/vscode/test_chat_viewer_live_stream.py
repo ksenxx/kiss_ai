@@ -19,7 +19,7 @@ opened the chat BEFORE the task started:
    must receive the live stream of a follow-up task launched from a
    different tab (``clear`` + ``status running`` + every task event).
 2. The same must hold for a viewer tab that has NO
-   ``_RunningAgentState`` registry entry (e.g. a tab restored by
+   ``kiss.server.agent_state`` registry entry (e.g. a tab restored by
    ``ready``/``resumeSession`` after a daemon restart, where
    ``_replay_session`` deliberately does not create registry state).
 3. A tab displaying a SUB-AGENT row of the chat must NOT be subscribed
@@ -50,9 +50,9 @@ from typing import Any, cast
 import yaml
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import get_available_models
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 _LIVE_TEXT = "live-follow-up-delta"
@@ -164,15 +164,21 @@ class TestChatViewerLiveStream(unittest.TestCase):
 
     def tearDown(self) -> None:
         _unpatch_grandparent_run(self.original_run)
+        agent_state.agent_states.clear()
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _tab_state(self, tab_id: str) -> agent_state.AgentState:
+        state = agent_state.find_by_tab(tab_id)
+        assert state is not None, f"no agent state registered for tab {tab_id}"
+        return state
 
     def _run_and_wait(self, tab_id: str, prompt: str) -> None:
         self.server._handle_command({
             "type": "run", "prompt": prompt, "model": self.model,
             "workDir": self.tmpdir, "tabId": tab_id, "autoCommit": True,
         })
-        t = self.server._get_tab(tab_id).task_thread
+        t = self._tab_state(tab_id).task_thread
         assert t is not None
         t.join(timeout=60)
         assert not t.is_alive()
@@ -202,7 +208,7 @@ class TestChatViewerLiveStream(unittest.TestCase):
         the live stream of a follow-up task launched in another tab."""
         tab_a, tab_b = "tab-A", "tab-B"
         self._run_and_wait(tab_a, "first task")
-        chat_id = self.server._get_tab(tab_a).chat_id
+        chat_id = self._tab_state(tab_a).chat_id
         assert chat_id
 
         self._open_chat_in_tab(tab_b, chat_id)
@@ -241,10 +247,10 @@ class TestChatViewerLiveStream(unittest.TestCase):
         entry — the post-daemon-restart shape) must also be subscribed."""
         tab_a, tab_c = "tab-A", "tab-C"
         self._run_and_wait(tab_a, "first task")
-        chat_id = self.server._get_tab(tab_a).chat_id
+        chat_id = self._tab_state(tab_a).chat_id
 
         self._open_chat_in_tab(tab_c, chat_id, with_new_chat=False)
-        state = _RunningAgentState.running_agent_states.get(tab_c)
+        state = agent_state.find_by_tab(tab_c)
         assert state is None or state.chat_id == "", (
             "precondition: viewer tab's registry entry must be chat-less"
         )
@@ -260,8 +266,8 @@ class TestChatViewerLiveStream(unittest.TestCase):
         parent chat's follow-up stream."""
         tab_a, tab_d = "tab-A", "tab-D"
         self._run_and_wait(tab_a, "first task")
-        chat_id = self.server._get_tab(tab_a).chat_id
-        parent_task_id = self.server._get_tab(tab_a).last_task_id
+        chat_id = self._tab_state(tab_a).chat_id
+        parent_task_id = self._tab_state(tab_a).task_id
 
         sub_task_id, _ = th._add_task(
             "sub task", chat_id=chat_id,
@@ -284,7 +290,7 @@ class TestChatViewerLiveStream(unittest.TestCase):
         """Navigating away (newChat) or closing the tab stops the feed."""
         tab_a, tab_b, tab_c = "tab-A", "tab-B", "tab-C"
         self._run_and_wait(tab_a, "first task")
-        chat_id = self.server._get_tab(tab_a).chat_id
+        chat_id = self._tab_state(tab_a).chat_id
 
         self._open_chat_in_tab(tab_b, chat_id)
         self._open_chat_in_tab(tab_c, chat_id)

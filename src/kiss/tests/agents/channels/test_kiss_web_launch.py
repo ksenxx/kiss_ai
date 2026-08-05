@@ -45,7 +45,6 @@ import yaml
 
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents import _kiss_web_launcher as launcher
 from kiss.agents.third_party_agents._kiss_web_launcher import (
@@ -54,6 +53,7 @@ from kiss.agents.third_party_agents._kiss_web_launcher import (
     run_agent_via_kiss_web,
 )
 from kiss.core import vscode_config
+from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
 
 STUB_SUMMARY = "stub summary done"
@@ -129,13 +129,13 @@ class _ApiLaunchBase(unittest.TestCase):
     def tearDown(self) -> None:
         launcher._SOCK_PATH_OVERRIDE = self._saved_sock_override
         self._parent_class.run = self._original_run
-        for tab in list(_RunningAgentState.running_agent_states.values()):
-            if tab.agent is not None and tab.agent._wt_pending:
+        for state in agent_state.snapshot():
+            if state.agent is not None and state.agent._wt_pending:
                 try:
-                    tab.agent.discard()
+                    state.agent.discard()
                 except Exception:  # pragma: no cover — best-effort cleanup
                     pass
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
         async def _shutdown() -> None:
             with self.server._printer._ws_lock:
@@ -553,9 +553,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         finally:
             release.set()
             deadline = 30.0
-            for state in list(
-                _RunningAgentState.running_agent_states.values()
-            ):
+            for state in agent_state.snapshot():
                 if state.task_thread is not None:
                     state.task_thread.join(timeout=deadline)
 

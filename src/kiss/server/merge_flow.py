@@ -29,12 +29,9 @@ from kiss.agents.sorcar.git_worktree import (
     repo_lock,
 )
 from kiss.agents.sorcar.persistence import _append_chat_event
-from kiss.agents.sorcar.running_agent_state import (
-    _RunningAgentState,
-    _tab_busy,
-)
 from kiss.agents.sorcar.useful_tools import _stale_worktree_fallback
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.server.diff_merge import (
     _capture_untracked,
     _cleanup_merge_data,
@@ -42,10 +39,7 @@ from kiss.server.diff_merge import (
     _merge_data_dir,
     _prepare_merge_view,
 )
-from kiss.server.helpers import (
-    generate_commit_message_from_diff,
-    tab_busy_with_other_task,
-)
+from kiss.server.helpers import generate_commit_message_from_diff
 
 if TYPE_CHECKING:
     from kiss.server.json_printer import JsonPrinter
@@ -53,23 +47,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _tab_task_key(tab: _RunningAgentState | None) -> str | None:
-    """Return the task id *tab* last ran, preferring the live agent's.
+def _state_task_key(state: AgentState | None) -> str | None:
+    """Return the task id *state* last ran, preferring the live agent's.
 
     Args:
-        tab: The per-tab state to inspect, or ``None``.
+        state: The agent state to inspect, or ``None``.
 
     Returns:
-        The task id, or ``None`` when the tab never ran a task.
+        The task id, or ``None`` when the state never ran a task.
     """
-    if tab is None:
+    if state is None:
         return None
-    task_id = tab.task_history_id
-    if task_id is None:
-        task_id = tab.last_task_id
-    if task_id is None and tab.agent is not None:
-        task_id = tab.agent._last_task_id
-    return task_id
+    agent = state.agent
+    task_id = getattr(agent, "_last_task_id", None) if agent is not None else None
+    if task_id:
+        return str(task_id)
+    return state.task_id or None
 
 
 def _unquoted_name_lines(output: str) -> list[str]:
@@ -199,30 +192,8 @@ class _MergeFlowMixin:
         work_dir: str
         _state_lock: threading.RLock
 
-        def _get_tab(self, tab_id: str) -> _RunningAgentState: ...
         def _any_non_wt_running(self) -> bool: ...
         def _dispose_if_closed(self, tab_id: str) -> None: ...
-
-    def _ensure_wt_agent(
-        self, tab: _RunningAgentState,
-    ) -> WorktreeSorcarAgent | None:
-        """Return the worktree-aware agent for *tab*, or ``None``.
-
-        Worktrees are no longer associated with chat sessions: every
-        ``run()`` call mints a fresh branch and there is no
-        cross-process restoration.  This method therefore returns
-        ``tab.agent`` as-is — it is the only authoritative source of
-        worktree state.  When the agent has been disposed (task ended
-        and the tab released its reference) there is no worktree to
-        operate on and ``None`` is returned.
-
-        The merge-flow call sites read ``tab.agent`` directly; the
-        only remaining caller is ``server.py`` (``_replay_session``).
-
-        Returns:
-            The agent stored on ``tab``, or ``None``.
-        """
-        return tab.agent
 
     def _open_ui_mirror(self, tab_id: str, work_dir: str = "") -> None:
         """Mirror *tab_id*'s interactive UI onto the other clients' tabs.
@@ -248,17 +219,15 @@ class _MergeFlowMixin:
             return
         viewers: list[str] = []
         with self._state_lock:
-            task_id = _tab_task_key(
-                _RunningAgentState.running_agent_states.get(tab_id),
-            )
+            task_id = _state_task_key(agent_state.find_by_tab(tab_id))
             task_key = self.printer._coerce_task_id(task_id)
             if task_key:
                 for viewer_tab_id in self.printer._fanout_targets(task_key):
-                    viewer = _RunningAgentState.running_agent_states.get(
-                        viewer_tab_id,
-                    )
-                    if viewer is not None and tab_busy_with_other_task(
-                        viewer, task_key,
+                    viewer = agent_state.find_by_tab(viewer_tab_id)
+                    if (
+                        viewer is not None
+                        and viewer.is_task_active
+                        and viewer.task_id != task_key
                     ):
                         continue
                     viewers.append(viewer_tab_id)
@@ -297,10 +266,10 @@ class _MergeFlowMixin:
             if total_hunks == 0:
                 return False
             resolved_tab_id = tab_id or None
-            resolved_tab: _RunningAgentState | None = None
+            resolved_tab: AgentState | None = None
             with self._state_lock:
                 if resolved_tab_id is not None:
-                    resolved_tab = _RunningAgentState.running_agent_states.get(resolved_tab_id)
+                    resolved_tab = agent_state.find_by_tab(resolved_tab_id)
                     if resolved_tab is not None:
                         resolved_tab.is_merging = True
             try:
@@ -381,7 +350,7 @@ class _MergeFlowMixin:
         user sees merge/discard buttons only after the hunk review is
         complete.
 
-        Uses ``_get_tab`` to obtain the tab so the autocommit-prompt
+        Looks up the tab's agent state so the autocommit-prompt
         check still fires even when the ``mergeAction`` command was
         routed to a process that never ran the original task (e.g. the
         service process after the task process was disposed).
@@ -401,19 +370,21 @@ class _MergeFlowMixin:
         if not tab_id:
             logger.debug("_finish_merge called without tab_id; ignoring")
             return
-        tab = self._get_tab(tab_id)
         with self._state_lock:
-            tab.is_merging = True
+            state = agent_state.find_by_tab(tab_id)
+            if state is not None:
+                state.is_merging = True
         try:
             _cleanup_merge_data(str(_merge_data_dir(tab_id)))
 
             self._present_pending_worktree(tab_id, try_merge_review=False)
 
-            if not tab.use_worktree:
+            if state is None or not state.use_worktree:
                 self._broadcast_autocommit_prompt(tab_id, work_dir)
         finally:
             with self._state_lock:
-                tab.is_merging = False
+                if state is not None:
+                    state.is_merging = False
             try:
                 self.printer.broadcast_tab_ui(
                     {"type": "merge_ended", "tabId": tab_id}
@@ -588,14 +559,12 @@ class _MergeFlowMixin:
                     "tabId": tab_id,
                 })
                 with self._state_lock:
-                    prompt_tab = _RunningAgentState.running_agent_states.get(
-                        tab_id,
-                    )
+                    prompt_state = agent_state.find_by_tab(tab_id)
                 user_prompt = (
-                    prompt_tab.last_user_prompt if prompt_tab else ""
+                    prompt_state.last_user_prompt if prompt_state else ""
                 ) or None
                 task_result = (
-                    prompt_tab.last_result_summary if prompt_tab else ""
+                    prompt_state.last_result_summary if prompt_state else ""
                 ) or None
                 msg = (
                     generate_commit_message_from_diff(
@@ -621,9 +590,7 @@ class _MergeFlowMixin:
                 )
                 if tab_id:
                     with self._state_lock:
-                        task_id = _tab_task_key(
-                            _RunningAgentState.running_agent_states.get(tab_id),
-                        )
+                        task_id = _state_task_key(agent_state.find_by_tab(tab_id))
                     if task_id is not None:
                         _append_chat_event(done_event, task_id=task_id)
             else:
@@ -722,10 +689,10 @@ class _MergeFlowMixin:
             tab_id: The tab whose speculative claim to release.
         """
         with self._state_lock:
-            tab = _RunningAgentState.running_agent_states.get(tab_id)
-            if tab is None:
+            state = agent_state.find_by_tab(tab_id)
+            if state is None:
                 return
-            tab.is_merging = False
+            state.is_merging = False
         self._dispose_if_closed(tab_id)
 
     def _finalize_pending_worktree(self, tab_id: str) -> _PendingOutcome:
@@ -751,7 +718,7 @@ class _MergeFlowMixin:
           the running task has not committed to yet;
         * a task has been *submitted* but has not reached its worker
           yet.  Ownership is therefore decided by the one shared
-          :func:`_tab_busy` predicate rather than by reading the two
+          :meth:`AgentState.busy` predicate rather than by reading the two
           flags directly: during that startup window both of them read
           False, and claiming ``is_merging`` there makes the worker
           refuse the run the user just typed ("Cannot run a task while
@@ -790,15 +757,15 @@ class _MergeFlowMixin:
             anything, is left to do.
         """
         with self._state_lock:
-            tab = _RunningAgentState.running_agent_states.get(tab_id)
-            if tab is None or not tab.use_worktree:
+            state = agent_state.find_by_tab(tab_id)
+            if state is None or not state.use_worktree:
                 return _PendingOutcome.PRESENT
-            if _tab_busy(tab):
+            if state.busy():
                 return _PendingOutcome.NOOP
-            wt_agent = tab.agent
+            wt_agent = state.agent
             if wt_agent is None or not wt_agent._wt_pending:
                 return _PendingOutcome.PRESENT
-            if wt_agent._pending_review or not tab.auto_commit_mode:
+            if wt_agent._pending_review or not state.auto_commit_mode:
                 # The caller will open the merge review.  Claim the
                 # worktree here too: `_present_pending_worktree` starts
                 # an unguarded review, so without a claim taken in the
@@ -806,7 +773,7 @@ class _MergeFlowMixin:
                 # two simultaneous resumes both reach
                 # `_prepare_and_start_merge` and broadcast a merge view
                 # apiece for one branch (F4-20).
-                tab.is_merging = True
+                state.is_merging = True
                 return _PendingOutcome.PRESENT_CLAIMED
             # Claim the worktree before releasing the lock so a
             # concurrent resume (remote commands run on a thread pool)
@@ -815,7 +782,7 @@ class _MergeFlowMixin:
             # action it selects: dropping it in between would reopen
             # the very race it exists to close, and would also let the
             # probe's answer go stale before it is acted on.
-            tab.is_merging = True
+            state.is_merging = True
         try:
             changed = self._get_worktree_changed_files(tab_id)
             action = "merge" if changed else "discard"
@@ -824,7 +791,7 @@ class _MergeFlowMixin:
             )
         finally:
             with self._state_lock:
-                tab.is_merging = False
+                state.is_merging = False
             self._dispose_if_closed(tab_id)
         self.printer.broadcast_tab_ui(
             {"type": "worktree_result", "tabId": tab_id, **result},
@@ -880,10 +847,10 @@ class _MergeFlowMixin:
             :meth:`_emit_pending_worktree`.
         """
         with self._state_lock:
-            tab = _RunningAgentState.running_agent_states.get(tab_id)
-        if tab is None or not tab.use_worktree:
+            state = agent_state.find_by_tab(tab_id)
+        if state is None or not state.use_worktree:
             return False
-        wt_agent = tab.agent
+        wt_agent = state.agent
         if wt_agent is None or not wt_agent._wt_pending:
             return False
         changed = self._get_worktree_changed_files(tab_id)
@@ -913,13 +880,13 @@ class _MergeFlowMixin:
             # skip it — skipping leaks the worktree forever because
             # nothing ever retries.
             with self._state_lock:
-                prev_merging = tab.is_merging
-                tab.is_merging = True
+                prev_merging = state.is_merging
+                state.is_merging = True
             try:
                 wt_agent.discard()
             finally:
                 with self._state_lock:
-                    tab.is_merging = prev_merging
+                    state.is_merging = prev_merging
                 # A close that arrived during the discard saw the
                 # tab busy and deferred disposal; nothing later
                 # would dispose it (F4-29).
@@ -961,10 +928,10 @@ class _MergeFlowMixin:
         Returns:
             True if the merge would likely fail, False otherwise.
         """
-        tab = self._get_tab(tab_id)
-        if not tab.use_worktree:
+        state = agent_state.find_by_tab(tab_id)
+        if state is None or not state.use_worktree:
             return False
-        wt_agent = tab.agent
+        wt_agent = state.agent
         if wt_agent is None:
             return False
         wt = wt_agent._wt
@@ -1068,10 +1035,10 @@ class _MergeFlowMixin:
         Returns:
             Sorted deduplicated list of relative file paths.
         """
-        tab = self._get_tab(tab_id)
-        if not tab.use_worktree:
+        state = agent_state.find_by_tab(tab_id)
+        if state is None or not state.use_worktree:
             return []
-        wt_agent = tab.agent
+        wt_agent = state.agent
         if wt_agent is None or not wt_agent._original_branch:
             return []
         wt = wt_agent
@@ -1126,27 +1093,27 @@ class _MergeFlowMixin:
             if result.returncode == 0 else []
         )
 
-    def _check_worktree_busy(self, tab: _RunningAgentState, verb: str) -> dict[str, Any] | None:
+    def _check_worktree_busy(self, state: AgentState, verb: str) -> dict[str, Any] | None:
         """Return an error dict if a worktree action should be refused, else None.
 
         Checks both the tab's own task and any non-worktree task running
         on the main tree (BUG-35, BUG-72 fixes).
 
         Must be called with ``_state_lock`` already held (RACE-1 fix)
-        so the caller can atomically set ``tab.is_merging = True``
+        so the caller can atomically set ``state.is_merging = True``
         before releasing the lock — otherwise a non-wt task on
         another tab could pass its own ``is_merging`` guard in the
         TOCTOU window between this check returning ``None`` and the
         caller acquiring ``_state_lock`` again to set the flag.
 
         Args:
-            tab: The per-tab state to check.
+            state: The agent state to check.
             verb: Human-readable action name (e.g. ``"merging"``).
 
         Returns:
             Error dict with ``success: False`` when busy, otherwise ``None``.
         """
-        if tab.is_task_active:
+        if state.is_task_active:
             return {
                 "success": False,
                 "message": (
@@ -1154,7 +1121,7 @@ class _MergeFlowMixin:
                     f"Wait for it to finish (or stop it) before {verb}."
                 ),
             }
-        if tab.is_merging:
+        if state.is_merging:
             return {
                 "success": False,
                 "message": (
@@ -1192,13 +1159,13 @@ class _MergeFlowMixin:
                 guard.  Used by ``_run_task_inner``'s post-task
                 auto-merge / auto-discard block (RACE-3 fix), which
                 runs on the same task thread that owns
-                ``tab.is_task_active = True`` and therefore would
+                ``state.is_task_active = True`` and therefore would
                 otherwise be refused by its own guard.  A concurrent
                 non-worktree task on the main tree still blocks a
                 ``"merge"`` — but never a ``"discard"``, which does
                 not touch the main working tree.
             already_claimed: When True, the caller has already set
-                ``tab.is_merging`` under ``_state_lock`` after checking
+                ``state.is_merging`` under ``_state_lock`` after checking
                 the busy conditions itself, and will clear it (and call
                 ``_dispose_if_closed``) when its own wider critical
                 section ends.  Implies *internal*.  This method must
@@ -1211,10 +1178,10 @@ class _MergeFlowMixin:
             Dict with ``success`` bool and ``message`` string.
         """
         internal = internal or already_claimed
-        tab = self._get_tab(tab_id)
-        if not tab.use_worktree:
+        state = agent_state.find_by_tab(tab_id)
+        if state is None or not state.use_worktree:
             return {"success": False, "message": "Worktree mode is not enabled"}
-        wt_agent = tab.agent
+        wt_agent = state.agent
         if wt_agent is None or not wt_agent._wt_pending:
             return {
                 "success": False,
@@ -1232,7 +1199,7 @@ class _MergeFlowMixin:
             }
         with self._state_lock:
             if not internal:
-                busy = self._check_worktree_busy(tab, verb)
+                busy = self._check_worktree_busy(state, verb)
                 if busy:
                     return busy
             elif action == "merge" and self._any_non_wt_running():
@@ -1256,7 +1223,7 @@ class _MergeFlowMixin:
                     ),
                 }
             if not already_claimed:
-                tab.is_merging = True
+                state.is_merging = True
         wt._pending_review = False
         try:
             with repo_lock(repo_root):
@@ -1282,7 +1249,7 @@ class _MergeFlowMixin:
         finally:
             if not already_claimed:
                 with self._state_lock:
-                    tab.is_merging = False
+                    state.is_merging = False
                 # A close that arrived during the merge/discard saw the
                 # tab busy and deferred disposal; without this call the
                 # backend tab state would leak indefinitely (F4-23).

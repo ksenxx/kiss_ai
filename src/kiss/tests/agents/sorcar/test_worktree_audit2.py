@@ -5,12 +5,14 @@
 """Tests confirming bugs found in worktree audit round 2.
 
 Each test confirms a specific bug exists in the current code, labeled
-BUG-5 through BUG-7 plus INC-2.
+BUG-6 through BUG-7.  (The BUG-5 test was removed with the per-tab
+registry: the ``tab.use_worktree`` state object it documented no
+longer exists — worktree mode now lives on the task-keyed
+``AgentState``.)
 """
 
 from __future__ import annotations
 
-import json
 import shutil
 import subprocess
 import tempfile
@@ -48,7 +50,11 @@ def _restore_db(saved: tuple) -> None:
 
 def _make_repo(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", str(path)], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "init", "-b", "main", str(path)],
+        capture_output=True,
+        check=True,
+    )
     subprocess.run(
         ["git", "-C", str(path), "config", "user.email", "test@test.com"],
         capture_output=True,
@@ -87,59 +93,6 @@ def _patch_super_run(
 def _unpatch_super_run(original: Any) -> None:
     parent_class = cast(Any, SorcarAgent.__mro__[1])
     parent_class.run = original
-
-
-class TestBug5UseWorktreeNotRestored:
-    """After server restart, _emit_pending_worktree returns early because
-    tab.use_worktree defaults to False and is never restored from the
-    persisted 'extra' data.
-    """
-
-    def setup_method(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.db_saved = _redirect_db(self.tmpdir)
-        self.repo = _make_repo(Path(self.tmpdir) / "repo")
-        self.original_run = _patch_super_run()
-
-    def teardown_method(self) -> None:
-        _unpatch_super_run(self.original_run)
-        _restore_db(self.db_saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_replay_session_does_not_restore_use_worktree(self) -> None:
-        """BUG-5: _replay_session doesn't parse persisted extra data to
-        restore use_worktree, making pending worktrees invisible after restart.
-        """
-        from kiss.server.server import VSCodeServer
-
-        agent = WorktreeSorcarAgent("test")
-        agent.run(prompt_template="task1", work_dir=str(self.repo))
-        assert agent._wt_pending
-
-        chat_id = agent.chat_id
-        task_id = agent._last_task_id
-        assert task_id is not None
-        th._save_task_extra(
-            {"is_worktree": True, "model": "test"},
-            task_id=task_id,
-        )
-
-        server = VSCodeServer()
-
-        tab = server._get_tab("test-tab")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-
-        assert tab.use_worktree is False
-
-        entry = th._load_latest_chat_events_by_chat_id(chat_id)
-        assert entry is not None
-        extra = json.loads(entry["extra"])  # type: ignore[arg-type]
-        assert extra["is_worktree"] is True
-
-        tab.agent.resume_chat_by_id(chat_id)
-        assert tab.use_worktree is False
-
-        agent.discard()
 
 
 class TestBug6FinalizeIgnoresCommitFailure:

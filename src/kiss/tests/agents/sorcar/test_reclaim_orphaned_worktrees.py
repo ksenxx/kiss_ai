@@ -36,9 +36,10 @@ from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
     _git,
 )
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
+from kiss.server.json_printer import JsonPrinter
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -604,15 +605,23 @@ class TestReclaimWiredIntoWorktreeAgent:
         agent1.run(prompt_template="task-a", work_dir=str(self.repo))
         own_wt = agent1._wt
         assert own_wt is not None
-        # Simulate the CLI/server registering the live tab (see
-        # ``cli_steering.py`` — the reclaim exclude set is derived
-        # from :class:`_RunningAgentState`).
-        state1 = _RunningAgentState("tab1", "gpt-4", agent=agent1)
-        _RunningAgentState.register("tab1", state1)
+        # Simulate the server registering the live task (the reclaim
+        # exclude set is derived from the task-keyed agent-state
+        # registry, reached via the printer's
+        # ``live_worktree_branches`` bridge).
+        state1 = agent_state.AgentState(
+            "reclaim-live-1",
+            agent=agent1,
+            tab_id="tab1",
+            server_owned=True,
+            is_task_active=True,
+        )
+        agent_state.register(state1)
 
         # Second agent starts a task with agent1 still holding its
         # worktree.  agent1's branch must be excluded from reclaim.
         agent2 = WorktreeSorcarAgent("test2")
+        agent2.printer = JsonPrinter()
         try:
             agent2.run(prompt_template="task-b", work_dir=str(self.repo))
 
@@ -620,6 +629,6 @@ class TestReclaimWiredIntoWorktreeAgent:
             assert own_wt.wt_dir.exists()
             assert GitWorktreeOps.branch_exists(self.repo, own_wt.branch)
         finally:
-            _RunningAgentState.unregister("tab1", state1)
+            agent_state.unregister("reclaim-live-1", state1)
             agent2.discard()
             agent1.discard()

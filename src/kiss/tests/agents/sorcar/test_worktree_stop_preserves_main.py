@@ -61,6 +61,7 @@ from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as _persistence
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 _GOOD_PPTX_BYTES: bytes = b"GOOD-DECK\x00" + os.urandom(8192)
@@ -92,7 +93,7 @@ def _list_kiss_wt_branches(repo: str) -> list[str]:
     """Return all ``kiss/wt-*`` branches still present in *repo*."""
     result = _run_git(repo, "branch", "--list", "kiss/wt-*")
     return [
-        line.strip().lstrip("* ").strip()
+        line.strip().lstrip("+* ").strip()
         for line in result.stdout.splitlines()
         if line.strip()
     ]
@@ -143,14 +144,13 @@ class _WorktreeStopBase(unittest.TestCase):
     def tearDown(self) -> None:
         self._parent_class.run = self._original_run
 
-        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-        for tab in list(_RunningAgentState.running_agent_states.values()):
-            if tab.agent is not None and tab.agent._wt_pending:
+        for state in agent_state.snapshot():
+            if state.agent is not None and state.agent._wt_pending:
                 try:
-                    tab.agent.discard()
+                    state.agent.discard()
                 except Exception:  # pragma: no cover — cleanup best-effort
                     pass
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
         if _persistence._db_conn is not None:
             _persistence._db_conn.close()
@@ -210,9 +210,11 @@ class TestUserStopPreservesMainBranch(_WorktreeStopBase):
             1. Real git repo with committed good ``slides.pptx``.
             2. Agent stub writes partial bytes to ``slides.pptx`` then
                raises ``KeyboardInterrupt`` (= user clicked Stop).
-            3. ``_run_task_inner`` is driven with ``useWorktree=True``
-               and ``autoCommit=True`` — matching the user's exact
-               configuration in the lost-slides incident.
+            3. A real ``run`` command is driven through
+               ``_handle_command`` with ``useWorktree=True`` and
+               ``autoCommit=True`` — matching the user's exact
+               configuration in the lost-slides incident — and the
+               worker thread is joined.
             4. ``server._close_tab(tab_id)`` simulates the user
                closing the chat tab afterward.  At this point the
                merge view is still open so the close is *deferred*
@@ -240,7 +242,8 @@ class TestUserStopPreservesMainBranch(_WorktreeStopBase):
         )
 
         tab_id = "tab-stop-test"
-        self.server._run_task_inner({
+        self.server._handle_command({
+            "type": "run",
             "prompt": "update the slides",
             "workDir": self.repo,
             "tabId": tab_id,
@@ -248,6 +251,9 @@ class TestUserStopPreservesMainBranch(_WorktreeStopBase):
             "autoCommit": True,
             "model": "",
         })
+        state = agent_state.find_by_tab(tab_id)
+        assert state is not None and state.task_thread is not None
+        state.task_thread.join(timeout=60)
 
         assert "task_stopped" in self._types() or (
             "task_interrupted" in self._types()

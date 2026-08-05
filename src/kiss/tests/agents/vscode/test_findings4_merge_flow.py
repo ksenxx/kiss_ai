@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 from ._memory_printer import MemoryPrinter
@@ -54,15 +55,20 @@ def _make_repo(path: Path) -> Path:
 def _setup_wt_tab(
     server: VSCodeServer, repo: Path, tab_id: str,
 ) -> tuple[Any, WorktreeSorcarAgent, Path]:
-    """Create a worktree agent and wire it into a server tab."""
+    """Create a worktree agent and register its tab's agent state."""
     wt_agent = WorktreeSorcarAgent("wt")
     wt_agent._chat_id = tab_id
     wt_work = wt_agent._try_setup_worktree(repo, str(repo))
     assert wt_work is not None
-    tab = server._get_tab(tab_id)
-    tab.agent = wt_agent
-    tab.use_worktree = True
-    return tab, wt_agent, Path(wt_work)
+    state = agent_state.AgentState(
+        f"{tab_id}-key",
+        agent=wt_agent,
+        tab_id=tab_id,
+        server_owned=True,
+    )
+    state.use_worktree = True
+    agent_state.register(state)
+    return state, wt_agent, Path(wt_work)
 
 
 def _commit_in_worktree(wt_dir: Path, fname: str, content: str) -> None:
@@ -90,8 +96,11 @@ class TestF419InternalStillGuardsMainTree:
         tab, wt_agent, wt_dir = _setup_wt_tab(server, repo, "wt-419")
         _commit_in_worktree(wt_dir, "work.txt", "agent work\n")
 
-        non_wt_tab = server._get_tab("direct-419")
-        non_wt_tab.is_running_non_wt = True
+        non_wt_state = agent_state.AgentState(
+            "direct-419-key", tab_id="direct-419", server_owned=True,
+        )
+        non_wt_state.is_running_non_wt = True
+        agent_state.register(non_wt_state)
         try:
             result = server._handle_worktree_action(
                 "merge", "wt-419", internal=True,
@@ -106,8 +115,9 @@ class TestF419InternalStillGuardsMainTree:
                 "despite the live direct task"
             )
         finally:
-            non_wt_tab.is_running_non_wt = False
+            non_wt_state.is_running_non_wt = False
             wt_agent.discard()
+            agent_state.agent_states.clear()
 
 
 class TestF420ReplayDoesNotResetActiveReview:
@@ -138,6 +148,7 @@ class TestF420ReplayDoesNotResetActiveReview:
         finally:
             tab.is_merging = False
             wt_agent.discard()
+            agent_state.agent_states.clear()
 
 
 class TestF421GitFailureNotMistakenForClean:
@@ -167,6 +178,7 @@ class TestF421GitFailureNotMistakenForClean:
         finally:
             _run_git(repo, "branch", "-m", "renamed", "main")
             wt_agent.discard()
+            agent_state.agent_states.clear()
 
 
 class TestF422CommittedChangesReachHunkReview:
@@ -206,3 +218,4 @@ class TestF422CommittedChangesReachHunkReview:
             with server._state_lock:
                 tab.is_merging = False
             wt_agent.discard()
+            agent_state.agent_states.clear()

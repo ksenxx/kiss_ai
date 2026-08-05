@@ -16,7 +16,7 @@ gone, every future ``mergeAction`` returns early, ``all-done`` is
 never dispatched and ``_finish_merge`` never runs.
 
 Result: the backend tab is stuck ``is_merging=True`` forever (agent
-and ``_RunningAgentState`` leak, the per-tab merge artifact directory
+and ``AgentState`` leak, the per-tab merge artifact directory
 is never cleaned, a pending worktree is never presented/released, and
 the stuck flag can block other tabs' merge actions via busy guards).
 
@@ -48,7 +48,7 @@ from websockets.asyncio.client import ClientConnection, connect
 import kiss.agents.sorcar.persistence as th
 import kiss.core.vscode_config as vc
 import kiss.server.web_server as web_server_module
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
@@ -158,8 +158,8 @@ class TestCloseTabMidMergeReview(IsolatedAsyncioTestCase):
                 pass
         await self.server.stop_async()
         web_server_module._TAB_CLOSE_GRACE = self._orig_grace
-        for tab_id in self._tab_ids:
-            _RunningAgentState.running_agent_states.pop(tab_id, None)
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
         if th._db_conn is not None:
             th._db_conn.close()
         _restore_persistence(self.saved)
@@ -199,8 +199,12 @@ class TestCloseTabMidMergeReview(IsolatedAsyncioTestCase):
         work.mkdir(exist_ok=True)
         merge_json = _build_pending_merge(work)
         vs = self.server._vscode_server
+        agent_state.register(
+            agent_state.AgentState(
+                f"task-{tab_id}", tab_id=tab_id, server_owned=True,
+            ),
+        )
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, vs._get_tab, tab_id)
         started = await loop.run_in_executor(
             None,
             partial(
@@ -211,8 +215,10 @@ class TestCloseTabMidMergeReview(IsolatedAsyncioTestCase):
             ),
         )
         self.assertTrue(started, "merge session failed to start")
-        tab = _RunningAgentState.running_agent_states[tab_id]
-        self.assertTrue(tab.is_merging)
+        state = agent_state.find_by_tab(tab_id)
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertTrue(state.is_merging)
         with self.server._merge_states_lock:
             self.assertIn(tab_id, self.server._merge_states)
         return work
@@ -232,10 +238,10 @@ class TestCloseTabMidMergeReview(IsolatedAsyncioTestCase):
 
         deadline = time.monotonic() + 8.0
         while time.monotonic() < deadline:
-            if tab_id not in _RunningAgentState.running_agent_states:
+            if agent_state.find_by_tab(tab_id) is None:
                 break
             await asyncio.sleep(0.1)
-        leaked = _RunningAgentState.running_agent_states.get(tab_id)
+        leaked = agent_state.find_by_tab(tab_id)
         self.assertIsNone(
             leaked,
             "BUG: deferred close mid-merge-review leaked the backend tab "
@@ -272,10 +278,10 @@ class TestCloseTabMidMergeReview(IsolatedAsyncioTestCase):
         while time.monotonic() < deadline:
             with self.server._merge_states_lock:
                 state_gone = tab_id not in self.server._merge_states
-            if state_gone and tab_id not in _RunningAgentState.running_agent_states:
+            if state_gone and agent_state.find_by_tab(tab_id) is None:
                 break
             await asyncio.sleep(0.1)
-        leaked = _RunningAgentState.running_agent_states.get(tab_id)
+        leaked = agent_state.find_by_tab(tab_id)
         self.assertIsNone(
             leaked,
             "BUG: explicit closeTab mid-merge-review left the backend tab "
@@ -293,6 +299,12 @@ class TestCloseTabMidMergeReview(IsolatedAsyncioTestCase):
         tab_id = "tab-reload-mid-merge"
         await self._start_review(tab_id)
 
+        # A fresh TLS handshake + auth + ready can take >0.3s on a
+        # loaded machine; use a grace long enough that the reconnect
+        # reliably lands inside the window, then wait past the
+        # original deadline to prove the pending close was cancelled.
+        web_server_module._TAB_CLOSE_GRACE = 3.0
+
         ws = await self._connect_ok()
         await ws.send(json.dumps({
             "type": "ready", "tabId": tab_id, "restoredTabs": [],
@@ -308,8 +320,8 @@ class TestCloseTabMidMergeReview(IsolatedAsyncioTestCase):
             await self._wait_for_event(ws2, "merge_started"),
             "review must be replayed to the reconnecting client",
         )
-        await asyncio.sleep(1.0)
-        tab = _RunningAgentState.running_agent_states.get(tab_id)
+        await asyncio.sleep(3.5)
+        tab = agent_state.find_by_tab(tab_id)
         self.assertIsNotNone(tab, "tab must survive a reload within grace")
         assert tab is not None
         self.assertTrue(tab.is_merging)

@@ -269,7 +269,7 @@ def test_vs_bug2_shutdown_helper_accepts_uuid_strings() -> None:
 
     Reproduces by reading the source and asserting the
     ``set[int]``/``int(th_id)`` patterns are gone.  A direct functional
-    repro would require spinning up a live `_RunningAgentState` /
+    repro would require spinning up a live agent-state registry /
     websocket / shutdown sequence — covered by the existing E2E test
     suite's daemon-shutdown tests.
     """
@@ -278,8 +278,7 @@ def test_vs_bug2_shutdown_helper_accepts_uuid_strings() -> None:
     ).read_text()
     assert "active_task_history_ids: set[int]" not in src
     assert "active_task_history_ids: set[str]" in src
-    assert "active_task_history_ids.add(int(th_id))" not in src
-    assert "active_task_history_ids.add(str(th_id))" in src
+    assert "active_task_history_ids.add(int(" not in src
 
 
 
