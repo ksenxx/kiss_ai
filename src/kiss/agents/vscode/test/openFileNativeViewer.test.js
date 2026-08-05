@@ -2,29 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression test for the extension-side ``openFile``
-// handler in ``SorcarSidebarView._handleMessage``.  Drives the
-// compiled ``out/SorcarSidebarView.js`` against a stubbed ``vscode``
-// module and a stub Unix-domain-socket daemon, exactly like
-// ``autocommitProgressSticky.test.js``.
-//
-// Covered scenarios:
-//   * Text source file → ``openTextDocument`` + ``showTextDocument``.
-//   * Text source file with ``:line`` → cursor positioned on the line.
-//   * Image file (.png) → native viewer via
-//     ``vscode.commands.executeCommand('vscode.open', uri)`` (NOT
-//     ``openTextDocument``, which would corrupt binary content).
-//   * PDF file (.pdf) → native viewer.
-//   * Path outside the configured workspace → silently refused.
-//   * Non-existent path → silently refused.
-//   * Directory → silently refused (only files open).
-//
-// The "native viewer" routing is the new behaviour the feature adds:
-// binary/non-text files must NOT be loaded as text documents because
-// VS Code's text editor cannot render them.  Sending them through
-// ``vscode.open`` delegates to whichever viewer VS Code has
-// registered for that extension (image preview, PDF preview, etc.).
 
 'use strict';
 
@@ -195,8 +172,6 @@ if (process.platform === 'win32') {
 let lastServerSock = null;
 const server = net.createServer(sock => {
   lastServerSock = sock;
-  // Drain incoming bytes; the openFile handler never talks to the
-  // daemon so we don't need to parse or respond.
   sock.on('data', () => {});
 });
 
@@ -267,14 +242,12 @@ async function runTests() {
   tmpDirs.push(ws);
   workspaceFolders = [{uri: makeUri(ws)}];
 
-  // Real fixtures inside the workspace.
   const textFile = path.join(ws, 'src', 'main.py');
   fs.mkdirSync(path.dirname(textFile), {recursive: true});
   fs.writeFileSync(textFile, 'print("hello")\n');
 
   const imageFile = path.join(ws, 'assets', 'logo.png');
   fs.mkdirSync(path.dirname(imageFile), {recursive: true});
-  // 8-byte PNG signature + IEND (enough to look like a binary file).
   fs.writeFileSync(
     imageFile,
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
@@ -292,7 +265,6 @@ async function runTests() {
   wv.fireMessage({type: 'ready', tabId: 'tab1', restoredTabs: []});
   await waitForClient();
 
-  // ---- 1. Text file ---------------------------------------------------
   clear();
   wv.fireMessage({type: 'openFile', path: 'src/main.py'});
   await waitFor(
@@ -308,7 +280,6 @@ async function runTests() {
   );
   console.log('  ok - text file opens via openTextDocument');
 
-  // ---- 2. Text file with :line ----------------------------------------
   clear();
   wv.fireMessage({type: 'openFile', path: 'src/main.py', line: 7});
   await waitFor(
@@ -318,8 +289,6 @@ async function runTests() {
       selectionAssignments.length === 1,
     'text file with line: openTextDocument + selection assignment expected',
   );
-  // Production code passes ``line - 1`` to ``new vscode.Position(...)``
-  // so the cursor lands on the 1-indexed line the user clicked.
   assert.strictEqual(
     selectionAssignments[0].line,
     6,
@@ -328,7 +297,6 @@ async function runTests() {
   assert.strictEqual(revealCalls.length, 1, 'revealRange must fire once');
   console.log('  ok - text file with :line positions the cursor');
 
-  // ---- 3. Image file → native viewer ---------------------------------
   clear();
   wv.fireMessage({type: 'openFile', path: 'assets/logo.png'});
   await waitFor(
@@ -354,7 +322,6 @@ async function runTests() {
   );
   console.log('  ok - image file opens via native viewer (vscode.open)');
 
-  // ---- 4. PDF file → native viewer -----------------------------------
   clear();
   wv.fireMessage({type: 'openFile', path: 'docs/spec.pdf'});
   await waitFor(
@@ -375,14 +342,12 @@ async function runTests() {
   );
   console.log('  ok - pdf file opens via native viewer (vscode.open)');
 
-  // ---- 5. Outside workspace → refused --------------------------------
   clear();
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-outside-'));
   tmpDirs.push(outside);
   const outsideFile = path.join(outside, 'evil.py');
   fs.writeFileSync(outsideFile, 'x = 1\n');
   wv.fireMessage({type: 'openFile', path: outsideFile});
-  // Give the handler a tick to run.
   await new Promise(r => setTimeout(r, 100));
   assert.deepStrictEqual(
     openedTextDocs,
@@ -396,7 +361,6 @@ async function runTests() {
   );
   console.log('  ok - outside-workspace path is refused');
 
-  // ---- 6. Non-existent path → refused --------------------------------
   clear();
   wv.fireMessage({type: 'openFile', path: 'no/such/file.py'});
   await new Promise(r => setTimeout(r, 100));
@@ -412,11 +376,8 @@ async function runTests() {
   );
   console.log('  ok - non-existent path is refused');
 
-  // ---- 7. Directory → refused ----------------------------------------
   clear();
   wv.fireMessage({type: 'openFile', path: 'src'});
-  // ``src`` resolves to a real path inside the workspace but is a
-  // directory; the handler must check ``isFile()`` and refuse.
   await new Promise(r => setTimeout(r, 100));
   assert.deepStrictEqual(
     openedTextDocs,
@@ -430,7 +391,6 @@ async function runTests() {
   );
   console.log('  ok - directory is refused (isFile guard)');
 
-  // Cleanup
   view.dispose();
   server.close();
   for (const dir of tmpDirs.slice().reverse()) {

@@ -67,8 +67,6 @@ class TestGhostTextNoExtraSpaces:
         The broadcast ghost suggestion must not start with whitespace.
         """
         server = VSCodeServer()
-        # Insert a task with a double space — the exact pattern that
-        # triggered the original bug report.
         th._add_task("fix  the bug now")
         events: list[dict] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
@@ -81,8 +79,6 @@ class TestGhostTextNoExtraSpaces:
             f"Ghost suggestion {suggestion!r} starts with whitespace when "
             f"the query already ends with a space — this is the extra-spaces bug."
         )
-        # And the suggestion concatenated to the query must recover the
-        # full history task verbatim.
         assert "fix " + suggestion == "fix  the bug now" or (
             suggestion == "the bug now"
         ), f"Suggestion {suggestion!r} should continue the history task cleanly"
@@ -163,8 +159,6 @@ class TestGhostTextNoExtraSpaces:
         whitespace characters — exactly one separator space is allowed.
         """
         server = VSCodeServer()
-        # Insert a task with a double space after the identifier — the
-        # exact pattern that triggers the user-reported bug.
         th._add_task("parse  arguments now")
         events: list[dict] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
@@ -173,7 +167,6 @@ class TestGhostTextNoExtraSpaces:
         assert len(ghost) == 1
         suggestion = ghost[0]["suggestion"]
         assert suggestion, "Expected a non-empty ghost suggestion"
-        # At most one leading space — the legitimate separator.
         leading = len(suggestion) - len(suggestion.lstrip())
         assert leading <= 1, (
             f"Ghost suggestion {suggestion!r} has {leading} leading "
@@ -181,5 +174,4 @@ class TestGhostTextNoExtraSpaces:
             f"allowed when the user's query ends in a non-whitespace "
             f"character — anything more renders as visible padding."
         )
-        # And the suggestion must continue the history task readably.
         assert suggestion == " arguments now"

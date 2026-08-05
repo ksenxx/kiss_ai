@@ -77,8 +77,6 @@ sys.stdout.flush()
     pid, fd = pty_spawn([sys.executable, "-c", child_code])
 
     try:
-        # 24 rows x 30 cols, so a miscounted ~26-column prompt wraps
-        # almost immediately while a correct 4-column prompt never does.
         fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 30, 0, 0))
         deadline = time.time() + 30.0
         out = b""
@@ -87,7 +85,7 @@ sys.stdout.flush()
         assert "›" in out.decode("utf-8", "ignore"), (
             f"prompt never appeared; output: {out!r}"
         )
-        _drain(fd, 0.5)  # settle: readline finishes prompt bookkeeping
+        _drain(fd, 0.5)
 
         typed = b""
         for ch in b"abcdefghij":

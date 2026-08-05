@@ -144,10 +144,6 @@ class _ScriptedDaemon:
                      "tabId": tab, "taskId": task},
                 ])
             else:
-                # F1 reproduction: start AND end land in ONE socket
-                # write, so both events are dispatched back-to-back on
-                # the client's loop thread — microseconds apart, far
-                # inside the submitter's 50 ms poll gap.
                 self._send(conn, [
                     {"type": "status", "running": True,
                      "tabId": tab, "taskId": task},
@@ -197,9 +193,6 @@ class TestF1FastFinishingTaskAcknowledged(unittest.TestCase):
             t0 = time.monotonic()
             _submit_task(client, "instant task", timeout_seconds=4.0)
             elapsed = time.monotonic() - t0
-            # Buggy code misses the set→clear edge and spins until the
-            # full 4 s acknowledgement deadline; fixed code latches the
-            # observed status and returns within milliseconds.
             self.assertLess(
                 elapsed, 3.0,
                 "submit wedged waiting for acknowledgement of a task "
@@ -234,8 +227,6 @@ class TestF2PumpStdinEofBusySpin(unittest.TestCase):
     """F2: ``_pump_stdin`` must idle, not spin, once stdin hits EOF."""
 
     def test_pump_does_not_busy_spin_after_stdin_eof(self) -> None:
-        # stdin = /dev/null → the very first os.read returns b"" (EOF),
-        # putting the pump in the EOF regime for its whole 0.8 s run.
         proc = subprocess.run(
             [sys.executable, "-c", _F2_SCRIPT],
             stdin=subprocess.DEVNULL,
@@ -249,8 +240,6 @@ class TestF2PumpStdinEofBusySpin(unittest.TestCase):
         ]
         self.assertTrue(cpu_lines, proc.stdout)
         cpu = float(cpu_lines[-1].split("=", 1)[1])
-        # Buggy code burns ~0.8 s of CPU in the 0.8 s window (100 %
-        # spin); fixed code sleeps in select and uses a few ms.
         self.assertLess(
             cpu, 0.3,
             f"_pump_stdin burned {cpu:.3f}s CPU in a 0.8s window after "
@@ -274,14 +263,10 @@ class TestF3MultiLineChunkNotDropped(unittest.TestCase):
 
         closer = threading.Timer(0.3, close_writer)
         try:
-            repl = AnchoredRepl()  # box never start()ed: redraw no-ops
-            # Two Enter(\r)-terminated lines in ONE chunk: feed()
-            # submits both before the pump re-polls is_done().
+            repl = AnchoredRepl()
             os.write(write_fd, b"first\rsecond\r")
             first = repl.read_idle_line()
             self.assertEqual(first, "first")
-            # Unblock the buggy code path (which would otherwise wait
-            # for more stdin data forever) by closing the writer soon.
             closer.start()
             second = repl.read_idle_line()
             self.assertEqual(
@@ -289,7 +274,6 @@ class TestF3MultiLineChunkNotDropped(unittest.TestCase):
                 "second submitted line of the chunk was dropped (F3)",
             )
             self.assertIn("second", repl.box.history)
-            # EOF must still surface once the surplus is drained.
             write_closed.wait(5.0)
             self.assertIsNone(repl.read_idle_line())
         finally:
@@ -332,7 +316,7 @@ class TestF9CtrlCAtAskUserPrompt(unittest.TestCase):
         tab_id = uuid.uuid4().hex
         proc = subprocess.Popen(
             [sys.executable, "-c", _F9_CHILD, str(sock), tmp, tab_id],
-            stdin=subprocess.PIPE,  # kept open so input() blocks
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -342,8 +326,6 @@ class TestF9CtrlCAtAskUserPrompt(unittest.TestCase):
                 daemon.wait_for("run", timeout=20.0),
                 "child never submitted the task",
             )
-            # Give the child time to drain the askUser event on its
-            # REPL thread, print the question and block in input().
             time.sleep(1.0)
             proc.send_signal(signal.SIGINT)
             out, err = proc.communicate(timeout=30)

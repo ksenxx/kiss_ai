@@ -99,7 +99,6 @@ def test_cli_returns_all_matching_tricks_at_sentence_start(
         f"Expected ALL three tricks starting with 'Reproduce' to appear in "
         f"the dropdown, but got {matches!r}"
     )
-    # The unrelated trick must NOT appear.
     assert "Use internet search extensively." not in matches
 
 

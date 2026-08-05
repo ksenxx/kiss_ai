@@ -4,13 +4,16 @@
 # add your name here
 """Browser automation tool for LLM agents using Playwright.
 
-Uses non-headless Playwright Chromium for page analysis and automation
-(accessibility tree, clicking, typing, screenshots).
+Uses headless Playwright Chromium for page analysis and automation
+(accessibility tree, clicking, typing, screenshots).  ``show_browser()``
+switches the session to a visible window when a page needs a human
+(interactive login, CAPTCHA, bot check).
 """
 
 from __future__ import annotations
 
 import atexit
+import json
 import logging
 import os
 import re
@@ -26,13 +29,19 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar.persistence import _default_kiss_dir
-from kiss.core.useful_tools import _absolutize, _active_worktree_remap
+from kiss.agents.sorcar.useful_tools import _absolutize, _active_worktree_remap
 
 logger = logging.getLogger(__name__)
 
 _SINGLETON_FILES = ("SingletonLock", "SingletonCookie", "SingletonSocket")
 
 _ACCOUNTS_GOOGLE_URL_RE = re.compile(r"^https?://accounts\.google\.com/")
+
+# Headless Chromium reports "HeadlessChrome/<version>" in its user agent.
+# Many sites use that token alone to serve a bot challenge instead of the
+# page, so it is rewritten to the equivalent headed token.
+_HEADLESS_UA_TOKEN = "HeadlessChrome"
+_HEADED_UA_TOKEN = "Chrome"
 
 
 def _abort_route(route: Any) -> None:
@@ -95,16 +104,8 @@ INTERACTIVE_ROLES = {
     "treeitem",
 }
 
-# Role lines look like ``- button "Name"`` — but when the accessible
-# name contains ``": "`` Playwright single-quote-wraps the whole YAML
-# key (``- 'link "colon: \"q\""':``), so an optional leading ``'`` must
-# be accepted or the element is silently never numbered.
 _ROLE_LINE_RE = re.compile(r"^(\s*)-\s+('?)([\w]+)\s*(.*)")
 
-# Accessible names are double-quoted with YAML escaping: ``\"`` for an
-# embedded quote and ``\\`` for a backslash.  A naive ``"([^"]*)"``
-# stops at the first embedded quote and records a corrupted name that
-# get_by_role(name=..., exact=True) can never match.
 _NAME_RE = re.compile(r'"((?:\\.|[^"\\])*)"')
 _NAME_UNESCAPE_RE = re.compile(r'\\(["\\])')
 
@@ -130,19 +131,10 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-# Seconds a graceful Playwright close may take before the watchdog kills
-# the Chromium process directly (a wedged driver connection can otherwise
-# hang the close call forever, leaking the browser).
 _CLOSE_WATCHDOG_SECS = 15.0
 
-# Serializes stale-dir cleanup + profile resolution + launch within this
-# process so two concurrently-launching tools can never clean/select the
-# same profile directory out from under each other.
 _LAUNCH_LOCK = threading.RLock()
 
-# Substrings identifying a Chromium/Playwright browser process command
-# line; the SingletonLock PID fallback only trusts PIDs whose process
-# matches (the lock could be corrupt or its PID recycled).
 _BROWSER_CMD_MARKERS = ("chrom", "playwright", "headless")
 
 
@@ -210,8 +202,6 @@ def _terminate_pid_escalating(pid: int, identity: str | None) -> None:
             return
         current = _process_identity(pid)
         if current is None:
-            # Process vanished between the checks (or ps failed): there
-            # is nothing that can be safely signalled.
             return
         if identity is None or current != identity:
             logger.warning(
@@ -315,18 +305,9 @@ def _is_profile_in_use(profile_dir: str) -> bool:
     Returns:
         True if the profile is currently locked by a live process.
     """
-    # Composition of the two shared helpers: ``_read_lock_pid``
-    # already rejects absent/unparsable/corrupt locks (including the
-    # ``pid <= 0`` case — ``os.kill(0, 0)`` signals the caller's own
-    # process group and always succeeds, which would mark the profile
-    # permanently in use), and ``_pid_alive`` implements the
-    # EPERM-means-alive liveness probe.
     try:
         pid = _read_lock_pid(profile_dir, propagate_permission_error=True)
     except PermissionError:
-        # Preserve the old inline check's conservative behaviour: a
-        # lock symlink we cannot inspect may belong to another user's
-        # live Chromium, so never launch a second browser into it.
         return True
     return pid is not None and _pid_alive(pid)
 
@@ -348,43 +329,50 @@ def _number_interactive_elements(snapshot: str) -> tuple[str, list[dict[str, str
         name_match = _NAME_RE.match(rest)
         name = _NAME_UNESCAPE_RE.sub(r"\1", name_match.group(1)) if name_match else ""
         if quote:
-            # The whole key is a YAML *single-quoted* scalar, in which
-            # an embedded apostrophe is escaped by doubling it
-            # (``- 'link "Bob''s: list"':``).  Collapse the doubling or
-            # get_by_role(name=..., exact=True) can never match.
             name = name.replace("''", "'")
-        elements.append({"role": role, "name": name})
+        # Record which occurrence of this (role, name) pair — and of the
+        # bare role — this element is, in snapshot (document) order, so
+        # resolving an ID targets *this* element rather than the first
+        # visible one that happens to share its role and name.
+        occurrence = sum(
+            1 for e in elements if e["role"] == role and e["name"] == name
+        )
+        role_occurrence = sum(1 for e in elements if e["role"] == role)
+        elements.append({
+            "role": role,
+            "name": name,
+            "occurrence": str(occurrence),
+            "role_occurrence": str(role_occurrence),
+        })
         result_lines.append(f"{indent}- [{counter}] {quote}{role} {rest}".rstrip())
     return "\n".join(result_lines), elements
 
 
 class WebUseTool:
-    """Browser automation tool using non-headless Playwright Chromium.
+    """Browser automation tool using headless Playwright Chromium.
 
-    The user can see and interact with the Chromium window directly.
-    All browsing (including user-interaction flows like OAuth, CAPTCHAs)
-    happens in this single Chromium instance.
+    Browsing is headless by default: no window is opened, nothing steals
+    the user's focus, and screenshots still work because Chromium renders
+    off-screen exactly as it does on screen.  All browsing happens in a
+    single Chromium instance with a persistent profile, so logins survive
+    across sessions.
+
+    When a page needs a human — an interactive login, a CAPTCHA, a bot
+    check — :meth:`show_browser` reopens the same profile in a visible
+    window and re-navigates to the current page.
     """
 
-    # Sentinel meaning "use the default profile dir under the KISS home".
-    # The actual path is resolved lazily at construction time via
-    # ``_default_kiss_dir()`` so it respects the ``KISS_HOME`` env var even
-    # when KISS_HOME is set after package import (as the test conftest does).
     _DEFAULT_USER_DATA_DIR = "__kiss_default_browser_profile__"
 
     def __init__(
         self,
         viewport: tuple[int, int] = (1280, 900),
         user_data_dir: str | None = _DEFAULT_USER_DATA_DIR,
-        headless: bool = False,
+        headless: bool = True,
         work_dir: str | None = None,
         ephemeral: bool = False,
         **_kwargs: Any,
     ) -> None:
-        # Ephemeral mode (parallel sub-agents): a throwaway profile in a
-        # fresh temp directory, deleted by close().  This keeps sub-agents
-        # off the user's persistent profile so they never escalate to
-        # ``browser_profile_N`` dirs (one leaked visible window each).
         self._ephemeral_dir: str | None = None
         if ephemeral:
             self._ephemeral_dir = tempfile.mkdtemp(prefix="kiss_web_profile_")
@@ -394,17 +382,12 @@ class WebUseTool:
         self.viewport = viewport
         self.user_data_dir = user_data_dir
         self._headless = headless
-        # Agent working directory: relative screenshot paths are
-        # anchored here, consistent with the Read/Write/Edit/Bash tools.
         self.work_dir = work_dir
         self._playwright: Any = None
         self._browser: Any = None
         self._context: Any = None
         self._page: Any = None
         self._elements: list[dict[str, str]] = []
-        # OS PID + identity fingerprint of the Chromium main process,
-        # recorded at launch so a failed graceful close can escalate to
-        # killing the process (identity guards against PID reuse).
         self._browser_pid: int | None = None
         self._browser_identity: str | None = None
         atexit.register(self.close)
@@ -535,7 +518,6 @@ class WebUseTool:
         self._browser_identity = None
         if pid is None or pid <= 0 or pid == os.getpid():
             return
-        # A graceful close that succeeded needs only a moment to finish.
         if _wait_pid_exit(pid, 2.0):
             return
         logger.warning("Chromium (pid %d) survived graceful close", pid)
@@ -583,8 +565,6 @@ class WebUseTool:
             pid = _read_lock_pid(profile_dir)
             if pid is None:
                 return
-            # The lock could be corrupt or its PID recycled: only trust
-            # it when the process actually looks like a browser.
             identity = _process_identity(pid)
             if identity and any(
                 marker in identity.lower() for marker in _BROWSER_CMD_MARKERS
@@ -622,12 +602,6 @@ class WebUseTool:
         """
         if self._is_alive():
             return
-        # Active tab closed (user hit the tab's ✕ / window.close()) but
-        # the context survives with other tabs: adopt the most recent
-        # surviving tab instead of tearing down the whole session and
-        # discarding every open tab.  ``self._page is None`` means a
-        # renderer *crash* (see _on_page_crash) — that path must still
-        # fall through to a full teardown + relaunch.
         if self._page is not None and self._context is not None:
             try:
                 pages = [p for p in self._context.pages if not p.is_closed()]
@@ -638,21 +612,28 @@ class WebUseTool:
                 self._adopt_page(pages[-1])
                 self._elements = []
                 return
-        # Re-arm the atexit safety net (close() unregisters it).  The
-        # unregister-then-register pattern keeps exactly one entry even
-        # when the browser is relaunched many times.
         atexit.unregister(self.close)
         atexit.register(self.close)
         self._close_browser_only()
         from playwright.sync_api import sync_playwright
 
-        prev_app = _get_frontmost_app()
+        # A headless launch never raises a window, so there is no focus to
+        # save and restore.
+        prev_app = None if self._headless else _get_frontmost_app()
         try:
             if self._playwright is None:
                 self._playwright = sync_playwright().start()
             launcher = self._playwright.chromium
             kwargs: dict[str, Any] = {
                 "headless": self._headless,
+                # The "chromium" channel selects the full Chromium binary,
+                # which headless runs in Chrome's new headless mode: the
+                # same renderer as a headed window, so pages and
+                # screenshots look exactly as the user would see them.
+                # Without it Playwright launches chrome-headless-shell, a
+                # stripped-down binary with lower fidelity and no
+                # extension support.
+                "channel": "chromium",
                 "args": [
                     "--disable-blink-features=AutomationControlled",
                     "--disable-features=IsolateOrigins,site-per-process",
@@ -667,16 +648,23 @@ class WebUseTool:
 
             try:
                 self._launch_browser(launcher, kwargs)
-            except Exception:  # pragma: no cover – Chromium always pre-installed in CI
+            except Exception as exc:  # pragma: no cover – Chromium pre-installed in CI
+                message = str(exc)
+                if (
+                    "Executable doesn't exist" not in message
+                    and "playwright install" not in message
+                ):
+                    # Profile locks, missing display libraries, resource
+                    # exhaustion, etc. — installing Chromium would not
+                    # help and would only bury the real error.
+                    raise
                 logger.info("Playwright Chromium not found, installing...")
-                # A partially-launched browser (launch succeeded, later
-                # setup raised) must be torn down before retrying or it
-                # would leak alongside the retry's browser.
                 self._close_browser_only()
                 subprocess.run(
                     [sys.executable, "-m", "playwright", "install", "chromium"],
                     check=True,
                     capture_output=True,
+                    timeout=900,
                 )
                 self._launch_browser(launcher, kwargs)
         except Exception:  # pragma: no cover — Playwright init failure
@@ -731,10 +719,6 @@ class WebUseTool:
         return None  # pragma: no cover — 100 concurrent instances is unlikely
 
     def _launch_browser(self, launcher: Any, kwargs: dict[str, Any]) -> None:
-        # The launch lock serializes cleanup + profile resolution + launch
-        # so two concurrently-launching tools in this process can never
-        # clean/select the same profile directory out from under each
-        # other.
         with _LAUNCH_LOCK:
             self._cleanup_stale_escalation_dirs()
             effective_dir = self._resolve_user_data_dir()
@@ -744,13 +728,6 @@ class WebUseTool:
                 self._context = launcher.launch_persistent_context(
                     effective_dir, **kwargs, **self._context_args()
                 )
-                # Record the Chromium OS PID immediately — before any
-                # post-launch setup that could raise — so close() can
-                # guarantee the process dies even when setup fails or a
-                # later graceful close fails.  NOTE: _on_browser_lost
-                # deliberately does NOT clear the PID — after the driver
-                # drops its references the PID is the only remaining
-                # handle to a possibly-still-running process.
                 self._capture_browser_pid(effective_dir)
                 page = (
                     self._context.pages[0] if self._context.pages
@@ -761,11 +738,34 @@ class WebUseTool:
                 self._capture_browser_pid(None)
                 self._context = self._browser.new_context(**self._context_args())
                 page = self._context.new_page()
-        # The accounts.google.com block applies to the tool as a whole,
-        # not just persistent profiles: install it on every context.
         self._context.route(_ACCOUNTS_GOOGLE_URL_RE, _abort_route)
         self._context.on("close", self._on_browser_lost)
         self._adopt_page(page)
+        self._mask_headless_user_agent()
+
+    def _mask_headless_user_agent(self) -> None:
+        """Rewrite the ``HeadlessChrome`` user-agent token to ``Chrome``.
+
+        Headless Chromium advertises ``HeadlessChrome/<version>``, and many
+        sites treat that token alone as a bot signal and answer with a
+        challenge page instead of content.  It is rewritten in both places
+        a site can read it: the ``User-Agent`` request header (context
+        wide) and ``navigator.userAgent`` (an init script that runs in
+        every page and frame of the context).  A headed browser reports no
+        such token, so this is a no-op there.
+        """
+        try:
+            user_agent = self._page.evaluate("navigator.userAgent")
+            if _HEADLESS_UA_TOKEN not in user_agent:
+                return
+            headed = user_agent.replace(_HEADLESS_UA_TOKEN, _HEADED_UA_TOKEN)
+            self._context.set_extra_http_headers({"User-Agent": headed})
+            self._context.add_init_script(
+                "Object.defineProperty(navigator, 'userAgent', "
+                f"{{get: () => {json.dumps(headed)}}});",
+            )
+        except Exception:  # pragma: no cover — evaluate on a fresh page rarely fails
+            logger.debug("Could not mask the headless user agent", exc_info=True)
 
     def _get_ax_tree(self, max_chars: int = 50000) -> str:
         self._ensure_browser()
@@ -804,17 +804,29 @@ class WebUseTool:
                 _, self._elements = _number_interactive_elements(snapshot)
             if element_id < 1 or element_id > len(self._elements):
                 raise ValueError(f"Element with ID {element_id} not found.")
-        role = self._elements[element_id - 1]["role"]
-        name = self._elements[element_id - 1]["name"]
+        entry = self._elements[element_id - 1]
+        role = entry["role"]
+        name = entry["name"]
         if name:
             locator = self._page.get_by_role(role, name=name, exact=True)
+            occurrence = int(entry.get("occurrence", "0"))
         else:
+            # get_by_role(role) matches named and unnamed elements alike,
+            # so an unnamed element's index counts every element of the
+            # role in snapshot order.
             locator = self._page.get_by_role(role)
+            occurrence = int(entry.get("role_occurrence", "0"))
         n = locator.count()
         if n == 0:  # pragma: no cover — race between snapshot and DOM
             raise ValueError(f"Element with ID {element_id} not found on page.")
         if n == 1:
             return locator
+        if occurrence < n:
+            # Both the aria snapshot and get_by_role() enumerate the
+            # accessibility tree in document order, so the recorded
+            # occurrence picks the exact element this ID was assigned
+            # to — not merely the first visible role/name match.
+            return locator.nth(occurrence)
         for i in range(n):  # pragma: no branch — first visible element always found
             try:
                 if locator.nth(i).is_visible():
@@ -823,6 +835,20 @@ class WebUseTool:
                 logger.debug("Exception caught", exc_info=True)
                 continue
         return locator.first  # pragma: no cover — all elements invisible is rare
+
+    def _try_ensure_browser(self, context: str) -> str | None:
+        """Start the browser if needed; return an error string on failure.
+
+        Public tools document string error returns, so browser
+        startup/install failures must surface as ``Error <context>: ...``
+        instead of escaping the method (S2-27).
+        """
+        try:
+            self._ensure_browser()
+            return None
+        except Exception as exc:
+            logger.warning("browser startup failed", exc_info=True)
+            return f"Error {context}: {exc}"
 
     def go_to_url(self, url: str) -> str:
         """Navigate the browser to a URL and return the page accessibility tree.
@@ -835,7 +861,9 @@ class WebUseTool:
         Returns:
             On success: page title, URL, and accessibility tree with [N] IDs. For "tab:list":
             list of open tabs with indices. On error: "Error navigating to <url>: <message>"."""
-        self._ensure_browser()
+        err = self._try_ensure_browser(f"navigating to {url}")
+        if err is not None:
+            return err
         try:
             pages = self._context.pages
             if url == "tab:list":
@@ -869,7 +897,9 @@ class WebUseTool:
         Returns:
             Updated accessibility tree (title, URL, numbered elements), or on error
             "Error clicking element <id>: <message>"."""
-        self._ensure_browser()
+        err = self._try_ensure_browser(f"clicking element {element_id}")
+        if err is not None:
+            return err
         try:
             locator = self._resolve_locator(element_id)
 
@@ -901,7 +931,9 @@ class WebUseTool:
 
         Returns:
             Updated accessibility tree, or "Error typing into element <id>: <message>" on error."""
-        self._ensure_browser()
+        err = self._try_ensure_browser(f"typing into element {element_id}")
+        if err is not None:
+            return err
         try:
             locator = self._resolve_locator(element_id)
             select_all = "Meta+a" if sys.platform == "darwin" else "Control+a"
@@ -927,7 +959,9 @@ class WebUseTool:
 
         Returns:
             Updated accessibility tree, or "Error pressing key '<key>': <message>" on error."""
-        self._ensure_browser()
+        err = self._try_ensure_browser(f"pressing key {key!r}")
+        if err is not None:
+            return err
         try:
             self._page.keyboard.press(key)
             self._page.wait_for_timeout(300)
@@ -946,7 +980,9 @@ class WebUseTool:
         Returns:
             Updated accessibility tree after scrolling, or
             "Error scrolling <direction>: <message>" on error."""
-        self._ensure_browser()
+        err = self._try_ensure_browser(f"scrolling {direction}")
+        if err is not None:
+            return err
         try:
             dx, dy = _SCROLL_DELTA.get(direction, (0, 300))
             vw, vh = self.viewport[0] // 2, self.viewport[1] // 2
@@ -961,11 +997,12 @@ class WebUseTool:
             return f"Error scrolling {direction}: {e}"
 
     def screenshot(self, file_path: str = "screenshot.png") -> str:
-        """Capture the visible viewport of the Chromium browser as an image.
+        """Capture the current viewport of the Chromium browser as an image.
 
         Use to verify layout, captchas, or visual state of a web page currently
-        open in the browser. This does NOT capture or display local files,
-        attached images, or PDFs — it only screenshots the browser window.
+        open in the browser. Works the same whether the browser is headless
+        (the default) or visible. This does NOT capture or display local files,
+        attached images, or PDFs — it only screenshots the browser page.
 
         Args:
             file_path: Path where the PNG will be saved (default "screenshot.png"). Parent
@@ -974,20 +1011,11 @@ class WebUseTool:
         Returns:
             "Screenshot saved to <resolved_path>", or
             "Error taking screenshot: <message>" on error."""
-        self._ensure_browser()
+        err = self._try_ensure_browser("taking screenshot")
+        if err is not None:
+            return err
         try:
-            # Anchor the path the same way the file tools do: expand
-            # ``~`` to the user's home (never a literal ``./~/`` dir),
-            # then resolve relative paths against the agent work_dir
-            # (NOT the daemon process cwd — in worktree mode that
-            # would silently escape the worktree).  Reuses the exact
-            # helper the Read/Write/Edit tools use so the two path
-            # policies can never drift.
             path = Path(_absolutize(file_path, self.work_dir)).resolve()
-            # Active-worktree remap, mirroring Write/Edit: an absolute
-            # parent-repo path (model ignored the ``Work dir:`` hint)
-            # must land inside the live ``.kiss-worktrees/kiss_wt-*``
-            # worktree — never dirty the user's main checkout.
             remapped = _active_worktree_remap(path, self.work_dir)
             if remapped is not None:
                 path = remapped
@@ -1008,7 +1036,9 @@ class WebUseTool:
         Returns:
             Accessibility tree or plain text as described above, or
             "Error getting page content: <message>" on error."""
-        self._ensure_browser()
+        err = self._try_ensure_browser("getting page content")
+        if err is not None:
+            return err
         try:
             if text_only:
                 title = self._page.title()
@@ -1032,23 +1062,16 @@ class WebUseTool:
             except Exception:  # pragma: no cover — Playwright stop rarely fails
                 logger.debug("Exception caught", exc_info=True)
         self._playwright = None
-        # Drop the atexit registration so closed tools are not retained
-        # for the process lifetime (one leaked entry per agent run).
-        # ``_ensure_browser`` re-registers if this tool is revived.
         atexit.unregister(self.close)
         if self._ephemeral_dir:
-            # Keep _ephemeral_dir set: a closed tool can be revived by
-            # the next web tool call (_ensure_browser relaunches and
-            # mkdir-recreates the dir), and the revived browser's profile
-            # must be deleted again by the next close().
             _rmtree_logged(self._ephemeral_dir)
         return "Browser closed."
 
     def close_browser(self) -> str:
-        """Close the Chromium browser window and free its OS process.
+        """Close the Chromium browser and free its OS process.
 
         Use when you are done with web browsing for now (its purpose is
-        over) so the browser window does not stay open for the rest of a
+        over) so the browser does not stay running for the rest of a
         long task. Safe to call anytime: the next web tool call (e.g.
         go_to_url) automatically relaunches a fresh browser with the same
         profile, so logins are preserved.
@@ -1061,12 +1084,85 @@ class WebUseTool:
             "web tool call."
         )
 
+    def show_browser(self, visible: bool = True) -> str:
+        """Show the Chromium window on screen. Browsing is headless by default.
+
+        Call this when a page needs the human in front of the screen: an
+        interactive login or OAuth consent, a CAPTCHA, an "unusual traffic"
+        bot check, or when the user asks to watch what you are doing. The
+        same browser profile is reused, so cookies and logins carry over,
+        and the page you are on is reopened in the visible window. Pass
+        visible=False to go back to the headless window when the human
+        part is done.
+
+        Args:
+            visible: True to reopen the browser in a window the user can see
+                and interact with, False to return to headless browsing.
+
+        Returns:
+            The accessibility tree of the reopened page, or
+            "Browser is now visible."/"Browser is now headless." when no page
+            was open, or "Error <doing something>: <message>" on failure."""
+        state = "visible" if visible else "headless"
+        if self._headless == (not visible) and self._is_alive():
+            return f"Browser is already {state}."
+        url, cookies = self._capture_session()
+        self._close_browser_only()
+        self._headless = not visible
+        err = self._try_ensure_browser(f"making the browser {state}")
+        if err is not None:
+            return err
+        self._restore_cookies(cookies)
+        if url:
+            return self.go_to_url(url)
+        return f"Browser is now {state}."
+
+    def _capture_session(self) -> tuple[str, list[Any]]:
+        """Return the page to reopen and the cookies to carry across a relaunch.
+
+        Chromium cannot switch between headless and visible without being
+        restarted, and a restart drops every session-only cookie — exactly
+        the cookies a login or bot-check flow is in the middle of setting.
+        They are handed back to the new browser by
+        :meth:`_restore_cookies`.
+
+        Returns:
+            The URL to reopen (empty when nothing worth reopening is
+            loaded) and the cookies of the current context.
+        """
+        if not self._is_alive():
+            return "", []
+        # The user may have opened a tab themselves while the window was
+        # visible; that newest tab is the one worth carrying over.
+        self._check_for_new_tab()
+        url = self._page.url
+        if url.startswith("about:"):
+            url = ""
+        try:
+            return url, self._context.cookies()
+        except Exception:  # pragma: no cover — reading cookies rarely fails
+            logger.debug("Could not read cookies before relaunch", exc_info=True)
+            return url, []
+
+    def _restore_cookies(self, cookies: list[Any]) -> None:
+        """Add *cookies* to the freshly launched context.
+
+        Args:
+            cookies: Cookies captured by :meth:`_capture_session`.
+        """
+        if not cookies:
+            return
+        try:
+            self._context.add_cookies(cookies)
+        except Exception:  # pragma: no cover — a malformed cookie is rare
+            logger.debug("Could not restore cookies after relaunch", exc_info=True)
+
     def get_tools(self) -> list[Callable[..., str]]:
         """Return callable web tools for registration with an agent.
 
         Returns:
             List of callables: go_to_url, click, type_text, press_key, scroll, screenshot,
-            get_page_content, close_browser. Does not include close."""
+            get_page_content, show_browser, close_browser. Does not include close."""
         return [
             self.go_to_url,
             self.click,
@@ -1075,5 +1171,6 @@ class WebUseTool:
             self.scroll,
             self.screenshot,
             self.get_page_content,
+            self.show_browser,
             self.close_browser,
         ]

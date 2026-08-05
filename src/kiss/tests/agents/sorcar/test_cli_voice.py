@@ -48,13 +48,7 @@ from kiss.ui.cli.cli_voice import (
 )
 
 BLINK_RED = "\x1b[5m\x1b[31m"
-# Steady (pre-wake) header indicator style: a reset then red, with no
-# blink attribute (matches ``voice_panel_top``'s non-blinking render).
 RED_ONLY = "\x1b[0m\x1b[31m"
-
-# ---------------------------------------------------------------------------
-# Fake listener child processes (real subprocesses, no mocks)
-# ---------------------------------------------------------------------------
 
 
 def _speech(text: str) -> str:
@@ -185,10 +179,6 @@ def _start_listener(
     return listener
 
 
-# ---------------------------------------------------------------------------
-# stdin pipe + anchored box harness (same style as test_cli_steering.py)
-# ---------------------------------------------------------------------------
-
 
 @pytest.fixture
 def stdin_pipe() -> Any:
@@ -215,7 +205,7 @@ def stdin_pipe() -> Any:
 def box() -> _InputBox:
     """An anchored input box rendering into a captured StringIO."""
     b = _InputBox(threading.RLock(), io.StringIO())
-    b._active = True  # render without owning a real terminal
+    b._active = True
     return b
 
 
@@ -266,17 +256,12 @@ def _wait_dead(proc_or_pid: Any, timeout: float = 5.0) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
-# (k) command registration + autocomplete
-# ---------------------------------------------------------------------------
-
 
 class TestVoiceCommandRegistration:
     def test_voice_in_slash_commands(self) -> None:
         assert "/voice" in SLASH_COMMANDS
         help_text = SLASH_COMMANDS["/voice"].lower()
         assert "wake word" in help_text
-        # Voice mode is a toggle and typing keeps working while it is on.
         assert "toggle" in help_text
         assert "typing" in help_text
 
@@ -286,10 +271,6 @@ class TestVoiceCommandRegistration:
         replacements = [r for r, _ in menu]
         assert any(r.startswith("/voice") for r in replacements)
 
-
-# ---------------------------------------------------------------------------
-# (h) KISS_SORCAR_VOICE_CMD parsing
-# ---------------------------------------------------------------------------
 
 
 class TestListenerCommand:
@@ -310,10 +291,6 @@ class TestListenerCommand:
             "python3", "/tmp/my listener.py", "--lang", "en US",
         ]
 
-
-# ---------------------------------------------------------------------------
-# (i) spawn failure
-# ---------------------------------------------------------------------------
 
 
 class TestSpawnFailure:
@@ -364,10 +341,6 @@ class TestSpawnFailure:
         assert "Enter" in out
 
 
-# ---------------------------------------------------------------------------
-# Anchored reader: display, speech, protocol handling
-# ---------------------------------------------------------------------------
-
 
 class TestAnchoredReader:
     def test_listening_display_and_speech_text(
@@ -387,7 +360,6 @@ class TestAnchoredReader:
         assert line == "hello world"
         assert BLINK_RED + "Listening ..." in rendered
         assert BLINK_RED + "Transcribing ..." in rendered
-        # The overlay is cleared once voice mode is closed.
         assert box.overlay == ""
 
     def test_completion_menu_and_buffer_stay_editable_during_voice(
@@ -407,13 +379,8 @@ class TestAnchoredReader:
             ["READY", _speech("menu-free")],
         )
         assert line == "menu-free"
-        # Typing stays fully usable while voice is on: the open
-        # completion menu survives, still previewing the highlighted
-        # candidate exactly as it did before voice started.
         assert box._menu_open
         assert box.buf == "/voice "
-        # The indicator lives in the header (top border), steady red
-        # pre-wake, and the caret parks on the still-visible buffer.
         assert "\x1b[36m╭─\x1b[0m\x1b[31mListening ..." in rendered
         cols = panel_cols()
         _row, col = body_cursor_col(box.buf, cols, box.cursor)
@@ -447,8 +414,6 @@ class TestAnchoredReader:
              _speech("good one")],
         )
         assert line == "good one"
-        # No wake word in this protocol stream: the header indicator is
-        # re-shown steady red (never blinking) after each bad payload.
         assert rendered.count(RED_ONLY + "Listening ...") >= 2
         assert BLINK_RED + "Listening ..." not in rendered
 
@@ -480,7 +445,6 @@ class TestAnchoredReader:
         )
         assert line is None
         assert "listener" in capsys.readouterr().out.lower()
-        # The header indicator never outlives the dead listener.
         assert box.overlay == ""
 
     def test_listener_terminated_after_stop(
@@ -495,7 +459,6 @@ class TestAnchoredReader:
         assert not listener.alive()
         assert listener.proc is not None
         assert listener.proc.poll() is not None
-        # A second stop is a harmless no-op.
         listener.stop()
 
     @pytest.mark.skipif(os.name != "posix", reason="POSIX process groups")
@@ -566,10 +529,6 @@ class TestAnchoredReader:
         listener.stop()
 
 
-# ---------------------------------------------------------------------------
-# Fallback (non-anchored) plain reader
-# ---------------------------------------------------------------------------
-
 
 class TestPlainReader:
     def test_plain_listening_display_and_speech(
@@ -589,7 +548,6 @@ class TestPlainReader:
             listener.stop()
         assert line == "fallback speech"
         out = capsys.readouterr().out
-        # Steady red before the wake word, blinking after WAKE.
         plain = out.find("\x1b[31mListening ...")
         blink = out.find(BLINK_RED + "Listening ...")
         assert plain != -1
@@ -631,10 +589,6 @@ class TestPlainReader:
         assert line is None
 
 
-# ---------------------------------------------------------------------------
-# Full REPL-loop integration (real CliClient object, real child listener)
-# ---------------------------------------------------------------------------
-
 
 def _make_client(tmp_path: Path) -> CliClient:
     """A real, unstarted CliClient — construction touches no sockets."""
@@ -672,8 +626,6 @@ class TestReplLoopIntegration:
             read_line,
             submitted.append,
         )
-        # Blank speech is skipped; both real utterances are submitted;
-        # after the listener exits the REPL falls back to typed input.
         assert submitted == ["task one", "task two"]
         assert "listener" in capsys.readouterr().out.lower()
 
@@ -699,14 +651,11 @@ class TestReplLoopIntegration:
             lambda: next(lines, None),
             submitted.append,
         )
-        # The spoken "/voice" ends voice mode: nothing is submitted, no
-        # nested listener is ever spawned, and the child is reaped.
         assert submitted == []
         assert counter_file.read_text() == "1"
         pids = pid_file.read_text().splitlines()
         assert len(pids) == 1
         assert _wait_dead(int(pids[0]))
-        # The toggle-off notification is yellow too.
         out = capsys.readouterr().out
         off = [ln for ln in out.splitlines() if "Voice mode off" in ln]
         assert off and off[0].startswith("\x1b[33m")
@@ -731,8 +680,6 @@ class TestReplLoopIntegration:
             return next(lines, None)
 
         def press_esc_once_listener_is_up() -> None:
-            # Cancel only after the child proved it is running (wrote
-            # its pid file) so the terminate-on-cancel is observable.
             deadline = time.monotonic() + 5.0
             while not pid_file.exists() and time.monotonic() < deadline:
                 time.sleep(0.02)
@@ -796,7 +743,6 @@ class TestReplLoopIntegration:
             submitted.append,
         )
         assert submitted == ["plain hello"]
-        # No wake word spoken: the inline indicator stays steady red.
         out = capsys.readouterr().out
         assert "\x1b[31mListening ..." in out
         assert BLINK_RED + "Listening ..." not in out

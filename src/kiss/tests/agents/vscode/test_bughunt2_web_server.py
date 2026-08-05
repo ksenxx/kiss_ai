@@ -166,7 +166,6 @@ class WssCliTaskLeakTest(IsolatedAsyncioTestCase):
             await self._wait_running(task_id, True),
             "cliTaskStart over WSS must register the running task",
         )
-        # Abruptly drop the announcing connection without cliTaskEnd.
         await ws.close()
         self.assertTrue(
             await self._wait_running(task_id, False),

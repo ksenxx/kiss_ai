@@ -2,20 +2,15 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-/**
- * Type definitions for VS Code extension messaging.
- */
 
 import {MergeData} from './MergeManager';
 
-/** Attachment for file uploads */
 export interface Attachment {
   name: string;
   mimeType: string;
-  data: string; // Base64 encoded
+  data: string;
 }
 
-/** Session/conversation info */
 export interface SessionInfo {
   id: number;
   task_id?: number;
@@ -25,7 +20,6 @@ export interface SessionInfo {
   has_events?: boolean;
 }
 
-/** Messages from webview to extension */
 export type FromWebviewMessage =
   | {
       type: 'submit';
@@ -43,19 +37,31 @@ export type FromWebviewMessage =
   | {type: 'selectModel'; model: string; tabId?: string}
   | {type: 'getHistory'; query?: string; offset?: number; generation?: number}
   | {type: 'getFrequentTasks'; limit?: number}
-  | {type: 'deleteTask'; taskId: number}
   | {type: 'deleteFrequentTask'; task: string}
   | {type: 'setFavorite'; taskId: number; isFavorite: boolean}
-  | {type: 'getFiles'; prefix: string; workDir?: string}
+  | {type: 'getFiles'; prefix: string; workDir?: string; tabId?: string}
   | {type: 'userAnswer'; answer: string; tabId?: string}
-  | {type: 'openFile'; path: string; line?: number}
+  | {
+      type: 'openFile';
+      path: string;
+      line?: number;
+      workDir?: string;
+      tabId?: string;
+    }
+  | {type: 'checkPaths'; paths: string[]; workDir?: string; tabId?: string}
   | {type: 'recordFileUsage'; path: string; workDir?: string}
   | {
       type: 'ready';
       tabId?: string;
       restoredTabs?: Array<{tabId: string; chatId: string}>;
     }
-  | {type: 'resumeSession'; id: string; taskId?: number; tabId?: string}
+  | {
+      type: 'resumeSession';
+      chatId?: string;
+      id?: string;
+      taskId?: string | number | null;
+      tabId?: string;
+    }
   | {type: 'getWelcomeSuggestions'}
   | {type: 'complete'; query: string; tabId?: string}
   | {type: 'mergeAction'; action: string; tabId?: string; workDir?: string}
@@ -70,13 +76,12 @@ export type FromWebviewMessage =
       tabId?: string;
       workDir?: string;
     }
-  | {type: 'resolveDroppedPaths'; uris: string[]}
+  | {type: 'resolveDroppedPaths'; uris: string[]; workDir?: string}
   | {type: 'webviewFocusChanged'; focused: boolean}
+  | {type: 'activeTabChanged'; tabId: string}
   | {
       type: 'getAdjacentTask';
       tabId?: string;
-      // DB row id of the reference task (UUID string; legacy rows may
-      // carry ints), or null when the tab has no known task row yet.
       taskId: string | number | null;
       direction: 'prev' | 'next';
     }
@@ -92,18 +97,26 @@ export type FromWebviewMessage =
   | {type: 'notificationAction'; id: string; action?: string}
   | {type: 'voiceToggle'; enabled: boolean; sensitivity?: number}
   | {type: 'voiceSensitivity'; value: number}
-  | {type: 'voiceAck'};
+  | {type: 'voiceAck'}
+  | {type: 'voiceDropped'; tabId?: string; text: string};
 
-/** Messages from extension to webview (matches browser event protocol) */
 export type ToWebviewMessage = ToWebviewMessageBody & {tabId?: string};
 
 type ToWebviewMessageBody =
-  // Voice wake-word events (host-side listener → voice.js)
-  | {type: 'voiceWake'}
+  // roundId pairs a transcript with the wake that started it. Rounds overlap
+  // (the listener re-arms while the previous utterance is transcribed), so the
+  // webview needs the id to know which conversation was on screen when those
+  // words were spoken.
+  | {type: 'voiceWake'; roundId: number}
   | {type: 'voiceTranscribing'}
-  | {type: 'voiceSpeech'; text: string; speaker?: number; language?: string}
+  | {
+      type: 'voiceSpeech';
+      roundId: number;
+      text: string;
+      speaker?: number;
+      language?: string;
+    }
   | {type: 'voiceState'; listening: boolean; error?: string}
-  // Streaming events (same as browser JsonPrinter)
   | {type: 'thinking_start'}
   | {type: 'thinking_delta'; text: string}
   | {type: 'thinking_end'}
@@ -121,16 +134,24 @@ type ToWebviewMessageBody =
       new_string?: string;
       extras?: Record<string, string>;
     }
-  | {type: 'tool_result'; content: string; is_error?: boolean}
+  | {
+      type: 'tool_result';
+      content: string;
+      is_error?: boolean;
+      tool_name?: string;
+      path?: string;
+    }
   | {type: 'system_output'; text: string}
+  | {
+      type: 'pathsExist';
+      results: Record<string, boolean>;
+      workDir?: string;
+    }
   | {
       type: 'result';
       text?: string;
       summary?: string;
       success?: boolean;
-      /** True when the agent paused to continue in a new session
-       *  (``json_printer`` copies ``is_continue`` onto result events;
-       *  main.js renders a "Status: Continue" banner for it). */
       is_continue?: boolean;
       total_tokens?: number;
       cost?: string;
@@ -145,10 +166,6 @@ type ToWebviewMessageBody =
     }
   | {type: 'system_prompt'; text: string}
   | {type: 'prompt'; text: string}
-  // Agent-initiated text-to-speech (the ``talk`` tool): the webview
-  // plays the GPT-synthesized clip (audioB64), staying silent when no
-  // clip can play; talkId dedupes fan-out copies, muted marks copies
-  // already played on this machine by another local player.
   | {
       type: 'talk';
       text: string;
@@ -159,7 +176,6 @@ type ToWebviewMessageBody =
       audioMime?: string;
       muted?: boolean;
     }
-  // Lifecycle events
   | {type: 'clear'; chat_id?: number}
   | {type: 'showWelcome'}
   | {type: 'clearChat'}
@@ -167,13 +183,9 @@ type ToWebviewMessageBody =
   | {type: 'task_error'; text: string}
   | {type: 'task_stopped'}
   | {type: 'task_interrupted'}
-  // UI events
   | {
       type: 'status';
       running: boolean;
-      /** Agent's true start timestamp (ms since epoch) supplied by the
-       *  backend (``task_runner`` / ``server._replay_session``) so the
-       *  webview's "Running …" timer is anchored to agent wall-clock. */
       startTs?: number;
     }
   | {
@@ -255,18 +267,10 @@ type ToWebviewMessageBody =
       type: 'adjacent_task_events';
       direction: 'prev' | 'next';
       task: string;
-      // DB row id (UUID string; legacy rows may carry ints) of the
-      // adjacent task, or null when no adjacent row exists.
       task_id: string | number | null;
       events: unknown[];
     }
   | {type: 'triggerStop'}
-  | {
-      type: 'taskDeleted';
-      chatId: number;
-      taskId: number;
-      chatHasMoreTasks: boolean;
-    }
   | {type: 'measureSize'}
   | {type: 'daemonStatus'; connected: boolean}
   | {
@@ -280,19 +284,29 @@ type ToWebviewMessageBody =
     }
   | {type: 'subagentDone'; tab_id?: string; success?: boolean}
   | {
-      // Sub-agent tab announcement: ``task_id`` is the sub-agent's
-      // persisted ``task_history.id`` (a UUID hex string) and
-      // ``parent_tab_id`` is the frontend tab id of the parent
-      // run_parallel tab (empty when the parent has no tab).  The
-      // broadcast is stamped ``taskId: ''`` so it stays a global
-      // system event (see ``ChatSorcarAgent.run``).
+      // Transient picker label update: 'agent' is the model a running
+      // agent switched itself to, 'restore' the end-of-task revert to
+      // the model the user picked in that tab.
+      type: 'modelPick';
+      model: string;
+      source: 'agent' | 'restore';
+      tabId: string;
+    }
+  | {
+      // Receipt for a Stop click: `accepted` is false when the daemon
+      // found no running task owning `tabId`, so the UI can say so
+      // instead of leaving the button looking dead.
+      type: 'stop_ack';
+      accepted: boolean;
+      tabId: string;
+    }
+  | {
       type: 'new_tab';
       task_id: string | number;
       parent_tab_id?: string;
       taskId?: string;
     };
 
-/** Command sent to Python backend */
 export interface AgentCommand {
   type:
     | 'run'
@@ -302,7 +316,6 @@ export interface AgentCommand {
     | 'selectModel'
     | 'getHistory'
     | 'getFrequentTasks'
-    | 'deleteTask'
     | 'deleteFrequentTask'
     | 'setFavorite'
     | 'getFiles'
@@ -335,7 +348,7 @@ export interface AgentCommand {
   answer?: string;
   path?: string;
   chatId?: number | string;
-  taskId?: number | null;
+  taskId?: string | number | null;
   activeFileContent?: string;
   action?: 'merge' | 'discard' | 'all-done' | 'commit' | 'skip';
   useWorktree?: boolean;

@@ -318,8 +318,6 @@ class TestAgentFallsBackOnRefusal:
         assert result == "done"
         assert agent.model_name == _FALLBACK
         assert agent._fallback_used is True
-        # Exactly ONE refused request to the primary (no useless retry
-        # turn — the old empty-turn path sent two), then the fallback.
         assert _SEEN_MODELS == [_PRIMARY, _FALLBACK]
 
     def test_refusal_without_fallback_raises_refusal_error(

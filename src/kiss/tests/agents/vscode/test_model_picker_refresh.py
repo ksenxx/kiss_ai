@@ -75,14 +75,6 @@ class TestModelPickerRefresh(TestCase):
         from kiss.core.models import codex_model as codex_module
 
         saved_codex_paths = codex_module._UI_CANDIDATE_PATHS
-        # A fresh install must also have no persisted ``last_model``
-        # preference and no ``KISS_MODEL`` override: the server
-        # constructor consults ``_load_last_model()`` (which reads
-        # ``vscode_config.CONFIG_PATH``) and ``$KISS_MODEL`` *before*
-        # ``get_default_model()``, so a value leaked into the shared
-        # per-process config by earlier tests would defeat the
-        # ``"No model"`` precondition.  Point the config at an empty
-        # temp dir for the duration of the test.
         import shutil
         import tempfile
         from pathlib import Path
@@ -99,7 +91,6 @@ class TestModelPickerRefresh(TestCase):
             codex_module._UI_CANDIDATE_PATHS = ()
 
             server = _make_server()
-            # Fresh install: no keys at construction time.
             assert server._default_model == "No model", (
                 f"precondition: expected 'No model', got {server._default_model!r}"
             )
@@ -115,8 +106,6 @@ class TestModelPickerRefresh(TestCase):
 
             server.printer.broadcast = capture  # type: ignore[assignment]
 
-            # User provides the key; config is refreshed (mirrors
-            # save_api_key_to_shell -> _refresh_config).
             os.environ["ANTHROPIC_API_KEY"] = "test-anthropic-key"
             config_module.DEFAULT_CONFIG = config_module.Config()
 
@@ -190,8 +179,6 @@ class TestModelPickerRefresh(TestCase):
 
             server.printer.broadcast = capture  # type: ignore[assignment]
 
-            # A real user selection (``_cmd_select_model``) updates the
-            # in-memory default AND persists it as ``last_model``.
             server._default_model = "claude-sonnet-4-5"
             _save_last_model("claude-sonnet-4-5")
             server._get_models()

@@ -2,40 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Integration test for the per-task metadata in the History
-// sidebar.
-//
-// Requirement driven by this test:
-//
-//   Every history row whose persisted ``extra`` carries a model
-//   name must render the model name and the three run flags
-//   appended to the workspace line, separated by ``•``.  Format:
-//
-//       <work_dir> • <model> • <wt|no-wt>
-//         • <parallel|sequential> • <auto-commit|manual-commit>
-//
-//   The combined text lives inside the single
-//   ``.running-item-workspace`` span (no separate "meta" span) so
-//   it renders on the SAME visual line as the workspace path.
-//
-//   * Rows with workspace but no model render the workspace alone
-//     (legacy behaviour).
-//   * Rows with model but no workspace render only the metadata
-//     part (no leading bullet, no placeholder).
-//   * Rows with neither render no ``.running-item-workspace`` span
-//     at all.
-//   * The booleans default to ``false`` when missing, so a row
-//     with model but no flags renders ``<model> • no-wt •
-//     sequential • manual-commit``.
-//
-// This test drives the production ``media/main.js`` (plus the real
-// ``media/chat.html`` markup and ``media/panelCopy.js``) inside jsdom,
-// exactly like ``historyTaskWorkspace.test.js``.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/historyTaskMeta.test.js
 
 'use strict';
 
@@ -76,7 +42,10 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
@@ -85,17 +54,6 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-// Fixture covering every combination the workspace+meta line must
-// handle:
-//
-//   * row A: all flags true, model + workspace present.
-//   * row B: all flags false, model + workspace present.
-//   * row C: model + flags present, but NO workspace — the
-//     metadata still renders, alone, in the workspace span.
-//   * row D: model missing — only the workspace renders.
-//   * row E: model present, every boolean flag missing from the
-//     payload — defaults to no-wt / sequential / manual-commit.
-//   * row F: neither workspace nor model — NO span at all.
 const WS_A = '/Users/koushik/work/repo-A';
 const WS_B = 'C:\\Users\\koushik\\repo-B';
 const WS_D = '/Users/koushik/work/repo-D';
@@ -178,8 +136,6 @@ const SESSIONS_FIXTURE = [
     steps: 0,
     is_favorite: false,
     work_dir: WS_D,
-    // intentionally NO model, NO is_worktree, NO is_parallel,
-    // NO auto_commit_mode
     startTs: 1_700_000_300_000,
     endTs: 1_700_000_301_000,
   },
@@ -198,9 +154,6 @@ const SESSIONS_FIXTURE = [
     is_favorite: false,
     work_dir: '',
     model: 'legacy-model',
-    // is_worktree / is_parallel / auto_commit_mode intentionally
-    // omitted — must default to false → no-wt / sequential /
-    // manual-commit.
     startTs: 1_700_000_400_000,
     endTs: 1_700_000_401_000,
   },
@@ -218,7 +171,6 @@ const SESSIONS_FIXTURE = [
     steps: 0,
     is_favorite: false,
     work_dir: '',
-    // no model, no flags, no workspace
     startTs: 1_700_000_500_000,
     endTs: 1_700_000_501_000,
   },
@@ -236,10 +188,6 @@ function rowsByTitle(win) {
   return map;
 }
 
-// The History sidebar's workspace filter checkbox (#hf-workspace)
-// hides every row whose ``work_dir`` does not match the currently
-// configured workspace.  We always want every fixture row to render,
-// so this helper clears the filter before sending the history event.
 function disableWorkspaceFilter(win) {
   send(win, {
     type: 'configData',
@@ -303,9 +251,6 @@ function testWorkspaceLineMergesMetadata() {
       '.running-item-workspace span',
   );
 
-  // Exact merged text: workspace, then model, then wt/no-wt,
-  // parallel/sequential, auto-commit/manual-commit — joined with
-  // the same bullet (``•``) the metrics row uses.
   assert.strictEqual(
     aWs.textContent,
     WS_A + ' • gpt-5 • wt • parallel • auto-commit',
@@ -316,36 +261,28 @@ function testWorkspaceLineMergesMetadata() {
     WS_B + ' • claude-3.7-sonnet • no-wt • sequential • manual-commit',
     `row B workspace+meta text mismatch; got: ${bWs.textContent}`,
   );
-  // No workspace → starts with the model, no leading bullet.
   assert.strictEqual(
     cWs.textContent,
     'gpt-5-mini • wt • sequential • auto-commit',
     `row C workspace+meta text mismatch; got: ${cWs.textContent}`,
   );
-  // No model → workspace alone (legacy rows).
   assert.strictEqual(
     dWs.textContent,
     WS_D,
     `row D workspace text mismatch; got: ${dWs.textContent}`,
   );
-  // Missing booleans default to false → no-wt / sequential /
-  // manual-commit.
   assert.strictEqual(
     eWs.textContent,
     'legacy-model • no-wt • sequential • manual-commit',
     `row E workspace+meta text (default flags) mismatch; got: ${eWs.textContent}`,
   );
 
-  // Row F: neither workspace nor model → NO span at all.
   assert.strictEqual(
     workspaceSpan(f),
     null,
     'row F (no workspace, no model) must NOT render a workspace span',
   );
 
-  // Position requirement: the workspace+meta span must follow the
-  // metrics span immediately so the metadata appears on the line
-  // right below metrics.
   for (const [label, row] of [
     ['A', a],
     ['B', b],
@@ -362,8 +299,6 @@ function testWorkspaceLineMergesMetadata() {
     );
   }
 
-  // No row should ever render a stray ``.running-item-meta`` span
-  // any more — the metadata lives inside the workspace span now.
   for (const [label, row] of [
     ['A', a],
     ['B', b],
@@ -386,12 +321,6 @@ function testWorkspaceLineMergesMetadata() {
 }
 
 function testWorkspaceLineBreaksToOwnVisualLine() {
-  // The merged workspace+meta span must use ``flex-basis: 100%``
-  // (same trick the metrics row uses) so it drops onto its own
-  // visual line inside the flex container ``.sidebar-item``.
-  // jsdom never loads the external ``main.css`` stylesheet that
-  // ``chat.html`` references via ``{{STYLE_HREF}}``, so we read the
-  // CSS file directly and assert that a matching rule exists.
   const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
   const re = /\.running-item-workspace\s*\{([^}]*)\}/g;
   let m;

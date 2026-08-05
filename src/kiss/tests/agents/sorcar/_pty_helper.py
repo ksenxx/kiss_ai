@@ -73,16 +73,10 @@ def pty_spawn(argv: list[str], env: dict[str, str] | None = None) -> tuple[int, 
             env=env,
         )
     except BaseException:
-        # If Popen fails (e.g. invalid argv / env), the parent still
-        # owns both ends of the PTY and must release them so the test
-        # process does not leak fds. ``slave_fd`` is closed in the
-        # second ``finally`` below; close ``master_fd`` here.
         os.close(master_fd)
         os.close(slave_fd)
         raise
     else:
-        # The child has inherited (and dup2'd) the slave fd into its
-        # standard streams; the parent only needs the master end.
         os.close(slave_fd)
     return proc.pid, master_fd
 
@@ -121,7 +115,4 @@ def _acquire_ctty() -> None:
     try:
         fcntl.ioctl(0, termios.TIOCSCTTY, 0)
     except OSError:
-        # Already the controlling terminal, or platform/kernel quirk —
-        # nothing actionable here; the test will surface a real problem
-        # if signal delivery is broken downstream.
         pass

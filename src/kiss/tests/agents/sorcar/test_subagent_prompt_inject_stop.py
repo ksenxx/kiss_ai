@@ -69,8 +69,6 @@ class _Harness:
         self.printer = WebPrinter()
         self.server = VSCodeServer(self.printer)
 
-        # Parent task: real ChatSorcarAgent with a real task_history row,
-        # registered under its frontend tab id (as _run_task_inner does).
         self.parent = ChatSorcarAgent("Parent")
         parent_task_id, chat_id = _add_task("parent task")
         self.parent._last_task_id = parent_task_id
@@ -87,9 +85,6 @@ class _Harness:
         _RunningAgentState.register("tab-parent", self.parent_state)
         self.printer.subscribe_tab(parent_task_id, "tab-parent")
 
-        # Sub-agent: mirrors chat_sorcar_agent._run_tasks_parallel's
-        # _run_single — synthetic backend tab id, _SubagentStopEvent
-        # chained to the parent's, is_subagent=True, agent._tab_id set.
         self.sub = ChatSorcarAgent("Parallel-sub")
         self.sub.resume_chat_by_id(chat_id)
         sub_task_id, _ = _add_task(
@@ -115,9 +110,6 @@ class _Harness:
         )
         _RunningAgentState.register(self.sub_tab_id, self.sub_state)
 
-        # Register both agents in the printer's persistence map and open
-        # in-memory recordings, exactly as ChatSorcarAgent.run does on
-        # the agent thread.
         for key, agent in (
             (self.parent_task_id, self.parent),
             (self.sub_task_id, self.sub),
@@ -125,11 +117,8 @@ class _Harness:
             self.printer._persist_agents[key] = agent
             self.printer._thread_local.task_id = key
             self.printer.start_recording()
-        # Commands arrive on a thread with no task binding.
         self.printer._thread_local.task_id = ""
 
-        # The frontend materialised a viewer tab for the sub-agent and
-        # posted resumeSession → subscribe_tab (main.js 'new_tab').
         self.viewer_tab = "tab-sub-viewer"
         self.printer.subscribe_tab(sub_task_id, self.viewer_tab)
 
@@ -182,11 +171,8 @@ class TestSubagentPromptInjection:
             and "HELLO SUBAGENT INJECTION" in str(e.get("text", ""))
         ]
         assert prompts, f"prompt echo not recorded; recording={rec}"
-        # The recorded copy must not pin a stale viewer tab id — replay
-        # re-stamps events with the subscribing tab's own id.
         assert "tabId" not in prompts[0]
         assert prompts[0].get("taskId") == h.sub_task_id
-        # Nothing leaked into the parent's recording.
         assert not [
             e for e in h.recording(h.parent_task_id)
             if "HELLO SUBAGENT INJECTION" in str(e.get("text", ""))
@@ -254,17 +240,11 @@ class TestSubagentPromptInjection:
             "prompt": "NO TASK YET",
             "tabId": "tab-parent",
         })
-        # Queued for the drain hook and marked for deferred durable
-        # echoing — the immediate echo is transient (tab-only), so
-        # nothing is recorded yet.
         assert h.parent_state.pending_user_messages == ["NO TASK YET"]
         assert h.parent_state.unattributed_prompt_echoes == ["NO TASK YET"]
         assert h.recording(h.parent_task_id) == []
 
-        # The agent thread allocates the task row and reaches its first
-        # model step: the drain hook injects the message and flushes
-        # the deferred echo under the consuming task's id.
-        h.parent._last_task_id = h.parent_task_id  # run(): _add_task done
+        h.parent._last_task_id = h.parent_task_id
         h.parent.printer = h.printer
         h.parent._tab_id = "tab-parent"  # type: ignore[attr-defined]
         model = AnthropicModel(
@@ -324,7 +304,6 @@ class TestSubagentPromptInjection:
             os.environ.get("ANTHROPIC_API_KEY", "test-key"),
         )
         h.parent._drain_pending_user_messages(model)
-        # Message still consumed; deferred echo dropped, no crash.
         assert [
             m for m in model.conversation
             if m.get("role") == "user" and "SILENT DEFER" in str(m.get("content"))
@@ -379,8 +358,6 @@ class TestSubagentPromptInjection:
             "prompt": "AGENTLESS OWNER",
             "tabId": "tab-parent",
         })
-        # Queued for the drain hook; unattributable → deferred echo,
-        # nothing recorded yet.
         assert h.parent_state.pending_user_messages == ["AGENTLESS OWNER"]
         assert h.parent_state.unattributed_prompt_echoes == ["AGENTLESS OWNER"]
         assert h.recording(h.parent_task_id) == []
@@ -397,7 +374,7 @@ class TestSubagentPromptInjection:
         pending queue would never be drained).
         """
         h = _Harness()
-        h.sub_state.is_task_active = False  # stop_event stays live
+        h.sub_state.is_task_active = False
         h.server._handle_command({
             "type": "appendUserMessage",
             "prompt": "TEARDOWN RACE",
@@ -422,13 +399,12 @@ class TestBusyRunConversion:
     def test_busy_run_queues_and_persists_prompt(self, isolated_db) -> None:
         """run on a busy tab queues the prompt and persists the echo."""
         h = _Harness()
-        h.parent_state.task_thread = threading.Thread()  # created, unstarted
+        h.parent_state.task_thread = threading.Thread()
         h.server._handle_command({
             "type": "run",
             "prompt": "STALE SUBMIT FOLLOW-UP",
             "tabId": "tab-parent",
         })
-        # Queued into the LIVE task — no second task started.
         assert h.parent_state.pending_user_messages == [
             "STALE SUBMIT FOLLOW-UP",
         ]
@@ -457,7 +433,7 @@ class TestBusyRunConversion:
         """
         h = _Harness()
         h.parent_state.task_thread = threading.Thread()
-        h.parent._last_task_id = None  # run() entered, _add_task not yet
+        h.parent._last_task_id = None
         h.server._handle_command({
             "type": "run",
             "prompt": "PRE-ALLOCATION SUBMIT",
@@ -469,15 +445,12 @@ class TestBusyRunConversion:
         assert h.parent_state.unattributed_prompt_echoes == [
             "PRE-ALLOCATION SUBMIT",
         ]
-        # Not attributable yet: nothing recorded, nothing persisted.
         assert h.recording(h.parent_task_id) == []
         assert not _persisted_prompts(
             h.persisted_events(h.parent_task_id), "PRE-ALLOCATION SUBMIT",
         )
 
-        # The worker thread's run() allocates the row and reaches the
-        # first model step — the drain flushes the durable echo.
-        h.parent._last_task_id = h.parent_task_id  # run(): _add_task done
+        h.parent._last_task_id = h.parent_task_id
         h.parent.printer = h.printer
         h.parent._tab_id = "tab-parent"  # type: ignore[attr-defined]
         model = AnthropicModel(
@@ -576,7 +549,6 @@ class TestWebPrinterTargetedEventGuard:
         assert _persisted_prompts(
             h.persisted_events(h.sub_task_id), "DURABLE COPY",
         )
-        # Sibling/parent recordings untouched.
         assert h.recording(h.parent_task_id) == []
 
     def test_plain_task_event_still_recorded_and_fanned_out(
@@ -654,7 +626,6 @@ class TestSubagentStop:
         h = _Harness()
         h.server._handle_command({"type": "stop", "tabId": "tab-parent"})
         assert h.parent_stop.is_set()
-        # _SubagentStopEvent chains the parent's event.
         assert h.sub_stop.is_set()
 
     def test_stop_on_sibling_viewer_leaves_this_subagent_running(

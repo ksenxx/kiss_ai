@@ -104,10 +104,6 @@ def _pop_tabs(*tab_ids: str) -> None:
         _RunningAgentState.running_agent_states.pop(tab_id, None)
 
 
-# ---------------------------------------------------------------------------
-# B1 — merge_ended must be broadcast only after is_merging is cleared
-# ---------------------------------------------------------------------------
-
 
 class _MergeEndedFlagPrinter(_RecordingPrinter):
     """Recorder that snapshots ``tab.is_merging`` at broadcast time.
@@ -205,7 +201,7 @@ class TestMergeEndedBroadcastAfterGuardCleared:
         try:
             tab = host._get_tab(tab_id)
             tab.use_worktree = False
-            tab.is_merging = True  # a merge review session is live
+            tab.is_merging = True
             printer.tab = tab
 
             host._finish_merge(tab_id, work_dir=str(repo))
@@ -213,13 +209,7 @@ class TestMergeEndedBroadcastAfterGuardCleared:
             types = printer.event_types()
             assert types.count("merge_ended") == 1
             assert "autocommit_prompt" in types
-            # The wave-2 F3 invariant is preserved: the dirty scan ran
-            # under the claim.
             assert printer.merging_at_prompt is True
-            # B1: the client-visible "merge is over, input re-enabled"
-            # signal must come AFTER every guarded post-merge step —
-            # a prompt submitted on receipt of merge_ended must not be
-            # rejected by the is_merging task-start guard.
             assert printer.merging_at_merge_ended is False, (
                 "merge_ended was broadcast while is_merging was still "
                 "raised — a run submitted on merge-view close is "
@@ -290,10 +280,6 @@ class TestMergeEndedBroadcastAfterGuardCleared:
         assert isinstance(host.printer, _RecordingPrinter)
         assert host.printer.events == []
 
-
-# ---------------------------------------------------------------------------
-# B2 — a pre-loop failure must not attribute the agent's lifetime metrics
-# ---------------------------------------------------------------------------
 
 
 class _ScriptedAgent(WorktreeSorcarAgent):
@@ -402,8 +388,6 @@ def test_b2_preloop_failure_does_not_inherit_lifetime_metrics(
     agent = _ScriptedAgent("Sorcar VS Code")
     tab.agent = agent
     try:
-        # Warm the reused agent: one successful run accumulates
-        # 100 tokens / $0.25 on its cumulative lifetime counters.
         server._run_task({
             "tabId": tab_id,
             "prompt": warm_prompt,
@@ -411,12 +395,7 @@ def test_b2_preloop_failure_does_not_inherit_lifetime_metrics(
             "model": models[0],
         })
         assert int(agent.total_tokens_used or 0) == 100
-        # The failed run resolves its persistence writes against the
-        # most recent row with the same task text — seed that row (a
-        # previous run of the identical prompt in history).
         _add_task(probe_prompt)
-        # ``_run_task`` disposes ``tab.agent`` in its outer finally;
-        # re-attach the SAME warm agent, as tab reuse does.
         tab.agent = agent
         tab.fail_next_prompt_write = True
 
@@ -431,9 +410,6 @@ def test_b2_preloop_failure_does_not_inherit_lifetime_metrics(
         assert row is not None
         result, tokens, cost, steps = row
         assert "simulated pre-subtask failure" in (result or "")
-        # Pre-fix: baselines were initialised to 0, so the failed run
-        # (which consumed NOTHING) was attributed the warm agent's
-        # entire lifetime: 100 tokens / $0.25.
         assert tokens == 0, (
             "pre-loop failure inherited the reused agent's cumulative "
             f"lifetime tokens (got {tokens})"
@@ -479,10 +455,6 @@ def test_b2_warm_agent_second_run_still_attributes_own_metrics(
     finally:
         _pop_tabs(tab_id)
 
-
-# ---------------------------------------------------------------------------
-# B3 — saveConfig work_dir propagation must be serialised with the save
-# ---------------------------------------------------------------------------
 
 
 class _GatedWorkDirPrinter(_RecordingPrinter):
@@ -562,10 +534,6 @@ def test_b3_racing_save_config_cannot_desync_live_and_persisted_work_dir(
 
         t_b = threading.Thread(target=save_b, daemon=True)
         t_b.start()
-        # Pre-fix: B completes fully while A's propagation is frozen
-        # mid-flight (proving the propagation escaped the lock).
-        # Post-fix: B is parked at _save_config_lock, so this wait
-        # times out — releasing the gate lets A finish and B follow.
         b_done.wait(timeout=1.0)
         printer.gate_release.set()
         t_a.join(timeout=30)
@@ -585,13 +553,8 @@ def test_b3_racing_save_config_cannot_desync_live_and_persisted_work_dir(
     finally:
         printer.gate_value = None
         printer.gate_release.set()
-        # Leave the developer's real config as we found it.
         server._cmd_save_config({"config": {"work_dir": original_work_dir}})
 
-
-# ---------------------------------------------------------------------------
-# D4 — message-object tool_result path must match the primary path
-# ---------------------------------------------------------------------------
 
 
 class _ToolResultBlock:
@@ -678,8 +641,6 @@ class TestMessageObjectToolResults:
     def test_streamed_bash_output_deduplicated(self) -> None:
         printer = _RecordingPrinter()
         printer._thread_local.task_id = "w3f3-d4-task"
-        # A bash_stream print marks the state streamed=True: the
-        # client already saw this output live.
         printer.print("live streamed chunk", type="bash_stream")
         msg = _ContentMessage([
             _ToolResultBlock("live streamed chunk", tool_name="Bash"),
@@ -695,7 +656,6 @@ class TestMessageObjectToolResults:
             "already-streamed output must not be duplicated into the "
             "tool_result event"
         )
-        # The streamed flag is consumed: the next result carries content.
         printer.print(
             _ContentMessage([_ToolResultBlock("fresh", tool_name="Bash")]),
             type="message",

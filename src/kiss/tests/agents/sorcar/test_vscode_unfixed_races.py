@@ -178,13 +178,6 @@ class TestEnsureCompleteWorkerDoubleInit(unittest.TestCase):
 
 
 
-# The historical ``TestBroadcastOrderingFixed`` introspected
-# ``VSCodePrinter.broadcast`` for a nested ``_stdout_lock`` /
-# ``_lock`` pattern.  Under the single-daemon architecture there is
-# no stdout transport — ``WebPrinter`` writes events to UDS / WSS
-# sockets via the asyncio loop and the per-stdout-lock invariant the
-# old test pinned no longer applies.
-
 
 if __name__ == "__main__":
     unittest.main()

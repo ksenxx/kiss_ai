@@ -75,12 +75,12 @@ def test_at_press_immediately_lists_files_and_folders(tmp_path: Path) -> None:
     shown = {str(c.display_text) for c in completions}
     assert "alpha.py" in shown
     assert "beta.md" in shown
-    assert "subdir/" in shown  # folders are offered too
+    assert "subdir/" in shown
     assert "subdir/gamma.txt" in shown
     for c in completions:
         assert c.text.startswith("./")
         assert c.text.endswith(" ")
-        assert c.start_position == -1  # replaces just the "@"
+        assert c.start_position == -1
 
 
 def test_at_query_filters_and_replaces_whole_token(tmp_path: Path) -> None:
@@ -137,7 +137,6 @@ def test_bare_slash_menu_visible_room_for_every_command(tmp_path: Path) -> None:
     as large as the number of slash commands so every entry is visible
     on a single ``/`` press.
     """
-    # 1. The completer itself must offer every built-in slash command.
     completer = PtkCompleter(CliCompleter(str(tmp_path)))
     completions = list(
         completer.get_completions(Document("/"), _typing_event())
@@ -145,7 +144,6 @@ def test_bare_slash_menu_visible_room_for_every_command(tmp_path: Path) -> None:
     displays = {str(c.display_text) for c in completions}
     for cmd in SLASH_COMMANDS:
         assert cmd in displays, f"{cmd} missing from /-menu completions"
-    # 2. The prompt session must reserve enough rows to render them all.
     hist = tmp_path / "hist"
     reader = PtkLineReader(CliCompleter(str(tmp_path)), hist)
     assert reader.session.reserve_space_for_menu >= len(SLASH_COMMANDS), (
@@ -187,10 +185,7 @@ def test_predictive_completion_pops_while_typing(tmp_path: Path) -> None:
         assert "rewrite the help banner" in texts
         assert "rewrite the docstring of `run_repl`" in texts
         assert "rewrite the README intro" in texts
-        # Most recently inserted task is offered first.
         assert texts[0] == "rewrite the help banner"
-        # Every completion replaces the full typed line and is tagged
-        # so the menu shows where the suggestion came from.
         for c in completions:
             assert c.start_position == -len("rewrite the")
             assert "history" in str(c.display_meta_text).lower()
@@ -230,9 +225,9 @@ def test_predictive_arrow_down_then_tab_accepts(tmp_path: Path) -> None:
         hist = tmp_path / "hist"
         with create_pipe_input() as pipe:
             def _send_keys() -> None:
-                pipe.send_text("\x1b[B")  # Down: highlight the suggestion
-                pipe.send_text("\t")  # Tab: confirm without submitting
-                pipe.send_text("\r")  # Enter: submit the now-completed line
+                pipe.send_text("\x1b[B")
+                pipe.send_text("\t")
+                pipe.send_text("\r")
 
             timer = threading.Timer(0.5, _send_keys)
             pipe.send_text("ref")
@@ -266,8 +261,8 @@ def test_predictive_arrow_down_then_enter_submits_typed_text(
         hist = tmp_path / "hist"
         with create_pipe_input() as pipe:
             def _send_keys() -> None:
-                pipe.send_text("\x1b[B")  # Down: highlight the suggestion
-                pipe.send_text("\r")  # Enter: submit typed text as-is
+                pipe.send_text("\x1b[B")
+                pipe.send_text("\r")
 
             timer = threading.Timer(0.5, _send_keys)
             pipe.send_text("ref")
@@ -300,11 +295,10 @@ def test_arrow_down_then_enter_selects_mention(tmp_path: Path) -> None:
     completer = CliCompleter(str(project))
     hist = tmp_path / "hist"
     with create_pipe_input() as pipe:
-        # Let complete_while_typing populate the menu before navigating.
         def _send_keys() -> None:
-            pipe.send_text("\x1b[B")  # Down: highlight first candidate
-            pipe.send_text("\r")  # Enter: accept highlighted completion
-            pipe.send_text(" please\r")  # Enter: submit the line
+            pipe.send_text("\x1b[B")
+            pipe.send_text("\r")
+            pipe.send_text(" please\r")
 
         timer = threading.Timer(0.5, _send_keys)
         pipe.send_text("look at @")
@@ -328,9 +322,9 @@ def test_tab_confirms_highlighted_completion(tmp_path: Path) -> None:
     hist = tmp_path / "hist"
     with create_pipe_input() as pipe:
         def _send_keys() -> None:
-            pipe.send_text("\x1b[B")  # Down: highlight alpha.py
-            pipe.send_text("\t")  # Tab: confirm it (stay editing)
-            pipe.send_text("now\r")  # Enter: submit
+            pipe.send_text("\x1b[B")
+            pipe.send_text("\t")
+            pipe.send_text("now\r")
 
         timer = threading.Timer(0.5, _send_keys)
         pipe.send_text("@alp")
@@ -354,7 +348,6 @@ def test_readline_history_is_migrated_once(tmp_path: Path) -> None:
     loaded = list(FileHistory(str(ptk_file)).load_history_strings())
     assert "first task" in loaded
     assert "second task" in loaded
-    # A second reader must not duplicate the migrated entries.
     PtkLineReader(CliCompleter(str(tmp_path)), hist)
     again = list(FileHistory(str(ptk_file)).load_history_strings())
     assert len(again) == len(loaded)

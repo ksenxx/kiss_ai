@@ -2,48 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Integration test for the per-task ids line in the History sidebar.
-//
-// Requirement driven by this test:
-//
-//   Every history row renders a third dot-separated line — the
-//   "ids" line — immediately under the workspace+meta line.  The
-//   line shows the row's chat id, task id, and parent task id
-//   (when each is set) using a single ``.running-item-ids`` span.
-//   Format:
-//
-//       chat <chat_id> • task <task_id> • parent <parent_task_id>
-//
-//   * Missing fields are skipped without a leading bullet or
-//     placeholder.
-//   * When NONE of the three ids are set, the row renders no
-//     ``.running-item-ids`` span at all.
-//   * The ids span is the LAST child of the per-row info column
-//     (after metrics and workspace+meta), so the three lines
-//     appear in this fixed top-to-bottom order:
-//
-//         steps • tokens • cost • duration
-//         workspace • model • flags
-//         chat <id> • task <id> • parent <id>
-//
-//   The metrics, workspace+meta, and ids spans must sit inside a
-//   single per-row info container (``.running-item-info``) that
-//   eliminates the vertical gap between them — the three lines
-//   must touch visually, with no empty row-gap between them.
-//
-//   The info container itself drops onto its own line below the
-//   task text via ``flex-basis: 100%`` (the same trick the
-//   metrics span used in the old layout) and uses a column flex
-//   with ``gap: 0`` so the three lines stack flush.
-//
-// This test drives the production ``media/main.js`` (plus the real
-// ``media/chat.html`` markup and ``media/panelCopy.js``) inside jsdom,
-// exactly like ``historyTaskMeta.test.js``.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/historyTaskIds.test.js
 
 'use strict';
 
@@ -84,7 +42,10 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
@@ -93,14 +54,6 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-// Fixture covering every combination the ids line must handle:
-//
-//   * row A: all three ids set (chat + task + parent_task_id).
-//   * row B: chat + task, no parent (regular non-sub-agent row).
-//   * row C: chat only — task_id null, no parent.
-//   * row D: task only — chat empty, no parent.
-//   * row E: parent only — chat empty, task_id null.
-//   * row F: none of the three — NO ids span at all.
 const WS = '/Users/koushik/work/repo';
 
 const SESSIONS_FIXTURE = [
@@ -230,10 +183,6 @@ function rowsByTitle(win) {
   return map;
 }
 
-// The History sidebar's workspace filter checkbox (#hf-workspace)
-// hides every row whose ``work_dir`` does not match the currently
-// configured workspace.  We always want every fixture row to render,
-// so this helper clears the filter before sending the history event.
 function disableWorkspaceFilter(win) {
   send(win, {
     type: 'configData',
@@ -283,7 +232,6 @@ function testIdsLineRendersAllCombinations() {
   assert.ok(e, 'row E must render');
   assert.ok(f, 'row F must render');
 
-  // Row A — all three ids — full line.
   const aIds = idsSpan(a);
   assert.ok(aIds, 'row A must render a .running-item-ids span');
   assert.strictEqual(
@@ -292,7 +240,6 @@ function testIdsLineRendersAllCombinations() {
     `row A ids text mismatch; got: ${aIds.textContent}`,
   );
 
-  // Row B — chat + task, no parent.
   const bIds = idsSpan(b);
   assert.ok(bIds, 'row B must render a .running-item-ids span');
   assert.strictEqual(
@@ -301,7 +248,6 @@ function testIdsLineRendersAllCombinations() {
     `row B ids text mismatch; got: ${bIds.textContent}`,
   );
 
-  // Row C — chat only.
   const cIds = idsSpan(c);
   assert.ok(cIds, 'row C must render a .running-item-ids span');
   assert.strictEqual(
@@ -310,7 +256,6 @@ function testIdsLineRendersAllCombinations() {
     `row C ids text mismatch; got: ${cIds.textContent}`,
   );
 
-  // Row D — task only.
   const dIds = idsSpan(d);
   assert.ok(dIds, 'row D must render a .running-item-ids span');
   assert.strictEqual(
@@ -319,7 +264,6 @@ function testIdsLineRendersAllCombinations() {
     `row D ids text mismatch; got: ${dIds.textContent}`,
   );
 
-  // Row E — parent only.
   const eIds = idsSpan(e);
   assert.ok(eIds, 'row E must render a .running-item-ids span');
   assert.strictEqual(
@@ -328,7 +272,6 @@ function testIdsLineRendersAllCombinations() {
     `row E ids text mismatch; got: ${eIds.textContent}`,
   );
 
-  // Row F — none of the three ids set → no span at all.
   assert.strictEqual(
     idsSpan(f),
     null,
@@ -351,10 +294,6 @@ function testIdsLineOrderingAndContainer() {
   assert.ok(a, 'row A must render');
   assert.ok(b, 'row B must render');
 
-  // The three rendered lines (metrics, workspace+meta, ids) must
-  // all sit inside the per-row ``.running-item-info`` column.
-  // Wrapping them eliminates the flex row-gap that previously
-  // showed up between the metrics and workspace lines.
   for (const [label, row] of [['A', a], ['B', b]]) {
     const info = infoBlock(row);
     assert.ok(
@@ -384,7 +323,6 @@ function testIdsLineOrderingAndContainer() {
       `row ${label}: ids must be a child of .running-item-info`,
     );
 
-    // Fixed order: metrics → workspace → ids.
     assert.strictEqual(
       metrics.nextElementSibling,
       workspace,
@@ -396,8 +334,6 @@ function testIdsLineOrderingAndContainer() {
       `row ${label}: ids must come immediately after workspace`,
     );
 
-    // The info block sits at the end of the row, after the
-    // running/failed dot, the task text, and the action column.
     assert.strictEqual(
       info,
       row.lastElementChild,
@@ -412,15 +348,8 @@ function testIdsLineOrderingAndContainer() {
 }
 
 function testIdsLineLayoutEliminatesGap() {
-  // jsdom never loads the external ``main.css`` stylesheet
-  // referenced via ``{{STYLE_HREF}}``, so we read the CSS file
-  // directly and assert the layout rules required to make the
-  // three lines render flush (no visual gap between metrics and
-  // workspace, no visual gap between workspace and ids).
   const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
 
-  // The info container must drop onto its own line below the
-  // task text and stack its children vertically with zero gap.
   const infoRe = /\.running-item-info\s*\{([^}]*)\}/g;
   const infoMatch = infoRe.exec(css);
   assert.ok(
@@ -441,9 +370,6 @@ function testIdsLineLayoutEliminatesGap() {
     '.running-item-info must stack its children vertically ' +
       '(flex-direction: column)',
   );
-  // Either ``gap: 0`` or ``row-gap: 0`` must zero the vertical
-  // spacing between metrics, workspace, and ids so they render
-  // flush with no visual gap.
   assert.match(
     infoBody,
     /(^|[^-])(?:row-)?gap\s*:\s*0(?:px)?\b/,
@@ -451,9 +377,6 @@ function testIdsLineLayoutEliminatesGap() {
       'metrics / workspace / ids render flush with no visual gap',
   );
 
-  // The ids span itself needs its own rule so it inherits the
-  // sidebar text colour, clips long content, and matches the
-  // small font used by the metrics / workspace lines.
   const idsRe = /\.running-item-ids\s*\{([^}]*)\}/g;
   const idsMatch = idsRe.exec(css);
   assert.ok(

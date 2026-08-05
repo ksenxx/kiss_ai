@@ -279,7 +279,6 @@ class TestWorktreeAutoCommitIncludesTaskResult:
                 baseline_commit=None,
             )
             agent._last_user_prompt = "implement feature Q"
-            # _last_result_summary remains ""
             with _LLMUnavailable():
                 assert agent._auto_commit_worktree() is True
 
@@ -332,7 +331,6 @@ class TestChatRunRecordsResultSummary:
                 agent.run(prompt_template="task 2", _skip_persistence=True)
             except RuntimeError:
                 pass
-            # The stale "first result" must NOT survive into run 2.
             assert agent._last_result_summary == "Task failed"
         finally:
             SorcarAgent.run = orig_run  # type: ignore[method-assign]

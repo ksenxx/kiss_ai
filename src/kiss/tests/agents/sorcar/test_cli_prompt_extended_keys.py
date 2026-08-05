@@ -200,10 +200,6 @@ class TestReadEmitsEnableAndDisableSequences:
                 def _boom(*_args: Any, **_kwargs: Any) -> str:
                     raise KeyboardInterrupt
 
-                # Swap in a raising prompt after the session was
-                # constructed so ``read()`` still writes its enable
-                # sequences on entry but then unwinds through the
-                # ``finally`` block.
                 reader.session.prompt = _boom  # type: ignore[method-assign]
                 try:
                     reader.read("> ")

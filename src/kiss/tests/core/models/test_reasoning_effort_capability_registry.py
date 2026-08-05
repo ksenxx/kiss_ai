@@ -51,10 +51,6 @@ from kiss.core.models.openai_compatible_model import (
     OpenAICompatibleModel,
 )
 
-# ---------------------------------------------------------------------------
-# Registry tripwire and consistency
-# ---------------------------------------------------------------------------
-
 _KNOWN_VENDORS = {"openai", "openrouter", "together", "zai", "moonshot"}
 
 _TRIPWIRE_MESSAGE = (
@@ -136,10 +132,6 @@ class TestFactoryRoutesMatchRegistry:
             p.base_url.rstrip("/") for p in OPENAI_COMPATIBLE_PROVIDERS
         )
 
-
-# ---------------------------------------------------------------------------
-# Wire behavior: real in-process HTTP server (no mocks).
-# ---------------------------------------------------------------------------
 
 
 def _chat_ok_json() -> bytes:
@@ -301,7 +293,6 @@ class TestAdaptiveProbeOnUnknownEndpoints:
         assert len(_CapabilityHandler.captured_bodies) == 1
         assert _CapabilityHandler.captured_bodies[0]["reasoning_effort"] == "high"
         assert _ADAPTIVE_TOOL_EFFORT_VERDICTS[wire_server] is True
-        # Second turn: still direct, still with the effort.
         m.generate_and_process_with_tools({"echo": echo})
         assert len(_CapabilityHandler.captured_bodies) == 2
         assert _CapabilityHandler.captured_bodies[1]["reasoning_effort"] == "high"
@@ -324,7 +315,6 @@ class TestAdaptiveProbeOnUnknownEndpoints:
         assert "reasoning_effort" not in _CapabilityHandler.captured_bodies[1]
         assert _CapabilityHandler.captured_bodies[1]["tools"]
         assert _ADAPTIVE_TOOL_EFFORT_VERDICTS[wire_server] is False
-        # Second turn: the cached verdict strips upfront — exactly one request.
         m.generate_and_process_with_tools({"echo": echo})
         assert len(_CapabilityHandler.captured_bodies) == 3
         assert "reasoning_effort" not in _CapabilityHandler.captured_bodies[2]
@@ -333,17 +323,12 @@ class TestAdaptiveProbeOnUnknownEndpoints:
         """A 400 for a request without effort propagates unchanged."""
         _CapabilityHandler.reject_reasoning_effort = True
         m = _make_model(wire_server)
-        # Pre-cache a rejecting verdict, then force the effort back into the
-        # request via a no-tools path check: without tools the wrapper must
-        # not retry-strip, and the server accepts (no effort key on 400 rule
-        # only when present) — instead verify the error path directly.
         _ADAPTIVE_TOOL_EFFORT_VERDICTS[wire_server] = True
         m.initialize("hi")
         from openai import BadRequestError
 
         with pytest.raises(BadRequestError):
             m.generate_and_process_with_tools({"echo": echo})
-        # Known-True verdict means no adaptive retry: exactly one request.
         assert len(_CapabilityHandler.captured_bodies) == 1
         _ADAPTIVE_TOOL_EFFORT_VERDICTS.pop(wire_server, None)
 

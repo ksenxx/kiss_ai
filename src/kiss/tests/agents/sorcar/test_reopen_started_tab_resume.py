@@ -72,15 +72,12 @@ class TestStartedTabResumeOwnRunningChat:
             lambda task_id, tab_id: subs.append((task_id, tab_id))
         )
 
-        # The tab that STARTED the task: a live running state keyed by
-        # the SAME tab id the webview restores on reopen.
         state = _RunningAgentState(tab_id, "test-model")
         state.chat_id = chat_id
         state.task_history_id = task_id
         state.is_task_active = True
         _RunningAgentState.running_agent_states[tab_id] = state
 
-        # Reopen → the webview replays its own chat with the same tab id.
         server._replay_session(chat_id=chat_id, tab_id=tab_id, task_id=task_id)
 
         running_events = [
@@ -96,7 +93,6 @@ class TestStartedTabResumeOwnRunningChat:
             f"task is running; broadcasts were: {[e.get('type') for e in events]}"
         )
 
-        # User input while still running must be queued, not dropped.
         server._cmd_append_user_message({"tabId": tab_id, "prompt": "hi there"})
         assert state.pending_user_messages == ["hi there"]
 
@@ -149,7 +145,6 @@ class TestStartedTabResumeOwnRunningChat:
             "a run for a tab with a live task must inject the prompt as a "
             "follow-up user message, not silently drop it"
         )
-        # The queued message is echoed so the user sees it in the chat.
         prompt_echoes = [
             e
             for e in events
@@ -158,8 +153,6 @@ class TestStartedTabResumeOwnRunningChat:
             and e.get("text") == "also update the docs"
         ]
         assert prompt_echoes, "the injected prompt must be echoed to the webview"
-        # The busy guard must still hold: no second task thread was started
-        # (``task_thread`` is unchanged) and no ``clear`` was broadcast.
         assert state.task_thread is worker
         assert not any(e.get("type") == "clear" for e in events)
 

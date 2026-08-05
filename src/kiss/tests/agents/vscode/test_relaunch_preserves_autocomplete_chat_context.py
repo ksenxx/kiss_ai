@@ -71,10 +71,6 @@ from kiss.agents.sorcar.persistence import (
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.server.server import VSCodeServer
 
-# A token that is astronomically unlikely to appear in any other file
-# on disk or in any other test's persisted state — the assertion below
-# relies on ``zephyrIdentifierMarker`` originating exclusively from
-# the fixture task text/result we insert in step (1).
 _MARKER = "zephyrIdentifierMarker"
 
 
@@ -119,13 +115,9 @@ class TestRelaunchPreservesAutocompleteChatContext(unittest.TestCase):
 
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
-        # Point ``KISS_HOME`` at the tmpdir so ``_load_chat_context_text``'s
-        # cache and any config lookups isolate cleanly from the real home.
         self._saved_kiss_home = os.environ.get("KISS_HOME")
         os.environ["KISS_HOME"] = str(Path(self._tmpdir) / ".kiss")
         self._saved_persistence = _redirect_persistence(self._tmpdir)
-        # No live tab state may leak from another test in the same
-        # process: cold-start semantics require an empty registry.
         _RunningAgentState.running_agent_states.clear()
 
     def tearDown(self) -> None:
@@ -137,12 +129,6 @@ class TestRelaunchPreservesAutocompleteChatContext(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_autocomplete_uses_resumed_chat_context(self) -> None:
-        # ------------------------------------------------------------------
-        # 1) Simulate the state left by a prior VS Code session: a
-        #    completed task in chat ``X`` whose result mentions
-        #    ``_MARKER``.  This is the identifier autocomplete must
-        #    still see after relaunch, without any live tab state.
-        # ------------------------------------------------------------------
         prior_chat_id = "chat-relaunch-autocomplete-fixture-0000001"
         task_id, chat_id = _add_task(
             "Investigate the earlier problem",
@@ -158,24 +144,14 @@ class TestRelaunchPreservesAutocompleteChatContext(unittest.TestCase):
             ),
         )
         _flush_chat_events()
-        # Bust any cached empty-context text a previous test in this
-        # process may have stashed for the fixture chat id (belt-and-
-        # suspenders — the fixture id is unique per test).
         _invalidate_chat_context_cache(prior_chat_id)
 
-        # Sanity — persistence really carries the marker under this chat.
         ctx = _load_chat_context(prior_chat_id)
         combined = " ".join(
             f"{e.get('task', '')} {e.get('result', '')}" for e in ctx
         )
         assert _MARKER in combined, combined
 
-        # ------------------------------------------------------------------
-        # 2) Simulate VS Code relaunch by instantiating a FRESH
-        #    :class:`VSCodeServer` (mirrors a daemon cold-start with
-        #    empty ``_RunningAgentState.running_agent_states`` /
-        #    ``_tab_chat_views``).
-        # ------------------------------------------------------------------
         server = VSCodeServer()
 
         events: list[dict[str, Any]] = []
@@ -187,12 +163,6 @@ class TestRelaunchPreservesAutocompleteChatContext(unittest.TestCase):
 
         server.printer.broadcast = _capture  # type: ignore[assignment]
 
-        # ------------------------------------------------------------------
-        # 3) The extension replays ``resumeSession`` for the restored
-        #    tab.  After this call the tab has NO ``_RunningAgentState``
-        #    entry (loading a chat into a tab is a view operation per
-        #    C2/C3) — only ``_tab_chat_views[tab_id] = prior_chat_id``.
-        # ------------------------------------------------------------------
         tab_id = "tab-restored-after-relaunch-autocomplete"
         server._handle_command(
             {
@@ -201,9 +171,6 @@ class TestRelaunchPreservesAutocompleteChatContext(unittest.TestCase):
                 "tabId": tab_id,
             },
         )
-        # Confirm the fixture: viewer-only tab (no registry entry) but
-        # the chat-view mapping IS populated — this is the state under
-        # which the bug fires.
         self.assertIsNone(
             _RunningAgentState.running_agent_states.get(tab_id),
             "resumeSession must not allocate a runtime tab state "
@@ -215,13 +182,7 @@ class TestRelaunchPreservesAutocompleteChatContext(unittest.TestCase):
             "_tab_chat_views for the follow-up route to work",
         )
 
-        # ------------------------------------------------------------------
-        # 4) User types the marker's prefix into the chat input.  The
-        #    webview posts a ``complete`` command to the daemon.  The
-        #    autocomplete worker is a real background thread; we
-        #    poll for the ``completions`` broadcast.
-        # ------------------------------------------------------------------
-        prefix = _MARKER[:6]  # "zephyr"
+        prefix = _MARKER[:6]
         server._handle_command(
             {
                 "type": "complete",
@@ -237,19 +198,11 @@ class TestRelaunchPreservesAutocompleteChatContext(unittest.TestCase):
             f"Autocomplete never emitted a 'completions' event for "
             f"query={prefix!r}. events={[e.get('type') for e in events]}",
         )
-        assert completions_event is not None  # for mypy
+        assert completions_event is not None
         texts = [
             c.get("text", "")
             for c in completions_event.get("completions", [])
         ]
-        # ------------------------------------------------------------------
-        # 5) The identifier persisted in the prior chat must appear as
-        #    a completion candidate — proving that ``_cmd_complete``
-        #    resolved the tab's chat id from ``_tab_chat_views`` and
-        #    passed it through to ``_active_file_identifier_matches``.
-        #    Under the bug ``chat_id=""`` is passed, the chat-context
-        #    text is empty, and the marker is missing from ``texts``.
-        # ------------------------------------------------------------------
         self.assertIn(
             _MARKER, texts,
             f"Ghost-text autocomplete lost its chat context after a "

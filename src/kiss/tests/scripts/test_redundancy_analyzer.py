@@ -136,10 +136,6 @@ def test_lcov_not_taken_branches_and_unhit_lines_ignored():
 
     redundant = analyze_redundancy(cov_file, lcov_files=[lcov_path])
     assert "test_empty" not in set(redundant) - {"test_empty"}
-    # test_empty has no items at all so it cannot make any item redundant
-    # and is itself trivially redundant only if it has nothing to cover.
-    # Methods with empty item sets are never added to method_items so
-    # they simply do not appear.
     assert "test_empty" not in redundant
     assert "test_real" not in redundant
 
@@ -166,7 +162,6 @@ def test_lcov_default_test_name_from_filename():
         )
 
     redundant = analyze_redundancy(cov_file, lcov_files=[lcov_path])
-    # playwright_run covers a strict subset of `other`, so it is redundant
     assert "playwright_run" in redundant
     assert "other" not in redundant
 
@@ -229,5 +224,3 @@ def _verify_coverage_preserved(cov_file: str, redundant: list[str]):
                         kept_arcs.add((src_file, f, t))
 
     assert kept_arcs == all_arcs, f"Lost arcs: {all_arcs - kept_arcs}"
-
-

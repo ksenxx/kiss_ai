@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import queue
 import threading
@@ -32,12 +33,9 @@ from typing import Any, cast
 
 from kiss.agents.sorcar.persistence import (
     _append_chat_event,
-    _chat_has_tasks,
     _current_db_path,
     _delete_frequent_task,
-    _delete_task,
     _get_adjacent_task_by_chat_id,
-    _get_task_chat_id,
     _history_date_range,
     _is_failed_result,
     _load_chat_events_by_task_id,
@@ -51,7 +49,10 @@ from kiss.agents.sorcar.persistence import (
     _search_history,
     _set_task_favorite,
 )
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.agents.sorcar.running_agent_state import (
+    _RunningAgentState,
+    _tab_busy,
+)
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import (
     MODEL_INFO,
@@ -85,22 +86,6 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
-# Keys in the persisted ``extra`` JSON that capture the per-task
-# snapshot of GLOBAL settings (the model picker and the worktree /
-# parallel / auto-commit toggles) at the moment the task ran.  When a
-# chat tab is LOADED FROM HISTORY into a tab, the live toggles in the
-# webview already reflect the user's CURRENT global preferences (synced
-# from ``~/.kiss/config.json`` via ``configData``);
-# replaying these stale per-task values would stamp the toggles back
-# onto the loaded task's old settings and silently make the NEXT task
-# run with those old settings instead of whatever the user just picked
-# globally.  ``_extra_for_replay`` strips them so the frontend's
-# ``task_events`` handler cannot clobber the live toggle state.
-#
-# Keys deliberately preserved: ``startTs`` / ``endTs`` drive the
-# "Running …" / "Done (Xm Ys)" header in the chat webview; ``work_dir``
-# is per-tab routing state; ``tokens`` / ``cost`` / ``steps`` /
-# ``version`` are informational read-outs of the historical run.
 _REPLAY_STRIPPED_EXTRA_KEYS = (
     "model",
     "is_worktree",
@@ -139,13 +124,6 @@ def _extra_for_replay(extra: object) -> str:
     except (json.JSONDecodeError, TypeError):
         return extra
     if not isinstance(parsed, dict):
-        # Defensive: any non-dict JSON (list / scalar) is malformed
-        # for a task's ``extra`` payload — the persistence layer
-        # always writes a JSON object.  Returning ``""`` here means a
-        # future frontend reader that uses spread / Object.assign
-        # cannot smuggle arbitrary fields through a corrupt or
-        # tampered row.  The frontend's ``if (ev.extra)`` guard
-        # handles the empty case cleanly.
         return ""
     if not any(key in parsed for key in _REPLAY_STRIPPED_EXTRA_KEYS):
         return extra
@@ -171,12 +149,39 @@ def _coerce_id(value: object) -> str | None:
     if isinstance(value, str) and value:
         return value
     if isinstance(value, bool):
-        # bool is a subclass of int; without this check ``True`` would be
-        # stringified to "True" and defeat the tamper guard.
         return None
     if isinstance(value, int) and value:
         return str(value)
     return None
+
+
+def _safe_start_ms(value: object) -> int:
+    """Convert a persisted ``timestamp`` (seconds) to epoch milliseconds.
+
+    SQLite's dynamic typing lets the non-STRICT ``REAL NOT NULL``
+    timestamp column hold TEXT or non-finite floats in hand-edited or
+    third-party-corrupted rows.  A raw ``int(float(value) * 1000)``
+    raises ``ValueError``/``TypeError`` on such text and ``OverflowError``
+    on infinity, which would abort the entire history response.  This
+    helper degrades a single corrupt timestamp to ``0`` instead.
+
+    Args:
+        value: The raw ``timestamp`` value read from a history row.
+
+    Returns:
+        Epoch milliseconds as an ``int``, or ``0`` when *value* is
+        missing, non-numeric, or non-finite.
+    """
+    try:
+        seconds = float(value or 0)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+    if not math.isfinite(seconds):
+        return 0
+    try:
+        return int(seconds * 1000)
+    except (OverflowError, ValueError):
+        return 0
 
 
 def _coalesced_replay_events(events: object) -> list[dict[str, Any]]:
@@ -199,19 +204,9 @@ def _coalesced_replay_events(events: object) -> list[dict[str, Any]]:
     if not isinstance(events, list):
         return []
     evs = cast("list[dict[str, Any]]", events)
-    # Legacy rows persisted before events carried a ``ts`` stamp (see
-    # ``stamp_event_ts`` in json_printer.py) still know WHEN they
-    # happened: the loaders inject the ``events.timestamp`` DB column
-    # (seconds float) as ``_timestamp``.  Backfill ``ts`` from it so
-    # the webview's per-panel time badge also renders for replays of
-    # old tasks.  Events that already carry ``ts`` keep it; junk
-    # ``_timestamp`` values (TEXT/BLOB/NaN/non-positive — see the
-    # data-forensics tests) are ignored.
     for ev in evs:
         if "ts" not in ev:
             legacy = ev.get("_timestamp")
-            # NaN fails ``> 0``; the upper bound is the ECMAScript
-            # Date range (±8.64e15 ms) so the frontend can format it.
             if isinstance(legacy, (int, float)) and 0 < legacy <= 8.64e12:
                 ev["ts"] = int(legacy * 1000)
     return _coalesce_events(evs)
@@ -236,33 +231,6 @@ def _live_task_id(tab: _RunningAgentState) -> str | None:
     if live_id is not None:
         return str(live_id)
     return tab.task_history_id
-
-
-def _tab_busy(tab: _RunningAgentState) -> bool:
-    """True when *tab* must not be disposed yet OR have its per-tab
-    state reset.
-
-    A tab is busy while a task is active, a merge review is in
-    progress, or its worker thread is still alive.  Shared by the
-    immediate (``_close_tab``) and deferred (``_dispose_if_closed``)
-    disposal paths, AND by :meth:`_replay_session` as the
-    ``not _tab_busy`` gate on resetting ``tab.use_worktree`` /
-    ``tab.use_parallel`` / ``tab.auto_commit_mode`` /
-    ``tab.selected_model`` on a history load.  Callers must hold
-    ``_state_lock`` while reading the result — the function itself
-    only does plain attribute reads and is not internally locked.
-
-    Args:
-        tab: The per-tab state to inspect.
-
-    Returns:
-        True when any lifecycle flag is still raised.
-    """
-    return (
-        tab.is_task_active
-        or tab.is_merging
-        or (tab.task_thread is not None and tab.task_thread.is_alive())
-    )
 
 
 def broadcast_to_conn(
@@ -292,9 +260,19 @@ def broadcast_to_conn(
 def _subagent_is_done(sub_task_id: Any) -> bool:
     """True when the sub-agent owning *sub_task_id* is no longer running.
 
-    Decided from the task-id-keyed :attr:`ChatSorcarAgent.running_agents`
-    map: presence under the sub-agent's own task id means its thread is
-    still running; absence means it finished.
+    Consults BOTH registries that track a live run, each under its own
+    lock, because they are updated at different moments of the task
+    lifecycle (S3-09): the agent publishes its ``task_history`` row
+    before inserting itself into
+    :attr:`ChatSorcarAgent.running_agents`, and at shutdown it pops
+    that map before the per-tab :class:`_RunningAgentState` is
+    unregistered.  Checking only the map therefore reported a task as
+    done during the startup gap while :meth:`_reattach_running_chat`
+    (which scans live ``_RunningAgentState`` entries) simultaneously
+    reattached it as running.  A task is considered running when its
+    id is in the map OR a live tab state (alive worker thread or
+    ``is_task_active``) owns the same task id — the same liveness
+    predicate reattachment uses.
 
     Args:
         sub_task_id: The sub-agent's ``task_history`` row id (any type;
@@ -305,11 +283,19 @@ def _subagent_is_done(sub_task_id: Any) -> bool:
     """
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
-    return not (
-        isinstance(sub_task_id, str)
-        and sub_task_id
-        and sub_task_id in ChatSorcarAgent.running_agents
-    )
+    if not (isinstance(sub_task_id, str) and sub_task_id):
+        return True
+    with ChatSorcarAgent._running_agents_lock:
+        if sub_task_id in ChatSorcarAgent.running_agents:
+            return False
+    with _RunningAgentState._registry_lock:
+        for tab in _RunningAgentState.running_agent_states.values():
+            if _live_task_id(tab) != sub_task_id:
+                continue
+            alive = tab.task_thread is not None and tab.task_thread.is_alive()
+            if alive or tab.is_task_active:
+                return False
+    return True
 
 
 class VSCodeServer(
@@ -320,56 +306,12 @@ class VSCodeServer(
 ):
     """Backend server for VS Code extension."""
 
-    # Class-level fallbacks so these attributes exist on every
-    # instance regardless of construction path — some tests build a
-    # minimal server via ``object.__new__(VSCodeServer)`` and never
-    # run ``__init__``, then call methods (``_replay_session``,
-    # ``_teardown_tab_resources``, ``_new_chat``) that read them.
-    # ``__init__`` shadows both with fresh per-instance values, so
-    # production servers never touch these class-level objects; only
-    # non-``__init__`` instances see (and, for the dict, share) them.
     _tab_opened_task_ids: dict[str, str] = {}
     _cli_running_lookup: Callable[[str], bool] | None = None
-    # Handle of the background orphan-task sweep thread started by
-    # ``__init__``; ``None`` on instances built via ``object.__new__``
-    # (test shortcuts) that never run ``__init__``.  Kept so tests and
-    # embedders can join the sweep deterministically.
     _orphan_sweep_thread: threading.Thread | None = None
 
     def __init__(self, printer: JsonPrinter | None = None) -> None:
-        # The transport-specific printer is owned by the caller
-        # (typically :class:`RemoteAccessServer`, which passes a
-        # :class:`WebPrinter`).  Defaulting to a plain
-        # :class:`JsonPrinter` keeps the unit tests that
-        # construct a bare ``VSCodeServer()`` working — they patch
-        # ``server.printer.broadcast`` themselves to capture events.
         self.printer: JsonPrinter = printer or JsonPrinter()
-        # ``running_agent_states`` is now a class attribute on
-        # :class:`_RunningAgentState` (shared across every instance).
-        # Reset on init so each ``VSCodeServer`` starts with a clean
-        # slate (production only ever spawns one server per Python
-        # process; test fixtures that instantiate the server fresh
-        # need isolation from prior tests' tab state).  The server
-        # still owns ``_state_lock`` to coordinate multi-step access
-        # (read-then-modify, scan-then-modify) and the lifecycle
-        # transitions that span both the dict and individual
-        # ``_RunningAgentState`` fields.
-        # A registry entry whose worker thread is STILL ALIVE in this
-        # very process (a second ``VSCodeServer`` constructed next to
-        # a live one — test fixtures, embedders) must not have its
-        # in-flight task row swept below: the worker's own cleanup
-        # ``finally`` will persist the real result.  Snapshot those
-        # task ids under the registry lock BEFORE clearing.
-        #
-        # Boot timestamp for the orphan sweep's eligibility cut-off.
-        # Captured BEFORE the sweep thread is spawned: only rows
-        # created strictly before this instant can be orphans of a
-        # prior, now-dead process.  Any row inserted AFTER this
-        # instant belongs to the live process (a task started while
-        # the background sweep was still pending — e.g. delayed by
-        # SQLite's 30 s ``busy_timeout``) and must never be rewritten
-        # to "Task terminated unexpectedly (process killed)" by a
-        # sweep that raced past its insertion.
         boot_ts = time.time()
         still_running: set[str] = set()
         with _RunningAgentState._registry_lock:
@@ -391,31 +333,6 @@ class VSCodeServer(
                     ", ".join(sorted(still_running)),
                 )
             _RunningAgentState.running_agent_states.clear()
-        # Sweep up "Agent Failed Abruptly" rows left behind by a prior
-        # process that was killed mid-task (SIGKILL / VS Code reload /
-        # OOM) — the Python ``finally`` in ``_TaskRunnerMixin`` cannot
-        # run when the host process dies, so the only way to clear
-        # the sentinel from those rows is here, on every fresh
-        # server boot.  Rows owned by worker threads that are still
-        # alive in THIS process (collected above) are excluded.
-        #
-        # The sweep runs in a BACKGROUND daemon thread.  It takes the
-        # persistence write lock and issues UPDATE/SELECT statements
-        # against ``sorcar.db``, whose connections are configured with
-        # ``PRAGMA busy_timeout=30000``.  Running it synchronously here
-        # blocked ``RemoteAccessServer.__init__`` — and therefore the
-        # UDS / WSS listeners bound later in ``_setup_server`` — for
-        # seconds on a large database and for up to ~30 s whenever
-        # another process held the SQLite write lock (most commonly the
-        # just-killed previous daemon flushing its final writes during
-        # an ``install.sh`` restart).  The user-visible symptom was the
-        # "KISS Sorcar Server is starting ..." overlay lingering after
-        # every install/update while ``~/.kiss/sorcar.sock`` did not
-        # yet exist.  Off-thread execution is safe: ``_get_db()`` opens
-        # a per-thread connection and ``_recover_orphaned_tasks``
-        # serialises with in-process writers via
-        # ``_rw_lock.write_lock()``.  The thread handle is kept so
-        # tests (and embedders) can join it deterministically.
         self._orphan_sweep_thread = threading.Thread(
             target=self._run_orphan_sweep,
             args=(still_running, boot_ts),
@@ -424,97 +341,20 @@ class VSCodeServer(
         )
         self._orphan_sweep_thread.start()
         self.work_dir = os.environ.get("KISS_WORKDIR", os.getcwd())
-        # ``_tab_chat_views`` maps every frontend tab id (from ANY
-        # VS Code window or browser window) to the chat id that tab
-        # currently has open.  Maintained by ``_cmd_run`` (launcher
-        # tabs), ``_replay_session`` (history / restored-tab viewers),
-        # ``_new_chat`` and ``_teardown_tab_resources``.  When a new
-        # task is allocated for a chat, ``_subscribe_chat_viewers``
-        # scans this map and subscribes every tab that has the chat
-        # open to the task's live event stream — the
-        # ``_RunningAgentState`` registry alone cannot serve this
-        # purpose because pure-viewer tabs deliberately have no
-        # registry entry after a daemon restart or deferred disposal
-        # (see the C2/C3 note in ``_replay_session``).  Guarded by
-        # ``_state_lock``.
         self._tab_chat_views: dict[str, str] = {}
-        # Maps a frontend tab id to the ``task_history.id`` the tab
-        # was OPENED with (``resumeSession`` carrying ``taskId``) and
-        # that no run in the tab has consumed yet.  The FIRST task the
-        # user issues in such a tab pops this entry and seeds
-        # :meth:`ChatSorcarAgent.resume_from_task_id` so the agent's
-        # chat context is built from the opened task's
-        # ``parent_task_id`` chain rather than the whole chat (see
-        # ``_run_task_inner``).  Consuming on first run keeps every
-        # later run in the tab on the normal chat-context path.
-        # Cleared alongside ``_tab_chat_views`` when the tab is
-        # re-pointed at a chat without a task id, starts a new chat,
-        # or is disposed.  Guarded by ``_state_lock``.
         self._tab_opened_task_ids: dict[str, str] = {}
-        # Maps ``id(user_answer_queue)`` to the task id of the currently
-        # pending ``ask_user_question`` that owns that queue.  ``userAnswer``
-        # uses this to close exactly the subscriber set for the task that
-        # consumed the answer; old completed-task subscriber sets are
-        # intentionally retained and must not receive unrelated close events.
         self._pending_user_answer_tasks: dict[int, str] = {}
         persisted = _load_last_model()
         self._default_model = persisted or os.environ.get("KISS_MODEL", "") or get_default_model()
-        # Share the lock that guards ``_RunningAgentState.running_agent_states``
-        # so producers outside this module (parallel sub-agent spawners
-        # in :class:`ChatSorcarAgent`, registration helpers in
-        # :class:`WorktreeSorcarAgent`) can serialise their mutations
-        # against the server's iteration loops without re-importing the
-        # server class.  Using the registry's ``RLock`` (re-entrant)
-        # also fixes a latent self-deadlock where an existing
-        # ``with self._state_lock:`` critical section would call into
-        # a helper that itself tried to re-acquire the same lock.
         self._state_lock = _RunningAgentState._registry_lock
         self._complete_seq: int = 0
-        # Latest autocomplete sequence number per connection, keyed by
-        # the ``connId`` that ``RemoteAccessServer`` stamps on every
-        # client command (``""`` for direct callers, e.g. tests).
-        # Staleness is tracked per connection so two VS Code windows
-        # typing concurrently never cancel each other's in-flight
-        # ghost-text requests (a single global counter let whichever
-        # window typed last mark every other window's pending request
-        # stale).
         self._complete_seq_latest: dict[str, int] = {}
-        self._complete_queue: queue.Queue[tuple[str, int, str, str, str, str]] | None = None
+        self._complete_queue: queue.Queue[tuple[str, int, str, str, str, str, str]] | None = None
         self._complete_worker: threading.Thread | None = None
-        # Per-work_dir file scan cache.  Keyed by the absolute work_dir
-        # path the scan ran in so different chat tabs (each with their
-        # own ``work_dir``) keep independent file lists for the
-        # ``@``-mention autocomplete picker.  ``None`` would have meant
-        # "no cache" for the legacy single-dir cache; the dict form uses
-        # "key absent" instead and is initialised empty.
         self._file_cache: dict[str, list[str]] = {}
-        # Last-seen active editor file path / content per connection,
-        # keyed by ``connId`` (``""`` for direct callers).  Each VS
-        # Code window reports its own active editor on ``complete``
-        # commands; keeping the fallback snapshot per connection means
-        # one window's active-file content can never leak into another
-        # window's ghost-text autocomplete context.
         self._last_active_file: dict[str, str] = {}
         self._last_active_content: dict[str, str] = {}
-        # Optional hook the owning ``RemoteAccessServer`` installs via
-        # :meth:`set_cli_running_lookup`.  Returns ``True`` when a
-        # given task id is currently being executed by the local
-        # ``sorcar`` CLI (announced via ``cliTaskStart`` envelopes).
-        # Used by :meth:`_replay_session` to subscribe a freshly
-        # resumed webview tab to the live event stream and broadcast
-        # a ``status:running`` event so the tab title shows the
-        # blinking-green-circle "running" indicator.  ``None`` in
-        # tests that construct ``VSCodeServer`` standalone.
         self._cli_running_lookup: Callable[[str], bool] | None = None
-        # Companion snapshot hook installed by ``RemoteAccessServer``
-        # via :meth:`set_cli_running_task_ids_lookup`.  Returns the
-        # full set of task ids the local ``sorcar`` CLI has announced
-        # as running (via ``cliTaskStart``).  Used by
-        # :meth:`_get_running_task_ids` to UNION the CLI-launched
-        # running tasks with the UI-launched ones, so the History
-        # panel's pulsing-green-dot ``is_running`` flag is set on
-        # CLI tasks too (the in-process ``_RunningAgentState``
-        # registry only tracks UI-launched tasks).
         self._cli_running_task_ids_lookup: Callable[[], set[str]] | None = None
 
     @staticmethod
@@ -561,9 +401,6 @@ class VSCodeServer(
                 "orphan-task recovery sweep failed; continuing startup",
             )
         finally:
-            # Release this short-lived thread's per-thread SQLite
-            # connection; without this every server construction
-            # would leak one open connection until process exit.
             _close_thread_db()
 
     def set_cli_running_lookup(
@@ -646,17 +483,6 @@ class VSCodeServer(
             if tab is None:
                 tab = _RunningAgentState(tab_id, self._default_model)
                 _RunningAgentState.running_agent_states[tab_id] = tab
-            # Lazily ensure an agent slot for tests / out-of-task
-            # callers that read ``tab.agent`` directly (e.g. merge
-            # / discard, worktree state inspection).  The agent is
-            # transient — :meth:`_TaskRunnerMixin._run_task`'s outer
-            # ``finally`` sets ``tab.agent = None`` once each task
-            # completes, and the next task's
-            # :meth:`_TaskRunnerMixin._run_task_inner` re-enters here
-            # (via ``_get_tab``) to allocate a fresh agent before the
-            # run starts.  So no agent state ever survives a task
-            # boundary; the slot populated here is a fresh, empty
-            # agent.
             if tab.agent is None:
                 agent = WorktreeSorcarAgent("Sorcar VS Code")
                 if tab.chat_id:
@@ -676,25 +502,11 @@ class VSCodeServer(
 
     def _handle_command(self, cmd: dict[str, Any]) -> None:
         """Dispatch a command from VS Code to the appropriate handler."""
-        # The shared routing fields are used as dict keys (tab
-        # registry, per-work_dir file cache, per-connection
-        # autocomplete state) throughout the handlers: a non-string
-        # value (e.g. ``"tabId": [1]`` from a malformed client) raises
-        # ``TypeError: unhashable type`` out of a registry lookup — or
-        # silently corrupts daemon-global state (``setWorkDir`` would
-        # assign the list to ``self.work_dir``) — and an exception
-        # escaping this method kills the transport's whole receive
-        # loop, i.e. the entire client connection.  Coerce them to
-        # ``""``, the neutral value every handler already guards.
         for field in ("tabId", "workDir", "connId"):
             value = cmd.get(field)
             if value is not None and not isinstance(value, str):
                 cmd[field] = ""
         cmd_type = cmd.get("type", "")
-        # A non-string ``type`` (e.g. a list) is unhashable: using it
-        # as a dict key would raise TypeError, which escapes to the
-        # transport's receive loop and kills the whole client
-        # connection.  Route it to the unknown-command branch instead.
         handler = self._HANDLERS.get(cmd_type) if isinstance(cmd_type, str) else None
         if handler is not None:
             handler(self, cmd)
@@ -703,9 +515,6 @@ class VSCodeServer(
             tab_id = cmd.get("tabId")
             if tab_id is not None:
                 event["tabId"] = tab_id
-            # Reply only to the connection that sent the unknown
-            # command — other windows' webviews must not render
-            # an error banner for a command they never issued.
             self._broadcast_to_conn(event, cmd.get("connId", ""))
 
     def _broadcast_to_conn(
@@ -759,6 +568,19 @@ class VSCodeServer(
         if cleanup_tab is not None:
             cleanup_tab(tab_id)
 
+    def _printer_close_owner_ui(self, tab_id: str) -> None:
+        """Take *tab_id*'s interactive UI off the other clients' screens.
+
+        Resolved via ``getattr`` for the same reason as
+        :meth:`_printer_cleanup_tab`.
+
+        Args:
+            tab_id: The frontend tab being disposed.
+        """
+        close_owner_ui = getattr(self.printer, "close_owner_ui", None)
+        if close_owner_ui is not None:
+            close_owner_ui(tab_id)
+
     def _get_models(self, conn_id: str = "") -> None:
         """Send available models list with usage counts and pricing.
 
@@ -791,26 +613,10 @@ class VSCodeServer(
         if custom:
             models_list.insert(0, custom)
 
-        # ``kiss-web`` can outlive VS Code windows.  A fresh VS Code
-        # activation asks this long-lived daemon for ``getModels``;
-        # if the user selected a different model in a previous window
-        # session, that choice is persisted in ``config.json`` and must
-        # take precedence over this process's stale in-memory default.
-        # Honor the persisted last model whenever it is still runnable.
         available_names = {m["name"] for m in models_list}
         with self._state_lock:
             self._refresh_default_model(available_names)
 
-            # On a fresh installation the server is constructed before any
-            # API key is configured, so ``self._default_model`` is the
-            # ``"No model"`` sentinel.  Once a key becomes available (env var
-            # or settings panel), ``get_available_models()`` returns real
-            # models, but the cached sentinel would keep the picker stuck on
-            # "No model".  Re-resolve the default whenever the cached
-            # selection is no longer a valid choice so the picker recovers.
-            # If the only available option is a custom endpoint, the core
-            # default resolver cannot name it; choose the first available
-            # entry so the picker never emits a stale unavailable selection.
             if self._default_model not in available_names:
                 refreshed = get_default_model()
                 if refreshed in available_names:
@@ -845,12 +651,6 @@ class VSCodeServer(
                 tid = _live_task_id(tab)
                 if tid is not None and tab.task_thread is not None and tab.task_thread.is_alive():
                     running.add(tid)
-        # CLI-launched tasks run in a separate ``sorcar`` process and
-        # have no ``_RunningAgentState`` entry on the daemon, but the
-        # ``RemoteAccessServer`` tracks them via ``cliTaskStart`` /
-        # ``cliTaskEnd`` envelopes.  Merge that set in so the History
-        # panel renders the pulsing-green-dot running indicator on
-        # CLI-launched rows too.
         if self._cli_running_task_ids_lookup is not None:
             try:
                 running.update(self._cli_running_task_ids_lookup())
@@ -892,21 +692,6 @@ class VSCodeServer(
                 if cur is not None:
                     steps += int(getattr(cur, "step_count", 0) or 0)
                 session["steps"] = steps
-                # Overlay run-mode metadata for the meta line.
-                # ``ChatSorcarAgent.run`` now persists an early
-                # ``extra`` payload when it inserts the row, but live
-                # state remains authoritative while the task runs
-                # (and supports legacy rows without that payload).
-                # Read it straight off the live agent / tab so the
-                # history sidebar's meta line renders the same model
-                # + flags the running tab actually uses.
-                # ``agent.model_name`` is the
-                # model the in-flight task was launched with
-                # (``_TaskRunnerMixin._cmd_run`` plumbs this from
-                # the ``run`` command's ``model`` field through to
-                # the agent); we prefer it over the tab-level
-                # ``selected_model`` because the user can change
-                # ``selected_model`` mid-task via the model picker.
                 mdl_live = getattr(agent, "model_name", "") or getattr(tab, "selected_model", "")
                 if isinstance(mdl_live, str) and mdl_live:
                     session["model"] = mdl_live
@@ -942,10 +727,6 @@ class VSCodeServer(
             has_events = bool(entry.get("has_events", False))
             chat_id = str(entry.get("chat_id", "") or "")
             result = str(entry.get("result", "") or "")
-            # r4-vscode-H2 — accept legacy int task_ids from DBs that
-            # escaped auto-migration.  Coerce to str so the rest of
-            # the history pipeline (which assumes a string id) works
-            # uniformly.
             entry_id = _coerce_id(entry.get("id"))
             is_running = entry_id is not None and entry_id in running_task_ids
             session: dict[str, Any] = {
@@ -955,70 +736,20 @@ class VSCodeServer(
                 "timestamp": entry.get("timestamp", 0),
                 "preview": task,
                 "has_events": has_events,
-                # A running task's row still holds the "Agent Failed
-                # Abruptly" sentinel result — don't paint it as failed
-                # while it is alive.
                 "failed": _is_failed_result(result) and not is_running,
                 "is_running": is_running,
                 "tokens": 0,
                 "cost": 0.0,
                 "steps": 0,
                 "is_favorite": False,
-                # ``work_dir`` persisted on this task's row: first in
-                # the early ``extra`` payload at row insertion, then
-                # finalized by ``_TaskRunnerMixin._save_task_extra``.
-                # Surfaced so the history sidebar's Workspace filter
-                # can compare completed/error rows with the client's
-                # configured workspace.  Empty only for legacy rows
-                # that pre-date the persistence change (or no-folder
-                # launches).
                 "work_dir": "",
-                # Per-task run-mode metadata persisted by
-                # ``_TaskRunnerMixin._run_task_inner`` into the row's
-                # ``extra`` JSON.  Surfaced so the history sidebar can
-                # render its dot-separated meta line under the
-                # workspace row::
-                #
-                #     <model> • <wt|no-wt> • <parallel|sequential>
-                #         • <auto-commit|manual-commit>
-                #
-                # Legacy rows that pre-date the persistence change
-                # (no ``model`` field) get an empty ``model``, which
-                # the frontend interprets as "render no meta line".
                 "model": "",
                 "is_worktree": False,
                 "is_parallel": False,
                 "auto_commit_mode": False,
-                # Agent start / end timestamps in ms since epoch.
-                # ``startTs`` comes from the row's own ``timestamp``
-                # column (set on INSERT in ``_add_task``), ``endTs``
-                # is read from the persisted ``extra`` JSON below
-                # (0 means the agent has not yet recorded an end —
-                # i.e. still running, or the task pre-dates the
-                # endTs persistence change).  Surfaced so the
-                # frontend can render the chat webview's
-                # "Running …" / "Done (Xm Ys)" header from
-                # agent wall-clock rather than the local client
-                # wall-clock at history-load time.
-                "startTs": int(
-                    float(entry.get("timestamp", 0) or 0)  # type: ignore[arg-type]
-                    * 1000
-                ),
+                "startTs": _safe_start_ms(entry.get("timestamp", 0)),
                 "endTs": 0,
             }
-            # Mark sub-agent rows so the history sidebar treats them
-            # as a regular task with one rendering difference: the
-            # reopened tab is styled as a sub-agent tab (purple
-            # accent) and suppresses adjacent-task loading
-            # for siblings in the same chat.  Persisted as just
-            # ``{"parent_task_id": <int>}`` under ``extra.subagent``;
-            # presence of the key implies the row is a sub-agent.
-            #
-            # ``extra`` also holds the post-completion metrics
-            # (``tokens``, ``cost``, ``steps``) written by
-            # ``_TaskRunnerMixin._run_task_inner`` so the history
-            # sidebar can render each row with the same metrics
-            # line as the Running tab.
             extra_raw = str(entry.get("extra", "") or "")
             if extra_raw:
                 try:
@@ -1029,15 +760,14 @@ class VSCodeServer(
                     sub = extra_obj.get("subagent")
                     if isinstance(sub, dict):
                         session["is_subagent"] = True
-                        # r3-vscode-H2: accept both UUID strings and
-                        # legacy int parent ids written by pre-UUID
-                        # task_history rows that escaped migration.
                         pid = _coerce_id(sub.get("parent_task_id"))
                         if pid is not None:
                             session["parent_task_id"] = pid
-                    # Field-by-field numeric coercion: garbage values
-                    # fall back to the zero default, numeric strings
-                    # round-trip through the cast.
+                    # ``OverflowError`` must be caught alongside the
+                    # usual coercion errors: Python's JSON parser
+                    # accepts ``Infinity``/huge numbers in hand-edited
+                    # ``extra`` payloads and one corrupt row must not
+                    # abort the entire history response (S3-13/R7).
                     for key, cast, default in (
                         ("tokens", int, 0),
                         ("cost", float, 0.0),
@@ -1045,22 +775,16 @@ class VSCodeServer(
                     ):
                         try:
                             session[key] = cast(extra_obj.get(key, default) or default)
-                        except (TypeError, ValueError):
+                        except (TypeError, ValueError, OverflowError):
                             session[key] = default
                     try:
                         session["endTs"] = int(extra_obj.get("endTs", 0) or 0)
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
                         session["endTs"] = 0
                     session["is_favorite"] = bool(extra_obj.get("is_favorite", False))
                     wd_raw = extra_obj.get("work_dir", "")
                     if isinstance(wd_raw, str):
                         session["work_dir"] = wd_raw
-                    # Run-mode metadata for the meta line.
-                    # ``model`` round-trips verbatim when present;
-                    # the three booleans are coerced via ``bool()``
-                    # so missing / non-boolean garbage falls back
-                    # to ``False`` (rendered as "no-wt" /
-                    # "sequential" / "manual-commit").
                     mdl_raw = extra_obj.get("model", "")
                     if isinstance(mdl_raw, str):
                         session["model"] = mdl_raw
@@ -1071,18 +795,11 @@ class VSCodeServer(
                         start_ts_raw = extra_obj.get("startTs", 0)
                         if start_ts_raw:
                             session["startTs"] = int(start_ts_raw)
-                    except (TypeError, ValueError):
+                    except (TypeError, ValueError, OverflowError):
                         pass
-            # For running tasks, overlay live metrics from the agent
-            # so the history panel shows current steps/tokens/cost
-            # instead of the stale persisted values (which are only
-            # written at task completion).
             if session.get("is_running") and entry_id is not None:
                 self._overlay_live_metrics(session, entry_id)
             sessions.append(session)
-        # First/last task timestamps over the WHOLE db (not just this
-        # page / search subset) so the sidebar can pre-fill its
-        # From/To date inputs with the true first and last task dates.
         min_ts, max_ts = _history_date_range()
         event: dict[str, Any] = {
             "type": "history",
@@ -1092,45 +809,6 @@ class VSCodeServer(
             "dateRange": {"min": min_ts, "max": max_ts},
         }
         self._broadcast_to_conn(event, conn_id)
-
-    def _handle_delete_task(self, task_id: str) -> None:
-        """Delete a task and its associated events from the database
-        and broadcast a ``taskDeleted`` event so any open chat tab
-        that displays this task or its chat can prune its UI.
-
-        The history sidebar is removed optimistically by the
-        frontend on click, but open tabs that show the deleted task
-        (as the current task or as an adjacent-task block from
-        scroll-loaded chat history) need to react too.  We therefore
-        look up the task's chat_id *before* deleting, and after
-        deletion broadcast::
-
-            {
-                "type": "taskDeleted",
-                "taskId": <str>,
-                "chatId": <str>,
-                "chatHasMoreTasks": <bool>,
-            }
-
-        ``chatHasMoreTasks`` lets the frontend decide whether to
-        merely remove a single ``.adjacent-task`` block or close the
-        whole tab (when the chat is now empty).
-
-        Args:
-            task_id: The primary key of the task_history row to
-                delete.
-        """
-        chat_id = _get_task_chat_id(task_id)
-        if not _delete_task(task_id):
-            return
-        self.printer.broadcast(
-            {
-                "type": "taskDeleted",
-                "taskId": task_id,
-                "chatId": chat_id,
-                "chatHasMoreTasks": _chat_has_tasks(chat_id),
-            }
-        )
 
     def _handle_set_favorite(self, task_id: str, is_favorite: bool) -> None:
         """Persist the favourite flag on a task history row.
@@ -1271,28 +949,20 @@ class VSCodeServer(
         Caller must have already popped *tab* from
         ``_RunningAgentState.running_agent_states``.
 
+        Retiring the worktree here can strand work — a rejected
+        pre-commit hook leaves the changes in the worktree directory,
+        and a conflicting merge leaves them on the branch — and the
+        agent records where to find them as a pending warning.  Those
+        warnings are flushed before the printer is torn down, because
+        after that there is nothing left to say it on and the user
+        would never learn their work survived.
+
         Args:
             tab_id: The frontend tab identifier being disposed.
             tab: The popped tab state, or ``None`` when the tab was
                 never created (e.g. ``closeTab`` for an unknown id).
         """
         if tab is not None:
-            # Release any still-pending worktree branch held by the
-            # tab's transient agent.  When the agent has already been
-            # disposed (the common case at tab close after the task
-            # ended), there is nothing to release: each task creates
-            # a fresh worktree and the agent is the sole authority on
-            # its state.
-            #
-            # "Lost slides" bug fix: when the last task ended in
-            # failure / user-Stop (``_pending_review=True``) and the
-            # user has not yet explicitly chosen Merge or Discard,
-            # commit the partial work onto the worktree branch but
-            # do NOT silently squash-merge it.  Closing a chat tab
-            # while a stopped task's partial work is unreviewed must
-            # not be allowed to overwrite the user's original
-            # branch.  The branch survives in ``git branch`` for
-            # manual recovery via ``git checkout <branch>``.
             try:
                 wt_agent = self._ensure_wt_agent(tab)
                 if wt_agent is not None and wt_agent._wt_pending:
@@ -1300,19 +970,11 @@ class VSCodeServer(
                         wt_agent._preserve_pending_worktree_for_review()
                     else:
                         wt_agent._release_worktree()
+                    wt_agent._flush_warnings(self.printer)
             except Exception:
                 logger.debug("Worktree release on tab close failed", exc_info=True)
-        # ``cleanup_tab`` removes *tab_id* from every task subscriber
-        # set so a stale viewer never receives events.  Per-task state
-        # (recordings, persist_agents, offsets) is owned by the agent
-        # thread and cleaned up by :meth:`_TaskRunnerMixin` /
-        # :meth:`ChatSorcarAgent.run`.  Use the getattr-guarded helper
-        # (like every sibling cleanup path) so duck-typed printers
-        # without ``cleanup_tab`` survive tab close too.
+        self._printer_close_owner_ui(tab_id)
         self._printer_cleanup_tab(tab_id)
-        # A disposed tab no longer views any chat: drop it from the
-        # chat-viewer map so future tasks on that chat do not fan
-        # events out to a tab that no longer exists.
         with self._state_lock:
             self._tab_chat_views.pop(tab_id, None)
             self._tab_opened_task_ids.pop(tab_id, None)
@@ -1337,44 +999,17 @@ class VSCodeServer(
             tab_id: The frontend tab identifier (a freshly-minted uuid).
         """
         if not tab_id:
-            # A malformed ``newChat`` without a tabId must not mint a
-            # phantom registry entry keyed "" via ``_get_tab`` —
-            # ``_cmd_close_tab`` guards against empty ids, so such an
-            # entry (and its eagerly-created agent) could never be
-            # disposed.  Mirror ``_replay_session``'s empty-id no-op.
             logger.debug("newChat ignored: empty tabId")
             return
         tab = self._get_tab(tab_id)
         with self._state_lock:
             self._refresh_default_model()
             tab.selected_model = self._default_model
-            # Clear the long-lived chat identity for this tab; the
-            # next ``_cmd_run`` will mint a fresh chat id when it
-            # builds the per-task agent.  No agent is owned by the
-            # tab outside of an active task, so there is nothing
-            # else to reset here.
             tab.chat_id = ""
             tab.last_task_id = None
-            # A fresh chat has no chat id yet, so the tab views no
-            # chat until ``_cmd_run`` mints one or ``_replay_session``
-            # associates a resumed one.  Any opened-by-task-id seed is
-            # likewise stale for a fresh chat.
             self._tab_chat_views.pop(tab_id, None)
             self._tab_opened_task_ids.pop(tab_id, None)
-            # Snapshot the model under the lock so the ``showWelcome``
-            # broadcast below cannot disagree with the in-memory state
-            # captured for ``tab.selected_model`` above (a concurrent
-            # ``_cmd_select_model`` could otherwise mutate
-            # ``self._default_model`` between the lock release and the
-            # broadcast read).
             welcome_model = self._default_model
-        # Drop any live-task subscriptions this tab carried from the
-        # chat it previously displayed (e.g. a still-running task it
-        # was viewing via ``_reattach_running_chat``).  The webview now
-        # shows the welcome screen, so the old task's streaming events
-        # must no longer fan out to this tab.  Resolved via ``getattr``
-        # because some duck-typed test printers implement only the
-        # broadcast/subscribe subset of the printer protocol.
         self._printer_cleanup_tab(tab_id)
         self.printer.broadcast(
             {
@@ -1401,6 +1036,14 @@ class VSCodeServer(
         mutating its ``use_worktree`` flag violated per-tab state
         isolation (C2/C3 fix).
 
+        Loading a chat never touches the tab's ``use_worktree`` /
+        ``use_parallel`` / ``auto_commit_mode`` / ``selected_model``:
+        those mirror the toolbar toggles, which are global UI state the
+        user owns.  Clearing them made a history click silently switch
+        auto-commit off, which in turn made the pending-worktree
+        handling below present a diff/merge review the user had opted
+        out of.
+
         Args:
             chat_id: The string chat session identifier to replay.
             tab_id: The frontend tab identifier.
@@ -1412,11 +1055,6 @@ class VSCodeServer(
         if not tab_id:
             logger.debug("_replay_session called without tab_id; ignoring")
             return
-        # Record which task id this tab was OPENED with so the first
-        # run in the tab can seed its chat context from the task's
-        # ``parent_task_id`` chain (consumed by ``_run_task_inner``).
-        # Re-pointing the tab at a chat WITHOUT a task id discards any
-        # earlier seed — the tab no longer views that specific task.
         with self._state_lock:
             if task_id:
                 self._tab_opened_task_ids[tab_id] = str(task_id)
@@ -1425,29 +1063,11 @@ class VSCodeServer(
         result = None
         if task_id is not None:
             result = _load_chat_events_by_task_id(task_id)
-            # If found, ensure chat_id is populated for resume_chat_by_id
             if result:
                 chat_id = str(result.get("chat_id", "") or chat_id)
         if not result:
             result = _load_latest_chat_events_by_chat_id(chat_id)
         if not result:
-            # The persisted ``task_history`` row may not exist yet —
-            # ``ChatSorcarAgent.run`` writes it inside the worker
-            # thread, and a tab that STARTED a task and is immediately
-            # closed+reopened (or VS Code reload) can race the writer.
-            # Without a row there are no events to replay, but a live
-            # ``_RunningAgentState`` may still exist for this
-            # ``chat_id`` / ``tab_id`` — re-subscribe the re-opened
-            # webview to its stream and broadcast ``status running:true``
-            # so the webview learns the task is running.  Otherwise the
-            # re-opened tab would silently keep ``isRunning=false``,
-            # the user's next message would be sent as a ``submit``
-            # (→ ``run``) that the daemon would have to inject (the
-            # tab is busy) — and after the task finishes the tab would
-            # appear idle, but any input would NEVER reach the
-            # appendUserMessage path because the webview never learned
-            # the task was running in the first place.  Worst case is
-            # silent: the user types and nothing happens.
             self._printer_cleanup_tab(tab_id)
             rebound_running = self._reattach_running_chat(
                 chat_id,
@@ -1465,8 +1085,6 @@ class VSCodeServer(
                         "startTs": start_ts,
                     }
                 )
-                # Empty task_events so the webview's replay loop
-                # transitions out of its "loading" state cleanly.
                 self.printer.broadcast(
                     {
                         "type": "task_events",
@@ -1478,20 +1096,6 @@ class VSCodeServer(
                         "tabId": tab_id,
                     }
                 )
-            # Mirror the found-row path's tab-state bookkeeping.
-            # Without this the race-window resume leaves the tab in a
-            # half-initialised state: (a) it is never recorded in
-            # ``_tab_chat_views``, so ``_subscribe_chat_viewers`` never
-            # fans the NEXT task on this chat out to it and a
-            # follow-up ``_cmd_run`` cannot resolve the chat id it
-            # should continue; (b) ``frontend_closed`` stays raised on
-            # a close-marked busy tab that the user just re-opened, so
-            # the deferred ``_dispose_if_closed`` tears the tab down
-            # the moment its task ends; (c) an existing registry
-            # entry keeps the previously displayed chat's ``chat_id``.
-            # Sub-agent view tabs (live registry entries flagged
-            # ``is_subagent``) are NOT viewers of the (parent) chat —
-            # matching the normal path's ``subagent_info`` guard.
             with self._state_lock:
                 tab = _RunningAgentState.running_agent_states.get(tab_id)
                 is_sub_view = tab is not None and tab.is_subagent
@@ -1502,28 +1106,7 @@ class VSCodeServer(
                 if chat_id and not is_sub_view:
                     self._tab_chat_views[tab_id] = chat_id
             return
-        # NOTE: do NOT early-return on empty ``events``.  When a
-        # sub-agent has just been spawned by ``run_parallel`` and
-        # broadcasts ``new_tab`` (carrying its own ``task_id``), the
-        # frontend round-trips a ``resumeSession`` back here long
-        # before the async event-writer thread has flushed any
-        # events to the DB.  Returning early on an empty events list
-        # would skip ``_reattach_running_chat`` below, so the new
-        # tab would never get subscribed to the sub-agent's live
-        # event stream and subsequent broadcasts would have no
-        # fan-out target.  Proceeding with an empty events list is
-        # harmless: ``task_events`` with ``events=[]`` is a no-op
-        # for the frontend's replay loop.
 
-        # Inspect ``extra`` BEFORE re-attaching so we know whether to
-        # flip the freshly-allocated tab into sub-agent styling.  The
-        # sub-agent's own :class:`_RunningAgentState` is registered by
-        # :meth:`ChatSorcarAgent._run_tasks_parallel` under the
-        # sub-agent's ``sub_tab_id`` and carries
-        # ``task_history_id`` mirrored from its own ``task_history``
-        # row, so :meth:`_reattach_running_chat` can disambiguate it
-        # from the parent (which shares ``chat_id``) by matching on
-        # the row's task id.
         extra_str = str(result.get("extra", "") or "")
         subagent_info: dict[str, object] | None = None
         extra_raw: object = None
@@ -1537,28 +1120,7 @@ class VSCodeServer(
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        # Subscribe the new tab to a still-running agent's event
-        # stream (under some other tab id) so its live events ALSO
-        # flow here — without stealing the stream from the original
-        # client.  See :meth:`_reattach_running_chat`.  The ``task_id``
-        # kwarg disambiguates by ``task_history_id`` so the parent
-        # (whose ``_RunningAgentState`` shares the sub-agent's
-        # ``chat_id``) is never matched when the user clicks a
-        # sub-agent row.  When ``task_id`` is ``None`` (no specific
-        # row, just a chat) the regular chat-id-based scan applies.
-        # r4-vscode-H1 — accept legacy int payloads from DBs that
-        # escaped the auto-migration; mirror the same defence
-        # applied to ``parent_task_id`` in r3-vscode-H2.
         rebound_task_id = _coerce_id(result.get("task_id") if result else None)
-        # The tab is navigating to (possibly) another chat: drop every
-        # live-task subscription it carried from whatever it displayed
-        # before, so the previous chat's still-running task does not
-        # keep streaming its events into a webview that now renders a
-        # different conversation.  When the loaded chat itself is
-        # backed by a running task, ``_reattach_running_chat`` below
-        # re-subscribes this tab to the correct stream.  Resolved via
-        # ``getattr`` because some duck-typed test printers implement
-        # only the broadcast/subscribe subset of the printer protocol.
         self._printer_cleanup_tab(tab_id)
         rebound_running = self._reattach_running_chat(
             chat_id,
@@ -1566,21 +1128,6 @@ class VSCodeServer(
             task_id=rebound_task_id,
             is_subagent=subagent_info is not None,
         )
-        # Tasks launched by the local ``sorcar`` CLI never have a
-        # :class:`_RunningAgentState` registry entry in this process
-        # (the CLI agent runs in a separate Python process and only
-        # talks to the daemon over UDS).  ``_reattach_running_chat``
-        # therefore returns ``False`` for them and a webview tab
-        # opened from the history sidebar would not be subscribed to
-        # the live event stream and not get the blinking-green-circle
-        # "running" indicator.  Consult the CLI-running-task hook the
-        # :class:`RemoteAccessServer` installed via
-        # :meth:`set_cli_running_lookup` and, when the click resolved
-        # to a still-running CLI task, subscribe this tab under the
-        # task id (so subsequent ``cliEvent`` relays fan out to it)
-        # AND broadcast a ``status:running=true`` event to start the
-        # indicator.  Mirrors the tail of the rebound-running branch
-        # below.
         if (
             not rebound_running
             and rebound_task_id is not None
@@ -1589,123 +1136,29 @@ class VSCodeServer(
         ):
             self.printer.subscribe_tab(str(rebound_task_id), tab_id)
             rebound_running = True
+        if (
+            not rebound_running
+            and rebound_task_id is not None
+            and self.printer.has_ui_mirror_for_task(rebound_task_id)
+        ):
+            # The task is over but another window is still holding a
+            # merge review or an auto-commit prompt open on it.
+            # Joining replays that UI into this tab, so opening the
+            # chat here shows the same question instead of nothing.
+            self.printer.subscribe_tab(str(rebound_task_id), tab_id)
 
-        # Loading a (completed or running-elsewhere) task into this
-        # tab is a VIEW operation — no agent will run here, so we
-        # MUST NOT eagerly create a fresh ``_RunningAgentState``
-        # registry entry or a ``WorktreeSorcarAgent``.  The new tab
-        # only needs the persisted events rendered in its webview
-        # (and, when ``rebound_running`` is true, a printer
-        # subscription to the live source tab — already established
-        # above by ``_reattach_running_chat`` via ``subscribe_tab``).
-        #
-        # If a ``_RunningAgentState`` already exists for ``tab_id``
-        # (e.g. the user previously launched a task in this tab and
-        # is now viewing a different chat in the same tab), update it
-        # in place but do NOT create one if absent.  In particular we
-        # still want to: (a) associate the resumed ``chat_id`` so a
-        # follow-up ``_cmd_run`` continues the same chat, and (b)
-        # clear ``frontend_closed`` so a pending deferred-dispose
-        # does not tear down the tab the user is actively viewing.
         with self._state_lock:
             tab = _RunningAgentState.running_agent_states.get(tab_id)
             if tab is not None:
                 tab.chat_id = chat_id
-                # Do NOT seed ``tab.use_worktree`` /
-                # ``tab.use_parallel`` / ``tab.auto_commit_mode`` /
-                # ``tab.selected_model`` from the loaded task's
-                # ``extra``: those historical values are a snapshot
-                # of the toggles / model at the time the task ran,
-                # NOT the user's current global setting.  Loading a
-                # chat is a VIEW operation — the NEXT task started in
-                # this tab will overwrite ``tab.use_worktree`` /
-                # ``tab.use_parallel`` / ``tab.auto_commit_mode`` from
-                # the frontend's live ``useWorktree`` / ``useParallel``
-                # / ``autoCommit`` flags (which mirror the user's
-                # CURRENT global toggles), so any value seeded here
-                # would be either stale (last-task snapshot) or
-                # immediately clobbered (correct global).
-                #
-                # Additionally, RESET these per-tab fields to baseline
-                # (= ``self._default_model`` for the model, ``False``
-                # for the toggle flags).  Without this reset a tab
-                # that previously ran a task — and therefore had
-                # ``tab.use_worktree`` / ``tab.use_parallel`` /
-                # ``tab.auto_commit_mode`` / ``tab.selected_model``
-                # written by ``_run_task`` — would keep those values
-                # after loading a different chat into the same tab,
-                # which ``_get_history`` then reads as the running-
-                # session sidebar metadata for any LIVE task in the
-                # loaded chat (see ``_get_history`` running-session
-                # loop earlier in this file).  Resetting here mirrors
-                # ``_new_chat``'s baseline (``tab.selected_model =
-                # self._default_model`` at the start of a fresh
-                # chat) and keeps a history-load idempotent w.r.t.
-                # the tab's prior task-runner state.
-                #
-                # Skip the reset when a task is actively running in
-                # this tab — that scenario means the user is re-
-                # rendering the live chat into the SAME tab that owns
-                # the run, so the in-flight per-tab fields are the
-                # source of truth for ``_get_history``'s sidebar
-                # metadata and must not be clobbered.
-                # Use the shared ``_tab_busy`` predicate so the guard
-                # ALSO covers an in-flight worktree-merge review
-                # (``tab.is_merging``).  Without that bit, a
-                # ``_replay_session`` re-entry on a tab whose
-                # post-task merge prompt is still open (e.g. user
-                # reloads the VS Code window mid-merge) would
-                # clobber ``tab.use_worktree=False`` and break
-                # ``_finish_merge`` / ``_present_pending_worktree``
-                # in ``merge_flow.py`` (which dispatch on
-                # ``tab.use_worktree``), leaking the worktree
-                # directory.
-                if not _tab_busy(tab):
-                    tab.use_worktree = False
-                    tab.use_parallel = False
-                    tab.auto_commit_mode = False
-                    tab.selected_model = self._default_model
                 tab.frontend_closed = False
-            # Record which chat this tab now displays so a task later
-            # started on the same chat (from any tab in any window)
-            # subscribes this tab to its live event stream (see
-            # :meth:`_TaskRunnerMixin._subscribe_chat_viewers`).
-            # Tracked independently of the ``_RunningAgentState``
-            # registry because viewer tabs may have no registry entry
-            # (C2/C3 above).  A tab converted into a sub-agent view
-            # is NOT a viewer of the (parent) chat: streaming the
-            # parent's follow-up tasks into a sub-agent tab would mix
-            # two different task streams in one webview.
             if subagent_info is None and chat_id:
                 self._tab_chat_views[tab_id] = chat_id
             else:
                 self._tab_chat_views.pop(tab_id, None)
 
         if subagent_info is not None:
-            # Convert the freshly created regular tab into a sub-agent
-            # tab on the frontend.  The ``openSubagentTab`` handler is
-            # idempotent on ``tab_id`` (see main.js case
-            # ``openSubagentTab``) and will flip the existing tab's
-            # ``isSubagentTab`` / title in place.  Sub-agent rows
-            # persist only the parent ``task_history.id`` — the
-            # description shown in the tab header is derived from the
-            # row's own ``task`` column.
-            #
-            # ``isDone`` (see :func:`_subagent_is_done`) lets the
-            # reopened tab render the same "done, no indicator" state
-            # the original tab ended on (instead of pulsing ◉ purple
-            # forever because no later ``subagentDone`` arrives).
             is_done = _subagent_is_done(result.get("task_id"))
-            # Look up the parent's frontend tab id so the frontend can
-            # record the parent → child relationship.  Without this,
-            # closing the parent tab would not cascade-close this
-            # sub-agent tab (see ``closeTab`` in media/main.js, which
-            # walks ``parentTabId`` chains).
-            # r3-vscode-H2: accept legacy int parent ids that may
-            # appear in DBs that escaped migration (extra JSON in a
-            # row that was never re-saved through the new typed
-            # column path).  Stringify rather than drop so the
-            # parent-tab resolver still has a value to match.
             parent_tid = _coerce_id(subagent_info.get("parent_task_id"))
             parent_tab_id_for_sub = self._resolve_parent_tab_id_for_sub(
                 parent_task_id=parent_tid,
@@ -1725,36 +1178,12 @@ class VSCodeServer(
             )
 
         if rebound_running:
-            # Make the resumed tab show the running spinner since the
-            # agent is still working.  Mirrors the broadcast that
-            # ``_run_task`` emits when a task starts.  This is emitted
-            # BEFORE ``task_events`` so the frontend's ``isRunning``
-            # flag is true while ``replayTaskEvents`` runs — matching
-            # the fresh-run ordering (``status:true`` → events) so a
-            # resumed-running tab and a fresh-run tab initialise the
-            # webview to the same state (chevron visibility, send/stop
-            # buttons, timer, etc.).
-            #
-            # Echo the agent's persisted ``startTs`` (ms since epoch,
-            # written into the ``extra`` JSON by ``_run_task_inner``)
-            # so the frontend's "Running …" header at the top of the
-            # chat webview reflects the agent's true elapsed time
-            # rather than the client's ``Date.now()`` at history-load.
             start_ts_for_resume = 0
             if isinstance(extra_raw, dict):
                 try:
                     start_ts_for_resume = int(extra_raw.get("startTs", 0) or 0)
                 except (TypeError, ValueError):
                     start_ts_for_resume = 0
-            # ``extra.startTs`` is only persisted at task END
-            # (``_save_task_extra`` in ``_run_task_inner``'s cleanup
-            # finally) — for a STILL-RUNNING task (the only case this
-            # branch handles) it is therefore always absent and the
-            # value above stays 0, which the frontend ignores
-            # (``ev.startTs > 0`` guard) before mis-anchoring the
-            # "Running …" timer at the client's ``Date.now()``.  Fall
-            # back to the live agent's in-memory start timestamp,
-            # stamped by ``_TaskRunnerMixin._run_task_inner``.
             if start_ts_for_resume <= 0:
                 start_ts_for_resume = self._live_task_start_ms(
                     rebound_task_id,
@@ -1768,13 +1197,6 @@ class VSCodeServer(
                     "startTs": start_ts_for_resume,
                 }
             )
-        # Coalesce consecutive per-token delta events before shipping
-        # the replay payload: persisted streams store one row per
-        # streamed token, so a long task can carry tens of thousands
-        # of tiny ``text_delta`` / ``thinking_delta`` events.  Merging
-        # them (same contract as ``JsonPrinter.stop_recording``)
-        # shrinks the JSON payload and the frontend's replay loop by
-        # orders of magnitude while rendering identically.
         self.printer.broadcast(
             {
                 "type": "task_events",
@@ -1782,29 +1204,12 @@ class VSCodeServer(
                 "task": result["task"],
                 "task_id": result.get("task_id"),
                 "chat_id": chat_id,
-                # ``_extra_for_replay`` strips ``model`` / ``is_worktree``
-                # / ``is_parallel`` / ``auto_commit_mode`` so loading a
-                # chat into this tab cannot clobber the live toggle / model
-                # state that mirrors the user's CURRENT global settings.
-                # A follow-up task started in this tab must use whatever
-                # the toggles currently say (= the global settings the
-                # user just picked), not the stale per-task snapshot of
-                # the historical row being loaded.  See the comment on
-                # :data:`_REPLAY_STRIPPED_EXTRA_KEYS`.
                 "extra": _extra_for_replay(result.get("extra", "")),
                 "tabId": tab_id,
             }
         )
         self._emit_pending_worktree(tab_id)
 
-        # When the user loads a PARENT task from the history sidebar,
-        # also reopen every sub-agent the parent fanned out via
-        # ``run_parallel`` so the loaded view mirrors the live
-        # execution layout (one purple sub-agent tab per fan-out
-        # task).  Sub-agent rows are skipped here — clicking a
-        # sub-agent row already converts the clicked tab into a
-        # sub-agent tab via the ``subagent_info`` branch above; we
-        # do NOT want to recursively reopen siblings on that path.
         if subagent_info is None and isinstance(rebound_task_id, str) and rebound_task_id:
             self._open_persisted_subagent_tabs(
                 parent_task_id=rebound_task_id,
@@ -1866,15 +1271,6 @@ class VSCodeServer(
                         return st.tab_id
 
             if chat_id:
-                # Exclude ``sub_tab_id`` itself: when a non-subagent
-                # state already exists for the freshly opened sub-tab
-                # (e.g. the user previously ran a task in that tab),
-                # ``_replay_session`` copies the resumed session's
-                # ``chat_id`` onto it before this resolver runs.
-                # Without the guard below, that state would match here
-                # and we'd return the sub-tab's own id, creating a
-                # self-referential parent_tab_id and a self-loop in
-                # the frontend's parent→child cascade-close registry.
                 chat_matches = [
                     st for st in non_sub_states if st.chat_id == chat_id and st.tab_id != sub_tab_id
                 ]
@@ -1932,16 +1328,6 @@ class VSCodeServer(
             description = str(row.get("task", "") or "")
             is_done = _subagent_is_done(sub_task_id)
             if not is_done:
-                # The sub-agent is STILL RUNNING: subscribe the reopened
-                # deterministic frontend tab to the live sub-agent's
-                # event stream.  Without this the reopened tab would be
-                # a dead viewer — no live events, no ``subagentDone``,
-                # and (critically) ``_find_source_tab_for_viewer`` could
-                # not resolve it to the sub-agent's registry entry, so
-                # the input textbox shown while the sub-agent runs
-                # (Stop / ``appendUserMessage``) would silently no-op.
-                # The exact ``task_id`` match keys the subscription to
-                # the sub-agent's own row, never the parent's.
                 self._reattach_running_chat(
                     str(row.get("chat_id", "") or ""),
                     sub_tab_id,
@@ -1967,36 +1353,11 @@ class VSCodeServer(
                     "task": description,
                     "task_id": sub_task_id,
                     "chat_id": row.get("chat_id", ""),
-                    # Sub-agent tabs reopened on a parent-task history
-                    # load must follow the same strip rule as the parent
-                    # ``_replay_session`` broadcast above: a persisted
-                    # sub-agent ``extra`` snapshot of
-                    # ``model`` / ``is_worktree`` / ``is_parallel`` /
-                    # ``auto_commit_mode`` is just as historical as the
-                    # parent's, and the frontend's background-tab
-                    # ``task_events`` branch still reads ``extra.model``
-                    # into ``teTab.selectedModel`` (see ``media/main.js``
-                    # near the ``bgExtra.model`` block).  Stripping here
-                    # prevents a stale per-sub-agent model from being
-                    # inherited by the live model picker when the user
-                    # later switches to that sub-tab.
                     "extra": _extra_for_replay(row.get("extra", "")),
                     "tabId": sub_tab_id,
                 }
             )
             if not is_done and _subagent_is_done(sub_task_id):
-                # Completion race: the sub-agent finished BETWEEN the
-                # ``is_done`` snapshot above and now.  Its own
-                # ``subagentDone`` fan-out may have run before this
-                # tab was subscribed, so without this recheck the
-                # reopened tab would keep pulsing "running" (with a
-                # live-looking input surface that routes nowhere)
-                # forever.  The ordering in ``_run_single``'s finally
-                # (``running_agents`` pop → ``subagentDone`` fan-out →
-                # state unregister) guarantees the two paths cannot
-                # BOTH miss: if the sub-agent was still registered at
-                # this recheck, its later fan-out includes this tab's
-                # fresh subscription.
                 self.printer.broadcast(
                     {
                         "type": "subagentDone",
@@ -2110,10 +1471,6 @@ class VSCodeServer(
             return False
         with self._state_lock:
             source: _RunningAgentState | None = None
-            # Pass 1 — exact ``task_history_id`` match (only when
-            # caller knows the row id).  Used by sub-agent multi-view
-            # so the parent's state (which shares ``chat_id``) is
-            # never reached.
             if task_id is not None:
                 for t in _RunningAgentState.running_agent_states.values():
                     if _live_task_id(t) != task_id:
@@ -2122,14 +1479,6 @@ class VSCodeServer(
                     if alive or t.is_task_active:
                         source = t
                         break
-            # Pass 2 — chat-id fallback, excluding sub-agent states.
-            # Excluding sub-agents here means the fallback can never
-            # subscribe a regular-task viewer to a sub-agent's stream
-            # (which would be the wrong row entirely).  When the row
-            # the user clicked is itself a sub-agent
-            # (``is_subagent=True``) the fallback is skipped
-            # altogether: a sub-agent row whose thread has already
-            # ended must NEVER be attached to its parent's stream.
             if source is None and chat_id and not is_subagent:
                 for t in _RunningAgentState.running_agent_states.values():
                     if t.chat_id != chat_id:
@@ -2143,17 +1492,6 @@ class VSCodeServer(
             if source is None:
                 return False
             source_task_id = _live_task_id(source)
-        # Subscribe the new viewer to the running task so live events
-        # fan out to the freshly opened tab.  The caller still emits a
-        # ``status running=true`` event before the ``task_events``
-        # replay so the webview's ``isRunning`` flag is set before
-        # ``replayTaskEvents`` runs; otherwise ``applyChevronState``
-        # would mark every replayed panel ``.chv-hidden``.
-        # ``source_tab_id == new_tab_id`` (the launcher tab replaying
-        # its OWN running chat, e.g. a webview restore) is subscribed
-        # too: ``_replay_session`` just dropped the tab's previous
-        # subscriptions via ``cleanup_tab``, so the owner must be
-        # re-registered.  ``subscribe_tab`` is idempotent.
         if source_task_id is not None:
             self.printer.subscribe_tab(source_task_id, new_tab_id)
         return True
@@ -2174,16 +1512,7 @@ class VSCodeServer(
             result: The task result summary.
             task_id: Stable history row id for the completed task.
         """
-        # Capture the task id so the worker thread can tag the
-        # ``followup_suggestion`` event correctly for fan-out via the
-        # subscriber map.  ``task_id`` is the parameter the caller
-        # passes in (the completed task's ``task_history.id``).
         owner_task_key = str(task_id) if task_id is not None else None
-        # Capture the database the task id belongs to NOW: this thread
-        # outlives the request (LLM call takes seconds), and a stale
-        # numeric id must never be written into a *different* database
-        # (swapped by test fixtures / a daemon restart) where it would
-        # resolve to an unrelated task's row.
         origin_db_path = _current_db_path()
 
         def _run() -> None:
@@ -2207,6 +1536,23 @@ class VSCodeServer(
                     )
             except Exception:  # pragma: no cover — LLM API error handler
                 logger.debug("Async followup generation failed", exc_info=True)
+            finally:
+                # The task's subscriber set was kept alive (a bounded
+                # linger) solely so this broadcast could still fan out
+                # after ``cleanup_task``.  The follow-up is the last
+                # post-task event, so release the lease as soon as it
+                # is delivered (or failed) instead of waiting out the
+                # full linger.
+                if owner_task_key is not None:
+                    try:
+                        self.printer.cleanup_task(
+                            owner_task_key, subscriber_linger_seconds=0,
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Follow-up subscriber release failed",
+                            exc_info=True,
+                        )
 
         threading.Thread(target=_run, daemon=True).start()
 

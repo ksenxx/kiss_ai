@@ -49,9 +49,6 @@ from kiss.tests.core.models.test_multihop_model_switching import (
     reveal_secret,
 )
 
-# Cheap serverless Together models that support tool calling (verified live
-# against https://api.together.xyz/v1/chat/completions).  Transient upstream
-# errors happen, so a couple of candidates are tried.
 _TOGETHER_TOOL_MODELS = [
     "openai/gpt-oss-20b",
     "meta-llama/Llama-3.3-70B-Instruct-Turbo",
@@ -132,7 +129,6 @@ class TestSorcarTogetherLive:
         tools = agent._get_tools()
         set_model = _find_tool(tools, "set_model")
 
-        # Hop 1: live OpenAI model, exactly as a running executor holds it.
         agent.model = model_factory("gpt-4o")
         agent.model_name = "gpt-4o"
         agent.model.initialize(
@@ -150,11 +146,6 @@ class TestSorcarTogetherLive:
             1,
         )
 
-        # Hop 2: switch INTO a Together model via the production set_model
-        # tool.  Regression hotspot: the OpenAI endpoint/key must NOT be
-        # carried over — routing must re-derive api.together.xyz and
-        # TOGETHER_API_KEY.  Serverless upstreams can be flaky, so a couple
-        # of candidate models are tried before skipping.
         hop2_done = False
         upstream_errors: list[str] = []
         for name in _TOGETHER_TOOL_MODELS:
@@ -181,8 +172,6 @@ class TestSorcarTogetherLive:
                 f"upstream: {upstream_errors}"
             )
 
-        # Hop 3: switch back OUT to a native OpenAI model.  The Together
-        # endpoint/key must not leak into the OpenAI model either.
         self._switch(agent, set_model, "gpt-4o")
         assert isinstance(agent.model, OpenAICompatibleModel)
         assert agent.model.base_url.startswith("https://api.openai.com"), (
@@ -190,7 +179,6 @@ class TestSorcarTogetherLive:
             "switching back to a native OpenAI model"
         )
 
-        # The full history — including the Together turn — must survive.
         agent.model.add_message_to_conversation(
             "user",
             "List every secret word you learned from the reveal_secret "

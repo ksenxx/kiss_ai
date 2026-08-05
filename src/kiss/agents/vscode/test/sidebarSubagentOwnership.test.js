@@ -2,40 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression test for the SorcarSidebarView side of the B1
-// tabId-routing fix (multi-model review, see tabIdRoutingFixes.test.js
-// for the webview side).
-//
-// Bug reproduced: ``openSubagentTab`` ownership adoption used
-// ``(!parent_tab_id || this._ownTabs.has(parent_tab_id))`` — a BLANK
-// ``parent_tab_id`` (the direct history-open of a sub-agent row, where
-// ``_resolve_parent_tab_id_for_sub`` validly returns "") made EVERY
-// VS Code window adopt the broadcast tab id into ``_ownTabs``.  Foreign
-// tab-stamped events (worktree_result, merge_data, askUser, ...) then
-// passed the adopting window's ``_isOwnTab`` gate and triggered native
-// UI side effects for another window's task.
-//
-// Fixed behaviour (all four branches of the adoption conditional):
-//   1. blank parent + target tab ALREADY owned  -> stays owned
-//      (the window whose webview created the tab and posted
-//      resumeSession keeps the conversion; its tab-stamped events
-//      still pass _isOwnTab).
-//   2. blank parent + target tab NOT owned      -> NOT adopted
-//      (another window's broadcast; its tab-stamped worktree_result
-//      must not render a notification here).
-//   3. parent owned                              -> sub tab adopted
-//      (live run_parallel spawn under a parent this window owns).
-//   4. parent NOT owned                          -> NOT adopted
-//      (another window's fan-out).
-//
-// This test drives the real compiled SorcarSidebarView + AgentClient
-// against a real Unix-domain socket daemon stub.  Only the `vscode`
-// module is stubbed (shared _vscode-stub.js fixture).
-//
-// Run directly with ``node`` (after ``npm run compile``):
-//
-//     node src/kiss/agents/vscode/test/sidebarSubagentOwnership.test.js
 
 'use strict';
 
@@ -118,10 +84,6 @@ Module._resolveFilename = function (request, parent, ...rest) {
   if (request === 'vscode') return require.resolve('./_vscode-stub.js');
   return origResolve.call(this, request, parent, ...rest);
 };
-// ``_vscode-stub.js`` is a git-tracked fixture shared by several tests
-// that run in parallel; it already contains
-// ``module.exports = global.__kissVscodeStub;`` — never write or delete
-// it here or concurrent tests lose their ``vscode`` module mid-run.
 global.__kissVscodeStub = vscodeStub;
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-sub-own-'));
@@ -214,10 +176,6 @@ async function runTests() {
     'ready must register the webview tab as owned',
   );
 
-  // ---- Branch 1: blank parent + target ALREADY owned -> stays owned.
-  // The direct history-open flow: the webview created the tab itself
-  // and posted resumeSession (ownership learned from webview traffic)
-  // BEFORE the daemon broadcast the blank-parent conversion.
   const HISTORY_SUB = 'tab-history-sub';
   wv.fireMessage({type: 'resumeSession', taskId: 'sub-task-1', tabId: HISTORY_SUB});
   assert.ok(
@@ -237,7 +195,6 @@ async function runTests() {
     view._ownTabs.has(HISTORY_SUB),
     'blank-parent conversion of an owned tab must keep ownership',
   );
-  // Its tab-stamped events still pass the _isOwnTab gate end-to-end.
   await daemonSend({
     type: 'worktree_result',
     success: true,
@@ -251,9 +208,6 @@ async function runTests() {
   );
   console.log('  ok - blank-parent conversion keeps an owned tab owned');
 
-  // ---- Branch 2: blank parent + target NOT owned -> NOT adopted.
-  // Another window's direct history-open broadcast reaches this
-  // window too; adopting it re-introduced the cross-window leak.
   const FOREIGN_SUB = 'tab-foreign-sub';
   await daemonSend({
     type: 'openSubagentTab',
@@ -283,7 +237,6 @@ async function runTests() {
   );
   console.log('  ok - foreign blank-parent conversion is not adopted');
 
-  // ---- Branch 3: parent owned -> sub tab adopted (live spawn).
   const LIVE_SUB = 'tab-owned-parent__sub_0';
   await daemonSend({
     type: 'openSubagentTab',
@@ -298,7 +251,6 @@ async function runTests() {
   );
   console.log('  ok - owned-parent sub-agent tab adopted');
 
-  // ---- Branch 4: parent NOT owned -> NOT adopted.
   const FOREIGN_PARENT_SUB = 'tab-foreign-parent__sub_0';
   await daemonSend({
     type: 'openSubagentTab',
@@ -313,7 +265,6 @@ async function runTests() {
   );
   console.log('  ok - foreign-parent sub-agent tab not adopted');
 
-  // ---- Guard: missing tab_id -> no adoption, no crash.
   const ownedBefore = view._ownTabs.size;
   await daemonSend({
     type: 'openSubagentTab',

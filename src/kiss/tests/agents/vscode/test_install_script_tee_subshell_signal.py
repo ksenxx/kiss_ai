@@ -72,8 +72,6 @@ def test_install_sh_uses_exec_tee_not_pipeline_subshell() -> None:
     ``\\x03`` from VS Code's terminal teardown kill the script.
     """
     src = _read_install_sh()
-    # ``exec > >(tee -a "$LOG_FILE") 2>&1`` must be present at module scope
-    # (not inside a function body) so it applies to the install body.
     exec_pattern = r'exec\s*>\s*>\(\s*tee\s+-a\s+"?\$LOG_FILE"?\s*\)\s*2>&1'
     assert re.search(exec_pattern, src), (
         "install.sh must use `exec > >(tee -a \"$LOG_FILE\") 2>&1` so the "
@@ -82,11 +80,6 @@ def test_install_sh_uses_exec_tee_not_pipeline_subshell() -> None:
         "reset by bash inside the subshell and a stray ^C from VS Code's "
         "terminal teardown silently aborts the update."
     )
-    # The previous pattern — ``{ ... } 2>&1 | tee "$LOG_FILE"`` — must be
-    # gone from the executable code.  The string may legitimately appear
-    # inside the explanatory comment immediately above the ``exec ...``
-    # line; strip lines whose first non-whitespace character is ``#``
-    # before checking.
     code_only = "\n".join(
         line
         for line in src.splitlines()
@@ -123,8 +116,6 @@ def test_install_sh_traps_sighup_for_pty_teardown() -> None:
         "install.sh must install `trap handle_hup HUP` so PTY closure runs "
         "the re-route handler instead of killing bash mid-step."
     )
-    # The handler must redirect to the log file so subsequent writes do
-    # not crash with EBADF/ENXIO on the closed PTY.
     handler_match = re.search(
         r"handle_hup\s*\(\)\s*\{([^}]*)\}", src, flags=re.DOTALL
     )
@@ -247,10 +238,6 @@ def test_install_sh_outer_trap_survives_sigint(tmp_path: Path) -> None:
         stderr=subprocess.DEVNULL,
     )
     try:
-        # Wait until the harness has installed its traps and passed
-        # through the `exec > >(tee ...)` redirection (it touches the
-        # ready marker right after) before delivering the signal.  A
-        # fixed sleep raced bash's startup under heavy parallel load.
         deadline = time.time() + 15.0
         while time.time() < deadline and not ready.exists():
             time.sleep(0.05)
@@ -303,19 +290,10 @@ def test_install_sh_outer_trap_survives_sighup(tmp_path: Path) -> None:
         stderr=subprocess.DEVNULL,
     )
     try:
-        # Wait until the harness has installed its traps and passed
-        # through the `exec > >(tee ...)` redirection (it touches the
-        # ready marker right after) before delivering the signal.  A
-        # fixed sleep raced bash's startup under heavy parallel load.
         deadline = time.time() + 15.0
         while time.time() < deadline and not ready.exists():
             time.sleep(0.05)
         assert ready.exists(), "harness never reached the install body"
-        # Send SIGHUP to bash specifically (not killpg) — that mirrors the
-        # kernel's "controlling-terminal hangup" delivery to the session
-        # leader.  Hitting the whole pgrp would also kill the ``tee -a``
-        # child of the process substitution before bash's trap can run
-        # ``exec >>$LOG_FILE``, racing in SIGPIPE on the broken pipe.
         os.kill(proc.pid, signal.SIGHUP)
         try:
             rc = proc.wait(timeout=15)

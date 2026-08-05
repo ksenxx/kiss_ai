@@ -26,10 +26,6 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-# ---------------------------------------------------------------------------
-# H3 — vscode_config.save_api_key_to_shell: 0600 mode + shell-quoted value
-# ---------------------------------------------------------------------------
-
 
 @unittest.skipIf(sys.platform == "win32", "POSIX-only file permissions test")
 class TestH3RcFilePermissionsAndQuoting(unittest.TestCase):
@@ -42,13 +38,11 @@ class TestH3RcFilePermissionsAndQuoting(unittest.TestCase):
             os.environ, {"HOME": str(self.home), "SHELL": "/bin/bash"},
         )
         self._home_patch.start()
-        # Patch Path.home() too because vscode_config uses it at module import.
         from kiss.core import vscode_config as vc
 
         self._vc = vc
         self._orig_rc_path = vc._shell_rc_path
         vc._shell_rc_path = lambda shell: self.home / ".bashrc"  # type: ignore[assignment]
-        # Avoid triggering DEFAULT_CONFIG rebuild — keeps the test hermetic
         self._refresh_patch = mock.patch.object(vc, "_refresh_config", lambda: None)
         self._refresh_patch.start()
 
@@ -73,18 +67,14 @@ class TestH3RcFilePermissionsAndQuoting(unittest.TestCase):
         self._vc.save_api_key_to_shell("OPENAI_API_KEY", "new-key")
         rc = self.home / ".bashrc"
         mode = stat.S_IMODE(rc.stat().st_mode)
-        # Allow exactly 0600 — no group/other bits.
         self.assertFalse(mode & 0o077,
                          f"RC mode {oct(mode)} leaks group/other read bits")
 
     def test_value_with_double_quote_is_quoted_safely(self) -> None:
         """A key value containing `"` must not break out of its quotes."""
-        # Pathological key with a double quote and a $ — both bash-special.
         evil = 'a"b$IFS$(echo pwned > /tmp/h3-pwned)c'
         self._vc.save_api_key_to_shell("OPENAI_API_KEY", evil)
         rc_text = (self.home / ".bashrc").read_text()
-        # The export must round-trip through bash to preserve the literal value.
-        # Run a fresh bash to source the RC and echo the variable.
         proc = subprocess.run(
             ["bash", "-c", f"source '{self.home / '.bashrc'}' && printf '%s' \"$OPENAI_API_KEY\""],
             capture_output=True, text=True, timeout=10,
@@ -92,7 +82,6 @@ class TestH3RcFilePermissionsAndQuoting(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, msg=proc.stderr)
         self.assertEqual(proc.stdout, evil,
                          f"Value did not round-trip; rc was:\n{rc_text}")
-        # And no file got written by command-substitution.
         self.assertFalse(Path("/tmp/h3-pwned").exists(),
                          "Command substitution executed during source!")
 
@@ -109,10 +98,6 @@ class TestH3RcFilePermissionsAndQuoting(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, msg=proc.stderr)
         self.assertEqual(proc.stdout, evil)
 
-
-# ---------------------------------------------------------------------------
-# H9 — autocomplete._get_files: scan must not block on first call
-# ---------------------------------------------------------------------------
 
 
 class TestH9AutocompleteNonBlocking(unittest.TestCase):
@@ -138,7 +123,6 @@ class TestH9AutocompleteNonBlocking(unittest.TestCase):
                 self._file_cache = {}
 
         srv = FakeServer()
-        # Patch _scan_files to take a long time so a synchronous call would block.
         from kiss.server import diff_merge as dm
 
         slow_scan_started = threading.Event()
@@ -154,18 +138,11 @@ class TestH9AutocompleteNonBlocking(unittest.TestCase):
             t0 = time.time()
             srv._get_files("a")
             dt = time.time() - t0
-        # The call must return in well under 2 s — it must not have waited
-        # for the scan.
         self.assertLess(dt, 0.5,
                         f"_get_files blocked for {dt:.2f}s — scan ran on caller thread")
-        # The scan should have been kicked off in the background.
         self.assertTrue(slow_scan_started.wait(2.0),
                         "Background scan was never started")
 
-
-# ---------------------------------------------------------------------------
-# M1 — diff_merge._git must time out, not hang forever
-# ---------------------------------------------------------------------------
 
 
 class TestM1GitHasTimeout(unittest.TestCase):
@@ -179,7 +156,6 @@ class TestM1GitHasTimeout(unittest.TestCase):
 
         def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
             captured.update(kwargs)
-            # Return a successful completed process to avoid breaking callers.
             return real_run(["true"], capture_output=True, text=True)
 
         with mock.patch.object(subprocess, "run", fake_run):
@@ -194,21 +170,14 @@ class TestM1GitHasTimeout(unittest.TestCase):
         """A hanging git is reported as a normal (failed) CompletedProcess."""
         from kiss.server import diff_merge as dm
 
-        # Use a real shell `sleep` to simulate a slow git.
         with mock.patch.object(
             subprocess, "run",
             side_effect=subprocess.TimeoutExpired(cmd="git status", timeout=0.1),
         ):
             result = dm._git("/tmp", "status")
-        # Must not raise — should return a CompletedProcess object so callers
-        # don't crash.
         self.assertIsInstance(result, subprocess.CompletedProcess)
         self.assertNotEqual(result.returncode, 0)
 
-
-# ---------------------------------------------------------------------------
-# M5 — _save_untracked_base must be atomic; pending-merge.json atomic write
-# ---------------------------------------------------------------------------
 
 
 class TestM5AtomicSaveAndDecodeError(unittest.TestCase):
@@ -219,7 +188,6 @@ class TestM5AtomicSaveAndDecodeError(unittest.TestCase):
         self.work = Path(self._tmp.name)
         (self.work / "a.txt").write_text("hello\nworld\n")
         (self.work / "b.txt").write_text("foo\nbar\n")
-        # Patch artifact-root so _untracked_base_dir lands inside the tmp dir.
         from kiss.core import config as cfg
 
         self._cfg_patch = mock.patch.object(
@@ -235,19 +203,16 @@ class TestM5AtomicSaveAndDecodeError(unittest.TestCase):
         """If copy fails partway, the OLD base copy must still be intact."""
         from kiss.server import diff_merge as dm
 
-        # First save a known good base copy.
         dm._save_untracked_base(str(self.work), {"a.txt"}, tab_id="tab1")
         base_dir = dm._untracked_base_dir("tab1")
         self.assertTrue((base_dir / "a.txt").exists())
 
-        # Now arrange a copy that crashes mid-way.
         original_copy = shutil.copy2
         call_count = {"n": 0}
 
         def flaky_copy(src: str, dst: str, *args: object, **kwargs: object) -> None:
             call_count["n"] += 1
             if call_count["n"] == 1:
-                # Successfully copy first file.
                 original_copy(src, dst)
                 return
             raise OSError("disk full")
@@ -260,8 +225,6 @@ class TestM5AtomicSaveAndDecodeError(unittest.TestCase):
             except OSError:
                 pass
 
-        # The base directory must still contain a.txt — the previous good
-        # state must not have been clobbered by the failed second save.
         a_in_base = base_dir / "a.txt"
         self.assertTrue(a_in_base.exists(),
                         "Previous good base copy was destroyed by failed save")
@@ -271,27 +234,17 @@ class TestM5AtomicSaveAndDecodeError(unittest.TestCase):
         """Binary file should yield empty hunks, not raise UnicodeDecodeError."""
         from kiss.server import diff_merge as dm
 
-        # UTF-16 encoded — read_text() with default UTF-8 raises UnicodeDecodeError.
         bin_path = self.work / "binary.dat"
         bin_path.write_bytes("hello world".encode("utf-16"))
         text_path = self.work / "text.txt"
         text_path.write_text("hello\n")
 
-        # Should not raise.
         result = dm._diff_files(str(bin_path), str(text_path))
         self.assertIsInstance(result, list)
 
 
-# ---------------------------------------------------------------------------
-# M2 — task_runner must set stop_event before the snapshot
-# ---------------------------------------------------------------------------
 
 
-
-
-# ---------------------------------------------------------------------------
-# M4 — _await_user_response must not loop forever when the queue is None
-# ---------------------------------------------------------------------------
 
 
 class TestM4AwaitUserResponseEmptyQueue(unittest.TestCase):
@@ -314,7 +267,7 @@ class TestM4AwaitUserResponseEmptyQueue(unittest.TestCase):
                 self.printer._thread_local.stop_event = threading.Event()
                 self.printer._thread_local.task_id = "ghost-tab"
                 self._state_lock = threading.RLock()
-                self._running_agent_states: dict[str, Any] = {}  # no entry for "ghost-tab"
+                self._running_agent_states: dict[str, Any] = {}
 
         srv = FakeServer()
         t0 = time.time()
@@ -325,10 +278,6 @@ class TestM4AwaitUserResponseEmptyQueue(unittest.TestCase):
                         f"_await_user_response took {dt:.2f}s with no queue — "
                         "must raise immediately, not loop")
 
-
-# ---------------------------------------------------------------------------
-# Property-based fuzzer for the H3 shell-quoting fix
-# ---------------------------------------------------------------------------
 
 
 class TestH3PropertyFuzz(unittest.TestCase):
@@ -374,8 +323,6 @@ class TestH3PropertyFuzz(unittest.TestCase):
             length = rng.randint(1, 40)
             value = "".join(rng.choice(meta + ["a", "b", "c", "1"])
                             for _ in range(length))
-            # Skip values containing newlines; export-style RC can't
-            # represent them without continuation, which is out of scope.
             if "\n" in value or "\r" in value or "\0" in value:
                 continue
             got = self._round_trip(value)

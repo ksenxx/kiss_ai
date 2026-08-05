@@ -71,15 +71,10 @@ class TestSubagentOnlyChatsDoNotConsumeLimit(_TempDbTestBase):
 
     def test_real_chat_beyond_raw_limit_still_returned(self) -> None:
         base = time.time()
-        # Oldest: real chat B.
         b_id, chat_b = _add_task("real task B")
         self._set_timestamp(b_id, base - 30)
-        # Middle: real chat A.
         a_id, chat_a = _add_task("real task A")
         self._set_timestamp(a_id, base - 20)
-        # Newest: an orphaned sub-agent-only chat (its parent lives in
-        # another chat / was created by a legacy run) — omitted from
-        # the listing but previously still consuming a limit slot.
         x_id, _chat_x = _add_task(
             "orphaned subagent task",
             extra={"subagent": {
@@ -95,8 +90,6 @@ class TestSubagentOnlyChatsDoNotConsumeLimit(_TempDbTestBase):
 
     def test_chat_recency_anchored_to_real_task(self) -> None:
         base = time.time()
-        # Chat A: real task at base-30, plus a sub-agent row at base-5
-        # (sub-agents share the parent's chat_id).
         a_id, chat_a = _add_task("chat A real task")
         self._set_timestamp(a_id, base - 30)
         sub_id, _ = _add_task(
@@ -105,8 +98,6 @@ class TestSubagentOnlyChatsDoNotConsumeLimit(_TempDbTestBase):
             extra={"subagent": {"parent_task_id": a_id}},
         )
         self._set_timestamp(sub_id, base - 5)
-        # Chat B: real task at base-20 — more recent REAL activity
-        # than chat A's real task.
         b_id, chat_b = _add_task("chat B real task")
         self._set_timestamp(b_id, base - 20)
 
@@ -114,7 +105,6 @@ class TestSubagentOnlyChatsDoNotConsumeLimit(_TempDbTestBase):
 
         chat_ids = [c["chat_id"] for c in chats]
         assert chat_ids == [chat_b, chat_a]
-        # Sub-agent rows stay hidden from the per-chat task list.
         a_entry = next(c for c in chats if c["chat_id"] == chat_a)
         tasks = a_entry["tasks"]
         assert isinstance(tasks, list)

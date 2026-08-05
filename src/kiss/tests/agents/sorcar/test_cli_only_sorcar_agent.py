@@ -44,12 +44,6 @@ _REMOVED_FLAGS: list[list[str]] = [
     ["--use-chat"],
     ["--cleanup"],
     ["--use-worktree"],
-    # ``-n/--new`` was a silent no-op in the sorcar CLI (the
-    # interactive client has no ``new`` parameter and the
-    # non-interactive path rejected the flag), so it has been
-    # removed entirely.  Channel agents (Slack, Discord, …) still
-    # support it via the local parser extension in
-    # :func:`channel_main`.
     ["-n"],
     ["--new"],
 ]
@@ -91,8 +85,6 @@ class TestNonInteractiveUsesPlainSorcarAgent:
         import kiss.ui.cli.cli_steering as cli_steering
 
         monkeypatch.setattr(cli_steering, "run_with_steering", fake_run)
-        # ``print_outcome`` is a no-op in verbose mode, but explicitly
-        # neuter it so the test doesn't depend on the printer state.
         monkeypatch.setattr(
             sorcar_cli, "print_outcome",
             lambda *_a, **_kw: None,
@@ -116,13 +108,6 @@ class TestNonInteractiveUsesPlainSorcarAgent:
         )
         assert not isinstance(agent, ChatSorcarAgent)
         assert not isinstance(agent, WorktreeSorcarAgent)
-
-    # Note: ``--no-worktree`` (and ``--worktree`` / ``--auto-commit``
-    # / ``--no-auto-commit`` / ``-n``) are now rejected when combined
-    # with ``-t`` / ``-f`` — see
-    # :mod:`test_cli_non_interactive_flag_validation` for the
-    # fail-fast contract.  This file pins the "which agent runs"
-    # contract; the flag-rejection contract lives next door.
 
 
 class TestResolveCliModesHelperIsGone:

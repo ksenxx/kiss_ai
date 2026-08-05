@@ -31,7 +31,6 @@ class TestAttributeTtsUsage:
         )
         assert agent.budget_used == pytest.approx(0.5387)
         assert agent.total_tokens_used == 1_680
-        # TTS is a single non-agentic call, not an agent step.
         assert agent.total_steps == 7
 
     def test_empty_usage_is_a_noop(self) -> None:
@@ -50,10 +49,6 @@ class TestSynthesizeTalkAudioUsage:
         assert usage == {}
 
     def test_failed_synthesis_still_reports_usage_keys(self) -> None:
-        # An unknown model makes ``agent.run`` raise BEFORE any API
-        # call: the ``finally`` must still fill ``usage_out`` (with the
-        # zero spend actually incurred) so the caller's attribution
-        # arithmetic never KeyErrors on a failed synthesis.
         usage: dict = {}
         assert (
             synthesize_talk_audio(
@@ -75,12 +70,8 @@ class TestSynthesizeTalkAudioUsage:
         audio_b64, mime = result
         assert mime == "audio/mpeg"
         assert len(audio_b64) > 100
-        # The spend must be visible to the caller...
         assert usage["budget_used"] > 0
         assert usage["total_tokens_used"] > 0
-        # ...and even a two-word utterance produces >100 audio output
-        # tokens; at the correct $64/M audio-output rate that is far
-        # above the old text-rate floor for the same token count.
         assert usage["budget_used"] > 100 * 10.0 / 1e6
 
 
@@ -117,8 +108,6 @@ class TestTalkToolWiringE2E:
         assert agent.budget_used == 0.0
         msg = talk("en-US", "Quick cost check.")
         assert "en-US" in msg
-        # The synthesis spend landed on THIS agent's task accounting...
         assert agent.budget_used > 0
         assert agent.total_tokens_used > 0
-        # ...without inventing an agent step for the one-shot TTS call.
         assert agent.total_steps == 0

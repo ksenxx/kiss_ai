@@ -156,8 +156,6 @@ class _ModelSampler:
 
 def _persisted_task_models() -> list[str]:
     """Return the ``model`` column of every task_history row, oldest first."""
-    # Use the persistence module's connection helper so a fresh
-    # per-test database is migrated before the first read.
     conn = sorcar_persistence._get_db()
     rows = conn.execute(
         "SELECT model FROM task_history ORDER BY timestamp ASC, rowid ASC"
@@ -176,6 +174,7 @@ class TestSetModelDoesNotLeakIntoNextWebviewTask:
     def teardown_method(self) -> None:
         _RunningAgentState.running_agent_states.clear()
 
+    @pytest.mark.slow
     def test_next_task_runs_on_picker_model(self, tmp_path: Any) -> None:
         """Task 2 in the same chat webview runs on the picker's model A."""
         available = get_available_models()
@@ -185,16 +184,11 @@ class TestSetModelDoesNotLeakIntoNextWebviewTask:
         server, events = _make_server()
         baseline = _persisted_task_models()
 
-        # 1. The user picks model A in the model picker.  This is the
-        #    ONLY action that persists the global last_model.
         server._cmd_select_model({"tabId": TAB_ID, "model": MODEL_A})
         assert _load_last_model() == MODEL_A
         tab = _RunningAgentState.running_agent_states[TAB_ID]
         assert tab.selected_model == MODEL_A
 
-        # 2. Task 1: the webview submits with the picker's model (A);
-        #    the agent switches itself to model B mid-task via the
-        #    real set_model tool, then finishes.
         sampler1 = _ModelSampler(tab)
         server._run_task({
             "tabId": TAB_ID,
@@ -204,15 +198,12 @@ class TestSetModelDoesNotLeakIntoNextWebviewTask:
         })
         samples1 = sampler1.stop()
 
-        # The switch must actually have happened (otherwise this test
-        # proves nothing): the live agent ran on B at some point.
         assert MODEL_B in samples1, (
             f"set_model to {MODEL_B} never took effect in task 1; "
             f"observed models: {sorted(samples1)}; events tail: "
             f"{[e.get('type') for e in events][-20:]}"
         )
 
-        # 3. The global model preference must be untouched by set_model.
         assert _load_last_model() == MODEL_A, (
             "set_model leaked into the persisted last_model "
             f"(global config): {_load_last_model()!r}"
@@ -226,8 +217,6 @@ class TestSetModelDoesNotLeakIntoNextWebviewTask:
             f"{tab.selected_model!r}"
         )
 
-        # 4. Task 2, submitted the way the chat webview does it: the
-        #    frontend's picker mirrors the daemon's default model.
         picker_model = server._default_model
         sampler2 = _ModelSampler(tab)
         server._run_task({
@@ -248,8 +237,6 @@ class TestSetModelDoesNotLeakIntoNextWebviewTask:
             "next task in the same chat webview"
         )
 
-        # 5. The persisted per-task metadata must record the LAUNCH
-        #    model of each task (A for both), not the mid-task switch.
         persisted = _persisted_task_models()[len(baseline):]
         assert persisted == [MODEL_A, MODEL_A], (
             f"persisted task models {persisted} != [{MODEL_A!r}, {MODEL_A!r}]"
@@ -285,7 +272,6 @@ class TestSetModelDoesNotLeakIntoPersistedTaskModel:
         assert MODEL_A in available, f"{MODEL_A} not available"
         assert MODEL_B in available, f"{MODEL_B} not available"
 
-        # The user's global picker preference.
         _save_last_model(MODEL_A)
         baseline = _persisted_task_models()
 
@@ -298,21 +284,16 @@ class TestSetModelDoesNotLeakIntoPersistedTaskModel:
         )
         assert "success" in result
 
-        # The switch must actually have happened for the test to prove
-        # anything: the agent's live model name is B after the run.
         assert agent.model_name == MODEL_B, (
             f"set_model to {MODEL_B} never took effect; agent still on "
             f"{agent.model_name!r}"
         )
 
-        # Global picker preference untouched.
         assert _load_last_model() == MODEL_A, (
             "set_model leaked into the persisted last_model "
             f"(global config): {_load_last_model()!r}"
         )
 
-        # The task row must record the model the task was LAUNCHED
-        # with (A), not the model the agent switched itself to (B).
         persisted = _persisted_task_models()[len(baseline):]
         assert persisted == [MODEL_A], (
             f"persisted task model {persisted} != [{MODEL_A!r}] — the "

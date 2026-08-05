@@ -179,7 +179,6 @@ class TestNewTabStaleTaskId:
         meaning a global system event).  It must NEVER be a previous
         sub-agent's task id.
         """
-        # Set up the parent agent's persisted task row.
         parent_task_id, parent_chat_id = _add_task(
             "parent task", chat_id="", extra={"model": "gpt-4o-mini"},
         )
@@ -187,12 +186,6 @@ class TestNewTabStaleTaskId:
         printer = _RecordingPrinter()
         model_config = {"base_url": self.url, "api_key": "test-key"}
 
-        # Simulate the production flow: a ThreadPoolExecutor with
-        # ``max_workers=1`` running three sub-agents in sequence on
-        # the SAME worker thread.  Each sub-agent has
-        # ``_subagent_info`` set so its ``run()`` will broadcast
-        # ``new_tab`` (and thereby exercise the
-        # ``_inject_task_id``-on-stale-tl.task_id codepath).
         def _run_subagent(idx: int) -> str:
             sub = ChatSorcarAgent(f"sub-{idx}")
             sub.resume_chat_by_id(parent_chat_id)
@@ -211,18 +204,12 @@ class TestNewTabStaleTaskId:
 
         assert len(results) == 3
 
-        # Collect every new_tab event captured on the printer.
         new_tab_events = [e for e in printer.events if e.get("type") == "new_tab"]
         assert len(new_tab_events) == 3, (
             f"Expected 3 new_tab events, got {len(new_tab_events)}: "
             f"{new_tab_events}"
         )
 
-        # The injected ``taskId`` on each new_tab event must equal the
-        # payload's own ``task_id`` (or be empty/missing — meaning the
-        # event was treated as a global system broadcast).  Any other
-        # value means the event was mis-stamped with a stale
-        # sub-agent's task id.
         offenders: list[dict[str, Any]] = []
         for ev in new_tab_events:
             payload_task_id = ev.get("task_id")
@@ -236,16 +223,12 @@ class TestNewTabStaleTaskId:
             f"{new_tab_events}."
         )
 
-        # The three new_tab payloads must carry three DISTINCT task ids.
         payload_ids = [str(ev["task_id"]) for ev in new_tab_events]
         assert len(set(payload_ids)) == 3, (
             f"Expected 3 distinct sub-agent task ids in new_tab payloads, "
             f"got {payload_ids}"
         )
 
-        # And the parent task's recording must NOT contain any
-        # sub-agent's new_tab event (would happen if the worker thread
-        # had inherited the parent task_id).
         parent_recording = printer._recordings.get(str(parent_task_id), [])
         parent_new_tabs = [
             e for e in parent_recording if e.get("type") == "new_tab"

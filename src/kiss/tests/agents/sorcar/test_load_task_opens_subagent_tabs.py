@@ -60,12 +60,6 @@ def _restore(saved: tuple[Path, object, Path]) -> None:
 def _make_server() -> tuple[VSCodeServer, list[dict]]:
     """Create a VSCodeServer whose broadcasts go into an in-memory list."""
     server = VSCodeServer()
-    # ``VSCodeServer.__init__`` starts a background ``orphan-task-sweep``
-    # daemon thread that opens its own SQLite connection against the
-    # (temp-dir-redirected) ``sorcar.db``.  Join it before returning so
-    # ``teardown_method`` never closes the connection / rmtree's the
-    # temp dir while the sweep thread is still mid-query — that race
-    # segfaults the interpreter on Python 3.14.
     thread = server._orphan_sweep_thread
     if thread is not None:
         thread.join(timeout=30)
@@ -170,8 +164,6 @@ class TestLoadParentOpensSubagentTabs:
             chat_id=chat_id, tab_id=parent_tab_id, task_id=parent_id,
         )
 
-        # Parent ``task_events`` was broadcast exactly once and is
-        # routed to the parent tab.
         parent_task_events = [
             e for e in events
             if e.get("type") == "task_events"
@@ -180,29 +172,21 @@ class TestLoadParentOpensSubagentTabs:
         assert len(parent_task_events) == 1
         assert parent_task_events[0]["task_id"] == parent_id
 
-        # One ``openSubagentTab`` per persisted sub-agent row.
         opens = [e for e in events if e.get("type") == "openSubagentTab"]
         assert len(opens) == 3, f"got opens={opens}"
 
-        # Deterministic sub-tab ids derived from parent tab id +
-        # sub-agent task id.
         expected_sub_tab_ids = [
             f"{parent_tab_id}__sub_{sid}" for sid in sub_ids
         ]
         assert [o["tab_id"] for o in opens] == expected_sub_tab_ids
 
-        # Each open carries the row's description as taken from the
-        # ``task`` column and signals sub-agent styling + completion.
         for i, op in enumerate(opens):
             assert op["isSubagentTab"] is True
-            # Sub-agents not currently in ``running_agents`` ⇒ done.
             assert op["isDone"] is True
             assert op["description"].startswith(f"Sub-task {i}")
             assert op["taskIndex"] == i
             assert op["parent_tab_id"] == parent_tab_id
 
-        # One ``task_events`` per sub-agent tab, routed to its sub
-        # tab id and carrying the sub-agent's persisted event.
         sub_task_events = [
             e for e in events
             if e.get("type") == "task_events"
@@ -218,13 +202,9 @@ class TestLoadParentOpensSubagentTabs:
                 for ev in te["events"]
             )
 
-        # Ordering: parent's ``task_events`` comes before any sub-agent
-        # ``openSubagentTab`` so the frontend renders the parent first.
         parent_idx = events.index(parent_task_events[0])
         for op in opens:
             assert events.index(op) > parent_idx
-        # Each sub-tab's ``openSubagentTab`` precedes its
-        # ``task_events`` so the tab exists when events arrive.
         for op, te in zip(opens, sub_task_events, strict=True):
             assert events.index(op) < events.index(te)
 
@@ -272,8 +252,6 @@ class TestLoadParentOpensSubagentTabs:
             chat_id=chat_id, tab_id="tab-direct-sub", task_id=sub_a,
         )
 
-        # Exactly one ``openSubagentTab`` (for the clicked sub-agent
-        # row itself, NOT one per sibling).
         opens = [e for e in events if e.get("type") == "openSubagentTab"]
         assert len(opens) == 1
         assert opens[0]["tab_id"] == "tab-direct-sub"

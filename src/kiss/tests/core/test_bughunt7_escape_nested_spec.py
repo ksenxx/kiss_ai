@@ -25,7 +25,6 @@ from kiss.agents.obsolete.gepa.template_utils import escape_invalid_template_fie
 def test_valid_outer_invalid_nested_spec_field_formats_safely() -> None:
     """{a:{b}} with only ``a`` valid must survive .format(a=...)."""
     escaped = escape_invalid_template_field_names("{a:{b}}", {"a"})
-    # Must not raise, and the unfillable placeholder stays verbatim.
     assert escaped.format(a=5) == "{a:{b}}"
 
 

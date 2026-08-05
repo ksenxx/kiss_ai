@@ -38,13 +38,12 @@ import threading
 import unittest
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parents[5]
 
 HAVE_MAC_TTS = bool(shutil.which("say")) and bool(shutil.which("afconvert"))
 
-# Per-attempt timeout for the (stalled) translation call.  Large
-# enough that the whole WAV is decoded before the first attempt times
-# out, small enough to keep the test fast.
 STALL_TIMEOUT_SECONDS = 8.0
 
 
@@ -98,14 +97,9 @@ class StallingHttpServer:
             try:
                 conn, _addr = self._sock.accept()
             except OSError:
-                return  # listener closed
+                return
             self.connections += 1
             self._held.append(conn)
-            # Drain the request (the gpt-audio call uploads a sizable
-            # base64 WAV body) so the client finishes writing and then
-            # blocks waiting for the response that never comes; never
-            # reading could instead stall the client's *upload* and
-            # change what this test exercises.
             threading.Thread(
                 target=self._drain, args=(conn,), daemon=True
             ).start()
@@ -116,7 +110,7 @@ class StallingHttpServer:
             while conn.recv(65536):
                 pass
         except OSError:
-            pass  # connection closed
+            pass
 
     def close(self) -> None:
         """Shut the listener and every held connection down."""
@@ -155,7 +149,7 @@ class ClosingHttpServer:
             try:
                 conn, _addr = self._sock.accept()
             except OSError:
-                return  # listener closed
+                return
             try:
                 conn.close()
             except OSError:
@@ -174,6 +168,7 @@ class ClosingHttpServer:
 class TestWakeWordSurvivesStalledTranscription(unittest.TestCase):
     """Saying "Sorcar" again works while a transcription is stalled."""
 
+    @pytest.mark.slow
     def test_second_wake_fires_during_stalled_transcription(self) -> None:
         stall = StallingHttpServer()
         try:
@@ -191,10 +186,6 @@ class TestWakeWordSurvivesStalledTranscription(unittest.TestCase):
                         ),
                     }
                 )
-                # Expected runtime: seconds of decoding plus one
-                # stalled translation (2 attempts x STALL_TIMEOUT).  A
-                # regression in timeout handling must fail the test
-                # quickly instead of hanging the suite for minutes.
                 proc = subprocess.run(
                     [
                         "uv", "run", "python", "-m",
@@ -214,24 +205,11 @@ class TestWakeWordSurvivesStalledTranscription(unittest.TestCase):
         self.assertIn("READY", lines, msg=detail)
 
         wake_count = lines.count("WAKE")
-        # THE regression assertion: before the fix the listener was
-        # stuck inside the stalled translation call when the second
-        # "Sorcar" played, so only one WAKE ever appeared.  Exactly
-        # two: one per spoken "Sorcar" (a third would be a
-        # double-trigger bug).
         self.assertEqual(wake_count, 2, msg=detail)
 
-        # The sentence after the first wake was captured and its
-        # translation attempted (the stalled server saw the request).
         self.assertIn("TRANSCRIBING", lines, msg=detail)
         self.assertGreaterEqual(stall.connections, 1, msg=detail)
 
-        # Listening resumed *while* the first transcription was still
-        # in flight: the second WAKE is reported before the stalled
-        # translation's NO_SPEECH failure line.  Terminal events are
-        # reported strictly in spoken (FIFO) order, so the first
-        # NO_SPEECH is necessarily the first capture's stalled
-        # translation, which cannot resolve before its >= 8s timeout.
         second_wake_idx = [i for i, ln in enumerate(lines)
                            if ln == "WAKE"][1]
         no_speech_idxs = [i for i, ln in enumerate(lines)
@@ -239,11 +217,8 @@ class TestWakeWordSurvivesStalledTranscription(unittest.TestCase):
         self.assertTrue(no_speech_idxs, msg=detail)
         self.assertLess(second_wake_idx, no_speech_idxs[0], msg=detail)
 
-        # Every stalled translation still reports a terminal event
-        # (NO_SPEECH) before the process exits: one per capture.
         self.assertEqual(len(no_speech_idxs), wake_count, msg=detail)
 
-        # The wake word was detected, so WAV mode exits 0.
         self.assertEqual(proc.returncode, 0, msg=detail)
 
 
@@ -297,12 +272,6 @@ class TestWakeCooldownSurvivesCapture(unittest.TestCase):
                 "please fix the parser bug in the compiler now",
             )
 
-        # One continuous stream: wake #1, a dictated command, the 2.2s
-        # silence that ends its capture, then wake #2 followed by only
-        # a 0.4s pause and MORE speech.  Wake #2 can therefore only
-        # fire through the partial-result path inside that short
-        # pause; with a frozen cooldown clock it is suppressed and
-        # never recovered.
         stream = (
             sorcar + _silence(1.0)
             + speech + _silence(2.2)
@@ -310,11 +279,6 @@ class TestWakeCooldownSurvivesCapture(unittest.TestCase):
             + speech
         )
 
-        # The fail-fast translation endpoint: a real server this test
-        # owns that accepts and instantly closes every connection, so
-        # each queued translation errors immediately and finalize()
-        # cannot hang.  (A "port with no listener" would be racy:
-        # another local process could grab the freed port.)
         refuse = ClosingHttpServer()
         overrides = {
             "OPENAI_BASE_URL": f"http://127.0.0.1:{refuse.port}/v1",
@@ -327,7 +291,7 @@ class TestWakeCooldownSurvivesCapture(unittest.TestCase):
             session = WakeSession(
                 WakeDetector(ensure_model(DEFAULT_MODELS_DIR))
             )
-            block = 2 * 800  # 50ms of s16le samples
+            block = 2 * 800
             for start in range(0, len(stream), block):
                 session.process(stream[start:start + block])
             session.finalize()
@@ -358,25 +322,17 @@ class TestWatchdogSilenceAdvancesSession(unittest.TestCase):
             sorcar = _tts_pcm(Path(tmp), "sorcar-dead-gap", "Sorcar")
 
         session = WakeSession(WakeDetector(ensure_model(DEFAULT_MODELS_DIR)))
-        block = 2 * 800  # 50ms of s16le samples
+        block = 2 * 800
 
         def feed(pcm: bytes) -> None:
             for start in range(0, len(pcm), block):
                 session.process(pcm[start:start + block])
 
-        # Wake #1 starts a no-speech capture.  Then the microphone
-        # stream "dies" for longer than both the capture timeout and
-        # the wake cooldown: the watchdog must advance the session
-        # through that wall-time silence, or the next spoken wake is
-        # swallowed by the stale capture / frozen cooldown.
         feed(sorcar + _silence(1.0))
         self.assertEqual(session.wakes, 1)
 
         session.process_silence(5.0)
 
-        # A second isolated Sorcar after the reopened stream should be
-        # detected immediately; it should not be treated as speech
-        # belonging to the old capture.
         feed(sorcar + _silence(1.0))
         session.finalize()
 

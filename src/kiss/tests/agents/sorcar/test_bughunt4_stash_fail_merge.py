@@ -104,12 +104,10 @@ class TestStashFailureAbortsMerge:
             try:
                 msg = agent.merge()
 
-                # The merge must have been aborted: main HEAD unchanged.
                 assert GitWorktreeOps.head_sha(repo) == head_before, (
                     "merge committed on a dirty main tree after the "
                     f"stash failed; merge() said: {msg}"
                 )
-                # The user's staged edit must still be staged.
                 cached = _git("diff", "--name-only", "--cached", cwd=repo)
                 assert "f.txt" in cached.stdout.splitlines(), (
                     "user's staged change to f.txt was lost; "
@@ -117,13 +115,11 @@ class TestStashFailureAbortsMerge:
                 )
                 show = _git("show", ":f.txt", cwd=repo)
                 assert "user staged work" in show.stdout
-                # The task branch must be kept for a later retry.
                 assert GitWorktreeOps.branch_exists(repo, branch)
                 assert agent._wt is not None, (
                     "worktree state cleared even though the merge "
                     "was not performed"
                 )
-                # The message must explain the stash failure.
                 assert "stash" in msg.lower()
             finally:
                 unreadable.chmod(0o644)
@@ -134,15 +130,12 @@ class TestStashFailureAbortsMerge:
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp) / "repo")
             agent = WorktreeSorcarAgent("bh4-stash-fail-overlap")
-            # Agent edits f.txt — the SAME file the user has staged.
             _setup_pending_worktree(repo, agent, "f.txt")
 
             unreadable = _dirty_main_with_unstashable_state(repo)
             try:
                 msg = agent.merge()
 
-                # The user's staged edit must still exist (not nuked by
-                # the conflict-path ``git reset --hard HEAD``).
                 show = _git("show", ":f.txt", cwd=repo)
                 assert "user staged work" in show.stdout, (
                     "user's staged change to f.txt was DESTROYED by "

@@ -114,10 +114,6 @@ class TestOpenSubagentTabIncludesParentTabId:
         )
         server, events = _make_server()
 
-        # Simulate the parent task actively running on tab "tab-parent".
-        # Its ``_RunningAgentState`` must carry ``task_history_id ==
-        # parent_id`` so the broadcaster can resolve parent_tab_id from
-        # the registry.
         parent_state = _RunningAgentState("tab-parent", "test-model")
         parent_state.chat_id = chat_id
         parent_state.task_history_id = parent_id
@@ -167,8 +163,6 @@ class TestOpenSubagentTabIncludesParentTabId:
 
         parent_state = _RunningAgentState("tab-parent-live", "test-model")
         parent_state.chat_id = chat_id
-        # Mirror the live state: task_history_id NOT yet populated,
-        # but the agent has already allocated the parent's row id.
         parent_state.task_history_id = None
         parent_state.agent = _StubAgent(parent_id)  # type: ignore[assignment]
         parent_state.is_subagent = False

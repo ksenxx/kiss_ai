@@ -47,7 +47,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
-from kiss.core.useful_tools import UsefulTools
+from kiss.agents.sorcar.useful_tools import UsefulTools
 
 
 def _run(*args: str, cwd: Path) -> None:
@@ -99,10 +99,6 @@ def repo_with_worktree(tmp_path: Path) -> tuple[Path, Path]:
     return repo, wt_dir
 
 
-# ────────────────────────────────────────────────────────────────────
-# Bug 1 — Relative paths bypass the remap
-# ────────────────────────────────────────────────────────────────────
-
 def test_relative_path_edit_lands_in_worktree_even_when_host_cwd_unrelated(
     repo_with_worktree, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -117,9 +113,6 @@ def test_relative_path_edit_lands_in_worktree_even_when_host_cwd_unrelated(
     bypassing the worktree.
     """
     repo, wt_dir = repo_with_worktree
-    # Host cwd is an unrelated tmp directory — the bug only surfaces
-    # when the host's cwd is NOT the parent repo (otherwise the remap
-    # accidentally still catches it).
     unrelated = tmp_path / "unrelated"
     unrelated.mkdir()
     monkeypatch.chdir(unrelated)
@@ -130,7 +123,6 @@ def test_relative_path_edit_lands_in_worktree_even_when_host_cwd_unrelated(
     assert "Successfully replaced" in out, out
     assert (wt_dir / "README.md").read_text() == "EDITED v2\n"
     assert (repo / "README.md").read_text() == "MAIN README v1\n"
-    # And it must NOT have created or touched anything in the unrelated dir.
     assert not (unrelated / "README.md").exists()
 
 
@@ -168,10 +160,6 @@ def test_relative_path_read_returns_worktree_content(
     assert out == "WT VERSION\n", out
 
 
-# ────────────────────────────────────────────────────────────────────
-# Bug 2 — Edit on file present in main but absent from worktree
-# ────────────────────────────────────────────────────────────────────
-
 def test_edit_does_not_mutate_main_when_file_missing_from_worktree(
     repo_with_worktree,
 ) -> None:
@@ -184,7 +172,6 @@ def test_edit_does_not_mutate_main_when_file_missing_from_worktree(
     edits main directly.
     """
     repo, wt_dir = repo_with_worktree
-    # Worktree's branch deletes README.md and commits.
     (wt_dir / "README.md").unlink()
     _run("git", "add", "-A", cwd=wt_dir)
     _run("git", "commit", "-m", "drop readme", cwd=wt_dir)
@@ -195,16 +182,9 @@ def test_edit_does_not_mutate_main_when_file_missing_from_worktree(
 
     out = tools.Edit(str(repo / "README.md"), "MAIN README v1", "PWNED")
 
-    # The main repo's README MUST be untouched.
     assert (repo / "README.md").read_text() == main_before
-    # The tool must surface a clear error rather than silently
-    # writing to main.
     assert "Error" in out, out
 
-
-# ────────────────────────────────────────────────────────────────────
-# Bug 3 — Read returning stale main content when worktree deleted file
-# ────────────────────────────────────────────────────────────────────
 
 def test_read_does_not_return_main_content_when_file_missing_from_worktree(
     repo_with_worktree,
@@ -222,15 +202,9 @@ def test_read_does_not_return_main_content_when_file_missing_from_worktree(
 
     out = tools.Read(str(repo / "README.md"))
 
-    # MUST NOT leak main's content.
     assert "MAIN README v1" not in out, out
-    # And SHOULD be a not-found error.
     assert "not found" in out.lower() or "Error" in out, out
 
-
-# ────────────────────────────────────────────────────────────────────
-# Bug 4 — Bash absolute-main-repo paths leak edits
-# ────────────────────────────────────────────────────────────────────
 
 def test_bash_output_redirection_to_main_repo_is_refused(
     repo_with_worktree,
@@ -253,7 +227,6 @@ def test_bash_output_redirection_to_main_repo_is_refused(
         description="evil",
     )
 
-    # Main MUST be untouched.
     assert target.read_text() == before
 
 
@@ -266,12 +239,9 @@ def test_bash_sed_inplace_against_main_repo_is_refused(
     before = target.read_text()
     tools = UsefulTools(work_dir=str(wt_dir))
 
-    # Use the GNU/BSD-compatible form: -i with an explicit empty backup
-    # suffix works on macOS BSD sed; -i alone works on GNU sed.  We
-    # just test that the file CONTENT doesn't change either way.
     if subprocess.run(["sed", "--version"], capture_output=True).returncode == 0:
         cmd = f"sed -i 's/MAIN/PWNED/' {target}"
-    else:  # BSD sed (macOS)
+    else:
         cmd = f"sed -i '' 's/MAIN/PWNED/' {target}"
     tools.Bash(cmd, description="evil")
 
@@ -324,10 +294,6 @@ def test_bash_on_paths_outside_repo_still_works(
     assert scratch.read_text() == "HELLO\n"
 
 
-# ────────────────────────────────────────────────────────────────────
-# Bug 6 — Auto-commit + squash-merge end-to-end
-# ────────────────────────────────────────────────────────────────────
-
 def test_remap_actually_advances_main_via_squash_merge(
     repo_with_worktree,
 ) -> None:
@@ -342,25 +308,20 @@ def test_remap_actually_advances_main_via_squash_merge(
     repo, wt_dir = repo_with_worktree
     branch = "kiss/wt-test-cafebabe"
     main_head_before = _stdout("git", "rev-parse", "main", cwd=repo)
-    baseline = main_head_before  # worktree was branched from main.
+    baseline = main_head_before
     tools = UsefulTools(work_dir=str(wt_dir))
 
-    # Simulate the LLM's main-repo Edit during a worktree task.
     tools.Edit(str(repo / "README.md"), "MAIN README v1", "MERGED")
 
-    # Auto-commit on the worktree branch.
     assert GitWorktreeOps.has_uncommitted_changes(wt_dir)
     committed = GitWorktreeOps.commit_all(wt_dir, "agent: remapped edit")
     assert committed
 
-    # Squash-merge the branch into main.
     result = GitWorktreeOps.squash_merge_from_baseline(
         repo, branch, baseline,
     )
-    # Whatever the enum reports as "applied", main's head must advance.
     main_head_after = _stdout("git", "rev-parse", "main", cwd=repo)
     assert main_head_after != main_head_before, (
         f"main did not advance: result={result}, head={main_head_after}"
     )
-    # And the post-merge main must contain the remapped edit.
     assert (repo / "README.md").read_text() == "MERGED\n"

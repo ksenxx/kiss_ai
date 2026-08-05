@@ -2,7 +2,12 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration test: search Google with a visible browser and summarize results."""
+"""Integration test: search Google headlessly, summarize, show a CAPTCHA.
+
+Searching happens in the default headless browser; the window is only put
+on screen (``show_browser``) when Google answers with a CAPTCHA that a
+human has to solve.
+"""
 
 import re
 from pathlib import Path
@@ -33,9 +38,10 @@ def main() -> None:
             import time
 
             print("Google CAPTCHA detected.")
+            web.show_browser()
             print("Waiting 30s -- solve the CAPTCHA in the browser window...")
             time.sleep(30)
-            tree = web.get_page_content()
+            tree = web.show_browser(visible=False)
             print(tree[:4000])
             print("... (truncated)\n")
 

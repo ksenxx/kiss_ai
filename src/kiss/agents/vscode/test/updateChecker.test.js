@@ -2,51 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression test for the KISS Sorcar on-activation PyPI
-// update check.
-//
-// Bug reproduced
-// --------------
-// Before this fix, when VS Code was launched and KISS Sorcar was NOT
-// installing (the "all deps present" fast path in
-// ``DependencyInstaller.ensureDependenciesImpl``) the extension did
-// nothing to tell the user a newer release was available.  The
-// kiss-web daemon polls PyPI hourly and broadcasts an
-// ``update_available`` event to connected webview clients — but on
-// the fast path the daemon is not restarted, so its cached "no
-// update" answer can be up to an hour stale.  Users who launched
-// VS Code only briefly never saw the next poll fire at all.
-//
-// This test pins the new ``checkForExtensionUpdate`` helper from
-// ``src/UpdateChecker.js`` (which the extension's ``activate``
-// invokes on every launch) by driving it directly against a real,
-// loopback HTTP server impersonating the PyPI JSON endpoint.  No
-// vscode is required — the helper accepts a ``notify`` callback so
-// the test can observe its behavior end-to-end without involving the
-// VS Code API or the user's ``~/.kiss/``.
-//
-// Coverage
-// --------
-//   1. Stale local version + newer PyPI version → ``notify`` is called
-//      with the right ``{latest, current}`` payload AND the JSON cache
-//      file is written (regression locks in the fix).
-//   2. Within cooldown the cached answer is replayed and PyPI is NOT
-//      hit a second time (rate-limit guard).
-//   3. After cooldown elapses with PyPI now reporting the current
-//      version, ``notify`` is NOT called (no false positive after the
-//      user updates).
-//   4. Network error: ``notify`` is NOT called, no exception escapes,
-//      the cache file is NOT poisoned with an empty answer.
-//   5. ``_version.py``-based current-version resolution finds the
-//      installed kiss_project version (covers the production code path
-//      that ``extension.ts`` calls into).
-//   6. ``compareVersions`` unit-style coverage so a malformed PyPI
-//      payload never produces a false positive.
-//
-// Runs under bare ``node`` (no TypeScript compile):
-//
-//     node test/updateChecker.test.js
 
 'use strict';
 
@@ -63,13 +18,6 @@ const {
   scanInstalledExtensionVersions,
 } = require('../src/UpdateChecker.js');
 
-// ---------------------------------------------------------------------------
-// PyPI stub: a real loopback HTTP server whose payload and hit counter
-// can be inspected per-test.  Mirrors the Python ``_PypiStub`` used by
-// ``tests/agents/vscode/test_update_available_check.py`` so the
-// extension- and daemon-side regression tests sit on the same shape of
-// fixture.
-// ---------------------------------------------------------------------------
 function startPypiStub(payload, status = 200) {
   const state = {payload, status, hits: 0, server: null, url: ''};
   return new Promise((resolve, reject) => {
@@ -100,10 +48,6 @@ function stopStub(state) {
   return new Promise(resolve => state.server.close(() => resolve()));
 }
 
-// ---------------------------------------------------------------------------
-// Per-test scratch directory so the helper's cache file does not leak
-// across cases or contaminate the developer's real ``~/.kiss/``.
-// ---------------------------------------------------------------------------
 const tmpDirs = [];
 function makeCachePath(tag) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `kiss-updcheck-${tag}-`));
@@ -124,11 +68,6 @@ async function test(name, fn) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// 1.  Stale current vs newer PyPI version: ``notify`` MUST fire.
-//     This is the bug reproduction — before the fix nothing called
-//     ``notify`` because the helper did not exist.
-// ---------------------------------------------------------------------------
 async function testNotifiesWhenUpdateAvailable() {
   const stub = await startPypiStub({info: {version: '2099.1.1'}});
   const cachePath = makeCachePath('newer');
@@ -155,7 +94,6 @@ async function testNotifiesWhenUpdateAvailable() {
       current: '2026.6.30',
     });
 
-    // Cache file is now written so the next activation rate-limits.
     const cache = JSON.parse(fs.readFileSync(cachePath, 'utf-8'));
     assert.strictEqual(cache.lastCheckMs, 1_000_000);
     assert.strictEqual(cache.lastLatest, '2099.1.1');
@@ -164,14 +102,10 @@ async function testNotifiesWhenUpdateAvailable() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// 2.  Within cooldown: cached answer is replayed, PyPI is NOT hit again.
-// ---------------------------------------------------------------------------
 async function testCooldownReplaysCachedDecision() {
   const stub = await startPypiStub({info: {version: '2099.1.1'}});
   const cachePath = makeCachePath('cooldown');
   try {
-    // First call populates the cache.
     await checkForExtensionUpdate({
       pypiUrl: stub.url,
       cacheFilePath: cachePath,
@@ -182,8 +116,6 @@ async function testCooldownReplaysCachedDecision() {
     });
     assert.strictEqual(stub.hits, 1);
 
-    // Second call within cooldown: must use cache, replay notify, and
-    // NOT make a second PyPI request.
     const notified = [];
     const result = await checkForExtensionUpdate({
       pypiUrl: stub.url,
@@ -206,10 +138,6 @@ async function testCooldownReplaysCachedDecision() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// 3.  After the user updates, PyPI reports the same version we have →
-//     ``notify`` must NOT fire (no stale "update available" toast).
-// ---------------------------------------------------------------------------
 async function testNoNotifyWhenUpToDate() {
   const stub = await startPypiStub({info: {version: '2026.6.30'}});
   const cachePath = makeCachePath('current');
@@ -233,10 +161,6 @@ async function testNoNotifyWhenUpToDate() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// 4.  Network failure (PyPI returns 500): ``notify`` must NOT fire, the
-//     promise must NOT reject, and the cache file must NOT be poisoned.
-// ---------------------------------------------------------------------------
 async function testFetchFailureDoesNotCrashOrNotify() {
   const stub = await startPypiStub(null, 500);
   const cachePath = makeCachePath('fail');
@@ -264,11 +188,6 @@ async function testFetchFailureDoesNotCrashOrNotify() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// 5.  Production current-version resolution via ``_version.py``: this
-//     covers the code path that ``extension.ts`` exercises when it
-//     hands ``kissProjectPath`` to the helper.
-// ---------------------------------------------------------------------------
 async function testResolvesCurrentVersionFromVersionPy() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-updcheck-vpy-'));
   tmpDirs.push(root);
@@ -278,8 +197,6 @@ async function testResolvesCurrentVersionFromVersionPy() {
     path.join(versionPyDir, '_version.py'),
     "__version__ = '2099.9.9'\n",
   );
-  // Pass an empty extensionsRoot so the scanner short-circuits and the
-  // resolver falls back to the ``kissProjectPath`` bundled version.
   const emptyExtRoot = fs.mkdtempSync(
     path.join(os.tmpdir(), 'kiss-updcheck-noext-'),
   );
@@ -287,8 +204,6 @@ async function testResolvesCurrentVersionFromVersionPy() {
   assert.strictEqual(resolveCurrentVersion(root, emptyExtRoot), '2099.9.9');
   assert.strictEqual(resolveCurrentVersion(undefined, emptyExtRoot), null);
 
-  // And end-to-end: the helper uses it when no ``currentVersion`` is
-  // passed explicitly.
   const stub = await startPypiStub({info: {version: '2099.9.10'}});
   const cachePath = makeCachePath('vpy');
   try {
@@ -314,17 +229,6 @@ async function testResolvesCurrentVersionFromVersionPy() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// 8.  Regression: stale-daemon-after-update bug.  When multiple
-//     ``ksenxx.kiss-sorcar-*`` extension dirs exist (the OLD version the
-//     daemon binary was launched from AND the freshly-installed NEW
-//     version), ``resolveCurrentVersion`` must return the NEW version.
-//     This is the reason the sticky "update available" toast used to
-//     keep re-appearing after the user clicked Update: the OLD daemon
-//     reported OLD as ``current`` even though NEW was already
-//     installed.  Mirrors ``TestUpdateAvailableUsesLatestInstalledExtension``
-//     in ``test_update_available_check.py``.
-// ---------------------------------------------------------------------------
 async function testScansMaxInstalledExtensionVersion() {
   const extRoot = fs.mkdtempSync(
     path.join(os.tmpdir(), 'kiss-updcheck-extroot-'),
@@ -344,14 +248,11 @@ async function testScansMaxInstalledExtensionVersion() {
       `__version__ = '${ver}'\n`,
     );
   }
-  // A non-KISS extension dir: must be ignored.
   fs.mkdirSync(path.join(extRoot, 'someone.other-extension-1.0.0'));
-  // A KISS dir with no _version.py: must be silently skipped.
   fs.mkdirSync(
     path.join(extRoot, 'ksenxx.kiss-sorcar-broken', 'kiss_project'),
     {recursive: true},
   );
-  // A KISS dir with a malformed _version.py: must be silently skipped.
   const bad = path.join(
     extRoot,
     'ksenxx.kiss-sorcar-2026.6.99',
@@ -361,7 +262,6 @@ async function testScansMaxInstalledExtensionVersion() {
   );
   fs.mkdirSync(bad, {recursive: true});
   fs.writeFileSync(path.join(bad, '_version.py'), '# no version here\n');
-  // A stray file at the extensions root: must not crash the scanner.
   fs.writeFileSync(path.join(extRoot, 'not-a-directory.txt'), 'junk');
 
   const seen = scanInstalledExtensionVersions(extRoot);
@@ -372,9 +272,6 @@ async function testScansMaxInstalledExtensionVersion() {
     'scanner must return only the parseable KISS Sorcar versions',
   );
 
-  // ``resolveCurrentVersion`` picks the MAX version even when the
-  // bundled ``kissProjectPath`` points at the OLD extension (which is
-  // exactly the post-update scenario).
   const oldKissProject = path.join(
     extRoot,
     'ksenxx.kiss-sorcar-2026.6.30',
@@ -385,9 +282,6 @@ async function testScansMaxInstalledExtensionVersion() {
     '2026.7.5',
   );
 
-  // And when the extensions root is missing / unreadable, the scanner
-  // returns an empty list and the resolver falls back to the bundled
-  // ``kissProjectPath``.
   assert.deepStrictEqual(
     scanInstalledExtensionVersions(
       path.join(extRoot, 'does-not-exist'),
@@ -403,39 +297,27 @@ async function testScansMaxInstalledExtensionVersion() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// 6.  compareVersions edge cases — keep parity with the Python helper.
-// ---------------------------------------------------------------------------
 async function testCompareVersions() {
   assert.strictEqual(compareVersions('2026.6.30', '2026.6.29'), 1);
   assert.strictEqual(compareVersions('2026.6.30', '2026.6.31'), -1);
   assert.strictEqual(compareVersions('2026.6.30', '2026.6.30'), 0);
-  // Shorter tuples are right-padded with zeros.
   assert.strictEqual(compareVersions('2026.6', '2026.6.0'), 0);
   assert.strictEqual(compareVersions('2026.7', '2026.6.9'), 1);
-  // Garbage falls back to equality so we never raise a false positive.
   assert.strictEqual(compareVersions('bad', '2026.6.30'), 0);
   assert.strictEqual(compareVersions('2026.6.30', ''), 0);
 }
 
-// ---------------------------------------------------------------------------
-// 7.  No current version available → graceful skip, no notify, no fetch.
-// ---------------------------------------------------------------------------
 async function testSkipsWhenCurrentVersionUnknown() {
   let fetched = 0;
   const notified = [];
   const cachePath = makeCachePath('nover');
-  // Point ``extensionsRoot`` at an empty tmpdir so the scanner does not
-  // discover the developer's real installed KISS Sorcar extension and
-  // resolve a "current" version through it — the intent of this test
-  // is the "unknown version" branch.
   const emptyExtRoot = fs.mkdtempSync(
     path.join(os.tmpdir(), 'kiss-updcheck-nover-ext-'),
   );
   tmpDirs.push(emptyExtRoot);
   const result = await checkForExtensionUpdate({
     cacheFilePath: cachePath,
-    currentVersion: '', // explicit empty + no kissProjectPath = unknown
+    currentVersion: '',
     extensionsRoot: emptyExtRoot,
     fetchLatest: () => {
       fetched += 1;
@@ -489,7 +371,6 @@ runTests()
       try {
         fs.rmSync(dir, {recursive: true, force: true});
       } catch {
-        /* ignore */
       }
     }
     console.log(`\n${passed} passed, ${failures.length} failed`);

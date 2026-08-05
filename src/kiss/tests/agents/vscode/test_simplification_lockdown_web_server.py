@@ -56,8 +56,6 @@ from kiss.server.web_server import (
     _version_tuple,
 )
 
-# Matches an unsubstituted chat.html template placeholder such as
-# ``{{MAIN_SRC}}``.  Used to prove _build_html substituted everything.
 _PLACEHOLDER_RE = re.compile(r"\{\{[A-Z_]+\}\}")
 
 _IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
@@ -223,7 +221,7 @@ class TestVscodeOnlyCommandsDropped(_ServerTestBase):
         Commands on one connection are dispatched strictly in order, so
         any (erroneous) broadcast caused by the VS Code-only commands
         would arrive before the unknown-command error sentinel.
-        ``openFile`` is no longer in ``_VSCODE_ONLY_COMMANDS`` (the web
+        ``openFile`` is not in ``sorcar.DROPPED_COMMANDS`` (the web
         server implements it for WSS clients) but must still be a
         silent defensive drop on the UDS transport.
         """
@@ -390,7 +388,6 @@ class TestUrlFileLifecycle(unittest.TestCase):
         _remove_url_file(self.url_file)
         self.assertFalse(self.url_file.exists())
         self.assertIsNone(_read_url_from_file(self.url_file))
-        # Removing an already-missing file is a silent no-op.
         _remove_url_file(self.url_file)
 
 

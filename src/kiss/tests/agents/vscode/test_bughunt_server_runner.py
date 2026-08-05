@@ -77,8 +77,6 @@ class _BugHuntBase(unittest.TestCase):
 
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
-        # Patch out the two LLM-calling helpers (same precedent as
-        # test_autocommit_persistence.py) so no paid API is hit.
         self._orig_gen = _merge_flow_module.generate_commit_message_from_diff
         self._orig_followup = _server_module.generate_followup_text
 
@@ -117,8 +115,6 @@ class TestResumeRunningStartTs(_BugHuntBase):
         release = threading.Event()
 
         def stub_run(self_agent: object, **kwargs: object) -> str:
-            # Simulate a long-running agent: block until the test
-            # releases us, keeping the task thread alive.
             release.wait(timeout=30)
             return "success: true\nsummary: long task done\n"
 
@@ -135,7 +131,6 @@ class TestResumeRunningStartTs(_BugHuntBase):
             "model": "",
         })
         try:
-            # Wait until the run has allocated its task_history row.
             task_id: str | None = None
             deadline = time.time() + 30
             while time.time() < deadline:
@@ -150,7 +145,6 @@ class TestResumeRunningStartTs(_BugHuntBase):
                 time.sleep(0.02)
             assert task_id is not None, "task row was never allocated"
 
-            # A second tab opens the running task from history.
             self.events.clear()
             self.server._cmd_resume_session({
                 "taskId": task_id,
@@ -174,8 +168,6 @@ class TestResumeRunningStartTs(_BugHuntBase):
                 "startTs <= 0 and mis-anchors the 'Running …' timer at "
                 "the client's Date.now()"
             )
-            # Sanity: the anchor is the agent's actual start time
-            # (within the last minute), not some garbage value.
             now_ms = int(time.time() * 1000)
             assert now_ms - 60_000 <= start_ts <= now_ms, (
                 f"startTs {start_ts} is not a plausible recent ms-epoch "

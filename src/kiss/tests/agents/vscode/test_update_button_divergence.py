@@ -51,9 +51,6 @@ REPO = Path(__file__).resolve().parents[5]
 INSTALL_SH = REPO / "install.sh"
 SIDEBAR_TS = REPO / "src" / "kiss" / "agents" / "vscode" / "src" / "SorcarSidebarView.ts"
 
-# A deterministic env that pins git's identity and disables any user-level
-# config so the hermetic repo is unaffected by ``~/.gitconfig`` (which on a
-# developer machine could set ``pull.rebase`` etc. and mask the bug).
 HERMETIC_GIT_ENV = {
     "GIT_AUTHOR_NAME": "tester",
     "GIT_AUTHOR_EMAIL": "tester@example.com",
@@ -132,18 +129,14 @@ def _make_diverged_clone(
     _run(["git", "push", "origin", "main"], cwd=seed)
 
     _run(["git", "clone", str(remote), str(local)], cwd=root)
-    # Pin identity inside the local clone so commits there don't pick up
-    # the developer machine's ``~/.gitconfig``.
     _run(["git", "config", "user.name", "tester"], cwd=local)
     _run(["git", "config", "user.email", "tester@example.com"], cwd=local)
 
-    # Rewrite origin/main to a different tip with a different install.sh.
     _run(["git", "clone", str(remote), str(pusher)], cwd=root)
     _run(["git", "config", "user.name", "tester"], cwd=pusher)
     _run(["git", "config", "user.email", "tester@example.com"], cwd=pusher)
     (pusher / "install.sh").write_text(upstream_install_sh, encoding="utf-8")
     _run(["git", "commit", "-am", "rewrite upstream install.sh"], cwd=pusher)
-    # ``--amend`` rewrites SHA, then force-push so origin/main is the new tip.
     _run(["git", "commit", "--amend", "--no-edit"], cwd=pusher)
     _run(["git", "push", "--force", "origin", "main"], cwd=pusher)
 
@@ -213,10 +206,6 @@ def _head_sha(repo: Path, ref: str = "HEAD") -> str:
     return str(_run(["git", "rev-parse", ref], cwd=repo).stdout).strip()
 
 
-# ---------------------------------------------------------------------------
-# Test 1 — install.sh recovers from divergence
-# ---------------------------------------------------------------------------
-
 
 def test_update_repo_recovers_from_diverged_upstream(tmp_path: Path) -> None:
     """``update_repo`` must reset to upstream when ``--ff-only`` fails.
@@ -232,7 +221,6 @@ def test_update_repo_recovers_from_diverged_upstream(tmp_path: Path) -> None:
         seed_install_sh="echo SEED\n",
         upstream_install_sh="echo NEW_UPSTREAM\n",
     )
-    # Sanity: a plain ``git pull --ff-only`` reproduces the original bug.
     diverged = subprocess.run(
         ["git", "-C", str(local), "pull", "--ff-only"],
         env=_git_env(),
@@ -250,14 +238,12 @@ def test_update_repo_recovers_from_diverged_upstream(tmp_path: Path) -> None:
     result = _run_update_repo(local)
     assert result.returncode == 0, result.stdout
     assert "Branches diverged" in result.stdout, result.stdout
-    # Upstream tip and local HEAD must agree.
     upstream_sha = _head_sha(local, "origin/main")
     head_sha = _head_sha(local, "HEAD")
     assert head_sha == upstream_sha, (
         f"HEAD ({head_sha}) did not reset to origin/main ({upstream_sha}) "
         f"after update_repo:\n{result.stdout}"
     )
-    # The new install.sh content must be on disk.
     assert "NEW_UPSTREAM" in (local / "install.sh").read_text(encoding="utf-8")
 
 
@@ -282,10 +268,6 @@ def test_update_repo_preserves_dirty_working_tree(tmp_path: Path) -> None:
     assert "Restoring stashed local changes" in result.stdout, result.stdout
     assert dirty_path.read_text(encoding="utf-8") == "user's uncommitted work\n"
 
-
-# ---------------------------------------------------------------------------
-# Test 3 — runUpdate's pre-flight refreshes a stale install.sh on disk
-# ---------------------------------------------------------------------------
 
 
 def _extract_runupdate_preflight(ts_text: str, esc_dir: str, esc_script: str) -> str:
@@ -319,10 +301,8 @@ def _extract_runupdate_preflight(ts_text: str, esc_dir: str, esc_script: str) ->
                 "${escScript}", esc_script
             )
         elif quote == '"':
-            # JS double-quoted strings allow ``\"`` and ``\\``.
             inner = inner.replace('\\"', '"').replace("\\\\", "\\")
         elif quote == "'":
-            # JS single-quoted strings use no escapes in this file; pass through.
             pass
         else:
             pytest.fail(f"unexpected quoting in preflight array: {raw!r}")
@@ -354,10 +334,6 @@ def test_runupdate_preflight_refreshes_stale_install_sh(tmp_path: Path) -> None:
         seed_install_sh=stale,
         upstream_install_sh=fresh,
     )
-    # The on-disk install.sh in ``local`` is currently the OLD one (the
-    # initial seed commit), because the local-only commit added an
-    # unrelated file rather than touching install.sh.  Confirm before
-    # running the pre-flight.
     on_disk = (local / "install.sh").read_text(encoding="utf-8")
     assert "STALE_MARKER" in on_disk, on_disk
 
@@ -388,7 +364,6 @@ def test_runupdate_preflight_refreshes_stale_install_sh(tmp_path: Path) -> None:
         "stale install.sh was executed even though the pre-flight should "
         f"have replaced it first:\n{result.stdout}"
     )
-    # The disk content must now reflect the upstream tip.
     assert "FRESH_MARKER" in (local / "install.sh").read_text(encoding="utf-8")
 
 
@@ -406,7 +381,6 @@ def test_runupdate_preflight_preserves_user_edits(tmp_path: Path) -> None:
         seed_install_sh=stale,
         upstream_install_sh=fresh,
     )
-    # An untracked file the user has authored locally — typical case.
     user_file = local / "my_notes.txt"
     user_file.write_text("important user notes\n", encoding="utf-8")
 

@@ -2,10 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Review-driven end-to-end regressions for the KISS Sorcar update
-// notification work.  These tests exercise the real media/main.js in a
-// JSDOM webview and lock down bugs found during the post-change review.
 
 'use strict';
 
@@ -58,6 +54,10 @@ function makeDomWebview() {
   };
   vm.runInContext(
     fs.readFileSync(path.join(mediaDir, 'panelCopy.js'), 'utf8'),
+    dom.getInternalVMContext(),
+  );
+  vm.runInContext(
+    fs.readFileSync(path.join(mediaDir, 'api.js'), 'utf8'),
     dom.getInternalVMContext(),
   );
   vm.runInContext(

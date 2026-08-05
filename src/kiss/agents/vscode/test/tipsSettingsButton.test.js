@@ -2,34 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test for the settings-panel Tips button in the chat
-// webview.
-//
-// Contract locked in here:
-//
-//   * The chat HTML rendered by ``buildChatHtml`` (compiled
-//     ``out/SorcarTab.js``) contains a ``#tips-btn`` button inside the
-//     settings panel's ``.config-update-row``, placed immediately to
-//     the LEFT of the "Git Commit" button (``#autocommit-btn``),
-//     carrying a lightbulb SVG icon, a visible "Tips" label, a
-//     tooltip, and an accessible label.
-//   * ``media/tips.js`` wires a click handler on ``#tips-btn``:
-//     clicking it mounts the ``<kiss-tips-panel>`` tips window showing
-//     the tips from ``window.__TIPS__.tips`` — regardless of the
-//     ``show`` (fresh-install) flag.
-//   * Only one panel instance may exist at a time: clicking the bulb
-//     while the panel is open does not stack a second panel; after
-//     Close the bulb reopens it.
-//   * The handler is robust: it works when ``window.__TIPS__`` is
-//     missing or has no tips (the panel opens empty and closeable),
-//     and tips.js does not throw when ``#tips-btn`` is absent.
-//
-// Runs against the compiled extension under ``out/`` and the real
-// ``media/chat.html`` + ``media/tips.js`` + ``media/marked.min.js``
-// in a jsdom DOM:
-//
-//     tsc -p . && node test/tipsSettingsButton.test.js
 
 'use strict';
 
@@ -41,14 +13,6 @@ const Module = require('module');
 
 const projectRoot = path.resolve(__dirname, '..');
 
-// ---------------------------------------------------------------------------
-// Stub ``vscode`` before the compiled extension loads it.
-// ---------------------------------------------------------------------------
-
-// ``_vscode-stub.js`` is a git-tracked fixture shared by tests running
-// in parallel; it already re-exports ``global.__kissVscodeStub || {}`` —
-// never rewrite or delete it here (writeFileSync truncates first, racing
-// a concurrent ``require('vscode')`` in sibling test processes).
 global.__kissVscodeStub = {
   Uri: {
     joinPath(base, ...parts) {
@@ -95,10 +59,6 @@ function mkTmp(prefix) {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
-/**
- * Run ``fn`` with KISS_HOME and KISS_TIPS_PATH pointing at fresh temp
- * locations.  ``setTips(content)`` writes the tips markdown file.
- */
 function withSandbox(fn) {
   const kissHome = path.join(mkTmp('kiss-bulb-home-'), 'kisshome');
   const tipsFile = path.join(mkTmp('kiss-bulb-md-'), 'TIPS.md');
@@ -128,17 +88,8 @@ function renderChatHtml() {
   return buildChatHtml(webview, extensionUri, 'test-model');
 }
 
-// ---------------------------------------------------------------------------
-// jsdom harness: real rendered chat HTML + real media/tips.js
-// ---------------------------------------------------------------------------
-
 const {JSDOM} = require(path.join(projectRoot, 'node_modules', 'jsdom'));
 
-/**
- * Load the real rendered chat HTML into jsdom (scripts inert), then
- * eval marked.min.js, ``window.__TIPS__ = cfg`` and media/tips.js —
- * mirroring the webview script order.  Returns the jsdom window.
- */
 function loadChatDom(cfg, {withConfig = true, withMarked = true} = {}) {
   const html = renderChatHtml();
   const dom = new JSDOM(html, {runScripts: 'outside-only'});
@@ -177,10 +128,6 @@ const THREE_TIPS = [
   'Second tip with **bold** text.',
   '### Third tip\n\n`code` here.',
 ];
-
-// ---------------------------------------------------------------------------
-// Button placement and appearance in the rendered chat HTML
-// ---------------------------------------------------------------------------
 
 test('Tips button sits in the settings row directly left of Git Commit', () => {
   withSandbox(({setTips}) => {
@@ -253,10 +200,6 @@ test('rendered HTML contains exactly one #tips-btn', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Click behaviour — the bulb shows the tips window
-// ---------------------------------------------------------------------------
-
 test('clicking the bulb shows the tips window with the tips', () => {
   withSandbox(({setTips}) => {
     setTips('# Tip\n\nHello.\n');
@@ -327,7 +270,6 @@ test('bulb also dismisses-and-reopens after a fresh-install auto-show', () => {
   withSandbox(({setTips}) => {
     setTips('# Tip\n\nHello.\n');
     const win = loadChatDom({tips: THREE_TIPS, show: true});
-    // Auto-shown on fresh install; the bulb must not stack a duplicate.
     const btn = win.document.getElementById('tips-btn');
     btn.click();
     assert.strictEqual(
@@ -390,8 +332,6 @@ test('tips.js tolerates a DOM without #tips-btn', () => {
   );
   assert.strictEqual(dom.window.document.querySelector('kiss-tips-panel'), null);
 });
-
-// ---------------------------------------------------------------------------
 
 if (failures.length > 0) {
   console.error(`\n${failures.length} test(s) failed, ${passed} passed`);

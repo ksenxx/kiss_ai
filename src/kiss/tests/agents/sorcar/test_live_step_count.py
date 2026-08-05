@@ -25,9 +25,6 @@ from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.kiss_agent import KISSAgent
 from kiss.server.server import VSCodeServer
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 def _redirect_db(tmpdir: str) -> tuple[Any, Any, Any]:
     """Point persistence at *tmpdir* and return original values to restore."""
@@ -58,10 +55,6 @@ def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]]]:
     return server, events
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
 
 class TestLiveStepCountInHistory:
     """``_get_history()`` overlays live metrics for running tasks."""
@@ -74,7 +67,6 @@ class TestLiveStepCountInHistory:
             server, events = _make_server()
             server.work_dir = tmpdir
 
-            # Persist a task row so _get_history returns it
             from kiss.agents.sorcar.persistence import _add_task, _save_task_result
             task_id, _chat_id = _add_task("test live history", "chat-hist")
             _save_task_result(
@@ -83,7 +75,6 @@ class TestLiveStepCountInHistory:
                 task="test live history",
             )
 
-            # Set up a running agent state matching the task
             tab_id = "hist-tab"
             tab = server._get_tab(tab_id)
             agent = WorktreeSorcarAgent("History Agent")
@@ -117,7 +108,6 @@ class TestLiveStepCountInHistory:
                 assert len(history_events) == 1
                 sessions = history_events[0]["sessions"]
 
-                # Find our task
                 our_session = None
                 for s in sessions:
                     if s.get("task_id") == task_id:
@@ -127,7 +117,6 @@ class TestLiveStepCountInHistory:
                     f"Task {task_id} not found in history sessions"
                 )
                 assert our_session["is_running"] is True
-                # Live steps: total_steps (0) + executor.step_count (5) = 5
                 assert our_session["steps"] == 5, (
                     f"Expected steps=5, got steps={our_session['steps']}"
                 )

@@ -2,19 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end integration test: when the agent asks the user a question
-// (ask-user modal), speech spoken after the "Sorcar" wake word must be
-// sent as the ANSWER to that question (a ``userAnswer`` message) rather
-// than as a new task, and the ask-user panel must show its own mic
-// button whose state mirrors the main #voice-btn and whose click
-// toggles wake-word listening exactly like the main mic.
-//
-// Runs the REAL production ``media/main.js`` and ``media/voice.js``
-// together in one jsdom webview (only the vscode host API is a
-// recording stub, as in every webview test).  Run with:
-//
-//     node test/voiceAskUserAnswer.test.js
 
 'use strict';
 
@@ -25,11 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom window running the production chat webview plus the
- * production voice.js in webview mode.  Returns ``{win, posted}``
- * where ``posted`` records every message posted to the vscode host.
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -63,11 +45,12 @@ function makeWebview() {
   };
 
   win.__VOICE__ = {mode: 'webview'};
-  // The mic is closed by default (fresh install); seed the explicit
-  // opt-in so wake-word listening auto-enables for these tests.
   win.localStorage.setItem('kissVoiceEnabled', '1');
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'voice.js'), 'utf8'));
   return {win, posted};
 }
@@ -107,8 +90,6 @@ function test(name, fn) {
   }
 }
 
-// ---------------------------------------------------------------------------
-
 test('the ask-user panel shows a mic button along with question/input/submit', () => {
   const {win} = makeWebview();
   send(win, {type: 'askUser', question: 'Which color?'});
@@ -131,7 +112,7 @@ test('the ask-user panel shows a mic button along with question/input/submit', (
 test('speech while a question is pending is sent as the userAnswer', () => {
   const {win, posted} = makeWebview();
   send(win, {type: 'askUser', question: 'Which color?'});
-  const tabId = win._demoApi.getActiveTabId();
+  const tabId = win._testApi.getActiveTabId();
   posted.length = 0;
   send(win, {type: 'voiceWake'});
   send(win, {type: 'voiceSpeech', text: 'blue', speaker: 1, language: 'fr'});
@@ -210,7 +191,6 @@ test('speech without a speaker answers with the raw text', () => {
 test('clicking the ask-user mic toggles wake-word listening like the main mic', () => {
   const {win, posted} = makeWebview();
   send(win, {type: 'askUser', question: 'Which color?'});
-  // The mic auto-enables at load, so the first click must turn it OFF.
   posted.length = 0;
   askMic(win).click();
   let toggles = posted.filter(m => m.type === 'voiceToggle');
@@ -288,16 +268,11 @@ test('answering by voice clears the pending question for the tab', () => {
   const {win, posted} = makeWebview();
   send(win, {type: 'askUser', question: 'Which color?'});
   send(win, {type: 'voiceSpeech', text: 'blue', speaker: 1});
-  // A second utterance must be a fresh task, not another answer.
   posted.length = 0;
   send(win, {type: 'voiceSpeech', text: 'now run tests', speaker: 1});
   assert.strictEqual(posted.filter(m => m.type === 'userAnswer').length, 0);
   assert.strictEqual(posted.filter(m => m.type === 'submit').length, 1);
 });
 
-// ---------------------------------------------------------------------------
-
 console.log(`\n${passed} passed, ${failures.length} failed`);
-// main.js starts webview timers (status ticks) that keep the node
-// event loop alive; exit explicitly once the verdict is printed.
 process.exit(failures.length > 0 ? 1 : 0);

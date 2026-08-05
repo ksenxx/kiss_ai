@@ -89,8 +89,6 @@ class _FakeIRCServer:
                 break
             if first:
                 first = False
-                # A TLS ClientHello starts with 0x16; close so a wrongly-TLS
-                # client fails its handshake quickly instead of hanging.
                 if data[:1] == b"\x16":
                     conn.close()
                     return

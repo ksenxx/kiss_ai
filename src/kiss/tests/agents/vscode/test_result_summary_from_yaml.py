@@ -120,10 +120,6 @@ class _PromptCapture:
         import yaml as _yaml
         self.prompts.append(str(kwargs.get("prompt_template", "")))
         summary = self.summaries.pop(0) if self.summaries else "done"
-        # ``yaml.dump`` produces a string that ``yaml.safe_load``
-        # round-trips, so the task runner's YAML parsing of the
-        # return value recovers the exact summary string regardless
-        # of punctuation it contains.
         return str(_yaml.dump({"success": True, "summary": summary}))
 
 
@@ -144,10 +140,6 @@ def _unpatch_parent_run(original: Any) -> None:
 
 def _run_and_wait(server: VSCodeServer, tab_id: str, prompt: str,
                   work_dir: str) -> None:
-    # ``autoCommit=True`` so the post-task flow short-circuits the
-    # interactive merge review (which would otherwise set
-    # ``tab.is_merging`` and block the second consecutive task in the
-    # same tab).
     server._handle_command({
         "type": "run", "prompt": prompt,
         "model": "claude-opus-4-6", "workDir": work_dir,
@@ -155,12 +147,6 @@ def _run_and_wait(server: VSCodeServer, tab_id: str, prompt: str,
     })
     t = server._get_tab(tab_id).task_thread
     assert t is not None
-    # 60s timeout: the end-to-end task flow (git-worktree setup,
-    # autocommit, persistence) easily exceeds 10s when other tests
-    # share the runner — observed wall time is ~6s per task in isolation
-    # and 15-30s under parallel load.  The 10s bound was the root cause
-    # of the flaky failure where the assert tripped before
-    # ``_run_task`` finished.
     t.join(timeout=60)
     assert not t.is_alive()
 
@@ -193,8 +179,6 @@ class TestResultSummaryFromYaml(unittest.TestCase):
                       "remember the magic word: banana",
                       self.tmpdir)
 
-        # The persisted ``result`` for the first task must be the YAML
-        # summary string, NOT the "No summary available" sentinel.
         rows = th._load_history(limit=10)
         assert rows, "expected first task to be persisted"
         first_result = rows[0]["result"]
@@ -208,7 +192,6 @@ class TestResultSummaryFromYaml(unittest.TestCase):
             f"task_history.result, got {first_result!r}"
         )
 
-        # Run a second task in the same tab/chat.
         _run_and_wait(self.server, tab_id, "what was the magic word?",
                       self.tmpdir)
         assert len(self.capture.prompts) >= 2

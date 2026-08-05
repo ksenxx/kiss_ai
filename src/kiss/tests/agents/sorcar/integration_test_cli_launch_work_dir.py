@@ -36,11 +36,6 @@ import sys
 import textwrap
 from pathlib import Path
 
-# Run the CLI argument parser in a child interpreter whose cwd is the
-# given ``run_cwd`` and whose environment carries the supplied
-# ``KISS_WORKDIR`` (or unset when ``None``).  The child prints the
-# resolved ``args.work_dir`` and the run-kwargs ``work_dir`` separated
-# by ``|`` so we can assert on both paths together.
 _PROBE_SOURCE = textwrap.dedent(
     """
     from kiss.agents.sorcar.cli_helpers import (

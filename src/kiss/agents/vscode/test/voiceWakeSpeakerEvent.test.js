@@ -2,31 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test for the host-side VoiceWakeService speaker events.
-//
-// After the "Sorcar" wake word, the Python listener captures the
-// speech that follows, translates it to English with a GPT audio
-// model, identifies the speaker by voice (Vosk x-vector model) and
-// prints one JSON object per utterance:
-//
-//     SPEECH {"text": <english text>, "speaker": <int or null>}
-//
-// VoiceWakeService must parse that payload and invoke ``onSpeech``
-// with BOTH the translated text and the speaker number, which the
-// sidebar forwards to the webview so voice.js can insert
-// ``Speaker #N says that: <text>`` and submit the task.
-//
-// This test spawns the REAL compiled service (out/voiceWake.js), which
-// spawns the REAL Python listener via ``uv run`` — no mocks.  The
-// listener is fed a WAV file (spoken "Sorcar" followed by a task
-// description, synthesized with macOS TTS) through the
-// ``KISS_VOICE_WAKE_ARGS`` extra-arguments hook.  The translation is a
-// real gpt-audio call, so the test skips politely without
-// OPENAI_API_KEY (and without macOS TTS, uv, or compiled output).
-//
-// Run directly with ``node test/voiceWakeSpeakerEvent.test.js`` after
-// ``npm run compile``.
 
 'use strict';
 
@@ -66,8 +41,6 @@ if (!process.env.OPENAI_API_KEY) {
   process.exit(0);
 }
 
-// The compiled service imports 'vscode' (through kissPaths); provide
-// the shared stub used by the other extension-host tests.
 global.__kissVscodeStub = {
   workspace: {
     isTrusted: true,
@@ -80,8 +53,6 @@ Module._resolveFilename = function (request, ...rest) {
   return realResolve.call(this, request, ...rest);
 };
 
-// Synthesize "Sorcar" + a task description + trailing silence at
-// 16kHz mono 16-bit (the [[slnc]] gaps drive capture endpointing).
 const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-voice-spk-'));
 const aiff = path.join(tmpdir, 'task.aiff');
 const wav = path.join(tmpdir, 'task.wav');
@@ -106,9 +77,9 @@ const wakes = [];
 const speeches = [];
 const states = [];
 const service = new VoiceWakeService(
-  () => wakes.push(Date.now()),
+  roundId => wakes.push(roundId),
   (listening, error) => states.push({listening, error}),
-  (text, speaker) => speeches.push({text, speaker}),
+  (roundId, text, speaker) => speeches.push({roundId, text, speaker}),
   () => {},
 );
 service.start();
@@ -127,10 +98,16 @@ function finish() {
       speeches.length >= 1,
       `expected an onSpeech callback, states=${JSON.stringify(states)}`,
     );
-    const {text, speaker} = speeches[0];
+    const {roundId, text, speaker} = speeches[0];
     assert.ok(
       /parser/i.test(text),
       `expected the translated task text, got ${JSON.stringify(text)}`,
+    );
+    // The words must come back labelled with the wake that produced them.
+    assert.strictEqual(
+      roundId,
+      wakes[0],
+      `the transcript must answer the wake that opened its round, got ${JSON.stringify(roundId)}`,
     );
     assert.strictEqual(
       speaker,

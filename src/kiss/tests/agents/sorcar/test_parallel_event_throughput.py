@@ -29,8 +29,6 @@ def _redirect(tmpdir: str) -> tuple:
     kiss_dir.mkdir(parents=True, exist_ok=True)
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "sorcar.db"
-    # _close_db drains+stops the writer thread, bumps the generation,
-    # clears the next-seq cache, and resets the connection cache.
     th._close_db()
     return saved
 
@@ -94,8 +92,6 @@ class TestParallelEventThroughput:
     def test_queue_call_is_sub_millisecond(self) -> None:
         """``_queue_chat_event`` must not block on the SQL write."""
         task_id, _ = th._add_task("latency-task", "")
-        # Prime the writer thread so the very first enqueue isn't charged
-        # for thread startup.
         th._queue_chat_event(
             {"type": "text_delta", "tabId": "t1", "content": "warmup"},
             task_id=task_id,
@@ -114,11 +110,6 @@ class TestParallelEventThroughput:
         samples_ns.sort()
         median_us = samples_ns[len(samples_ns) // 2] / 1000.0
         p99_us = samples_ns[int(len(samples_ns) * 0.99)] / 1000.0
-        # Median must be sub-millisecond; p99 well under 5ms even on
-        # slow CI runners.  Synchronous ``_append_chat_event`` measured
-        # 200µs–2.5ms median in the benchmark — this confirms the
-        # producer-side cost is now bounded by ``json.dumps`` + queue
-        # put rather than SQL commit.
         assert median_us < 1000.0, f"median {median_us}µs >= 1ms"
         assert p99_us < 5000.0, f"p99 {p99_us}µs >= 5ms"
 
@@ -126,10 +117,8 @@ class TestParallelEventThroughput:
 
     def test_flush_is_idempotent_when_queue_empty(self) -> None:
         """``_flush_chat_events`` must be a no-op when nothing is queued."""
-        # No events enqueued yet — writer thread may not even be running.
         th._flush_chat_events()
         th._flush_chat_events()
-        # After enqueue + flush + flush, the second flush is still safe.
         task_id, _ = th._add_task("idempotent-task", "")
         th._queue_chat_event(
             {"type": "text_delta", "tabId": "t1", "content": "x"},
@@ -153,7 +142,6 @@ class TestParallelEventThroughput:
                 {"type": "text_delta", "tabId": "t1", "content": f"q{i}"},
                 task_id=task_id,
             )
-        # Now insert a synchronous event; it must have the highest seq.
         th._append_chat_event(
             {"type": "task_done", "tabId": "t1", "content": "final"},
             task_id=task_id,
