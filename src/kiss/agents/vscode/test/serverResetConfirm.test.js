@@ -2,30 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Webview-side contract test for the settings-panel "Server reset"
-// button.
-//
-// New contract (in-settings-panel floating dialog)
-// -------------------------------------------------
-// The "Server reset" button (``#cfg-server-reset-btn``) in the
-// settings panel asks the kiss-web daemon to SIGTERM itself so the
-// supervising LaunchAgent/systemd unit respawns a fresh daemon
-// process.  When the click happens while ANY tab still has a running
-// agent, the webview MUST surface an in-settings-panel floating
-// confirmation box (``#server-reset-confirm-modal``) with OK and
-// Cancel buttons.  The webview must NOT post ``serverReset`` to the
-// extension until the user clicks OK.  Cancel closes the dialog and
-// posts nothing.
-//
-// When no tab is running, the webview fast-paths
-// ``{type:'serverReset'}`` directly to the extension and does NOT
-// open the floating box.
-//
-// The integration test in ``serverResetFloatingDialog.test.js``
-// covers the full extension+daemon end-to-end loop — this test pins
-// the webview half so a future refactor of ``main.js`` cannot
-// silently revert the in-panel dialog to a system modal.
 
 'use strict';
 
@@ -81,6 +57,10 @@ function makeDomWebview() {
     dom.getInternalVMContext(),
   );
   vm.runInContext(
+    fs.readFileSync(path.join(mediaDir, 'api.js'), 'utf8'),
+    dom.getInternalVMContext(),
+  );
+  vm.runInContext(
     fs.readFileSync(path.join(mediaDir, 'main.js'), 'utf8'),
     dom.getInternalVMContext(),
   );
@@ -112,8 +92,6 @@ function isFloatingModalOpen(win) {
 }
 
 async function runTests() {
-  // ---------- Static structure: the floating box must exist inside
-  //            #settings-panel with OK/Cancel buttons.
   {
     const wv = makeDomWebview();
     try {
@@ -145,9 +123,6 @@ async function runTests() {
     }
   }
 
-  // ---------- Case A: no agent running → fast path.
-  // The webview must immediately post {type:'serverReset'} and must
-  // NOT open the floating box.
   {
     const wv = makeDomWebview();
     try {
@@ -175,7 +150,6 @@ async function runTests() {
     }
   }
 
-  // ---------- Case B: agent running → floating box, NO post yet.
   {
     const wv = makeDomWebview();
     try {
@@ -198,7 +172,6 @@ async function runTests() {
         'no serverReset post must be made until the user clicks OK',
       );
 
-      // Cancel closes the box and posts nothing.
       click(wv.win.document.getElementById('server-reset-confirm-cancel'));
       await waitFor(
         () => !isFloatingModalOpen(wv.win),
@@ -210,7 +183,6 @@ async function runTests() {
         'Cancel must NOT post serverReset',
       );
 
-      // Re-open and OK → exactly one serverReset post.
       click(btn);
       await waitFor(
         () => isFloatingModalOpen(wv.win),
@@ -237,8 +209,6 @@ async function runTests() {
     }
   }
 
-  // ---------- Case C: agent finished → fast path resumes.
-  // After ``running:false`` arrives the click must fast-path again.
   {
     const wv = makeDomWebview();
     try {
@@ -271,8 +241,6 @@ async function runTests() {
     }
   }
 
-  // ---------- Case D: double-click while floating box is open.
-  // The second click must be ignored — no extra posts, no stacking.
   {
     const wv = makeDomWebview();
     try {
@@ -310,7 +278,6 @@ async function runTests() {
     }
   }
 
-  // ---------- Case E: Escape closes the floating dialog.
   {
     const wv = makeDomWebview();
     try {

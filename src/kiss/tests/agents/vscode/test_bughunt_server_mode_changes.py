@@ -165,7 +165,7 @@ class TestModeOnlyChangeReview(unittest.TestCase):
         manifest_path = self.data_dir / "pending-merge.json"
         manifest = json.loads(manifest_path.read_text())
         for f in manifest["files"]:
-            f.pop("exec", None)  # simulate a legacy manifest
+            f.pop("exec", None)
             _reject_all_hunks_in_file(f)
 
         self.assertEqual(script.read_text(), "#!/bin/sh\necho l\n")

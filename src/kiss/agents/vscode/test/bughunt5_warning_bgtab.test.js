@@ -2,28 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Bug-hunt 5 integration test: a LIVE ``warning`` event stamped for a
-// BACKGROUND tab must be routed into that tab's saved output fragment
-// (like every other display event), not silently dropped.
-//
-// Bug locked in:
-//
-//   The top-level message switch in ``media/main.js`` routes
-//   tab-stamped display events for non-active tabs through its
-//   ``default:`` branch into ``processOutputEventForBgTab`` so the
-//   event lands in the background tab's ``outputFragment`` and is
-//   visible when the user switches to that tab.  ``case 'warning'``
-//   however did a plain ``break`` on tabId mismatch — so when a
-//   worktree task finished with a stash-pop warning while the user
-//   was viewing ANOTHER tab, the warning never reached the owning
-//   tab's transcript: switching to the tab showed the task's result
-//   but not the warning that the user's uncommitted changes are
-//   stuck in the git stash.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/bughunt5_warning_bgtab.test.js
 
 'use strict';
 
@@ -34,12 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom window running the production chat webview: the real
- * ``chat.html`` body (placeholders blanked), ``panelCopy.js`` and
- * ``main.js`` evaluated in the window, and a recording
- * ``acquireVsCodeApi`` stub (the only host API the webview has).
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -74,32 +46,30 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
 
-/** Dispatch a backend→webview event exactly like the extension does. */
 function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
 function testBackgroundTabWarningSurvivesTabSwitch() {
   const {win} = makeWebview();
-  const api = win._demoApi;
-  assert.ok(api, '_demoApi must be exposed by main.js');
+  const api = win._testApi;
+  assert.ok(api, '_testApi must be exposed by main.js');
 
   const tab1 = api.getActiveTabId();
   assert.ok(tab1, 'initial tab id must exist');
 
-  // Open a second tab — tab1 becomes a background tab.
   api.createNewTab();
   const tab2 = api.getActiveTabId();
   assert.ok(tab2 && tab2 !== tab1, 'a fresh second tab must be active');
 
-  // Tab1's worktree task streams its final events while the user is
-  // looking at tab2: an ordinary display event (control) and the
-  // stash-pop warning, both stamped with tab1's id.
   send(win, {type: 'system_output', text: 'control-sysout-QQQ7', tabId: tab1});
   send(win, {
     type: 'warning',
@@ -107,7 +77,6 @@ function testBackgroundTabWarningSurvivesTabSwitch() {
     tabId: tab1,
   });
 
-  // Neither event may leak into the ACTIVE (tab2) transcript.
   const activeText = win.document.getElementById('output').textContent;
   assert.ok(
     !activeText.includes('control-sysout-QQQ7') &&
@@ -115,8 +84,6 @@ function testBackgroundTabWarningSurvivesTabSwitch() {
     'background-tab events must not render in the active tab',
   );
 
-  // Switch back to tab1 by clicking its tab-bar element (the real
-  // user gesture) — restoreTab re-attaches tab1's outputFragment.
   const tabEl = win.document.querySelector(
     '.chat-tab[data-tab-id="' + tab1 + '"]',
   );
@@ -141,9 +108,6 @@ function testBackgroundTabWarningSurvivesTabSwitch() {
 }
 
 function testForeignWindowTabWarningStillDropped() {
-  // A warning stamped for a tab of ANOTHER VS Code window (no local
-  // tab with that id) must still be dropped — regression guard for
-  // the bughunt3 foreign-tab behaviour.
   const {win} = makeWebview();
   send(win, {
     type: 'warning',

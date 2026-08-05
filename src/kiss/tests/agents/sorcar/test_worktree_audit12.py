@@ -236,7 +236,7 @@ class TestBug60DoMergeTypeGuard:
         )
 
         wt = agent._wt
-        result, warning = agent._do_merge(wt)
+        result, warning, _cleanup = agent._do_merge(wt)
 
         assert result == MergeResult.CHECKOUT_FAILED, (
             "BUG-60: _do_merge should return CHECKOUT_FAILED when "
@@ -275,7 +275,7 @@ class TestBug60DoMergeTypeGuard:
         )
 
         wt = agent._wt
-        result, warning = agent._do_merge(wt)
+        result, warning, _cleanup = agent._do_merge(wt)
         assert result == MergeResult.SUCCESS, (
             "Regression: valid original_branch should merge successfully"
         )

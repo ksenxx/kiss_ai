@@ -84,7 +84,6 @@ class TestAppendUserPromptHelper:
 
     def test_strips_trailing_whitespace_from_base_message(self) -> None:
         msg = _append_user_prompt("subject\n\n", "do X")
-        # Trailing blank line on base is stripped before separator.
         assert msg == "subject\n\nUser prompt:\ndo X"
 
     def test_multiline_prompt_preserved(self) -> None:
@@ -182,7 +181,6 @@ class TestWorktreeAutoCommitIncludesUserPrompt:
                 ["git", "-C", str(wt_dir), "config", "user.name", "T"],
                 check=True,
             )
-            # Agent makes a change in the worktree.
             (wt_dir / "new.txt").write_text("hello\n")
 
             agent = WorktreeSorcarAgent("test")
@@ -227,7 +225,6 @@ class TestWorktreeAutoCommitIncludesUserPrompt:
                 wt_dir=wt_dir,
                 baseline_commit=None,
             )
-            # _last_user_prompt remains ""
             with _LLMUnavailable():
                 assert agent._auto_commit_worktree() is True
 
@@ -241,10 +238,6 @@ class TestChatRunRecordsUserPrompt:
     """
 
     def test_run_sets_last_user_prompt_before_dispatch(self) -> None:
-        # We don't need to actually drive the LLM — we just need to
-        # observe that ``_last_user_prompt`` is set BEFORE the
-        # underlying ``super().run`` is invoked.  Patch
-        # ``ChatSorcarAgent``'s parent ``run`` to capture state.
         from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
         from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 

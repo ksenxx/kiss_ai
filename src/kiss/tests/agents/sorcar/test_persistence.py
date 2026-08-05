@@ -81,8 +81,6 @@ class TestChatEvents:
         loaded = json.loads(str(result["extra"]))
         assert loaded["model"] == "gpt-4o"
         assert loaded["is_worktree"] is True
-        # Flat-column schema: falsy booleans are indistinguishable from
-        # the default and are not re-emitted in the synthesized extra JSON.
         assert loaded.get("is_parallel", False) is False
 
     def test_set_events_stores_timestamps(self):
@@ -147,24 +145,19 @@ class TestChatEvents:
         time.sleep(0.01)
         dup_b_id, _ = th._add_task("same-text", chat_id="dup")
         th._append_chat_event({"ev": "dup-b"}, task_id=dup_b_id)
-        # prev from the second duplicate must be the first duplicate
         prev_of_b = th._get_adjacent_task_by_chat_id("dup", dup_b_id, "prev")
         assert prev_of_b is not None
         assert prev_of_b["task_id"] == dup_a_id
         prev_b_events = prev_of_b["events"]
         assert isinstance(prev_b_events, list)
         assert prev_b_events[0]["ev"] == "dup-a"
-        # prev from the first duplicate must be the unique earlier row
         prev_of_a = th._get_adjacent_task_by_chat_id("dup", dup_a_id, "prev")
         assert prev_of_a is not None
         assert prev_of_a["task_id"] == first_id
-        # next from the first duplicate must reach the second duplicate
         next_of_a = th._get_adjacent_task_by_chat_id("dup", dup_a_id, "next")
         assert next_of_a is not None
         assert next_of_a["task_id"] == dup_b_id
-        # None when the id is not in the chat
         assert th._get_adjacent_task_by_chat_id("dup", "999999", "prev") is None
-        # None when id is None
         assert th._get_adjacent_task_by_chat_id("dup", None, "prev") is None
 
     def test_event_timestamp_in_raw_db(self):
@@ -215,8 +208,6 @@ class TestSaveTaskExtra:
         assert stored["version"] == "0.2.79"
         assert stored["tokens"] == 1234
         assert stored["cost"] == 0.0567
-        # Flat-column schema: falsy booleans collapse to the default and
-        # are not re-emitted in the synthesized extra JSON.
         assert stored.get("is_parallel", False) is False
         assert stored["is_worktree"] is True
 
@@ -233,10 +224,6 @@ class TestSaveTaskExtra:
     def test_extra_default_empty(self):
         th._add_task("no extra")
         entries = th._load_history(limit=1)
-        # r3-H3: ``_row_to_extra_json`` now always emits every typed
-        # column (including string/numeric defaults) so consumers see
-        # a consistent shape regardless of whether a field was
-        # explicitly set or left at the column default.
         import json as _json
         loaded = _json.loads(str(entries[0]["extra"]))
         assert loaded == {

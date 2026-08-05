@@ -81,26 +81,14 @@ class TestDaemonConnectionLostRepro(unittest.TestCase):
     """End-to-end reproducer for the daemon-connection-lost bug."""
 
     def setUp(self) -> None:
-        # Every resource is registered with ``addCleanup`` the moment
-        # it is acquired.  ``addCleanup`` runs in LIFO order regardless
-        # of whether ``setUp`` completes — so a failure half-way
-        # through still releases the loop thread, the UDS listener,
-        # the asyncio event loop FDs, the devnull FD, and the tmpdir.
-        # Pre-tightening, a partial setUp left every one of those
-        # leaked, which compounded into ``OSError [Errno 24] Too many
-        # open files`` once a few hundred CLI tests had run in the
-        # same process.
         self.tmpdir = tempfile.mkdtemp(prefix="sorcar_cli_repro_")
         self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
-        # Final ``gc.collect()`` reclaims any selector / transport FDs
-        # whose only references were on now-closed asyncio tasks.
         self.addCleanup(gc.collect)
 
         self.sock_path = str(Path(self.tmpdir) / "sorcar.sock")
         self.work_dir = str(Path(self.tmpdir) / "wd")
         os.makedirs(self.work_dir, exist_ok=True)
 
-        # Isolate sqlite persistence under the temp kiss-home.
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
         self._saved_persistence = (th._DB_PATH, th._db_conn, th._KISS_DIR)
@@ -108,8 +96,6 @@ class TestDaemonConnectionLostRepro(unittest.TestCase):
         th._DB_PATH = kiss_dir / "sorcar.db"
         th._db_conn = None
         self.addCleanup(self._restore_persistence)
-        # Drop any tabs the test may have inserted into the shared
-        # process-wide registry so they cannot bleed into later tests.
         self.addCleanup(_RunningAgentState.running_agent_states.clear)
 
         self._saved_env = os.environ.get("KISS_SORCAR_SOCK")
@@ -123,9 +109,6 @@ class TestDaemonConnectionLostRepro(unittest.TestCase):
             target=self.loop.run_forever, daemon=True,
         )
         self.loop_thread.start()
-        # Stop / close the loop LAST (after every coroutine-based
-        # cleanup has already run on it).  LIFO ordering means we
-        # register this BEFORE we register the asyncio shutdown.
         self.addCleanup(self._stop_and_close_loop)
 
         self.server = RemoteAccessServer(
@@ -139,8 +122,6 @@ class TestDaemonConnectionLostRepro(unittest.TestCase):
             ),
             self.loop,
         ).result(timeout=5)
-        # Aggressive async shutdown runs before ``_stop_and_close_loop``
-        # because addCleanup is LIFO.
         self.addCleanup(self._run_async_shutdown)
 
         self._devnull = open(os.devnull, "w")
@@ -153,11 +134,6 @@ class TestDaemonConnectionLostRepro(unittest.TestCase):
             tab_id=self.tab_id,
             printer=self.printer,
         )
-        # Send a courtesy ``stop`` + ``close`` to the daemon before
-        # ripping the loop down — the client's UDS writer must be
-        # closed FIRST so the server-side ``_uds_handler`` exits its
-        # ``readline`` await with EOF and stops referencing the
-        # transport.
         self.addCleanup(self._close_client)
         self.client.start(timeout=5.0)
 
@@ -207,9 +183,6 @@ class TestDaemonConnectionLostRepro(unittest.TestCase):
         async def _shutdown() -> None:
             with self.server._printer._ws_lock:
                 writers = list(self.server._printer._uds_writers)
-                # Drop the references now — any subsequent broadcast
-                # will be a no-op rather than writing into a dying
-                # transport.
                 self.server._printer._uds_writers.clear()
             for writer in writers:
                 try:
@@ -277,10 +250,6 @@ class TestDaemonConnectionLostRepro(unittest.TestCase):
         """A >64 KiB broadcast must NOT tear down the CLI UDS reader."""
         self._wait_for_uds_writers()
 
-        # Inject a single oversize event (~120 KiB) targeted at the
-        # CLI's tab.  This mirrors the daemon's real ``system_prompt``
-        # broadcast which is too large for asyncio's default 64 KiB
-        # StreamReader buffer.
         big = "A" * 120_000
         self.server._printer.broadcast({
             "type": "text_delta",
@@ -288,7 +257,6 @@ class TestDaemonConnectionLostRepro(unittest.TestCase):
             "text": big,
         })
 
-        # Allow the asyncio reader plenty of time to consume the line.
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:
             if self.client._closed.is_set():

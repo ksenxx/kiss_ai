@@ -14,6 +14,7 @@ from __future__ import annotations
 import enum
 import functools
 import logging
+import shlex
 import sys
 import threading
 import time
@@ -31,10 +32,6 @@ from kiss.agents.sorcar.git_worktree import (
     repo_lock,
 )
 from kiss.agents.sorcar.persistence import _allocate_chat_id
-
-# ``_generate_commit_message`` is re-exported (and looked up from this
-# module's globals at call time) so tests can monkeypatch
-# ``worktree_sorcar_agent._generate_commit_message``.
 from kiss.agents.sorcar.sorcar_agent import (
     _generate_commit_message,
     auto_commit_changes,
@@ -52,8 +49,6 @@ class _WorktreeCleanupOutcome(enum.Enum):
     PRESERVED_COMMIT_FAILED = "preserved_commit_failed"
 
 
-# Result-specific middle lines for the manual-resolution command block
-# (see :func:`_merge_fix_steps`).
 _PRECOMMIT_FIX_LINES = (
     "    # fix pre-commit issues, then:\n"
     "    git commit --no-verify\n"
@@ -75,8 +70,9 @@ def _manual_merge_cmd(wt: GitWorktree) -> str:
         A shell command string for manual merge.
     """
     if wt.baseline_commit:
-        return f"git cherry-pick --no-commit {wt.baseline_commit}..{wt.branch}"
-    return f"git merge --squash {wt.branch}"
+        rev_range = shlex.quote(f"{wt.baseline_commit}..{wt.branch}")
+        return f"git cherry-pick --no-commit {rev_range}"
+    return f"git merge --squash {shlex.quote(wt.branch)}"
 
 
 def _merge_fix_steps(wt: GitWorktree, fix_lines: str) -> str:
@@ -103,11 +99,11 @@ def _merge_fix_steps(wt: GitWorktree, fix_lines: str) -> str:
         The indented multi-line command block (no trailing newline).
     """
     return (
-        f"    cd {wt.repo_root}\n"
-        f"    git checkout {wt.original_branch}\n"
+        f"    cd {shlex.quote(str(wt.repo_root))}\n"
+        f"    git checkout {shlex.quote(wt.original_branch or '')}\n"
         f"    {_manual_merge_cmd(wt)}\n"
         + fix_lines
-        + f"    git branch -D {wt.branch}"
+        + f"    git branch -D {shlex.quote(wt.branch)}"
     )
 
 
@@ -118,8 +114,11 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
     Worktrees are not associated with the agent's ``chat_id``: branch
     names use a unique time + random suffix, and there is no
     cross-process state restoration based on chat session.  Any
-    previous worktree owned by this agent instance is auto-merged
-    (or kept on conflict) before the new one is created.
+    previous worktree owned by this agent instance is retired before
+    the new one is created: auto-merged (or kept on conflict) when its
+    task finished, and merely committed to its own branch when the
+    task failed or was stopped.  See
+    :meth:`_retire_previous_worktree`.
 
     Attributes:
         _wt: The current/pending worktree state, or ``None`` when idle.
@@ -132,54 +131,12 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         self._wt: GitWorktree | None = None
         self._stash_pop_warning: str | None = None
         self._merge_conflict_warning: str | None = None
-        # Guards the two warning attributes above.  The git operations
-        # themselves are serialized under ``repo_lock``, but the
-        # warning attributes are written by ``_release_worktree``
-        # (invoked from ``run()`` / ``new_chat()`` / server teardown
-        # threads) and read-then-cleared by ``_flush_warnings`` on the
-        # task-runner thread.  Without the lock, two concurrent
-        # flushes could both pass the truthiness check and broadcast
-        # the same warning twice, and a warning set between a flush's
-        # check and its ``= None`` clear would be silently dropped.
         self._warning_lock: threading.Lock = threading.Lock()
-        # When False, ``_auto_commit_worktree`` is a no-op so the
-        # worktree's uncommitted changes are preserved for manual
-        # review (and ``_finalize_worktree`` returns False, keeping
-        # the worktree directory in place).  Mirrors the sorcar CLI
-        # ``--auto-commit`` / ``--no-auto-commit`` flag, which
-        # defaults to True.
         self.auto_commit_enabled: bool = True
-        # Frontend tab id, stamped by
-        # :meth:`_TaskRunnerMixin._run_task_inner` immediately after
-        # constructing the agent.  Consumed by
-        # :meth:`SorcarAgent._drain_pending_user_messages` to look up
-        # the owning :class:`_RunningAgentState` and pull queued
-        # follow-up prompts before each model call.
         self._tab_id: str = ""
-        # Wall-clock start of the current task in epoch milliseconds,
-        # stamped by the VS Code ``task_runner`` just before the run
-        # starts; read (via ``getattr`` with a 0 default) by
-        # ``server._live_task_start_ms`` for resume timelines.
         self._task_start_ms: int = 0
-        # "Lost slides" bug fix: when a worktree task ends in
-        # failure / user-Stop and the partial work is left for
-        # review (e.g. the merge view is opened, or the changes
-        # are binary-only and even the merge view cannot start),
-        # the VS Code ``task_runner`` sets this flag.  At tab
-        # teardown (:meth:`VSCodeServer._teardown_tab_resources`)
-        # the flag steers the worktree into
-        # :meth:`_preserve_pending_worktree_for_review` instead of
-        # :meth:`_release_worktree`, so the partial work is
-        # committed onto the ``kiss/wt-*`` branch but NOT silently
-        # squash-merged into the user's original branch — closing
-        # the chat tab can no longer overwrite the main branch
-        # with an incomplete, unverified deck.  Cleared whenever
-        # the user explicitly merges or discards — both via
-        # :meth:`_MergeFlowMixin._handle_worktree_action` and
-        # directly in :meth:`merge` / :meth:`discard` — or when
-        # the agent boots a fresh worktree via
-        # :meth:`_try_setup_worktree` / :meth:`new_chat`.
         self._pending_review: bool = False
+        self._last_preserve_outcome: _WorktreeCleanupOutcome | None = None
 
 
     @property
@@ -237,17 +194,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             return False
         if not self.auto_commit_enabled:
             return False
-        # Mint a single notification id for the whole
-        # ``auto_commit_changes`` lifecycle so both the "generating"
-        # and "committed" toasts share it (Bug 2 from gpt-5.5
-        # review).  Includes ``time.time_ns()`` so concurrent
-        # auto-commits (e.g. sub-agent sessions on the same tab)
-        # don't collide.  The id is a LOCAL bound via
-        # ``functools.partial`` — never instance state — so a
-        # concurrent ``_auto_commit_worktree`` on the same agent
-        # (e.g. teardown-preserve racing an explicit merge) can never
-        # overwrite this call's id and pair its "committed" toast
-        # with the other call's "generating" toast.
         commit_run_id = f"autocommit-{self._tab_id}-{time.time_ns()}"
         return auto_commit_changes(
             self._wt.wt_dir,
@@ -297,25 +243,26 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         printer = getattr(self, "printer", None)
         if printer is None or not hasattr(printer, "broadcast"):
             return
+        severity = "info"
         if stage == "generating":
             message = "Generating commit message"
         elif stage == "committed":
             message = f"Committed {subject}" if subject else "Committed"
+        elif stage == "failed":
+            # Terminal update for the sticky "generating" toast: the
+            # commit did not land (e.g. a pre-commit hook rejected it),
+            # so replace the toast instead of leaving it forever.
+            message = (
+                "Auto-commit failed (a pre-commit hook may have "
+                "rejected it); the worktree is preserved"
+            )
+            severity = "warning"
         else:
             return
-        # The ``"generating"`` toast must remain visible for the
-        # entire (potentially long) LLM-driven commit-message call —
-        # the webview's transient auto-dismiss timer (~5 s) would
-        # otherwise hide it mid-flight and mislead the user into
-        # thinking the commit had stalled.  Mark it ``sticky`` so
-        # ``scheduleNotificationDismiss`` short-circuits, and rely on
-        # the subsequent ``"committed"`` event (which reuses the same
-        # ``id`` but omits ``sticky``) to replace it with a regular
-        # transient toast that fades out normally.
         event: dict[str, object] = {
             "type": "notification",
             "id": notification_id,
-            "severity": "info",
+            "severity": severity,
             "message": message,
             "tabId": self._tab_id,
         }
@@ -365,17 +312,8 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         if wt.wt_dir.exists():
             self._auto_commit_worktree()
             if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
-                # ``auto_commit_enabled=False`` contract (see the
-                # attribute docstring in ``__init__``): never
-                # force-commit the user's reviewable changes under
-                # ``--no-auto-commit`` (``_auto_commit_worktree``
-                # no-ops when the flag is off, so EVERYTHING is still
-                # uncommitted here).
                 if not self.auto_commit_enabled:
                     return _WorktreeCleanupOutcome.PRESERVED_NO_AUTOCOMMIT, ""
-                # Single-shot retry: closes the residual race window
-                # between ``auto_commit_changes``'s second
-                # ``stage_all`` and its ``commit_staged`` call.
                 GitWorktreeOps.commit_all(
                     wt.wt_dir,
                     "kiss: auto-commit late-arriving changes",
@@ -390,18 +328,14 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
     def _finalize_worktree(self) -> bool:
         """Auto-commit, remove worktree, prune.
 
-        After the LLM-driven auto-commit, a single-shot retry runs
-        :meth:`GitWorktreeOps.commit_all` with a generic message to
-        catch the very narrow remaining race where a file appears
-        between :func:`~kiss.agents.sorcar.sorcar_agent.auto_commit_changes`'s
-        second ``stage_all`` and its ``commit_staged`` call (e.g.
-        ``PROGRESS.md`` being rewritten, ``.DS_Store`` materializing
-        after an ``open`` of the report, an editor swap file
-        appearing).  Only if that retry STILL leaves uncommitted
-        state do we preserve the worktree and log a warning — and
-        that warning now includes the raw ``git status --porcelain``
-        leftover so an operator can distinguish a real pre-commit
-        rejection from a race leftover from a corrupt index without
+        Delegates the auto-commit → late-arriver-retry →
+        preserve-or-remove sequence to
+        :meth:`_commit_and_clean_worktree` (see its docstring for the
+        race being closed).  Only if the retry STILL leaves
+        uncommitted state do we preserve the worktree and log a
+        warning that includes the raw ``git status --porcelain``
+        leftover, so an operator can distinguish a real pre-commit
+        rejection from a race leftover or a corrupt index without
         sshing in.
 
         Returns:
@@ -434,7 +368,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
     def _do_merge(
         self,
         wt: GitWorktree,
-    ) -> tuple[MergeResult, str]:
+    ) -> tuple[MergeResult, str, str]:
         """Stash, checkout, squash-merge, pop for a worktree branch.
 
         Serialized under ``repo_lock`` to prevent concurrent tabs from
@@ -444,9 +378,14 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             wt: The worktree state to merge.
 
         Returns:
-            ``(result, stash_warning)`` where *result* is the merge
-            outcome and *stash_warning* is a non-empty string if
-            stash-pop failed.  Checkout failures return
+            ``(result, stash_warning, cleanup_warning)`` where *result*
+            is the merge outcome, *stash_warning* is a non-empty string
+            if stash-pop failed, and *cleanup_warning* is a non-empty
+            string when the merge succeeded but the task branch could
+            not be deleted (the caller decides how to surface it — the
+            interactive ``merge()`` puts it in its immediate response,
+            ``_release_worktree`` defers it via ``_set_warnings``).
+            Checkout failures return
             ``MergeResult.CHECKOUT_FAILED`` (with a stash warning only
             when the pre-checkout stash could not be restored).  A
             dirty main tree whose ``git stash push`` itself failed
@@ -457,30 +396,21 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             ``git reset --hard`` would destroy their edits.
         """
         stash_warning = ""
+        cleanup_warning = ""
         if wt.original_branch is None:
-            return (MergeResult.CHECKOUT_FAILED, "")
+            return (MergeResult.CHECKOUT_FAILED, "", "")
         with repo_lock(wt.repo_root):
-            # Re-ensure the PROGRESS.md merge driver right before the
-            # merge so pending worktrees created by older agent
-            # versions (or repos whose local config was wiped) still
-            # auto-resolve scratch-file conflicts.
             try:
                 GitWorktreeOps.ensure_scratch_merge_driver(wt.repo_root)
             except Exception:  # pragma: no cover — filesystem permission error
                 logger.warning(
                     "Failed to install scratch merge driver", exc_info=True
                 )
-            # Stash BEFORE the checkout: dirty user edits on a
-            # different branch would otherwise make the checkout fail
-            # ("local changes would be overwritten") even though
-            # merge()'s contract promises they are stashed first.
             did_stash = GitWorktreeOps.stash_if_dirty(wt.repo_root)
             if not did_stash and GitWorktreeOps.has_uncommitted_changes(
                 wt.repo_root
             ):
-                # The tree is dirty but ``git stash push`` FAILED
-                # (returncode != 0) — abort before any mutation.
-                return (MergeResult.STASH_FAILED, "")
+                return (MergeResult.STASH_FAILED, "", "")
             current = GitWorktreeOps.current_branch(wt.repo_root)
             if current != wt.original_branch:
                 ok, err = GitWorktreeOps.checkout(
@@ -500,16 +430,8 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                             "be auto-restored. Run 'git stash pop' to "
                             "recover them."
                         )
-                    return (MergeResult.CHECKOUT_FAILED, stash_warning)
+                    return (MergeResult.CHECKOUT_FAILED, stash_warning, "")
 
-            # Thread the recorded task prompt/result into the merge
-            # commit message so the final commit on the user's
-            # original branch ALWAYS records them — even when the
-            # agent hand-committed its own work in the worktree (so
-            # the post-task auto-commit was a no-op and the branch
-            # HEAD message carries neither block).  See
-            # ``GitWorktreeOps._merge_commit_message`` for the dedup
-            # contract (production incident: commit dd563a7c).
             user_prompt = getattr(self, "_last_user_prompt", "") or None
             task_result = getattr(self, "_last_result_summary", "") or None
             if wt.baseline_commit:
@@ -548,10 +470,27 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                         "run 'git stash pop' to restore them."
                     )
 
-            if result == MergeResult.SUCCESS:
-                GitWorktreeOps.delete_branch(wt.repo_root, wt.branch)
+            if result == MergeResult.SUCCESS and not GitWorktreeOps.delete_branch(
+                wt.repo_root, wt.branch
+            ):
+                # The merge itself succeeded, but the task branch could
+                # not be deleted (delete_branch returns False when both
+                # normal and forced deletion fail).  Surface it instead
+                # of silently leaking the branch and its config.
+                logger.warning(
+                    "Merged branch '%s' could not be deleted; it still "
+                    "exists in %s",
+                    wt.branch,
+                    wt.repo_root,
+                )
+                cleanup_warning = (
+                    f"Merged branch '{wt.branch}' could not be deleted "
+                    "and still exists. Run "
+                    f"'git branch -D {shlex.quote(wt.branch)}' to "
+                    "remove it."
+                )
 
-        return (result, stash_warning)
+        return (result, stash_warning, cleanup_warning)
 
     def _release_worktree(self) -> str | None:
         """Auto-commit, auto-merge, and clean up a pending worktree.
@@ -582,10 +521,14 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         wt = self._wt
 
         if not self._finalize_worktree():
+            # The worktree directory is being left on disk with
+            # uncommitted work.  Persist the preserve-for-review
+            # marker so a future
+            # :meth:`GitWorktreeOps.reclaim_orphaned_worktrees` in a
+            # fresh process cannot silently publish this deliberately
+            # parked work.
+            GitWorktreeOps.save_preserve_marker(wt.repo_root, wt.branch)
             if not self.auto_commit_enabled:
-                # ``--no-auto-commit`` contract: the worktree has
-                # uncommitted changes and auto-commit is disabled by
-                # user choice — not a pre-commit hook failure.
                 self._set_warnings(merge=(
                     f"Auto-commit is disabled (--no-auto-commit) and "
                     f"the worktree for '{wt.branch}' has uncommitted "
@@ -613,13 +556,12 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             self._wt = None
             return None
 
-        result, stash_warning = self._do_merge(wt)
+        result, stash_warning, cleanup_warning = self._do_merge(wt)
         if stash_warning:
             self._set_warnings(stash=stash_warning)
+        if cleanup_warning:
+            self._set_warnings(merge=cleanup_warning)
 
-        # From here on the agent no longer tracks the worktree: on
-        # success it is fully merged; on failure the branch is kept in
-        # git for manual resolution (described by the warning below).
         self._wt = None
 
         if result == MergeResult.SUCCESS:
@@ -667,7 +609,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 wt.branch,
                 wt.original_branch,
             )
-        else:  # MergeResult.CONFLICT
+        else:
             self._set_warnings(merge=(
                 f"Auto-merge of '{wt.branch}' into "
                 f"'{wt.original_branch}' had conflicts. The "
@@ -701,7 +643,13 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
           the ``kiss/wt-*`` branch (recoverable via
           ``git checkout <branch>``).
         * Removes the worktree directory and runs ``git worktree
-          prune`` so disk state is clean.
+          prune`` so disk state is clean.  Those first two bullets are
+          the ``COMMITTED_AND_REMOVED`` outcome, and only there does
+          the branch carry the work.  When the commit does not happen
+          — ``--no-auto-commit``, or a hook refusing it — the
+          directory is deliberately **kept** instead, because it is
+          then the only copy of the work; both cases warn the user
+          where it is.
         * Does **not** call :meth:`_do_merge`: the partial work is
           NOT squash-merged into the user's original branch.  Closing
           the chat tab (or the WebSocket all-done close path) can
@@ -711,35 +659,48 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
 
         Idempotent / safe: no-op when no worktree is pending.
 
+        Records the cleanup outcome in ``_last_preserve_outcome`` so a
+        caller can tell whether the work really made it onto the
+        branch.  Reading the warning slot instead would be wrong: a
+        broadcast that failed puts an *older* warning back
+        (:meth:`_flush_warnings`), and that stale text says nothing
+        about this worktree.
+
         Returns:
             True when a pending worktree was preserved (or had no
             uncommitted work to preserve and was just cleaned up).
             False when there was nothing to do.
         """
+        self._last_preserve_outcome = None
         if self._wt is None:
             return False
         wt = self._wt
-        # Capture any uncommitted partial work as a real commit so it
-        # survives the worktree directory removal — the same
-        # auto-commit → late-arriver-retry → preserve-or-remove engine
-        # ``_finalize_worktree`` uses, for the same reasons
-        # (PROGRESS.md being rewritten, pre-commit hook rejections,
-        # the ``--no-auto-commit`` contract, etc.).
         outcome, leftover = self._commit_and_clean_worktree(wt)
+        self._last_preserve_outcome = outcome
+        if outcome in (
+            _WorktreeCleanupOutcome.PRESERVED_NO_AUTOCOMMIT,
+            _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED,
+        ):
+            # Persist the "preserve for manual review" decision so a
+            # future :meth:`GitWorktreeOps.reclaim_orphaned_worktrees`
+            # (running in a fresh process after the original agent
+            # died) does not silently publish this deliberately parked
+            # work.
+            GitWorktreeOps.save_preserve_marker(wt.repo_root, wt.branch)
         if outcome is _WorktreeCleanupOutcome.PRESERVED_NO_AUTOCOMMIT:
-            # Preserve the worktree directory intact — the user can
-            # review/commit manually in ``wt_dir``.
             logger.warning(
                 "Auto-commit disabled (--no-auto-commit); "
                 "preserving worktree '%s' with uncommitted "
                 "changes for manual review at %s",
                 wt.branch, wt.wt_dir,
             )
+            self._set_warnings(merge=(
+                f"Auto-commit is disabled, so the uncommitted changes of "
+                f"branch '{wt.branch}' were left in the worktree directory "
+                f"{wt.wt_dir}. Recover them there, or commit them to the "
+                f"branch yourself; nothing else will clean it up."
+            ))
         elif outcome is _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED:
-            # A pre-commit hook rejected the commit, or a real commit
-            # failure.  The worktree dir is preserved so no work is
-            # lost; the user can finish the commit manually with
-            # ``cd <wt_dir> && git commit``.
             logger.warning(
                 "Worktree '%s' has uncommitted changes after "
                 "preserve-for-review (likely a pre-commit hook "
@@ -747,21 +708,27 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 "git status --porcelain:\n%s",
                 wt.branch, wt.wt_dir, leftover,
             )
-        # Drop the in-memory worktree reference (the branch lives on
-        # in git and is recoverable manually) and clear the
-        # pending-review flag — future operations on this agent
-        # instance should not inherit the stopped-task state.
+            self._set_warnings(merge=(
+                f"Branch '{wt.branch}' still has uncommitted changes — the "
+                f"commit was refused, most likely by a pre-commit hook. Its "
+                f"worktree directory {wt.wt_dir} was kept so the work is not "
+                f"lost; recover it there. git status --porcelain:\n{leftover}"
+            ))
         self._wt = None
         self._pending_review = False
         return True
 
 
     def new_chat(self) -> None:
-        """Reset to a new chat session, auto-merging any pending worktree.
+        """Reset to a new chat session, retiring any pending worktree.
 
-        If a worktree task is pending from the previous session, it is
-        auto-committed with a detailed LLM message and squash-merged
-        into the original branch before the chat state is reset.
+        If a worktree task is pending from the previous session it is
+        retired through :meth:`_retire_previous_worktree`, so finished
+        work is auto-committed and squash-merged into the original
+        branch while work the user has not accepted yet — a failed or
+        stopped task, flagged by ``_pending_review`` — is only
+        committed to its own ``kiss/wt-*`` branch.  Opening a new chat
+        is not a decision about the old task's work.
 
         When the release fails (merge conflict, checkout failure,
         stash failure, --no-auto-commit with uncommitted changes),
@@ -774,14 +741,69 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         next ``run()``'s flush (``_flush_warnings`` no-ops without a
         ``broadcast``-capable printer).
         """
-        self._release_worktree()
+        self._retire_previous_worktree()
         self._flush_warnings(getattr(self, "printer", None))
-        # ``_release_worktree`` already cleared ``self._wt``; defensively
-        # clear the pending-review flag as well so a brand-new chat
-        # session never inherits stop-state from the previous task.
-        self._pending_review = False
         super().new_chat()
 
+
+    def _live_worktree_branches(self) -> set[str]:
+        """Return the set of ``kiss/wt-*`` branches owned by live agents.
+
+        Union of *self*'s current worktree branch (if any) and every
+        other tab's live agent branch as tracked by
+        :attr:`_RunningAgentState.running_agent_states`.  Used by
+        :meth:`_try_setup_worktree` to build the ``exclude_branches``
+        argument for
+        :meth:`GitWorktreeOps.reclaim_orphaned_worktrees` so a
+        concurrent tab's active worktree is never adopted, merged, or
+        removed by our reclaim pass.
+        """
+        branches: set[str] = set()
+        if self._wt is not None:
+            branches.add(self._wt.branch)
+        # Local import to avoid a circular import at module load time.
+        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+        for state in list(_RunningAgentState.running_agent_states.values()):
+            agent = getattr(state, "agent", None)
+            wt = getattr(agent, "_wt", None) if agent is not None else None
+            if wt is not None:
+                branches.add(wt.branch)
+        return branches
+
+    def _retire_previous_worktree(self) -> str | None:
+        """Clear the way for a new task's worktree, without publishing.
+
+        A new task must not inherit the previous task's branch, so the
+        previous worktree has to go somewhere.  *Where* depends on
+        whether the user has already been told its work is finished:
+
+        * ``_pending_review`` NOT set — the previous task ran to
+          completion, so :meth:`_release_worktree` squash-merges it
+          into the original branch as it always has.
+        * ``_pending_review`` set — the previous task failed or was
+          stopped, and
+          :meth:`_preserve_pending_worktree_for_review` states the
+          contract: incomplete, unverified work is committed to its
+          ``kiss/wt-*`` branch and never merged into the user's branch
+          behind their back.  Releasing here would break that contract
+          on a technicality — the user typed a *new* prompt, which is
+          not a decision about the *old* task's work.
+
+        Returns:
+            The branch the main worktree ends up on after a successful
+            release, or ``None`` when nothing was pending, the release
+            failed, or the work was preserved for review.  The preserve
+            path returns ``None`` because it never checks the original
+            branch out, so its caller must not treat it as the branch
+            the repository is now sitting on.
+        """
+        if self._pending_review:
+            self._preserve_pending_worktree_for_review()
+            self._pending_review = False
+            return None
+        released_branch = self._release_worktree()
+        self._pending_review = False
+        return released_branch
 
     def _try_setup_worktree(
         self,
@@ -803,34 +825,27 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         Returns:
             Worktree work directory path, or ``None`` on failure.
         """
-        # RACE-2 fix: hold ``repo_lock`` for the entire release +
-        # worktree-create + copy-dirty-state + baseline-commit
-        # sequence.  Previously only the inner ``_release_worktree``
-        # / ``current_branch`` call held the lock; concurrent
-        # ``_handle_worktree_action`` or non-wt task-start handlers
-        # could interleave with ``copy_dirty_state`` and
-        # ``baseline`` commit, snapshotting an inconsistent main
-        # tree.  The lock is re-entrant
-        # (:func:`git_worktree.repo_lock` is an ``RLock``) so the
-        # ``_do_merge`` invoked by ``_release_worktree`` re-acquires
-        # it cleanly on the same thread.
-        with repo_lock(repo):
-            # The released worktree may live in a DIFFERENT repo (the
-            # user changed ``work_dir`` between runs).  Its original
-            # branch name must then not leak into *repo*: a same-named
-            # branch there would silently become the merge target
-            # (wrong merge result) and ``merge()`` would switch the
-            # user's checkout to it.
-            prev_repo_root = self._wt.repo_root if self._wt is not None else None
-            released_branch = self._release_worktree()
-            # A brand-new task must never inherit the pending-review
-            # state of the previous worktree (e.g. a stopped task
-            # followed by an explicit new task on the same agent
-            # instance) — otherwise the next ``_teardown_tab_resources``
-            # would preserve THIS task's worktree branch even when the
-            # new task completes cleanly.
-            self._pending_review = False
+        # Lock-ordering discipline (ABBA deadlock avoidance):
+        # _release_worktree -> _do_merge takes the PREVIOUS repo's lock.
+        # For a CROSS-repository switch, acquiring the destination lock
+        # first would nest the two locks in ABBA order (two agents
+        # switching A->B and B->A would deadlock forever), so the release
+        # runs BEFORE the destination lock is taken.  For a SAME-repo
+        # switch the re-entrant per-repo lock is held continuously
+        # across release and creation, keeping the released branch and
+        # the new worktree's HEAD atomic against concurrent tabs.
+        prev_repo_root = self._wt.repo_root if self._wt is not None else None
+        cross_repo = (
+            prev_repo_root is not None
+            and prev_repo_root.resolve() != repo.resolve()
+        )
+        released_branch: str | None = None
+        if cross_repo:
+            released_branch = self._retire_previous_worktree()
 
+        with repo_lock(repo):
+            if not cross_repo:
+                released_branch = self._retire_previous_worktree()
             original_branch: str | None
             if (
                 released_branch is not None
@@ -856,6 +871,18 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             try:
                 GitWorktreeOps.ensure_excluded(repo)
                 GitWorktreeOps.ensure_scratch_merge_driver(repo)
+                # Reclaim before sweep: reclaim may merge and delete
+                # orphan branches, and sweep purges leftover config
+                # sections whose branches were just removed.  Exclude
+                # every branch owned by a *live* agent in this
+                # process — self and every other tab — so a running
+                # sibling task's worktree is never adopted or
+                # destroyed by our reclaim pass.
+                GitWorktreeOps.reclaim_orphaned_worktrees(
+                    repo,
+                    exclude_branches=self._live_worktree_branches(),
+                )
+                GitWorktreeOps.sweep_orphaned_state(repo)
             except Exception:  # pragma: no cover — filesystem permission error
                 logger.warning("Failed to update git exclude", exc_info=True)
 
@@ -882,11 +909,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             try:
                 dirty_copied = GitWorktreeOps.copy_dirty_state(repo, wt_dir)
             except OSError:
-                # E.g. a dirty file the process cannot read (mode 000)
-                # makes shutil.copy2 raise PermissionError.  Honor
-                # run()'s fallback contract: clean up the half-created
-                # worktree/branch and run the task directly instead of
-                # crashing the whole task.
                 logger.warning(
                     "Failed to copy dirty state into worktree; "
                     "falling back to direct execution",
@@ -911,15 +933,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                             baseline_commit,
                         )
                 elif GitWorktreeOps.has_uncommitted_changes(wt_dir):
-                    # The baseline commit FAILED (e.g. a
-                    # prepare-commit-msg hook — which --no-verify does
-                    # NOT skip — or a stale index.lock): the user's
-                    # dirty state would sit uncommitted in the
-                    # worktree and later be auto-committed as (and
-                    # attributed to) agent work, then squash-merged
-                    # back — duplicating the user's edits.  Honor
-                    # run()'s fallback contract instead: clean up and
-                    # run the task directly.
                     logger.warning(
                         "Baseline commit failed in new worktree; "
                         "falling back to direct execution"
@@ -993,9 +1006,25 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             merge_warning = self._merge_conflict_warning
             self._merge_conflict_warning = None
         if stash_warning:
-            printer.broadcast({"type": "warning", "message": stash_warning})
+            try:
+                printer.broadcast({"type": "warning", "message": stash_warning})
+            except Exception:
+                # Restore so a broken printer never permanently loses the
+                # (already-cleared) warning — but only when the slot is
+                # still empty, so a warning set concurrently while this
+                # broadcast was failing is never overwritten by the old one.
+                logger.debug("stash warning broadcast failed", exc_info=True)
+                with self._warning_lock:
+                    if self._stash_pop_warning is None:
+                        self._stash_pop_warning = stash_warning
         if merge_warning:
-            printer.broadcast({"type": "warning", "message": merge_warning})
+            try:
+                printer.broadcast({"type": "warning", "message": merge_warning})
+            except Exception:
+                logger.debug("merge warning broadcast failed", exc_info=True)
+                with self._warning_lock:
+                    if self._merge_conflict_warning is None:
+                        self._merge_conflict_warning = merge_warning
 
 
     def run(  # type: ignore[override]
@@ -1008,9 +1037,12 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         Creates a new worktree and branch, redirects ``work_dir`` into
         the worktree, and delegates to ``ChatSorcarAgent.run()``.
         Each call starts a fresh worktree; any previously pending
-        branch from an earlier run is auto-committed and squash-merged
-        into its original branch first (kept in git for manual
-        resolution only when that auto-merge fails or conflicts).
+        branch from an earlier run is retired first by
+        :meth:`_retire_previous_worktree` — auto-committed and
+        squash-merged into its original branch (kept in git for manual
+        resolution when that auto-merge fails or conflicts), or, when
+        the earlier run failed or was stopped, committed to its own
+        branch without ever touching the original one.
 
         Falls back to direct execution (no worktree) when:
         - ``use_worktree`` kwarg is explicitly ``False``
@@ -1030,10 +1062,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
-        # Establish ``chat_id`` BEFORE registering so the entry is
-        # keyed by the canonical session identifier.  Identical to
-        # the standalone :meth:`ChatSorcarAgent.run` minting (both
-        # use a fresh UUID hex via :func:`_allocate_chat_id`).
         if self._chat_id == "":
             self._chat_id = _allocate_chat_id()
         registered_here = self._register_running_state()
@@ -1052,12 +1080,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             printer = kwargs.get("printer")
             self._flush_warnings(printer)
             if wt_work_dir is None:
-                # Fall back to direct execution (no worktree).  Use the
-                # SAME exception contract as the worktree path below:
-                # non-``KISSError`` exceptions become a YAML
-                # ``success: false`` result rather than propagating, so
-                # callers see one failure surface regardless of repo
-                # state (git repo vs not, detached HEAD, setup failure).
                 try:
                     return super().run(
                         prompt_template=prompt_template, **kwargs
@@ -1122,11 +1144,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             raise RuntimeError("No pending worktree task to merge")
 
         wt = self._wt
-        # The user has explicitly chosen to merge, so the stopped-task
-        # ``_pending_review`` state no longer applies (mirrors
-        # ``_MergeFlowMixin._handle_worktree_action``, which clears the
-        # flag before dispatching; direct API callers must get the
-        # same contract).
         self._pending_review = False
 
         if wt.original_branch is None:
@@ -1138,25 +1155,15 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 f"    git checkout <branch> && {merge_cmd}"
             )
 
-        # Always finalize, even when the worktree directory is already
-        # gone: ``_finalize_worktree`` runs ``git worktree prune``,
-        # without which a stale registration (deleted dir, bookkeeping
-        # kept) makes ``git branch -d/-D`` refuse to delete the task
-        # branch after a successful merge.
         if not self._finalize_worktree():
             if not self.auto_commit_enabled:
-                # ``--no-auto-commit`` contract: ``_finalize_worktree``
-                # deliberately returned False because the worktree has
-                # uncommitted changes and auto-commit is disabled —
-                # do NOT blame a pre-commit hook for a mode the user
-                # explicitly chose.
                 return (
                     f"Cannot merge: auto-commit is disabled "
                     f"(--no-auto-commit) and the worktree for "
                     f"'{wt.branch}' has uncommitted changes. "
                     f"The worktree is preserved at: {wt.wt_dir}\n\n"
                     "Review and commit the changes manually:\n"
-                    f"    cd {wt.wt_dir}\n"
+                    f"    cd {shlex.quote(str(wt.wt_dir))}\n"
                     "    git add -A && git commit -m 'agent work'\n\n"
                     "Then retry: agent.merge()"
                 )
@@ -1165,15 +1172,20 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 "(a pre-commit hook may have rejected the commit). "
                 f"The worktree is preserved at: {wt.wt_dir}\n\n"
                 "Fix the issue, then commit manually:\n"
-                f"    cd {wt.wt_dir}\n"
+                f"    cd {shlex.quote(str(wt.wt_dir))}\n"
                 "    git add -A && git commit -m 'agent work'\n\n"
                 "Then retry: agent.merge()"
             )
 
-        result, stash_warning = self._do_merge(wt)
+        result, stash_warning, cleanup_warning = self._do_merge(wt)
         stash_suffix = ""
         if stash_warning:
             stash_suffix = "\n\n⚠️  " + stash_warning
+        if cleanup_warning:
+            # Branch cleanup failed after a successful merge: put it in
+            # the immediate response so the caller/UI never reports an
+            # unqualified success while the task branch leaks.
+            stash_suffix += "\n\n⚠️  " + cleanup_warning
 
         if result == MergeResult.CHECKOUT_FAILED:
             return (
@@ -1240,8 +1252,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             raise RuntimeError("No pending worktree task to discard")
 
         wt = self._wt
-        # Explicit discard clears the stopped-task review state, same
-        # contract as ``merge()`` above.
         self._pending_review = False
         checkout_warning = ""
         delete_warning = ""
@@ -1260,7 +1270,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                     f"\n⚠️  Branch '{wt.branch}' could not be deleted "
                     "and still exists.  Switch to a different branch "
                     f"(e.g. 'git checkout <other>') and run "
-                    f"'git branch -D {wt.branch}' to remove it."
+                    f"'git branch -D {shlex.quote(wt.branch)}' to remove it."
                 )
         self._wt = None
         if delete_warning:
@@ -1268,14 +1278,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         return f"Discarded branch '{wt.branch}'.{checkout_warning}"
 
 
-# Flags that only make sense in interactive (daemon-client) mode:
-# they configure features the bare ``SorcarAgent`` used by the
-# non-interactive path does not implement.  Listed as the literal CLI
-# tokens (matched against ``sys.argv`` so the user's exact spelling
-# is reflected in the error).  ``main()`` consults this set after
-# parsing to fail fast when one of these flags is combined with
-# ``-t`` / ``-f``.  Argparse prefix abbreviations cannot evade this
-# table because :func:`_build_arg_parser` sets ``allow_abbrev=False``.
 _INTERACTIVE_ONLY_FLAGS: frozenset[str] = frozenset({
     "--worktree", "--no-worktree",
     "--auto-commit", "--no-auto-commit",
@@ -1304,7 +1306,6 @@ def _reject_interactive_only_flags(argv: list[str]) -> None:
     Args:
         argv: The process argument list (typically ``sys.argv``).
     """
-    # dict.fromkeys = order-preserving dedup of the offending flags.
     bad = list(dict.fromkeys(
         token for token in argv[1:] if token in _INTERACTIVE_ONLY_FLAGS
     ))
@@ -1319,9 +1320,3 @@ def _reject_interactive_only_flags(argv: list[str]) -> None:
     )
     print(msg, file=sys.stderr)
     sys.exit(2)
-
-
-# NOTE: the ``sorcar`` console-script entry point (``main``) lives in
-# :mod:`kiss.ui.cli.sorcar_cli`: it dispatches into the UI layer
-# (cli_client / cli_steering / mcp_cli), which sorcar code must not
-# import (sorcar depends only on itself and ``kiss.core``).

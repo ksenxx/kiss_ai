@@ -141,7 +141,6 @@ def test_get_files_per_tab_caches_are_independent(
     a, b = two_workspaces
     server, events = _make_server(a)
 
-    # Tab A → workDir=a
     server._handle_command(
         {"type": "getFiles", "prefix": "", "workDir": a},
     )
@@ -150,7 +149,6 @@ def test_get_files_per_tab_caches_are_independent(
     assert "alpha.txt" in a_files
     assert "beta.txt" not in a_files
 
-    # Tab B → workDir=b (must NOT reuse tab A's cache)
     events.clear()
     server._handle_command(
         {"type": "getFiles", "prefix": "", "workDir": b},
@@ -160,7 +158,6 @@ def test_get_files_per_tab_caches_are_independent(
     assert "beta.txt" in b_files
     assert "alpha.txt" not in b_files
 
-    # Both caches are populated independently.
     with server._state_lock:
         assert a in server._file_cache
         assert b in server._file_cache
@@ -169,9 +166,6 @@ def test_get_files_per_tab_caches_are_independent(
         assert "alpha.txt" not in server._file_cache[b]
         assert "beta.txt" not in server._file_cache[a]
 
-    # Cache-hit path: a second query against each folder must return
-    # the same files synchronously (no second loading placeholder is
-    # required for correctness, but the populated event must match).
     events.clear()
     server._handle_command(
         {"type": "getFiles", "prefix": "", "workDir": a},
@@ -224,6 +218,5 @@ def test_get_files_empty_string_workdir_falls_back_to_daemon_work_dir(
     assert "beta.txt" not in files, (
         f"empty workDir must NOT scan folder B; got {files}"
     )
-    # And folder B's cache must remain untouched (no spurious key).
     with server._state_lock:
         assert b not in server._file_cache

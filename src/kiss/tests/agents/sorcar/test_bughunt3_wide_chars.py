@@ -39,8 +39,6 @@ def test_cjk_body_fits_panel_inner_width() -> None:
     cols = 40
     rows, is_placeholder = panel_body("汉" * 40, cols)
     assert not is_placeholder
-    # Single-line buffer pads to the 3-row minimum; only the content
-    # row (index 0) carries the wide-char text.
     assert len(rows) == 3
     body = rows[0]
     assert _width(body) == cols - 4, (
@@ -77,7 +75,6 @@ def test_clip_buf_tail_respects_display_width() -> None:
 
 def test_cursor_col_counts_wide_chars_as_two_columns() -> None:
     """The caret must land after the rendered text, not after len() chars."""
-    # body row: "│ " (cols 1-2) + "› " (2 cols) + "汉汉" (4 cols) → col 9.
     assert body_cursor_col("汉汉", 80) == (0, 9)
 
 
@@ -94,7 +91,6 @@ def test_ascii_behavior_unchanged() -> None:
     """Sanity: ASCII buffers keep the historical geometry."""
     cols = 80
     rows, _ = panel_body("hello", cols)
-    # 3-row minimum: 1 content row + 2 padding rows.
     assert len(rows) == 3
     assert rows[0] == ("› hello").ljust(cols - 4)
     assert body_cursor_col("hello", cols) == (0, 3 + 2 + 5)

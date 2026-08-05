@@ -36,20 +36,12 @@ class _StaleSubscriptionBase(unittest.TestCase):
     def setUp(self) -> None:
         self.printer = MemoryPrinter()
         self.server = VSCodeServer(self.printer)
-        # Persist a task row for chat A and register a live-looking
-        # owner state for it (mirrors the state an in-flight
-        # ``_run_task_inner`` maintains: ``is_task_active=True`` and
-        # ``task_history_id`` set, exactly what
-        # ``_reattach_running_chat`` matches on).
         self.task_a, self.chat_a = _add_task("live task on chat A")
         self.src_tab = "srv2-src-tab"
         src = self.server._get_tab(self.src_tab)
         src.chat_id = self.chat_a
         src.task_history_id = self.task_a
         src.is_task_active = True
-        # The launcher tab is subscribed to its own task's stream
-        # (done by ChatSorcarAgent.run via ``_subscribe_tab_id`` in
-        # production).
         self.printer.subscribe_tab(self.task_a, self.src_tab)
 
     def tearDown(self) -> None:
@@ -84,13 +76,10 @@ class TestNewChatDropsOldStream(_StaleSubscriptionBase):
     def test_new_chat_unsubscribes_tab_from_old_task(self) -> None:
         viewer = "srv2-viewer-newchat"
         self._resume(self.chat_a, self.task_a, viewer)
-        # Sanity: the viewer is now receiving task A's live events.
         self.printer.emitted.clear()
         self._emit_live_event_for_task_a()
         assert self._copies_for(viewer), "viewer never subscribed to task A"
 
-        # The user clicks "New Chat" in that tab: the webview shows the
-        # welcome screen, so task A's events must no longer reach it.
         self.server._handle_command({"type": "newChat", "tabId": viewer})
         self.printer.emitted.clear()
         self._emit_live_event_for_task_a()
@@ -111,8 +100,6 @@ class TestReplayOtherChatDropsOldStream(_StaleSubscriptionBase):
         self._emit_live_event_for_task_a()
         assert self._copies_for(viewer), "viewer never subscribed to task A"
 
-        # The user loads a COMPLETED task of an unrelated chat B into
-        # the same tab.
         time.sleep(0.02)
         task_b, chat_b = _add_task("completed task on chat B")
         self._resume(chat_b, task_b, viewer)

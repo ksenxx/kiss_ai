@@ -74,18 +74,11 @@ def ends_with_line_continuation(buf: str) -> tuple[bool, int]:
     """
     if not buf:
         return (False, 0)
-    # Strip trailing ASCII spaces / tabs (but never newlines — an
-    # embedded ``\n`` inside the buffer must not be silently
-    # collapsed).  This is what lets ``"foo \\   " + Enter`` still
-    # count as a continuation.
     end = len(buf)
     while end > 0 and buf[end - 1] in " \t":
         end -= 1
     if end == 0 or buf[end - 1] != "\\":
         return (False, len(buf))
-    # Count how many consecutive backslashes end the buffer (before
-    # the stripped whitespace tail).  An odd count is a continuation;
-    # an even count is a fully-escaped literal ``\\`` sequence.
     count = 0
     j = end
     while j > 0 and buf[j - 1] == "\\":
@@ -93,11 +86,6 @@ def ends_with_line_continuation(buf: str) -> tuple[bool, int]:
         j -= 1
     if count % 2 == 0:
         return (False, len(buf))
-    # Continuation: consume the trailing whitespace and the outermost
-    # backslash.  Any preceding escaped backslashes (``count - 1``
-    # of them, an even number) are retained in the buffer so the
-    # user can still literally include ``\\`` characters at the end
-    # of a continued line.
     return (True, end - 1)
 
 

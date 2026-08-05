@@ -76,12 +76,7 @@ from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.model_info import MODEL_INFO, ModelInfo
 
 _MODEL = "claude-stall-under-test"
-#: Tight stall timeout for the tests (seconds).
 _STALL_TIMEOUT = 1.5
-#: Hard deadline for calls that hung (or took 600s+) on the pre-fix code.
-#: Far below the SDK-default 600s read timeout, yet generous enough for
-#: slow CI machines (the worst fixed path is the no-headers one:
-#: 2 SDK attempts x stall + backoff).
 _FAST_FAIL_BUDGET = 30.0
 
 _OPENAI_FINISH_TOOL = {
@@ -233,24 +228,19 @@ class _StallHandler(BaseHTTPRequestHandler):
             self._write_chunks(_finish_tool_stream(model_name))
             return
         if _STATE.mode == "no_headers":
-            # Request accepted (and fully read), response never starts.
             _STATE.stop.wait(timeout=120.0)
             return
         self._send_sse_headers()
         if _STATE.mode == "silent":
-            # Headers sent, then not a single byte: the production hang.
             _STATE.stop.wait(timeout=120.0)
             return
         if _STATE.mode == "think_then_ping":
             self._write_chunks(_thinking_block_prefix(model_name))
-        # ping_only / think_then_ping: keep-alive pings keep BYTES flowing
-        # (defeating a pure read-timeout) while the SDK filters the events
-        # out, so the agent still sees nothing.
         while not _STATE.stop.wait(timeout=0.2):
             try:
                 self._write_chunks([_sse("ping", {"type": "ping"})])
             except OSError:
-                return  # client aborted (watchdog closed the response)
+                return
 
     def _send_sse_headers(self) -> None:
         self.send_response(200)
@@ -423,7 +413,6 @@ class TestAdapterAbortsStalledStream:
             )
         )
         _assert_stall_timeout_error(outcome)
-        # max_retries=1 → exactly 2 attempts, not the SDK-default 3.
         assert _STATE.request_count == 2
 
     def test_ping_only_stream_times_out_fast(

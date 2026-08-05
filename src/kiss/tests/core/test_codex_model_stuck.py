@@ -39,12 +39,11 @@ class TestCodexModelStuckBug:
     def test_codex_model_returns_quickly_when_cli_missing(self) -> None:
         """When the codex CLI is not installed, the agent must fail promptly
         instead of retrying 10000 times in the RelentlessAgent loop."""
-        from kiss.core.relentless_agent import RelentlessAgent
+        from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 
         saved_path = os.environ.get("PATH", "")
         saved_candidates = codex_module._UI_CANDIDATE_PATHS
         try:
-            # Ensure codex CLI is not found
             os.environ["PATH"] = ""
             codex_module._UI_CANDIDATE_PATHS = ()
 
@@ -68,8 +67,6 @@ class TestCodexModelStuckBug:
             parsed = yaml.safe_load(result)
             assert isinstance(parsed, dict)
             assert parsed["success"] is False
-            # The key assertion: is_continue must be False (not True),
-            # meaning the agent stopped rather than spinning forever.
             assert parsed.get("is_continue", False) is False, (
                 "Agent should NOT set is_continue=True when the model fails "
                 "on the very first call — that causes infinite retries."
@@ -90,9 +87,6 @@ class TestCodexModelStuckBug:
         tmpdir = tempfile.mkdtemp()
         try:
             codex_module._UI_CANDIDATE_PATHS = ()
-            # Force codex/gpt-5.5 into the available set by faking the CLI.
-            # Keep /usr/bin on PATH so git (needed by the task runner's
-            # pre-snapshot step) remains available.
             fake_codex = Path(tmpdir) / "bin" / "codex"
             fake_codex.parent.mkdir(parents=True, exist_ok=True)
             fake_codex.write_text("#!/bin/sh\nexit 1\n")
@@ -131,8 +125,6 @@ class TestCodexModelStuckBug:
             tab = server._get_tab(tab_id)
             t = tab.task_thread
             assert t is not None
-            # Must complete within 30 seconds — before the fix this would
-            # spin for thousands of iterations and effectively hang.
             t.join(timeout=30)
             assert not t.is_alive(), (
                 "Task thread is still alive after 30s — the agent is stuck "
@@ -149,8 +141,6 @@ class TestCodexModelStuckBug:
                 + str([e.get("type") for e in events])
             )
 
-            # The fix for the "no response in webview" bug:
-            # A result event must be broadcast so the user sees the error.
             with lock:
                 result_events = [
                     e for e in events if e.get("type") == "result"

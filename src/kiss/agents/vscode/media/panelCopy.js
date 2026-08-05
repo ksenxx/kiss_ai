@@ -3,27 +3,9 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 /* global module */
-/**
- * Per-panel "Copy to clipboard" helper for the KISS Sorcar chat webview.
- *
- * Exposes ``getRawText(panel)`` and ``addCopyButton(panel)`` on
- * ``window.PanelCopy`` for the browser-loaded ``main.js`` and also as a
- * CommonJS module so a Node + jsdom test can exercise the same code
- * paths without a VS Code host.
- *
- * The Copy button reads the panel's ``data-raw-text`` attribute when
- * present so panels that were rendered via ``marked.parse()`` (Result,
- * Prompt, System Prompt, streamed Thought text, ...) copy the agent's
- * original markdown source instead of the rendered HTML's
- * markdown-stripped ``textContent``.  Panels without a
- * ``data-raw-text`` override (Thought container, tool_call args, bash
- * output, ...) fall back to a DOM walk that still skips the button /
- * chevron / collapse-preview chrome.
- */
 'use strict';
 
 (function (root) {
-  // Outline + check SVG icons shown on the Copy button.
   const PANEL_COPY_SVG =
     '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" ' +
     'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
@@ -36,8 +18,6 @@
     'stroke-linejoin="round" aria-hidden="true">' +
     '<polyline points="20 6 9 17 4 12"/></svg>';
 
-  // CSS classes for purely visual sub-nodes that must not leak into the
-  // clipboard payload.
   const SKIP_CLASSES = [
     'panel-copy-btn',
     'collapse-chv',
@@ -54,17 +34,6 @@
     return false;
   }
 
-  /**
-   * Collect the raw (un-rendered) text payload of ``node`` for the Copy
-   * button.
-   *
-   * Walks ``node``'s subtree, but when an element carries a
-   * ``data-raw-text`` attribute returns that attribute's value verbatim
-   * instead of recursing into its formatted children.  Element children
-   * are joined with ``\n`` so panels that stack several sub-blocks
-   * (Thought panel: think + txt + tool_call + ...) round-trip without
-   * losing block separation.
-   */
   function getRawText(node) {
     if (!node) return '';
     if (node.nodeType === 3) return node.textContent || '';
@@ -94,13 +63,6 @@
     return out;
   }
 
-  /**
-   * Normalise the raw text returned by ``getRawText`` so the clipboard
-   * receives clean markdown: collapse trailing spaces before newlines,
-   * cap runs of blank lines at one, and trim leading / trailing
-   * newlines.  Indentation, code-block whitespace, and embedded single
-   * spaces are preserved.
-   */
   function normalise(text) {
     return String(text == null ? '' : text)
       .replace(/[ \t]+\n/g, '\n')
@@ -108,23 +70,6 @@
       .replace(/^\n+|\n+$/g, '');
   }
 
-  /**
-   * Attach a Copy-to-clipboard button to a chat panel.
-   *
-   * The button sits absolutely in the top-right corner of ``panelEl``
-   * (the helper adds the ``copyable`` class which sets
-   * ``position: relative`` on the panel) and copies the panel's raw
-   * text via ``navigator.clipboard.writeText`` (or a textarea +
-   * ``document.execCommand('copy')`` fallback).  Clicking the button
-   * never collapses the panel: the handler stops propagation before
-   * the collapsible-header listener runs.  After a successful copy the
-   * icon swaps to a check mark for 1.5 s as feedback.
-   *
-   * Idempotent: calling twice on the same panel is a no-op.
-   *
-   * @param {HTMLElement} panelEl - panel container to attach the
-   *   button to.
-   */
   function addCopyButton(panelEl) {
     if (!panelEl || panelEl.querySelector(':scope > .panel-copy-btn')) return;
     panelEl.classList.add('copyable');
@@ -171,26 +116,10 @@
   }
 
   // panelts-coverage:start
-  /**
-   * Format an event timestamp (ms since epoch) as a human-readable
-   * label in the user's locale.
-   *
-   * Every label carries the FULL date and a seconds-precision time
-   * of day ("Mar 5, 2021 2:07:33 PM") so an event's exact moment is
-   * always visible, even for same-day events.  Invalid / missing /
-   * non-positive inputs format as the empty string so callers can
-   * skip the badge.
-   *
-   * @param {number} ts - event time in ms since the epoch.
-   * @returns {string} the "date time" label, or '' when *ts* is
-   *   unusable.
-   */
   function formatEventTs(ts) {
     const n = Number(ts);
     if (!isFinite(n) || n <= 0) return '';
     const d = new Date(n);
-    // A finite ms value can still overflow the ECMAScript Date range
-    // (±8.64e15); such a Date formats as "Invalid Date" — skip it.
     if (!isFinite(d.getTime())) return '';
     const day = d.toLocaleDateString([], {
       month: 'short',
@@ -205,29 +134,8 @@
     return day + ' ' + time;
   }
 
-  /**
-   * Return (creating on demand) the panel's bottom footer bar — the
-   * ``div.panel-time`` element that renders as the LAST child of every
-   * event panel.  The bar is shared by the event-timestamp badge
-   * (``span.panel-ts``, left side) and the live "time spent" label
-   * (``span.panel-elapsed``, right side, written by ``main.js``).
-   *
-   * The first call also attaches a one-time ``MutationObserver`` that
-   * re-anchors the bar as the panel's last child whenever later
-   * content (streamed thoughts, a tool_result output panel, ...) is
-   * appended after it, so the bar always renders at the bottom — even
-   * for replayed panels that never enter the live 1-second ticker.
-   *
-   * ``panel-time`` is in ``SKIP_CLASSES`` so nothing in the bar leaks
-   * into the clipboard payload.
-   *
-   * @param {HTMLElement} panelEl - panel container to stamp.
-   * @returns {HTMLElement} the panel's ``div.panel-time`` footer bar.
-   */
   function ensurePanelFoot(panelEl) {
     const doc = panelEl.ownerDocument || document;
-    // Find an existing direct-child bar (scan from the end; avoid
-    // matching bars inside nested panels).
     let bar = null;
     for (let i = panelEl.children.length - 1; i >= 0; i--) {
       const c = panelEl.children[i];
@@ -257,27 +165,6 @@
     return bar;
   }
 
-  /**
-   * Attach a date + seconds event-timestamp badge to a chat panel's bottom
-   * footer bar.
-   *
-   * The badge (``span.panel-ts``) is inserted as the FIRST child of
-   * the panel's ``div.panel-time`` footer bar (see
-   * ``ensurePanelFoot``) so it renders bottom-LEFT — in the same bar
-   * as, and to the left of, the right-aligned "time spent" label
-   * (``span.panel-elapsed``).  Its full ``toLocaleString`` form is
-   * exposed as a hover tooltip.  ``panel-time`` is in
-   * ``SKIP_CLASSES`` so the badge never leaks into the clipboard
-   * payload.
-   *
-   * Idempotent: a panel keeps its FIRST badge; later calls return it
-   * unchanged.  Returns ``null`` (and adds nothing) when *panelEl* is
-   * falsy or *ts* does not format to a label.
-   *
-   * @param {HTMLElement} panelEl - panel container to stamp.
-   * @param {number} ts - event time in ms since the epoch.
-   * @returns {HTMLElement|null} the badge element, or null.
-   */
   function addPanelTimestamp(panelEl, ts) {
     if (!panelEl) return null;
     const label = formatEventTs(ts);

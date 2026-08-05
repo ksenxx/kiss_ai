@@ -51,8 +51,6 @@ from kiss.tests.conftest import (
     requires_openai_api_key,
 )
 
-# A conversation exactly as GeminiModel stores it: OpenAI-like messages, but
-# with tool-call arguments as a dict (not a JSON string).
 _GEMINI_STYLE_CONVERSATION: list[dict[str, Any]] = [
     {"role": "user", "content": "Use the add tool to compute 2 + 3, then report the sum."},
     {
@@ -69,7 +67,6 @@ _GEMINI_STYLE_CONVERSATION: list[dict[str, Any]] = [
     {"role": "tool", "tool_call_id": "call_g1", "content": "5"},
 ]
 
-# A conversation exactly as OpenAICompatibleModel stores it.
 _OPENAI_STYLE_CONVERSATION: list[dict[str, Any]] = [
     {"role": "system", "content": "You are a concise assistant."},
     {"role": "user", "content": "Use the add tool to compute 2 + 3, then report the sum."},
@@ -87,7 +84,6 @@ _OPENAI_STYLE_CONVERSATION: list[dict[str, Any]] = [
     {"role": "tool", "tool_call_id": "call_01", "content": "5"},
 ]
 
-# A conversation exactly as AnthropicModel stores it.
 _ANTHROPIC_STYLE_CONVERSATION: list[dict[str, Any]] = [
     {"role": "user", "content": "Use the add tool to compute 2 + 3, then report the sum."},
     {
@@ -164,7 +160,7 @@ class TestOpenAIToGemini:
         m = _make_gemini()
         m.conversation = copy.deepcopy(_OPENAI_STYLE_CONVERSATION)
         contents = m._convert_conversation_to_gemini_contents()
-        assert len(contents) == 3  # system skipped
+        assert len(contents) == 3
         assistant = contents[1]
         assert assistant.role == "model"
         fcs = _function_calls(assistant)
@@ -243,7 +239,7 @@ class TestAnthropicToGemini:
         assistant = contents[1]
         assert assistant.role == "model"
         texts = [p.text for p in _parts(assistant) if p.text]
-        assert texts == ["Adding."]  # thinking text is NOT replayed
+        assert texts == ["Adding."]
         fcs = _function_calls(assistant)
         assert len(fcs) == 1
         assert fcs[0].name == "add"
@@ -257,7 +253,7 @@ class TestAnthropicToGemini:
         assert tool_turn.role == "user"
         fr = _parts(tool_turn)[0].function_response
         assert fr is not None
-        assert fr.name == "add"  # looked up via the tool_use id map
+        assert fr.name == "add"
         assert fr.response == {"result": 5}
 
     def test_nested_tool_result_content_text_is_extracted(self) -> None:
@@ -423,7 +419,7 @@ class TestCliPromptFlattening:
         text = flatten_content_to_text(_ANTHROPIC_STYLE_CONVERSATION[1]["content"])
         assert "Adding." in text
         assert '[Tool Call] add({"a": 2, "b": 3})' in text
-        assert "thinking" not in text  # hidden provider state dropped
+        assert "thinking" not in text
 
     def test_flatten_tool_result_and_media_blocks(self) -> None:
         text = flatten_content_to_text(
@@ -436,7 +432,7 @@ class TestCliPromptFlattening:
             ]
         )
         assert "5" in text
-        assert "aGVsbG8=" not in text  # no base64 dumps in the prompt
+        assert "aGVsbG8=" not in text
         assert "[image attachment omitted]" in text
 
     def test_claude_code_prompt_has_no_block_reprs(self) -> None:
@@ -445,8 +441,6 @@ class TestCliPromptFlattening:
         prompt = m._build_prompt()
         assert "'type':" not in prompt
         assert "Adding." in prompt
-        # The Anthropic tool_result lives in a user turn, so its text is
-        # rendered under the [User] label.
         assert "[User]: 5" in prompt
 
 

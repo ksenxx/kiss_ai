@@ -1,43 +1,153 @@
 /*
  * remote-codex.css — Codex mobile / ChatGPT-app restyle for the
- * REMOTE webapp only.
+ * REMOTE webapp only.  Loaded exclusively by the standalone
+ * remote page built by ``web_server._build_html()``.
  *
- * Loaded exclusively by the standalone remote page built by
- * ``web_server._build_html()`` (linked after main.css so overrides
- * win).  The VS Code extension webview shares chat.html + main.css
- * but NEVER loads this file — and as a second safety net EVERY rule
- * below is scoped under ``body.remote-chat``, the class only the
- * remote page's BODY_CLASS_ATTR substitution adds.
- *
- * Design tokens (OpenAI Codex app / ChatGPT mobile, dark):
- *   page bg        #0d0d0d      primary text  #ececec
- *   muted text     #afafaf      placeholder   #8e8e8e
- *   composer card  #212121, radius 28px, inset white edge
- *   drawer/panel   #171717 / #212121, radius 12-16px
- *   controls       36px circles; Send = white circle w/ black icon
- *   chips/tabs     rounded pills; hover bg white/15
- *
- * ONLY presentation changes: no DOM ids, classes, or behavior differ.
+ * All colors are routed through the custom properties declared on
+ * ``body.remote-chat`` (dark, the default) so that the Light Modern
+ * palette in ``body.remote-chat.light-theme`` re-themes the whole
+ * page.  The theme is toggled by the sun/moon button in the tab bar
+ * (see ``renderTabBar`` in main.js) and persisted in localStorage.
  */
 
-/* ── Page & core palette ─────────────────────────────── */
 body.remote-chat {
   --bg: #0d0d0d;
   --bg2: #0d0d0d;
   --surface: #171717;
   --surface2: #212121;
   --fg: #ececec;
+  --fg-strong: #fff;
   --dim: #afafaf;
-  --border: rgb(255 255 255 / 10%);
+  --faint: #8e8e8e;
+  --icon: #cdcdcd;
   --input-bg: #212121;
+  --chip-bg: #1a1a1a;
+  --chip-border: #3a3a3a;
+  --border: rgb(255 255 255 / 10%);
+  --border-8: rgb(255 255 255 / 8%);
+  --border-12: rgb(255 255 255 / 12%);
+  --border-15: rgb(255 255 255 / 15%);
+  --border-18: rgb(255 255 255 / 18%);
+  --border-25: rgb(255 255 255 / 25%);
+  --border-30: rgb(255 255 255 / 30%);
+  --ring: rgb(255 255 255 / 20%);
+  --ring-focus: rgb(255 255 255 / 35%);
+  --hover: rgb(255 255 255 / 8%);
+  --hover-strong: rgb(255 255 255 / 15%);
+  --hover-faint: rgb(255 255 255 / 4%);
+  --send-bg: #fff;
+  --send-fg: #0d0d0d;
+  --send-hover-bg: #ececec;
+  --send-disabled-bg: rgb(255 255 255 / 25%);
+  --shadow: rgb(0 0 0 / 50%);
+  --favorite: #f5b400;
+  --copied: #4caf50;
 
-  background: #0d0d0d;
-  color: #ececec;
+  /*
+   * Docked task-history panel geometry (desktop mode only).  The
+   * minimum is the width the five status/scope toggle buttons of the
+   * history "Filters" section need to sit on ONE line: ~448px of
+   * chips plus the panel's 2 x 16px padding, rounded up so platforms
+   * with wider font metrics still fit.  main.js reads both bounds so
+   * the resizer can never drag the panel below the one-line width.
+   */
+  --sidebar-min-w: 520px;
+  --sidebar-max-w: 820px;
+  --sidebar-default-w: clamp(var(--sidebar-min-w), 34vw, var(--sidebar-max-w));
+
+  /* Chat width the docked panel may never eat into, so a panel widened
+     on a big monitor cannot crush the chat on a smaller window. */
+  --chat-min-w: 360px;
+
+  /*
+   * Settings drawer width on desktop — a narrow drawer instead of the
+   * 90vw mobile sheet.  The lower bound is the width the "Tips",
+   * "Git Commit", "Update" and "Reset Server" buttons of the settings
+   * form need to sit on ONE line with none of their labels wrapping:
+   * ~417px of buttons plus the panel's 2 x 16px padding, rounded up so
+   * platforms with wider font metrics (Segoe UI, Roboto) still fit.
+   */
+  --settings-panel-w: 480px;
+
+  background: var(--bg);
+  color: var(--fg);
 }
 
-/* ── Tab bar → segmented pill chips ──────────────────── */
+/*
+ * Light theme — palette borrowed from VS Code's "Light Modern"
+ * default theme.  Re-declares both the ``--vscode-*`` variables used
+ * directly by main.css rules and the semantic variables main.css
+ * derives at ``:root`` (those resolve at the root element, so the
+ * body-level ``--vscode-*`` overrides alone would not reach them).
+ */
+body.remote-chat.light-theme {
+  --vscode-editor-background: #fff;
+  --vscode-editor-foreground: #3b3b3b;
+  --vscode-input-background: #fff;
+  --vscode-input-foreground: #3b3b3b;
+  --vscode-input-border: #cecece;
+  --vscode-focusBorder: #005fb8;
+  --vscode-button-background: #005fb8;
+  --vscode-button-foreground: #fff;
+  --vscode-button-hoverBackground: #0258a8;
+  --vscode-sideBar-background: #f8f8f8;
+  --vscode-list-hoverBackground: #f2f2f2;
+  --vscode-badge-background: #ccc;
+  --vscode-badge-foreground: #3b3b3b;
+  --vscode-textLink-foreground: #005fb8;
+  --vscode-descriptionForeground: #616161;
+  --vscode-editorWidget-background: #f8f8f8;
+  --vscode-editorWidget-border: #c8c8c8;
+  --vscode-panel-border: #e5e5e5;
+  --vscode-terminal-ansiRed: #cd3131;
+  --vscode-terminal-ansiGreen: #107c10;
+  --vscode-terminal-ansiYellow: #949800;
+  --vscode-terminal-ansiBlue: #0451a5;
+  --vscode-terminal-ansiMagenta: #bc05bc;
+  --vscode-terminal-ansiCyan: #0598bc;
+  --accent: #005fb8;
+  --green: #107c10;
+  --red: #cd3131;
+  --yellow: #949800;
+  --purple: #bc05bc;
+  --cyan: #0598bc;
+  --blue: #0451a5;
+  --orange: color-mix(in srgb, var(--yellow) 55%, var(--red));
+  --bg: #fff;
+  --bg2: #fff;
+  --surface: #f8f8f8;
+  --surface2: #f3f3f3;
+  --fg: #3b3b3b;
+  --fg-strong: #1f1f1f;
+  --dim: #616161;
+  --faint: #8b8b8b;
+  --icon: #5f5f5f;
+  --input-bg: #f3f3f3;
+  --chip-bg: #f6f6f6;
+  --chip-border: #d4d4d4;
+  --border: rgb(0 0 0 / 10%);
+  --border-8: rgb(0 0 0 / 8%);
+  --border-12: rgb(0 0 0 / 12%);
+  --border-15: rgb(0 0 0 / 15%);
+  --border-18: rgb(0 0 0 / 20%);
+  --border-25: rgb(0 0 0 / 25%);
+  --border-30: rgb(0 0 0 / 30%);
+  --ring: rgb(0 0 0 / 10%);
+  --ring-focus: rgb(0 0 0 / 25%);
+  --hover: rgb(0 0 0 / 5%);
+  --hover-strong: rgb(0 0 0 / 8%);
+  --hover-faint: rgb(0 0 0 / 4%);
+  --send-bg: #1f1f1f;
+  --send-fg: #fff;
+  --send-hover-bg: #333;
+  --send-disabled-bg: rgb(0 0 0 / 15%);
+  --shadow: rgb(0 0 0 / 18%);
+  --favorite: #b58500;
+  --copied: #107c10;
+}
+
 body.remote-chat #tab-bar {
-  background: #0d0d0d;
+  background: var(--bg);
   border-bottom: none;
   padding: 8px 10px 4px;
 }
@@ -45,125 +155,83 @@ body.remote-chat #tab-bar {
 body.remote-chat #tab-list { gap: 6px; }
 
 body.remote-chat #tab-bar .chat-tab {
-  border: 1px solid rgb(255 255 255 / 10%);
-  border-bottom: 1px solid rgb(255 255 255 / 10%);
+  border: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
   border-radius: 999px;
   padding: 5px 12px;
   background: transparent;
-  color: #afafaf;
+  color: var(--dim);
   transition: background 0.15s, color 0.15s;
 }
 
 body.remote-chat #tab-bar .chat-tab:hover {
-  background: rgb(255 255 255 / 8%);
-  color: #ececec;
+  background: var(--hover);
+  color: var(--fg);
 }
 
 body.remote-chat #tab-bar .chat-tab.active {
-  background: #212121;
-  border-color: rgb(255 255 255 / 18%);
-  color: #ececec;
+  background: var(--surface2);
+  border-color: var(--border-18);
+  color: var(--fg);
 }
 
 body.remote-chat #tab-bar .chat-tab-close { border-radius: 999px; }
 
 body.remote-chat #tab-bar .chat-tab-add {
-  border: 1px solid rgb(255 255 255 / 10%);
+  border: 1px solid var(--border);
   border-radius: 999px;
-  color: #afafaf;
+  color: var(--dim);
 }
 
-/* Settings button (gear icon): main.css caps .chat-tab-settings at
- * min/max-width 30px with padding 4px 8px 4px 0 (~22px of content
- * space for the 18x18 SVG).  The higher-specificity
- * ``body.remote-chat #tab-bar .chat-tab`` rule above overrides that
- * padding to 5px 12px, collapsing the 30px-wide flex item to ~6px of
- * content — enough to shrink the SVG flex-child to a dot.  Restore a
- * pill-shaped hit target with enough room for the 18x18 gear (mirrors
- * the .chat-tab-add pill treatment) and pin the SVG's intrinsic size
- * so it can never be flex-shrunk. */
-body.remote-chat #tab-bar .chat-tab-settings {
-  border: 1px solid rgb(255 255 255 / 10%);
+body.remote-chat #tab-bar .chat-tab-settings,
+body.remote-chat #tab-bar .chat-tab-theme {
+  border: 1px solid var(--border);
   border-radius: 999px;
-  color: #afafaf;
+  color: var(--dim);
   padding: 5px 8px;
   min-width: 36px;
   max-width: 36px;
 }
 
-body.remote-chat #tab-bar .chat-tab-settings svg {
+body.remote-chat #tab-bar .chat-tab-theme {
+  justify-content: center;
+  margin-right: 8px;
+  flex-shrink: 0;
+}
+
+body.remote-chat #tab-bar .chat-tab-settings svg,
+body.remote-chat #tab-bar .chat-tab-theme svg {
   display: block;
   width: 18px;
   height: 18px;
   flex-shrink: 0;
 }
 
-/* ── Status bar → subtle muted pill row ──────────────── */
 body.remote-chat #tab-status-bar {
-  background: #0d0d0d;
+  background: var(--bg);
   border-bottom: none;
   padding: 2px 16px 6px;
 }
 
 body.remote-chat #tab-status-bar .status {
   font-size: 12px;
-  color: #8e8e8e;
+  color: var(--faint);
 }
 
 body.remote-chat #tab-status-bar .status-metric {
   font-size: 12px;
-  color: #afafaf;
+  color: var(--dim);
 }
-
-/* ── Task panel → dark elevated user bubble ──────────────
- * The pinned recent-task panel matches the rest of the dark
- * Codex palette instead of the old bright #ececec card: same
- * #212121 surface + inset white hairline as the composer
- * (#input-container), light #ececec text, right-aligned. */
-body.remote-chat #task-panel {
-  margin: 8px 16px 0;
-  margin-left: auto;
-  max-width: 90%;
-  border: 1px solid rgb(255 255 255 / 10%);
-  border-radius: 22px;
-  background: #212121;
-  color: #ececec;
-  box-shadow: inset 0 0 1px rgb(255 255 255 / 20%);
-
-  /* 58px right inset fits the two floating icons (drawer chevron +
-     copy) side by side without covering the task text. */
-  padding: 10px 58px 10px 16px;
-}
-
-body.remote-chat #task-panel-copy { color: #8e8e8e; }
-body.remote-chat #task-panel-copy:hover { color: #ececec; }
-
-/* Drawer toggles under the dark Codex skin: same muted-grey icon
-   palette as #task-panel-copy; the input handle matches the composer
-   card surface so it reads as part of the drawer it controls. */
-body.remote-chat #task-panel-drawer-btn { color: #8e8e8e; }
-body.remote-chat #task-panel-drawer-btn:hover { color: #ececec; }
 
 body.remote-chat #input-drawer-btn {
-  background: #212121;
-  border-color: rgb(255 255 255 / 15%);
-  color: #afafaf;
+  background: var(--surface2);
+  border-color: var(--border-15);
+  color: var(--dim);
 }
 
 body.remote-chat #input-drawer-btn:hover {
-  color: #ececec;
-  border-color: rgb(255 255 255 / 30%);
-}
-
-/* Collapsed drawers under the remote skin: the remote base rules
-   above set shorthand ``padding`` with higher specificity than
-   main.css's ``.drawer-collapsed`` longhands, so the slim collapsed
-   heights must be restated here.  The input drawer keeps the
-   safe-area bottom inset so the handle stays reachable above the
-   iOS home indicator. */
-body.remote-chat #task-panel.drawer-collapsed {
-  padding-top: 6px;
-  padding-bottom: 6px;
+  color: var(--fg);
+  border-color: var(--border-30);
 }
 
 body.remote-chat #input-area.drawer-collapsed {
@@ -171,45 +239,35 @@ body.remote-chat #input-area.drawer-collapsed {
   padding-bottom: calc(2px + env(safe-area-inset-bottom, 0px));
 }
 
-/* ── Output column (Codex thread) ────────────────────── */
-body.remote-chat #output {
-  background: #0d0d0d;
-  padding: 16px 16px 24px;
-}
+body.remote-chat #welcome h2 { color: var(--fg); }
 
-body.remote-chat #welcome h2 { color: #ececec; }
-body.remote-chat #welcome p { color: #afafaf; }
+body.remote-chat #welcome p { color: var(--dim); }
 
-/* ── Composer → elevated rounded 28px card ───────────── */
 body.remote-chat #input-area {
-  background: #0d0d0d;
+  background: var(--bg);
   border-top: none;
   padding: 4px 12px calc(10px + env(safe-area-inset-bottom, 0px));
 }
 
-/* The composer panel (textbox + buttons) spans the FULL chat webview
-   width — same as the chat thread — with only #input-area's gutter
-   padding as inset.  No max-width cap: an earlier 90% cap left the
-   panel visibly narrower than the chat column. */
 body.remote-chat #input-container {
-  background: #212121;
+  background: var(--surface2);
   border: 1px solid transparent;
   border-radius: 28px;
-  box-shadow: inset 0 0 1px rgb(255 255 255 / 20%);
+  box-shadow: inset 0 0 1px var(--ring);
   padding: 10px 14px 8px;
 }
 
 body.remote-chat #input-container:focus-within {
   border-color: transparent;
-  box-shadow: inset 0 0 1px rgb(255 255 255 / 35%);
+  box-shadow: inset 0 0 1px var(--ring-focus);
 }
 
 body.remote-chat #task-input {
-  color: #ececec;
+  color: var(--fg);
   min-height: 2.4em;
 }
 
-body.remote-chat #task-input::placeholder { color: #8e8e8e; }
+body.remote-chat #task-input::placeholder { color: var(--faint); }
 
 body.remote-chat #input-footer {
   border-top: none;
@@ -217,16 +275,6 @@ body.remote-chat #input-footer {
   margin-top: 2px;
 }
 
-/* Composer controls: 36px circular buttons, hover white/15.
-   The -8px horizontal margins quarter the visible gap between the
-   composer buttons (burger menu, model pill, attach, promptlet, mic).
-   Each 36px circular button pads its 16px icon by 10px per side, so
-   adjacent icons historically sat ~21px apart (icon-icon) and ~11px
-   from the model pill's border.  Pulling the circles together by 8px
-   per inner edge shrinks those visible gaps to ~5px and ~3px — half of
-   the previous -5px halving — while keeping the full 36px touch
-   targets.  Outer edges stay put (see the #menu-btn / #voice-btn
-   overrides below) so row alignment is unchanged. */
 body.remote-chat #menu-btn,
 body.remote-chat #upload-btn,
 body.remote-chat #tricks-btn,
@@ -243,7 +291,7 @@ body.remote-chat #voice-btn {
   background: transparent;
   border: none;
   border-radius: 50%;
-  color: #cdcdcd;
+  color: var(--icon);
   transition: background 0.15s;
 }
 
@@ -251,39 +299,38 @@ body.remote-chat #menu-btn:hover:not(:disabled),
 body.remote-chat #upload-btn:hover:not(:disabled),
 body.remote-chat #tricks-btn:hover:not(:disabled),
 body.remote-chat #voice-btn:hover:not(:disabled) {
-  background: rgb(255 255 255 / 15%);
-  color: #ececec;
+  background: var(--hover-strong);
+  color: var(--fg);
 }
 
 body.remote-chat #tricks-btn.active,
 body.remote-chat #voice-btn.active {
-  background: rgb(255 255 255 / 15%);
-  color: #fff;
+  background: var(--hover-strong);
+  color: var(--fg-strong);
 }
 
 body.remote-chat #menu-btn { margin-left: 0; }
+
 body.remote-chat #voice-btn { margin-right: 0; }
 
-/* Model pill (Codex "5.6 Sol" style) */
 body.remote-chat #model-btn {
   background: transparent;
-  border: 1px solid rgb(255 255 255 / 15%);
+  border: 1px solid var(--border-15);
   border-radius: 999px;
   padding: 6px 12px;
   height: 32px;
-  color: #cdcdcd;
+  color: var(--icon);
 }
 
 body.remote-chat #model-btn:hover:not(:disabled) {
-  background: rgb(255 255 255 / 8%);
-  border-color: rgb(255 255 255 / 25%);
-  color: #ececec;
+  background: var(--hover);
+  border-color: var(--border-25);
+  color: var(--fg);
 }
 
-/* Send = white circle with dark icon (ChatGPT primary action) */
 body.remote-chat #send-btn {
-  background: #fff;
-  color: #0d0d0d;
+  background: var(--send-bg);
+  color: var(--send-fg);
   width: 36px;
   height: 36px;
   border-radius: 50%;
@@ -291,79 +338,78 @@ body.remote-chat #send-btn {
 }
 
 body.remote-chat #send-btn:hover {
-  background: #ececec;
-  color: #0d0d0d;
+  background: var(--send-hover-bg);
+  color: var(--send-fg);
   box-shadow: none;
 }
 
 body.remote-chat #send-btn:disabled {
-  background: rgb(255 255 255 / 25%);
-  color: #0d0d0d;
+  background: var(--send-disabled-bg);
+  color: var(--send-fg);
   opacity: 1;
 }
 
-/* Stop = same circle, red accent kept for clarity */
 body.remote-chat #stop-btn {
   width: 36px;
   height: 36px;
   border-radius: 50%;
-  background: #fff;
-  color: #0d0d0d;
+  background: var(--send-bg);
+  color: var(--send-fg);
   border: none;
 }
 
-body.remote-chat #demo-pause-btn {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-}
-
-/* Model dropdown → rounded popover card */
 body.remote-chat #model-dropdown {
-  background: #212121;
-  border: 1px solid rgb(255 255 255 / 10%);
+  background: var(--surface2);
+  border: 1px solid var(--border);
   border-radius: 16px;
-  box-shadow: 0 8px 24px rgb(0 0 0 / 50%);
+  box-shadow: 0 8px 24px var(--shadow);
   overflow: hidden;
 }
 
-/* File chips → rounded attachment cards */
 body.remote-chat .file-chip {
-  background: #1a1a1a;
-  border: 1px solid #3a3a3a;
+  background: var(--chip-bg);
+  border: 1px solid var(--chip-border);
   border-radius: 16px;
-  color: #ececec;
+  color: var(--fg);
 }
 
-/* Suggestion chips → pill cards */
+/* This selector has to repeat the mobile chip shape: the plain
+   `.file-chip.error` rule in main.css is less specific than the one above and
+   would otherwise lose to it, leaving a failed photo looking like a normal
+   attachment. */
+body.remote-chat .file-chip.error {
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  border-color: color-mix(in srgb, var(--red) 32%, transparent);
+  color: var(--red);
+}
+
 body.remote-chat .suggestion-chip {
   background: transparent;
-  border: 1px solid rgb(255 255 255 / 12%);
+  border: 1px solid var(--border-12);
   border-radius: 16px;
-  color: #ececec;
+  color: var(--fg);
 }
 
 body.remote-chat .suggestion-chip:hover {
-  background: rgb(255 255 255 / 8%);
-  border-color: rgb(255 255 255 / 20%);
-  color: #ececec;
+  background: var(--hover);
+  border-color: var(--ring);
+  color: var(--fg);
 }
 
-/* ── Drawers: sidebar / frequent / tricks / settings ─── */
 body.remote-chat #sidebar,
 body.remote-chat #frequent-panel,
 body.remote-chat #tricks-panel {
-  background: #171717;
-  border-right: 1px solid rgb(255 255 255 / 8%);
+  background: var(--surface);
+  border-right: 1px solid var(--border-8);
 }
 
 body.remote-chat #settings-panel {
-  background: #171717;
-  border-left: 1px solid rgb(255 255 255 / 8%);
+  background: var(--surface);
+  border-left: 1px solid var(--border-8);
 }
 
 body.remote-chat .sidebar-hdr {
-  color: #8e8e8e;
+  color: var(--faint);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   font-size: 12px;
@@ -375,25 +421,24 @@ body.remote-chat .sidebar-item {
 }
 
 body.remote-chat .sidebar-item:hover {
-  background: rgb(255 255 255 / 8%);
+  background: var(--hover);
 }
 
 body.remote-chat .search-wrap input {
-  background: #212121;
-  border: 1px solid rgb(255 255 255 / 10%);
+  background: var(--surface2);
+  border: 1px solid var(--border);
   border-radius: 999px;
-  color: #ececec;
+  color: var(--fg);
 }
 
-/* Settings form fields → dark rounded inputs */
 body.remote-chat .config-label input[type="text"],
 body.remote-chat .config-label input[type="password"],
 body.remote-chat .config-label input[type="number"],
 body.remote-chat .config-label textarea {
-  background: #212121;
-  border: 1px solid rgb(255 255 255 / 10%);
+  background: var(--surface2);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  color: #ececec;
+  color: var(--fg);
 }
 
 body.remote-chat .config-update-btn,
@@ -401,14 +446,13 @@ body.remote-chat .config-gitcommit-btn {
   border-radius: 999px;
 }
 
-/* ── Modals → rounded 16px popover cards ─────────────── */
 body.remote-chat #ask-user-modal .modal-content,
 body.remote-chat #auth-modal .auth-modal-content,
 body.remote-chat .server-reset-confirm-content {
-  background: #212121;
-  border: 1px solid rgb(255 255 255 / 10%);
+  background: var(--surface2);
+  border: 1px solid var(--border);
   border-radius: 16px;
-  box-shadow: 0 8px 24px rgb(0 0 0 / 50%);
+  box-shadow: 0 8px 24px var(--shadow);
 }
 
 body.remote-chat .auth-modal-btn,
@@ -416,417 +460,59 @@ body.remote-chat .server-reset-confirm-btn {
   border-radius: 999px;
 }
 
-/* ── Mobile polish ───────────────────────────────────── */
 @media (width <= 600px) {
-  body.remote-chat #output { padding: 12px 12px 20px; }
-
   body.remote-chat #input-area {
     padding-left: 8px;
     padding-right: 8px;
   }
 }
 
-/* ── Codex flat thread (indistinguishable from Codex) ────
- * The real Codex desktop/app thread renders assistant, tool, and
- * thinking content FLAT on the page background: no cards, no filled
- * header strips, no uppercase labels.  Activity labels ("Bash",
- * "Thinking", nested-agent output) are quiet sentence-case muted-gray
- * rows with the chevron as the only affordance.  The one elevated
- * element is monospace output (bash stream / tool results), which
- * gets a subtle inset #171717 block at the Codex 12px radius.  Error
- * red is intentionally KEPT (main.css .tr.err / .rl.fail /
- * .wt-result-err are not overridden) so failures still stand out. */
-
-/* Container panels: flat on the page, no card chrome. */
-body.remote-chat .tc {
-  border: 1px solid rgb(255 255 255 / 8%);
-  border-radius: 12px;
-  background: transparent;
-}
-
-body.remote-chat .tc-h {
-  background: transparent;
-  color: #8e8e8e;
-  text-transform: none;
-  letter-spacing: normal;
-  font-weight: 500;
-}
-
-body.remote-chat .tc-h.tc-h-bash {
-  background: transparent;
-  color: #8e8e8e;
-}
-
-body.remote-chat .rc {
-  border: none;
-  border-radius: 0;
-  background: transparent;
-}
-
-body.remote-chat .rc-h {
-  background: transparent;
-  text-transform: none;
-  letter-spacing: normal;
-  padding-left: 0;
-  padding-right: 0;
-}
-
-body.remote-chat .rc-h h3 {
-  color: #ececec;
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .rc-body {
-  padding-left: 0;
-  padding-right: 0;
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .system-prompt,
-body.remote-chat .prompt {
-  border: 1px solid rgb(255 255 255 / 8%);
-  border-radius: 12px;
-  background: transparent;
-}
-
-body.remote-chat .system-prompt-h,
-body.remote-chat .prompt-h {
-  background: transparent;
-  color: #8e8e8e;
-  text-transform: none;
-  letter-spacing: normal;
-  font-weight: 500;
-}
-
-body.remote-chat .think {
-  border: none;
-  background: transparent;
-  padding-left: 0;
-  padding-right: 0;
-}
-
-body.remote-chat .think .lbl {
-  color: #8e8e8e;
-  text-transform: none;
-  letter-spacing: normal;
-  font-weight: 500;
-}
-
-body.remote-chat .think .cnt {
-  color: #8e8e8e;
-  font-size: var(--fs-base);
-
-  /* The task panel renders upright — thinking content matches. */
-  font-style: normal;
-}
-
-body.remote-chat .llm-panel {
-  border: 1px solid rgb(255 255 255 / 8%);
-  border-radius: 12px;
-  background: transparent;
-}
-
-body.remote-chat .llm-panel-hdr {
-  background: transparent;
-  color: #8e8e8e;
-  text-transform: none;
-  letter-spacing: normal;
-  font-weight: 500;
-}
-
-/* Inset output blocks: the one inset surface in the thread.  Like
- * every other chat-panel content they render in the task panel's
- * sans stack, not the editor's monospace font. */
-body.remote-chat .tr {
-  background: #171717;
-  border: 1px solid rgb(255 255 255 / 8%);
-  border-radius: 12px;
-  color: #afafaf;
-  font-size: var(--fs-base);
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
-}
-
-body.remote-chat .tr .rl {
-  color: #8e8e8e;
-  text-transform: none;
-  letter-spacing: normal;
-  font-weight: 500;
-}
-
-body.remote-chat .tr.note {
-  border-color: rgb(255 255 255 / 15%);
-}
-
-body.remote-chat .tr.note strong {
-  color: #ececec;
-}
-
-body.remote-chat .tr.warn {
-  background: #171717;
-  border-color: rgb(255 255 255 / 15%);
-}
-
-body.remote-chat .tr.warn strong {
-  color: #ececec;
-}
-
-body.remote-chat .merge-info {
-  border: 1px solid rgb(255 255 255 / 8%);
-  border-radius: 12px;
-  background: transparent;
-}
-
-body.remote-chat .merge-info-hdr {
-  color: #ececec;
-  font-weight: 500;
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .wt-result-ok {
-  color: #ececec;
-  border-left-color: rgb(255 255 255 / 30%);
-}
-
-body.remote-chat .bash-panel {
-  background: #171717;
-  border: 1px solid rgb(255 255 255 / 8%);
-  border-radius: 12px;
-}
-
-/* Nested mono blocks inside a tool-call panel keep the panel's own
- * rounding (main.css strips their border/margin when nested). */
-body.remote-chat .tc > .bash-panel,
-body.remote-chat .tc > .tr {
-  border: none;
-  border-radius: 0 0 12px 12px;
-  border-top: 1px solid rgb(255 255 255 / 8%);
-}
-
-/* Code blocks inside streamed markdown match the inset surface. */
-body.remote-chat .txt pre,
-body.remote-chat .md-body pre {
-  background: #171717;
-  border: 1px solid rgb(255 255 255 / 8%);
-  border-radius: 12px;
-}
-
-/* main.css paints .hljs with `background: var(--surface2) !important`,
- * which would clash with the pre's #171717 inset surface; make the
- * highlighted code transparent so the pre's surface shows through. */
-body.remote-chat .txt pre code.hljs,
-body.remote-chat .md-body pre code.hljs {
-  background: transparent !important;
-  border-radius: 0;
-}
-
-/* Muted argument/metadata rows inside tool-call bodies. */
-body.remote-chat .tc-arg {
-  color: #8e8e8e;
-}
-
-body.remote-chat .tc-arg-name {
-  color: #afafaf;
-}
-
-/* Quiet time footer + collapse preview, Codex-muted.  The footer is
- * the last mono label left (main.css puts it in the editor's
- * monospace font); render it in the same sans stack as every other
- * panel label. */
-body.remote-chat .panel-time {
-  color: #8e8e8e;
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
-}
-
-body.remote-chat .collapse-preview {
-  color: #8e8e8e;
-}
-
-/* ── Codex chat alignment ────────────────────────────────
- * The pinned user prompt (#task-panel, OUTSIDE #output) is a
- * right-aligned bubble (rule above); everything streamed into the
- * #output thread — tool calls, results, thinking, text — hugs the
- * LEFT edge of the chat column like Codex's assistant lane and spans
- * 90% of the chat webview.  This later rule overrides the centering
- * rule above (same specificity, later in file wins). */
-body.remote-chat #output > *:not(#welcome) {
-  max-width: 90%;
-  margin-left: 0;
-  margin-right: auto;
-}
-
-/* ── Sidebar resize handle ───────────────────────────────
- * The #sidebar-resizer drag handle only exists visually on the
- * docked desktop sidebar (rules in the media block below); it is
- * hidden everywhere else, including the mobile drawer and the
- * VS Code extension webview (all rules body.remote-chat scoped). */
 body.remote-chat #sidebar-resizer {
   display: none;
 }
 
-/* Disable text selection while dragging the resize handle. */
 body.remote-chat.sidebar-resizing {
   user-select: none;
 }
 
-/* ── Uniform panel typography (task-panel-matched) ───────
- * On the remote page every piece of body text inside a chat
- * panel renders at ONE size (--fs-base) regardless of nesting
- * (main.css shrinks .txt inside .llm-panel, uses --fs-md for
- * tool/result/prompt bodies and hard-codes 12px merge hunks)
- * AND in the same sans --vscode-font-family stack the pinned
- * task panel (#task-panel) uses — main.css (plus the browser's
- * UA stylesheet for pre/code) puts tool paths/bodies, results,
- * system/bash output, merge hunks and code in the editor's
- * monospace font. */
-body.remote-chat .txt {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .llm-panel .txt {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .llm-panel .think .cnt {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .tc-b {
-  font-size: var(--fs-base);
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
-}
-
-body.remote-chat .tp {
-  font-size: var(--fs-base);
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
-}
-
-body.remote-chat .bash-panel-content {
-  font-size: var(--fs-base);
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
-}
-
-body.remote-chat .rs {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .rs b {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .rc-status {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .system-prompt-body {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .prompt-body {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .sys {
-  font-size: var(--fs-base);
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
-}
-
-body.remote-chat .merge-info-body {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .merge-ctx {
-  font-size: var(--fs-base);
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
-}
-
-body.remote-chat .merge-hunk {
-  font-size: var(--fs-base);
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
-}
-
-body.remote-chat .txt code {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .md-body code {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .md-body pre code {
-  font-size: var(--fs-base);
-}
-
-body.remote-chat .md-body th,
-body.remote-chat .md-body td {
-  font-size: var(--fs-base);
-}
-
-/* Catch-all for every pre/code content in the thread (main.css's
- * bare ``code`` rule and the UA's ``pre`` default are monospace);
- * the #output id outranks main.css's class-based mono rules. */
-body.remote-chat #output pre,
-body.remote-chat #output code {
-  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
-}
-
-/* Thread-scroll placeholders render italic in main.css; every other
- * panel text on the remote page is upright — match it. */
-body.remote-chat .adjacent-loader,
-body.remote-chat .adjacent-task-placeholder {
-  font-style: normal;
-}
-
-/* ── History rows: per-chat color on the left border ─────
- * main.css paints each History row with its per-chat pastel
- * --task-color background and near-black text/buttons.  On the
- * remote page the row goes neutral-dark with light text and the
- * per-chat color moves to a thick left border. */
 body.remote-chat .running-item {
-  background-color: rgb(255 255 255 / 4%);
-  color: #ececec;
+  background-color: var(--hover-faint);
+  color: var(--fg);
   border-left: 4px solid var(--task-color, transparent);
 }
 
 body.remote-chat .running-item-metrics {
-  color: #afafaf;
+  color: var(--dim);
 }
 
 body.remote-chat .running-item-workspace,
 body.remote-chat .running-item-ids {
-  color: #8e8e8e;
+  color: var(--faint);
 }
 
 body.remote-chat .running-item .ids-copy-btn,
-body.remote-chat .running-item .sidebar-item-delete,
+body.remote-chat .running-item .sidebar-item-collapse,
 body.remote-chat .running-item .sidebar-item-copy,
 body.remote-chat .running-item .sidebar-item-favorite {
-  color: #ececec;
+  color: var(--fg);
 }
 
 body.remote-chat .running-item .ids-copy-btn:hover,
-body.remote-chat .running-item .sidebar-item-delete:hover,
+body.remote-chat .running-item .sidebar-item-collapse:hover,
 body.remote-chat .running-item .sidebar-item-copy:hover,
 body.remote-chat .running-item .sidebar-item-favorite:hover {
-  background: rgb(255 255 255 / 10%);
+  background: var(--border);
 }
 
-/* Keep the state colors the light overrides above would otherwise
- * outrank, with dark-page-legible greens for the copied ticks. */
 body.remote-chat .running-item .sidebar-item-favorite.favorited {
-  color: #f5b400;
+  color: var(--favorite);
 }
 
 body.remote-chat .running-item .ids-copy-btn.copied,
 body.remote-chat .running-item .sidebar-item-copy.copied {
-  color: #4caf50;
+  color: var(--copied);
 }
 
-/* ── History rows: all metadata on ONE wrapping line ─────
- * main.css stacks the metrics / workspace+meta / ids spans as a
- * flex column and nowrap-clips the long ones.  The remote page
- * flows all of them inline — steps, tok, cost, duration, time,
- * work dir, model, wt, parallel, auto-commit, chat id, task id —
- * as a single dot-separated line that wraps. */
 body.remote-chat .running-item-info {
   display: block;
   overflow-wrap: anywhere;
@@ -844,20 +530,19 @@ body.remote-chat .running-item-ids::before {
   content: " • ";
 }
 
-/* ── Desktop: dock the history sidebar on the left ───────
- * body.remote-desktop is added by main.js only on the remote page
- * when matchMedia('(min-width: 900px)') matches.  The sidebar keeps
- * its position:fixed; left:0 from main.css and simply stops
- * translating off-canvas; #app clears the docked column.  BOTH the
- * sidebar width and #app's margin are driven by the SAME
- * --sidebar-w custom property (set by the resize handle in main.js)
- * so they can never desync.  The DEFAULT (nothing dragged yet) is
- * 1/4 of the browser screen (25vw), clamped to the resize range. */
+/*
+ * Desktop mode: the history panel is DOCKED beside the chat instead of
+ * overlaying it as a drawer.  Every docked rule is scoped to
+ * ``#sidebar.open`` so the burger button, which only toggles that
+ * class, really shows and hides the panel: without ``.open`` the
+ * panel falls back to the translated-off-screen drawer rule in
+ * main.css and ``#app`` reclaims the freed width.
+ */
 @media (width >= 900px) {
-  body.remote-chat.remote-desktop #sidebar {
+  body.remote-chat.remote-desktop #sidebar.open {
     transform: none;
-    width: var(--sidebar-w, clamp(220px, 25vw, 600px));
-    border-right: 1px solid rgb(255 255 255 / 8%);
+    width: var(--sidebar-w, var(--sidebar-default-w));
+    border-right: 1px solid var(--border-8);
   }
 
   body.remote-chat.remote-desktop #sidebar-overlay {
@@ -865,14 +550,21 @@ body.remote-chat .running-item-ids::before {
   }
 
   body.remote-chat.remote-desktop #app {
-    margin-left: var(--sidebar-w, clamp(220px, 25vw, 600px));
+    /* Matches the panel's own 0.2s slide in main.css so the chat does
+       not jump ahead of it while the burger shows or hides it. */
+    margin-left: 0;
+    transition: margin-left 0.2s ease;
   }
 
-  /* Right-edge drag handle: a 6px col-resize strip.  #sidebar is
-   * position:fixed (a containing block), so the absolute child
-   * pins to its right edge.  touch-action:none lets pointer events
-   * drive the drag on touch screens too. */
-  body.remote-chat.remote-desktop #sidebar-resizer {
+  body.remote-chat.remote-desktop:has(#sidebar.open) #app {
+    margin-left: var(--sidebar-w, var(--sidebar-default-w));
+  }
+
+  body.remote-chat.remote-desktop #settings-panel {
+    width: min(90vw, var(--settings-panel-w));
+  }
+
+  body.remote-chat.remote-desktop #sidebar.open #sidebar-resizer {
     display: block;
     position: absolute;
     top: 0;
@@ -886,6 +578,6 @@ body.remote-chat .running-item-ids::before {
   body.remote-chat.remote-desktop #sidebar-resizer:hover,
   body.remote-chat.remote-desktop #sidebar-resizer:active,
   body.remote-chat.remote-desktop #sidebar-resizer:focus-visible {
-    background: rgb(255 255 255 / 12%);
+    background: var(--border-12);
   }
 }

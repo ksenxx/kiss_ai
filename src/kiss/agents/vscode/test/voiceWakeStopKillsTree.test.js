@@ -2,23 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end tests for the host-side VoiceWakeService process
-// lifecycle.  They run the REAL compiled extension code and REAL
-// subprocess trees; only the VS Code API module is stubbed because it
-// does not exist under plain Node.
-//
-// Regressions locked in:
-//   1. stop() kills the WHOLE `uv run` -> Python tree, not just the
-//      wrapper (the old wrapper-only kill orphaned Python mic holders).
-//   2. stdout produced by a stopped/superseded listener is ignored, so
-//      a late READY/WAKE cannot turn the mic UI back on after stop().
-//   3. SorcarSidebarView.dispose() tears down its VoiceWakeService, so
-//      extension deactivation/reload cannot leave a detached listener
-//      holding the microphone.
-//
-// Run directly with `node test/voiceWakeStopKillsTree.test.js` after
-// `npm run compile`.
 
 'use strict';
 
@@ -64,9 +47,6 @@ class StubEventEmitter {
   }
 }
 
-// The compiled service imports 'vscode' (through kissPaths, and the
-// sidebar imports it directly); provide the shared stub used by the
-// other extension-host tests.
 global.__kissVscodeStub = {
   workspace: {
     isTrusted: true,
@@ -114,12 +94,10 @@ function killGroup(pid, signal = 'SIGKILL') {
     process.kill(-pid, signal);
     return;
   } catch {
-    // The process may not be a group leader (or may already be dead).
   }
   try {
     process.kill(pid, signal);
   } catch {
-    // Already dead.
   }
 }
 
@@ -150,7 +128,6 @@ function cleanupHome(tmpHome, pidFile) {
       .filter(Boolean);
     for (const pid of pids) killGroup(pid);
   } catch {
-    // No pid file — nothing was spawned.
   }
   fs.rmSync(tmpHome, {recursive: true, force: true});
 }

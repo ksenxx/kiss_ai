@@ -2,48 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test for the redesigned History filter bar: the five
-// category checkboxes (Running / Errored / Succeeded / Workspace /
-// Favorites) are rendered as Material-style FILTER CHIPS — pill
-// toggles with a hidden checkbox, a leading status dot (or icon)
-// and a text label — instead of bare native checkboxes.
-//
-// Requirements driven by this test:
-//
-//   1. The chips live in a `.history-filter-chips` group that is a
-//      DIRECT child of `.history-filter-bar`.
-//
-//   2. Each chip is a `<label class="hf-chip">` containing a hidden
-//      `<input type="checkbox">` that KEEPS the pre-redesign ids
-//      (hf-running, hf-errors, hf-completed, hf-workspace,
-//      hf-favorite) and default checked states (all checked except
-//      Favorites) so the existing filter logic keeps working.
-//
-//   3. Workspace still sits immediately before Favorites.
-//
-//   4. Each of the three status chips (Running / Errored /
-//      Succeeded) carries a `.hf-chip-dot` status dot; the
-//      Workspace and Favorites chips carry a `.hf-chip-icon`
-//      leading SVG icon.  Every chip has a `.hf-chip-label`.
-//
-//   5. Toggling a chip's checkbox still filters the history rows
-//      (client-side, via ``applyHistoryFilterVisibility``).
-//
-//   6. main.css styles the chips: pill shape, hidden checkbox, and
-//      a `:has(input:checked)` selected state.
-//
-//   7. The ugly emoji calendar buttons are gone: chat.html contains
-//      no 📅 character; the pickers are SVG icon buttons inside one
-//      `.history-filter-daterange` group.
-//
-// This test drives the production ``media/main.js`` + real
-// ``media/chat.html`` markup inside jsdom — no mocks of project
-// code — exactly like ``historyWorkspaceFilter.test.js``.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/historyFilterChips.test.js
 
 'use strict';
 
@@ -84,7 +42,10 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
@@ -93,7 +54,6 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** Visible (display !== 'none') history row titles. */
 function visibleTitles(win) {
   const list = win.document.getElementById('history-list');
   const out = [];
@@ -171,7 +131,7 @@ const CHIP_SPEC = [
   {
     id: 'hf-workspace',
     label: 'Workspace',
-    checked: true,
+    checked: false,
     lead: '.hf-chip-icon',
   },
   {
@@ -189,7 +149,6 @@ function testChipMarkup() {
   const bar = doc.querySelector('.history-filter-bar');
   assert.ok(bar, '.history-filter-bar must exist');
 
-  // 1) Chips group is a direct child of the filter bar.
   const chips = doc.querySelector('.history-filter-chips');
   assert.ok(chips, '.history-filter-chips group must exist');
   assert.strictEqual(
@@ -198,8 +157,6 @@ function testChipMarkup() {
     '.history-filter-chips must be a DIRECT child of .history-filter-bar',
   );
 
-  // 2) Each chip: label.hf-chip > hidden checkbox (stable id +
-  //    default) + leading dot/icon + .hf-chip-label text.
   for (const spec of CHIP_SPEC) {
     const input = doc.getElementById(spec.id);
     assert.ok(input, `#${spec.id} checkbox must exist`);
@@ -235,7 +192,6 @@ function testChipMarkup() {
     );
   }
 
-  // The two icon chips carry inline SVG icons (not emoji).
   ['hf-workspace', 'hf-favorite'].forEach(id => {
     const chip = doc.getElementById(id).parentElement;
     assert.ok(
@@ -244,7 +200,6 @@ function testChipMarkup() {
     );
   });
 
-  // 3) Workspace immediately before Favorites among bar checkboxes.
   const ids = Array.from(
     bar.querySelectorAll('input[type="checkbox"]'),
   ).map(i => i.id);
@@ -304,7 +259,6 @@ function testChipTogglingFiltersRows() {
 function testChipCss() {
   const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
 
-  // Pill container rule.
   const chipRule = /\.hf-chip\s*\{([^}]*)\}/.exec(css);
   assert.ok(chipRule, 'main.css must declare a .hf-chip rule');
   assert.ok(
@@ -316,7 +270,6 @@ function testChipCss() {
     '.hf-chip must look interactive (cursor: pointer)',
   );
 
-  // The native checkbox is visually hidden inside the chip.
   const hiddenRule =
     /\.hf-chip\s+input\[type="checkbox"\]\s*\{([^}]*)\}/.exec(css);
   assert.ok(
@@ -328,13 +281,11 @@ function testChipCss() {
     'the chip checkbox must be visually hidden (opacity: 0)',
   );
 
-  // Selected state via :has(input:checked).
   assert.ok(
     /\.hf-chip:has\([^)]*input:checked\)/.test(css),
     'main.css must style the selected chip via .hf-chip:has(input:checked)',
   );
 
-  // Chips group wraps.
   const groupRule = /\.history-filter-chips\s*\{([^}]*)\}/.exec(css);
   assert.ok(groupRule, 'main.css must declare .history-filter-chips');
   assert.ok(

@@ -70,7 +70,7 @@ def test_copy_dirty_state_staged_rename_then_deleted_new_file(
 
     wt = tmp_path / "wt"
     assert GitWorktreeOps.create(repo, "kiss/wt-bughunt-rd", wt)
-    assert (wt / "old.txt").is_file()  # fresh checkout from HEAD
+    assert (wt / "old.txt").is_file()
 
     GitWorktreeOps.copy_dirty_state(repo, wt)
 
@@ -103,7 +103,7 @@ def test_copy_dirty_state_tracked_dir_replaced_by_file(
 
     wt = tmp_path / "wt"
     assert GitWorktreeOps.create(repo, "kiss/wt-bughunt-dirfile", wt)
-    assert (wt / "a").is_dir()  # fresh checkout from HEAD
+    assert (wt / "a").is_dir()
 
     GitWorktreeOps.copy_dirty_state(repo, wt)
 
@@ -141,8 +141,8 @@ def test_copy_dirty_state_staged_dir_to_file_then_deleted(
 
     wt = tmp_path / "wt"
     assert GitWorktreeOps.create(repo, "kiss/wt-bughunt-ad", wt)
-    assert (wt / "a").is_dir()  # fresh checkout from HEAD
+    assert (wt / "a").is_dir()
 
-    GitWorktreeOps.copy_dirty_state(repo, wt)  # must not raise
+    GitWorktreeOps.copy_dirty_state(repo, wt)
 
     assert not (wt / "a").exists()

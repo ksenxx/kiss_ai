@@ -2,24 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end tests: a prompt injected into a RUNNING sub-agent tab
-// must show up as a "Prompt" panel in the sub-agent's trajectory —
-// and must SURVIVE tab switches and a ``task_events`` replay (the
-// backend now records + persists the echoed prompt event under the
-// sub-agent's task, stamped with ``taskId``).  Also locks the Stop
-// wiring: Stop on a sub-agent tab posts ``stop`` with the SUB-AGENT's
-// tab id only.
-//
-// Drives the real ``media/main.js`` against the real
-// ``media/chat.html`` markup in jsdom with the exact backend event
-// shapes captured from a live daemon run (new_tab → resumeSession →
-// openSubagentTab → status → prompt echo), mirroring the harness of
-// ``subagentRunningInput.test.js``.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/subagentPromptTrajectory.test.js
 
 'use strict';
 
@@ -30,7 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/** Build a jsdom window running the production chat webview. */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -61,17 +42,18 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
 
-/** Dispatch a backend→webview event exactly like the extension does. */
 function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** Click the tab bar entry for *tabId* exactly like a user would. */
 function clickTab(win, tabId) {
   const el = Array.from(
     win.document.querySelectorAll('#tab-list .chat-tab'),
@@ -80,17 +62,12 @@ function clickTab(win, tabId) {
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
-/** All rendered Prompt panels whose body contains *text*. */
 function promptPanels(win, text) {
   return Array.from(win.document.querySelectorAll('.ev.prompt')).filter(el =>
     (el.textContent || '').includes(text),
   );
 }
 
-/**
- * Boot a webview with a running parent whose agent spawned one
- * sub-agent via ``run_parallel`` — the exact live broadcast sequence.
- */
 function bootWithSubagent() {
   const {win, posted} = makeWebview();
   const ready = posted.find(m => m.type === 'ready');
@@ -126,10 +103,6 @@ function bootWithSubagent() {
   return {win, posted, parentId, subTabId};
 }
 
-// ---------------------------------------------------------------------------
-// 1. Typing + Send on a running sub-agent tab posts appendUserMessage
-//    with the SUB-AGENT's tab id.
-// ---------------------------------------------------------------------------
 function testSendPostsAppendUserMessageForSubTab() {
   const {win, posted, subTabId} = bootWithSubagent();
   clickTab(win, subTabId);
@@ -154,10 +127,6 @@ function testSendPostsAppendUserMessageForSubTab() {
   console.log('ok - send posts appendUserMessage with the sub tab id');
 }
 
-// ---------------------------------------------------------------------------
-// 2. The backend's echoed prompt event (tabId + taskId stamped) renders
-//    a Prompt panel in the ACTIVE sub-agent tab's trajectory.
-// ---------------------------------------------------------------------------
 function testEchoedPromptRendersInSubagentTrajectory() {
   const {win, subTabId} = bootWithSubagent();
   clickTab(win, subTabId);
@@ -177,9 +146,6 @@ function testEchoedPromptRendersInSubagentTrajectory() {
   console.log('ok - echoed prompt renders in the sub-agent trajectory');
 }
 
-// ---------------------------------------------------------------------------
-// 3. The injected prompt SURVIVES switching away and back (tab restore).
-// ---------------------------------------------------------------------------
 function testInjectedPromptSurvivesTabSwitch() {
   const {win, parentId, subTabId} = bootWithSubagent();
   clickTab(win, subTabId);
@@ -201,10 +167,6 @@ function testInjectedPromptSurvivesTabSwitch() {
   console.log('ok - injected prompt survives a tab switch');
 }
 
-// ---------------------------------------------------------------------------
-// 4. A task_events replay containing the recorded prompt re-renders it
-//    (backend now records the echo under the sub-agent's task).
-// ---------------------------------------------------------------------------
 function testReplayRendersRecordedPrompt() {
   const {win, subTabId} = bootWithSubagent();
   clickTab(win, subTabId);
@@ -230,9 +192,6 @@ function testReplayRendersRecordedPrompt() {
   console.log('ok - task_events replay renders the recorded prompt');
 }
 
-// ---------------------------------------------------------------------------
-// 5. Stop on a running sub-agent tab posts stop with the SUB tab id.
-// ---------------------------------------------------------------------------
 function testStopPostsSubagentTabId() {
   const {win, posted, subTabId} = bootWithSubagent();
   clickTab(win, subTabId);
@@ -261,7 +220,4 @@ function main() {
 }
 
 main();
-// main.js installs webview timers (status clock, ghost-text debounce)
-// that keep the node event loop alive; exit explicitly once every
-// assertion above has passed.
 process.exit(0);

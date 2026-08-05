@@ -2,25 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Integration test for the "Sorcar" voice wake word in VS Code webview
-// mode (media/voice.js).
-//
-// Extension webviews cannot capture the microphone, so voice.js runs in
-// "webview" mode there: the extension host owns the local Vosk listener
-// and forwards ``{type: 'voiceWake'}`` messages; the toggle button posts
-// ``{type: 'voiceToggle', enabled}`` back through the 'kiss-voice-post'
-// bridge event.  This test runs the real ``media/voice.js`` against a
-// real jsdom document (no mocks for the code under test) and locks in:
-//
-//  1. A voiceWake message never types text into #task-input — it only
-//     flashes the mic button, focuses the input, and keeps listening.
-//  2. Clicking the toggle posts voiceToggle {enabled: true/false}
-//     through the kiss-voice-post bridge.
-//  3. voiceState messages drive the button UI (listening / error).
-//  4. Rapid duplicate wake events are debounced by the cooldown.
-//
-// Run directly with ``node test/voiceWebviewMode.test.js``.
 
 'use strict';
 
@@ -46,13 +27,6 @@ function test(name, fn) {
   }
 }
 
-/**
- * Build a fresh jsdom window whose document contains the two elements
- * voice.js needs (#voice-btn, #task-input), inject the webview-mode
- * config, and execute the real voice.js.  Returns the window plus the
- * list of messages posted through the 'kiss-voice-post' bridge and a
- * counter of 'input' events seen on the textarea.
- */
 function makeWindow() {
   const dom = new JSDOM(
     '<!DOCTYPE html><html><body>' +
@@ -63,10 +37,6 @@ function makeWindow() {
   );
   const win = dom.window;
   win.__VOICE__ = {mode: 'webview'};
-  // The mic is closed by default (fresh install); these tests exercise
-  // the listening flow, so seed the explicit opt-in that auto-enables
-  // the mic at load.  Default-off behavior is locked in by
-  // voiceMicAutoOn.test.js and the persistence test below.
   win.localStorage.setItem('kissVoiceEnabled', '1');
 
   const posted = [];
@@ -91,8 +61,6 @@ function sendHostMessage(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-// ---------------------------------------------------------------------------
-
 test('voiceWake message never types text into the task input', () => {
   const {win, inputEvents, focusCalls} = makeWindow();
   const inp = win.document.getElementById('task-input');
@@ -108,8 +76,6 @@ test('voiceWake message never types text into the task input', () => {
 test('duplicate wake events within the cooldown fire only once', () => {
   const {win, focusCalls} = makeWindow();
   const inp = win.document.getElementById('task-input');
-  // Blur between wakes: a non-debounced triggerWake would refocus the
-  // input each time, so the focus counter reveals every extra firing.
   sendHostMessage(win, {type: 'voiceWake'});
   inp.blur();
   sendHostMessage(win, {type: 'voiceWake'});
@@ -120,10 +86,6 @@ test('duplicate wake events within the cooldown fire only once', () => {
 
 test('clicking the toggle posts voiceToggle through the bridge', () => {
   const {win, posted} = makeWindow();
-  // The seeded opt-in auto-enables the mic at load, so the first
-  // click turns it OFF and the second back ON.
-  // Note: JSON comparison because jsdom detail objects come from
-  // another realm (different Object prototype than the test's).
   assert.strictEqual(
     JSON.stringify(posted),
     JSON.stringify([{type: 'voiceToggle', enabled: true, sensitivity: 80}]),
@@ -142,25 +104,17 @@ test('clicking the toggle posts voiceToggle through the bridge', () => {
 });
 
 test('mic state persists in localStorage and is applied on load', () => {
-  // The seeded opt-in auto-enables at load; the first click therefore
-  // disables and persists the opt-out.
   const first = makeWindow();
   first.win.document.getElementById('voice-btn').click();
   assert.strictEqual(
     first.win.localStorage.getItem('kissVoiceEnabled'),
     '0',
   );
-  // A window with a stored opt-in ('1') MUST auto-enable (makeWindow
-  // seeds the opt-in).
   const second = makeWindow();
   assert.strictEqual(
     JSON.stringify(second.posted),
     JSON.stringify([{type: 'voiceToggle', enabled: true, sensitivity: 80}]),
   );
-  // A brand-new window (fresh storage — first install) must stay OFF:
-  // the mic is closed by default so Sorcar never responds to the wake
-  // word until the user turns it on.  Build the dom manually so no
-  // opt-in is seeded.
   const dom = new JSDOM(
     '<!DOCTYPE html><html><body>' +
       '<button id="voice-btn"></button>' +
@@ -176,7 +130,6 @@ test('mic state persists in localStorage and is applied on load', () => {
   script.textContent = fs.readFileSync(VOICE_JS_PATH, 'utf-8');
   win.document.body.appendChild(script);
   assert.strictEqual(posted.length, 0);
-  // And a stored opt-out ('0') also stays off.
   const dom2 = new JSDOM(
     '<!DOCTYPE html><html><body>' +
       '<button id="voice-btn"></button>' +
@@ -198,7 +151,6 @@ test('mic state persists in localStorage and is applied on load', () => {
 test('voiceState messages drive the toggle UI classes', () => {
   const {win} = makeWindow();
   const btn = win.document.getElementById('voice-btn');
-  // Auto-enabled at load → 'loading' until the host confirms.
   assert.ok(btn.classList.contains('voice-loading'));
   sendHostMessage(win, {type: 'voiceState', listening: true});
   assert.ok(btn.classList.contains('voice-listening'));
@@ -210,8 +162,6 @@ test('voiceState messages drive the toggle UI classes', () => {
   });
   assert.ok(btn.classList.contains('voice-error'));
   assert.ok(btn.getAttribute('data-tooltip').includes('mic unavailable'));
-  // After an error the stored preference must be off so the next
-  // reload does not spin forever.
   assert.strictEqual(win.localStorage.getItem('kissVoiceEnabled'), '0');
 });
 
@@ -223,8 +173,6 @@ test('wake preserves the input when it already has other text', () => {
   assert.strictEqual(inp.value, 'draft text');
   assert.strictEqual(focusCalls.count, 1);
 });
-
-// ---------------------------------------------------------------------------
 
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length > 0) {

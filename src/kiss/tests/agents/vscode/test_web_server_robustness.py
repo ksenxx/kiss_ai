@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
+import pytest
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
@@ -67,10 +68,6 @@ from kiss.server.web_server import (
     _self_signed_cert_needs_renewal,
     _WebMergeState,
 )
-
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
 
 
 def _find_free_port() -> int:
@@ -109,10 +106,6 @@ class _ConfigSnapshot:
             CONFIG_PATH.unlink()
 
 
-# ---------------------------------------------------------------------------
-# M1 — get_running_loop instead of get_event_loop
-# ---------------------------------------------------------------------------
-
 
 
 
@@ -140,7 +133,6 @@ class TestM1NoDeprecationWarning(IsolatedAsyncioTestCase):
             warnings.simplefilter("always")
             await server.start_async()
             try:
-                # Touch a real client so the loop is fully spun up.
                 async with connect(
                     f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
                 ) as ws:
@@ -161,10 +153,6 @@ class TestM1NoDeprecationWarning(IsolatedAsyncioTestCase):
         )
 
 
-# ---------------------------------------------------------------------------
-# M2 — RemoteAccessServer must not mutate os.environ["KISS_WORKDIR"]
-# ---------------------------------------------------------------------------
-
 
 class TestM2NoEnvMutation(unittest.TestCase):
     """Constructing the server must not write to ``os.environ``."""
@@ -172,7 +160,6 @@ class TestM2NoEnvMutation(unittest.TestCase):
     def setUp(self) -> None:
         self._orig = os.environ.pop("KISS_WORKDIR", None)
         self._snap = _ConfigSnapshot().__enter__()
-        # Ensure the load_config() fallback can't leak a value either.
         save_config({"remote_password": ""})
 
     def tearDown(self) -> None:
@@ -184,16 +171,13 @@ class TestM2NoEnvMutation(unittest.TestCase):
     def test_init_does_not_set_kiss_workdir(self) -> None:
         """``__init__`` does not set the KISS_WORKDIR environment variable."""
         wd = tempfile.mkdtemp()
-        # Important: ensure the env var is empty before construction.
         self.assertNotIn("KISS_WORKDIR", os.environ)
         server = RemoteAccessServer(
             host="127.0.0.1",
             port=_find_free_port(),
             work_dir=wd,
         )
-        # The fix moves the work_dir onto the instance — verify it.
         self.assertEqual(server.work_dir, wd)
-        # And the global env must NOT have been mutated.
         self.assertNotIn(
             "KISS_WORKDIR", os.environ,
             "RemoteAccessServer.__init__ must not mutate os.environ",
@@ -211,18 +195,12 @@ class TestM2NoEnvMutation(unittest.TestCase):
         s2 = RemoteAccessServer(
             host="127.0.0.1", port=_find_free_port(), work_dir=b,
         )
-        # Each instance retains its own value.
         self.assertEqual(s1.work_dir, a)
         self.assertEqual(s2.work_dir, b)
         self.assertEqual(s1._printer.work_dir, a)
         self.assertEqual(s2._printer.work_dir, b)
-        # And the env var still has not been written.
         self.assertNotIn("KISS_WORKDIR", os.environ)
 
-
-# ---------------------------------------------------------------------------
-# M3 — minimum TLS version pin
-# ---------------------------------------------------------------------------
 
 
 class TestM3MinimumTlsVersion(unittest.TestCase):
@@ -245,17 +223,12 @@ class TestM3MinimumTlsVersion(unittest.TestCase):
         self.assertGreaterEqual(ctx.minimum_version, ssl.TLSVersion.TLSv1_2)
 
 
-# ---------------------------------------------------------------------------
-# M4 — auto-renewal of self-signed cert near/past expiry
-# ---------------------------------------------------------------------------
-
 
 class TestM4SelfSignedCertRenewal(unittest.TestCase):
     """An expired/expiring auto-generated cert is regenerated on next load."""
 
     def setUp(self) -> None:
         self._tmp = Path(tempfile.mkdtemp())
-        # Redirect _TLS_DIR so we don't touch the user's real ~/.kiss/tls.
         self._orig_tls_dir = ws_mod._TLS_DIR
         ws_mod._TLS_DIR = self._tmp
 
@@ -271,8 +244,6 @@ class TestM4SelfSignedCertRenewal(unittest.TestCase):
         _generate_self_signed_cert(cert_path, key_path)
         cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
         lifetime = cert.not_valid_after_utc - cert.not_valid_before_utc
-        # >= ~9 years (allowing for the leap-day rounding) ensures the
-        # validity is no longer the historic 365 days.
         self.assertGreater(
             lifetime, datetime.timedelta(days=365 * 9),
             f"Cert lifetime {lifetime.days}d is too short; expected ~10y",
@@ -280,8 +251,6 @@ class TestM4SelfSignedCertRenewal(unittest.TestCase):
 
     def test_needs_renewal_helper_detects_expired(self) -> None:
         """``_self_signed_cert_needs_renewal`` returns True for an expired cert."""
-        # Generate a normal cert so the path exists, then overwrite with
-        # a freshly-built expired cert.
         cert_path = self._tmp / "cert.pem"
         key_path = self._tmp / "key.pem"
         _write_expired_cert(cert_path, key_path)
@@ -359,10 +328,6 @@ def _write_expired_cert(cert_path: Path, key_path: Path) -> None:
     os.chmod(key_path, 0o600)
 
 
-# ---------------------------------------------------------------------------
-# M5 — TOCTOU retry on cloudflared bind collision
-# ---------------------------------------------------------------------------
-
 
 class TestM5SpawnRetriesOnImmediateExit(IsolatedAsyncioTestCase):
     """``_spawn_cloudflared`` retries with a fresh port on quick-exit."""
@@ -370,16 +335,6 @@ class TestM5SpawnRetriesOnImmediateExit(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._snap = _ConfigSnapshot().__enter__()
         save_config({"remote_password": ""})
-        # Widen the production fail-fast window
-        # (``proc.wait(timeout=_SPAWN_FAILFAST_WINDOW)`` in
-        # ``_spawn_cloudflared``) for the duration of this test.  On a
-        # heavily loaded machine (e.g. several pytest processes running
-        # in parallel) even the fail-fast fake below can take longer
-        # than the default 1s to exec and exit; the production code
-        # would then misclassify the doomed first spawn as healthy,
-        # skip the retry, and this test would flakily observe an
-        # invocation count of 0.  The healthy second invocation blocks
-        # ``wait`` for the full window, so keep it modest.
         import kiss.server.web_server as ws_mod
 
         self._orig_failfast_window = ws_mod._SPAWN_FAILFAST_WINDOW
@@ -387,13 +342,6 @@ class TestM5SpawnRetriesOnImmediateExit(IsolatedAsyncioTestCase):
         self._tmpdir = tempfile.mkdtemp()
         self._counter_file = os.path.join(self._tmpdir, "counter")
         Path(self._counter_file).write_text("0")
-        # Fake cloudflared: exits with code 7 on the first invocation,
-        # then runs successfully (sleeps).  Uses a counter file so the
-        # test is robust against argv differences.  Implemented as a
-        # /bin/bash script because bash startup has very low and
-        # consistent latency, ensuring the first invocation reliably
-        # exits within the (widened) fail-fast window of
-        # ``_spawn_cloudflared``.
         cf = os.path.join(self._tmpdir, "cloudflared")
         Path(cf).write_text(
             "#!/bin/bash\n"
@@ -409,9 +357,6 @@ class TestM5SpawnRetriesOnImmediateExit(IsolatedAsyncioTestCase):
         )
         os.chmod(cf, 0o755)
         self._old_path = os.environ.get("PATH", "")
-        # Use a minimal PATH so any real cloudflared installed on the
-        # developer's machine (e.g. ~/.local/bin/cloudflared) cannot
-        # shadow our fake under full-suite test pollution.
         os.environ["PATH"] = self._tmpdir + ":/usr/bin:/bin"
         self.port = _find_free_port()
         self.server = RemoteAccessServer(
@@ -438,12 +383,9 @@ class TestM5SpawnRetriesOnImmediateExit(IsolatedAsyncioTestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
         self._snap.__exit__()
 
+    @pytest.mark.slow
     async def test_spawn_retries_on_immediate_exit(self) -> None:
         """First spawn exits with rc=7, second succeeds; final proc is alive."""
-        # The production fail-fast window (widened to 10s in
-        # ``asyncSetUp``) returns as soon as the first (failing) fake
-        # exits and tolerates bash startup latency even on a heavily
-        # loaded machine.
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(
             None, self.server._spawn_cloudflared,
@@ -453,17 +395,11 @@ class TestM5SpawnRetriesOnImmediateExit(IsolatedAsyncioTestCase):
         self.assertIsNotNone(proc)
         assert proc is not None
         self.assertIsNone(proc.poll(), "final cloudflared proc must be alive")
-        # The fake cloudflared was invoked at least twice (first exit
-        # forced the retry).
         count = int(Path(self._counter_file).read_text())
         self.assertGreaterEqual(count, 2)
 
 
 
-
-# ---------------------------------------------------------------------------
-# M6 — merge state cleanup on disconnect + lock against agent-thread race
-# ---------------------------------------------------------------------------
 
 
 class TestM6MergeStateCleanup(IsolatedAsyncioTestCase):
@@ -505,32 +441,20 @@ class TestM6MergeStateCleanup(IsolatedAsyncioTestCase):
             ) as ws:
                 await ws.send(json.dumps({"type": "auth", "password": ""}))
                 await asyncio.wait_for(ws.recv(), timeout=5)
-                # Send any command carrying the tabId so the server
-                # records it on this connection.
                 await ws.send(json.dumps({
                     "type": "getWelcomeSuggestions", "tabId": tab_id,
                 }))
-                # Drain a few events to let the server process the
-                # message.
                 for _ in range(3):
                     try:
                         await asyncio.wait_for(ws.recv(), timeout=1)
                     except (TimeoutError, ConnectionClosed):
                         break
-                # Inject a merge state for this tab from outside
-                # (mimicking what WebPrinter.broadcast →
-                # _register_merge_state does).
                 self.server._register_merge_state(tab_id, {"files": [
                     {"name": "x.txt", "base": "/tmp/x.b",
                      "current": "/tmp/x.c",
                      "hunks": [{"bs": 0, "bc": 0, "cs": 0, "cc": 1}]},
                 ]})
                 self.assertIn(tab_id, self.server._merge_states)
-            # After the WS closes, the grace timer eventually fires
-            # ``_fire_pending_tab_close`` which pops the merge state.
-            # Allow well over the (shrunk) grace window for the timer
-            # to elapse and the executor-dispatched closeTab to
-            # finalise.
             for _ in range(40):
                 await asyncio.sleep(0.05)
                 if tab_id not in self.server._merge_states:
@@ -552,10 +476,6 @@ class TestM6MergeStateCleanup(IsolatedAsyncioTestCase):
         )
 
 
-# ---------------------------------------------------------------------------
-# M7 — clamp restoredTabs / attachments / prompt size
-# ---------------------------------------------------------------------------
-
 
 class TestM7CapsRestoredTabs(IsolatedAsyncioTestCase):
     """Oversize ``restoredTabs`` is truncated to the configured cap."""
@@ -563,14 +483,12 @@ class TestM7CapsRestoredTabs(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self._snap = _ConfigSnapshot().__enter__()
         save_config({"remote_password": ""})
-        # Tighten the cap so we don't have to send 32+ entries.
         self._old_cap = ws_mod._MAX_RESTORED_TABS
         ws_mod._MAX_RESTORED_TABS = 3
         self.port = _find_free_port()
         self.server = RemoteAccessServer(
             host="127.0.0.1", port=self.port, work_dir=tempfile.mkdtemp(),
         )
-        # Track resumeSession invocations on the underlying VSCodeServer.
         self._resumed: list[str] = []
         original = self.server._vscode_server._handle_command
 
@@ -601,13 +519,12 @@ class TestM7CapsRestoredTabs(IsolatedAsyncioTestCase):
             await ws.send(json.dumps({
                 "type": "ready", "tabId": "primary", "restoredTabs": tabs,
             }))
-            # Drain a bunch of responses.
             for _ in range(50):
                 try:
                     await asyncio.wait_for(ws.recv(), timeout=0.5)
                 except TimeoutError:
                     break
-        await asyncio.sleep(0.5)  # let the executor finish
+        await asyncio.sleep(0.5)
         self.assertEqual(
             len(self._resumed), 3,
             f"Expected exactly cap=3 resumeSession calls, got {self._resumed}",
@@ -682,10 +599,6 @@ class TestM7TruncatesPrompt(IsolatedAsyncioTestCase):
         self.assertLessEqual(len(captured[0]["prompt"]), 100)
 
 
-# ---------------------------------------------------------------------------
-# M8 — broadcast tracks futures; remove_client cancels pending sends
-# ---------------------------------------------------------------------------
-
 
 class TestM8FuturesTrackedAndCancelled(IsolatedAsyncioTestCase):
     """``WebPrinter`` tracks pending sends and cancels them on remove_client."""
@@ -694,20 +607,13 @@ class TestM8FuturesTrackedAndCancelled(IsolatedAsyncioTestCase):
         printer = WebPrinter()
         printer._loop = asyncio.get_running_loop()
 
-        # A fake "client" with a never-completing send coroutine.  We
-        # deliberately do NOT inherit from ServerConnection — broadcast
-        # only needs an object that has an awaitable .send().
         class _StuckWs:
             async def send(self, _data: str) -> None:
-                # Block forever so the future never completes by itself.
                 await asyncio.Event().wait()
 
         stuck = _StuckWs()
         printer.add_client(stuck)  # type: ignore[arg-type]
-        # Trigger a broadcast — the send coroutine will be scheduled
-        # but will never finish, so the future stays pending.
         printer.broadcast({"type": "ping"})
-        # Give the loop a moment to schedule.
         await asyncio.sleep(0.1)
         with printer._ws_lock:
             pending = list(printer._pending_sends.get(stuck, set()))
@@ -718,10 +624,7 @@ class TestM8FuturesTrackedAndCancelled(IsolatedAsyncioTestCase):
         fut = pending[0]
         self.assertFalse(fut.done(), "future must still be pending")
 
-        # Now remove the client — the future must be cancelled.
         printer.remove_client(stuck)  # type: ignore[arg-type]
-        # remove_client cancels via `fut.cancel()`.  Wait briefly for
-        # the cancellation to propagate.
         for _ in range(20):
             await asyncio.sleep(0.05)
             if fut.cancelled() or fut.done():
@@ -730,7 +633,6 @@ class TestM8FuturesTrackedAndCancelled(IsolatedAsyncioTestCase):
             fut.cancelled() or fut.done(),
             "pending future must be cancelled (or completed) after remove_client",
         )
-        # And the per-client tracking dict no longer holds the client.
         with printer._ws_lock:
             self.assertNotIn(stuck, printer._pending_sends)
 
@@ -748,8 +650,6 @@ class TestM8FuturesTrackedAndCancelled(IsolatedAsyncioTestCase):
         ok = _OkWs()
         printer.add_client(ok)  # type: ignore[arg-type]
         printer.broadcast({"type": "hello"})
-        # Wait for the scheduled send to complete and the done-callback
-        # to drain the pending set.
         for _ in range(20):
             await asyncio.sleep(0.05)
             with printer._ws_lock:
@@ -759,10 +659,6 @@ class TestM8FuturesTrackedAndCancelled(IsolatedAsyncioTestCase):
             self.assertEqual(printer._pending_sends.get(ok), set())
         self.assertGreaterEqual(len(_OkWs.sent), 1)
 
-
-# ---------------------------------------------------------------------------
-# M9 — _WebMergeState exposes is_resolved; web_server stops poking _resolved
-# ---------------------------------------------------------------------------
 
 
 class TestM9IsResolvedMethod(unittest.TestCase):
@@ -783,10 +679,6 @@ class TestM9IsResolvedMethod(unittest.TestCase):
         self.assertFalse(state.is_resolved(0, 0))
 
 
-
-# ---------------------------------------------------------------------------
-# M10 — _send_welcome_info is async and uses run_in_executor for blocking IO
-# ---------------------------------------------------------------------------
 
 
 class TestM10WelcomeInfoIsAsync(unittest.TestCase):
@@ -825,10 +717,9 @@ class TestM10WelcomeInfoDoesNotBlockEventLoop(IsolatedAsyncioTestCase):
 
         def _slow_read(url_file: Path) -> str | None:
             slow_calls.append(time.monotonic())
-            time.sleep(1.5)  # synchronous sleep to simulate slow IO
+            time.sleep(1.5)
             return original(url_file)
 
-        # Patch the module-level helper for the duration of the test.
         ws_mod._read_url_from_file = _slow_read  # type: ignore[assignment]
         self.server._active_url = None
         try:
@@ -850,17 +741,11 @@ class TestM10WelcomeInfoDoesNotBlockEventLoop(IsolatedAsyncioTestCase):
             ws_mod._read_url_from_file = original  # type: ignore[assignment]
 
         self.assertEqual(len(slow_calls), 1)
-        # The ticker fired ~24 times during the 1.2s window — if the
-        # event loop had been blocked it would have fired zero times.
         self.assertGreater(
             tick_count, 5,
             f"event loop was blocked during slow IO (only {tick_count} ticks)",
         )
 
-
-# ---------------------------------------------------------------------------
-# M11 — _WebMergeState.current() returns None once everything is resolved
-# ---------------------------------------------------------------------------
 
 
 class TestM11CurrentReturnsNoneWhenAllResolved(unittest.TestCase):
@@ -871,9 +756,7 @@ class TestM11CurrentReturnsNoneWhenAllResolved(unittest.TestCase):
             {"name": "a", "hunks": [{}, {}]},
             {"name": "b", "hunks": [{}]},
         ]})
-        # Sanity: before resolving anything, current is the first hunk.
         self.assertEqual(state.current(), (0, 0))
-        # Resolve every hunk (mimics accept-all / reject-all).
         for fi, hi in state.all_unresolved():
             state.mark_resolved(fi, hi)
         self.assertEqual(state.remaining, 0)
@@ -896,11 +779,6 @@ class TestM11CurrentReturnsNoneWhenAllResolved(unittest.TestCase):
         assert cur is not None
         self.assertFalse(state.is_resolved(*cur))
 
-
-# ---------------------------------------------------------------------------
-# M12 — _authenticate_ws closes the socket on every failure, including
-#       the exception path
-# ---------------------------------------------------------------------------
 
 
 

@@ -51,8 +51,6 @@ def _extract_live_followup_case(src: str) -> str:
     ``break;`` (the live arm uses ``break;`` inside the switch; the replay
     arm uses ``return;`` because it lives inside a ``forEach`` callback).
     """
-    # Match the case label, then capture everything up to the first ``break;``
-    # that closes a brace block (the case body is wrapped in ``{ ... }``).
     pattern = (
         r"case\s+'followup_suggestion':\s*\{(?P<body>.*?)\n\s*break;\s*\n\s*\}"
     )
@@ -61,7 +59,6 @@ def _extract_live_followup_case(src: str) -> str:
         "Could not locate the live case 'followup_suggestion': { ... break; } "
         "arm in main.js — did the dispatcher structure change?"
     )
-    # There should be exactly one such arm (the replay path uses ``return;``).
     assert len(matches) == 1, (
         f"Expected exactly one live followup_suggestion case body, found "
         f"{len(matches)}.  Update the test to disambiguate."
@@ -79,9 +76,6 @@ def test_live_followup_suggestion_handler_does_not_call_sb() -> None:
     src = _read_main_js()
     body = _extract_live_followup_case(src)
 
-    # ``sb`` is the only scroll-to-bottom helper in main.js; it is invoked as
-    # ``sb()`` (no arguments) and never as a substring of another identifier
-    # (we still anchor to be safe).
     assert not re.search(r"\bsb\s*\(\s*\)", body), (
         "Live case 'followup_suggestion' still calls sb() — this scrolls the "
         "chat to the bottom every time a 'Suggested next' bar is shown, which "
@@ -123,7 +117,6 @@ def test_replay_followup_suggestion_does_not_call_sb() -> None:
     a future refactor from re-introducing the live-side bug here.
     """
     src = _read_main_js()
-    # Match the replay arm: ``if (t === 'followup_suggestion') { ... return; }``
     m = re.search(
         r"if\s*\(\s*t\s*===\s*'followup_suggestion'\s*\)\s*\{(?P<body>.*?)\n\s*return;\s*\n\s*\}",
         src,

@@ -43,12 +43,6 @@ def escape_invalid_template_field_names(text : str, valid_field_names : set[str]
         if field_name is None:
             continue
 
-        # A placeholder is only fillable when its own field AND every
-        # field nested inside its format spec are valid.  Doubled
-        # braces are NOT unescaped inside a format spec by
-        # ``str.format``, so escaping just the invalid nested field
-        # would leave an invalid spec that raises at format time —
-        # the whole placeholder must be escaped verbatim instead.
         spec_field_names = get_template_field_names(format_spec) if format_spec else []
         is_valid = field_name in valid_field_names and all(
             name in valid_field_names for name in spec_field_names

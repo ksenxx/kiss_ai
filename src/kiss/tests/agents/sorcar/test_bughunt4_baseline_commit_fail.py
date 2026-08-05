@@ -87,7 +87,6 @@ class TestBaselineCommitFailure:
         with tempfile.TemporaryDirectory() as tmp:
             repo = _make_repo(Path(tmp) / "repo")
             _install_failing_prepare_commit_msg_hook(repo)
-            # User dirty state that needs a baseline commit.
             (repo / "README.md").write_text("# Test\nuser edit\n")
 
             agent = WorktreeSorcarAgent("bh4-baseline-fail")
@@ -109,7 +108,6 @@ class TestBaselineCommitFailure:
             assert leftovers == [], (
                 f"partial worktree dirs left behind: {leftovers}"
             )
-            # The user's dirty edit in the main tree is untouched.
             assert (repo / "README.md").read_text() == "# Test\nuser edit\n"
 
     def test_clean_main_tree_is_unaffected_by_failing_hook(self) -> None:

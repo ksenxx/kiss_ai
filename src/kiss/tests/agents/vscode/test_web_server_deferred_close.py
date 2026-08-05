@@ -70,7 +70,6 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect_persistence(self.tmpdir)
-        # Patch the grace window to something tiny so tests don't wait.
         import kiss.server.web_server as ws
 
         self._orig_grace = ws._TAB_CLOSE_GRACE
@@ -92,7 +91,6 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
         _silence_broadcasts(self.server)
 
     async def asyncTearDown(self) -> None:
-        # Cancel any timers the test left behind.
         with self.server._pending_tab_closes_lock:
             for h in list(self.server._pending_tab_closes.values()):
                 try:
@@ -144,13 +142,11 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
         """``_cancel_pending_tab_close`` removes the pending entry and
         prevents the timer from firing.
         """
-        # Pre-create a backend tab state so we'd notice an erroneous close.
         self.server._vscode_server._get_tab("tab-B")
         self.server._schedule_tab_close("tab-B")
         self.server._cancel_pending_tab_close("tab-B")
         with self.server._pending_tab_closes_lock:
             self.assertNotIn("tab-B", self.server._pending_tab_closes)
-        # Wait past the (tiny) grace window — the timer must NOT fire.
         await asyncio.sleep(0.15)
         self.assertIn("tab-B", _RunningAgentState.running_agent_states)
 
@@ -190,17 +186,13 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
         try:
             self.server._schedule_tab_close(tab_id)
             await self._wait_pending_clear(tab_id)
-            # Wait long enough for the executor-dispatched closeTab
-            # to run.
             for _ in range(100):
                 if tab.frontend_closed:
                     break
                 await asyncio.sleep(0.01)
-            # Deferred: state still present, frontend_closed flagged.
             self.assertIn(tab_id, _RunningAgentState.running_agent_states)
             self.assertTrue(tab.frontend_closed)
 
-            # Mirror _run_task's finally tail.
             release.set()
             thr.join(timeout=5)
             with self.server._vscode_server._state_lock:
@@ -226,9 +218,6 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
                 {"tab-X", "tab-Y", "tab-Z"},
             )
 
-        # Simulate the cancel path triggered by ``_handle_ready``: the
-        # current connection's ``tabId`` plus every restored tab id is
-        # cancelled.
         self.server._cancel_pending_tab_close("tab-X")
         for restored_id in ("tab-Y", "tab-Z"):
             self.server._cancel_pending_tab_close(restored_id)
@@ -236,8 +225,6 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
         with self.server._pending_tab_closes_lock:
             self.assertEqual(self.server._pending_tab_closes, {})
 
-        # Wait past the grace window — none of the tabs should be
-        # disposed.
         await asyncio.sleep(_TAB_CLOSE_GRACE + 0.05)
         for tab_id in ("tab-X", "tab-Y", "tab-Z"):
             self.assertIn(tab_id, _RunningAgentState.running_agent_states)
@@ -253,24 +240,12 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
         tab = self.server._vscode_server._get_tab(tab_id)
         tab.frontend_closed = True
 
-        # Drive _replay_session with no events (the call still runs
-        # ``_get_tab`` + flag clear, then returns when no events are
-        # found).  Use a chat_id that doesn't exist so the function
-        # falls through to the early-return path AFTER `_get_tab`
-        # would have been called normally — to exercise the flag
-        # clear we instead invoke the same code path the resume uses.
-        # Simpler: call resume_chat_by_id directly (what _replay_session
-        # does after _get_tab) and then mirror the flag clear logic.
         from kiss.server.server import VSCodeServer
-        # Use the same `_state_lock`-guarded clear that
-        # ``_replay_session`` now performs.
         assert isinstance(self.server._vscode_server, VSCodeServer)
         with self.server._vscode_server._state_lock:
             tab.frontend_closed = False
 
         self.assertFalse(tab.frontend_closed)
-        # Now if the lifecycle ends, _dispose_if_closed must NOT pop
-        # this tab.
         self.server._vscode_server._dispose_if_closed(tab_id)
         self.assertIn(tab_id, _RunningAgentState.running_agent_states)
 
@@ -283,15 +258,6 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
         tab = self.server._vscode_server._get_tab(tab_id)
         tab.frontend_closed = True
 
-        # ``_replay_session`` early-returns when no events are found
-        # for the chat_id; but with our changes, even the early-return
-        # path runs ``_get_tab`` only AFTER deciding the events exist.
-        # When events truly don't exist for an unknown chat_id, the
-        # function exits before touching the tab.  So instead we
-        # verify the documented invariant: after ``_replay_session``
-        # is called for a chat with events, ``frontend_closed`` is
-        # cleared.  We bypass the persistence layer by stubbing the
-        # event loader.
         import kiss.server.server as srv
 
         orig_loader = srv._load_latest_chat_events_by_chat_id
@@ -310,7 +276,6 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
             srv._load_latest_chat_events_by_chat_id = orig_loader  # type: ignore[assignment]
 
         self.assertFalse(tab.frontend_closed)
-        # And the tab survived a subsequent ``_dispose_if_closed``.
         self.server._vscode_server._dispose_if_closed(tab_id)
         self.assertIn(tab_id, _RunningAgentState.running_agent_states)
 
@@ -325,7 +290,6 @@ class TestDeferredWebTabClose(IsolatedAsyncioTestCase):
         with self.server._pending_tab_closes_lock:
             h2 = self.server._pending_tab_closes[tab_id]
         self.assertIsNot(h1, h2)
-        # The old handle is cancelled.
         self.assertTrue(h1.cancelled())
 
     async def test_stop_async_cancels_pending(self) -> None:

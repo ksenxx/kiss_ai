@@ -74,16 +74,7 @@ def main() -> None:
 
     interactive = args.task is None and args.file is None
     if not interactive:
-        # Validate AFTER argparse (so ``-t``/``-f`` are decoded
-        # correctly) but BEFORE the agent is built / the LLM is
-        # contacted (so the user sees the error immediately and no
-        # budget is spent).
         _reject_interactive_only_flags(sys.argv)
-    # ``RecordingConsolePrinter`` records every display event to the
-    # chat DB AND renders the Rich panels to the terminal, so the same
-    # run is visible live in the terminal and replayable later in the
-    # chat webview.  Passed as a factory because the sorcar layer
-    # (cli_helpers) must not import the UI layer itself.
     from kiss.ui.cli.cli_printer import RecordingConsolePrinter
 
     run_kwargs = _build_run_kwargs(args, printer_factory=RecordingConsolePrinter)
@@ -95,21 +86,13 @@ def main() -> None:
             run_client(
                 work_dir=run_kwargs.get("work_dir") or work_dir,
                 model_name=run_kwargs.get("model_name", ""),
-                # ``_build_run_kwargs`` has no active-editor concept
-                # (the CLI has no such flag); the identifier-suffix
-                # predictive completion is a VS Code-extension-only
-                # feature, so the completer runs without a file here.
                 active_file="",
                 use_worktree=bool(getattr(args, "worktree", True)),
                 use_parallel=bool(getattr(args, "parallel", True)),
-                # Fallback default matches the argparse default
-                # (``--auto-commit`` default=True in cli_helpers) and
-                # the sibling ``worktree``/``parallel`` fallbacks.
                 auto_commit=bool(getattr(args, "auto_commit", True)),
             ),
         )
 
-    # Non-interactive: plain SorcarAgent, no chat / no worktree.
     from kiss.ui.cli.cli_steering import run_with_steering
 
     agent: SorcarAgent = SorcarAgent("Sorcar Agent")

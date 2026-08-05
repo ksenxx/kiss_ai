@@ -49,7 +49,6 @@ from kiss.agents.sorcar.mcp_servers import (
     save_mcp_server,
 )
 
-# How long ``sorcar mcp auth`` waits for the browser redirect.
 AUTH_TIMEOUT = 300.0
 
 
@@ -245,8 +244,6 @@ class _OAuthCallbackServer:
                 code = (params.get("code") or [""])[0] or None
                 error = (params.get("error") or [""])[0] or None
                 if code is None and error is None:
-                    # Not the OAuth redirect (e.g. a favicon probe):
-                    # never clobber an already-captured code.
                     self.send_response(404)
                     self.end_headers()
                     return
@@ -258,9 +255,6 @@ class _OAuthCallbackServer:
                         b"complete.</h2>You may close this tab.</body></html>"
                     )
                 elif outer.code is None:
-                    # RFC 6749 4.1.2.1 error response (e.g. the user
-                    # denied access): record the reason so wait() can
-                    # fail fast instead of sitting out the timeout.
                     desc = (params.get("error_description") or [""])[0]
                     outer.error = f"{error}: {desc}" if desc else error
                     body = (
@@ -268,7 +262,6 @@ class _OAuthCallbackServer:
                         b"failed.</h2>You may close this tab.</body></html>"
                     )
                 else:
-                    # A late error request never clobbers a captured code.
                     body = (
                         b"<html><body><h2>Sorcar MCP authentication "
                         b"complete.</h2>You may close this tab.</body></html>"
@@ -397,11 +390,6 @@ def _cmd_auth(args: argparse.Namespace, work_dir: str) -> int:
                 _connect_once(cfg, auth), CONNECT_TIMEOUT + AUTH_TIMEOUT,
             )
         finally:
-            # Close (and thereby unblock) the callback server *inside*
-            # the event loop: asyncio.run's teardown joins the default
-            # executor, so a callback.wait() still blocked there would
-            # stall the CLI for up to AUTH_TIMEOUT seconds after an
-            # early connection failure.
             callback.close()
 
     try:

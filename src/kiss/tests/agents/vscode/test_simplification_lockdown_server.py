@@ -163,8 +163,6 @@ class TestGetHistoryExtraCoercion(_DbTestBase):
         assert isinstance(s["cost"], float)
         assert s["steps"] == 0
         assert s["endTs"] == 0
-        # Garbage startTs keeps the row-timestamp fallback (ms since
-        # epoch from the INSERT time, hence > 0).
         assert s["startTs"] > 0
 
     def test_mixed_valid_and_garbage_rows_coexist(self) -> None:
@@ -310,7 +308,6 @@ class TestLiveTaskIdFallback(_DbTestBase):
             "auto_commit_mode": False,
         }
 
-        # The fallback id must NOT match while the agent id is set.
         unmatched: dict = {"tokens": 0, "cost": 0.0, "steps": 0}
         server._overlay_live_metrics(unmatched, "42")
         assert unmatched == {"tokens": 0, "cost": 0.0, "steps": 0}
@@ -432,7 +429,7 @@ class TestMergeFlowDelegates(_DbTestBase):
 
         server._emit_pending_worktree("tab-no-worktree")
 
-        assert len(events) == before  # no broadcast, no exception
+        assert len(events) == before
 
 
 class TestPersistedSubagentIsDone(_DbTestBase):
@@ -472,4 +469,3 @@ class TestPersistedSubagentIsDone(_DbTestBase):
         )
 
         assert [e for e in events if e.get("type") == "openSubagentTab"] == []
-

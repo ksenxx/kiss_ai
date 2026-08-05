@@ -12,31 +12,23 @@ blocked/undecodable.  Per product decision (matching voice.js: "a
 quiet ack is a far better failure than the loud robotic voice"), that
 fallback is removed: when no natural clip can play, the talk degrades
 to SILENCE and the talk queue advances so later talks still play.
-Demo mode never synthesizes speech: a replayed talk without recorded
-audio is skipped silently.
 
-These tests run the REAL production ``media/main.js`` (+ ``demo.js``
-for the demo scenarios) in jsdom with NO production code mocked, under
-a deterministic virtual clock, and assert for every historical
-fallback trigger that:
+These tests run the REAL production ``media/main.js`` in jsdom with NO
+production code mocked, under a deterministic virtual clock, and
+assert for every historical fallback trigger that:
 
 * ``window.speechSynthesis.speak`` is NEVER invoked, and
-* the talk queue / demo replay still advances (no hang, later natural
-  clips still play).
+* the talk queue still advances (no hang, later natural clips still
+  play).
 
 Scenarios:
 
 * ``live-silent``  — live ``talk`` event without ``audioB64``;
 * ``live-reject``  — live ``talk`` whose clip ``play()`` rejects
-  (autoplay policy block / undecodable clip);
-* ``demo-silent``  — demo replay of a ``talk`` event with no recorded
-  audio (skipped silently, replay completes);
-* ``demo-reject``  — demo replay whose recorded clip's ``play()``
-  rejects.
+  (autoplay policy block / undecodable clip).
 
-Each live scenario queues a SECOND talk carrying a good clip and
-asserts it plays, proving the silent degradation released the talk
-queue.  Each demo scenario asserts the replay runs to completion.
+Each scenario queues a SECOND talk carrying a good clip and asserts it
+plays, proving the silent degradation released the talk queue.
 """
 
 from __future__ import annotations
@@ -58,16 +50,8 @@ TALK_TEXT = (
     "probability."
 )
 
-# Virtual-time ceiling of one driver run.
 VIRTUAL_CAP_MS = 600_000
 
-# Node driver: loads chat.html (script tags stripped), installs a
-# deterministic virtual clock, runs the real main.js (+ demo.js for
-# demo scenarios), triggers one historical Web-Speech-fallback
-# scenario (argv mode), and reports every speechSynthesis.speak call
-# and every Audio clip play.  Prints JSON:
-# {"spoken": [...], "clips": [...], "vnow": N, "replayDone": bool,
-#  "timerErrors": [...]}.
 NODE_DRIVER = r"""
 'use strict';
 const fs = require('fs');
@@ -75,8 +59,7 @@ const path = require('path');
 const {JSDOM} = require('jsdom');
 
 const MEDIA = process.argv[2];
-const mode = process.argv[3]; // live-silent | live-reject |
-                              // demo-silent | demo-reject
+const mode = process.argv[3]; // live-silent | live-reject
 const capMs = parseInt(process.argv[4], 10);
 const talkText = process.argv[5];
 
@@ -195,77 +178,31 @@ win.acquireVsCodeApi = function () {
   return {
     getState: () => state,
     setState: s => { state = s; },
-    postMessage: msg => {
-      if (msg.type === 'resumeSession') {
-        const tabId = msg.tabId;
-        // demo-silent: the recorded talk carries no audio (skipped
-        // silently); demo-reject: it carries a recorded clip whose
-        // play() rejects.
-        const talkExtras = {
-          text: talkText, language: 'en-US', emotion: 'warm'};
-        if (mode === 'demo-reject') {
-          talkExtras.audioB64 = REJECT_CLIP;
-          talkExtras.audioMime = 'audio/mpeg';
-        }
-        win.setTimeout(() => {
-          win.dispatchEvent(new win.MessageEvent('message', {data: {
-            type: 'task_events',
-            tabId: tabId,
-            chat_id: 'chat-1',
-            task_id: 'task-1',
-            task: 'Demo task',
-            extra: {},
-            events: [
-              {type: 'text_delta', text: 'Answering out loud now. '},
-              {type: 'tool_call', name: 'talk', tool_id: 'tc-1',
-               arguments: '', extras: talkExtras},
-              {type: 'tool_result', tool_id: 'tc-1',
-               result: 'Spoke to the user.'},
-            ],
-          }}));
-        }, 0);
-      }
-    },
+    postMessage: () => {},
   };
 };
 
 win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
+win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
 win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
-let replayDone = false;
-if (mode === 'demo-silent' || mode === 'demo-reject') {
-  win.eval(fs.readFileSync(path.join(MEDIA, 'demo.js'), 'utf8'));
-  const sessions = [{
-    id: 'chat-1', task_id: 'task-1', has_events: true,
-    preview: 'Demo task',
-  }];
-  win._startDemoReplay(sessions, sessions[0]).then(
-    () => { replayDone = true; },
-    e => {
-      console.error(e && (e.stack || e.message || String(e)));
-      process.exit(1);
-    },
-  );
-} else {
-  // Live ``talk`` events straight through the window message handler,
-  // exactly as the extension host delivers them.  The first talk
-  // triggers the historical fallback (no audio / rejected play); the
-  // SECOND carries a good clip and must still play — proof the silent
-  // degradation released the serialized talk queue.
-  const first = {type: 'talk', text: talkText, language: 'en-US',
-                 emotion: 'warm', talkId: 'talk-1'};
-  if (mode === 'live-reject') {
-    first.audioB64 = REJECT_CLIP;
-    first.audioMime = 'audio/mpeg';
-  }
-  win.dispatchEvent(new win.MessageEvent('message', {data: first}));
-  win.dispatchEvent(new win.MessageEvent('message', {data: {
-    type: 'talk', text: 'And that is the full story.',
-    language: 'en-US', emotion: 'warm', talkId: 'talk-2',
-    audioB64: GOOD_CLIP, audioMime: 'audio/mpeg',
-  }}));
-  replayDone = true; // not a demo scenario
+// Live ``talk`` events straight through the window message handler,
+// exactly as the extension host delivers them.  The first talk
+// triggers the historical fallback (no audio / rejected play); the
+// SECOND carries a good clip and must still play — proof the silent
+// degradation released the serialized talk queue.
+const first = {type: 'talk', text: talkText, language: 'en-US',
+               emotion: 'warm', talkId: 'talk-1'};
+if (mode === 'live-reject') {
+  first.audioB64 = REJECT_CLIP;
+  first.audioMime = 'audio/mpeg';
 }
+win.dispatchEvent(new win.MessageEvent('message', {data: first}));
+win.dispatchEvent(new win.MessageEvent('message', {data: {
+  type: 'talk', text: 'And that is the full story.',
+  language: 'en-US', emotion: 'warm', talkId: 'talk-2',
+  audioB64: GOOD_CLIP, audioMime: 'audio/mpeg',
+}}));
 
 (async () => {
   // do-while: always advance + drain at least once so promise chains
@@ -274,12 +211,11 @@ if (mode === 'demo-silent' || mode === 'demo-reject') {
   do {
     advanceTo(vnow + 500);
     await drain();
-  } while (vnow < capMs && !(replayDone && vtimers.size === 0));
+  } while (vnow < capMs && vtimers.size !== 0);
   console.log(JSON.stringify({
     spoken: spoken,
     clips: clips,
     vnow: vnow,
-    replayDone: replayDone,
     timerErrors: timerErrors,
   }));
   process.exit(0);
@@ -294,14 +230,12 @@ def run_fallback_driver(mode: str) -> dict:
     """Run the jsdom no-Web-Speech driver and return its JSON result.
 
     Args:
-        mode: Fallback scenario — ``live-silent``, ``live-reject``,
-            ``demo-silent`` or ``demo-reject``.
+        mode: Fallback scenario — ``live-silent`` or ``live-reject``.
 
     Returns:
-        ``{"spoken": [...], "clips": [...], "vnow": N, "replayDone":
-        bool, "timerErrors": [...]}`` — every Web-Speech utterance,
-        every Audio clip play attempt, the final virtual time, whether
-        the demo replay completed, and page timer exceptions.
+        ``{"spoken": [...], "clips": [...], "vnow": N, "timerErrors":
+        [...]}`` — every Web-Speech utterance, every Audio clip play
+        attempt, the final virtual time, and page timer exceptions.
     """
     node = shutil.which("node")
     if node is None:
@@ -373,34 +307,6 @@ class TestNoWebSpeechFallback(unittest.TestCase):
         assert any(GOOD_CLIP_B64 in c for c in result["clips"]), (
             "rejected-play degradation did not release the talk queue: "
             f"{result}"
-        )
-
-    def test_demo_talk_without_audio_stays_silent_replay_completes(
-        self,
-    ) -> None:
-        """A demo replay of a ``talk`` event without recorded audio
-        must be skipped silently — never synthesized, never the
-        robotic voice — and the replay must still run to completion
-        (no hang)."""
-        result = run_fallback_driver("demo-silent")
-        self.check_no_web_speech(result)
-        assert result["replayDone"], (
-            f"demo replay never finished: {result}"
-        )
-        assert not result["clips"], (
-            f"the talk carried no audio, yet a clip played: {result}"
-        )
-
-    def test_demo_clip_rejected_play_stays_silent_replay_completes(
-        self,
-    ) -> None:
-        """A demo replay whose recorded clip's ``play()`` rejects
-        must degrade to silence — never the robotic voice — and the
-        replay must still run to completion."""
-        result = run_fallback_driver("demo-reject")
-        self.check_no_web_speech(result)
-        assert result["replayDone"], (
-            f"demo replay never finished: {result}"
         )
 
 

@@ -89,8 +89,6 @@ class TestAudioPricesRegistered:
         ],
     )
     def test_gpt_audio_mini_family_audio_prices(self, model_name: str) -> None:
-        # openrouter.ai/openai/gpt-audio-mini lists audio rates EQUAL to
-        # the text rates ($0.60 in / $2.40 out per 1M).
         info = MODEL_INFO[model_name]
         assert info.audio_input_price_per_1M == 0.6
         assert info.audio_output_price_per_1M == 2.4
@@ -109,9 +107,6 @@ class TestCalculateCostAudioTokens:
         assert cost == pytest.approx(expected)
 
     def test_typical_talk_call_costs_6x_more_than_text_billing(self) -> None:
-        # A ~30s talk() utterance: ~60 text prompt tokens, ~20 text output
-        # tokens, ~600 audio output tokens.  Text-rate billing charged
-        # $0.0068; the correct bill is $0.0387 (5.7x more).
         correct = calculate_cost(
             "gpt-audio-1.5", 60, 20, num_audio_output_tokens=600,
         )
@@ -131,9 +126,6 @@ class TestCalculateCostAudioTokens:
         assert cost == pytest.approx(expected)
 
     def test_model_without_audio_prices_falls_back_to_text_rates(self) -> None:
-        # Text-only models have no audio prices; audio counts (which
-        # should never occur for them) bill at text rates rather than
-        # silently costing $0.
         cost = calculate_cost(
             "gpt-5.6-sol",
             num_input_tokens=0,
@@ -161,8 +153,8 @@ class TestOpenAIExtractorAudioSplit:
             audio_output=280,
         )
         assert m.extract_input_output_token_counts_from_response(response) == (
-            17,  # 25 prompt - 8 audio
-            20,  # 300 completion - 280 audio
+            17,
+            20,
             0,
             0,
             0,

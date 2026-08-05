@@ -48,10 +48,6 @@ from typing import Any
 from kiss.server.server import VSCodeServer
 from kiss.server.web_server import WebPrinter
 
-# Content/panel event types that belong to a single task's chat stream.
-# If any of these is broadcast without a ``tabId`` while two tabs are
-# running, the frontend renders it into the active tab — polluting a
-# different running task's chat.
 _CONTENT_EVENT_TYPES = frozenset({
     "result", "text_delta", "text_end", "thinking_start", "thinking_delta",
     "thinking_end", "tool_call", "tool_result", "system_output",
@@ -108,7 +104,6 @@ class TestCrossTabChatPollution:
         """
         server, printer = _make_server()
 
-        # tabB is actively running an unrelated task.
         printer.subscribe_tab("200", "tabB")
         server._get_tab("tabB").task_history_id = "200"
 

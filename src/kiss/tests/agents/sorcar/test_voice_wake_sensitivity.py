@@ -43,6 +43,8 @@ import threading
 import unittest
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parents[5]
 
 HAVE_MAC_TTS = bool(shutil.which("say")) and bool(shutil.which("afconvert"))
@@ -101,9 +103,6 @@ class TestSensitivityCliRealVoice(unittest.TestCase):
             "soccer",
             "soccer [[slnc 1500]] soccer [[slnc 1500]] soccer [[slnc 1500]]",
         )
-        # The short pause before "Sorcar" keeps the TTS from slurring
-        # the phrase into a single [unk] (observed with some prosody):
-        # this decodes to "[unk] sore car" with conf 1.0 reliably.
         cls.hey_wav = _say_wav(
             cls.tmpdir,
             "hey",
@@ -128,8 +127,6 @@ class TestSensitivityCliRealVoice(unittest.TestCase):
         shutil.rmtree(cls.tmpdir, ignore_errors=True)
 
     def test_sorcar_wakes_at_default_sensitivity(self) -> None:
-        # Explicit default: fails before the feature exists because
-        # --sensitivity is an unknown argument (argparse exits 2).
         proc = _run_listener(self.sorcar_wav, "--sensitivity", "80")
         lines = proc.stdout.split()
         self.assertIn("READY", lines, msg=proc.stderr[-2000:])
@@ -137,10 +134,6 @@ class TestSensitivityCliRealVoice(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, msg=proc.stderr[-2000:])
 
     def test_low_sensitivity_rejects_sound_alike(self) -> None:
-        # "soccer" force-fits onto "sar car"/"sir car" with word
-        # confidences ~0.55-0.69 (measured): it wakes at the default
-        # sensitivity but not at sensitivity 10, whose confidence gate
-        # (0.72) exceeds every force-fit score.
         wakes = _run_listener(self.soccer_wav, "--sensitivity", "80")
         self.assertIn("WAKE", wakes.stdout.split(),
                       msg=wakes.stderr[-2000:])
@@ -153,10 +146,8 @@ class TestSensitivityCliRealVoice(unittest.TestCase):
                          msg=rejects.stdout)
         self.assertEqual(rejects.returncode, 1, msg=rejects.stdout)
 
+    @pytest.mark.slow
     def test_high_sensitivity_wakes_on_trailing_alias(self) -> None:
-        # "hey there Sorcar" decodes to "[unk] sore car" (measured):
-        # strict whole-utterance matching rejects it below 75; at 80
-        # (the default) a trailing alias is accepted and wakes.
         strict = _run_listener(self.hey_wav, "--sensitivity", "50")
         self.assertIn("READY", strict.stdout.split(),
                       msg=strict.stderr[-2000:])
@@ -200,8 +191,6 @@ class TestSensitivitySliderBrowser(unittest.TestCase):
         from kiss.server.web_server import RemoteAccessServer
 
         self.tmpdir = Path(tempfile.mkdtemp())
-        # Chromium loops the fake-capture file, so the same "hey there
-        # Sorcar" audio keeps playing before and after the slider move.
         self.wav = _say_wav(
             self.tmpdir, "hey", "hey there [[slnc 300]] Sorcar [[slnc 1500]]"
         )
@@ -234,6 +223,7 @@ class TestSensitivitySliderBrowser(unittest.TestCase):
             self.loop.close()
             shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    @pytest.mark.slow
     def test_slider_changes_browser_wake_sensitivity(self) -> None:
         from playwright.sync_api import sync_playwright
 
@@ -250,8 +240,6 @@ class TestSensitivitySliderBrowser(unittest.TestCase):
             )
             try:
                 context = browser.new_context(ignore_https_errors=True)
-                # Seed a strict sensitivity (50): the default (80)
-                # accepts a trailing alias and would wake immediately.
                 context.add_init_script(
                     "localStorage.setItem('kissVoiceEnabled', '1');"
                     "localStorage.setItem('kissVoiceSensitivity', '50');"
@@ -262,8 +250,6 @@ class TestSensitivitySliderBrowser(unittest.TestCase):
                     wait_until="load",
                     timeout=60_000,
                 )
-                # The settings panel must contain the sensitivity
-                # slider, reflecting the stored value.
                 slider = page.evaluate(
                     "(() => { const s = document.getElementById("
                     "'cfg-voice-sensitivity'); return s &&"
@@ -273,7 +259,6 @@ class TestSensitivitySliderBrowser(unittest.TestCase):
                 self.assertEqual(slider["value"], "50")
                 self.assertEqual(slider["min"], "0")
                 self.assertEqual(slider["max"], "100")
-                # Record every wake flash on the mic button.
                 page.evaluate(
                     "window.__sawWake = false;"
                     "const btn = document.getElementById('voice-btn');"
@@ -282,22 +267,16 @@ class TestSensitivitySliderBrowser(unittest.TestCase):
                     "    window.__sawWake = true;"
                     "}).observe(btn, {attributes: true});"
                 )
-                # Wait for listening to start (cold cache: the server
-                # downloads the Vosk model, the browser unpacks it in
-                # the WASM worker).
                 page.wait_for_function(
                     "document.getElementById('voice-btn')"
                     ".classList.contains('voice-listening')",
                     timeout=300_000,
                 )
-                # At the strict stored sensitivity (50) the looping
-                # "hey there Sorcar" audio must NOT wake the listener.
                 page.wait_for_timeout(10_000)
                 self.assertFalse(
                     page.evaluate("window.__sawWake"),
                     "audio must not wake at sensitivity 50",
                 )
-                # Drag the slider to 85: the SAME audio must now wake.
                 page.evaluate(
                     "const s = document.getElementById("
                     "'cfg-voice-sensitivity');"
@@ -314,8 +293,6 @@ class TestSensitivitySliderBrowser(unittest.TestCase):
                 page.wait_for_function(
                     "window.__sawWake === true", timeout=120_000
                 )
-                # A fresh profile (no stored value) must default the
-                # slider to 80.
                 fresh = browser.new_context(ignore_https_errors=True)
                 fresh_page = fresh.new_page()
                 fresh_page.goto(

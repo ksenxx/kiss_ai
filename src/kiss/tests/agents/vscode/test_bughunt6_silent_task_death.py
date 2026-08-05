@@ -96,7 +96,6 @@ class TestSilentTaskDeath(unittest.TestCase):
             if done:
                 break
             time.sleep(0.02)
-        # Give post-status broadcasts (none expected pre-fix) a moment.
         time.sleep(0.2)
         with self._events_lock:
             return list(self.events)

@@ -253,8 +253,6 @@ class TestExtendedThinkingFlagCanForceOff:
         """Simulate a MODEL_INFO override that opts a prefix-matched model out."""
         info = MODEL_INFO["claude-opus-4-8"]
         monkeypatch.setattr(info, "extended_thinking", False)
-        # ``adaptive_thinking`` is separately gated; keep it as-declared
-        # so this test only measures the ``extended_thinking`` opt-out.
         assert _supports_extended_thinking("claude-opus-4-8") is False
         m = AnthropicModel("claude-opus-4-8", api_key="test-key")
         m.conversation = [{"role": "user", "content": "ping"}]

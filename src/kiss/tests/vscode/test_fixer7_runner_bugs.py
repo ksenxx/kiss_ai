@@ -67,10 +67,6 @@ def _pop_tabs(*tab_ids: str) -> None:
         _RunningAgentState.running_agent_states.pop(tab_id, None)
 
 
-# ---------------------------------------------------------------------------
-# F1 — _cmd_run: tab wedged forever when the clear broadcast raises
-# ---------------------------------------------------------------------------
-
 
 class _FailingClearPrinter(_CapturePrinter):
     """Transport whose ``clear`` broadcast always fails (subclass error)."""
@@ -91,17 +87,9 @@ def test_f1_failed_clear_broadcast_does_not_wedge_tab() -> None:
         with pytest.raises(RuntimeError):
             server._cmd_run(dict(cmd))
         tab = _RunningAgentState.running_agent_states[tab_id]
-        # The in-flight markers armed before the failed broadcast must
-        # be rolled back — the worker thread never ran, so nothing else
-        # will ever reset them.
         assert tab.task_thread is None
         assert tab.stop_event is None
         assert tab.user_answer_queue is None
-        # Behavioral proof the tab is NOT wedged: a second run takes
-        # the fresh-task path again (and fails at the same broadcast)
-        # instead of the busy path.  Pre-fix, the busy path silently
-        # queued the prompt as a follow-up no agent would ever drain
-        # and echoed it back as a ``prompt`` event.
         with pytest.raises(RuntimeError):
             server._cmd_run(dict(cmd))
         assert tab.pending_user_messages == []
@@ -110,20 +98,12 @@ def test_f1_failed_clear_broadcast_does_not_wedge_tab() -> None:
         _pop_tabs(tab_id)
 
 
-# ---------------------------------------------------------------------------
-# F3 — _resolve_user_answer_queue: cross-task user-answer hijack
-# ---------------------------------------------------------------------------
-
 
 def test_f3_stale_viewer_answer_not_hijacked_by_unrelated_task() -> None:
     printer = _CapturePrinter()
     server = VSCodeServer(printer=printer)
     viewer, owner = "f3-viewer", "f3-owner"
     try:
-        # ``viewer`` and ``owner`` co-subscribed to task 100, which has
-        # FINISHED (cleanup_task intentionally preserves subscriber
-        # sets).  ``owner`` is now running a brand-new UNRELATED task
-        # 200 with a live answer queue owned by that task.
         printer.subscribe_tab(100, viewer)
         printer.subscribe_tab(100, owner)
         owner_state = _RunningAgentState(owner, "test-model")
@@ -134,25 +114,16 @@ def test_f3_stale_viewer_answer_not_hijacked_by_unrelated_task() -> None:
         owner_state.agent._last_task_id = "200"
         printer.subscribe_tab(200, owner)
 
-        # A stale answer submitted from the viewer's still-open modal
-        # (for finished task 100) must NOT be delivered into task 200's
-        # live queue.
         server._cmd_user_answer({"tabId": viewer, "answer": "stale"})
         assert owner_state.user_answer_queue.empty()
         assert all(e.get("type") != "askUserDone" for e in printer.events)
 
-        # Correct routing is preserved: when the owner's live agent IS
-        # running the shared task, the viewer's answer reaches it.
         owner_state.agent._last_task_id = "100"
         server._cmd_user_answer({"tabId": viewer, "answer": "real answer"})
         assert owner_state.user_answer_queue.get_nowait() == "real answer"
     finally:
         _pop_tabs(viewer, owner)
 
-
-# ---------------------------------------------------------------------------
-# F4 — bash_stream inline flush: stale broadcast after concurrent reset()
-# ---------------------------------------------------------------------------
 
 
 class _ResetRacePrinter(JsonPrinter):
@@ -196,27 +167,16 @@ def test_f4_inline_bash_flush_not_emitted_after_reset() -> None:
     resetter = threading.Thread(target=do_reset, daemon=True)
     resetter.start()
     printer._thread_local.task_id = task_key
-    # ``last_flush`` starts at 0.0, so the first chunk takes the inline
-    # (immediate) flush path rather than arming the 0.1 s timer.
     printer.print("previous-turn output", type="bash_stream")
     resetter.join(timeout=5.0)
     assert not resetter.is_alive()
-    # The chunk itself must have been flushed (the reset raced it, it
-    # did not precede it) ...
     assert any(
         e.get("type") == "system_output"
         and "previous-turn output" in e.get("text", "")
         for e in printer.events
     )
-    # ... but the emission must not have happened AFTER the new turn's
-    # reset() completed — that would leak the previous turn's stale
-    # bash output into the new turn's transcript.
     assert not printer.stale_emission
 
-
-# ---------------------------------------------------------------------------
-# F10 — voice_wake: junk KISS_VOICE_MIC_BLOCK_SIZE must not crash
-# ---------------------------------------------------------------------------
 
 
 def test_f10_mic_block_size_falls_back_on_junk_env() -> None:
@@ -236,10 +196,6 @@ def test_f10_mic_block_size_falls_back_on_junk_env() -> None:
         else:
             os.environ["KISS_VOICE_MIC_BLOCK_SIZE"] = saved
 
-
-# ---------------------------------------------------------------------------
-# F11 — voice_wake: no phantom WAKE after a cooldown-suppressed match
-# ---------------------------------------------------------------------------
 
 HAVE_MAC_TTS = bool(shutil.which("say")) and bool(shutil.which("afconvert"))
 
@@ -301,7 +257,7 @@ def test_f11_cooldown_suppressed_wake_resets_cleanly(tmp_path: Path) -> None:
     silence_block = b"\x00" * (BLOCK_SIZE * 2)
 
     def feed_pcm(pcm: bytes) -> None:
-        step = BLOCK_SIZE * 2  # frames -> bytes (s16le)
+        step = BLOCK_SIZE * 2
         for i in range(0, len(pcm), step):
             if detector.feed(pcm[i : i + step]):
                 wakes.append(detector._audio_seconds)
@@ -324,17 +280,10 @@ def test_f11_cooldown_suppressed_wake_resets_cleanly(tmp_path: Path) -> None:
     if utterance_seconds > COOLDOWN_SECONDS - 1.0:
         pytest.skip("TTS utterance too long to land inside the cooldown")
 
-    # First "Sorcar": genuine wake (fires during the trailing silence
-    # once Vosk endpoints the utterance).
     feed_pcm(pcm)
     feed_silence_until_wake(2.0)
     wake1 = wakes[0]
 
-    # Second "Sorcar" immediately after: its match lands well inside
-    # the cooldown and must be suppressed — and the suppression (which
-    # now resets the recognizer) must not leave state that fires a
-    # phantom WAKE out of the following 4 s of pure silence after the
-    # cooldown expires.
     feed_pcm(pcm)
     feed_silence(4.0)
     if len(wakes) > 1 and wakes[1] - wake1 >= COOLDOWN_SECONDS - 0.05:
@@ -344,17 +293,11 @@ def test_f11_cooldown_suppressed_wake_resets_cleanly(tmp_path: Path) -> None:
         )
     assert wakes == [wake1], f"unexpected wake(s) after suppression: {wakes}"
 
-    # Third "Sorcar" well past the cooldown: the added ``Reset()`` on
-    # the suppressed path must not deafen the detector.
     feed_pcm(pcm)
     feed_silence_until_wake(2.0)
     assert len(wakes) == 2
     assert wakes[1] - wake1 >= COOLDOWN_SECONDS
 
-
-# ---------------------------------------------------------------------------
-# F16 — _run_task: Stop (KeyboardInterrupt) during setup vanished silently
-# ---------------------------------------------------------------------------
 
 
 class _StopDuringSetupPrinter(_CapturePrinter):
@@ -389,9 +332,6 @@ def test_f16_keyboard_interrupt_during_setup_broadcasts_result(
     server = VSCodeServer(printer=printer)
     tab_id = "f16-tab"
     try:
-        # Pre-fix this re-raised out of ``_run_task`` (only
-        # ``Exception`` was caught): the spinner stopped but no result
-        # was ever broadcast — the task silently vanished.
         server._run_task({
             "tabId": tab_id,
             "prompt": "x",
@@ -402,7 +342,6 @@ def test_f16_keyboard_interrupt_during_setup_broadcasts_result(
         assert results[0]["success"] is False
         assert results[0]["tabId"] == tab_id
         assert "stopped" in results[0]["text"].lower()
-        # The finally still ends the spinner.
         assert any(
             e.get("type") == "status" and e.get("running") is False
             for e in printer.events

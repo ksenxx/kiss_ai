@@ -136,8 +136,6 @@ class _RecordingPrinter:
     def __init__(self, repo: Path) -> None:
         self._repo = repo
         self.events: list[dict[str, Any]] = []
-        # HEAD SHA at the moment each event was broadcast.  ``""``
-        # means "no HEAD yet" (an unborn branch).
         self.head_at_event: list[str] = []
 
     def broadcast(self, event: dict[str, Any]) -> None:
@@ -208,10 +206,7 @@ class TestAutoCommitChangesNotifyFn:
 
             assert created is True
             assert [c[0] for c in calls] == ["generating", "committed"]
-            # "generating" must fire BEFORE the commit lands.
             assert calls[0][2] == head_before
-            # "committed" must carry the first line of the message
-            # and fire AFTER the commit lands.
             assert calls[1][1] == "feat: add f.txt"
             head_after = _head_sha(repo)
             assert calls[1][2] == head_after
@@ -250,10 +245,7 @@ class TestAutoCommitChangesNotifyFn:
                 )
 
             assert created is False
-            # No changes ⇒ no "generating" toast (it would be misleading
-            # because nothing is going to be committed).
             assert calls == []
-            # No changes ⇒ no LLM call (saves tokens and latency).
             assert msg_fn_called == []
             assert _head_sha(repo) == head_before
 
@@ -348,7 +340,7 @@ class TestAutoCommitChangesNotifyFn:
                 )
 
             assert created is False
-            assert invocations == []  # message_fn was NOT called.
+            assert invocations == []
 
 
 class TestWorktreeAutoCommitBroadcasts:
@@ -370,8 +362,6 @@ class TestWorktreeAutoCommitBroadcasts:
             agent.printer = printer  # type: ignore[assignment]
 
             with _LLMUnavailable():
-                # The LLM-fallback path produces:
-                #   "kiss: auto-commit agent changes" (no user prompt)
                 assert agent._auto_commit_worktree() is True
 
             notifs = _notification_events(printer)
@@ -380,36 +370,21 @@ class TestWorktreeAutoCommitBroadcasts:
             gen_ev, gen_head = notifs[0]
             committed_ev, committed_head = notifs[1]
 
-            # Shape: every notification carries type/id/severity/message/tabId.
             for ev in (gen_ev, committed_ev):
                 assert ev["type"] == "notification"
                 assert ev["severity"] == "info"
                 assert ev["tabId"] == "tab-xyz"
                 assert isinstance(ev["id"], str) and ev["id"]
-            # Bug 2 (gpt-5.5 review): the two events MUST share the
-            # same notification id so the webview updates the toast in
-            # place (Generating → Committed) instead of stacking two
-            # toasts and leaving the misleading "Generating commit
-            # message" lingering until its own auto-dismiss timer fires.
             assert gen_ev["id"] == committed_ev["id"]
 
-            # Content + ordering.
             assert gen_ev["message"] == "Generating commit message"
-            assert gen_head == head_before  # fired BEFORE the commit
-            # The "Generating commit message" toast MUST be sticky:
-            # the webview's transient auto-dismiss timer (~5 s for
-            # info severity) would otherwise hide it mid-LLM-call and
-            # mislead the user into thinking the commit had stalled.
-            # The follow-up "Committed <subject>" event reuses the
-            # same id but omits sticky, so the toast reverts to a
-            # normal transient that fades on its own.
+            assert gen_head == head_before
             assert gen_ev.get("sticky") is True
             assert "sticky" not in committed_ev or not committed_ev["sticky"]
             assert committed_ev["message"].startswith("Committed ")
             head_after = _head_sha(wt_dir)
-            assert committed_head == head_after  # fired AFTER the commit
+            assert committed_head == head_after
             assert head_after != head_before
-            # Subject in the toast matches the actual git log subject.
             subject = _head_message(wt_dir).splitlines()[0].strip()
             assert committed_ev["message"] == f"Committed {subject}"
 
@@ -423,7 +398,6 @@ class TestWorktreeAutoCommitBroadcasts:
             tmp = Path(tmp_str)
             agent, _repo, wt_dir = _setup_worktree_agent(tmp, "notif-empty")
             head_before = _head_sha(wt_dir)
-            # No changes in wt_dir ⇒ commit_staged returns False.
 
             printer = _RecordingPrinter(wt_dir)
             agent.printer = printer  # type: ignore[assignment]
@@ -431,7 +405,6 @@ class TestWorktreeAutoCommitBroadcasts:
             with _LLMUnavailable():
                 assert agent._auto_commit_worktree() is False
 
-            # No notifications at all — the empty path is silent.
             assert _notification_events(printer) == []
             assert _head_sha(wt_dir) == head_before
 
@@ -448,11 +421,6 @@ class TestWorktreeAutoCommitBroadcasts:
             with _LLMUnavailable():
                 assert agent._auto_commit_worktree() is True
 
-            # And the commit landed.  The LLM-unavailable path inside
-            # ``generate_commit_message_from_diff`` swallows the
-            # exception and returns the ``"kiss: auto-commit agent work"``
-            # fallback, so the outer ``except`` in
-            # :func:`auto_commit_changes` does NOT fire.
             assert _head_message(wt_dir).startswith(
                 "kiss: auto-commit agent work"
             )
@@ -520,8 +488,6 @@ class TestWorktreeAutoCommitBroadcasts:
         nothing) and must NOT broadcast the "Generating commit
         message" toast.
         """
-        # Spy on ``_generate_commit_message`` to confirm it is never
-        # called when the worktree has no changes.
         import kiss.agents.sorcar.sorcar_agent as sa
 
         original = sa._generate_commit_message

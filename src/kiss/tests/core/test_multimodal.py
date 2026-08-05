@@ -267,9 +267,6 @@ class TestTranscribeAudio(unittest.TestCase):
             def do_POST(self) -> None:  # noqa: N802 - http.server API
                 self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
                 Handler.request_count += 1
-                # The OpenAI SDK itself retries twice (3 requests per
-                # attempt), so fail the first 4 requests to force the
-                # application-level retry loop to perform a 2nd attempt.
                 if Handler.request_count <= 4:
                     body = b'{"error": {"message": "rate limited", "type": "rate_limit_error"}}'
                     self.send_response(429)

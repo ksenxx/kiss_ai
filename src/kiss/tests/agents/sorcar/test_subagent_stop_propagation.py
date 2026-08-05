@@ -150,16 +150,12 @@ class TestStopEventPropagationToSubagents:
                 "printer._thread_local before agent.run() is called."
             )
             assert captured[sub_key]["stop_event_is_set"] is False
-        # Each sub-agent gets its OWN event (so the user can stop one
-        # sub-agent without touching its siblings or the parent) ...
         ev_a = captured["task-a"]["stop_event"]
         ev_b = captured["task-b"]["stop_event"]
         assert ev_a is not ev_b, (
             "each parallel sub-agent must get its own stop event so a "
             "sub-agent-tab Stop kills only that sub-agent"
         )
-        # ... setting a sub-agent's event never propagates upward or
-        # sideways ...
         ev_a.set()
         assert not parent_stop.is_set(), (
             "stopping one sub-agent must not stop the parent task"
@@ -167,8 +163,6 @@ class TestStopEventPropagationToSubagents:
         assert not ev_b.is_set(), (
             "stopping one sub-agent must not stop its siblings"
         )
-        # ... while a PARENT stop still propagates to every sub-agent
-        # through the chained event.
         parent_stop.set()
         assert ev_b.is_set(), (
             "a parent-task stop must still reach every sub-agent's "
@@ -209,8 +203,6 @@ class TestStopEventPropagationToSubagents:
         with pytest.raises(KeyboardInterrupt):
             parent._run_tasks_parallel(["t1"])
 
-        # The sub-agent saw the set stop signal (its own event chains
-        # to the parent's) before raising.
         sub = captured["t1"]
         assert sub["stop_event"] is not None
         assert sub["stop_event_is_set"] is True
@@ -255,8 +247,6 @@ class TestStopEventPropagationToSubagents:
             "boundaries at every depth."
         )
         assert not nested_ev.is_set()
-        # A parent stop must propagate transitively through the chain
-        # of per-sub-agent events: parent → sub → nested.
         parent_stop.set()
         assert sub_ev.is_set(), (
             "parent stop must reach the direct sub-agent's chained event"
@@ -264,11 +254,7 @@ class TestStopEventPropagationToSubagents:
         assert nested_ev.is_set(), (
             "parent stop must reach the NESTED sub-agent's chained event"
         )
-        # A nested-level stop stays at its level: it must not flip the
-        # intermediate sub-agent's own flag nor the parent's event.
         assert isinstance(nested_ev, threading.Event)
-        # Different worker threads at each level — propagation is
-        # cross-thread, not just same-thread reuse.
         assert (
             captured[sub_key]["thread_ident"]
             != captured[nested_key]["thread_ident"]

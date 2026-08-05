@@ -104,7 +104,6 @@ class TestSymlinkTypechangeReject(unittest.TestCase):
         (self.repo / "link.txt").write_text("agent content\n")
         self._review_and_reject_all()
         self._assert_link_restored()
-        # The original target file is untouched.
         self.assertEqual((self.repo / "data.txt").read_text(), "hello\n")
 
     def test_reject_restores_retargeted_symlink(self) -> None:

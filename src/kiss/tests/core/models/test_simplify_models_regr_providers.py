@@ -223,7 +223,6 @@ class TestAnthropicNormalization:
             {"type": "text", "text": "calling"},
             {"type": "tool_use", "id": "c1", "name": "F", "input": {"x": 1}},
         ]
-        # tool result and following user turn are merged into one user message
         assert out[2]["content"][0] == {
             "type": "tool_result",
             "tool_use_id": "c1",
@@ -248,7 +247,6 @@ class TestAnthropicNormalization:
         assert kwargs["model"] == "claude-sonnet-4-5"
         assert kwargs["system"] == "sys prompt"
         assert kwargs["messages"] == [{"role": "user", "content": "hi"}]
-        # sonnet-4 default: thinking enabled + boosted max_tokens
         assert kwargs["thinking"] == {"type": "enabled", "budget_tokens": 10000}
         assert kwargs["max_tokens"] == 64000
         assert kwargs["cache_control"] == {"type": "ephemeral"}
@@ -457,7 +455,7 @@ class TestGeminiHelpers:
 
     def test_decode_base64(self) -> None:
         assert _decode_base64(PNG_B64) == PNG_BYTES
-        assert _decode_base64("A") is None  # invalid length raises binascii.Error
+        assert _decode_base64("A") is None
 
     def test_media_block_anthropic_image(self) -> None:
         part = _media_block_to_part(
@@ -637,7 +635,7 @@ class TestGeminiConversion:
         m.conversation = [
             {"role": "system", "content": "sys1"},
             {"role": "system", "content": [{"type": "text", "text": "sys2"}]},
-            {"role": "system", "content": "cfg"},  # duplicate skipped
+            {"role": "system", "content": "cfg"},
             {"role": "user", "content": "hi"},
         ]
         assert m._resolve_system_instruction() == "cfg\n\nsys1\n\nsys2"
@@ -909,7 +907,6 @@ class TestClaudeCodeModel:
         )
         assert content == tc
         assert m._stopped_for_tool_calls is True
-        # result event is still scanned after the early stop for usage data
         assert result.get("result") == "SHOULD NOT BE USED"
 
     def test_parse_stream_events_tool_calls_clean_finish(self) -> None:

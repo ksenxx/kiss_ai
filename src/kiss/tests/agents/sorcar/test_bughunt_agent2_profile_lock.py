@@ -74,7 +74,6 @@ def test_profile_locked_by_own_live_process_is_in_use(tmp_path) -> None:
 
 def test_profile_locked_by_dead_process_is_free(tmp_path) -> None:
     """A lock whose PID no longer exists reads as free (stale lock)."""
-    # Spawn-and-reap a real child so the PID is guaranteed dead.
     proc = subprocess.Popen(["true"])
     proc.wait()
     pid = proc.pid

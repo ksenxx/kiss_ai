@@ -2,14 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Regression tests for the slide-up panels (Settings / Frequent tasks /
-// Tricks) in media/main.js.  Locks in the exact open/close behavior —
-// 'open' class on panel + overlay, the backend request each open
-// triggers — so the duplicated open*/close* helpers can be unified
-// without any visible change.
-//
-//     node src/kiss/agents/vscode/test/simplify2_panels.test.js
 'use strict';
 
 const assert = require('assert');
@@ -20,9 +12,6 @@ function isOpen(win, id) {
 }
 
 function run() {
-  // The Frequent-tasks toggle button is provided by the remote
-  // webapp's HTML (not by chat.html); add it before main.js boots so
-  // the same wiring path is exercised.
   const {win, posted} = makeWebview({
     beforeScripts(w) {
       const btn = w.document.createElement('button');
@@ -32,7 +21,6 @@ function run() {
   });
   const doc = win.document;
 
-  // --- Tricks panel: toggle button opens, overlay click closes. ---
   win.__TRICKS__ = ['do the thing'];
   const tricksBtn = doc.getElementById('tricks-btn');
   tricksBtn.click();
@@ -50,7 +38,6 @@ function run() {
   tricksBtn.click();
   assert.ok(!isOpen(win, 'tricks-panel'), 'toggle button closes tricks panel');
 
-  // --- Frequent tasks panel: open requests tasks from the backend. ---
   const frequentBtn = doc.getElementById('frequent-tasks-btn');
   frequentBtn.click();
   assert.ok(isOpen(win, 'frequent-panel'), 'frequent panel opens');
@@ -63,7 +50,6 @@ function run() {
   assert.ok(!isOpen(win, 'frequent-panel'), 'close button closes panel');
   assert.ok(!isOpen(win, 'frequent-overlay'), 'frequent overlay closes');
 
-  // --- Settings panel: gear tab opens (requests config), X closes. ---
   const gear = doc.querySelector('.chat-tab-settings');
   assert.ok(gear, 'tab bar renders the settings gear button');
   gear.click();

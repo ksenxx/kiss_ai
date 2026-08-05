@@ -533,7 +533,6 @@ class TestAutocommitPromptForBinaryOnlyChanges(_LifecycleHarness):
         tab = self.server._get_tab(tab_id)
         tab.use_worktree = False
 
-        # Commit a binary file so it's tracked
         pdf_path = Path(self.tmpdir, "output.pdf")
         pdf_path.write_bytes(b"%PDF-1.4 original content\x00\xff\xd8")
         _git(self.tmpdir, "add", "output.pdf")
@@ -548,7 +547,6 @@ class TestAutocommitPromptForBinaryOnlyChanges(_LifecycleHarness):
             )
         )
 
-        # Agent rebuilds the PDF (binary-only change)
         pdf_path.write_bytes(b"%PDF-1.4 rebuilt content\x00\xff\xd9\xab\xcd")
 
         started = self.server._prepare_and_start_merge(
@@ -560,7 +558,6 @@ class TestAutocommitPromptForBinaryOnlyChanges(_LifecycleHarness):
             tab_id=tab_id,
         )
 
-        # Binary files are now included in the merge view
         assert started, (
             "Binary-only changes should start a merge session "
             f"(with binary flag). Events: {_event_types(self.events)}"
@@ -570,7 +567,6 @@ class TestAutocommitPromptForBinaryOnlyChanges(_LifecycleHarness):
         assert "merge_data" in types
         assert "merge_started" in types
 
-        # The merge data should contain the binary file with binary flag
         md_event = _find_event(self.events, "merge_data")
         files = md_event["data"]["files"]
         assert len(files) == 1
@@ -598,7 +594,6 @@ class TestAutocommitPromptForBinaryOnlyChanges(_LifecycleHarness):
             )
         )
 
-        # Agent modifies both a text file and a binary file
         Path(self.tmpdir, "README.md").write_text("# Updated by agent\n")
         pdf_path.write_bytes(b"%PDF-1.4 rebuilt\x00\xff\xab")
 
@@ -611,13 +606,11 @@ class TestAutocommitPromptForBinaryOnlyChanges(_LifecycleHarness):
             tab_id=tab_id,
         )
 
-        # Text hunks exist → merge session starts
         assert started, (
             "Mixed binary+text changes should start a merge session "
             f"for the text hunks. Events: {_event_types(self.events)}"
         )
 
-        # After merge review, autocommit_prompt includes both files
         self.events.clear()
         self.server._finish_merge(tab_id)
 
@@ -643,7 +636,6 @@ class TestAutocommitUsesCommandWorkDir(unittest.TestCase):
     def setUp(self) -> None:
         self.repo = tempfile.mkdtemp()
         _init_repo(self.repo)
-        # The daemon-wide work_dir points at a *non-git* folder.
         self.nongit = tempfile.mkdtemp()
         if _git(self.nongit, "rev-parse", "--is-inside-work-tree").returncode == 0:
             self.skipTest(f"{self.nongit} is inside a git repo")
@@ -714,7 +706,6 @@ class TestCommitMessageUsesCommandWorkDir(unittest.TestCase):
     def setUp(self) -> None:
         self.repo = tempfile.mkdtemp()
         _init_repo(self.repo)
-        # The daemon-wide work_dir points at a *non-git* folder.
         self.nongit = tempfile.mkdtemp()
         if _git(self.nongit, "rev-parse", "--is-inside-work-tree").returncode == 0:
             self.skipTest(f"{self.nongit} is inside a git repo")
@@ -756,7 +747,6 @@ class TestCommitMessageUsesCommandWorkDir(unittest.TestCase):
             "tabId": "t-cm3",
             "workDir": self.repo,
         })
-        # The handler runs in a daemon thread; wait briefly for the event.
         for _ in range(50):
             if any(e["type"] == "commitMessage" for e in self.events):
                 break

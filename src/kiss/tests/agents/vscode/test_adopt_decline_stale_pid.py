@@ -92,10 +92,6 @@ class TestAdoptDeclineStalePid(unittest.TestCase):
     def test_unrelated_process_with_reused_pid_survives(self) -> None:
         """Decline path must not signal a PID that is not cloudflared."""
         port = self._start_unhealthy_metrics_server()
-        # A real, long-lived, UNRELATED process (plays the role of
-        # whatever the OS gave the recycled PID to — a user's editor,
-        # a build, anything).  Its executable is python, not
-        # cloudflared.
         proc = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(60)"],
             stdout=subprocess.DEVNULL,
@@ -107,7 +103,6 @@ class TestAdoptDeclineStalePid(unittest.TestCase):
         result = ws._try_adopt_existing_cloudflared()
 
         self.assertIsNone(result, "unhealthy tunnel must not be adopted")
-        # Give any wrongly-sent SIGTERM time to land.
         deadline = time.monotonic() + 1.0
         while time.monotonic() < deadline:
             self.assertIsNone(
@@ -149,9 +144,6 @@ class TestAdoptDeclineStalePid(unittest.TestCase):
     def test_real_cloudflared_lookalike_is_terminated(self) -> None:
         """A genuine cloudflared process on the decline path IS terminated."""
         port = self._start_unhealthy_metrics_server()
-        # Exec python through a symlink named ``cloudflared`` so the
-        # process's comm / argv[0] basename is ``cloudflared`` — the
-        # same identity a real cloudflared binary presents.
         link = Path(self._tmp.name) / "cloudflared"
         os.symlink(sys.executable, link)
         proc = subprocess.Popen(

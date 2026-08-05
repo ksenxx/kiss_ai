@@ -42,8 +42,6 @@ import pytest
 REPO = Path(__file__).resolve().parents[5]
 INSTALL_SCRIPT = REPO / "install.sh"
 
-# Stub ``npm run package`` prints this and exits 7, deterministically
-# ending the run *after* all the version checks under test.
 NPM_MARKER = "NPM-PACKAGE-MARKER"
 NPM_EXIT = 7
 
@@ -160,6 +158,7 @@ def run_install(sandbox: dict, use_pty: bool) -> subprocess.CompletedProcess:
     )
 
 
+@pytest.mark.slow
 def test_git_auto_upgrade_without_tty_does_not_crash(tmp_path: Path) -> None:
     """Webapp update path: no tty, old git, failing brew — must proceed.
 
@@ -194,6 +193,7 @@ def test_git_auto_upgrade_with_eof_tty_does_not_crash(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.slow
 def test_missing_version_constants_do_not_crash(tmp_path: Path) -> None:
     """A missing DependencyInstaller.ts must not kill the script.
 

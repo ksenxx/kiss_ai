@@ -41,6 +41,7 @@ class ModelInfo:
         adaptive_thinking: bool | None = None,
         audio_input_price_per_million: float | None = None,
         audio_output_price_per_million: float | None = None,
+        alias_of: str | None = None,
     ):
         self.context_length = context_length
         self.input_price_per_1M = input_price_per_million
@@ -51,62 +52,19 @@ class ModelInfo:
         self.cache_read_price_per_1M = cache_read_price_per_million
         self.cache_write_price_per_1M = cache_write_price_per_million
         self.cache_write_1h_price_per_1M = cache_write_1h_price_per_million
-        #: USD per 1M AUDIO input/output tokens for audio-chat models
-        #: (e.g. ``gpt-audio-1.5``: $32 in / $64 out while its TEXT
-        #: tokens bill $2.50/$10).  ``None`` means the model has no
-        #: separate audio rates; any audio tokens then bill at the
-        #: text input/output prices.
         self.audio_input_price_per_1M = audio_input_price_per_million
         self.audio_output_price_per_1M = audio_output_price_per_million
         self.thinking = thinking
-        #: Optional name of a fallback model to switch to when the primary
-        #: model returns a non-retryable error (e.g. Anthropic responding
-        #: with ``"Claude Fable 5 is not available. Please use Opus 4.8"``
-        #: or ``"credit balance is too low"``).  ``None`` disables the
-        #: fallback behavior for this model.
         self.fallback = fallback
-        #: Tri-state override for whether this Anthropic model expects the
-        #: ``thinking`` request parameter and the
-        #: ``anthropic-beta: interleaved-thinking-2025-05-14`` header.
-        #:
-        #: * ``True``  — force extended thinking on (used for models like
-        #:   ``claude-fable-5`` / ``claude-sonnet-5`` whose family names
-        #:   are not covered by the legacy prefix heuristic in
-        #:   :func:`kiss.core.models.anthropic_model._build_create_kwargs`).
-        #: * ``False`` — force extended thinking off.
-        #: * ``None``  — no explicit opinion; the adapter falls back to
-        #:   its prefix-based default.
         self.extended_thinking = extended_thinking
-        #: Tri-state override for ``thinking.type``.  ``True`` requests
-        #: ``{"type": "adaptive", "display": "summarized"}`` (required by
-        #: Claude 4.6+ / fable / sonnet-5 which reject ``"enabled"``;
-        #: ``display`` must be ``"summarized"`` because it defaults to
-        #: ``"omitted"``, which returns empty signature-only thinking);
-        #: ``False`` forces ``{"type": "enabled", "budget_tokens": ...}``;
-        #: ``None`` falls back to
-        #: :func:`kiss.core.models.anthropic_model._uses_adaptive_thinking`.
         self.adaptive_thinking = adaptive_thinking
+        self.alias_of = alias_of
 
 
 PACKAGE_MODEL_INFO_PATH = Path(__file__).parent / "MODEL_INFO.json"
 
-#: Optional user-curated model overrides / extensions file.
-#:
-#: The bundled ``MODEL_INFO.json`` next to this module is the read-only
-#: source of truth for shipped models — it is never copied into
-#: ``~/.kiss/``.  Users add personal models or override bundled pricing
-#: by editing ``~/.kiss/MY_MODELS.json``, which the loader merges on top
-#: of the bundled table at import time.
 USER_MY_MODELS_PATH = Path.home() / ".kiss" / "MY_MODELS.json"
 
-#: Default JSON content seeded into ``~/.kiss/MY_MODELS.json`` on first
-#: read.  Contains a short ``_documentation`` block and a single
-#: commented-out example entry (key starts with ``_`` so it is ignored
-#: by :func:`_read_my_models` until the user removes the prefix).
-#:
-#: Keeping the seed inert means a fresh install sees exactly the bundled
-#: model table — no spurious "example" model appears in the picker
-#: until the user opts in by renaming ``_example/my-org/my-custom-model``.
 MY_MODELS_DEFAULT_CONTENT = json.dumps(
     {
         "_documentation": [
@@ -238,6 +196,7 @@ def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
         adaptive_thinking=entry.get("adaptive_thinking"),
         audio_input_price_per_million=entry.get("audio_input_price_per_1M"),
         audio_output_price_per_million=entry.get("audio_output_price_per_1M"),
+        alias_of=entry.get("alias_of"),
     )
 
 
@@ -322,12 +281,6 @@ class OpenAICompatibleProvider:
     delegate_tools_to_responses: bool
 
 
-# Single source of truth for OpenAI-compatible vendor endpoints. Adding a
-# new vendor here (with its declared ``tools_accept_reasoning_effort``
-# capability) is ALL that is required — routing, capability handling and
-# SorcarAgent's endpoint carry-over logic all derive from this table. A
-# regression test (test_reasoning_effort_capability_registry.py) trips when
-# an entry is added so the capability declaration is a conscious decision.
 OPENAI_COMPATIBLE_PROVIDERS: tuple[OpenAICompatibleProvider, ...] = (
     OpenAICompatibleProvider(
         name="openrouter",
@@ -336,8 +289,6 @@ OPENAI_COMPATIBLE_PROVIDERS: tuple[OpenAICompatibleProvider, ...] = (
         prefixes=("openrouter/",),
         excludes=(),
         api_key_name="OPENROUTER_API_KEY",
-        # Verified live: 200 with a real tool call for every effort level
-        # including "xhigh"; OpenRouter translates the effort per provider.
         tools_accept_reasoning_effort=True,
         delegate_tools_to_responses=False,
     ),
@@ -346,15 +297,8 @@ OPENAI_COMPATIBLE_PROVIDERS: tuple[OpenAICompatibleProvider, ...] = (
         host="api.openai.com",
         base_url="https://api.openai.com/v1",
         prefixes=_OPENAI_PREFIXES,
-        # gpt-oss models are served by Together; text-embedding-004 is a
-        # Gemini embedding model; codex/ is the Codex CLI transport. All
-        # three match _OPENAI_PREFIXES textually and are handled by later
-        # factory branches.
         excludes=("openai/gpt-oss", "text-embedding-004", "codex/"),
         api_key_name="OPENAI_API_KEY",
-        # Verified live: /v1/chat/completions rejects tools +
-        # reasoning_effort for GPT-5.x / o-series reasoning models
-        # ("please use /v1/responses instead") — hence the delegation.
         tools_accept_reasoning_effort=False,
         delegate_tools_to_responses=True,
     ),
@@ -365,10 +309,6 @@ OPENAI_COMPATIBLE_PROVIDERS: tuple[OpenAICompatibleProvider, ...] = (
         prefixes=_TOGETHER_PREFIXES,
         excludes=(),
         api_key_name="TOGETHER_API_KEY",
-        # Verified live: 200 with a real tool call for low/medium/high
-        # (non-reasoning models ignore the effort harmlessly; "xhigh" is
-        # rejected but no Together catalog entry defaults to xhigh).
-        # Together serverless does NOT implement /v1/responses.
         tools_accept_reasoning_effort=True,
         delegate_tools_to_responses=False,
     ),
@@ -379,8 +319,6 @@ OPENAI_COMPATIBLE_PROVIDERS: tuple[OpenAICompatibleProvider, ...] = (
         prefixes=("glm-",),
         excludes=(),
         api_key_name="ZAI_API_KEY",
-        # Unverified (no live probe possible without credentials): the
-        # transport keeps the effort optimistically and adapts at runtime.
         tools_accept_reasoning_effort=None,
         delegate_tools_to_responses=False,
     ),
@@ -391,8 +329,6 @@ OPENAI_COMPATIBLE_PROVIDERS: tuple[OpenAICompatibleProvider, ...] = (
         prefixes=("kimi-", "moonshot-"),
         excludes=(),
         api_key_name="MOONSHOT_API_KEY",
-        # Unverified (no live probe possible without credentials): the
-        # transport keeps the effort optimistically and adapts at runtime.
         tools_accept_reasoning_effort=None,
         delegate_tools_to_responses=False,
     ),
@@ -502,24 +438,48 @@ _QUARTER_CACHE_OPENROUTER_PREFIXES = (
 
 _XHIGH_SUFFIX = "-xhigh"
 
+_LEVEL_ALIAS_SUFFIXES = ("-max", "-high", "-medium", "-low")
 
-def _strip_xhigh_alias(bare: str) -> str:
-    """Strip the synthetic ``-xhigh`` alias suffix from a model name.
 
-    ``-xhigh`` is a KISS-internal alias suffix (see ``update_models.py``)
-    that maps onto the same provider model id as its base entry. Provider
-    pricing tables only mention the base names, so every pricing lookup
-    must consult the base name. Returning the input unchanged when the
-    suffix is absent keeps callers simple.
+def _strip_thinking_alias(bare: str) -> str:
+    """Strip a synthetic ``-{thinking_level}`` alias suffix from a model name.
+
+    ``-xhigh`` / ``-max`` / ``-high`` / ``-medium`` / ``-low`` are
+    KISS-internal alias suffixes (see ``update_models.py``) that map onto
+    the same provider model id as their base entry (``-max`` is the top of
+    the Moonshot/Kimi scale, ``-xhigh`` the top of the OpenAI scale).
+    Provider pricing tables and endpoints only know the base names, so
+    every pricing lookup and outbound request must consult the base name.
+
+    ``-xhigh`` is stripped unconditionally (no real upstream model ends in
+    it). The other level suffixes collide with real upstream model names
+    (e.g. ``openrouter/openai/o3-mini-high``), so they are stripped only
+    when ``bare`` is EXACTLY a catalog key carrying the ``alias_of``
+    marker that ``update_models.py`` writes on every generated alias; in
+    that case the marker's recorded base key is returned verbatim. Callers
+    must therefore pass the full catalog key (including any
+    ``openrouter/`` prefix) BEFORE removing routing prefixes — fuzzy
+    suffix-tail matching is deliberately avoided so an unrelated catalog
+    alias can never rewrite a similarly-named custom model. Returning the
+    input unchanged when no alias matches keeps callers simple.
 
     Args:
-        bare: A model name, possibly ending in ``-xhigh``.
+        bare: A model name, possibly ending in a thinking-level suffix.
 
     Returns:
-        ``bare`` with a trailing ``-xhigh`` removed if present.
+        The alias's recorded base catalog key when ``bare`` is a generated
+        alias, otherwise ``bare`` unchanged (modulo unconditional
+        ``-xhigh`` stripping).
     """
     if bare.endswith(_XHIGH_SUFFIX):
         return bare[: -len(_XHIGH_SUFFIX)]
+    for suffix in _LEVEL_ALIAS_SUFFIXES:
+        if not bare.endswith(suffix):
+            continue
+        info = MODEL_INFO.get(bare)
+        if info is not None and info.alias_of:
+            return info.alias_of
+        return bare
     return bare
 
 
@@ -567,7 +527,7 @@ def _openai_cache_read_multiplier(bare: str) -> float:
     if "-pro" in bare:
         return 1.0
     if bare in ("gpt-latest", "gpt-mini-latest"):
-        return 0.10  # OpenRouter aliases for the current GPT-5.x models
+        return 0.10
     if bare.startswith("gpt-5") or "chat-latest" in bare:
         return 0.10
     if bare.startswith("gpt-image-1-mini"):
@@ -580,7 +540,7 @@ def _openai_cache_read_multiplier(bare: str) -> float:
         return 0.50
     if bare.startswith(("o3", "o4")):
         return 0.25
-    return 0.50  # gpt-4o, gpt-4, gpt-3.5-turbo, computer-use, ...
+    return 0.50
 
 
 def _openai_bare_name(name: str) -> str | None:
@@ -599,15 +559,16 @@ def _openai_bare_name(name: str) -> str | None:
         The OpenAI model name without provider prefix, or ``None`` if ``name``
         is not an OpenAI cache-eligible model.
     """
+    name = _strip_thinking_alias(name)
     if name.startswith(_OPENAI_OPENROUTER_PREFIXES):
         bare = name.split("/", 2)[2]
         if bare.startswith("gpt-oss"):
             return None
-        return _strip_xhigh_alias(bare)
+        return bare
     if name.startswith(_OPENAI_PREFIXES) and not name.startswith(
         ("text-embedding", "openai/", "codex/")
     ):
-        return _strip_xhigh_alias(name)
+        return name
     return None
 
 
@@ -638,18 +599,16 @@ def _apply_cache_pricing(name: str, info: ModelInfo) -> None:
     if bare is not None:
         info.cache_read_price_per_1M = inp * _openai_cache_read_multiplier(bare)
         if _openai_charges_cache_writes(bare):
-            # GPT-5.6+ model families bill cache writes at 1.25x input.
             info.cache_write_price_per_1M = inp * 1.25
         else:
-            # Models before the GPT-5.6 family have free cache writes.
             info.cache_write_price_per_1M = 0.0
         return
     if name.startswith("gemini-"):
-        info.cache_read_price_per_1M = inp * 0.1  # Gemini context cache read
+        info.cache_read_price_per_1M = inp * 0.1
         info.cache_write_price_per_1M = 0.0
         return
     if name.startswith(_GOOGLE_OPENROUTER_PREFIXES):
-        info.cache_read_price_per_1M = inp * 0.25  # OpenRouter Gemini implicit cache
+        info.cache_read_price_per_1M = inp * 0.25
         info.cache_write_price_per_1M = 0.0
         return
     if name.startswith("openrouter/deepseek/"):
@@ -657,27 +616,20 @@ def _apply_cache_pricing(name: str, info: ModelInfo) -> None:
         if name.startswith("openrouter/deepseek/deepseek-v4-pro"):
             multiplier = 0.003625 / 0.435
         info.cache_read_price_per_1M = inp * multiplier
-        info.cache_write_price_per_1M = inp  # DeepSeek cache write = input price
+        info.cache_write_price_per_1M = inp
         return
     if name.startswith("openrouter/qwen/"):
         info.cache_read_price_per_1M = inp * 0.2
         info.cache_write_price_per_1M = inp * 1.25
         return
     if name.startswith(_QUARTER_CACHE_OPENROUTER_PREFIXES):
-        info.cache_read_price_per_1M = inp * 0.25  # Moonshot / Grok cache read
-        info.cache_write_price_per_1M = 0.0
-        return
-    if name.startswith(("kimi-", "moonshot-")):
-        # Direct Moonshot API cache-hit ratios vary per family (July 2026,
-        # platform.kimi.ai: K2.5 $0.10/$0.60 = 0.167x, K2.6 $0.16/$0.95 =
-        # 0.168x, K2.7-Code $0.19/$0.95 = 0.20x, K3 $0.30/$3.00 = 0.10x),
-        # so every kimi-* entry in MODEL_INFO.json carries an explicit
-        # ``cache_read_price_per_1M``.  This 0.25x fallback is a
-        # conservative safety net for entries that omit it.
         info.cache_read_price_per_1M = inp * 0.25
         info.cache_write_price_per_1M = 0.0
         return
-    # No documented cache discount: leave None (full input price fallback).
+    if name.startswith(("kimi-", "moonshot-")):
+        info.cache_read_price_per_1M = inp * 0.25
+        info.cache_write_price_per_1M = 0.0
+        return
 
 
 for _name, _info in MODEL_INFO.items():
@@ -1065,11 +1017,11 @@ def get_default_model() -> str:
     """
     return _model_for_first_configured_provider(
         {
-            "ANTHROPIC_API_KEY": "claude-fable-5",
-            "OPENAI_API_KEY": "gpt-5.6-sol",
-            "GEMINI_API_KEY": "gemini-3.1-pro-preview",
-            "OPENROUTER_API_KEY": "openrouter/anthropic/claude-fable-5",
-            "TOGETHER_API_KEY": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+            "ANTHROPIC_API_KEY": "claude-opus-4-7",
+            "OPENAI_API_KEY": "gpt-5.6-sol-medium",
+            "GEMINI_API_KEY": "gemini-3.6-flash",
+            "OPENROUTER_API_KEY": "openrouter/anthropic/claude-opus-4.7",
+            "TOGETHER_API_KEY": "moonshotai/Kimi-K3",
             "cc": "cc/opus",
             "codex": "codex/default",
         }
@@ -1099,14 +1051,9 @@ def _openai_long_context_prices(
     families).  Prices verified against the OpenAI pricing page
     (https://developers.openai.com/api/docs/pricing).
     """
-    bare = _strip_provider_prefix(model_name)
+    bare = _strip_thinking_alias(_strip_provider_prefix(model_name))
     if bare.startswith(_OPENAI_OPENROUTER_PREFIXES):
         bare = bare.split("/", 2)[2]
-    bare = _strip_xhigh_alias(bare)
-    # OpenAI's published rule (developers.openai.com model pages for
-    # gpt-5.6-sol/terra, gpt-5.5, gpt-5.4): "Prompts with >272K input
-    # tokens are priced at 2x input and 1.5x output for the full
-    # request."  The threshold is 272,000 INPUT tokens, not 200k.
     if bare.startswith("gpt-5.6-sol"):
         return 272_000, 10.00, 45.00, 1.00, 12.50
     if bare.startswith("gpt-5.6-terra"):
@@ -1135,10 +1082,9 @@ def _gemini_long_context_prices(
     caching never incurs).  Prices verified against
     https://ai.google.dev/gemini-api/docs/pricing.
     """
-    bare = _strip_provider_prefix(model_name)
+    bare = _strip_thinking_alias(_strip_provider_prefix(model_name))
     if bare.startswith(_GOOGLE_OPENROUTER_PREFIXES):
         bare = bare.split("/", 2)[2]
-    bare = _strip_xhigh_alias(bare)
     if bare.startswith(("gemini-3-pro", "gemini-3.1-pro")):
         return 200_000, 4.00, 18.00, 0.40, None
     if bare.startswith("gemini-2.5-pro"):
@@ -1219,19 +1165,11 @@ def calculate_cost(
     long_prices = _openai_long_context_prices(model_name) or _gemini_long_context_prices(
         model_name
     )
-    # Long-context tiers key off the PROMPT size (Google: "prompts
-    # <= 200k tokens"; OpenAI bills the higher tier when the input
-    # context exceeds the threshold).  Output tokens do not count
-    # toward the tier decision, so they are excluded here.
     prompt_tokens = total_tokens - num_output_tokens - num_audio_output_tokens
     if long_prices is not None and prompt_tokens > long_prices[0]:
         _, input_price, output_price, cr_price, long_cw_price = long_prices
         if long_cw_price is not None:
             cw_price = long_cw_price
-    # Audio-chat models (gpt-audio family) bill audio tokens at their
-    # own, much higher rates ($32/$64 per 1M for gpt-audio-1.5 vs its
-    # $2.50/$10 text rates).  Models without registered audio prices
-    # fall back to text rates so audio usage never bills at $0.
     audio_in_price = (
         info.audio_input_price_per_1M
         if info.audio_input_price_per_1M is not None

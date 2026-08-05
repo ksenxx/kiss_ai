@@ -68,10 +68,6 @@ def _make_repo(tmp_path: Path) -> Path:
     return repo
 
 
-# ---------------------------------------------------------------------------
-# Finding A: _diff_name_only must not mangle space-adjacent filenames.
-# ---------------------------------------------------------------------------
-
 
 def test_diff_name_only_preserves_leading_and_trailing_spaces(
     tmp_path: Path,
@@ -142,10 +138,6 @@ def test_diff_name_only_unicode_name(tmp_path: Path) -> None:
     (repo / filename).write_text("after\n")
     assert GitWorktreeOps._diff_name_only(repo) == [filename]
 
-
-# ---------------------------------------------------------------------------
-# Finding B: copy_dirty_state routed through the shared porcelain parser.
-# ---------------------------------------------------------------------------
 
 
 def _make_worktree_checkout(repo: Path, tmp_path: Path) -> Path:
@@ -221,10 +213,6 @@ def test_porcelain_entries_rename_and_line_separator(tmp_path: Path) -> None:
     assert ("R ", "src.txt", "dst.txt") in entries
     assert ("??", None, "u\u2028v.txt") in entries
 
-
-# ---------------------------------------------------------------------------
-# Finding C: single-sourced commit-message block format.
-# ---------------------------------------------------------------------------
 
 
 def test_helpers_blocks_detected_as_duplicate_by_dedup() -> None:

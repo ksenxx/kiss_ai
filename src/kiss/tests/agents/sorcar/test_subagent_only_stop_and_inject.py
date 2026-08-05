@@ -107,9 +107,6 @@ class TestSubagentOnlyStop:
             stop = getattr(printer._thread_local, "stop_event", None)
             assert stop is not None
             if task_key == "victim":
-                # Emulate the agent's step loop: every printer call
-                # polls the cooperative stop signal (the production
-                # poll lives in ``JsonPrinter._check_stop``).
                 assert _wait_until(stop.is_set), (
                     "the victim sub-agent never observed its own "
                     "stop event"
@@ -141,9 +138,6 @@ class TestSubagentOnlyStop:
         runner = threading.Thread(target=_run_parent, daemon=True)
         runner.start()
 
-        # Wait for the victim's registry entry, then stop ONLY it —
-        # exactly what ``VSCodeServer._stop_task`` does once it
-        # resolves the sub-agent's state.
         def _victim_state() -> _RunningAgentState | None:
             with _RunningAgentState._registry_lock:
                 for tid, st in (
@@ -239,9 +233,6 @@ class TestSubagentPromptInjectionWiring:
             assert printer is not None
             self.printer = printer
             captured["tab_id"] = getattr(self, "_tab_id", "")
-            # Wait for the test to queue a message on this sub-agent's
-            # registry entry, then run the REAL drain hook exactly like
-            # the pre-step hook does before each model call.
             assert queued.wait(10)
             model = _RecordingModel()
             SorcarAgent._drain_pending_user_messages(self, model)
@@ -278,7 +269,6 @@ class TestSubagentPromptInjectionWiring:
         entry = _sub_entry()
         assert entry is not None
         sub_tab_id, sub_state = entry
-        # Queue a follow-up exactly like _cmd_append_user_message does.
         with _RunningAgentState._registry_lock:
             sub_state.pending_user_messages.append("focus on tests")
         queued.set()
@@ -369,8 +359,6 @@ class TestViewerTabResolvesToSubagent:
             "Stop on the sub-agent's chat tab must set the "
             "sub-agent's own stop event"
         )
-        # The chained parent event must stay unset — only the
-        # sub-agent stops.
         assert isinstance(state.stop_event, _SubagentStopEvent)
         parent_ev = state.stop_event._parent_event
         assert parent_ev is not None and not parent_ev.is_set(), (

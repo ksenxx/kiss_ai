@@ -64,10 +64,6 @@ def kiss_db(tmp_path: Path):
     th._DB_PATH, th._db_conn, th._KISS_DIR, vc.CONFIG_DIR = saved
 
 
-# ---------------------------------------------------------------------------
-# Anchored steering box (_InputBox) — the real interactive input path
-# ---------------------------------------------------------------------------
-
 
 def _make_box(work_dir: str) -> tuple[_InputBox, list[str]]:
     """Build a real box wired to a real ``CliCompleter.build_menu``."""
@@ -94,15 +90,12 @@ def test_bare_esc_closes_menu_via_idle_flush(tmp_path: Path, kiss_db) -> None:
     box, submitted = _make_box(str(tmp_path))
     _feed(box, b"/resume ", submitted)
     assert box._menu_open is True
-    _feed(box, b"\x1b", submitted)  # bare ESC — deferred as pending
+    _feed(box, b"\x1b", submitted)
     assert box.flush_pending_escape() is True
     assert box._menu_open is False
     assert box._menu_items == []
-    assert box.buf == "/resume "  # typed text untouched
-    # The pending ESC was consumed: a subsequent flush is a no-op ...
+    assert box.buf == "/resume "
     assert box.flush_pending_escape() is False
-    # ... and the next printable keystroke types normally (no stale
-    # ESC prepended that would swallow it).
     _feed(box, b"-", submitted)
     assert box.buf == "/resume -"
 
@@ -115,9 +108,6 @@ def test_esc_followed_by_key_in_same_chunk_closes_menu(
     box, submitted = _make_box(str(tmp_path))
     _feed(box, b"/resume ", submitted)
     assert box._menu_open is True
-    # ESC + 'x' arriving in one read (fast typing / Alt+x): the ESC
-    # closes the menu; menus for the subsequent edit may reopen only
-    # for actual candidates ('x' matches none here).
     _feed(box, b"\x1bx", submitted)
     assert box._menu_open is False
     assert box.buf == "/resume x"
@@ -138,10 +128,10 @@ def test_flush_keeps_split_escape_sequences_pending(
     _feed(box, b"/resume --task ", submitted)
     assert box._menu_open is True
     assert box._menu_sel == 0
-    _feed(box, b"\x1b[", submitted)  # split Down-arrow, first half
+    _feed(box, b"\x1b[", submitted)
     assert box.flush_pending_escape() is False
-    assert box._menu_open is True  # menu untouched
-    _feed(box, b"B", submitted)  # second half completes ESC[B (Down)
+    assert box._menu_open is True
+    _feed(box, b"B", submitted)
     assert box._menu_open is True
     assert box._menu_sel == 1
 
@@ -157,10 +147,6 @@ def test_bare_esc_without_menu_is_a_noop(tmp_path: Path) -> None:
     assert box.buf == "hello"
     assert box._menu_open is False
 
-
-# ---------------------------------------------------------------------------
-# prompt_toolkit fallback (PtkLineReader)
-# ---------------------------------------------------------------------------
 
 
 def _wait_for(condition: Callable[[], bool], what: str) -> None:
@@ -192,7 +178,7 @@ def _drive_session(
             def run_driver() -> None:
                 try:
                     driver(pipe, buf)
-                except BaseException as exc:  # propagated after join
+                except BaseException as exc:
                     errors.append(exc)
                     pipe.send_text("\r")
 
@@ -220,7 +206,7 @@ def test_ptk_esc_closes_menu_and_enter_submits_typed_text(
             and bool(buf.complete_state.completions),
             "the /resume argument-option menu",
         )
-        pipe.send_text("\x1b")  # bare ESC — must close the menu
+        pipe.send_text("\x1b")
         _wait_for(
             lambda: buf.complete_state is None,
             "the menu to close after ESC",
@@ -244,12 +230,12 @@ def test_ptk_esc_restores_typed_text_after_navigation(
             and bool(buf.complete_state.completions),
             "the /resume argument-option menu",
         )
-        pipe.send_text("\x1b[B")  # Down: highlight + insert a candidate
+        pipe.send_text("\x1b[B")
         _wait_for(
             lambda: buf.text != "/resume ",
             "navigation to insert the candidate text",
         )
-        pipe.send_text("\x1b")  # ESC — close menu, restore typed text
+        pipe.send_text("\x1b")
         _wait_for(
             lambda: buf.complete_state is None and buf.text == "/resume ",
             "ESC to close the menu and restore the typed text",

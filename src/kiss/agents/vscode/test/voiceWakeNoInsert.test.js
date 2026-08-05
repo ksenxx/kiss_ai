@@ -2,35 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression test: hearing the "Sorcar" wake word must NOT
-// type the literal word "sorcar" (or any other text) into the task
-// input textbox.
-//
-// Bug being reproduced: ``triggerWake()`` in media/voice.js set
-// ``inp.value = 'sorcar'`` as a visible placeholder while the host
-// recorded/translated the speech that followed.  Users saw the word
-// "sorcar" appear in their input box — and any draft they had typed
-// was destroyed by the placeholder.  The wake event must only show a
-// transient visual indicator on the mic button; text appears in the
-// input only when the translated speech arrives as
-// ``{type: 'voiceSpeech', text}``.
-//
-// This test runs the real ``media/voice.js`` against a real jsdom
-// document (no mocks for the code under test) and locks in:
-//
-//  1. A voiceWake message leaves an empty input EMPTY — the word
-//     "sorcar" never appears.
-//  2. A voiceWake message preserves an existing user draft untouched.
-//  3. The wake event still gives visible feedback (the transient
-//     'voice-triggered' class on the mic button) and focuses the input.
-//  4. The full wake → translated-speech flow never shows "sorcar":
-//     after wake the input is empty, then the translation is inserted.
-//  5. Wake followed by silence (empty voiceSpeech) leaves the input
-//     exactly as it was — nothing to clean up because nothing was
-//     inserted.
-//
-// Run directly with ``node test/voiceWakeNoInsert.test.js``.
 
 'use strict';
 
@@ -56,12 +27,6 @@ function test(name, fn) {
   }
 }
 
-/**
- * Build a fresh jsdom window containing the two elements voice.js
- * needs (#voice-btn, #task-input), inject the webview-mode config and
- * execute the real voice.js.  Returns the window plus a counter of
- * 'input' events and a counter of focus() calls on the textarea.
- */
 function makeWindow() {
   const dom = new JSDOM(
     '<!DOCTYPE html><html><body>' +
@@ -89,8 +54,6 @@ function makeWindow() {
 function sendHostMessage(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
-
-// ---------------------------------------------------------------------------
 
 test('voiceWake never types "sorcar" into an empty task input', () => {
   const {win, inputEvents} = makeWindow();
@@ -129,7 +92,7 @@ test('wake then translated speech: only the translation appears', () => {
   assert.strictEqual(inp.value, '');
   sendHostMessage(win, {type: 'voiceSpeech', text: 'Fix the parser bug'});
   assert.strictEqual(inp.value, 'Fix the parser bug');
-  assert.strictEqual(inputEvents.count, 1); // only the speech insert
+  assert.strictEqual(inputEvents.count, 1);
 });
 
 test('wake then silence leaves the input exactly as it was', () => {
@@ -141,8 +104,6 @@ test('wake then silence leaves the input exactly as it was', () => {
   assert.strictEqual(inp.value, 'draft');
   assert.strictEqual(inputEvents.count, 0);
 });
-
-// ---------------------------------------------------------------------------
 
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length > 0) {

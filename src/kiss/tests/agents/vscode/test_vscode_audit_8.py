@@ -60,7 +60,6 @@ class TestAPIKeyEnvVarsType:
         """Verify source_shell_env membership check works with frozenset."""
         from kiss.core.vscode_config import API_KEY_ENV_VARS
 
-        # The `k in API_KEY_ENV_VARS` check in source_shell_env must work
         assert "GEMINI_API_KEY" in API_KEY_ENV_VARS
         assert "NONEXISTENT_KEY" not in API_KEY_ENV_VARS
 
@@ -84,7 +83,6 @@ class TestTimerFlushNoClosure:
         from kiss.server.json_printer import JsonPrinter
 
         hints = JsonPrinter._timer_flush_for_task.__annotations__
-        # The task_id parameter should accept str | None
         assert "task_id" in hints
 
     def test_bash_timer_uses_method(self) -> None:
@@ -104,22 +102,16 @@ class TestTimerFlushNoClosure:
 
         printer.broadcast = capture_broadcast  # type: ignore[assignment]
 
-        # First call flushes immediately (last_flush is 0.0, so delta >= 0.1).
-        # A second call within 0.1s triggers the timer path.
         printer.print("chunk1", type="bash_stream")
         printer.print("chunk2", type="bash_stream")
         with printer._bash_lock:
             bs = printer._bash_state
             assert bs.timer is not None, "Timer should be set for buffered bash output"
             timer_func = bs.timer.function
-            # Timer function must be a functools.partial, not a closure
             assert isinstance(timer_func, functools_partial), (
                 f"Timer function should be functools.partial, got {type(timer_func)}"
             )
             assert timer_func.func == printer._timer_flush_for_task
-        # Wait for the 0.1s timer to fire.  Under coverage instrumentation
-        # the timer thread is delayed noticeably, so poll up to 2 s with a
-        # short backoff instead of relying on a single sleep.
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
             flush_events = [e for e in events if e.get("type") == "system_output"]
@@ -128,7 +120,6 @@ class TestTimerFlushNoClosure:
             time.sleep(0.05)
         flush_events = [e for e in events if e.get("type") == "system_output"]
         all_text = "".join(e["text"] for e in flush_events)
-        # chunk1 flushes immediately; chunk2 flushes via the timer.
         assert "chunk1" in all_text
         assert "chunk2" in all_text
 

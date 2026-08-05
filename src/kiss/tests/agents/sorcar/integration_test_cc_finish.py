@@ -14,8 +14,8 @@ import shutil
 import pytest
 import yaml
 
+from kiss.agents.sorcar.relentless_agent import finish
 from kiss.core.models.claude_code_model import ClaudeCodeModel
-from kiss.core.relentless_agent import finish
 
 _has_claude = shutil.which("claude") is not None
 requires_claude_cli = pytest.mark.skipif(not _has_claude, reason="claude CLI not installed")

@@ -119,7 +119,6 @@ class TestB9StashIfDirtyContract:
     def test_noop_stash_push_does_not_pop_user_stash(self, tmp_path: Path) -> None:
         """A pre-existing user stash must survive the stash/pop caller flow."""
         repo = _init_repo(tmp_path)
-        # The user parked precious work in a stash of their own.
         (repo / "precious.txt").write_text("precious\n")
         _git(repo, "add", "precious.txt")
         _git(repo, "stash", "push", "-m", "user-precious")
@@ -127,7 +126,6 @@ class TestB9StashIfDirtyContract:
 
         _add_dirty_submodule(tmp_path, repo)
 
-        # Caller flow used by merge paths: pop only when a stash was made.
         if GitWorktreeOps.stash_if_dirty(repo):
             GitWorktreeOps.stash_pop(repo)
 
@@ -181,7 +179,7 @@ class TestB7AppendInfoLine:
         repo = _init_repo(tmp_path)
         exclude = repo / ".git" / "info" / "exclude"
         exclude.parent.mkdir(parents=True, exist_ok=True)
-        exclude.write_text("existing-pattern")  # no trailing newline
+        exclude.write_text("existing-pattern")
 
         GitWorktreeOps._append_info_line(repo, "exclude", ".kiss-worktrees/")
 
@@ -239,7 +237,6 @@ class TestB4RemoveStaleRegistration:
         repo = _init_repo(tmp_path)
         wt_dir = repo / ".kiss-worktrees" / "kiss_wt-test"
         assert GitWorktreeOps.create(repo, "kiss-task-b4", wt_dir)
-        # A crash / manual cleanup deleted the directory behind git's back.
         shutil.rmtree(wt_dir)
         assert not wt_dir.exists()
 
@@ -291,7 +288,6 @@ class TestB2StashPopFallback:
         (repo / "u.txt").write_text("stashed-untracked\n")
         (repo / "f.txt").write_text("mod\n")
         _git(repo, "stash", "push", "--include-untracked", "-m", "kiss-stash")
-        # An identically-named untracked file now blocks the pop.
         (repo / "u.txt").write_text("in-the-way\n")
 
         assert GitWorktreeOps.stash_pop(repo) is False

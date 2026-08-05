@@ -206,10 +206,6 @@ class TestBaseJsonPrinterTabIdParity(_PersistenceHarness):
         row exists) stays transient in the base class too."""
         task_id = self._register_task("parity transient result")
         self._start_task_thread_context(task_id)
-        # NOTE: no ``taskId`` on the event; the thread-local must not
-        # be used to smuggle a transient tab-scoped event into the
-        # durable stream (matches WebPrinter, whose tabId branch never
-        # consults the thread-local).
         self.printer.broadcast(
             {
                 "type": "result",
@@ -249,8 +245,6 @@ class TestFanoutSingleTabIdStamp(_PersistenceHarness):
         subscriber's."""
         task_id = self._register_task("fanout dup")
         self.printer.subscribe_tab(task_id, "viewer-1")
-        # Exactly what _relay_cli_event receives from the CLI bridge
-        # for sorcar_agent._broadcast_subagent_done.
         event = {
             "type": "subagentDone",
             "tab_id": f"task-{task_id}__sub_0",

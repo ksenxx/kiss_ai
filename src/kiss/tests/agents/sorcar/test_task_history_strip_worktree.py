@@ -72,15 +72,10 @@ class TestStripWorktreeSuffix(unittest.TestCase):
         assert strip_worktree_suffix(wt) == "/Users/alice/proj"
 
     def test_only_strips_kiss_worktrees_segment(self) -> None:
-        # A path that *contains* the literal string ".kiss-worktrees"
-        # only mid-segment should not be touched.
         p = "/Users/alice/some.kiss-worktrees-backup/data"
         assert strip_worktree_suffix(p) == p
 
     def test_requires_kiss_wt_prefix(self) -> None:
-        # The directory under ``.kiss-worktrees/`` must start with
-        # ``kiss_wt-`` (the framework's slug format).  Anything else is
-        # not a KISS worktree and must be left alone.
         p = "/Users/alice/proj/.kiss-worktrees/something-else/file.txt"
         assert strip_worktree_suffix(p) == p
 

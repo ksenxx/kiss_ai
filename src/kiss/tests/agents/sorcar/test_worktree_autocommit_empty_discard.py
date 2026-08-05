@@ -166,12 +166,8 @@ class TestWorktreeAutocommitEmptyDiscards(_WorktreeAutocommitEmptyBase):
             "model": "",
         })
 
-        # Sanity: the agent did create a worktree branch during the run.
         assert "worktree_created" in self._types(), self._types()
 
-        # Bug repro / fix verification: after the run the branch must
-        # be gone (auto-discarded), not lingering as an empty branch
-        # and not auto-merged into the original branch.
         branches = _list_kiss_wt_branches(self.repo)
         assert branches == [], (
             f"BUG: when use_worktree=True, autoCommit=True, task succeeds, "
@@ -180,9 +176,6 @@ class TestWorktreeAutocommitEmptyDiscards(_WorktreeAutocommitEmptyBase):
             f"Events: {self._types()}"
         )
 
-        # And HEAD must be unchanged — no auto-merge commit was created
-        # (merging an empty branch into the original would otherwise
-        # advance HEAD).
         post_head = _head_sha(self.repo)
         assert post_head == pre_head, (
             f"BUG: HEAD advanced from {pre_head} to {post_head} despite "
@@ -190,8 +183,6 @@ class TestWorktreeAutocommitEmptyDiscards(_WorktreeAutocommitEmptyBase):
             f"should have been created."
         )
 
-        # And a worktree_result event with the discard message was
-        # broadcast — not a merge-success event.
         wt_results = [e for e in self.events if e["type"] == "worktree_result"]
         assert len(wt_results) == 1, (
             f"Expected exactly one worktree_result event; got: {wt_results}"
@@ -219,26 +210,22 @@ class TestWorktreeAutocommitEmptyDiscards(_WorktreeAutocommitEmptyBase):
             "model": "",
         })
 
-        # Branch should be gone (squash-merged + cleaned up).
         branches = _list_kiss_wt_branches(self.repo)
         assert branches == [], (
             f"Expected the worktree branch to be cleaned up after "
             f"auto-merge; got: {branches}"
         )
 
-        # HEAD advanced (the squash-merge commit was created).
         post_head = _head_sha(self.repo)
         assert post_head != pre_head, (
             f"Expected HEAD to advance after auto-merging real "
             f"changes; both were {post_head}"
         )
 
-        # The new file is present in the main working tree.
         assert (Path(self.repo) / "agent_out.txt").is_file(), (
             "Expected agent_out.txt to be merged into the main tree"
         )
 
-        # A worktree_result with a merge-success message was broadcast.
         wt_results = [e for e in self.events if e["type"] == "worktree_result"]
         assert len(wt_results) == 1, (
             f"Expected exactly one worktree_result event; got: {wt_results}"
