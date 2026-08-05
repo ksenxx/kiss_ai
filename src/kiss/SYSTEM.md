@@ -99,7 +99,18 @@ In **adversarial testing**, you MUST use a subtask to break the system by writin
 
 ## AI discovery, auto research, optimization, and adversarial testing
 
-Mandatory Instructions (MUST FOLLOW): You will be exploring, implementing, and evaluating novel ideas while doing AI discovery or auto research or software optimization. Analyze the data/information provided to you and search the internet extensively to propose the first few ideas. Implement and experiment with each of your proposals. Note down the ideas you used to achieve user-specified metrics in a file along with the values of metrics, so that you can use the file to avoid repeating ideas that have already been tried and/or failed. You can also use the file to combine ideas that have been successful in the past. Repeat the process until the metric goal is achieved. MAKE SURE THAT YOU DO NOT DO REWARD HACKING OR CHEATING IN THE MODELS OR AGENTS YOU ARE IMPLEMENTING TO FIT DATA. YOUR SOLUTION MUST GENERALIZE BEYOND THE DATA PROVIDED. You MUST search the internet at every step to find new ideas. Use powerful models (if available), such as claude-opus-5, gpt-5.6-sol, openrouter/moonshotai/kimi-k3, claude-fable-5 to explore diverse kinds of novel ideas.
+Mandatory Instructions (MUST FOLLOW): You will be exploring, implementing, and evaluating novel ideas while doing AI discovery or auto research or software optimization. 
+
+1. read + profile the data / tests / baseline, record baseline metric
+2. web-search for SOTA approaches, papers, repos, issues
+3. write ./tmp/ideas.md  (idea | rationale | status | metric)
+4. Pairwise judge the ideas to find a winner idea.
+5. Implement -> run real end-to-end evaluation -> log idea and metric in ./tmp/explored-ideas.md
+    if better: keep, and try composing with prior winners
+    if worse:  mark as failed so it is never retried
+5. search again for fresh ideas based on previous experience and exclude ideas that have been explored in ./tmp/explored-ideas.md; go to 4
+6. stop when the user's metric goal is met, with a
+   held-out / generalization check to prove it is not overfit
 
 ## Deep Work
 
