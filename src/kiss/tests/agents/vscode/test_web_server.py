@@ -959,13 +959,23 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             self.assertIn("configData", received_types)
 
     async def test_ws_stop_no_error(self) -> None:
-        """stop command with no running task does not produce an error."""
+        """stop command with no running task is reported, not an error.
+
+        The stop is answered with ``stop_ack accepted=false`` so the tab
+        can tell the user its click found nothing to stop; dropping it in
+        silence is what made a mis-targeted click look like a dead button
+        (``reports/stop_button_delay_2026-08-05.html``).
+        """
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
 
             await ws.send(json.dumps({"type": "stop", "tabId": "no-task"}))
             await ws.send(json.dumps({"type": "getModels"}))
+            ack = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            self.assertEqual(ack["type"], "stop_ack")
+            self.assertIs(ack["accepted"], False)
+            self.assertEqual(ack["tabId"], "no-task")
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "models")
 

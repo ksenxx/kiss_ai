@@ -360,9 +360,15 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
 
         events_before = len(events)
         server._stop_task(viewer_tab_id)
-        assert len(events) == events_before, (
-            "Stopping an orphaned viewer should not broadcast new events"
-        )
+        # The orphaned stop is a no-op for the task, but it is NOT
+        # silent: it tells the tab its click found nothing to stop.
+        # Dropping it without a word is what made a mis-targeted click
+        # indistinguishable from a task that had not reacted yet
+        # (reports/stop_button_delay_2026-08-05.html).
+        new_events = events[events_before:]
+        assert new_events == [
+            {"type": "stop_ack", "accepted": False, "tabId": viewer_tab_id},
+        ], f"Stopping an orphaned viewer broadcast {new_events}"
 
     def test_stop_with_orphan_subscription_pointing_to_missing_source(
         self,

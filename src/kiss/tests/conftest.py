@@ -41,6 +41,7 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar import persistence as _th
+from kiss.core import stop_signal
 from kiss.core.kiss_error import KISSError
 
 # Generous: a sweep only walks the sentinel rows of one temporary
@@ -106,6 +107,14 @@ def _tear_down_after_orphan_sweeps(tear_down: Callable[[], None]) -> None:
 def pytest_runtest_call(item: pytest.Item) -> Iterator[None]:
     """Guard every test's teardown against the orphan-sweep race.
 
+    Also unbinds the runner thread's stop event afterwards.  A test that
+    binds one (``printer._thread_local.stop_event = ...``) publishes it
+    for the whole thread — that is the point of
+    :mod:`kiss.core.stop_signal`, which lets model streams see a stop —
+    so a test that leaves a *set* event behind would make the next
+    test's first ``print()`` raise ``KeyboardInterrupt``.  Production
+    unbinds per run; tests get it centrally here.
+
     Args:
         item: The test about to run. For ``unittest.TestCase`` items its
             ``tearDown`` is wrapped so sweeps are joined before the
@@ -123,6 +132,7 @@ def pytest_runtest_call(item: pytest.Item) -> Iterator[None]:
         yield
     finally:
         join_orphan_sweeps()
+        stop_signal.set_thread_stop_event(None)
 
 
 def simple_calculator(expression: str) -> str:

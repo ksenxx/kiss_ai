@@ -1154,6 +1154,15 @@ body.remote-chat #welcome-config { display: none !important; }
 #stop-btn svg { width: 15px; height: 15px; }
 #stop-btn:hover { background: color-mix(in srgb, var(--red) 20%, transparent); box-shadow: 0 0 12px color-mix(in srgb, var(--red) 15%, transparent); }
 
+/* Stop requested, agent not there yet: pulse so a pending stop cannot be
+   mistaken for a click the daemon never received. */
+#stop-btn.stopping { animation: stop-pending 1.1s ease-in-out infinite; }
+
+@keyframes stop-pending {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
 #input-footer {
   display: flex; justify-content: space-between; align-items: center;
   margin-top: 5px; padding-top: 5px; border-top: 1px solid color-mix(in srgb, var(--fg) 5%, transparent);

@@ -25,6 +25,7 @@ from functools import partial
 from typing import Any
 
 from kiss.agents.sorcar.persistence import _queue_chat_event
+from kiss.core import stop_signal
 from kiss.core.printer import (
     Printer,
     extract_extras,
@@ -194,6 +195,32 @@ def _orphaned_ui_close_events(
     ]
 
 
+class _PrinterThreadLocal(threading.local):
+    """Per-thread printer state whose ``stop_event`` is process-visible.
+
+    ``stop_event`` is a property over :mod:`kiss.core.stop_signal`
+    rather than plain thread-local storage, so the single assignment
+    that binds a stop event to a task thread (``task_runner``,
+    ``chat_sorcar_agent``'s fan-out workers, ``sorcar_agent``'s
+    sub-agents) also publishes it to code *below* the agent.  Model
+    adapters need it to abort a stream that has gone silent: without it
+    a stop is only noticed when the agent next prints, which left task
+    ``709ebce3`` unstoppable for 178 seconds
+    (``reports/stop_button_delay_2026-08-05.html``).  Keeping one
+    storage location — instead of publishing to two — means the flag
+    the agent polls and the flag the model watches can never disagree.
+    """
+
+    @property
+    def stop_event(self) -> threading.Event | None:
+        """The calling thread's stop event, or ``None`` when unbound."""
+        return stop_signal.get_thread_stop_event()
+
+    @stop_event.setter
+    def stop_event(self, event: threading.Event | None) -> None:
+        stop_signal.set_thread_stop_event(event)
+
+
 class JsonPrinter(Printer):
     """Base printer for browser-based UIs (task-id keyed).
 
@@ -236,7 +263,7 @@ class JsonPrinter(Printer):
         return bs
 
     def __init__(self) -> None:
-        self._thread_local = threading.local()
+        self._thread_local = _PrinterThreadLocal()
         self._lock = threading.Lock()
         self._bash_lock = threading.Lock()
         self._bash_states: dict[str, _BashState] = {}

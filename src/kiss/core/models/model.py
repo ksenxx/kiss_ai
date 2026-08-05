@@ -546,6 +546,9 @@ class Model(ABC):
         self.usage_info_for_messages: str = ""
         self.conversation: list[Any] = []
         self.client: Any = None
+        # Whether a thinking block is currently open, so an aborted
+        # stream can close it (see _close_thinking_if_open).
+        self._thinking_open = False
 
     def _invoke_token_callback(self, token: str) -> None:
         """Invoke the token callback synchronously."""
@@ -558,8 +561,20 @@ class Model(ABC):
         Args:
             is_start: ``True`` when a thinking block starts, ``False`` when it ends.
         """
+        self._thinking_open = is_start
         if self.thinking_callback is not None:
             self.thinking_callback(is_start)
+
+    def _close_thinking_if_open(self) -> None:
+        """Close an open thinking block, if there is one.
+
+        A stream that is aborted mid-thinking — a user stop, or a stall —
+        never reaches the loop's own closing callback, and the printer
+        would then render everything afterwards as "thinking" forever.
+        Safe to call at any time: it is a no-op when no block is open.
+        """
+        if self._thinking_open:
+            self._invoke_thinking_callback(False)
 
     def reset_conversation(self) -> None:
         """Reset conversation state for reuse across sub-sessions.

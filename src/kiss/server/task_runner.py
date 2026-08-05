@@ -474,6 +474,10 @@ class _TaskRunnerMixin:
                 client_task_id=client_task_id,
             )
             self._dispose_if_closed(tab_id)
+            # The binding is per THREAD — that is how a model stream
+            # learns about a stop — so it has to end with the run, or
+            # anything this thread does next would inherit it.
+            self.printer._thread_local.stop_event = None
 
     def _restore_user_model_pick(self, tab_id: str) -> None:
         """Put the user's own model back in *tab_id*'s picker.
@@ -1405,7 +1409,7 @@ class _TaskRunnerMixin:
                 stop every tab's task.
         """
         if not tab_id:
-            logger.debug("_stop_task called without tab_id; ignoring")
+            logger.warning("Stop requested without a tabId; ignoring")
             return
         with self._state_lock:
             tab = _RunningAgentState.running_agent_states.get(tab_id)
@@ -1427,9 +1431,29 @@ class _TaskRunnerMixin:
                         owner_tab_id = source_tab_id
                         owner_state = source
 
-        if stop_event:
+        thread_alive = task_thread is not None and task_thread.is_alive()
+        if stop_event is None and not thread_alive:
+            # A stop the server cannot route used to vanish behind a
+            # disabled logger.debug, so a mis-targeted click looked
+            # exactly like a click on a wedged task.  Say so, in the log
+            # and in the UI, instead of dropping it.
+            logger.info(
+                "Stop requested for tab %s but no running task owns it",
+                tab_id,
+            )
+            self._broadcast_stop_ack(tab_id, accepted=False)
+            return
+
+        logger.info(
+            "Stop requested for tab %s (task owner %s)", tab_id, owner_tab_id,
+        )
+        # Acknowledged BEFORE the event is set: the task can die on the
+        # very next bytecode, and the user needs to see that the click
+        # landed even when it does.
+        self._broadcast_stop_ack(tab_id, accepted=True)
+        if stop_event is not None:
             stop_event.set()
-        if task_thread is not None and task_thread.is_alive():
+        if thread_alive and task_thread is not None:
             still_owns = partial(
                 _state_owns_thread,
                 owner_tab_id,
@@ -1441,6 +1465,24 @@ class _TaskRunnerMixin:
                 args=(task_thread, still_owns),
                 daemon=True,
             ).start()
+
+    def _broadcast_stop_ack(self, tab_id: str, accepted: bool) -> None:
+        """Tell *tab_id* that its Stop click was received.
+
+        The button used to give no feedback at all, so a stop that was
+        merely *pending* — the agent was inside a quiet model request —
+        looked identical to a stop that never arrived, and the only
+        sensible reaction was to click again
+        (``reports/stop_button_delay_2026-08-05.html``).
+
+        Args:
+            tab_id: The tab whose Stop button was pressed.
+            accepted: ``True`` when a running task was found and
+                signalled, ``False`` when nothing owned the tab.
+        """
+        self.printer.broadcast(
+            {"type": "stop_ack", "accepted": accepted, "tabId": tab_id},
+        )
 
     def _find_source_tab_for_viewer(self, viewer_tab_id: str) -> str | None:
         """Find a peer tab id sharing the same task as *viewer_tab_id*.

@@ -293,6 +293,14 @@ type ToWebviewMessageBody =
       tabId: string;
     }
   | {
+      // Receipt for a Stop click: `accepted` is false when the daemon
+      // found no running task owning `tabId`, so the UI can say so
+      // instead of leaving the button looking dead.
+      type: 'stop_ack';
+      accepted: boolean;
+      tabId: string;
+    }
+  | {
       type: 'new_tab';
       task_id: string | number;
       parent_tab_id?: string;

@@ -49,6 +49,7 @@ from kiss.core.models.openai_compatible_model import (
     _model_thinking_level,
     _provider_model_name,
 )
+from kiss.core.models.stream_abort import stop_aware_events
 
 _RESPONSES_INPUT_AUDIO_FORMATS = {"mp3", "wav"}
 _RESPONSES_INPUT_IMAGE_MIME_TYPES = {
@@ -1267,7 +1268,15 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         self._last_stream_item_indexes = item_output_indexes
         self._last_stream_message_output_index = None
 
-        for event in stream:
+        # stop_aware_events aborts the request the moment the user
+        # presses Stop; a bare `for event in stream` would hold the agent
+        # inside recv() until the client's own timeout expires
+        # (reports/stop_button_delay_2026-08-05.html).
+        for event in stop_aware_events(
+            stream,
+            on_abort=self._close_thinking_if_open,
+            name="openai-responses-stream-abort-watchdog",
+        ):
             etype = self._event_type(event)
             ev_item_id = str(getattr(event, "item_id", "") or "")
             if not ev_item_id:

@@ -183,8 +183,11 @@ class TestFrontendHandlerHonorsIsDone:
         m_done = re.search(
             r"subTab\.isDone\s*=\s*([^;]+);", body,
         )
+        # The handler sets the running state through setTabRunning(),
+        # which also drops any pending-stop state along with it
+        # (reports/stop_button_delay_2026-08-05.html).
         m_running = re.search(
-            r"subTab\.isRunning\s*=\s*([^;]+);", body,
+            r"setTabRunning\(subTab,\s*([^)]+)\)", body,
         )
         assert m_done is not None, body
         assert m_running is not None, body

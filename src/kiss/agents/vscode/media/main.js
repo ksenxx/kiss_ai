@@ -512,6 +512,10 @@
       // owns the task before the daemon has told anyone its real id.
       pendingTaskId: null,
       isRunning: false,
+      // Raised by the Stop button until the task actually ends, so a
+      // stop the agent has not reached yet looks different from a stop
+      // that never arrived (see stop_button_delay_2026-08-05.html).
+      isStopping: false,
       outputFragment: null,
       taskPanelHTML: '',
       taskPanelVisible: false,
@@ -5124,7 +5128,7 @@
       case 'status': {
         const evTab = findTabByEvt(ev);
         if (evTab) {
-          evTab.isRunning = !!ev.running;
+          setTabRunning(evTab, !!ev.running);
           // modelpick-coverage:start
           // Belt and braces for the daemon's `modelPick` restore: a task
           // that stops without one (a killed daemon, a submit refused at
@@ -5183,6 +5187,17 @@
           refreshModelLabel();
         }
         renderModelList('');
+        break;
+      case 'stop_ack':
+        // The daemon found nothing to stop for this tab — the click
+        // would otherwise have been swallowed in silence, which is
+        // exactly what makes people click again.  No running task owns
+        // the tab, so its "running" look was stale too: setReady drops
+        // the spinner, timer and Stop button along with the message.
+        if (!ev.accepted) {
+          markStopping(ev.tabId || activeTabId, false);
+          setReady('No running task to stop', ev.tabId || activeTabId);
+        }
         break;
       // modelpick-coverage:start
       case 'modelPick':
@@ -5613,6 +5628,7 @@
       }
 
       case 'triggerStop':
+        markStopping(activeTabId, true);
         api.stop({tabId: activeTabId});
         break;
       case 'appendToInput':
@@ -6002,7 +6018,7 @@
         }
         const subDone = !!ev.isDone;
         subTab.isDone = subDone;
-        subTab.isRunning = !subDone;
+        setTabRunning(subTab, !subDone);
         subTab.taskPanelHTML = subDesc;
         subTab.taskPanelVisible = true;
         if (rpPanel)
@@ -6028,7 +6044,7 @@
           openReadyReportTabs(doneTab.id, false);
           // report-coverage:end
           doneTab.isDone = true;
-          doneTab.isRunning = false;
+          setTabRunning(doneTab, false);
           if (doneTab.id === activeTabId) {
             setRunningState(false);
             if (inputContainer) inputContainer.style.display = 'none';
@@ -6116,10 +6132,64 @@
     }
   }
 
+  /**
+   * Repaint the Stop button from the active tab's pending-stop state.
+   *
+   * A stop the agent has not acted on yet (it is inside a long model
+   * request) is indistinguishable from a stop that never arrived unless
+   * the button says so — which is why the button looked dead for three
+   * minutes in the post-mortem `stop_button_delay_2026-08-05.html`.
+   */
+  function renderStopButton() {
+    const tab = getTab(activeTabId);
+    const stopping = !!(tab && tab.isStopping) && isRunning;
+    stopBtn.classList.toggle('stopping', stopping);
+    stopBtn.setAttribute(
+      'data-tooltip',
+      stopping ? 'Stopping — waiting for the agent' : 'Stop agent',
+    );
+  }
+
+  /**
+   * Record whether `tabId` has a stop in flight and repaint the button.
+   *
+   * @param {string} tabId Tab whose Stop button was pressed.
+   * @param {boolean} stopping True while the stop is pending.
+   */
+  function markStopping(tabId, stopping) {
+    const tab = getTab(tabId);
+    if (tab) tab.isStopping = stopping;
+    if (tabId === activeTabId) renderStopButton();
+  }
+
+  /**
+   * Set a tab's running state, dropping any pending stop along with it.
+   *
+   * `isStopping` means "a stop is in flight for the task THIS tab is
+   * running", so it must not outlive that task: a background tab that
+   * finished while stopping would otherwise open its next task with the
+   * Stop button already pulsing.
+   *
+   * @param {object} tab The tab to update.
+   * @param {boolean} running Whether that tab is now running a task.
+   */
+  function setTabRunning(tab, running) {
+    tab.isRunning = running;
+    if (!running) tab.isStopping = false;
+    if (tab.id === activeTabId) renderStopButton();
+  }
+
   function setRunningState(running) {
     isRunning = running;
     sendBtn.style.display = 'flex';
     stopBtn.style.display = running ? 'flex' : 'none';
+    // A tab that is not running has nothing left to stop, so the
+    // pending state never survives the task it belonged to.
+    if (!running) {
+      const activeTab = getTab(activeTabId);
+      if (activeTab) activeTab.isStopping = false;
+    }
+    renderStopButton();
 
     updateInputDisabled();
     if (running) {
@@ -6163,7 +6233,7 @@
     if (tabId !== undefined) {
       doneTab = getTab(tabId);
       if (doneTab) {
-        doneTab.isRunning = false;
+        setTabRunning(doneTab, false);
         if (hasStart) doneTab.t0 = doneStartTs;
         doneTab.endTs = hasEnd ? doneEndTs : Date.now();
         doneTab.statusTextContent = label || 'Ready';
@@ -6995,6 +7065,7 @@
       e.preventDefault();
     });
     stopBtn.addEventListener('click', () => {
+      markStopping(activeTabId, true);
       api.stop({tabId: activeTabId});
     });
     uploadBtn.addEventListener('click', () => {

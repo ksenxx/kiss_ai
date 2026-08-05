@@ -8,14 +8,13 @@
 import base64
 import json
 import logging
-import threading
-import time
 from collections.abc import Callable
 from typing import Any
 
 import httpx
 from anthropic import Anthropic, APITimeoutError
 
+from kiss.core import stop_signal
 from kiss.core.kiss_error import KISSError, ModelRefusalError
 from kiss.core.models.model import (
     Attachment,
@@ -26,68 +25,15 @@ from kiss.core.models.model import (
     responses_items_to_chat_messages,
     transcribe_audio,
 )
+from kiss.core.models.stream_abort import (
+    DEFAULT_STREAM_STALL_TIMEOUT,
+    StreamAbortWatchdog,
+)
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_STREAM_STALL_TIMEOUT = 180.0
 _CONNECT_TIMEOUT = 10.0
 _MAX_RETRIES = 1
-
-
-class _StreamStallWatchdog:
-    """Closes a message stream when no SSE *event* arrives in time.
-
-    The httpx read timeout on the client bounds byte-level silence, but the
-    Anthropic API sends periodic ``ping`` keep-alive events that the SDK
-    filters out before yielding — a wedged request that only pings would
-    reset the byte-level timeout forever while the agent sees no event at
-    all (the "stuck in thinking" symptom).  This watchdog bounds
-    *event*-level silence: :meth:`beat` is called for every yielded event,
-    and when none arrives within *timeout* seconds the underlying response
-    is closed, which makes the blocked iterator raise so the caller can
-    convert it into a retryable :class:`TimeoutError`.
-    """
-
-    def __init__(self, stream: Any, timeout: float) -> None:
-        """Start watching *stream*.
-
-        Args:
-            stream: The ``MessageStream`` whose ``close()`` aborts the
-                blocked read.
-            timeout: Seconds of event-level silence tolerated.
-        """
-        self._stream = stream
-        self._timeout = timeout
-        self._last_event = time.monotonic()
-        self._lock = threading.Lock()
-        self._done = threading.Event()
-        self.stalled = False
-        self._thread = threading.Thread(
-            target=self._watch, name="anthropic-stream-stall-watchdog", daemon=True
-        )
-        self._thread.start()
-
-    def beat(self) -> None:
-        """Record that an event arrived (resets the stall clock)."""
-        with self._lock:
-            self._last_event = time.monotonic()
-
-    def stop(self) -> None:
-        """Stop the watchdog thread (stream finished or failed)."""
-        self._done.set()
-
-    def _watch(self) -> None:
-        poll = max(0.05, min(1.0, self._timeout / 4))
-        while not self._done.wait(poll):
-            with self._lock:
-                idle = time.monotonic() - self._last_event
-            if idle >= self._timeout:
-                self.stalled = True
-                try:
-                    self._stream.close()
-                except Exception:
-                    logger.debug("Exception caught", exc_info=True)
-                return
 
 
 def _anthropic_cache_creation_tokens(usage: Any) -> tuple[int, int]:
@@ -817,7 +763,7 @@ class AnthropicModel(Model):
           its message is often empty) or ``anthropic.APITimeoutError``
           when the response headers never arrive (SDK retries
           ``_MAX_RETRIES`` times first);
-        * **event level** — :class:`_StreamStallWatchdog` closes the
+        * **event level** — :class:`StreamAbortWatchdog` closes the
           response when no SSE event is yielded in time, catching wedged
           requests that keep the connection alive with ``ping`` events
           (which the SDK filters out before yielding).
@@ -837,12 +783,17 @@ class AnthropicModel(Model):
             TimeoutError: When the streaming connection delivers no data
                 (or no events) for ``stream_stall_timeout`` seconds.
         """
-        watchdog: _StreamStallWatchdog | None = None
+        watchdog: StreamAbortWatchdog | None = None
         in_thinking = False
         thinking_started = False
         try:
             with self.client.messages.stream(**kwargs) as stream:
-                watchdog = _StreamStallWatchdog(stream, self._stream_stall_timeout)
+                watchdog = StreamAbortWatchdog(
+                    stream,
+                    stall_timeout=self._stream_stall_timeout,
+                    stop_event=stop_signal.get_thread_stop_event(),
+                    name="anthropic-stream-abort-watchdog",
+                )
                 try:
                     for event in stream:
                         watchdog.beat()
@@ -871,15 +822,76 @@ class AnthropicModel(Model):
                                 if thinking_started:
                                     self._invoke_thinking_callback(False)
                                     thinking_started = False
+                    # An aborted socket ends the iterator at EOF instead
+                    # of raising, so the abort has to be reported here
+                    # too — otherwise get_final_message() would surface
+                    # it as a confusing "incomplete message" error.
+                    if watchdog.stopped:
+                        raise self._stop_error(thinking_started)
+                    if watchdog.stalled:
+                        raise self._stall_error(thinking_started)
                     return stream.get_final_message()
                 finally:
                     watchdog.stop()
         except (httpx.TimeoutException, APITimeoutError) as exc:
+            if self._stream_was_stopped(watchdog):
+                raise self._stop_error(thinking_started) from exc
             raise self._stall_error(thinking_started) from exc
+        except TimeoutError:
+            # Already the stall error raised after the loop below; its
+            # thinking bracket is closed, so re-wrapping it would emit a
+            # second thinking_callback(False).
+            raise
         except Exception as exc:
+            if self._stream_was_stopped(watchdog):
+                raise self._stop_error(thinking_started) from exc
             if watchdog is not None and watchdog.stalled:
                 raise self._stall_error(thinking_started) from exc
             raise
+
+    @staticmethod
+    def _stream_was_stopped(watchdog: StreamAbortWatchdog | None) -> bool:
+        """Return whether the user stopped the task during this request.
+
+        The watchdog reports a stop it acted on, but it only exists once
+        the response headers have arrived: a request that is silent
+        BEFORE that (the SDK's own connect/read timeout territory) fails
+        with ``watchdog is None``, and reporting that as a retryable
+        stall would make the agentic loop re-ask the model on behalf of
+        a task the user already stopped.  Asking the thread's stop
+        signal directly covers both windows.
+
+        Args:
+            watchdog: The stall watchdog for this request, or ``None``
+                when the stream never opened.
+
+        Returns:
+            ``True`` when the request must unwind as a user stop.
+        """
+        if watchdog is not None and watchdog.stopped:
+            return True
+        return stop_signal.stop_requested()
+
+    def _stop_error(self, thinking_started: bool) -> KeyboardInterrupt:
+        """Build the stop error for a stream the user aborted.
+
+        A user stop must NOT surface as the retryable
+        :class:`TimeoutError` a stall produces — the agentic loop would
+        re-ask the model and the task would keep running.
+        ``KeyboardInterrupt`` is the same signal ``_check_stop`` raises,
+        so the whole stack unwinds into the normal "Task stopped by
+        user" path.
+
+        Args:
+            thinking_started: Whether ``thinking_callback(True)`` was
+                emitted without its matching ``False``.
+
+        Returns:
+            The ``KeyboardInterrupt`` for the caller to raise.
+        """
+        if thinking_started:
+            self._invoke_thinking_callback(False)
+        return KeyboardInterrupt("Agent stop requested")
 
     def _stall_error(self, thinking_started: bool) -> TimeoutError:
         """Build the retryable stall error, closing any open thinking bracket.

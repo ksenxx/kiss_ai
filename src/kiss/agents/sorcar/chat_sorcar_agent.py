@@ -15,7 +15,7 @@ import logging
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -37,8 +37,10 @@ from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
     _attribute_sub_usage,
+    _await_subagents,
     _broadcast_subagent_done,
     _coerce_tasks,
+    _collect_unfinished_usage,
     _live_agent_usage,
     _LiveUsageMonitor,
     _yaml_failure,
@@ -672,6 +674,9 @@ class ChatSorcarAgent(SorcarAgent):
         )
 
         sub_usage: list[tuple[float, int, int]] = [(0.0, 0, 0)] * len(tasks)
+        # Each child's agent, published as soon as it exists so the
+        # parent can still read the spend of a child it had to abandon.
+        sub_agents: list[Any] = [None] * len(tasks)
         usage_monitor = _LiveUsageMonitor(self, printer)
 
         def _run_single(args: tuple[int, str]) -> str:
@@ -681,6 +686,7 @@ class ChatSorcarAgent(SorcarAgent):
             if tl is not None:
                 tl.stop_event = sub_stop_event
             agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
+            sub_agents[idx] = agent
             usage_monitor.track(agent)
             if chat_id:
                 agent.resume_chat_by_id(chat_id)
@@ -755,20 +761,47 @@ class ChatSorcarAgent(SorcarAgent):
                     except Exception:
                         pass
                 _RunningAgentState.unregister(sub_tab_id, sub_state)
+                # Pool workers are reused across fan-outs, and the
+                # binding is per THREAD (it is what lets a model stream
+                # see a stop), so leaving it behind would let an
+                # unrelated sibling inherit a stop meant for this task.
+                if tl is not None:
+                    tl.stop_event = None
 
         usage_monitor.start()
+        pool: ThreadPoolExecutor | None = None
+        futures: list[Future[str]] = []
+        abandoned = False
         try:
-            with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                results = list(pool.map(_run_single, enumerate(tasks)))
+            pool = ThreadPoolExecutor(max_workers=max_workers)
+            futures = [
+                pool.submit(_run_single, item) for item in enumerate(tasks)
+            ]
+            try:
+                results = _await_subagents(futures, parent_stop_event)
+            except BaseException:
+                # Includes the KeyboardInterrupt that _stop_task injects
+                # into this thread, which lands as soon as a wait slice
+                # ends — i.e. well before the grace period above.
+                abandoned = any(not f.done() for f in futures)
+                raise
         finally:
+            # Only a deliberately abandoned child skips the join: it is
+            # ignoring its stop event, and waiting for it would put the
+            # parent straight back into the uninterruptible wait this
+            # fix removes.  Every other path joins exactly as the old
+            # `with ThreadPoolExecutor(...)` block did, which also
+            # RECLAIMS each level's worker thread — nested fan-outs rely
+            # on that to bound how many threads exist at once.
+            if pool is not None:
+                pool.shutdown(wait=not abandoned, cancel_futures=abandoned)
             # stop() joins the monitor BEFORE the offsets bump so a late
             # emission can never double-count.  The attribution runs in
-            # this finally so a parent stop that unwinds pool.map cannot
-            # make completed siblings' (and interrupted children's live)
-            # spend disappear from the parent task's totals — the pool's
-            # __exit__ has already joined every worker, so the sub_usage
-            # slots are final here.
+            # this finally so a parent stop that unwinds the fan-out
+            # cannot make completed siblings' (and interrupted children's
+            # live) spend disappear from the parent task's totals.
             usage_monitor.stop()
+            _collect_unfinished_usage(futures, sub_agents, sub_usage)
             _attribute_sub_usage(
                 self,
                 sum(u[0] for u in sub_usage),

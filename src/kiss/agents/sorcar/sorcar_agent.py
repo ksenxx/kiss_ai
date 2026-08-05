@@ -10,9 +10,10 @@ import json
 import logging
 import os
 import threading
+import time
 import uuid
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
@@ -257,6 +258,103 @@ def _broadcast_subagent_done(
                 restore(model, vid)
         except Exception:
             pass
+
+
+# How long the parent may sit in one wait() before re-reading its stop
+# event.  A completed child wakes the wait immediately, so this only
+# bounds flag-checking: the abandon path below allows 15s anyway, and
+# ``_force_stop_thread`` waits 1s before its first injection and retries
+# at +5s.  It must not be much smaller: nested fan-outs put one waiting
+# parent on the stack per level, and every one of them wakes on this
+# interval, so a 0.1s slice made a deeply nested tree crawl under GIL
+# contention.
+_SUBAGENT_POLL_SECONDS = 1.0
+_SUBAGENT_STOP_GRACE_SECONDS = 15.0
+
+
+def _await_subagents(
+    futures: list[Future[str]],
+    stop_event: threading.Event | None,
+) -> list[str]:
+    """Collect fan-out results without becoming unstoppable.
+
+    ``list(pool.map(...))`` parks the parent thread in a C-level lock,
+    where it can neither poll its stop event (a parent prints nothing
+    while its children run) nor accept the ``KeyboardInterrupt`` that
+    ``VSCodeServer._stop_task`` injects — CPython delivers an injected
+    exception only at a bytecode boundary.  That is why the parent of
+    task ``709ebce3`` outlived the Stop click by three minutes
+    (``reports/stop_button_delay_2026-08-05.html``).  Waiting in short
+    slices instead keeps the parent at a bytecode boundary throughout.
+
+    A stopped child normally unwinds in well under a second, and its
+    result is still collected so sibling spend and summaries survive.
+    Only a child that ignores its stop event for
+    ``_SUBAGENT_STOP_GRACE_SECONDS`` is abandoned, so that one wedged
+    sub-agent can no longer hold the whole task hostage.
+
+    Args:
+        futures: One future per fanned-out sub-agent, in task order.
+        stop_event: The parent task's stop event, or ``None`` when the
+            fan-out is not running under a stoppable task.
+
+    Returns:
+        The sub-agent results, in the order the tasks were given.
+
+    Raises:
+        KeyboardInterrupt: When a stop was requested and at least one
+            child was still running after the grace period.
+    """
+    pending = set(futures)
+    give_up_at: float | None = None
+    while pending:
+        _done, pending = wait(pending, timeout=_SUBAGENT_POLL_SECONDS)
+        if not pending:
+            break
+        if stop_event is None or not stop_event.is_set():
+            continue
+        if give_up_at is None:
+            give_up_at = time.monotonic() + _SUBAGENT_STOP_GRACE_SECONDS
+        elif time.monotonic() >= give_up_at:
+            raise KeyboardInterrupt("Agent stop requested")
+    return [f.result() for f in futures]
+
+
+def _collect_unfinished_usage(
+    futures: list[Future[str]],
+    sub_agents: list[Any],
+    sub_usage: list[tuple[float, int, int]],
+) -> None:
+    """Fill in the spend of children that never got to report it.
+
+    A child fills its own ``sub_usage`` slot in its ``finally``, so a
+    child the parent abandoned (see :func:`_await_subagents`) would leave
+    a zero there and its cost, tokens and steps would silently vanish
+    from the parent task's totals.  Reading the live figures off the
+    child's agent recovers everything it had spent up to this instant —
+    without waiting for it, which is the whole point of abandoning it.
+    A live read of a still-running child can lag its true spend slightly
+    (it may land mid-handoff between executor sessions), which is why a
+    child that finishes in the meantime keeps its own final figure.
+
+    Args:
+        futures: One future per fanned-out sub-agent, in task order.
+        sub_agents: The children's agents, in the same order; entries are
+            ``None`` for children that never started.
+        sub_usage: Per-child ``(cost, tokens, steps)`` slots, updated in
+            place for unfinished children only.
+    """
+    for idx, future in enumerate(futures):
+        agent = sub_agents[idx]
+        if future.done() or agent is None:
+            continue
+        live = _live_agent_usage(agent)
+        # A worker writes its own slot BEFORE its future completes, so a
+        # future that finished while this live read was in flight has
+        # already published a strictly better figure: keep it.
+        if future.done():
+            continue
+        sub_usage[idx] = live
 
 
 def _live_agent_usage(agent: Any) -> tuple[float, int, int]:
@@ -1389,6 +1487,9 @@ def run_tasks_parallel(
     from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
     sub_usage: list[tuple[float, int, int]] = [(0.0, 0, 0)] * len(tasks)
+    # Published as soon as each child exists so an abandoned child's
+    # spend can still be read (see _collect_unfinished_usage).
+    sub_agents: list[Any] = [None] * len(tasks)
 
     parent_tl = getattr(printer, "_thread_local", None) if printer else None
     parent_key = getattr(parent_tl, "task_id", "") if parent_tl else ""
@@ -1400,6 +1501,7 @@ def run_tasks_parallel(
         if tl is not None:
             tl.stop_event = parent_stop_event
         agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
+        sub_agents[idx] = agent
         agent._subagent_info = {"parent_task_id": "", "parent_tab_id": ""}
         if usage_monitor is not None:
             usage_monitor.track(agent)
@@ -1427,15 +1529,33 @@ def run_tasks_parallel(
                     [f"task-{parent_key}__sub_{idx}"],
                     model_name or "",
                 )
+            # Pool workers are reused and the binding is per THREAD, so
+            # leaving it behind would let an unrelated sibling inherit a
+            # stop meant for this task.
+            if tl is not None:
+                tl.stop_event = None
 
+    pool: ThreadPoolExecutor | None = None
+    futures: list[Future[str]] = []
+    abandoned = False
     try:
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            results = list(pool.map(_run_single, enumerate(tasks)))
+        pool = ThreadPoolExecutor(max_workers=max_workers)
+        futures = [pool.submit(_run_single, item) for item in enumerate(tasks)]
+        try:
+            results = _await_subagents(futures, parent_stop_event)
+        except BaseException:
+            abandoned = any(not f.done() for f in futures)
+            raise
     finally:
-        # Fill totals_out even when a worker propagates an interrupt:
-        # the pool's __exit__ has already joined every worker, so the
-        # sub_usage slots are final and completed siblings' spend is
-        # not lost from the parent's accounting.
+        # Only a child that ignored its stop event is abandoned; every
+        # other path joins (and so RECLAIMS the workers) exactly as the
+        # old `with ThreadPoolExecutor(...)` block did.
+        if pool is not None:
+            pool.shutdown(wait=not abandoned, cancel_futures=abandoned)
+        # Fill totals_out even when a worker propagates an interrupt, and
+        # read the live figures of any child that never got to report its
+        # own, so no completed sibling's spend is lost.
+        _collect_unfinished_usage(futures, sub_agents, sub_usage)
         if totals_out is not None:
             totals_out["budget_used"] = sum(u[0] for u in sub_usage)
             totals_out["total_tokens_used"] = sum(u[1] for u in sub_usage)

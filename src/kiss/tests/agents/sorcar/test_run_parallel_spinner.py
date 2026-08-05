@@ -87,7 +87,11 @@ const statusText = { textContent: 'Ready' };
 let isRunning = false;
 let t0 = null;
 let endTs = 0;
+let activeTabId = 'tab-1';
+const activeTab = { id: activeTabId, isRunning: false, isStopping: false };
 
+function getTab(id) { return id === activeTabId ? activeTab : null; }
+function renderStopButton() { calls.push('renderStopButton'); }
 function updateInputDisabled() { calls.push('updateInputDisabled'); }
 function startTimer() { calls.push('startTimer'); }
 function stopTimer() { calls.push('stopTimer'); }

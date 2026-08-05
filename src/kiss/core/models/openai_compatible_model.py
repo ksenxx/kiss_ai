@@ -28,6 +28,7 @@ from kiss.core.models.model import (
     parse_binary_attachments,
     responses_items_to_chat_messages,
 )
+from kiss.core.models.stream_abort import stop_aware_events
 
 logger = logging.getLogger(__name__)
 
@@ -850,7 +851,17 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         response = None
         last_chunk = None
         in_reasoning = False
-        for chunk in self.client.chat.completions.create(**kwargs):
+        # stop_aware_events, not a bare `for chunk in ...`: otherwise the
+        # thread sits in recv() on a quiet connection for the client's
+        # full 1800s timeout, deaf to Stop, because the flag is only read
+        # when the agent emits something and an injected
+        # KeyboardInterrupt cannot reach a thread inside C code
+        # (reports/stop_button_delay_2026-08-05.html).
+        for chunk in stop_aware_events(
+            self.client.chat.completions.create(**kwargs),
+            on_abort=self._close_thinking_if_open,
+            name="openai-stream-abort-watchdog",
+        ):
             last_chunk = chunk
             if chunk.choices:
                 delta = chunk.choices[0].delta
@@ -990,7 +1001,16 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             response = None
             last_chunk = None
             in_reasoning = False
-            for chunk in self._create_chat_completion_adaptive(kwargs):
+            # stop_aware_events, not a bare `for chunk in ...`: this is
+            # the path Sorcar's agentic loop takes, and a provider that
+            # goes byte-silent here would otherwise hold the agent for
+            # the client's full 1800s timeout, deaf to Stop
+            # (reports/stop_button_delay_2026-08-05.html).
+            for chunk in stop_aware_events(
+                self._create_chat_completion_adaptive(kwargs),
+                on_abort=self._close_thinking_if_open,
+                name="openai-tools-stream-abort-watchdog",
+            ):
                 last_chunk = chunk
                 if chunk.choices:
                     delta = chunk.choices[0].delta
