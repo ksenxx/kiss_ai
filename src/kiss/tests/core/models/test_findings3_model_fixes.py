@@ -63,10 +63,8 @@ class TestFinding3CacheControlNoCallerMutation:
             model_config=caller_config,
         )
         kwargs = m._build_chat_kwargs([{"role": "user", "content": "hi"}])
-        # The request kwargs DO carry the injected cache marker...
         assert kwargs["extra_body"]["cache_control"] == {"type": "ephemeral"}
         assert kwargs["extra_body"]["custom"] == 1
-        # ...but neither the caller's dict nor the stored config was mutated.
         assert caller_config["extra_body"] == {"custom": 1}
         assert m.model_config["extra_body"] == {"custom": 1}
 
@@ -105,7 +103,6 @@ class TestFinding5NativeReasoningDictWins:
     """#5 — a caller-native ``reasoning`` dict suppresses the default."""
 
     def test_v1_skips_default_when_native_reasoning_effort_present(self) -> None:
-        # gpt-5.5 declares thinking="high" in MODEL_INFO.
         m = OpenAICompatibleModel(
             "gpt-5.5",
             base_url="https://api.openai.com/v1",
@@ -157,7 +154,6 @@ class TestFinding7NonStringToolResults:
         assert tool_msg["content"] == '{"a": 1, "b": [2, 3]}'
 
     def test_base_model_dict_tool_result_is_json_encoded(self) -> None:
-        # ClaudeCodeModel inherits the base Model implementation.
         m = ClaudeCodeModel("claude-fable-5")
         m.conversation = [
             {"role": "user", "content": "hi"},
@@ -168,7 +164,6 @@ class TestFinding7NonStringToolResults:
         )
         tool_msg = m.conversation[-1]
         assert tool_msg["role"] == "tool"
-        # ensure_ascii=False keeps non-ASCII text readable.
         assert tool_msg["content"] == '{"ключ": "значение"}'
 
     def test_v1_list_tool_result_does_not_crash(self) -> None:

@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.core.useful_tools import UsefulTools
+from kiss.agents.sorcar.useful_tools import UsefulTools
 
 
 @pytest.fixture()
@@ -56,15 +56,12 @@ def test_edit_stale_worktree_path_falls_back_to_repo(repo: Path) -> None:
     tools = UsefulTools()
     stale = _stale_path(repo)
 
-    # Read succeeds via the documented fallback...
     assert tools.Read(str(stale)) == "REAL CONTENT\n"
 
-    # ...so Edit on the very same path must succeed too.
     out = tools.Edit(str(stale), "REAL CONTENT", "EDITED CONTENT")
 
     assert "Successfully replaced" in out, out
     assert (repo / "src" / "module.py").read_text() == "EDITED CONTENT\n"
-    # No zombie worktree directory may appear.
     assert not (repo / ".kiss-worktrees").exists()
 
 
@@ -93,9 +90,7 @@ def test_write_stale_worktree_path_does_not_resurrect_zombie_worktree(
     out = tools.Write(str(stale), "NEW CONTENT\n")
 
     assert "Successfully wrote" in out, out
-    # The write must land in the parent repo...
     assert (repo / "src" / "module.py").read_text() == "NEW CONTENT\n"
-    # ...and must NOT resurrect a zombie worktree directory.
     assert not (repo / ".kiss-worktrees").exists()
 
 
@@ -105,7 +100,7 @@ def test_read_live_worktree_deleted_file_does_not_leak_repo_copy(
     """A *live* worktree path whose file was deleted in the worktree must
     report not-found — not silently return the parent repo's copy."""
     wt_root = repo / ".kiss-worktrees" / "kiss_wt-live-1"
-    (wt_root / "src").mkdir(parents=True)  # worktree exists, file deleted
+    (wt_root / "src").mkdir(parents=True)
 
     out = UsefulTools().Read(str(wt_root / "src" / "module.py"))
 

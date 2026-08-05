@@ -98,9 +98,6 @@ class TestLiveUsageMonitor:
         parent's cumulative offset — the exact aggregate the header shows."""
         printer = _RecordingPrinter()
         parent = _parent_with_task(printer, "parent-task")
-        # Parent spent $0.05 / 500 tokens / 3 steps in prior sessions —
-        # snapshotted into the printer offsets at session start
-        # (relentless_agent.perform_task does exactly this).
         parent.budget_used = 0.05
         parent.total_tokens_used = 500
         parent.total_steps = 3
@@ -113,7 +110,6 @@ class TestLiveUsageMonitor:
         monitor.track(sub)
         monitor.start()
         try:
-            # The sub-agent's first LLM call lands: $0.25 / 1000 tokens.
             sub.budget_used = 0.25
             sub.total_tokens_used = 1000
             sub.total_steps = 4
@@ -123,7 +119,6 @@ class TestLiveUsageMonitor:
                     for e in printer.usage_events("parent-task")
                 )
             ), "no parent usage_info with aggregated cost was broadcast"
-            # A second call: totals must keep tracking upward.
             sub.budget_used = 0.40
             sub.total_tokens_used = 2000
             sub.total_steps = 5
@@ -142,7 +137,6 @@ class TestLiveUsageMonitor:
         latest = next(e for e in events if e.get("cost") == "$0.4500")
         assert latest["total_tokens"] == 2500
         assert latest["total_steps"] == 8
-        # Change-only emission: no two consecutive identical snapshots.
         snapshots = [
             (e.get("cost"), e.get("total_tokens"), e.get("total_steps"))
             for e in events
@@ -210,7 +204,7 @@ class TestLiveUsageMonitor:
         monitor = _LiveUsageMonitor(parent, None, interval=0.01)
         monitor.start()
         assert monitor._thread is None
-        monitor.stop()  # must not raise
+        monitor.stop()
 
     def test_stop_joins_before_offsets_bump_no_double_count(self) -> None:
         """After ``stop()`` returns no further emission may occur, so the
@@ -238,7 +232,6 @@ class TestLiveUsageMonitor:
             "monitor emitted after stop(): a stale raw emission would be "
             "offset by the just-bumped totals and double-count the display"
         )
-        # Every pre-stop emission carried offset 0 — never double counted.
         for e in printer.usage_events("stop-task"):
             assert e["cost"] == "$0.2500"
 
@@ -302,14 +295,9 @@ class TestRunTasksParallelLiveUsage:
         )
         costs = [float(e["cost"].lstrip("$")) for e in live]
         assert max(costs) > 0.0
-        # Monotonic non-decreasing live cost stream.
         assert costs == sorted(costs)
-        # Final attribution: parent totals now include the sub-agents'
-        # spend, and the printer offsets equal those totals exactly
-        # (displayed final == attributed final; nothing double counted).
         assert parent.budget_used > 0.0
         assert printer.budget_offset == pytest.approx(parent.budget_used)
         assert printer.tokens_offset == parent.total_tokens_used
         assert printer.steps_offset == parent.total_steps
-        # Live stream never exceeded the final attributed total.
         assert max(costs) <= parent.budget_used + 1e-9

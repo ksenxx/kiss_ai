@@ -38,7 +38,6 @@ def _isolate_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     db_path = tmp_path / "sorcar.db"
     monkeypatch.setattr(persistence, "_DB_PATH", db_path)
     persistence._close_db()
-    # Reset shared registries that survive across tests.
     with _RunningAgentState._registry_lock:
         _RunningAgentState.running_agent_states.clear()
     with ChatSorcarAgent._running_agents_lock:
@@ -51,27 +50,18 @@ def _isolate_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     persistence._close_db()
 
 
-# ---------------------------------------------------------------------------
-# Round-3 sorcar-other H1 (HIGH):
-#   ``_register_running_state`` runs before ``_add_task``.  When
-#   ``_add_task`` raises (DB error, disk-full, etc.) the agent must
-#   not leak a stale entry in ``running_agent_states``.
-# ---------------------------------------------------------------------------
-
 
 def test_register_unregisters_when_add_task_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """If ``_add_task`` raises mid-``run``, the registered state is removed."""
     agent = ChatSorcarAgent("h1-leak-probe")
-    # Force ``_add_task`` to raise.
     from kiss.agents.sorcar import chat_sorcar_agent as csa
 
     def _boom(*_args: object, **_kwargs: object) -> tuple[str, str]:
         raise RuntimeError("simulated DB write failure")
 
     monkeypatch.setattr(csa, "_add_task", _boom)
-    # Stub out everything beyond ``_add_task`` so we don't run a model.
     monkeypatch.setattr(
         ChatSorcarAgent, "build_chat_prompt",
         lambda self, p: p,  # type: ignore[arg-type]
@@ -87,19 +77,10 @@ def test_register_unregisters_when_add_task_raises(
     )
 
 
-# ---------------------------------------------------------------------------
-# Round-3 sorcar-other H2 (HIGH):
-#   When a sub-agent state is constructed inside ``_run_tasks_parallel``,
-#   peer threads holding ``_registry_lock`` must never see a half-built
-#   ``_RunningAgentState``: all required fields (``chat_id``,
-#   ``is_subagent``, ``parent_task_id``, ``is_task_active``,
-#   ``model_name``, ``agent``) must be populated by the constructor.
-# ---------------------------------------------------------------------------
-
 
 def test_running_agent_state_subagent_kwargs_populate_in_constructor() -> None:
     """The constructor sets all subagent-related fields in one shot."""
-    fake_agent = object()  # not a real ChatSorcarAgent but treated as opaque
+    fake_agent = object()
     parent_uuid = uuid.uuid4().hex
     state = _RunningAgentState(
         "sub-tab-001",
@@ -110,8 +91,6 @@ def test_running_agent_state_subagent_kwargs_populate_in_constructor() -> None:
         parent_task_id=parent_uuid,
         is_task_active=True,
     )
-    # The H2 fix requires every field below to be set by __init__,
-    # not by post-construction attribute writes.
     assert state.chat_id == "chat-xyz"
     assert state.is_subagent is True
     assert state.parent_task_id == parent_uuid
@@ -149,9 +128,7 @@ def test_run_tasks_parallel_constructs_subagent_state_atomically(
                             (k, st.is_subagent, st.chat_id, st.is_task_active),
                         )
 
-    # Stub run() so we don't actually invoke a model.
     def _fake_run(self: ChatSorcarAgent, **_kwargs: object) -> str:
-        # Brief pause to widen the observation window.
         import time
         time.sleep(0.005)
         return "summary: done"
@@ -175,13 +152,6 @@ def test_run_tasks_parallel_constructs_subagent_state_atomically(
         f"{bad[:3]}"
     )
 
-
-# ---------------------------------------------------------------------------
-# Round-3 sorcar-other H5 (HIGH):
-#   ``_run_single`` re-snapshots ``self._last_task_id`` at worker start
-#   so a concurrent batch (or late-arriving parent ``_add_task``) does
-#   not orphan the sub-agent row.
-# ---------------------------------------------------------------------------
 
 
 def test_run_single_resnapshots_parent_task_id_at_worker_start(
@@ -208,9 +178,6 @@ def test_run_single_resnapshots_parent_task_id_at_worker_start(
         captured.append(
             cast("str | None", info["parent_task_id"]) if info else None,
         )
-        # On the first worker, simulate the parent's _add_task arriving
-        # late: publish the real task_history.id BEFORE worker #2's
-        # snapshot.
         if len(captured) == 1:
             parent._last_task_id = real_parent_tid  # noqa: SLF001
         return "summary: ok"

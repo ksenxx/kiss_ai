@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import math
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -22,6 +23,7 @@ import yaml
 from kiss.agents.sorcar.persistence import _list_recent_chats
 from kiss.core import config as config_module
 from kiss.core._version import __version__
+from kiss.core.html_render import html_to_text
 from kiss.core.models.model_info import get_default_model
 
 if TYPE_CHECKING:
@@ -203,6 +205,36 @@ def _coerce_positive_int(value: str) -> int:
     return parsed
 
 
+def _parse_budget_value(value: str) -> float:
+    """Parse a ``--max_budget`` value as a positive finite float.
+
+    Rejects ``nan`` (which would disable the ``budget_used >= max_budget``
+    guard entirely because every comparison with NaN is false), ``inf``,
+    zero, and negative values.
+
+    Args:
+        value: Raw command-line string.
+
+    Returns:
+        The parsed budget as a float.
+
+    Raises:
+        argparse.ArgumentTypeError: If *value* is not a positive finite
+            number.
+    """
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"--max_budget must be a positive finite number, got {value!r}"
+        ) from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError(
+            f"--max_budget must be a positive finite number, got {value!r}"
+        )
+    return parsed
+
+
 def _print_recent_chats(limit: int = DEFAULT_RECENT_CHATS_LIMIT) -> None:
     """Print the most recent chat sessions with their tasks and results.
 
@@ -326,7 +358,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Custom HTTP header (format: 'Key:Value'). Can be used multiple times.",
     )
     parser.add_argument(
-        "-b", "--max_budget", type=float,
+        "-b", "--max_budget", type=_parse_budget_value,
         default=config_module.DEFAULT_CONFIG.max_budget,
         help="Maximum budget in USD",
     )
@@ -413,12 +445,6 @@ def _build_run_kwargs(
     if args.endpoint:
         model_config["base_url"] = args.endpoint
     if args.header:
-        # Reject malformed headers loudly instead of silently dropping
-        # them (w3 C-3): a ``--header`` without a colon (or with an
-        # empty key) used to vanish without a message, surfacing later
-        # only as an opaque downstream auth/HTTP error.  The same
-        # strict :func:`_parse_kv` backs the sibling ``sorcar mcp``
-        # CLI's ``--env`` / ``--header`` options.
         headers = dict(_parse_kv(
             args.header, ":",
             error_fmt="Invalid --header {pair!r}: expected 'Key:Value'",
@@ -437,13 +463,6 @@ def _build_run_kwargs(
         "verbose": args.verbose,
         "ask_user_question_callback": cli_ask_user_question,
     }
-    # When the CLI runs verbosely (the default), install a recording
-    # console printer.  The plain ``ConsolePrinter`` renders Rich
-    # panels but does NOT persist events, so the chat webview shows a
-    # blank session for CLI-launched tasks.  ``RecordingConsolePrinter``
-    # both records every display event to the chat DB AND renders the
-    # Rich panels to the terminal, so the same run is visible live in
-    # the terminal and replayable later in the chat webview.
     if args.verbose and printer_factory is not None:
         run_kwargs["printer"] = printer_factory()
     return run_kwargs
@@ -453,10 +472,11 @@ def _print_result(result: str) -> None:
     """Print the agent's run result without the raw YAML envelope.
 
     The agent returns a YAML document with ``success`` and ``summary``
-    keys.  Printing that document verbatim exposes the raw YAML to the
-    user; instead show only the human-readable ``summary`` text.  When
-    the result is not the expected YAML mapping, fall back to printing
-    it as-is so no output is ever silently dropped.
+    keys, where the summary is always HTML.  Printing that document
+    verbatim exposes raw YAML and HTML tags to the user; instead render
+    the ``summary`` HTML as plain terminal text.  When the result is not
+    the expected YAML mapping, fall back to printing it as-is so no
+    output is ever silently dropped.
 
     Args:
         result: The YAML string returned by the running agent.
@@ -466,10 +486,8 @@ def _print_result(result: str) -> None:
     except Exception:
         parsed = None
     if isinstance(parsed, dict) and "summary" in parsed:
-        # ``summary:`` with no value parses to ``None`` — print an
-        # empty summary rather than the literal string ``"None"``.
         summary = parsed.get("summary")
-        print("" if summary is None else str(summary))
+        print("" if summary is None else html_to_text(str(summary)))
     else:
         print(result)
 

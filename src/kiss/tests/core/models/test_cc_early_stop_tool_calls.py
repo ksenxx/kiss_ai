@@ -195,7 +195,6 @@ class TestEarlyStopOnToolCalls:
                 "type": "content_block_delta",
                 "delta": {"type": "text_delta", "text": tool_json},
             }},
-            # The model continues with hallucinated results (but we should stop)
             {"type": "stream_event", "event": {
                 "type": "content_block_delta",
                 "delta": {"type": "text_delta", "text": hallucinated},
@@ -208,10 +207,8 @@ class TestEarlyStopOnToolCalls:
         assert m._stopped_for_tool_calls is True
         assert len(function_calls) == 1
         assert function_calls[0]["name"] == "Bash"
-        # go_to_url from hallucinated result should NOT be extracted
         names = {fc["name"] for fc in function_calls}
         assert "go_to_url" not in names
-        # Content should be truncated to end of first tool_calls block
         assert "fake.com" not in content
 
     def test_multiple_tool_calls_in_one_block_all_extracted(self) -> None:
@@ -263,8 +260,6 @@ class TestEarlyStopOnToolCalls:
 
         function_calls, content, m = _run_with_events(events)
 
-        # No trailing content after tool_calls → model finishes normally
-        # (early stop is only triggered by trailing hallucinated text)
         assert len(function_calls) == 1
         assert function_calls[0]["name"] == "Bash"
 
@@ -313,10 +308,8 @@ class TestEarlyStopOnToolCalls:
         function_calls, content, m = _run_with_events(events)
 
         assert m._stopped_for_tool_calls is True
-        # Only the first tool call (Bash) should be extracted
         assert len(function_calls) == 1
         assert function_calls[0]["name"] == "Bash"
-        # The hallucinated URLs should not appear in the content
         assert "nps.gov" not in content
         assert "travelyosemite" not in content
 

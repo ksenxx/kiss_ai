@@ -3,10 +3,6 @@
    Koushik Sen (ksen@berkeley.edu)
    add your name here */
 
-/* KISS Sorcar VS Code Extension Styles
-   Ported from json_printer.py OUTPUT_CSS + chatbot_ui.py assistant-panel styles
-   to produce identical rendering in the VS Code webview sidebar. */
-
 :root {
   font-size: var(--vscode-font-size);
 
@@ -26,18 +22,18 @@
   --cyan: var(--vscode-terminal-ansiCyan);
   --orange: color-mix(in srgb, var(--yellow) 55%, var(--red));
   --blue: var(--vscode-terminal-ansiBlue, #569cd6);
-  --fs-xs:  0.636rem;  /* ~8px at 13px */
-  --fs-sm:  0.818rem;  /* ~11px at 13px — labels */
-  --fs-md:  0.909rem;  /* ~12px at 13px — secondary text */
-  --fs-base: 1rem;     /* matches theme font-size — body text */
-  --fs-lg:  1.091rem;  /* ~14px at 13px */
-  --fs-xl:  1.273rem;  /* ~17px at 13px — headings */
-  --fs-2xl: 1.545rem;  /* ~20px at 13px — large headings */
+  --fs-xs:  0.636rem;
+  --fs-sm:  0.818rem;
+  --fs-md:  0.909rem;
+  --fs-base: 1rem;
+  --fs-lg:  1.091rem;
+  --fs-xl:  1.273rem;
+  --fs-2xl: 1.545rem;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
-/* stylelint-disable-next-line property-no-vendor-prefix -- iOS Safari requires -webkit- prefix */
+/* stylelint-disable-next-line property-no-vendor-prefix */
 html { max-width: 100vw; overflow-x: hidden; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
 
 body {
@@ -58,7 +54,6 @@ body {
   overflow-x: hidden;
 }
 
-/* ── Chat-webview notifications ─────────────────────── */
 .kiss-notification-container {
   position: fixed;
   top: 8px;
@@ -225,7 +220,6 @@ body {
   }
 }
 
-/* ── Per-tab Status Bar ─────────────────────────────── */
 #tab-status-bar {
   display: flex;
   justify-content: flex-start;
@@ -247,7 +241,6 @@ body {
 #status-text { color: var(--green); }
 
 
-/* ── Tab Bar ─────────────────────────────────────────── */
 #tab-bar {
   display: flex;
   align-items: center;
@@ -269,8 +262,6 @@ body {
 
 
 
-/* ── Settings sub-tab panel ─────────────────────────── */
-
 
 .config-label {
   display: block;
@@ -282,6 +273,7 @@ body {
 .config-label input[type="text"],
 .config-label input[type="password"],
 .config-label input[type="number"],
+.config-label select,
 .config-label textarea {
   display: block;
   width: 100%;
@@ -298,18 +290,16 @@ body {
 
 .config-label textarea { resize: vertical; }
 
-/* In VS Code the work_dir field is read-only (it always shows the
-   window's open workspace folder); render it dimmed so it reads as
-   informational rather than editable. */
 .config-label input[readonly] { color: var(--dim); }
 
+.config-label select { cursor: pointer; }
+
 .config-label input:focus,
+.config-label select:focus,
 .config-label textarea:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
 .config-checkbox { display: flex; align-items: center; gap: 8px; flex-direction: row; }
 .config-checkbox input[type="checkbox"] { margin: 0; width: auto; }
 
-/* Wake-word ("Sorcar") sensitivity slider: range input plus the live
-   numeric value, applied immediately by voice.js (no Save needed). */
 .config-sensitivity-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
 
 .config-sensitivity-row input[type="range"] {
@@ -327,13 +317,24 @@ body {
 
 .config-divider { border-top: 1px solid var(--border); margin: 12px 0; }
 
-.config-update-row { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+/* Tips / Git Commit / Update / Reset Server.  ``flex-wrap`` + the
+   ``white-space: nowrap`` on the buttons below make the row break
+   BETWEEN buttons when it is too narrow, never inside a label. */
+.config-update-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
 
 .config-gitcommit-btn {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 6px;
   padding: 6px 12px;
+  white-space: nowrap;
   background: color-mix(in srgb, var(--fg) 4%, transparent);
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -349,9 +350,11 @@ body {
 
 .config-update-btn {
   display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 6px;
   padding: 6px 12px;
+  white-space: nowrap;
   background: color-mix(in srgb, var(--fg) 4%, transparent);
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -365,10 +368,6 @@ body {
 .config-update-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .config-update-btn svg { flex-shrink: 0; }
 
-/* When the hourly PyPI check finds a newer release, main.js adds
-   the ``has-update`` class to the Update button and inserts an SVG
-   icon with class ``update-available-icon``.  These rules style
-   that icon green and draw the user's attention to the badge. */
 .config-update-btn.has-update {
   border-color: color-mix(in srgb, #2ea043 60%, var(--border));
   background: color-mix(in srgb, #2ea043 10%, transparent);
@@ -430,10 +429,10 @@ body {
   width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
   background: #2e7d32;
   box-shadow: 0 0 0 1px rgb(0 0 0 / 15%);
-  animation: tab-running-pulse 1.5s ease-in-out infinite;
+  animation: running-pulse 1.5s ease-in-out infinite;
 }
 
-@keyframes tab-running-pulse {
+@keyframes running-pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 1px rgb(0 0 0 / 15%); }
   50% { opacity: 0.4; box-shadow: 0 0 6px 2px rgb(46 125 50 / 50%); }
 }
@@ -443,6 +442,12 @@ body {
 }
 .chat-tab-ok { color: var(--green); }
 .chat-tab-fail { color: var(--red); }
+
+.chat-tab-attention {
+  font-size: 12px; font-weight: 700; flex-shrink: 0; line-height: 1;
+  color: var(--yellow, #d29922);
+  animation: running-pulse 1.5s ease-in-out infinite;
+}
 
 .chat-tab-close {
   display: inline-flex;
@@ -482,14 +487,6 @@ body {
 }
 .chat-tab-settings svg { display: block; }
 
-/* ── Subagent Tabs ───────────────────────────────────── */
-
-/* Sub-agent tabs MUST be visually distinct from regular chat
- * tabs: the user clicks a sub-agent row in history and the
- * resulting tab is the only one that does not load sibling
- * tasks from the same chat_id.  Use the purple accent for the
- * border, background tint, and label colour so it is obvious
- * at a glance — both when inactive and when active. */
 .chat-tab.subagent-tab {
   border-bottom-color: color-mix(in srgb, var(--purple) 55%, transparent);
   background: color-mix(in srgb, var(--purple) 8%, transparent);
@@ -516,11 +513,6 @@ body {
 }
 
 .chat-tab.subagent-tab .subagent-indicator.done {
-  /* Sub-agent finished: kill the pulse animation and pin the purple
-   * ◉ glyph at full opacity.  The user-visible "this sub-agent is
-   * done" signal is a SOLID (non-pulsing) purple ◉ in the tab
-   * title, vs. the pulsing ◉ shown while the sub-agent is still
-   * running. */
   animation: none;
   opacity: 1;
 }
@@ -552,35 +544,37 @@ body {
 }
 .tab-ctx-item:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
 
-/* ── Task Panel ──────────────────────────────────────── */
 #task-panel {
   position: relative;
   flex-shrink: 0;
   margin: 8px 10px 0;
-
-  /* 52px right inset fits the two floating icons (drawer chevron +
-     copy) side by side without covering the task text. */
-  padding: 8px 52px 8px 12px;
+  padding: 8px 64px 8px 12px;
   border: 2px solid rgb(255 200 0 / 50%);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--accent) 4%, transparent);
+
+  /* Reverse (invert) of the rest of the chat view: swap --bg and --fg. */
+  --panel-bg: var(--fg);
+  --panel-fg: var(--bg);
+  --panel-dim: color-mix(in srgb, var(--bg) 65%, var(--fg));
+
+  background: var(--panel-bg);
   font-size: var(--vscode-editor-font-size);
-  color: var(--fg);
+  color: var(--panel-fg);
   line-height: 1.6;
   display: none;
 }
 #task-panel.visible { display: block; }
 
-/* Expanded task drawer: show the ENTIRE task text.  The height is
-   viewport-bounded (60vh) so the panel always remains within the chat
-   webview — overlong tasks scroll inside the panel instead of pushing
-   the events area and the composer off screen. */
 #task-panel-text {
   max-height: 60vh;
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-word;
+  scrollbar-color: var(--panel-dim) transparent;
 }
+
+#task-panel-text::-webkit-scrollbar-thumb { background: var(--panel-dim); }
+#task-panel-text::-webkit-scrollbar-thumb:hover { background: var(--panel-fg); }
 
 #task-panel-copy {
   position: absolute;
@@ -589,7 +583,7 @@ body {
   transform: translateY(-50%);
   background: none;
   border: none;
-  color: var(--dim);
+  color: var(--panel-dim);
   cursor: pointer;
   padding: 2px;
   display: flex;
@@ -599,15 +593,9 @@ body {
   user-select: none;
 }
 #task-panel-copy * { user-select: none; }
-#task-panel-copy:hover { color: var(--fg); }
+#task-panel-copy:hover { color: var(--panel-fg); }
 #task-panel-copy.copied { color: var(--green); }
 
-/* ── Drawer widgets (task panel + input panel) ────────
- * Each pinned panel is a drawer: a chevron toggle tucks its contents
- * away into a slim bar and hands the freed height to the chat events
- * area (#output — the flex:1 child of the #app column).  The toggles
- * flip aria-expanded; the chevron rotates to always point where the
- * drawer will move on click. */
 #task-panel-drawer-btn {
   position: absolute;
   right: 28px;
@@ -615,14 +603,12 @@ body {
   transform: translateY(-50%);
   background: none;
   border: none;
-  color: var(--dim);
+  color: var(--panel-dim);
   cursor: pointer;
   padding: 0;
-
-  /* 24x24 minimum hit target (WCAG 2.2 §2.5.8) — the icon inside
-     stays 1em; the box gives fingers something to land on. */
-  width: 24px;
-  height: 24px;
+  width: 36px;
+  height: 36px;
+  font-size: 1.5em;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -630,7 +616,7 @@ body {
   user-select: none;
 }
 #task-panel-drawer-btn * { user-select: none; }
-#task-panel-drawer-btn:hover { color: var(--fg); }
+#task-panel-drawer-btn:hover { color: var(--panel-fg); }
 
 #task-panel-drawer-btn:focus-visible {
   outline: 1px solid var(--accent);
@@ -639,8 +625,6 @@ body {
 #task-panel-drawer-btn svg { transition: transform 0.2s ease; }
 #task-panel-drawer-btn[aria-expanded="false"] svg { transform: rotate(180deg); }
 
-/* Collapsed task drawer: a slim bar with the task clamped to one
-   ellipsized line. */
 #task-panel.drawer-collapsed {
   padding-top: 4px;
   padding-bottom: 4px;
@@ -652,7 +636,6 @@ body {
   text-overflow: ellipsis;
 }
 
-/* ── Output Area ────────────────────────────────────── */
 #output {
   flex: 1; overflow-y: auto; overflow-x: hidden;
   overscroll-behavior-y: none;
@@ -666,18 +649,10 @@ body {
 #welcome h2 { font-size: var(--fs-2xl); font-weight: 600; color: var(--fg); margin-bottom: 3px; letter-spacing: -0.3px; }
 #welcome p { font-size: var(--fs-base); color: var(--dim); margin-bottom: 14px; }
 
-/*
- * Remote-chat welcome layout: hide the SAMPLE_TASKS suggestions panel.
- * The #input-area stays pinned at the bottom of #app (never relocated
- * into #welcome) so its width is identical in both the welcome and
- * running-task states.
- */
 body.remote-chat #welcome { min-height: 100%; box-sizing: border-box; }
 body.remote-chat #welcome > #suggestions { display: none; }
 body.remote-chat #welcome-config { display: none !important; }
 
-/* In remote-chat mode #input-area stays in #app (never moved into
-   #welcome) so its width matches the running-task layout exactly. */
 #remote-url { width: 100%; margin-bottom: 10px; }
 
 .remote-url-bar {
@@ -739,8 +714,6 @@ body.remote-chat #welcome-config { display: none !important; }
   letter-spacing: 0.04em; color: var(--accent); margin-bottom: 2px; opacity: 0.8;
 }
 
-/* Clamp each suggested task to at most 3 lines, with an ellipsis when the
-   text overflows, so long suggestions don't blow up the welcome layout. */
 .chip-text {
   display: -webkit-box;
   -webkit-line-clamp: 3;
@@ -750,12 +723,10 @@ body.remote-chat #welcome-config { display: none !important; }
   text-overflow: ellipsis;
 }
 
-/* ── Event items (from OUTPUT_CSS) ──────────────────── */
 .ev { margin-bottom: 6px; animation: fadeIn .15s ease; }
 
 @keyframes fadeIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
 
-/* Thinking blocks */
 .think {
   padding: 8px 12px; margin: 8px 0;
   border: 1px solid rgb(121 192 255 / 12%); border-radius: 8px;
@@ -776,7 +747,6 @@ body.remote-chat #welcome-config { display: none !important; }
 }
 .think .cnt.hidden { display: none; }
 
-/* Text blocks */
 .txt {
   font-size: var(--fs-base); line-height: 1.5; color: color-mix(in srgb, var(--fg) 93%, transparent);
   padding: 4px 10px; white-space: pre-wrap; word-break: break-word;
@@ -794,7 +764,6 @@ body.remote-chat #welcome-config { display: none !important; }
 }
 .txt pre code { background: none; padding: 0; }
 
-/* Tool calls */
 .tc {
   border: 1px solid var(--border); border-radius: 8px; margin: 8px 0;
   overflow: hidden; background: var(--surface);
@@ -807,23 +776,12 @@ body.remote-chat #welcome-config { display: none !important; }
 }
 .tc-h:hover { color: var(--fg); }
 
-/* Bash tool-call panels paint their title header in cyan to mirror
-   how file paths render (see ``.tp``).  The compound selector beats
-   the generic ``.tc-h`` rule above without raising specificity for
-   other tools. */
 .tc-h.tc-h-bash {
   background: color-mix(in srgb, var(--cyan) 8%, transparent); color: var(--cyan);
 }
 .tc-h.tc-h-bash:hover { color: var(--fg); }
 .tc.collapsed > :not(.tc-h, .panel-copy-btn) { display: none; }
 
-/* ``summary`` tool panels (see the ``case 'tool_call':`` summary
-   branch in main.js): the agent's periodic activity summary adopts
-   the preceding event panels into ``.summary-sub`` and collapses.
-   The description must stay FULLY visible while collapsed — it is a
-   direct child ``.tc-summary-desc`` exempted from the generic
-   ``.tc.collapsed`` hide rule above — while the adopted sub-panels
-   hide with everything else. */
 .tc-summary-desc {
   padding: 6px 12px;
   white-space: pre-wrap;
@@ -831,27 +789,14 @@ body.remote-chat #welcome-config { display: none !important; }
   color: var(--fg);
 }
 .tc.tc-summary.collapsed > .tc-summary-desc { display: block; }
+.tc-summary-desc.md-body { white-space: normal; }
 
-/* The header's one-line ellipsised preview would duplicate (and
-   truncate) the always-visible description — keep it off.  Direct
-   child combinators only: tool panels ADOPTED into a summary must
-   keep their own previews when individually collapsed. */
 .tc-summary > .tc-h > .collapse-preview { display: none; }
 
-/* "(click to expand)" affordance next to the ``summary`` label in the
-   panel header (see the summary branch of ``case 'tool_call':`` in
-   main.js).  Dimmed and italicised out of the orange label so it
-   reads as UI chrome, and hidden once the panel IS expanded — the hint
-   would lie.  Direct child combinators for the same adoption-safety
-   reason as the preview rule above. */
 .tc-summary > .tc-h > .tc-summary-hint {
   color: var(--dim);
   font-weight: 400;
   font-style: italic;
-
-  /* The header uppercases its label (.tc-h) — the hint must keep the
-     user-requested literal text "(click to expand)", not "(CLICK TO
-     EXPAND)". */
   text-transform: none;
   letter-spacing: normal;
 }
@@ -874,14 +819,6 @@ body.remote-chat #welcome-config { display: none !important; }
 .tp[data-path] { cursor: pointer; text-decoration: underline dotted; }
 .tp[data-path]:hover { color: color-mix(in srgb, var(--accent) 82%, transparent); text-decoration: underline solid; }
 
-/*
- * Clickable filepath token surfaced by ``linkifyFilePaths`` in
- * ``main.js``.  Wraps any ``/abs/path``, ``./rel``, ``../rel``,
- * ``~/home/path`` or ``src/workspace/path`` token (with optional
- * ``:line`` suffix) appearing
- * inside rendered chat content so the global ``[data-path]`` click
- * handler can route a click to the extension's ``openFile`` viewer.
- */
 .kiss-filelink {
   color: var(--cyan);
   cursor: pointer;
@@ -903,7 +840,6 @@ body.remote-chat #welcome-config { display: none !important; }
 .tc-arg { margin: 2px 0; color: var(--dim); }
 .tc-arg-name { color: var(--accent); font-weight: 500; }
 
-/* Diff rendering */
 .diff-old {
   color: var(--red); background: color-mix(in srgb, var(--red) 8%, transparent);
   padding: 1px 6px; display: block; white-space: pre-wrap; word-break: break-word;
@@ -922,7 +858,6 @@ body.remote-chat #welcome-config { display: none !important; }
 .diff-hl-add { background: color-mix(in srgb, var(--green) 30%, transparent); border-radius: 2px; padding: 0 1px; }
 .extra { color: var(--dim); margin: 2px 0; }
 
-/* Tool result */
 .tr {
   padding: 5px 10px; margin: 6px 0;
   border: 1px solid var(--border); border-radius: 8px;
@@ -932,11 +867,9 @@ body.remote-chat #welcome-config { display: none !important; }
 }
 .tr.err { background: color-mix(in srgb, var(--red) 4%, transparent); border-color: color-mix(in srgb, var(--red) 20%, transparent); }
 
-/* Informational server notice (e.g. runUpdate acknowledgement). */
 .tr.note { border-color: color-mix(in srgb, var(--green) 20%, transparent); }
 .tr.note strong { color: var(--green); }
 
-/* Backend warning (e.g. stash-pop failure / merge-conflict warning). */
 .tr.warn { background: color-mix(in srgb, var(--orange) 4%, transparent); border-color: color-mix(in srgb, var(--orange) 20%, transparent); }
 .tr.warn strong { color: var(--orange); }
 
@@ -946,7 +879,6 @@ body.remote-chat #welcome-config { display: none !important; }
 }
 .tr .rl.fail { color: var(--red); }
 
-/* Result card */
 .rc {
   border: 1px solid var(--green); border-radius: 10px;
   margin: 12px 0; overflow: hidden; background: var(--surface);
@@ -974,7 +906,6 @@ body.remote-chat #welcome-config { display: none !important; }
 .rc-status { color: var(--yellow); font-weight: 700; font-size: var(--fs-xl); margin-bottom: 10px; }
 .rc-status.rc-status-fail { color: var(--red); }
 
-/* System prompt / prompt */
 .system-prompt, .prompt {
   border: 1px solid var(--border); border-radius: 8px; margin: 8px 0;
   overflow: hidden; background: var(--surface);
@@ -992,14 +923,12 @@ body.remote-chat #welcome-config { display: none !important; }
   line-height: 1.6; max-height: 400px; overflow-y: auto;
 }
 
-/* System output */
 .sys {
   font-size: var(--fs-base); color: var(--dim);
   font-family: var(--vscode-editor-font-family, monospace);
   white-space: pre-wrap; word-break: break-word; padding: 2px 0;
 }
 
-/* Bash stream panel */
 .bash-panel {
   background: rgb(0 0 0 / 35%); border: 1px solid var(--border);
   border-radius: 8px; margin: 2px 0 8px; padding: 8px 10px;
@@ -1022,7 +951,6 @@ body.remote-chat #welcome-config { display: none !important; }
   white-space: pre-wrap; word-break: break-word;
 }
 
-/* LLM panel (nested agent output) */
 .llm-panel {
   border: 1px solid rgb(88 166 255 / 15%); border-radius: 8px;
   margin: 6px 0; max-height: 350px; overflow-y: auto;
@@ -1033,7 +961,6 @@ body.remote-chat #welcome-config { display: none !important; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* Wait spinner (input actions) */
 #wait-spinner {
   width: 12px; height: 12px;
   border: 2px solid rgb(255 255 255 / 8%);
@@ -1048,7 +975,6 @@ body.remote-chat #welcome-config { display: none !important; }
   animation: spin .8s linear infinite; opacity: 1;
 }
 
-/* Follow-up suggestion bar */
 .followup-bar {
   display: flex; flex-direction: column; gap: 4px;
   padding: 8px 12px; margin: 8px 0;
@@ -1071,7 +997,6 @@ body.remote-chat #welcome-config { display: none !important; }
   white-space: normal; word-break: break-word;
 }
 
-/* Ghost text overlay */
 #ghost-overlay {
   position: absolute; top: 0; left: 0; right: 0;
   pointer-events: none; white-space: pre-wrap; word-break: break-word;
@@ -1083,10 +1008,6 @@ body.remote-chat #welcome-config { display: none !important; }
   color: color-mix(in srgb, var(--fg) 50%, transparent);
 }
 
-/* "Listening ..." overlay: blinks in large type over the task input
-   while the mic button flashes red (wake word heard, speech being
-   captured).  voice.js toggles the 'listening' class on
-   #input-text-wrap; the overlay never intercepts clicks/typing. */
 #listening-overlay {
   display: none; position: absolute; inset: 0; z-index: 5;
   pointer-events: none; align-items: center; justify-content: flex-start;
@@ -1104,27 +1025,22 @@ body.remote-chat #welcome-config { display: none !important; }
 
 
 
-/* Disabled state for textarea while agent is running or merge is active */
 #task-input:disabled {
   opacity: 0.45;
   cursor: not-allowed;
 }
 
-/* Drag-over visual feedback */
 #input-container.drag-over {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 6%, transparent);
 }
 
-/* ── Input Area ─────────────────────────────────────── */
 #input-area {
   flex-shrink: 0; padding: 0 12px 12px; padding-top: 10px;
   border-top: 1px solid var(--border); background: var(--bg2);
   position: relative;
 }
 
-/* Input panel drawer handle: a small pill floating on the top border
-   of #input-area, always reachable to collapse/expand the composer. */
 #input-drawer-btn {
   position: absolute;
   top: -13px;
@@ -1133,9 +1049,6 @@ body.remote-chat #welcome-config { display: none !important; }
   display: flex;
   align-items: center;
   justify-content: center;
-
-  /* 40x24 pill: at least the 24px WCAG 2.2 minimum hit target in
-     both axes so the handle is comfortably tappable on phones. */
   width: 40px;
   height: 24px;
   padding: 0;
@@ -1161,11 +1074,6 @@ body.remote-chat #welcome-config { display: none !important; }
 #input-drawer-btn svg { transition: transform 0.2s ease; }
 #input-drawer-btn[aria-expanded="false"] svg { transform: rotate(180deg); }
 
-/* Collapsed input drawer: hide EVERY child of #input-area except the
-   handle itself — including the inline-styled #autocomplete popover
-   and any merge/worktree action bar inserted by main.js (both toggle
-   inline display, hence the !important) — so the freed height goes to
-   the flex:1 events area (#output). */
 #input-area.drawer-collapsed > :not(#input-drawer-btn) { display: none !important; }
 
 #input-area.drawer-collapsed {
@@ -1188,6 +1096,17 @@ body.remote-chat #welcome-config { display: none !important; }
 }
 .file-chip .fc-rm:hover { color: var(--red); }
 
+/* A camera photo is decoded and re-encoded before it can be sent; the chip
+   stays in place, greyed out, until its bytes are ready. */
+.file-chip.pending { opacity: 0.6; }
+
+/* A file the browser could not decode (a HEIC outside Safari) is reported
+   here instead of vanishing. */
+.file-chip.error {
+  background: color-mix(in srgb, var(--red) 10%, transparent); border-color: color-mix(in srgb, var(--red) 30%, transparent);
+  color: color-mix(in srgb, var(--red) 91%, transparent);
+}
+
 #input-container {
   background: var(--input-bg); border: 1px solid var(--border);
   border-radius: 10px; padding: 8px 10px; transition: border-color 0.2s;
@@ -1204,7 +1123,6 @@ body.remote-chat #welcome-config { display: none !important; }
 }
 #task-input::placeholder { color: color-mix(in srgb, var(--fg) 50%, transparent); }
 
-/* Input clear (X) button */
 #input-clear-btn {
   position: absolute; top: 2px; right: 2px; z-index: 10;
   background: none; border: none; color: color-mix(in srgb, var(--fg) 50%, transparent);
@@ -1236,52 +1154,21 @@ body.remote-chat #welcome-config { display: none !important; }
 #stop-btn svg { width: 15px; height: 15px; }
 #stop-btn:hover { background: color-mix(in srgb, var(--red) 20%, transparent); box-shadow: 0 0 12px color-mix(in srgb, var(--red) 15%, transparent); }
 
-/* Demo pause/play button — shown to the left of the stop button
-   while a demo replay is playing (see body.demo-playing below). */
-#demo-pause-btn {
-  background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); border: none;
-  border-radius: 50%; width: 34px; height: 34px; cursor: pointer; transition: all 0.2s; display: none;
-  align-items: center; justify-content: center; flex-shrink: 0;
+/* Stop requested, agent not there yet: pulse so a pending stop cannot be
+   mistaken for a click the daemon never received. */
+#stop-btn.stopping { animation: stop-pending 1.1s ease-in-out infinite; }
+
+@keyframes stop-pending {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
 }
-#demo-pause-btn svg { width: 15px; height: 15px; }
-#demo-pause-btn:hover { background: color-mix(in srgb, var(--accent) 35%, transparent); color: var(--fg); box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 20%, transparent); }
 
-/* Demo replay chrome: while a demo is playing hide the input textbox
-   and its controls and show stop + pause/play instead.  !important is
-   required because setRunningState writes inline display styles on
-   the send/stop buttons. */
-body.demo-playing #input-text-wrap,
-body.demo-playing #menu-btn,
-body.demo-playing #model-btn,
-body.demo-playing #upload-btn,
-body.demo-playing #tricks-btn,
-body.demo-playing #voice-btn,
-body.demo-playing #send-btn { display: none !important; }
-body.demo-playing #stop-btn { display: flex !important; }
-body.demo-playing #demo-pause-btn { display: flex !important; }
-
-/* Demo replay ENDED (finished naturally or stopped): keep the input
-   controls hidden and show ONLY the play button, which restarts the
-   demo from the beginning (see setDemoUiState in main.js and
-   window._restartDemoReplay in demo.js). */
-body.demo-ended #input-text-wrap,
-body.demo-ended #menu-btn,
-body.demo-ended #model-btn,
-body.demo-ended #upload-btn,
-body.demo-ended #tricks-btn,
-body.demo-ended #voice-btn,
-body.demo-ended #send-btn,
-body.demo-ended #stop-btn { display: none !important; }
-body.demo-ended #demo-pause-btn { display: flex !important; }
-
-/* Input Footer */
 #input-footer {
   display: flex; justify-content: space-between; align-items: center;
   margin-top: 5px; padding-top: 5px; border-top: 1px solid color-mix(in srgb, var(--fg) 5%, transparent);
   flex-wrap: wrap; gap: 4px;
 }
 
-/* Model Picker */
 #model-picker { position: relative; display: flex; align-items: center; gap: 1px; min-width: 0; overflow: visible; flex-wrap: wrap; }
 
 #model-btn {
@@ -1306,31 +1193,24 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 #upload-btn:hover { color: color-mix(in srgb, var(--fg) 70%, transparent); border-color: color-mix(in srgb, var(--fg) 16%, transparent); background: color-mix(in srgb, var(--fg) 5%, transparent); }
 #upload-btn svg { width: 16px; height: 16px; }
 
-#menu-btn {
-  background: none; border: none;
-  color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
-  padding: 2px; transition: color 0.15s, opacity 0.15s;
-  display: flex; align-items: center; position: relative;
-}
-#menu-btn:hover:not(:disabled) { color: color-mix(in srgb, var(--fg) 66%, transparent); }
-#menu-btn:disabled { opacity: 0.3; cursor: not-allowed; }
-
-/* Inline toggle buttons (worktree / parallel / auto-commit) */
+#menu-btn,
 .toggle-btn {
   background: none; border: none;
   color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
   padding: 2px; transition: color 0.15s, opacity 0.15s;
   display: flex; align-items: center; position: relative;
 }
+
+#menu-btn:hover:not(:disabled),
 .toggle-btn:hover:not(:disabled) { color: color-mix(in srgb, var(--fg) 66%, transparent); }
+
+#menu-btn:disabled,
 .toggle-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 .toggle-btn.active { color: var(--accent); }
 .toggle-btn.active:hover:not(:disabled) { color: color-mix(in srgb, var(--accent) 80%, transparent); }
 
 #upload-btn:disabled { opacity: 0.3; cursor: not-allowed; }
 
-/* Voice wake-word toggle (say "Sorcar"); the ask-user modal's mic
-   button mirrors every state of the main mic (see voice.js). */
 #voice-btn.voice-loading, .ask-user-mic.voice-loading { opacity: 0.5; }
 #voice-btn.voice-listening, .ask-user-mic.voice-listening { animation: voice-pulse 1.6s ease-in-out infinite; }
 #voice-btn.voice-error, .ask-user-mic.voice-error { color: var(--error, #f48771); }
@@ -1394,7 +1274,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   position: sticky; top: 0; z-index: 1;
 }
 
-/* Autocomplete */
 @keyframes acSlideUp {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: none; }
@@ -1493,7 +1372,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   border: 1px solid rgb(255 255 255 / 4%);
 }
 
-/* ── Sidebar ────────────────────────────────────────── */
 #sidebar {
   position: fixed;
   left: 0;
@@ -1520,7 +1398,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 
 #sidebar-overlay.open { opacity: 1; pointer-events: auto; }
 
-/* ── Settings panel (slides in from the right) ─────── */
 #settings-panel {
   position: fixed;
   right: 0;
@@ -1547,7 +1424,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 
 #settings-overlay.open { opacity: 1; pointer-events: auto; }
 
-/* ── Frequent tasks panel (slides up from the bottom) ─────── */
 #frequent-panel {
   position: fixed;
   left: 5%;
@@ -1578,7 +1454,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 
 #frequent-overlay.open { opacity: 1; pointer-events: auto; }
 
-/* ── Tricks panel (slides up from the bottom, 90% × 60vh) ────── */
 #tricks-panel {
   position: fixed;
   left: 5%;
@@ -1687,7 +1562,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   white-space: normal;
 }
 
-/* Show up to two lines of task text per frequent-tasks row, then ellipsize. */
 .frequent-item > .sidebar-item-text {
   white-space: normal;
   word-break: break-word;
@@ -1718,14 +1592,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   margin-top: 2px;
 }
 
-/* The settings panel uses its OWN ``overflow-y: auto`` (see #settings-panel
-   above) to scroll its long form when it doesn't fit the viewport.  The
-   shared .sidebar-section rule above (designed for the History / Frequent
-   sidebar tabs that nest an inner scrolling list) would otherwise clip the
-   form to the panel height — ``flex: 1`` stretches it to exactly the
-   parent's content area and ``overflow: hidden`` chops everything past
-   the bottom, leaving #settings-panel with no overflow to scroll.  Restore
-   natural sizing + visible overflow inside the settings panel only. */
 #settings-panel > .sidebar-section {
   flex: 0 0 auto;
   overflow: visible;
@@ -1756,11 +1622,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 .sidebar-section .search-wrap { margin-bottom: 10px; }
 #history-search:focus { border-color: var(--accent); }
 
-/* Collapsible "Filters" panel wrapping the whole filter bar (status
-   chips + From/To date range).  The header is a disclosure <button>
-   titled "Filters"; clicking it toggles the [hidden] attribute on
-   #history-filters-body and rotates the chevron.  Shared by the
-   extension webview and the remote web chat. */
 .history-filters-panel { margin-bottom: 4px; }
 
 .history-filters-toggle {
@@ -1784,31 +1645,19 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   transform: rotate(90deg);
 }
 
-/* Keep the collapsed body hidden even if a display rule is ever
-   added to .history-filters-body (author rules beat the UA [hidden]
-   default). */
 .history-filters-body[hidden] { display: none !important; }
 
-/* History filter bar: a row of Material-style filter chips (pill
-   toggles with a hidden checkbox + status dot / icon) followed by
-   one unified From → To date-range pill.  Lives between the search
-   box and the history list inside #sidebar-tab-history-panel. */
 .history-filter-bar {
   display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap;
   margin-bottom: 10px; font-size: var(--fs-md);
   color: var(--fg);
 }
 
-/* Chip set: wraps to new rows when the sidebar is narrow. */
 .history-filter-chips {
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
   width: 100%;
 }
 
-/* One filter chip: <label class="hf-chip"> wrapping a visually
-   hidden checkbox, a leading status dot (or SVG icon) and a short
-   text label.  Selected = translucent accent fill + accent border;
-   unselected = muted outline (Material filter-chip convention). */
 .hf-chip {
   position: relative;
   display: inline-flex; align-items: center; gap: 4px;
@@ -1826,9 +1675,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   background: color-mix(in srgb, var(--fg) 10%, transparent);
 }
 
-/* The checkbox stays in the DOM (keyboard + a11y + the existing
-   filter logic reads .checked) but is visually hidden inside the
-   chip. */
 .hf-chip input[type="checkbox"] {
   position: absolute; opacity: 0; pointer-events: none;
   width: 0; height: 0; margin: 0;
@@ -1840,13 +1686,11 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   color: var(--fg);
 }
 
-/* Keyboard focus ring for the hidden checkbox. */
 .hf-chip:focus-within {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
-/* Leading status dot — colored per category when selected. */
 .hf-chip-dot {
   flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%;
   background: color-mix(in srgb, var(--fg) 35%, transparent);
@@ -1867,7 +1711,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   box-shadow: 0 0 4px color-mix(in srgb, #58a6ff 60%, transparent);
 }
 
-/* Leading SVG icon (Workspace folder, Favorites star). */
 .hf-chip-icon {
   flex: 0 0 auto; width: 10px; height: 10px; opacity: 0.85;
 }
@@ -1882,9 +1725,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   color: color-mix(in srgb, var(--fg) 55%, transparent);
 }
 
-/* Unified From → To date-range pill wrapping both date groups.
-   ``max-width: 100%`` + shrinkable date groups keep the pill inside
-   a narrow sidebar instead of overflowing it. */
 .history-filter-daterange {
   display: inline-flex; align-items: center; gap: 4px;
   flex-wrap: nowrap; white-space: nowrap;
@@ -1899,7 +1739,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   user-select: none;
 }
 
-/* Small × that clears both dates; hidden by JS while empty. */
 .hf-date-clear {
   flex: 0 0 auto;
   background: transparent; border: none; border-radius: 50%;
@@ -1914,15 +1753,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   color: var(--fg);
 }
 
-/* Atomic wrapper around a date filter trio (label + <input
-   type=date> + calendar-picker button) inside .history-filter-bar.
-   .history-filter-bar is a ``flex-wrap: wrap`` container, so
-   without this wrapper the three pieces would each be their own
-   flex item and could land on three separate rows when the
-   sidebar gets narrow.  ``display: inline-flex`` makes the
-   wrapper itself a single flex item of the bar, and
-   ``flex-wrap: nowrap`` + ``white-space: nowrap`` keep the
-   label, input, and button glued on the same visual line. */
 .history-filter-date-group {
   display: inline-flex; align-items: center; gap: 4px;
   flex-wrap: nowrap; white-space: nowrap;
@@ -1939,9 +1769,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 }
 .history-filter-date:focus { border-bottom-color: var(--accent); }
 
-/* Hide the native picker indicator so it does not overlap the
-   text in the date input; clicking the adjacent button below
-   opens the date picker instead. */
 .history-filter-date::-webkit-calendar-picker-indicator {
   display: none; appearance: none;
 }
@@ -1951,9 +1778,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   display: none;
 }
 
-/* Calendar picker icon button placed next to each date textbox.
-   Renders an inline SVG calendar and opens the custom in-webview
-   calendar popup (the native picker indicator is hidden above). */
 .history-filter-date-btn {
   flex: 0 0 auto;
   display: inline-flex; align-items: center; justify-content: center;
@@ -1977,12 +1801,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   outline: none; color: var(--accent);
 }
 
-/* Custom in-webview calendar popup opened by ``.history-filter-date-btn``.
-   The native <input type=date> picker (input.showPicker / focus+click)
-   is unreliable inside VS Code webviews, so we render our own popup
-   here.  Picking a day writes ``YYYY-MM-DD`` into the adjacent date
-   input and dispatches a ``change`` event so the existing filter
-   listener runs. */
 .kiss-datepicker {
   position: fixed; z-index: 10000;
   background: var(--bg, #1e1e1e);
@@ -2078,27 +1896,26 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%;
   background: #2e7d32; margin-right: 8px;
   box-shadow: 0 0 0 1px rgb(0 0 0 / 15%);
-  animation: sidebar-running-pulse 1.5s ease-in-out infinite;
+  animation: running-pulse 1.5s ease-in-out infinite;
 }
 
-/* Solid green circle for cleanly-finished History rows.  Same #2e7d32
-   hue as the pulsing running dot, but with NO animation — so the user
-   instantly distinguishes finished tasks (static green) from running
-   ones (pulsing green) and failed ones (solid red).  Sits at the
-   middle-left of the row as the first child, matching the layout of
-   the running and failed dots. */
 .sidebar-item-completed {
   flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%;
   background: #2e7d32; margin-right: 8px;
   box-shadow: 0 0 0 1px rgb(0 0 0 / 15%);
 }
 
+/* The panel is at least two lines tall - the task text and, below it,
+   the action strip - so the status dot is centred on the first line of
+   the task text rather than on the whole panel.  The offset is the
+   panel's own padding-top plus half a line box, and the translation
+   then centres the dot on that point. */
 .running-item > .sidebar-item-failed,
 .running-item > .sidebar-item-running,
 .running-item > .sidebar-item-completed {
   position: absolute;
   left: 5px;
-  top: 50%;
+  top: calc(7px + 0.5lh);
   transform: translateY(-50%);
   margin-right: 0;
 }
@@ -2109,39 +1926,25 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   white-space: normal;
   align-items: center;
   row-gap: 8px;
-  padding-top: 18px;
-  padding-bottom: 9px;
-  padding-left: 13px;
-  min-height: 96px;
-
-  /* Per-chat pastel look, driven by the --task-color custom property
-     that renderHistory stamps on every row (it used to be an inline
-     background-color + color pair, which no stylesheet — e.g. the
-     remote page's remote-codex.css — could override). */
+  padding-left: 19px;
   background-color: var(--task-color, color-mix(in srgb, var(--fg) 3%, transparent));
   color: #1a1a1a;
 }
 
 .running-item > .sidebar-item-text {
+  /* The action strip below takes a full-width line, so the task text
+     claims one too; without it the text would be squeezed to nothing. */
+  flex-basis: 100%;
   white-space: normal;
   word-break: break-word;
   overflow: hidden;
   text-overflow: ellipsis;
   display: -webkit-box;
-  -webkit-line-clamp: 4;
-  line-clamp: 4;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
   -webkit-box-orient: vertical;
 }
 
-/* Per-row info column for the History sidebar.  Wraps the three
-   stacked detail lines (metrics, workspace+meta, chat/task/parent
-   ids) so they render flush, with NO flex row-gap between them.
-   The container itself drops onto its own visual line inside the
-   .sidebar-item flex container via ``flex-basis: 100%`` (the same
-   trick the metrics row used in the old layout); its inner
-   column flex with ``gap: 0`` stacks the three lines tightly so
-   the user does not see an empty 8px row-gap between the metrics
-   and workspace lines or between the workspace and ids lines. */
 .running-item-info {
   flex-basis: 100%;
   display: flex;
@@ -2157,16 +1960,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   color: color-mix(in srgb, #000 65%, transparent);
 }
 
-/* Workspace + meta row — the task's work_dir plus the per-task
-   metadata (model name, wt/no-wt, parallel/sequential,
-   auto-commit/manual-commit) rendered as a single dot-separated
-   line right below the metrics row.  ``flex-basis: 100%`` is kept
-   for backwards compatibility with any surface that may still
-   render it as a direct child of ``.sidebar-item``; in the
-   History sidebar the span sits inside ``.running-item-info``
-   which already handles the line break.  Long lines are clipped
-   with an ellipsis; the native ``title`` attribute (set in
-   renderHistory) exposes the full text on hover. */
 .running-item-workspace {
   flex-basis: 100%;
   font-size: var(--fs-sm);
@@ -2176,11 +1969,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   text-overflow: ellipsis;
 }
 
-/* Ids row — chat id, task id, and parent task id rendered as a
-   single dot-separated line right below the workspace+meta row.
-   Same compact small font and clipped overflow as the workspace
-   row so the History panel keeps a consistent three-line stack
-   for every task. */
 .running-item-ids {
   flex-basis: 100%;
   font-size: var(--fs-sm);
@@ -2190,12 +1978,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   text-overflow: ellipsis;
 }
 
-/* Tiny icon-only copy buttons that sit right after the chat id and
-   the task id on the ids row.  Clicking one copies just that raw id
-   to the clipboard (see makeIdCopyButton in main.js).  Rendered as
-   inline-flex so the 10px clipboard icon lines up with the small
-   ids text; ``vertical-align: middle`` keeps it from pushing the
-   row's line-height around. */
 .ids-copy-btn {
   display: inline-flex;
   align-items: center;
@@ -2224,18 +2006,9 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 
 .ids-copy-btn.copied { opacity: 0.9; color: #006400; }
 
-@keyframes sidebar-running-pulse {
-  0%, 100% { opacity: 1; box-shadow: 0 0 0 1px rgb(0 0 0 / 15%); }
-  50% { opacity: 0.4; box-shadow: 0 0 6px 2px rgb(46 125 50 / 50%); }
-}
-
-/* Per-row action column for history items: stacks the favourite,
-   copy, and delete buttons (and the inline delete-confirm prompt)
-   vertically with a 6px gap.  ``align-self: stretch`` lets the row
-   set the column height; the buttons remain top-aligned. */
 .sidebar-item-actions {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   gap: 6px;
   flex-shrink: 0;
   margin-left: 6px;
@@ -2244,6 +2017,7 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 
 .sidebar-item-delete,
 .sidebar-item-copy,
+.sidebar-item-collapse,
 .sidebar-item-favorite {
   flex-shrink: 0; border: none; cursor: pointer; padding: 2px 0; margin-left: 2px;
   border-radius: 3px; line-height: 1; display: flex; align-items: center;
@@ -2252,21 +2026,36 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   transition: opacity 0.15s, background 0.15s, color 0.15s;
 }
 
-.sidebar-item-actions > .sidebar-item-delete,
 .sidebar-item-actions > .sidebar-item-copy,
-.sidebar-item-actions > .sidebar-item-favorite,
-.sidebar-item-actions > .sidebar-item-confirm {
+.sidebar-item-actions > .sidebar-item-collapse,
+.sidebar-item-actions > .sidebar-item-favorite {
   margin-left: 0;
 }
 
 .sidebar-item-delete:hover,
 .sidebar-item-copy:hover,
+.sidebar-item-collapse:hover,
 .sidebar-item-favorite:hover { opacity: 0.9; background: color-mix(in srgb, #000 10%, transparent); }
+
+.sidebar-item-collapse svg { transition: transform 0.15s ease; }
+.running-item:not(.collapsed) .sidebar-item-collapse svg { transform: rotate(180deg); }
+.running-item.collapsed > .running-item-info { display: none; }
 
 .sidebar-item-copy.copied { opacity: 0.9; color: #006400; }
 
 .sidebar-item-favorite.favorited { color: #f5b400; opacity: 1; }
 .sidebar-item-favorite.favorited:hover { color: #f5b400; opacity: 1; }
+
+/* A task panel in the task-history list gives its favourite / copy /
+   collapse buttons a full-width line of their own below the task text.
+   Only the placement differs: the buttons themselves keep the compact
+   12x12 icon in a 12x16 box that every other sidebar list uses, so
+   nothing here may override their size. */
+.running-item > .sidebar-item-actions {
+  flex-basis: 100%;
+  margin-left: 0;
+  margin-top: 2px;
+}
 
 .sidebar-item-confirm {
   display: flex; align-items: center; gap: 4px; flex-shrink: 0; margin-left: 6px;
@@ -2293,12 +2082,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 }
 .sidebar-empty { font-size: var(--fs-base); color: color-mix(in srgb, var(--fg) 50%, transparent); padding: 8px 0; }
 
-/* ── Ask User Modal ───────────────────────────────────
-   The modal must fit within the chat webview even when the agent's
-   question is very long.  Layout: modal-content is a flex column with
-   max-height: 85vh; the question area inside #ask-user-slot is the only
-   shrinkable child (min-height: 0; overflow-y: auto) so the reply
-   textarea and Submit button always stay visible. */
 #ask-user-modal {
   position: fixed; inset: 0; background: rgb(0 0 0 / 70%);
   display: flex; align-items: center; justify-content: center; z-index: 300;
@@ -2321,12 +2104,7 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   font-size: var(--fs-lg); color: color-mix(in srgb, var(--fg) 83%, transparent);
   margin-bottom: 12px; line-height: 1.5;
   flex: 0 1 auto; min-height: 0; overflow-y: auto;
-
-  /* room for the scrollbar so text never sits under it */
   padding-right: 4px;
-
-  /* break long unbreakable strings (URLs, identifiers) so they don't force
-     horizontal overflow inside the narrow modal */
   overflow-wrap: anywhere; word-break: break-word;
 }
 
@@ -2345,10 +2123,8 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 }
 .ask-user-submit:hover { opacity: 0.9; }
 
-/* Submit button + mic button row inside the ask-user modal */
 .ask-user-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
 
-/* Mic button in the ask-user modal: say "Sorcar" then speak the answer */
 .ask-user-mic {
   background: none; border: none;
   color: color-mix(in srgb, var(--fg) 50%, transparent); cursor: pointer;
@@ -2359,11 +2135,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
 .ask-user-mic.active { color: var(--accent); }
 .ask-user-mic svg { width: 16px; height: 16px; }
 
-/* ── Remote-Access Password (Auth) Modal ──────────────
-   Replaces the browser-native prompt(), which renders elongated with
-   wasted vertical space below its buttons.  Sized tightly around its
-   contents — no min-height on the input, no padding after the button
-   row. */
 #auth-modal {
   position: fixed; inset: 0; background: rgb(0 0 0 / 70%);
   display: flex; align-items: center; justify-content: center; z-index: 400;
@@ -2406,13 +2177,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   color: var(--vscode-button-foreground);
 }
 
-/* ── Server-Reset Confirmation Floating Box ──────────────
-   Replaces the native VS Code modal warning dialog for the settings-
-   panel "Server reset" button.  The floating box is scoped to the
-   settings panel (it's a child of #settings-panel in chat.html) and
-   uses ``position: absolute; inset: 0`` so its backdrop covers the
-   whole settings panel — not the entire VS Code window.  Hidden by
-   default; main.js toggles ``.open`` to show it. */
 #server-reset-confirm-modal {
   display: none;
   position: absolute; inset: 0;
@@ -2458,7 +2222,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   color: var(--vscode-button-foreground);
 }
 
-/* ── Markdown content rendering (shared via .md-body on system-prompt-body, prompt-body, rc-body) ── */
 .md-body p { margin: 4px 0; }
 .md-body :is(h1,h2,h3,h4,h5,h6) { margin: 8px 0 4px; font-weight: 600; color: var(--fg); }
 .md-body h1 { font-size: var(--fs-xl); }
@@ -2495,7 +2258,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   background: color-mix(in srgb, var(--fg) 4%, transparent); font-weight: 600;
 }
 
-/* ── Merge Toolbar (shown in input area) ───────────── */
 .merge-toolbar-card {
   background: var(--input-bg); border: 1px solid var(--border);
   border-radius: 10px; padding: 6px 10px; animation: fadeIn 0.2s ease;
@@ -2562,7 +2324,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   font-size: var(--fs-md); color: var(--dim);
 }
 
-/* Per-file diff container inside a merge-info panel */
 .merge-file-diff { margin-top: 10px; }
 
 .merge-file-name {
@@ -2571,7 +2332,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   margin-bottom: 4px;
 }
 
-/* Context lines between hunks */
 .merge-ctx {
   margin: 0; padding: 2px 8px;
   background: var(--vscode-input-background, var(--surface2));
@@ -2581,7 +2341,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   overflow-x: auto; border-radius: 0;
 }
 
-/* A single reviewable hunk (block) */
 .merge-hunk {
   display: block; margin: 4px 0; padding: 6px 8px;
   background: var(--vscode-input-background, var(--surface2));
@@ -2598,13 +2357,11 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   text-transform: uppercase; letter-spacing: 0.04em;
 }
 
-/* Currently-selected hunk (driven by Prev/Next) */
 .merge-hunk.current {
   border-color: var(--yellow);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--yellow) 25%, transparent);
 }
 
-/* Accepted: dim + thin green check stripe */
 .merge-hunk.accepted {
   opacity: 0.45;
   border-color: color-mix(in srgb, var(--green) 40%, transparent);
@@ -2615,7 +2372,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   content: ' · ACCEPTED'; color: var(--green);
 }
 
-/* Rejected: dim + red stripe + strikethrough on the +/- lines */
 .merge-hunk.rejected {
   opacity: 0.45;
   border-color: color-mix(in srgb, var(--red) 40%, transparent);
@@ -2631,7 +2387,6 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   content: ' · REJECTED'; color: var(--red);
 }
 
-/* Inline +/- lines inside a hunk (used in web view) */
 .merge-hunk .diff-del {
   display: block; color: var(--red);
   background: color-mix(in srgb, var(--red) 12%, transparent);
@@ -2644,11 +2399,9 @@ body.demo-ended #demo-pause-btn { display: flex !important; }
   padding: 0 2px;
 }
 
-/* ── Syntax highlighting overrides ───────────────────── */
 code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', monospace); }
 .hljs { background: var(--surface2) !important; border-radius: 6px; padding: 10px !important; }
 
-/* ── Custom tooltips (native title doesn't work in VS Code webviews) ── */
 #custom-tooltip {
   position: fixed; z-index: 10000; background: var(--bg2); color: var(--fg);
   border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px;
@@ -2658,16 +2411,15 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 }
 #custom-tooltip.visible { opacity: 1; }
 
-/* The pinned task text's tooltip (hover on #task-panel-text) shows the
-   ENTIRE task at the SAME font size as the task text: the identical
-   var(--vscode-editor-font-size) declaration #task-panel uses, so the
-   two computed sizes match in the VS Code webview AND on the remote
-   web app (which serves this same stylesheet). */
 #custom-tooltip.task-panel-tooltip {
   font-size: var(--vscode-editor-font-size);
+
+  /* Match the reversed (inverted) task panel palette. */
+  background: var(--fg);
+  color: var(--bg);
+  border-color: color-mix(in srgb, var(--bg) 30%, var(--fg));
 }
 
-/* ── Worktree action bar ────────────────────────────── */
 .wt-bar {
   display: flex; flex-direction: column; gap: 10px; padding: 10px 12px;
   background: color-mix(in srgb, var(--accent) 8%, transparent);
@@ -2719,8 +2471,6 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   border-left: 3px solid var(--red); margin: 6px 0;
 }
 
-/* ── Adjacent task (thread scroll) ──────────────────── */
-
 .adjacent-loader {
   text-align: center;
   padding: 10px;
@@ -2745,7 +2495,6 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   font-style: italic;
 }
 
-/* ── Collapsible panels ─────────────────────────────── */
 .collapse-header {
   display: flex; align-items: center;
 }
@@ -2773,14 +2522,6 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .llm-panel-hdr:hover { color: var(--fg); }
 .llm-panel.collapsed > :not(.llm-panel-hdr, .panel-copy-btn) { display: none; }
 
-/* Per-panel bottom footer bar — kept as the LAST child of every event
-   panel (ensurePanelFoot in panelCopy.js).  A dim flex row whose LEFT
-   side holds the date + seconds event-timestamp badge (span.panel-ts) and
-   whose RIGHT side holds the "time spent" label (span.panel-elapsed,
-   written by finalizePanelTime / the live 1-second ticker).
-   Collapsing a panel hides this bar via the existing
-   ``.llm-panel.collapsed > :not(.llm-panel-hdr, .panel-copy-btn)`` and
-   ``.tc.collapsed > :not(.tc-h, .panel-copy-btn)`` rules. */
 .panel-time {
   display: flex;
   align-items: baseline;
@@ -2793,14 +2534,12 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   opacity: 0.75;
 }
 
-/* Right-aligned "time spent" label inside the footer bar. */
 .panel-elapsed {
   margin-left: auto;
   text-align: right;
   white-space: nowrap;
 }
 
-/* Panel copy button — anchored top-right of any .copyable panel. */
 .copyable { position: relative; }
 
 .panel-copy-btn {
@@ -2825,10 +2564,6 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 
 .panel-copy-btn.copied { color: var(--green); }
 
-/* Compact event-time badge (span.panel-ts, added by panelCopy.js's
-   addPanelTimestamp) — the LEFT side of the panel's bottom footer bar
-   (div.panel-time), in the same row as the right-aligned "time spent"
-   label.  Font, size, color and opacity are inherited from the bar. */
 .panel-ts {
   white-space: nowrap;
 }
@@ -2840,25 +2575,15 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 
 .merge-info.collapsed .merge-info-body { display: none; }
 
-/* Chevron collapse-pass hide (applyChevronState): non-result panels
-   of completed tasks are fully hidden (not just body-collapsed). */
 .chv-hidden { display: none !important; }
 
 
 
-/* ── Scrollbar ──────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--dim); }
 
-/* ── KISS Sorcar server-starting overlay ────────────
-   Shown above #app while the kiss-web daemon UDS socket is not yet
-   connected (initial bootstrap or transient reconnect).  Hides the
-   tabs / welcome page so the user does not see a half-functional UI
-   that cannot reach the backend.  Toggled by setServerLoading() in
-   main.js in response to the ``daemonStatus`` message from the
-   extension host (SorcarSidebarView). */
 #kiss-server-loading {
   position: fixed;
   inset: 0;
@@ -2898,7 +2623,6 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   to { transform: rotate(360deg); }
 }
 
-/* ── Content tabs (remote-webapp file viewer) ─────────── */
 #content-tab-area {
   flex: 1 1 auto;
   min-height: 0;

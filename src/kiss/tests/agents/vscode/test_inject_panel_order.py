@@ -81,8 +81,6 @@ def test_default_seed_body_matches_task_spec() -> None:
         "Write end-to-end 100% coverage tests for the feature first."
         "  Then implement the feature."
     )
-    # The full file content must be parseable as a single ``## Trick``
-    # section so the panel renders it as one chip.
     assert DEFAULT_MY_INJECTION == (
         "## Trick\n\n" + MY_INJECTION_DEFAULT_BODY + "\n"
     )
@@ -95,10 +93,8 @@ def test_my_injection_seeded_with_default_when_missing(
     my_path = kiss_home / "MY_INJECTION.md"
     assert not my_path.exists()
     tricks = read_tricks()
-    # MY_INJECTION.md exists after the call, holding the default.
     assert my_path.exists()
     assert my_path.read_text() == DEFAULT_MY_INJECTION
-    # The default trick comes first, followed by the bundled tricks.
     assert tricks == [
         MY_INJECTION_DEFAULT_BODY,
         "bundled trick one",
@@ -131,8 +127,6 @@ def test_my_injection_user_edits_preserved(
     kiss_home.mkdir(parents=True, exist_ok=True)
     user = kiss_home / "MY_INJECTION.md"
     user.write_text("## Trick\n\nuser override\n")
-    # Make the user copy unambiguously older than "now" — a naive
-    # mtime-refresh would clobber it; this test asserts we never do.
     os.utime(user, (0, 0))
     tricks = read_tricks()
     assert user.read_text() == "## Trick\n\nuser override\n"
@@ -170,7 +164,6 @@ def test_no_injections_md_written_to_kiss_home(  # noqa: N802 - test asserts on 
         "read_tricks() must not create ~/.kiss/INJECTIONS.md — only "
         "MY_INJECTION.md is auto-seeded."
     )
-    # But MY_INJECTION.md SHOULD have been created.
     assert (kiss_home / "MY_INJECTION.md").exists()
 
 
@@ -179,12 +172,8 @@ def test_read_tricks_handles_unreadable_my_injection_gracefully(
 ) -> None:
     """A binary-corrupted MY_INJECTION.md must not crash the daemon."""
     kiss_home.mkdir(parents=True, exist_ok=True)
-    # Write raw bytes that aren't valid UTF-8 to provoke a
-    # UnicodeDecodeError on ``read_text``.
     (kiss_home / "MY_INJECTION.md").write_bytes(b"\xff\xfe\x00\x00bogus")
     tricks = read_tricks()
-    # The bundled tricks still render — MY_INJECTION.md just contributes
-    # nothing rather than killing the ghost-text worker thread.
     assert tricks == ["bundled trick one", "bundled trick two"]
 
 
@@ -222,8 +211,6 @@ def test_kiss_home_unwritable_still_returns_bundled(
         monkeypatch.setenv("KISS_HOME", str(readonly_parent / ".kiss"))
         assert kiss_home_dir() == readonly_parent / ".kiss"
         tricks = read_tricks()
-        # ensure_user_asset_from_default returns None on read-only HOME;
-        # MY_INJECTION tricks are skipped, bundled tricks still render.
         assert tricks == ["bundled trick one", "bundled trick two"]
     finally:
         readonly_parent.chmod(0o700)
@@ -241,11 +228,7 @@ def test_no_injections_path_falls_back_to_bundled_package_file(
     """
     monkeypatch.delenv("KISS_INJECTIONS_PATH", raising=False)
     tricks = read_tricks()
-    # The default MY_INJECTION trick is always at index 0 of a fresh
-    # install (kiss_home fixture wipes the user copy).
     assert tricks[0] == MY_INJECTION_DEFAULT_BODY
-    # The real bundled INJECTIONS.md ships several "Trick" sections,
-    # so there must be at least one bundled trick after the user one.
     assert len(tricks) >= 2
 
 
@@ -296,7 +279,7 @@ def test_section_with_non_trick_heading_is_ignored(
     )
     monkeypatch.setenv("KISS_INJECTIONS_PATH", str(bundled))
     kiss_home.mkdir(parents=True, exist_ok=True)
-    (kiss_home / "MY_INJECTION.md").write_text("")  # no user tricks
+    (kiss_home / "MY_INJECTION.md").write_text("")
     tricks = read_tricks()
     assert tricks == ["real trick"]
 

@@ -207,15 +207,10 @@ class TestF5ConcurrentFlushBroadcastsOnce(_Base):
             target=agent._flush_warnings, args=(printer,),
         )
         flusher.start()
-        # Wait until the flush is inside its (slow) broadcast, then
-        # write the second warning — exactly the window in which the
-        # old check-then-clear implementation wiped it.
         self.assertTrue(printer.in_broadcast.wait(timeout=5.0))
         agent._set_warnings(merge="second warning")
         flusher.join()
 
-        # The second warning must still be pending and surface on the
-        # next flush.
         agent._flush_warnings(printer)
         messages = [e.get("message") for e in printer.by_type("warning")]
         self.assertIn("first warning", messages)
@@ -265,7 +260,6 @@ class TestF6CommitToastIdIsPerInvocation(_Base):
         committed = agent._auto_commit_worktree()
 
         self.assertTrue(committed)
-        # The commit really landed with the generated message.
         subject = _run_git(str(wt_dir), "log", "-1", "--format=%s").stdout
         self.assertEqual(subject.strip(), "wave2 test commit")
 
@@ -317,8 +311,6 @@ class TestF8ChatIdMintingIsShared(_Base):
 
         self.assertIn("wave2 done", result)
         self.assertEqual(agent.chat_id, "cafe" * 8)
-        # The persisted task row carries the id minted by the shared
-        # helper.
         conn = _persistence._get_db()
         rows = conn.execute("SELECT chat_id FROM task_history").fetchall()
         self.assertTrue(rows)
@@ -347,7 +339,6 @@ class TestF15NewChatSurfacesReleaseWarnings(_Base):
         message = warnings[0].get("message") or ""
         self.assertIn("Auto-commit is disabled", message)
         self.assertIn(str(wt_dir), message)
-        # Flushed means cleared — and the chat state was reset.
         self.assertIsNone(agent._merge_conflict_warning)
         self.assertEqual(agent.chat_id, "")
         self.assertIsNone(agent._wt)

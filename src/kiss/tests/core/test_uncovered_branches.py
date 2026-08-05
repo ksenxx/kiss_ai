@@ -224,7 +224,7 @@ class TestGetAvailableModels:
         import os
 
         from kiss.core import config as config_module
-        from kiss.core.models.model_info import get_default_model
+        from kiss.core.models.model_info import MODEL_INFO, get_default_model
 
         env_keys = [
             "ANTHROPIC_API_KEY",
@@ -234,6 +234,7 @@ class TestGetAvailableModels:
             "TOGETHER_API_KEY",
         ]
         saved = {k: os.environ.get(k) for k in env_keys}
+        original_config = config_module.DEFAULT_CONFIG
         try:
             for k in env_keys:
                 os.environ.pop(k, None)
@@ -251,23 +252,33 @@ class TestGetAvailableModels:
 
             os.environ["TOGETHER_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
-            assert get_default_model() == "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8"
+            selected = get_default_model()
+            assert selected == "moonshotai/Kimi-K3"
+            assert selected in MODEL_INFO
 
             os.environ["OPENROUTER_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
-            assert get_default_model() == "openrouter/anthropic/claude-fable-5"
+            selected = get_default_model()
+            assert selected == "openrouter/anthropic/claude-opus-4.7"
+            assert selected in MODEL_INFO
 
             os.environ["GEMINI_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
-            assert get_default_model() == "gemini-3.1-pro-preview"
+            selected = get_default_model()
+            assert selected == "gemini-3.6-flash"
+            assert selected in MODEL_INFO
 
             os.environ["OPENAI_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
-            assert get_default_model() == "gpt-5.6-sol"
+            selected = get_default_model()
+            assert selected == "gpt-5.6-sol-medium"
+            assert selected in MODEL_INFO
 
             os.environ["ANTHROPIC_API_KEY"] = "t"
             config_module.DEFAULT_CONFIG = config_module.Config()
-            assert get_default_model() == "claude-fable-5"
+            selected = get_default_model()
+            assert selected == "claude-opus-4-7"
+            assert selected in MODEL_INFO
         finally:
             for k in env_keys:
                 val = saved[k]
@@ -275,7 +286,7 @@ class TestGetAvailableModels:
                     os.environ[k] = val
                 else:
                     os.environ.pop(k, None)
-            config_module.DEFAULT_CONFIG = config_module.Config()
+            config_module.DEFAULT_CONFIG = original_config
 
 
 class TestAttachment:
@@ -296,8 +307,8 @@ class TestAttachment:
 
 class TestRelentlessAgentDockerBash:
     def test_docker_bash_raises_without_manager(self) -> None:
+        from kiss.agents.sorcar.relentless_agent import RelentlessAgent
         from kiss.core.kiss_error import KISSError
-        from kiss.core.relentless_agent import RelentlessAgent
 
         agent = RelentlessAgent("test")
         agent._reset(
@@ -357,7 +368,7 @@ class TestAnthropicBuildKwargs:
         """No room for the 1024-token minimum thinking budget → no thinking."""
         from kiss.core.models.anthropic_model import AnthropicModel
 
-        m = AnthropicModel("claude-sonnet-4-test", api_key="test")
+        m = AnthropicModel("claude-sonnet-4-5", api_key="test")
         m.model_config = {"max_tokens": 999}
         m.conversation = [{"role": "user", "content": "hello"}]
         kwargs = m._build_create_kwargs()
@@ -368,7 +379,7 @@ class TestAnthropicBuildKwargs:
         """The API requires max_tokens > budget_tokens; budget is capped."""
         from kiss.core.models.anthropic_model import AnthropicModel
 
-        m = AnthropicModel("claude-sonnet-4-test", api_key="test")
+        m = AnthropicModel("claude-sonnet-4-5", api_key="test")
         m.model_config = {"max_tokens": 5000}
         m.conversation = [{"role": "user", "content": "hello"}]
         kwargs = m._build_create_kwargs()
@@ -378,7 +389,7 @@ class TestAnthropicBuildKwargs:
     def test_build_kwargs_large_max_tokens_default_thinking_budget(self) -> None:
         from kiss.core.models.anthropic_model import AnthropicModel
 
-        m = AnthropicModel("claude-sonnet-4-test", api_key="test")
+        m = AnthropicModel("claude-sonnet-4-5", api_key="test")
         m.model_config = {"max_tokens": 20000}
         m.conversation = [{"role": "user", "content": "hello"}]
         kwargs = m._build_create_kwargs()
@@ -404,8 +415,6 @@ class TestAnthropicBuildKwargs:
             == 'Use ${VAR} and {"json": true} with X'
         )
         assert substitute_prompt_args(template, None) == template
-        # Single pass: a value containing another key's placeholder is
-        # not re-expanded.
         assert (
             substitute_prompt_args("{a} {b}", {"a": "{b}", "b": "B"})
             == "{b} B"
@@ -414,7 +423,7 @@ class TestAnthropicBuildKwargs:
     def test_build_kwargs_custom_thinking_not_overridden(self) -> None:
         from kiss.core.models.anthropic_model import AnthropicModel
 
-        m = AnthropicModel("claude-sonnet-4-test", api_key="test")
+        m = AnthropicModel("claude-sonnet-4-5", api_key="test")
         m.model_config = {"thinking": {"type": "disabled"}}
         m.conversation = [{"role": "user", "content": "hello"}]
         kwargs = m._build_create_kwargs()
@@ -513,5 +522,3 @@ class TestAnthropicAddFunctionResults:
         )
         last = m.conversation[-1]
         assert "Tokens: 100" in last["content"][0]["content"]
-
-

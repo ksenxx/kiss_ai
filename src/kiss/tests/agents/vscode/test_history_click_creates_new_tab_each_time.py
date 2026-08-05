@@ -34,6 +34,7 @@ _MAIN_JS = (
     / "media"
     / "main.js"
 )
+_API_JS = _MAIN_JS.with_name("api.js")
 
 
 def _extract_fn_body(src: str, header: str) -> str:
@@ -85,9 +86,6 @@ class TestHistoryClickAlwaysCreatesNewTab(unittest.TestCase):
 
     def test_three_clicks_on_same_history_row_create_three_tabs(self) -> None:
         create_new_tab_src = _extract_fn_body(self.js, "function createNewTab(")
-        # Sanity: the source we're simulating must be the post-fix
-        # version that allocates a fresh uuid every call and does NOT
-        # short-circuit on a presetId.
         assert "function createNewTab()" in create_new_tab_src, (
             "createNewTab must take no parameters; the multi-client "
             "dedupe path was removed."
@@ -127,6 +125,8 @@ class TestHistoryClickAlwaysCreatesNewTab(unittest.TestCase):
             function clearGhost() {}
             function hideAC() {}
             function closeModelDD() {}
+            // Opening a chat ends the launch tab switch; irrelevant here.
+            function closeLaunchSwitch() {}
             function startTimer() {}
             function stopTimer() {}
             function removeSpinner() {}
@@ -139,7 +139,6 @@ class TestHistoryClickAlwaysCreatesNewTab(unittest.TestCase):
             function syncClearBtn() {}
             function updateChevronIcon() {}
             function applyChevronState() {}
-            function clearDemoEndedUi() {}
             function setTaskText(text) { _lastTaskText = text; }
             var _lastTaskText = '';
 
@@ -191,11 +190,6 @@ class TestHistoryClickAlwaysCreatesNewTab(unittest.TestCase):
             var seedTabId = baseline.id;
             """
 
-        # The history-click body below mirrors the
-        # ``if (s.has_events && s.id)`` branch in ``renderHistory``
-        # exactly (see main.js, around the historyList click handler).
-        # We replay it three times on the same ``s`` object — the
-        # same row the user keeps clicking in the history panel.
         harness = r"""
             // The persisted session the user is repeatedly clicking.
             var s = {
@@ -242,7 +236,12 @@ class TestHistoryClickAlwaysCreatesNewTab(unittest.TestCase):
             }));
             """
 
-        script = preamble + "\n" + create_new_tab_src + "\n" + harness
+        script = (
+            preamble
+            + "\n" + _API_JS.read_text()
+            + "\nvar api = createSorcarApi(function(m) { vscode.postMessage(m); });\n"
+            + create_new_tab_src + "\n" + harness
+        )
         result = _run_node(script)
         assert result.returncode == 0, (
             f"node error: {result.stderr}\nstdout: {result.stdout}"
@@ -250,28 +249,18 @@ class TestHistoryClickAlwaysCreatesNewTab(unittest.TestCase):
         out = json.loads(result.stdout)
 
         tab_ids = out["tabIds"]
-        # Seed tab + one per click → 4 tabs total.
         self.assertEqual(
             len(tab_ids), 4,
             f"expected 4 tabs (1 seed + 3 history clicks); got {tab_ids!r}",
         )
-        # All tab ids must be unique — no dedupe by session id.
         self.assertEqual(
             len(set(tab_ids)), 4,
             f"tab ids must all be distinct; got {tab_ids!r}",
         )
-        # None of the freshly minted tab ids must collide with the
-        # session id (which used to be the "preset id" the dedupe path
-        # would have keyed on).
         self.assertNotIn("chat-abc-123", tab_ids)
-        # The active tab must be the most recent history-click tab
-        # (and not the seed).
         self.assertNotEqual(out["activeTabId"], out["seedTabId"])
         self.assertEqual(out["activeTabId"], tab_ids[-1])
 
-        # Exactly three resumeSession messages, one per click; each
-        # carries the SAME chat id (the multi-client routing key) but
-        # a DISTINCT tab id (the per-tab routing key).
         resume_msgs = out["resumeMsgs"]
         self.assertEqual(len(resume_msgs), 3)
         chat_ids = {m["id"] for m in resume_msgs}
@@ -282,13 +271,10 @@ class TestHistoryClickAlwaysCreatesNewTab(unittest.TestCase):
         self.assertEqual(len(set(resume_tab_ids)), 3,
                          f"resumeSession tabIds must be distinct; "
                          f"got {resume_tab_ids!r}")
-        # Each resumeSession's tabId must be one of the freshly
-        # created tab ids — never the chat id.
         for tid in resume_tab_ids:
             self.assertIn(tid, tab_ids)
             self.assertNotEqual(tid, "chat-abc-123")
 
-        # Three newChat messages also fired — one per createNewTab().
         new_chat_msgs = out["newChatMsgs"]
         self.assertEqual(len(new_chat_msgs), 3)
         new_chat_tab_ids = [m["tabId"] for m in new_chat_msgs]
@@ -314,20 +300,17 @@ class TestHistoryClickHandlerSourceHasNoDedupe(unittest.TestCase):
     def test_render_history_click_has_no_dedupe(self) -> None:
         body = _extract_fn_body(self.js, "function renderHistory(")
 
-        # No ``const created = createNewTab();`` style gating.
         self.assertIsNone(
             re.search(r"=\s*createNewTab\s*\(", body),
             "renderHistory must not capture createNewTab()'s return "
             "value — createNewTab no longer signals dedupe.",
         )
-        # No ``tabs.find(... === s.id ...)`` style dedupe lookup.
         self.assertIsNone(
             re.search(r"tabs\.find\([^)]*s\.id", body),
             "renderHistory must not search tabs by session id before "
             "creating a new tab; the multi-client backend routes by "
             "chat id, so frontend dedupe is incorrect.",
         )
-        # And no ``switchToTab(s.id)`` shortcut.
         self.assertNotIn(
             "switchToTab(s.id", body,
             "renderHistory must not switch to a tab keyed by the "

@@ -51,7 +51,7 @@ def _extract_function_body(src: str, name: str) -> str:
     pattern = re.compile(rf"function {re.escape(name)}\s*\([^)]*\)\s*\{{")
     m = pattern.search(src)
     assert m, f"function {name} not found in main.js"
-    start = m.end() - 1  # include opening brace
+    start = m.end() - 1
     depth = 0
     i = start
     while i < len(src):
@@ -82,10 +82,6 @@ def test_result_event_sets_pending_panel_in_active_tab() -> None:
     src = _read_main_js()
     body = _extract_function_body(src, "processOutputEvent")
 
-    # Find the section that handles 'result' events (after handleOutputEvent)
-    # The fix should set pendingPanel = true somewhere after the result check
-    # Match: after "t === 'result'" there must be "pendingPanel = true"
-    # without crossing into another event type handler
     assert re.search(
         r"t\s*===\s*'result'.*?pendingPanel\s*=\s*true",
         body,
@@ -106,7 +102,6 @@ def test_result_event_sets_pending_panel_in_bg_tab() -> None:
     src = _read_main_js()
     body = _extract_function_body(src, "processOutputEventForBgTab")
 
-    # Use a pattern that specifically matches t === 'result' (not tool_result)
     assert re.search(
         r"t\s*===\s*'result'.*?bgPendingPanel\s*=\s*true",
         body,
@@ -127,8 +122,6 @@ def test_clear_resets_background_tab_streaming_state() -> None:
     """
     src = _read_main_js()
 
-    # Find the 'clear' case in the handleEvent switch
-    # The case body should reset streaming state for background tabs
     clear_m = re.search(
         r"case\s+'clear'\s*:\s*\{(.*?)break;\s*\}",
         src,
@@ -137,7 +130,6 @@ def test_clear_resets_background_tab_streaming_state() -> None:
     assert clear_m, "could not locate case 'clear': in main.js"
     clear_body = clear_m.group(1)
 
-    # The fix should reset streamStepCount or streamPendingPanel for the bg tab
     assert "streamStepCount" in clear_body or "streamPendingPanel" in clear_body, (
         "The 'clear' handler must reset the background tab's streaming state "
         "(streamStepCount, streamPendingPanel, etc.) when the event targets "
@@ -156,8 +148,6 @@ def test_first_thinking_panel_creation_condition() -> None:
     src = _read_main_js()
     body = _extract_function_body(src, "processOutputEvent")
 
-    # The panel creation line should be:
-    # (pendingPanel || stepCount === 0) && (t === 'thinking_start' || t === 'text_delta')
     assert re.search(
         r"\(pendingPanel\s*\|\|\s*stepCount\s*===\s*0\)",
         body,

@@ -2,31 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end integration test: spoken tasks are SUBMITTED to the agent
-// of the highlighted tab.
-//
-// After the "Sorcar" wake word the extension host translates the
-// speech, identifies the speaker, and detects the language; the
-// webview receives ``{type: 'voiceSpeech', text, speaker, language}``.
-// voice.js inserts ``Speaker #N says in the language X that: <text>``
-// (or ``Speaker #N says that: <text>`` when no language was
-// detected) into the task input and raises a
-// ``kiss-voice-submit`` event; main.js must then behave exactly like a
-// click on the send button:
-//
-//  * no task running in the highlighted tab — post a ``submit``
-//    message whose prompt is the prefixed text, and clear the input;
-//  * a task already running in the tab — post ``appendUserMessage``
-//    (a steering instruction injected into the live agent) with the
-//    prefixed text, and clear the input;
-//  * an empty translation — post nothing.
-//
-// Runs the REAL production ``media/main.js`` and ``media/voice.js``
-// together in one jsdom webview (only the vscode host API is a
-// recording stub, as in every webview test).  Run with:
-//
-//     node test/voiceSubmitToAgent.test.js
 
 'use strict';
 
@@ -37,11 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom window running the production chat webview plus the
- * production voice.js in webview mode.  Returns ``{win, posted}``
- * where ``posted`` records every message posted to the vscode host.
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -76,7 +46,10 @@ function makeWebview() {
 
   win.__VOICE__ = {mode: 'webview'};
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'voice.js'), 'utf8'));
   return {win, posted};
 }
@@ -104,8 +77,6 @@ function test(name, fn) {
   }
 }
 
-// ---------------------------------------------------------------------------
-
 test('spoken task is submitted to the idle highlighted tab', () => {
   const {win, posted} = makeWebview();
   posted.length = 0;
@@ -118,7 +89,7 @@ test('spoken task is submitted to the idle highlighted tab', () => {
     'Speaker #1 says that: Fix the parser bug',
   );
   assert.strictEqual(posted.filter(m => m.type === 'appendUserMessage').length, 0);
-  assert.strictEqual(input(win).value, ''); // submit cleared the input
+  assert.strictEqual(input(win).value, '');
 });
 
 test('spoken task steers a running agent as a user message', () => {
@@ -133,7 +104,7 @@ test('spoken task steers a running agent as a user message', () => {
     'Speaker #2 says that: Also update the docs',
   );
   assert.strictEqual(posted.filter(m => m.type === 'submit').length, 0);
-  assert.strictEqual(input(win).value, ''); // steering cleared the input
+  assert.strictEqual(input(win).value, '');
 });
 
 test('spoken task with a language submits the language-aware prompt', () => {
@@ -152,7 +123,7 @@ test('spoken task with a language submits the language-aware prompt', () => {
     submits[0].prompt,
     'Speaker #1 says in the language fr that: Fix the parser bug',
   );
-  assert.strictEqual(input(win).value, ''); // submit cleared the input
+  assert.strictEqual(input(win).value, '');
 });
 
 test('spoken task with a language steers a running agent', () => {
@@ -172,7 +143,7 @@ test('spoken task with a language steers a running agent', () => {
     'Speaker #2 says in the language es that: Also update the docs',
   );
   assert.strictEqual(posted.filter(m => m.type === 'submit').length, 0);
-  assert.strictEqual(input(win).value, ''); // steering cleared the input
+  assert.strictEqual(input(win).value, '');
 });
 
 test('legacy speech without a speaker still submits unprefixed', () => {
@@ -229,9 +200,5 @@ test('two speakers submit two distinct prefixed tasks', () => {
   ]);
 });
 
-// ---------------------------------------------------------------------------
-
 console.log(`\n${passed} passed, ${failures.length} failed`);
-// main.js starts webview timers (status ticks) that keep the node
-// event loop alive; exit explicitly once the verdict is printed.
 process.exit(failures.length > 0 ? 1 : 0);

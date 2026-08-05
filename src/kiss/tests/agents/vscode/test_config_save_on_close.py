@@ -42,7 +42,6 @@ class TestSettingsSavesOnCloseOrSwitch(unittest.TestCase):
         """Return the source of ``function <name>() { … }`` (balanced)."""
         m = re.search(r"function\s+" + re.escape(name) + r"\(", self._js)
         assert m, f"{name} not found"
-        # Find the opening brace.
         i = self._js.index("{", m.end())
         depth = 1
         j = i + 1
@@ -65,10 +64,7 @@ class TestSettingsSavesOnCloseOrSwitch(unittest.TestCase):
 
     def test_open_settings_panel_posts_get_config(self) -> None:
         body = self._extract_fn("openSettingsPanel")
-        # Opening the panel must request the latest config from the backend.
         assert "getConfig" in body
-        # And reset the populated flag so a subsequent close won't re-save
-        # stale values that were never populated by a fresh fetch.
         assert "configFormPopulated = false" in body
 
     def test_save_settings_helper_is_guarded_by_form_populated(self) -> None:

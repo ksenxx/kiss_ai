@@ -106,7 +106,6 @@ class TestWorktreeRenameChangedFiles(unittest.TestCase):
         new_path.write_text(
             new_path.read_text().replace("line5\n", "line5-agent\n"),
         )
-        # User meanwhile edits the soon-to-be-deleted old path on main.
         main_old = Path(self.repo, "old.txt")
         main_old.write_text(
             main_old.read_text().replace("line9\n", "line9-user\n"),

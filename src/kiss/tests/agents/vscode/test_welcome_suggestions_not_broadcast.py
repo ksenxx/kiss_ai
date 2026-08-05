@@ -114,7 +114,6 @@ class TestWelcomeSuggestionsNotBroadcast(IsolatedAsyncioTestCase):
         a ``welcome_suggestions`` event to be delivered to a
         previously connected client (the extension).
         """
-        # 1) Extension-side connection: registers with the broadcaster.
         ext_reader, ext_writer = await asyncio.open_unix_connection(
             str(self.uds_path),
             limit=16 * 1024 * 1024,
@@ -130,19 +129,13 @@ class TestWelcomeSuggestionsNotBroadcast(IsolatedAsyncioTestCase):
                 ).encode("utf-8") + b"\n",
             )
             await ext_writer.drain()
-            # Drain the extension's own ready handshake events.
             await self._drain_until(ext_reader, "focusInput", timeout=2.0)
-            # Pull out any welcome_suggestions emitted for THIS client's
-            # own ready handshake — those are expected.  We only care
-            # about events that arrive AFTER the second client connects.
             try:
                 while True:
                     await asyncio.wait_for(ext_reader.readline(), timeout=0.2)
             except TimeoutError:
                 pass
 
-            # 2) Second client (the webapp opening a new chat tab) sends
-            #    a getWelcomeSuggestions command.
             web_reader, web_writer = await asyncio.open_unix_connection(
                 str(self.uds_path),
                 limit=16 * 1024 * 1024,
@@ -155,9 +148,6 @@ class TestWelcomeSuggestionsNotBroadcast(IsolatedAsyncioTestCase):
                 )
                 await web_writer.drain()
 
-                # 3) The first (extension) client must NOT receive a
-                #    welcome_suggestions event triggered by the second
-                #    client's request.
                 for _ in range(50):
                     try:
                         msg = await self._read_event(

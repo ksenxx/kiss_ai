@@ -50,7 +50,6 @@ class TestStaleDbEvents:
     def setup_method(self):
         self.tmpdir_a = tempfile.mkdtemp()
         self.tmpdir_b = tempfile.mkdtemp()
-        # Make sure no backlog from earlier tests is in flight.
         th._flush_chat_events()
         self.saved = _redirect(self.tmpdir_a)
 
@@ -75,16 +74,10 @@ class TestStaleDbEvents:
         """Events enqueued under DB A never land on DB B's same-id task."""
         task_a, _ = th._add_task("task-a", chat_id="chat-a")
         th._flush_chat_events()
-        # Enqueue a backlog far larger than one writer batch so part of
-        # it is still queued when the database is swapped underneath.
         for i in range(5000):
             th._queue_chat_event(
                 {"type": "text_delta", "content": f"x{i}"}, task_id=task_a,
             )
-        # Swap to a fresh database B and re-INSERT a task with the same
-        # UUID into B (UUIDs no longer collide naturally, so we force
-        # the collision to reproduce the original cross-DB pollution
-        # precondition).
         th._DB_PATH = Path(self.tmpdir_b) / "sorcar.db"
         th._db_conn = None
         db_b = th._get_db()

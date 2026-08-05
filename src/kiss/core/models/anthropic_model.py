@@ -8,14 +8,13 @@
 import base64
 import json
 import logging
-import threading
-import time
 from collections.abc import Callable
 from typing import Any
 
 import httpx
 from anthropic import Anthropic, APITimeoutError
 
+from kiss.core import stop_signal
 from kiss.core.kiss_error import KISSError, ModelRefusalError
 from kiss.core.models.model import (
     Attachment,
@@ -26,87 +25,15 @@ from kiss.core.models.model import (
     responses_items_to_chat_messages,
     transcribe_audio,
 )
+from kiss.core.models.stream_abort import (
+    DEFAULT_STREAM_STALL_TIMEOUT,
+    StreamAbortWatchdog,
+)
 
 logger = logging.getLogger(__name__)
 
-#: Maximum seconds the Anthropic streaming connection may go without
-#: delivering ANY bytes (response headers, SSE events, or the periodic
-#: ``ping`` keep-alive events the API sends during long turns) before the
-#: request is aborted with a retryable error.
-#:
-#: Without this bound the SDK default applies — ``httpx.Timeout(read=600)``
-#: with 2 silent retries — so a request that the API accepts but never
-#: answers hangs the agent for 10–30 minutes with zero output.  This was
-#: the production "task stuck in thinking" failure (task
-#: ``f554c68446fa42af89c2fd3c7cc14f63`` in ``~/.kiss/sorcar.db``,
-#: 2026-07-21 10:08): step 2's stream produced no events for 5.5 minutes,
-#: no error was ever raised, and the user had to stop the task by hand.
-#: Overridable per model via ``model_config["stream_stall_timeout"]``.
-DEFAULT_STREAM_STALL_TIMEOUT = 180.0
-#: Seconds allowed for establishing the TCP/TLS connection.
 _CONNECT_TIMEOUT = 10.0
-#: SDK-level retries for connect/timeout failures BEFORE the response
-#: starts.  The SDK default of 2 made the worst pre-header case
-#: ``3 x stall`` of silent waiting; one retry keeps resilience to
-#: transient connection failures while bounding silence at ``2 x stall``.
-#: KISSAgent adds its own, user-visible retries on top.
 _MAX_RETRIES = 1
-
-
-class _StreamStallWatchdog:
-    """Closes a message stream when no SSE *event* arrives in time.
-
-    The httpx read timeout on the client bounds byte-level silence, but the
-    Anthropic API sends periodic ``ping`` keep-alive events that the SDK
-    filters out before yielding — a wedged request that only pings would
-    reset the byte-level timeout forever while the agent sees no event at
-    all (the "stuck in thinking" symptom).  This watchdog bounds
-    *event*-level silence: :meth:`beat` is called for every yielded event,
-    and when none arrives within *timeout* seconds the underlying response
-    is closed, which makes the blocked iterator raise so the caller can
-    convert it into a retryable :class:`TimeoutError`.
-    """
-
-    def __init__(self, stream: Any, timeout: float) -> None:
-        """Start watching *stream*.
-
-        Args:
-            stream: The ``MessageStream`` whose ``close()`` aborts the
-                blocked read.
-            timeout: Seconds of event-level silence tolerated.
-        """
-        self._stream = stream
-        self._timeout = timeout
-        self._last_event = time.monotonic()
-        self._lock = threading.Lock()
-        self._done = threading.Event()
-        self.stalled = False
-        self._thread = threading.Thread(
-            target=self._watch, name="anthropic-stream-stall-watchdog", daemon=True
-        )
-        self._thread.start()
-
-    def beat(self) -> None:
-        """Record that an event arrived (resets the stall clock)."""
-        with self._lock:
-            self._last_event = time.monotonic()
-
-    def stop(self) -> None:
-        """Stop the watchdog thread (stream finished or failed)."""
-        self._done.set()
-
-    def _watch(self) -> None:
-        poll = max(0.05, min(1.0, self._timeout / 4))
-        while not self._done.wait(poll):
-            with self._lock:
-                idle = time.monotonic() - self._last_event
-            if idle >= self._timeout:
-                self.stalled = True
-                try:
-                    self._stream.close()
-                except Exception:
-                    logger.debug("Exception caught", exc_info=True)
-                return
 
 
 def _anthropic_cache_creation_tokens(usage: Any) -> tuple[int, int]:
@@ -120,47 +47,102 @@ def _anthropic_cache_creation_tokens(usage: Any) -> tuple[int, int]:
     return 0, aggregate
 
 
+_THINKING_FAMILIES = ("opus", "sonnet", "haiku", "fable")
+
+
+def _parse_claude_version(model_name: str) -> tuple[str, int, int | None] | None:
+    """Parse ``claude-<family>-<major>[-<minor>][-<date>]`` model names.
+
+    The accepted shapes are exactly ``claude-<family>-<major>``,
+    ``claude-<family>-<major>-<date>``, ``claude-<family>-<major>-<minor>``,
+    and ``claude-<family>-<major>-<minor>-<date>``, where ``<family>`` is
+    alphabetic, ``<major>`` and ``<minor>`` are non-zero-padded runs of
+    digits, ``<minor>`` is not 8 digits long, and ``<date>`` is exactly
+    8 digits and may only be the final segment.
+
+    Args:
+        model_name: The model name to parse (e.g. ``claude-opus-4-8``,
+            ``claude-opus-5``, ``claude-haiku-4-5-20251001``).
+
+    Returns:
+        A ``(family, major, minor)`` tuple, where ``minor`` is ``None``
+        when the name has no minor version (e.g. ``claude-opus-4`` or a
+        dated snapshot of a bare major like ``claude-opus-4-20250514``,
+        whose 8-digit date segment is not a minor version).  Returns
+        ``None`` for every name outside the grammar above: non-Claude
+        models, legacy ``claude-3-5-sonnet-*`` names whose family slot
+        holds a digit, zero-padded or non-numeric majors or minors
+        (``claude-opus-04``, ``claude-opus-x``, ``claude-opus-5-04``),
+        empty or non-numeric trailing segments (``claude-opus-5-``,
+        ``claude-opus-5-junk``), extra segments beyond
+        ``<minor>-<date>`` (``claude-opus-5-1-2``,
+        ``claude-opus-5-1-20260301-777``), and non-final 8-digit date
+        segments (``claude-opus-4-20250514-1``,
+        ``claude-opus-5-20260301-99``).
+    """
+    parts = model_name.split("-")
+    if len(parts) < 3 or len(parts) > 5 or parts[0] != "claude":
+        return None
+    family = parts[1]
+    if not family.isalpha():
+        return None
+    major_str = parts[2]
+    if not major_str.isdigit() or (len(major_str) > 1 and major_str[0] == "0"):
+        return None
+    tail = parts[3:]
+    if tail and len(tail[-1]) == 8 and tail[-1].isdigit():
+        tail = tail[:-1]  # a trailing 8-digit segment is a date, not a minor
+    if len(tail) > 1:
+        return None
+    minor: int | None = None
+    if tail:
+        minor_str = tail[0]
+        if (
+            not minor_str.isdigit()
+            or len(minor_str) == 8
+            or (len(minor_str) > 1 and minor_str[0] == "0")
+        ):
+            return None
+        minor = int(minor_str)
+    return family, int(major_str), minor
+
+
 def _uses_adaptive_thinking(model_name: str) -> bool:
     """Return True if the Claude model requires ``thinking.type=adaptive``.
 
     Consultation order:
 
     1. ``MODEL_INFO[model_name].adaptive_thinking`` when explicitly set
-       (``True`` / ``False``) — the source of truth for
-       ``claude-fable-*``, ``claude-sonnet-5`` and any other new-family
-       Claude models whose name does not fit the legacy prefix
-       heuristic.  This is loaded from ``MODEL_INFO.json`` at import
-       time so a JSON edit reconfigures the adapter without a code
-       change.
-    2. The legacy prefix heuristic: newer Claude Opus models (4.6 and
-       later) no longer support ``thinking.type=enabled`` and must use
-       ``adaptive`` instead. Older Opus 4.x models (4, 4.1, 4.5) still
-       use ``enabled``. Sonnet/Haiku 4 models continue to use
-       ``enabled`` as before.
+       (``True`` / ``False``) — the highest-priority source of truth.
+       This is loaded from ``MODEL_INFO.json`` at import time so a JSON
+       edit reconfigures the adapter without a code change.
+    2. A version-aware heuristic on the model name, parsed as
+       ``claude-<family>-<major>[-<minor>]``:
+
+       * every modern-family model (opus/sonnet/haiku/fable) with major
+         version >= 5 uses adaptive thinking (``claude-opus-5``,
+         ``claude-fable-5``, future ``claude-*-6`` ... included), since
+         Anthropic rejects ``thinking.type=enabled`` for these models;
+       * within the 4.x generation only Opus 4.6 and later use
+         adaptive; older Opus 4.x (4, 4.1, 4.5) and all Sonnet/Haiku
+         4.x still use ``enabled``. An 8-digit date segment (e.g.
+         ``claude-opus-4-20250514``) is not treated as a minor version.
     """
-    # Deferred import to avoid a cycle between ``model_info`` (which
-    # imports the model classes lazily) and this module.
     from kiss.core.models.model_info import MODEL_INFO
 
     info = MODEL_INFO.get(model_name)
     if info is not None and info.adaptive_thinking is not None:
         return info.adaptive_thinking
 
-    prefix = "claude-opus-4-"
-    if not model_name.startswith(prefix):
+    version = _parse_claude_version(model_name)
+    if version is None:
         return False
-    suffix = model_name[len(prefix):]
-    minor_str = suffix.split("-", 1)[0]
-    if len(minor_str) == 8 and minor_str.isdigit():
-        # Date-stamped official id (e.g. ``claude-opus-4-20250514``): the
-        # token is a release date, not a minor version — this is Opus 4.0,
-        # which only supports ``thinking.type=enabled``.
+    family, major, minor = version
+    if family not in _THINKING_FAMILIES:
         return False
-    try:
-        minor = int(minor_str)
-    except ValueError:
-        return False
-    return minor >= 6
+    if major >= 5:
+        return True
+    return family == "opus" and major == 4 and minor is not None and minor >= 6
 
 
 def _supports_extended_thinking(model_name: str) -> bool:
@@ -169,28 +151,34 @@ def _supports_extended_thinking(model_name: str) -> bool:
     Consultation order:
 
     1. ``MODEL_INFO[model_name].extended_thinking`` when explicitly set —
-       the source of truth for new-family Claude models whose name is
-       not covered by the legacy prefix allowlist below (e.g.
-       ``claude-fable-5``, ``claude-sonnet-5``). Setting the flag to
-       ``False`` also lets ``MODEL_INFO.json`` opt a specific model out
-       of extended thinking without a code change.
-    2. Legacy prefix allowlist: every ``claude-{opus,sonnet,haiku}-4``
-       model supports extended thinking.
+       the highest-priority source of truth. Setting the flag to
+       ``False`` lets ``MODEL_INFO.json`` opt a specific model out of
+       extended thinking without a code change.
+    2. A version-aware heuristic on the model name, parsed as
+       ``claude-<family>-<major>``: every modern-family model
+       (opus/sonnet/haiku/fable) with major version >= 4 supports
+       extended thinking. Legacy ``claude-3*`` names (whose family slot
+       holds a digit) and non-Claude names never match, so they stay
+       non-thinking.
 
-    The paper-analysed ``claude-fable-5`` failure lived in the gap
-    between these two rules: its name does not match the prefix
-    allowlist, so before this helper existed the adapter never sent the
-    ``thinking`` param and the model returned encrypted-only reasoning
-    turns that ``KISSAgent`` misread as "empty response".
+    The paper-analysed ``claude-fable-5`` failure — and the identical
+    ``claude-opus-5`` regression after it — lived in the gap between an
+    unset JSON flag and the previous hardcoded ``claude-*-4`` prefix
+    allowlist: the adapter never sent the ``thinking`` param, so the
+    model's reasoning stayed invisible (or came back encrypted-only and
+    ``KISSAgent`` misread it as "empty response").
     """
     from kiss.core.models.model_info import MODEL_INFO
 
     info = MODEL_INFO.get(model_name)
     if info is not None and info.extended_thinking is not None:
         return info.extended_thinking
-    return model_name.startswith(
-        ("claude-opus-4", "claude-sonnet-4", "claude-haiku-4")
-    )
+
+    version = _parse_claude_version(model_name)
+    if version is None:
+        return False
+    family, major, _minor = version
+    return family in _THINKING_FAMILIES and major >= 4
 
 
 _AUDIO_FORMAT_TO_MIME: dict[str, str] = {
@@ -422,13 +410,6 @@ class AnthropicModel(Model):
                 is available; otherwise they are skipped with a warning.  Video
                 attachments are always skipped.
         """
-        # Bound the time the connection may sit with NO bytes flowing
-        # (httpx read/write/pool timeouts apply between bytes, so a healthy
-        # long generation — which streams deltas and periodic ``ping``
-        # events continuously — is unaffected).  Without this, the SDK
-        # default (read=600s, 2 silent retries) let an accepted-but-dead
-        # request hang the agent for 10–30 minutes with no output: the
-        # "task stuck in thinking" production failure.
         self.client = Anthropic(
             api_key=self.api_key,
             timeout=httpx.Timeout(self._stream_stall_timeout, connect=_CONNECT_TIMEOUT),
@@ -460,7 +441,6 @@ class AnthropicModel(Model):
         for block in content:
             if isinstance(block, dict):
                 dict_block_type = block.get("type")
-                # Drop pre-existing whitespace-only text dicts too.
                 if dict_block_type == "text" and not block.get("text", "").strip():
                     continue
                 if dict_block_type in ("image_url", "file", "input_audio"):
@@ -626,8 +606,6 @@ class AnthropicModel(Model):
         msg_copy = msg.copy()
         attachments = msg_copy.pop("attachments", None)
         if attachments:
-            # Gemini hand-off: lift the Attachment objects into Anthropic
-            # content blocks (the API rejects unknown message fields).
             att_blocks = _attachments_to_blocks(attachments)
             prior = msg_copy.get("content")
             if isinstance(prior, str):
@@ -648,19 +626,15 @@ class AnthropicModel(Model):
             blocks.extend(_tool_calls_to_tool_use_blocks(tool_calls))
             return [{"role": msg_copy.get("role", "assistant"), "content": blocks}]
 
-        # If content is a string, ensure it's non-whitespace
         if isinstance(content, str):
             if content.strip():
                 return [msg_copy]
-            # Skip messages with whitespace-only string content
             return []
-        # If content is a list of blocks, normalize them
         if isinstance(content, list):
             normalized_blocks = self._normalize_content_blocks(content)
             if normalized_blocks:
                 msg_copy["content"] = normalized_blocks
                 return [msg_copy]
-            # Skip messages where all blocks were dropped
             return []
         return []
 
@@ -676,23 +650,10 @@ class AnthropicModel(Model):
         kwargs = self.model_config.copy()
         enable_cache = kwargs.pop("enable_cache", True)
         system_instruction = kwargs.pop("system_instruction", None)
-        # ``reasoning_effort`` and ``use_responses_api`` are OpenAI-specific
-        # knobs (the factory auto-defaults the former into ``model_config``
-        # for gpt-5.x reasoning models; the latter forces/disables the
-        # /v1/responses delegation); they arrive here verbatim when a live
-        # conversation (and its config) is handed over by the Sorcar
-        # ``set_model`` tool.  The Anthropic API rejects unknown kwargs, so
-        # drop them — the extended-thinking default below already enables
-        # native reasoning for Claude 4+ models.
         kwargs.pop("reasoning_effort", None)
         kwargs.pop("use_responses_api", None)
-        # Consumed by ``initialize`` (client construction); not an API param.
         kwargs.pop("stream_stall_timeout", None)
 
-        # Hoist OpenAI-style ``role="system"`` messages (present when the
-        # conversation was handed off from an OpenAI-schema model, e.g. via
-        # the Sorcar ``set_model`` tool) into the top-level ``system``
-        # parameter; the Anthropic Messages API rejects the "system" role.
         system_texts: list[str] = [system_instruction] if system_instruction else []
         for msg in self.conversation:
             if msg.get("role") != "system":
@@ -725,21 +686,12 @@ class AnthropicModel(Model):
 
         if "thinking" not in kwargs and _supports_extended_thinking(self.model_name):
             if not user_set_max_tokens:
-                max_tokens = 65536 if self.model_name.startswith("claude-opus-4") else 64000
+                version = _parse_claude_version(self.model_name)
+                is_opus = version is not None and version[0] == "opus"
+                max_tokens = 65536 if is_opus else 64000
             if _uses_adaptive_thinking(self.model_name):
-                # ``display`` defaults to "omitted" on adaptive-thinking
-                # models (fable-5, mythos-5, sonnet-5, opus-4-7/4-8): the
-                # API then returns thinking blocks with an EMPTY ``thinking``
-                # field (encrypted signature only) and emits no
-                # ``thinking_delta`` stream events, so no thinking tokens
-                # are ever revealed to the user.  Request the readable
-                # summary explicitly.
                 kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
             else:
-                # The API requires ``max_tokens > budget_tokens`` and
-                # ``budget_tokens >= 1024``.  Cap the budget below the
-                # user's max_tokens and skip thinking entirely when there
-                # is no room for the minimum budget.
                 budget = min(10000, max_tokens - 1)
                 if budget >= 1024:
                     kwargs["thinking"] = {
@@ -747,11 +699,6 @@ class AnthropicModel(Model):
                         "budget_tokens": budget,
                     }
 
-        # When extended thinking is enabled, request interleaved thinking via
-        # the anthropic-beta header so the model emits between-tool-call
-        # reasoning as ``thinking`` content blocks (routed to the Thoughts
-        # panel) instead of as plain ``text`` blocks (which would render in
-        # the main response area).
         if "thinking" in kwargs:
             existing_headers = kwargs.get("extra_headers") or {}
             beta_header = existing_headers.get("anthropic-beta", "")
@@ -783,16 +730,6 @@ class AnthropicModel(Model):
         if tools:
             kwargs["tools"] = tools
             if "tool_choice" not in kwargs and "thinking" not in kwargs:
-                # KISSAgent's ReAct loop requires every agentic turn to
-                # produce a tool call (``finish`` is always present), so
-                # non-thinking models force ``tool_choice=any`` to prevent
-                # tool-less turns.  When thinking is active (``enabled`` or
-                # ``adaptive``) tool use only supports ``tool_choice``
-                # ``auto``/``none``: ``enabled`` rejects forced tool use with
-                # a 400, and adaptive models (fable-5, sonnet-5, opus-4-7/4-8)
-                # silently DISABLE thinking for the request ("graceful
-                # thinking degradation") — the response then contains only
-                # ``tool_use`` blocks and no thinking is ever revealed.
                 kwargs["tool_choice"] = {"type": "any"}
 
         if enable_cache:
@@ -826,7 +763,7 @@ class AnthropicModel(Model):
           its message is often empty) or ``anthropic.APITimeoutError``
           when the response headers never arrive (SDK retries
           ``_MAX_RETRIES`` times first);
-        * **event level** — :class:`_StreamStallWatchdog` closes the
+        * **event level** — :class:`StreamAbortWatchdog` closes the
           response when no SSE event is yielded in time, catching wedged
           requests that keep the connection alive with ``ping`` events
           (which the SDK filters out before yielding).
@@ -846,12 +783,17 @@ class AnthropicModel(Model):
             TimeoutError: When the streaming connection delivers no data
                 (or no events) for ``stream_stall_timeout`` seconds.
         """
-        watchdog: _StreamStallWatchdog | None = None
+        watchdog: StreamAbortWatchdog | None = None
         in_thinking = False
         thinking_started = False
         try:
             with self.client.messages.stream(**kwargs) as stream:
-                watchdog = _StreamStallWatchdog(stream, self._stream_stall_timeout)
+                watchdog = StreamAbortWatchdog(
+                    stream,
+                    stall_timeout=self._stream_stall_timeout,
+                    stop_event=stop_signal.get_thread_stop_event(),
+                    name="anthropic-stream-abort-watchdog",
+                )
                 try:
                     for event in stream:
                         watchdog.beat()
@@ -880,19 +822,76 @@ class AnthropicModel(Model):
                                 if thinking_started:
                                     self._invoke_thinking_callback(False)
                                     thinking_started = False
+                    # An aborted socket ends the iterator at EOF instead
+                    # of raising, so the abort has to be reported here
+                    # too — otherwise get_final_message() would surface
+                    # it as a confusing "incomplete message" error.
+                    if watchdog.stopped:
+                        raise self._stop_error(thinking_started)
+                    if watchdog.stalled:
+                        raise self._stall_error(thinking_started)
                     return stream.get_final_message()
                 finally:
                     watchdog.stop()
         except (httpx.TimeoutException, APITimeoutError) as exc:
+            if self._stream_was_stopped(watchdog):
+                raise self._stop_error(thinking_started) from exc
             raise self._stall_error(thinking_started) from exc
+        except TimeoutError:
+            # Already the stall error raised after the loop below; its
+            # thinking bracket is closed, so re-wrapping it would emit a
+            # second thinking_callback(False).
+            raise
         except Exception as exc:
-            # The watchdog closes the response out from under the blocked
-            # iterator, which surfaces as a provider/transport error
-            # (e.g. ``httpx.StreamClosed`` or a peer-closed read error) —
-            # attribute it to the stall.
+            if self._stream_was_stopped(watchdog):
+                raise self._stop_error(thinking_started) from exc
             if watchdog is not None and watchdog.stalled:
                 raise self._stall_error(thinking_started) from exc
             raise
+
+    @staticmethod
+    def _stream_was_stopped(watchdog: StreamAbortWatchdog | None) -> bool:
+        """Return whether the user stopped the task during this request.
+
+        The watchdog reports a stop it acted on, but it only exists once
+        the response headers have arrived: a request that is silent
+        BEFORE that (the SDK's own connect/read timeout territory) fails
+        with ``watchdog is None``, and reporting that as a retryable
+        stall would make the agentic loop re-ask the model on behalf of
+        a task the user already stopped.  Asking the thread's stop
+        signal directly covers both windows.
+
+        Args:
+            watchdog: The stall watchdog for this request, or ``None``
+                when the stream never opened.
+
+        Returns:
+            ``True`` when the request must unwind as a user stop.
+        """
+        if watchdog is not None and watchdog.stopped:
+            return True
+        return stop_signal.stop_requested()
+
+    def _stop_error(self, thinking_started: bool) -> KeyboardInterrupt:
+        """Build the stop error for a stream the user aborted.
+
+        A user stop must NOT surface as the retryable
+        :class:`TimeoutError` a stall produces — the agentic loop would
+        re-ask the model and the task would keep running.
+        ``KeyboardInterrupt`` is the same signal ``_check_stop`` raises,
+        so the whole stack unwinds into the normal "Task stopped by
+        user" path.
+
+        Args:
+            thinking_started: Whether ``thinking_callback(True)`` was
+                emitted without its matching ``False``.
+
+        Returns:
+            The ``KeyboardInterrupt`` for the caller to raise.
+        """
+        if thinking_started:
+            self._invoke_thinking_callback(False)
+        return KeyboardInterrupt("Agent stop requested")
 
     def _stall_error(self, thinking_started: bool) -> TimeoutError:
         """Build the retryable stall error, closing any open thinking bracket.

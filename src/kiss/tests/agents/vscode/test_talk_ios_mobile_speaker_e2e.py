@@ -65,21 +65,11 @@ JSDOM_PKG = VSCODE_DIR / "node_modules" / "jsdom" / "package.json"
 
 SAMPLE_RATE = 44100
 
-# The reply the agent's ``talk`` tool speaks after the user asks a
-# question from their iPhone.
 TALK_TEXT = (
     "Alright, I looked into it. "
     "The tests are green and the fix is ready!"
 )
 
-# Node driver: runs the REAL production ``media/main.js`` in jsdom
-# under an iOS-Safari-faithful Audio autoplay gate and a
-# speechSynthesis spy, optionally simulates the user's tap, delivers
-# the scenario's ``talk`` events exactly like the remote webapp's
-# WebSocket layer does, and prints JSON:
-# ``{"constructed": [src...], "played": [src...],
-#    "rejected": [src...], "speechSynthesisCalls": [label...],
-#    "utterancesConstructed": N}``.
 NODE_IOS_DRIVER = r"""
 'use strict';
 const fs = require('fs');
@@ -169,6 +159,7 @@ function IOSAudio(src) {
 }
 win.Audio = IOSAudio;
 
+win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
 win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
 win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
@@ -187,7 +178,7 @@ if (scenario.tap) {
 
 // The agent's ``talk`` broadcasts arrive over the WebSocket long
 // after any tap — NOT inside any user-gesture handler.
-const tabId = win._demoApi.getActiveTabId();
+const tabId = win._testApi.getActiveTabId();
 for (const ev of scenario.events) {
   win.dispatchEvent(new win.MessageEvent('message', {data: Object.assign(
       {type: 'talk', emotion: '', tabId: tabId}, ev)}));
@@ -369,8 +360,6 @@ class TestTalkIosMobileSpeakerE2E(unittest.TestCase):
             [
                 {"text": TALK_TEXT, "talkId": "ios-e2e-talk-1",
                  "audioB64": self.clip_b64, "audioMime": "audio/aiff"},
-                # No audioB64: must be silent (no Audio element, no
-                # Web Speech) and must NOT stall the talk queue.
                 {"text": "this event carries no audio",
                  "talkId": "ios-e2e-talk-2"},
                 {"text": TALK_TEXT, "talkId": "ios-e2e-talk-3",
@@ -379,23 +368,13 @@ class TestTalkIosMobileSpeakerE2E(unittest.TestCase):
             tap=True,
         )
 
-        # The robotic Web Speech engine must never be touched.
         self.assertEqual(result["speechSynthesisCalls"], [])
         self.assertEqual(result["utterancesConstructed"], 0)
 
-        # Only the two audio-carrying events reach an Audio element,
-        # both play the exact GPT clip, and none is autoplay-blocked
-        # (the user's tap provided the activation).  The middle
-        # audio-less event was silent AND the queue advanced past it —
-        # otherwise the second clip would never have played.
         self.assertEqual(result["constructed"], [clip_url, clip_url])
         self.assertEqual(result["played"], [clip_url, clip_url])
         self.assertEqual(result["rejected"], [])
 
-        # The acoustic proof: render the exact clip the Audio element
-        # played through the speakers and listen with the microphone.
-        # A silent regression (empty/garbled clip) records only noise
-        # and fails right here.
         recording = record_while(
             lambda: play_data_url_aloud(result["played"][0])
         )
@@ -425,14 +404,10 @@ class TestTalkIosMobileSpeakerE2E(unittest.TestCase):
             tap=False,
         )
 
-        # The clip was handed to an Audio element, iOS blocked it, and
-        # nothing was played.
         self.assertEqual(result["constructed"], [clip_url])
         self.assertEqual(result["rejected"], [clip_url])
         self.assertEqual(result["played"], [])
 
-        # And crucially: the blocked clip must NOT fall back to the
-        # robotic Web Speech voice — no speechSynthesis call ever.
         self.assertEqual(result["speechSynthesisCalls"], [])
         self.assertEqual(result["utterancesConstructed"], 0)
 

@@ -21,11 +21,6 @@ from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
-# Deliberately frozen at import time: channel agents build their
-# ``channel_dir`` constants from ``Path.home() / ".kiss"``, and
-# :class:`ChannelConfig` uses this same frozen base only to extract the
-# *relative* part of those dirs so :meth:`ChannelConfig.path` can rebase
-# them onto the lazily-resolved ``$KISS_HOME`` (see :func:`_kiss_home`).
 _DEFAULT_KISS_DIR = Path.home() / ".kiss"
 
 
@@ -260,10 +255,6 @@ class BaseChannelAgent:
 
     _backend: Any
 
-    #: Channel-specific guidance (e.g. browser-based authentication
-    #: steps) appended to the system prompt on direct runs and to the
-    #: task prompt on ``run_agent_via_kiss_web`` API launches (the
-    #: ``kiss.server.sorcar.run`` API carries no system prompt).
     channel_system_prompt: str = ""
 
     def _is_authenticated(self) -> bool:
@@ -657,17 +648,10 @@ def channel_main(
         agent = agent_cls(workspace=workspace)
     else:
         agent = agent_cls()
-    # ``cli_helpers`` (sorcar layer) must not import the UI layer, so
-    # the recording printer used for verbose runs is injected here.
     from kiss.ui.cli.cli_printer import RecordingConsolePrinter
 
     run_kwargs = _build_run_kwargs(args, printer_factory=RecordingConsolePrinter)
 
-    # Interactive mode launches the agent as a kiss-web registered
-    # agent via ``_cmd_run`` (see ``run_agent_via_kiss_web``) so the
-    # task is live-visible in remote webviews.  Map the run kwargs to
-    # the launcher's contract; the task runner supplies its own
-    # printer / web-tools / parallel settings from kiss-web config.
     from kiss.agents.third_party_agents._kiss_web_launcher import (
         run_agent_via_kiss_web,
     )

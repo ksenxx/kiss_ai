@@ -2,38 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression test for the "Working on it." acknowledgement
-// played by media/voice.js after a voice-dictated task is submitted.
-//
-// Bug (the "alien voice"): in VS Code webview mode voice.js played the
-// GPT-synthesized ack clip with `new Audio(...).play()`.  A dictated
-// task involves no recent click inside the webview, so Chromium's
-// autoplay policy rejects the play() promise (microsoft/vscode#197937)
-// and voice.js fell back to the Web Speech API system voice — a loud,
-// high-pitched robotic "Working on it." on EVERY spoken task, even
-// after agent `talk` clips were fixed to play natively on the daemon.
-//
-// Required behaviour verified here:
-//
-//  1. webview mode: the ack is delegated to the extension host with a
-//     `{type: 'voiceAck'}` post (the host plays media/working-on-it.mp3
-//     natively on the machine's speakers — no autoplay policy there);
-//     the webview itself never constructs an Audio element and NEVER
-//     speaks with the robotic Web Speech voice.
-//  2. browser mode (remote chat page): the Audio element still plays
-//     the clip (a real browser tab allows it after the user's
-//     interaction), but a rejected play() now degrades to SILENCE —
-//     never to the robotic Web Speech voice.  No voiceAck post is sent
-//     (the daemon may be on another machine).
-//  3. browser mode without an Audio API: silent, no robotic fallback,
-//     no crash.
-//
-// Runs the real media/voice.js in a real jsdom document — no mocks for
-// the code under test (Audio / speechSynthesis are the browser
-// environment, which jsdom does not provide).  Run with:
-//
-//     node test/voiceAckNoRoboticFallback.test.js
 
 'use strict';
 
@@ -59,20 +27,10 @@ async function test(name, fn) {
   }
 }
 
-/** Let pending promise rejections / microtasks settle. */
 function flush() {
   return new Promise(resolve => setTimeout(resolve, 25));
 }
 
-/**
- * Build a fresh jsdom window running the real media/voice.js with the
- * given __VOICE__ config, a recording Audio stub whose play() is
- * rejected (the webview autoplay policy), a recording Web Speech stub,
- * and a recorder for 'kiss-voice-post' bridge messages.
- *
- * withAudio=false omits the Audio API entirely (e.g. a stripped-down
- * embedder) so the no-Audio degradation path can be exercised.
- */
 function makeWindow(cfg, {withAudio = true} = {}) {
   const dom = new JSDOM(
     '<!DOCTYPE html><html><body>' +
@@ -100,8 +58,6 @@ function makeWindow(cfg, {withAudio = true} = {}) {
       };
     };
   } else {
-    // jsdom ships a stub HTMLAudioElement constructor; remove it so
-    // `typeof window.Audio === 'function'` is genuinely false.
     win.Audio = undefined;
   }
   win.SpeechSynthesisUtterance = function SpeechSynthesisUtterance(text) {
@@ -125,8 +81,6 @@ function makeWindow(cfg, {withAudio = true} = {}) {
 function sendHostMessage(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
-
-// ---------------------------------------------------------------------------
 
 async function main() {
   await test(

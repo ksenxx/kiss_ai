@@ -84,6 +84,7 @@ def _read_child_pid(pidfile: Path, deadline_s: float = 10.0) -> int:
     raise AssertionError("silent MCP child never wrote its pidfile")
 
 
+@pytest.mark.slow
 def test_connect_timeout_straggler_killed_on_shutdown(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -111,6 +112,7 @@ def test_connect_timeout_straggler_killed_on_shutdown(
                 pass
 
 
+@pytest.mark.slow
 def test_connect_timeout_straggler_killed_after_grace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

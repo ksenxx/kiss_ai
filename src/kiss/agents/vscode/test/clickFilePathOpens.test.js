@@ -2,18 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end JSDOM tests for the "click filepath in chat → open file"
-// feature: rendered chat content (prompts, results, streamed text,
-// bash tool output, error tool_result text) must surface filepath
-// tokens as clickable elements that post ``openFile`` to the
-// extension.  The extension's existing ``openFile`` handler (see
-// ``SorcarSidebarView.ts``) does the actual fs.existsSync gating and
-// dispatches to the VS Code editor or the native viewer.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/clickFilePathOpens.test.js
 
 'use strict';
 
@@ -45,7 +33,23 @@ function makeWebview() {
   win.acquireVsCodeApi = function () {
     let state;
     return {
-      postMessage: msg => posted.push(msg),
+      // Confirm every checkPaths existence query, like the extension
+      // host does for files that exist: these tests exercise the
+      // linkifier itself (clickFilePathExistsOnly.test.js covers the
+      // exists / does-not-exist split against the real filesystem).
+      postMessage: msg => {
+        posted.push(msg);
+        if (msg.type === 'checkPaths') {
+          const results = {};
+          for (const p of msg.paths) results[p] = true;
+          send(win, {
+            type: 'pathsExist',
+            results,
+            workDir: msg.workDir,
+            tabId: msg.tabId,
+          });
+        }
+      },
       getState: () => state,
       setState: s => {
         state = s;
@@ -54,7 +58,10 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   return {win, posted};
 }
 
@@ -63,19 +70,10 @@ function send(win, data) {
 }
 
 function flushTextStream(win) {
-  // ``text_end`` flushes the streamed buffer through marked.parse +
-  // kissSanitize so the linkifier runs.
   send(win, {type: 'text_end'});
 }
 
 function findLinks(win, p) {
-  // Both the new ``kiss-filelink`` markers and the existing tool_call
-  // ``.tp[data-path]`` hooks expose a ``data-path`` attribute that the
-  // global click handler in ``main.js`` dispatches on.  The feature
-  // covers all rendered free-text chat content (prompts, results,
-  // streamed text, tool output, errors) — wherever a filepath token
-  // appears in user-visible text it must surface a ``data-path``
-  // element matching ``p``.
   return Array.from(
     win.document.querySelectorAll('#output [data-path]'),
   ).filter(el => el.dataset.path === p);
@@ -86,10 +84,6 @@ function clickFirstLink(win, p) {
   assert.ok(el, 'expected a [data-path="' + p + '"] in #output');
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
-
-// ---------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------
 
 function testAbsoluteFilePathInPromptIsLinkified() {
   const {win} = makeWebview();
@@ -205,12 +199,6 @@ function testFilePathInResultTextLinkified() {
 
 function testFilePathInBashOutputLinkified() {
   const {win} = makeWebview();
-  // Bash tool output flows in via streamed ``system_output`` events
-  // into the panel created by the ``tool_call`` event.  The
-  // ``tool_result`` for a Bash call is suppressed by the
-  // ``hadBash && !is_error`` early-exit (the streamed bytes already
-  // populated the panel), so we drive the bash path with
-  // system_output events explicitly.
   send(win, {type: 'tool_call', name: 'Bash', command: 'ls /tmp'});
   send(win, {type: 'system_output', text: 'found at /etc/hosts on line 3'});
   send(win, {type: 'tool_result', content: ''});
@@ -226,8 +214,6 @@ function testFilePathInBashOutputLinkified() {
 
 function testFilePathInNonBashToolOutputLinkified() {
   const {win} = makeWebview();
-  // For non-Bash tools, the success tool_result content is rendered
-  // into a bash-panel (textContent).  Same linkifier must run.
   send(win, {type: 'tool_call', name: 'Read', path: '/tmp/x.txt'});
   send(win, {
     type: 'tool_result',
@@ -266,7 +252,6 @@ function testFilePathInStreamedTextLinkifiedOnFlush() {
   send(win, {type: 'text_delta', text: 'Edit '});
   send(win, {type: 'text_delta', text: '/srv/app/main.py'});
   send(win, {type: 'text_delta', text: ' please'});
-  // Before flush, no links yet (raw text node).
   flushTextStream(win);
   const links = findLinks(win, '/srv/app/main.py');
   assert.strictEqual(
@@ -297,8 +282,6 @@ function testFilePathInsideCodeBlockLinkified() {
 function testHttpUrlNotLinkifiedAsFilePath() {
   const {win} = makeWebview();
   send(win, {type: 'prompt', text: 'see https://example.com/foo/bar.json'});
-  // The URL becomes an <a href=…>; its path slice "/foo/bar.json" must
-  // NOT be wrapped as a filepath (it is part of the URL).
   const links = findLinks(win, '/foo/bar.json');
   assert.strictEqual(
     links.length,
@@ -310,10 +293,6 @@ function testHttpUrlNotLinkifiedAsFilePath() {
 }
 
 function testBareFilenameNotLinkified() {
-  // Bare filenames (no slash, just an extension) are too ambiguous to
-  // detect reliably and would noise-up sentences like "version 1.0".
-  // The feature explicitly requires at least one slash or a relative
-  // directory component.
   const {win} = makeWebview();
   send(win, {type: 'prompt', text: 'package.json was updated to 2.0'});
   const links = findLinks(win, 'package.json');
@@ -332,13 +311,10 @@ function testSentenceTrailingPunctuationNotIncluded() {
     type: 'prompt',
     text: 'fix /tmp/a.py, /tmp/b.py.',
   });
-  // The trailing comma after a.py and period after b.py must not be
-  // captured as part of the path.
   const a = findLinks(win, '/tmp/a.py');
   const b = findLinks(win, '/tmp/b.py');
   assert.strictEqual(a.length, 1, '/tmp/a.py must be linkified');
   assert.strictEqual(b.length, 1, '/tmp/b.py must be linkified');
-  // And neither should include trailing punctuation.
   const aWithComma = findLinks(win, '/tmp/a.py,');
   const bWithPeriod = findLinks(win, '/tmp/b.py.');
   assert.strictEqual(
@@ -384,8 +360,6 @@ function testClickPostsOpenFileWithLine() {
 }
 
 function testFilePathInsideExistingAnchorNotDoubleLinkified() {
-  // marked autolinks bare URLs; the linkifier must skip text nodes
-  // already inside <a> so we never produce nested <a><span/></a>.
   const {win} = makeWebview();
   send(win, {
     type: 'prompt',
@@ -403,9 +377,6 @@ function testFilePathInsideExistingAnchorNotDoubleLinkified() {
 
 function testToolCallPathArgStillUsesExistingHook() {
   const {win, posted} = makeWebview();
-  // The existing ``Read`` tool_call panel header lists ``path: <tp>``
-  // with ``data-path`` already (pre-existing code).  Click still
-  // posts openFile; the new feature must not break this.
   send(win, {type: 'tool_call', name: 'Read', path: '/tmp/old/style.py'});
   const links = findLinks(win, '/tmp/old/style.py');
   assert.ok(
@@ -423,9 +394,6 @@ function testToolCallPathArgStillUsesExistingHook() {
 }
 
 function testLinkifierIsIdempotent() {
-  // Re-rendering must not nest data-path spans inside themselves.  The
-  // simplest assertion: after a prompt event the only data-path
-  // elements have no data-path descendant.
   const {win} = makeWebview();
   send(win, {type: 'prompt', text: 'open /tmp/once.py twice /tmp/once.py'});
   const links = Array.from(

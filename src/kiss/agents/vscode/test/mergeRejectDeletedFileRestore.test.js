@@ -2,35 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Bug-hunt integration test for MergeManager's reject-side restore.
-//
-// Bugs locked in (all mirror behavior the server-side reject path in
-// web_server.py already implements — the native VS Code path ignored
-// the manifest's ``target`` / ``link_target`` / ``exec`` fields):
-//
-//   1. Rejecting an agent-DELETED tracked file never restored it: the
-//      manifest points ``current`` at an empty ``.deleted`` placeholder
-//      and carries the real workspace path in ``target``; MergeManager
-//      only ever wrote to ``current``, so the user's file stayed
-//      deleted after clicking Reject.
-//
-//   2. ``_restoreBinaryBase`` wrote THROUGH a symlink at the reviewed
-//      path — silently clobbering the symlink's destination (possibly
-//      a precious file outside the repo).
-//
-//   3. A ``link_target`` entry must recreate the symlink itself on
-//      reject, not write the blob's target string as file content.
-//
-//   4. Rejecting a deleted ``100755`` script must restore it with the
-//      exec bit (``exec: true`` in the manifest).
-//
-// Drives the real compiled ``out/MergeManager.js`` with the same
-// in-memory vscode stub as bughunt_isNewFile.test.js.
-//
-// Run directly with ``node`` (after ``npm run compile``):
-//
-//     node src/kiss/agents/vscode/test/mergeRejectDeletedFileRestore.test.js
 
 'use strict';
 
@@ -39,11 +10,6 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
-
-// ---------------------------------------------------------------------------
-// In-memory text-document model shared by the vscode stub (same as
-// bughunt_isNewFile.test.js).
-// ---------------------------------------------------------------------------
 
 const docs = new Map();
 
@@ -200,10 +166,6 @@ Module._resolveFilename = function (request, parent, ...rest) {
   if (request === 'vscode') return require.resolve('./_vscode-stub.js');
   return origResolve.call(this, request, parent, ...rest);
 };
-// ``_vscode-stub.js`` is a git-tracked fixture shared by tests running
-// in parallel; it already re-exports ``global.__kissVscodeStub`` — never
-// rewrite or delete it here (writeFileSync truncates first, racing a
-// concurrent ``require('vscode')`` in sibling test processes).
 global.__kissVscodeStub = vscodeStub;
 
 const sourcePath = path.join(__dirname, '..', 'out', 'MergeManager.js');
@@ -349,7 +311,7 @@ async function testRejectLinkTargetRecreatesSymlink() {
   const placeholder = path.join(mergeDir, '.deleted', 'lnk');
   fs.writeFileSync(placeholder, '');
   const base = path.join(mergeDir, 'base', 'lnk');
-  fs.writeFileSync(base, dest); // blob content = the target string
+  fs.writeFileSync(base, dest);
 
   const mgr = freshMgr();
   await mgr.openMerge({

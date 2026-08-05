@@ -2,35 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end tests: the "(click to expand)" affordance next to the
-// ``summary`` label in the header of the agent's collapsed ``summary``
-// digest panel.
-//
-// The summary panel auto-collapses when it renders (see
-// ``summaryToolCollapse.test.js``), hiding the adopted event panels
-// behind a header click.  Nothing used to tell the user the header is
-// clickable, so the panel header must now read
-//
-//     summary (click to expand)
-//
-// with the hint (a) rendered in a dedicated ``.tc-summary-hint`` span
-// directly after the tool name, (b) visible while the panel is
-// collapsed, (c) hidden once the user expands the panel (the label
-// would lie), (d) restored on re-collapse, (e) absent from every
-// non-summary tool panel, (f) present on the history-replay
-// (``task_events``) path exactly like the live path, and (g) excluded
-// from the panel Copy button's clipboard payload and from the
-// collapsed-header text preview.
-//
-// The tests exercise the real ``media/main.js`` + ``media/panelCopy.js``
-// against the real ``media/chat.html`` (and, where computed styles
-// matter, the real ``media/main.css``) in jsdom — the same harness as
-// ``summaryToolCollapse.test.js``.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/summaryHeaderExpandHint.test.js
 
 'use strict';
 
@@ -47,10 +18,6 @@ const DESC =
   'The agent read the panel-rendering code, wrote a failing test for ' +
   'the missing header affordance, and then implemented the hint span.';
 
-/**
- * Build a jsdom window running the real chat webview (chat.html +
- * panelCopy.js + main.js).
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -80,22 +47,19 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  // The sourceURL pragma names this eval instance in V8 coverage
-  // output so summaryHeaderExpandHint.coverage.js can locate it and
-  // gate the summaryhint-coverage region of main.js at 100%.
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
   win.eval(
-    fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8') +
       '\n//# sourceURL=summaryhint-main.js',
   );
   return win;
 }
 
-/** Dispatch a backend→webview event exactly like the extension does. */
 function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** Inject the real production stylesheet so computed styles resolve. */
 function injectCss(win) {
   const css = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
   const styleEl = win.document.createElement('style');
@@ -103,7 +67,6 @@ function injectCss(win) {
   win.document.head.appendChild(styleEl);
 }
 
-/** Emit *n* distinct tool_call panels (Read path-arg panels). */
 function sendToolPanels(win, n) {
   for (let i = 0; i < n; i++) {
     send(win, {type: 'tool_call', name: 'Read', path: '/tmp/f' + i + '.txt'});
@@ -127,8 +90,6 @@ function clickHeader(win, panel) {
     );
 }
 
-// ── tests ──────────────────────────────────────────────────────────
-
 function testHintRenderedNextToSummaryLabel() {
   const win = makeWebview();
   send(win, {type: 'prompt', text: 'go'});
@@ -147,9 +108,6 @@ function testHintRenderedNextToSummaryLabel() {
     HINT,
     'the hint must read exactly "(click to expand)"',
   );
-  // The hint sits NEXT TO (after) the "summary" tool name: the
-  // header's flattened text reads "summary (click to expand)"
-  // (ignoring the chevron glyph addCollapse prepends).
   const flat = (hdr.textContent || '').replace(/\s+/g, ' ');
   assert.ok(
     /summary \(click to expand\)/.test(flat),
@@ -296,7 +254,6 @@ function testHintExcludedFromCollapsePreview() {
   sendToolPanels(win, 2);
   send(win, {type: 'tool_call', name: 'summary', description: DESC});
   const p = summaryPanels(win)[0];
-  // Toggle once each way so collapsePreview() recomputes.
   clickHeader(win, p);
   clickHeader(win, p);
   const prev = p.querySelector(':scope > .tc-h > .collapse-preview');
@@ -312,8 +269,6 @@ function testHintExcludedFromCollapsePreview() {
 }
 
 function testHintStyledDimmerThanLabel() {
-  // The hint is an affordance, not part of the tool name: the real
-  // stylesheet must render it dimmer than the orange header label.
   const win = makeWebview();
   injectCss(win);
   sendToolPanels(win, 1);
@@ -328,10 +283,6 @@ function testHintStyledDimmerThanLabel() {
     hdrColor.trim(),
     'the hint must not inherit the header label color unchanged',
   );
-  // The header uppercases its label (``.tc-h { text-transform:
-  // uppercase }``) — the hint must escape that transform so the user
-  // sees the literal "(click to expand)", not "(CLICK TO EXPAND)"
-  // (adversarial-review finding).
   assert.strictEqual(
     win.getComputedStyle(hint).getPropertyValue('text-transform').trim(),
     'none',

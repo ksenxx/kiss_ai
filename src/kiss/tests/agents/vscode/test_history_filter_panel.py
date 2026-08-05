@@ -34,8 +34,6 @@ class TestHistoryFilterPanel(unittest.TestCase):
         """The history panel HTML embeds the filter controls between
         ``<div class="search-wrap">`` and ``<div id="history-list">``."""
         html = web_server._build_html()  # type: ignore[attr-defined]
-        # Slice from the search wrap closing tag to the history list
-        # opening tag — everything in between is the filter bar.
         m = re.search(
             r'id="history-search".*?</div>'
             r'(?P<bar>.*?)'
@@ -53,14 +51,14 @@ class TestHistoryFilterPanel(unittest.TestCase):
             "hf-running",
             "hf-errors",
             "hf-completed",
-            "hf-workspace",
         ):
             self.assertIn(f'id="{cid}"', bar)
             self.assertIn("checked", bar.split(f'id="{cid}"', 1)[1][:40])
+        self.assertIn('id="hf-workspace"', bar)
+        self.assertNotIn(
+            "checked", bar.split('id="hf-workspace"', 1)[1][:40]
+        )
         self.assertIn('id="hf-favorite"', bar)
-        # Workspace checkbox sits immediately before Favorites in
-        # the filter bar — its <input> must appear earlier than the
-        # Favorites <input>.
         self.assertLess(
             bar.index('id="hf-workspace"'),
             bar.index('id="hf-favorite"'),
@@ -97,12 +95,8 @@ class TestHistoryFilterPanel(unittest.TestCase):
             web_server.MEDIA_DIR / "main.js"
         ).read_text(encoding="utf-8")
         self.assertIn("function applyHistoryFilterVisibility", js)
-        # The renderHistory pass stamps each row with its category
-        # and timestamp so the helper can filter without re-running
-        # the network round-trip.
         self.assertIn("dataset.category", js)
         self.assertIn("dataset.timestamp", js)
-        # Listener wiring covers all filter controls.
         for cid in (
             "hf-running",
             "hf-errors",

@@ -42,20 +42,15 @@ from kiss.core.vscode_config import (
 )
 from kiss.server import web_server as ws
 
-# ---------------------------------------------------------------------------
-# _is_pid_alive
-# ---------------------------------------------------------------------------
-
 
 def test_is_pid_alive_self() -> None:
     assert ws._is_pid_alive(os.getpid()) is True
 
 
 def test_is_pid_alive_dead_pid() -> None:
-    # Spawn and reap a child to get a pid that is guaranteed gone.
     proc = subprocess.Popen(["true"])
     proc.wait()
-    time.sleep(0.05)  # let the kernel finalize the exit.
+    time.sleep(0.05)
     assert ws._is_pid_alive(proc.pid) is False
 
 
@@ -63,10 +58,6 @@ def test_is_pid_alive_zero() -> None:
     assert ws._is_pid_alive(0) is False
     assert ws._is_pid_alive(-1) is False
 
-
-# ---------------------------------------------------------------------------
-# _save_cloudflared_pidfile / _load_cloudflared_pidfile
-# ---------------------------------------------------------------------------
 
 
 def test_save_and_load_pidfile_roundtrip(tmp_path, monkeypatch) -> None:
@@ -119,10 +110,6 @@ def test_load_pidfile_non_dict_returns_none(tmp_path, monkeypatch) -> None:
     assert ws._load_cloudflared_pidfile() is None
 
 
-# ---------------------------------------------------------------------------
-# _try_adopt_existing_cloudflared
-# ---------------------------------------------------------------------------
-
 
 def test_adopt_returns_none_when_pidfile_missing(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(ws, "_CLOUDFLARED_PIDFILE", tmp_path / "missing.pid")
@@ -160,10 +147,6 @@ def test_adopt_returns_none_when_metrics_unhealthy(
         proc.terminate()
         proc.wait()
 
-
-# ---------------------------------------------------------------------------
-# _wait_for_remote_password (uses real config under KISS_HOME tempdir)
-# ---------------------------------------------------------------------------
 
 
 def _snapshot_config() -> dict | None:
@@ -208,8 +191,6 @@ def test_wait_for_remote_password_times_out() -> None:
         pw = ws._wait_for_remote_password(timeout=1.0)
         elapsed = time.monotonic() - t0
         assert pw == ""
-        # Allow a generous upper bound for slow CI machines, but the
-        # function must have waited at least the full timeout.
         assert 1.0 <= elapsed < 3.0
     finally:
         _restore_config(snapshot)
@@ -232,8 +213,6 @@ def test_wait_for_remote_password_picks_up_late_write() -> None:
             pw = ws._wait_for_remote_password(timeout=5.0)
             elapsed = time.monotonic() - t0
             assert pw == "set-late"
-            # Must have waited until at least the late write fired (~1s),
-            # but well under the 5s timeout.
             assert 0.9 < elapsed < 3.0
         finally:
             thread.join(timeout=2.0)

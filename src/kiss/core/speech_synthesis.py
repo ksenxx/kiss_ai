@@ -36,12 +36,6 @@ from typing import Any
 
 from kiss.core.kiss_agent import KISSAgent
 
-# Hard cap on one audio API request (seconds).  Without it the OpenAI
-# client waits its 600s default — one stalled HTTPS call would block the
-# caller for ten minutes.  Overridable for tests via
-# KISS_VOICE_AUDIO_TIMEOUT.  Single-sourced here (in core) so both this
-# module and ``kiss.server.voice_wake`` share one policy without the
-# core layer depending on the server layer.
 DEFAULT_AUDIO_TIMEOUT_SECONDS = 60.0
 
 
@@ -74,31 +68,10 @@ def audio_timeout_seconds() -> float:
         "KISS_VOICE_AUDIO_TIMEOUT", DEFAULT_AUDIO_TIMEOUT_SECONDS,
     )
 
-# Newest, most natural GPT audio model in MODEL_INFO.json (validated
-# live: valid MP3 with the default voice).  ``gpt-audio-mini`` also
-# works at ~1/4 the price but sounds noticeably flatter.
 DEFAULT_TTS_MODEL = "gpt-audio-1.5"
 
-# "cedar" and "marin" are OpenAI's two newest voices "with the most
-# significant improvements to natural-sounding speech" and the two the
-# TTS docs recommend "for best quality".  "cedar" is the deeper,
-# warmer of the pair — it reads like a charismatic film narrator,
-# the closest preset to the requested celebrity-like delivery
-# (voice cloning of real celebrities is prohibited by OpenAI's usage
-# policies, so delivery style is steered by prompt instead).
 DEFAULT_TTS_VOICE = "cedar"
 
-# The "Script:" framing below is load-bearing: a plain "repeat the
-# user's text" system prompt made gpt-audio-mini reply conversationally
-# ("Hi! It's great to hear your new voice...") instead of reading the
-# text verbatim.
-#
-# The labeled delivery block mirrors OpenAI's own openai.fm instruction
-# format (Voice Affect / Pacing / Pauses / Pronunciation) — the proven
-# way to steer the gpt-audio family's delivery.  It exists to kill the
-# model's known artifacts (community-reported: random mid-script
-# pauses, stutters, repeated or restarted sentences, volume drift) and
-# to get a warm, charismatic, celebrity-narrator read.
 TTS_SYSTEM_PROMPT = (
     "You are a professional text-to-speech engine. The user message "
     "contains a script. Read the script aloud word-for-word, exactly "
@@ -184,15 +157,12 @@ def synthesize_talk_audio(
                 verbose=False,
             )
         finally:
-            # Report the spend BEFORE any result validation: a failed
-            # or invalid synthesis may still have billed the API call.
             if usage_out is not None:
                 usage_out["budget_used"] = float(agent.budget_used or 0.0)
                 usage_out["total_tokens_used"] = int(agent.total_tokens_used or 0)
         data = getattr(agent.model, "last_audio_data", None)
         if not data:
             return None
-        # Round-trip validates the base64 before shipping it to clients.
         base64.b64decode(data)
         return data, "audio/mpeg"
     except Exception as err:  # noqa: BLE001 — talk must degrade, not raise

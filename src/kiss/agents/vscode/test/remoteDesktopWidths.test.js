@@ -2,32 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end tests: desktop-width defaults for the REMOTE webapp.
-//
-// Feature under test — on desktop browsers the remote webapp must:
-//
-//   1. Give the docked history panel a DEFAULT width of 1/4 of the
-//      browser screen (25vw, clamped to the resize range [220, 600]):
-//        * the CSS fallback for --sidebar-w is a 25vw-based clamp();
-//        * main.js seeds the resize logic (aria-valuenow, keyboard
-//          baseline, dblclick reset) from 25% of window.innerWidth
-//          instead of a fixed 300px;
-//        * an explicitly dragged/persisted width still wins.
-//   2. Let the chat panels (children of #output) and the pinned task
-//      panel (#task-panel) span 90% of the chat webview (#app column)
-//      instead of the old 768px / 85% / 75% caps, while the composer
-//      (#input-container — the panel with the input textbox and the
-//      buttons) spans the FULL chat webview width with no cap at all.
-//
-// jsdom performs no layout, so the width RULES are asserted from the
-// parsed remote-codex.css and the dynamic behavior (defaults, drag,
-// reset, keyboard, persistence) from the real chat.html + main.js
-// running in jsdom (window.innerWidth = 1024 → 25% = 256px).
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/remoteDesktopWidths.test.js
 
 'use strict';
 
@@ -38,19 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom webview running the real chat.html + panelCopy.js +
- * main.js, with a controllable matchMedia stub and pointer-capture
- * stubs (jsdom implements neither natively).
- *
- * @param {object} [opts]
- * @param {boolean} [opts.remote=true] add class="remote-chat" to body
- * @param {boolean} [opts.desktopMatches=true] initial
- *     matchMedia('(min-width: 900px)').matches
- * @param {string|null} [opts.storedWidth=null] pre-seed
- *     localStorage['kiss-sidebar-w'] BEFORE main.js runs
- * @returns {{win: object, posted: Array, fireChange: function(boolean)}}
- */
 function makeWebview(opts) {
   const {remote = true, desktopMatches = true, storedWidth = null} =
     opts || {};
@@ -108,7 +69,10 @@ function makeWebview(opts) {
     };
   };
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   function fireChange(matches) {
     mql.matches = matches;
     listeners.forEach((fn) => fn(mql));
@@ -116,12 +80,10 @@ function makeWebview(opts) {
   return {win, posted, fireChange};
 }
 
-/** Current --sidebar-w custom property value ('' when unset). */
 function sidebarW(win) {
   return win.document.documentElement.style.getPropertyValue('--sidebar-w');
 }
 
-/** Dispatch a pointer-type event on *el* (jsdom: MouseEvent carrier). */
 function pointer(win, el, type, props) {
   const ev = new win.MouseEvent(type, {
     bubbles: true,
@@ -136,7 +98,6 @@ function pointer(win, el, type, props) {
   return ev;
 }
 
-/** Perform a full drag of the resizer: down at x0, move to x1, up. */
 function drag(win, resizer, x0, x1) {
   pointer(win, resizer, 'pointerdown', {clientX: x0, pointerId: 1});
   pointer(win, resizer, 'pointermove', {clientX: x1, pointerId: 1});
@@ -145,7 +106,6 @@ function drag(win, resizer, x0, x1) {
 
 const CSS = fs.readFileSync(path.join(MEDIA, 'remote-codex.css'), 'utf8');
 
-/** Declaration body of the LAST body.remote-chat rule for selector. */
 function cssRule(selector) {
   const source = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const re = new RegExp(source + String.raw`\s*(?:,[^{]*)?\{([^}]*)\}`, 'g');
@@ -156,65 +116,98 @@ function cssRule(selector) {
   return body;
 }
 
-// jsdom default innerWidth is 1024 → 25% of the screen is 256px.
-const QUARTER = 256;
+// jsdom reports window.innerWidth = 1024, so 34vw is 348px and the
+// --sidebar-min-w floor (the width at which every history filter
+// toggle fits on one line) wins.
+const DEFAULT_W = 520;
 
-// ---------------------------------------------------------------------------
-// 1. CSS: the docked sidebar defaults to 1/4 of the browser screen.
-//    Both the sidebar width and #app's margin use the SAME 25vw-based
-//    clamp() fallback inside var(--sidebar-w, ...).
-// ---------------------------------------------------------------------------
-function testCssSidebarQuarterScreenDefault() {
-  const sidebar = cssRule('body.remote-chat.remote-desktop #sidebar');
-  const app = cssRule('body.remote-chat.remote-desktop #app');
-  const fallback = 'var(--sidebar-w, clamp(220px, 25vw, 600px))';
+// The panel may never take so much of the window that the chat column
+// drops below --chat-min-w (360px), so on jsdom's 1024px window the
+// effective maximum is 664px rather than the 820px hard bound.
+const MAX_W = 1024 - 360;
+
+function testCssSidebarWidthFitsTheFilterToggles() {
+  const vars = cssRule('body.remote-chat');
+  assert.ok(
+    vars.includes(`--sidebar-min-w: ${DEFAULT_W}px`),
+    `the docked panel floor must be the one-line filter width ` +
+      `(${DEFAULT_W}px) — got: ${vars.trim()}`,
+  );
+  assert.ok(
+    /--sidebar-default-w:\s*clamp\(\s*var\(--sidebar-min-w\),[^;]*var\(--sidebar-max-w\)\)/.test(
+      vars,
+    ),
+    'the default width must clamp between the shared min/max bounds',
+  );
+  const sidebar = cssRule('body.remote-chat.remote-desktop #sidebar.open');
+  const app = cssRule(
+    'body.remote-chat.remote-desktop:has(#sidebar.open) #app',
+  );
+  const fallback = 'var(--sidebar-w, var(--sidebar-default-w))';
   assert.ok(
     sidebar.includes(`width: ${fallback}`),
-    `docked sidebar default width must be 25vw (1/4 screen) clamped ` +
-      `to the resize range — got: ${sidebar.trim()}`,
+    `the docked sidebar width must fall back to --sidebar-default-w — ` +
+      `got: ${sidebar.trim()}`,
   );
   assert.ok(
     app.includes(`margin-left: ${fallback}`),
-    '#app margin must be driven by the SAME 25vw-based fallback',
+    '#app margin must be driven by the SAME width fallback',
   );
-  console.log('PASS CSS defaults the docked sidebar to 1/4 screen (25vw)');
+  console.log('PASS CSS sizes the docked sidebar to fit the filter toggles');
 }
 
-// ---------------------------------------------------------------------------
-// 2. CSS: chat panels streamed into #output span 90% of the chat
-//    webview column (was min(85%, 768px)).
-// ---------------------------------------------------------------------------
-function testCssChatPanelsNinetyPercent() {
-  const rule = cssRule('body.remote-chat #output > *:not(#welcome)');
+function testCssDockedRulesRequireAnOpenSidebar() {
+  // The burger button only toggles #sidebar.open, so every docked rule
+  // must depend on that class — otherwise the panel stays glued to the
+  // screen and the chat never reclaims its width.
+  const app = cssRule('body.remote-chat.remote-desktop #app');
   assert.ok(
-    /max-width:\s*90%/.test(rule),
-    `chat panels must span 90% of the chat webview — got: ${rule.trim()}`,
+    /margin-left:\s*0/.test(app),
+    `with the panel hidden #app must have no left offset — ` +
+      `got: ${app.trim()}`,
   );
-  assert.ok(!rule.includes('768px'), 'the old 768px cap must be gone');
-  console.log('PASS CSS chat panels span 90% of the chat webview');
+  const stripped = CSS.replace(/\/\*[\s\S]*?\*\//g, '');
+  const dockedWithoutOpen = new RegExp(
+    String.raw`body\.remote-chat\.remote-desktop #sidebar\s*\{`,
+  );
+  assert.ok(
+    !dockedWithoutOpen.test(stripped),
+    'docked #sidebar rules must be scoped to #sidebar.open',
+  );
+  console.log('PASS CSS docks the sidebar only while it is open');
 }
 
-// ---------------------------------------------------------------------------
-// 3. CSS: the pinned task panel spans 90% of the chat webview (was
-//    75%) and stays a right-aligned bubble.
-// ---------------------------------------------------------------------------
-function testCssTaskPanelNinetyPercent() {
-  const rule = cssRule('body.remote-chat #task-panel');
+function testCssSettingsPanelStaysNarrow() {
+  const settings = cssRule('body.remote-chat.remote-desktop #settings-panel');
   assert.ok(
-    /max-width:\s*90%/.test(rule),
-    `the fixed task panel must span 90% — got: ${rule.trim()}`,
+    settings.includes('width: min(90vw, var(--settings-panel-w))'),
+    `the settings drawer must stay as narrow as the VS Code sidebar — ` +
+      `got: ${settings.trim()}`,
   );
+  const vars = cssRule('body.remote-chat');
   assert.ok(
-    rule.includes('margin-left: auto'),
-    'task panel must stay right-aligned',
+    /--settings-panel-w:\s*\d+px/.test(vars),
+    'the narrow settings width must be a fixed pixel bound',
   );
-  console.log('PASS CSS fixed task panel spans 90% of the chat webview');
+  console.log('PASS CSS keeps the desktop settings panel narrow');
 }
 
-// ---------------------------------------------------------------------------
-// 4. CSS: the composer card (input textbox + buttons) spans the FULL
-//    chat webview width — no max-width cap, no centered margin.
-// ---------------------------------------------------------------------------
+function testCssChatPanelsNotRestyled() {
+  // The chat thread and the fixed task panel must render exactly like
+  // the VS Code extension webview (main.css), so remote-codex.css must
+  // not target #output children or #task-panel at all.
+  const stripped = CSS.replace(/\/\*[\s\S]*?\*\//g, '');
+  assert.ok(
+    !stripped.includes('#output'),
+    'remote-codex.css must not restyle #output or its children',
+  );
+  assert.ok(
+    !stripped.includes('#task-panel'),
+    'remote-codex.css must not restyle the fixed task panel',
+  );
+  console.log('PASS CSS chat panels and task panel keep the extension look');
+}
+
 function testCssComposerFullWidth() {
   const rule = cssRule('body.remote-chat #input-container');
   assert.ok(
@@ -230,17 +223,13 @@ function testCssComposerFullWidth() {
   console.log('PASS CSS composer spans the full chat webview width');
 }
 
-// ---------------------------------------------------------------------------
-// 5. JS: with no persisted width the resize logic seeds from 1/4 of
-//    the window width (jsdom: 1024 → 256), reflected in aria-valuenow.
-// ---------------------------------------------------------------------------
-function testDefaultSeededFromQuarterWindow() {
+function testDefaultSeededFromTheOneLineFloor() {
   const {win} = makeWebview({remote: true, desktopMatches: true});
   const resizer = win.document.getElementById('sidebar-resizer');
   assert.strictEqual(
     resizer.getAttribute('aria-valuenow'),
-    String(QUARTER),
-    'default aria-valuenow must be 25% of the window width',
+    String(DEFAULT_W),
+    'default aria-valuenow must be the one-line filter width',
   );
   assert.strictEqual(
     sidebarW(win),
@@ -248,14 +237,10 @@ function testDefaultSeededFromQuarterWindow() {
     'no inline --sidebar-w until the user resizes (CSS fallback rules)',
   );
   win.close();
-  console.log('PASS resize logic seeds its default from 1/4 window width');
+  console.log('PASS resize logic seeds its default from the one-line floor');
 }
 
-// ---------------------------------------------------------------------------
-// 6. JS: the keyboard baseline starts from the quarter-width default
-//    (ArrowRight = 256 + 16 = 272).
-// ---------------------------------------------------------------------------
-function testKeyboardBaselineQuarterWindow() {
+function testKeyboardBaselineIsTheDefaultWidth() {
   const {win} = makeWebview({remote: true, desktopMatches: true});
   const resizer = win.document.getElementById('sidebar-resizer');
   resizer.dispatchEvent(
@@ -263,70 +248,70 @@ function testKeyboardBaselineQuarterWindow() {
   );
   assert.strictEqual(
     sidebarW(win),
-    `${QUARTER + 16}px`,
-    'ArrowRight must grow from the quarter-screen default',
+    `${DEFAULT_W + 16}px`,
+    'ArrowRight must grow from the default width',
   );
   win.close();
-  console.log('PASS keyboard resize starts from the quarter-width default');
+  console.log('PASS keyboard resize starts from the default width');
 }
 
-// ---------------------------------------------------------------------------
-// 7. JS: double-click resets the width back to 1/4 of the CURRENT
-//    window width (not a fixed 300px) and clears persistence.
-// ---------------------------------------------------------------------------
-function testDoubleClickResetsToQuarterWindow() {
+function testDoubleClickResetsToTheDefaultWidth() {
   const {win} = makeWebview({remote: true, desktopMatches: true});
   const resizer = win.document.getElementById('sidebar-resizer');
-  drag(win, resizer, 300, 500);
-  assert.strictEqual(sidebarW(win), '500px');
+  drag(win, resizer, 300, 640);
+  assert.strictEqual(sidebarW(win), '640px');
   resizer.dispatchEvent(new win.MouseEvent('dblclick', {bubbles: true}));
   assert.strictEqual(
     sidebarW(win),
-    `${QUARTER}px`,
-    'dblclick must reset to 1/4 of the window width',
+    `${DEFAULT_W}px`,
+    'dblclick must reset to the default width',
   );
-  assert.strictEqual(resizer.getAttribute('aria-valuenow'), String(QUARTER));
+  assert.strictEqual(resizer.getAttribute('aria-valuenow'), String(DEFAULT_W));
   assert.strictEqual(win.localStorage.getItem('kiss-sidebar-w'), null);
   win.close();
-  console.log('PASS double-click resets to 1/4 of the window width');
+  console.log('PASS double-click resets to the default width');
 }
 
-// ---------------------------------------------------------------------------
-// 8. JS: an explicitly persisted width still beats the quarter-screen
-//    default, and drag clamping stays [220, 600].
-// ---------------------------------------------------------------------------
 function testPersistedWidthStillWins() {
   const stored = makeWebview({
     remote: true,
     desktopMatches: true,
-    storedWidth: '450',
+    storedWidth: '640',
   });
   assert.strictEqual(
     sidebarW(stored.win),
-    '450px',
-    'persisted width must override the quarter-screen default',
+    '640px',
+    'persisted width must override the default',
   );
   assert.strictEqual(
     stored.win.document
       .getElementById('sidebar-resizer')
       .getAttribute('aria-valuenow'),
-    '450',
+    '640',
   );
   stored.win.close();
+  const narrow = makeWebview({
+    remote: true,
+    desktopMatches: true,
+    storedWidth: '240',
+  });
+  assert.strictEqual(
+    sidebarW(narrow.win),
+    `${DEFAULT_W}px`,
+    'a width persisted before the widening must be clamped back up so ' +
+      'the filter toggles stay on one line',
+  );
+  narrow.win.close();
   const {win} = makeWebview({remote: true, desktopMatches: true});
   const resizer = win.document.getElementById('sidebar-resizer');
   drag(win, resizer, 300, 80);
-  assert.strictEqual(sidebarW(win), '220px', 'min clamp unchanged');
-  drag(win, resizer, 220, 900);
-  assert.strictEqual(sidebarW(win), '600px', 'max clamp unchanged');
+  assert.strictEqual(sidebarW(win), `${DEFAULT_W}px`, 'min clamp');
+  drag(win, resizer, 520, 1600);
+  assert.strictEqual(sidebarW(win), `${MAX_W}px`, 'max clamp');
   win.close();
-  console.log('PASS persisted width wins; clamp range unchanged');
+  console.log('PASS persisted width wins but is clamped to the new range');
 }
 
-// ---------------------------------------------------------------------------
-// 9. Isolation: no quarter-screen seeding leaks into the VS Code
-//    extension webview (no remote-chat class).
-// ---------------------------------------------------------------------------
 function testVsCodeWebviewIsolation() {
   const {win, posted} = makeWebview({remote: false, desktopMatches: true});
   assert.ok(
@@ -344,13 +329,14 @@ function testVsCodeWebviewIsolation() {
   console.log('PASS VS Code webview (no remote-chat) is unaffected');
 }
 
-testCssSidebarQuarterScreenDefault();
-testCssChatPanelsNinetyPercent();
-testCssTaskPanelNinetyPercent();
+testCssSidebarWidthFitsTheFilterToggles();
+testCssDockedRulesRequireAnOpenSidebar();
+testCssSettingsPanelStaysNarrow();
+testCssChatPanelsNotRestyled();
 testCssComposerFullWidth();
-testDefaultSeededFromQuarterWindow();
-testKeyboardBaselineQuarterWindow();
-testDoubleClickResetsToQuarterWindow();
+testDefaultSeededFromTheOneLineFloor();
+testKeyboardBaselineIsTheDefaultWidth();
+testDoubleClickResetsToTheDefaultWidth();
 testPersistedWidthStillWins();
 testVsCodeWebviewIsolation();
 console.log('All remoteDesktopWidths tests passed.');

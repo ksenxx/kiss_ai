@@ -78,7 +78,6 @@ def _reap(pid: int, fd: int, timeout: float = 5.0) -> int:
                 pass
             return status
         time.sleep(0.02)
-    # Last-resort cleanup so the worker process slot is freed.
     try:
         os.kill(pid, 9)
     except ProcessLookupError:
@@ -130,9 +129,6 @@ def test_pty_spawn_delivers_sigint_via_etx_byte() -> None:
     try:
         ready = _drain(fd, time.monotonic() + 5.0)
         assert b"ready" in ready, ready
-        # ETX byte triggers SIGINT to the child's foreground PG via the
-        # line discipline because TIOCSCTTY made the slave PTY the
-        # controlling terminal.
         os.write(fd, b"\x03")
         tail = _drain(fd, time.monotonic() + 5.0)
     finally:

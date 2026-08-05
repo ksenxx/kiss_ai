@@ -43,18 +43,17 @@ The template supports the placeholder syntax common to those tools:
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 import re
 import shlex
+import signal
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from kiss.agents.sorcar.persistence import _default_kiss_dir
-
-# Frontmatter parsing, whitespace normalization, and the
-# ``CLAUDE_CONFIG_DIR`` resolution are shared with skills.py so the
-# two Markdown-definition discovery paths can never drift.
 from kiss.agents.sorcar.skills import (
     claude_config_dir,
     collapse_whitespace,
@@ -63,37 +62,17 @@ from kiss.agents.sorcar.skills import (
 )
 
 logger = logging.getLogger(__name__)
-# ``$ARGUMENTS`` placeholder (all arguments, verbatim).
 _ARGUMENTS_RE = re.compile(r"\$ARGUMENTS\b")
-# ``$1`` … ``$9`` positional-argument placeholders.
 _POSITIONAL_RE = re.compile(r"\$([1-9])\b")
-# Combined pattern for the single-pass substitution in
-# :func:`expand_command`, matching every injection construct the
-# template supports: ``@{path}`` (group ``file``), ``!`command```
-# (group ``shell``), ``$ARGUMENTS``, and ``$1`` … ``$9`` (group
-# ``pos``).  One pass over the ORIGINAL template is essential:
-# replacement text — a user-supplied argument value, an injected
-# file's contents, or a shell command's output — must never be
-# re-scanned by a later substitution.  Otherwise a data file merely
-# referenced with ``@{path}`` could get an embedded ``!`cmd```
-# EXECUTED, and literal ``$1`` / ``$ARGUMENTS`` text inside file
-# contents or shell output would be rewritten with the user's
-# arguments.
 _INJECT_RE = re.compile(
     r"@\{(?P<file>[^{}]+)\}"
     r"|!`(?P<shell>[^`]+)`"
     r"|\$ARGUMENTS\b"
     r"|\$(?P<pos>[1-9])\b"
 )
-# The non-argument injection constructs alone (``@{path}`` and
-# ``!`command```).  Used to blank them out of the template before
-# deciding whether it contains a *real* argument placeholder: a ``$1``
-# or ``$ARGUMENTS`` inside a file path or shell command is consumed by
-# the earlier alternatives of ``_INJECT_RE`` and never substituted, so
-# it must not suppress the append-args fallback either.
 _NON_ARG_INJECT_RE = re.compile(r"@\{[^{}]+\}|!`[^`]+`")
 
-_SHELL_TIMEOUT_SECONDS = 60
+_SHELL_TIMEOUT_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
@@ -168,9 +147,6 @@ def _parse_command_file(path: Path, root: Path, source: str) -> CustomCommand | 
         return None
     rel = path.relative_to(root)
     name = ":".join((*rel.parts[:-1], rel.stem))
-    # Collapse all whitespace (a YAML block scalar may span lines) so
-    # the one-line ``/commands`` and ``/help`` listings never break —
-    # same normalization as skills.py applies to skill descriptions.
     return CustomCommand(
         name=name,
         description=collapse_whitespace(meta.get("description", "")),
@@ -238,8 +214,28 @@ def _read_injected_file(raw: str, work_dir: str) -> str:
         path = Path(work_dir) / raw
     try:
         return path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return f"[could not read file: {raw}]"
+
+
+def _kill_shell_process_tree(proc: subprocess.Popen) -> None:
+    """Kill a timed-out injected shell command and all its descendants.
+
+    On POSIX the shell runs in its own session (``start_new_session``)
+    so the whole process group can be SIGKILLed; ``os.killpg`` does not
+    exist on Windows, where ``taskkill /T /F`` terminates the tree.
+
+    Args:
+        proc: The timed-out shell process.
+    """
+    if os.name == "nt":  # pragma: no cover — Windows-only branch
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+            capture_output=True, timeout=30,
+        )
+    else:
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
 
 
 def _run_injected_shell(command: str, work_dir: str) -> str:
@@ -258,16 +254,25 @@ def _run_injected_shell(command: str, work_dir: str) -> str:
         note on failure), stripped of surrounding newlines.
     """
     command = command.strip()
+    is_windows = os.name == "nt"
+    proc: subprocess.Popen[bytes] = subprocess.Popen(
+        command, shell=True, cwd=work_dir,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        creationflags=(
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if is_windows else 0
+        ),
+        start_new_session=not is_windows,
+    )
     try:
-        proc = subprocess.run(
-            command, shell=True, cwd=work_dir, capture_output=True,
-            text=True, timeout=_SHELL_TIMEOUT_SECONDS,
-        )
+        stdout_bytes, stderr_bytes = proc.communicate(timeout=_SHELL_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
+        _kill_shell_process_tree(proc)
+        with contextlib.suppress(Exception):
+            proc.communicate(timeout=10)
         return f"[shell command timed out: {command}]"
-    output = proc.stdout
+    output = stdout_bytes.decode("utf-8", errors="replace")
     if proc.returncode != 0:
-        output += proc.stderr
+        output += stderr_bytes.decode("utf-8", errors="replace")
         output += f"\n[Shell command exited with code {proc.returncode}]"
     return output.strip("\n")
 
@@ -296,12 +301,6 @@ def expand_command(command: CustomCommand, args_text: str, work_dir: str) -> str
         The fully expanded prompt text.
     """
     args_text = args_text.strip()
-    # Computed on the ORIGINAL template (so placeholder-looking text
-    # inside injected file contents / shell output cannot suppress the
-    # append-args fallback below) with the ``@{path}`` / ``!`command```
-    # constructs blanked out first: a ``$1`` or ``$ARGUMENTS`` inside
-    # them is consumed by those alternatives of ``_INJECT_RE`` and never
-    # substituted, so it is not a real placeholder either.
     scannable = _NON_ARG_INJECT_RE.sub("", command.template)
     has_placeholder = bool(
         _ARGUMENTS_RE.search(scannable) or _POSITIONAL_RE.search(scannable)
@@ -322,7 +321,7 @@ def expand_command(command: CustomCommand, args_text: str, work_dir: str) -> str
         if pos is not None:
             index = int(pos) - 1
             return positional[index] if index < len(positional) else ""
-        return args_text  # bare $ARGUMENTS
+        return args_text
 
     text = _INJECT_RE.sub(inject_repl, command.template)
     if args_text and not has_placeholder:

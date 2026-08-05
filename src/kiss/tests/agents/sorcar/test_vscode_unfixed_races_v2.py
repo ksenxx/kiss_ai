@@ -58,7 +58,6 @@ class TestConcurrentUserAnswerWedge(unittest.TestCase):
         return tab
 
     def tearDown(self) -> None:
-        # Wipe registry to keep tests independent.
         with _RunningAgentState._registry_lock:
             _RunningAgentState.running_agent_states.clear()
 
@@ -85,10 +84,6 @@ class TestConcurrentUserAnswerWedge(unittest.TestCase):
         orig_put = q.put
 
         def synced_put(item, *args, **kwargs):  # type: ignore[no-untyped-def]
-            # Wait for the peer thread so both reach the blocking put
-            # before either succeeds.  If only one thread reaches
-            # this (post-fix), the barrier times out (BrokenBarrier)
-            # and we proceed normally.
             try:
                 barrier.wait()
             except threading.BrokenBarrierError:
@@ -113,8 +108,6 @@ class TestConcurrentUserAnswerWedge(unittest.TestCase):
         t2.join(timeout=3.0)
 
         wedged = [t for t in (t1, t2) if t.is_alive()]
-        # Drain the queue so wedged threads (if any) can unblock and
-        # avoid leaking into other tests.
         try:
             while not q.empty():
                 q.get_nowait()
@@ -180,10 +173,6 @@ class TestPersistEventLookupRace(unittest.TestCase):
         cleanup_thread.start()
         cleanup_entered.wait(timeout=2.0)
 
-        # While cleanup holds ``_lock``, fire ``_persist_event``.
-        # With the fix in place, the lookup is now under ``_lock``
-        # and this thread blocks until cleanup releases.  Without
-        # the fix, the lookup races and returns immediately.
         b_done = threading.Event()
 
         def call_persist() -> None:
@@ -193,8 +182,6 @@ class TestPersistEventLookupRace(unittest.TestCase):
         b_thread = threading.Thread(target=call_persist, daemon=True)
         b_thread.start()
 
-        # Give the racing thread time to either complete (bug) or
-        # block on the lock (fix).
         completed_during_cleanup = b_done.wait(timeout=0.3)
 
         cleanup_can_exit.set()

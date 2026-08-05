@@ -99,8 +99,6 @@ def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]], threading.Lock]:
     printer = server.printer
 
     def capture(event: dict[str, Any]) -> None:
-        # Mirror the real ``JsonPrinter.broadcast`` side effects so
-        # persistence and per-task recording see the event.
         ev = printer._inject_task_id(event)
         with printer._lock:
             printer._record_event(ev)
@@ -215,7 +213,6 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         return None
 
     def test_replay_strips_global_setting_keys_from_extra(self) -> None:
-        # Step 1: run a first task with the old global settings.
         first_tab = "tab-first"
         _run_and_wait(
             self.server,
@@ -232,19 +229,15 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         first_task_id = cast(str, first_row["id"])
         assert chat_id, "first task should have a chat id"
 
-        # Sanity-check the persisted snapshot — the bug is only
-        # interesting BECAUSE these keys live in ``extra``.
         persisted = self._persisted_extra_for(first_task_id)
         assert persisted.get("is_worktree") is True, persisted
         assert persisted.get("is_parallel") is True, persisted
         assert persisted.get("auto_commit_mode") is True, persisted
         assert persisted.get("model") == "claude-opus-4-6", persisted
 
-        # Clear captured events so the replay broadcast is unambiguous.
         with self.lock:
             self.events.clear()
 
-        # Step 2: user clicks the history row for T1 into a fresh tab.
         history_tab = "tab-history"
         self.server._handle_command(
             {"type": "newChat", "tabId": history_tab},
@@ -256,10 +249,6 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
             "tabId": history_tab,
         })
 
-        # Step 3: inspect the broadcast ``task_events``.  Its ``extra``
-        # must NOT carry the four global-setting keys, so the
-        # frontend's ``task_events`` handler cannot stamp the live
-        # toggles / model with the loaded task's stale snapshot.
         replay = self._broadcasted_task_events()
         assert replay is not None, "expected a task_events broadcast on resume"
         extra_str = cast(str, replay.get("extra", ""))
@@ -273,14 +262,11 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
                 f"replay broadcast leaked stripped key {stripped!r}: "
                 f"{extra_json!r}"
             )
-        # Keys we DO want to keep for the chat header / timer / tab
-        # work-dir routing must survive the strip.
         assert extra_json.get("work_dir") == self.tmpdir, extra_json
         assert int(cast(int, extra_json.get("startTs", 0))) > 0, extra_json
         assert int(cast(int, extra_json.get("endTs", 0))) > 0, extra_json
 
     def test_followup_task_uses_new_global_settings(self) -> None:
-        # Step 1: run a first task under the OLD global settings.
         first_tab = "tab-first"
         _run_and_wait(
             self.server,
@@ -296,7 +282,6 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         chat_id = str(first_row["chat_id"])
         first_task_id = cast(str, first_row["id"])
 
-        # Step 2: user clicks the history row for T1 → fresh tab.
         history_tab = "tab-history"
         self.server._handle_command(
             {"type": "newChat", "tabId": history_tab},
@@ -308,19 +293,12 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
             "tabId": history_tab,
         })
 
-        # The replay must NOT have seeded ``tab.use_worktree`` with
-        # the loaded task's snapshot — otherwise a follow-up run that
-        # forgot to pass ``useWorktree`` would silently inherit the
-        # stale True from the loaded T1.  The new global setting is
-        # ``False`` (the user toggled it off after T1 finished).
         loaded_tab = self.server._get_tab(history_tab)
         assert not loaded_tab.use_worktree, (
             "loading a chat must not stamp tab.use_worktree from the "
             "loaded task's historical snapshot"
         )
 
-        # Step 3: the user submits a follow-up under the NEW global
-        # settings (toggles all flipped off, model swapped).
         _run_and_wait(
             self.server,
             tab_id=history_tab,
@@ -332,9 +310,6 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
             auto_commit=False,
         )
 
-        # The second persisted task's extras must reflect the NEW
-        # global settings.  ``_load_history`` returns rows in
-        # most-recent-first order so the follow-up is row 0.
         rows = th._load_history(limit=10)
         assert len(rows) >= 2, rows
         second_task_id = cast(str, rows[0]["id"])
@@ -346,13 +321,23 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         assert second_extra.get("model") == "claude-sonnet-4-5", second_extra
 
 
-    def test_history_load_resets_use_parallel_and_auto_commit(self) -> None:
-        """Symmetric to ``test_followup_task_uses_new_global_settings``
-        for the parallel / auto-commit toggles.  A history load must
-        leave ``tab.use_parallel`` and ``tab.auto_commit_mode`` at the
-        baseline (``False``), so a follow-up run that forgets to pass
-        ``useParallel`` / ``autoCommit`` cannot silently inherit the
-        loaded task's stale ``True``."""
+    def test_history_load_preserves_use_parallel_and_auto_commit(self) -> None:
+        """A history load must leave the tab's toggles exactly as the
+        user set them.
+
+        The toolbar toggles are GLOBAL UI state owned by the frontend —
+        that is the whole premise of this file, whose sibling test
+        proves the backend strips the four global-setting keys from the
+        replayed ``extra`` so the live toggles win.  Resetting the
+        backend's copy therefore desynchronises the two, and clearing
+        ``auto_commit_mode`` in particular made
+        :meth:`_MergeFlowMixin._emit_pending_worktree` present a
+        diff/merge review to a user who had explicitly switched
+        auto-commit on.
+
+        Every ``run`` command carries ``useWorktree`` / ``useParallel``
+        / ``autoCommit`` explicitly (see ``_cmd_run``), so preserving
+        the flags cannot leak stale values into a follow-up task."""
         first_tab = "tab-first-pa"
         _run_and_wait(
             self.server,
@@ -372,6 +357,12 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         self.server._handle_command(
             {"type": "newChat", "tabId": history_tab},
         )
+        # The user flips the toolbar switches on before clicking the
+        # history row; the backend mirror must survive the click.
+        history_state = self.server._get_tab(history_tab)
+        history_state.use_worktree = True
+        history_state.use_parallel = True
+        history_state.auto_commit_mode = True
         self.server._handle_command({
             "type": "resumeSession",
             "id": chat_id,
@@ -380,17 +371,18 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         })
 
         loaded_tab = self.server._get_tab(history_tab)
-        assert not loaded_tab.use_worktree, loaded_tab.use_worktree
-        assert not loaded_tab.use_parallel, loaded_tab.use_parallel
-        assert not loaded_tab.auto_commit_mode, loaded_tab.auto_commit_mode
+        assert loaded_tab.use_worktree, loaded_tab.use_worktree
+        assert loaded_tab.use_parallel, loaded_tab.use_parallel
+        assert loaded_tab.auto_commit_mode, loaded_tab.auto_commit_mode
 
-    def test_history_load_resets_selected_model(self) -> None:
-        """A history load must reset ``tab.selected_model`` to the
-        server's default (the persisted last-picked global model),
-        not leave it at whatever the previous chat in the same tab
-        was using.  Without the reset, ``_get_history``'s
-        running-session sidebar would read the stale per-tab model
-        for any LIVE task in the newly-loaded chat."""
+    def test_history_load_preserves_selected_model(self) -> None:
+        """A history load must not rewrite ``tab.selected_model``.
+
+        The model picker is global UI state like the toggles.  The
+        stale-sidebar concern that once justified a reset cannot arise:
+        ``_attach_live_session_metrics`` only reads ``selected_model``
+        for a tab whose ``_live_task_id`` matches a RUNNING task, and
+        such a tab was already exempt from the reset."""
         first_tab = "tab-first-model"
         _run_and_wait(
             self.server,
@@ -406,12 +398,6 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         chat_id = str(first_row["chat_id"])
         first_task_id = cast(str, first_row["id"])
 
-        # Now load that chat into a brand-new tab.  We seed
-        # ``selected_model`` on the tab to a non-default value
-        # AFTER ``newChat`` (which itself resets it), to simulate
-        # a tab that had run a task with a non-default model in
-        # the past.  ``_replay_session`` (with the fix) must reset
-        # it back to the server default.
         history_tab = "tab-history-model"
         self.server._handle_command(
             {"type": "newChat", "tabId": history_tab},
@@ -426,11 +412,7 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         })
 
         loaded_tab = self.server._get_tab(history_tab)
-        assert (
-            loaded_tab.selected_model == self.server._default_model
-        ), loaded_tab.selected_model
-        # Defensive: must not be the stale value we seeded.
-        assert loaded_tab.selected_model != stale_model
+        assert loaded_tab.selected_model == stale_model, loaded_tab.selected_model
 
     def test_history_load_preserves_state_during_merge_review(self) -> None:
         """Regression for the round-2 gpt-5.5 review finding: the
@@ -457,7 +439,6 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         task_id = cast(str, row["id"])
 
         tab = self.server._get_tab(tab_id)
-        # Simulate mid-merge: task finished, merge review still open.
         tab.is_task_active = False
         tab.is_merging = True
         tab.use_worktree = True
@@ -479,8 +460,11 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
             tab.is_merging = False
 
     def test_history_load_preserves_state_when_thread_alive(self) -> None:
-        """Cover the ``task_thread.is_alive()`` arm of the
-        ``_tab_busy`` predicate inside ``_replay_session``."""
+        """A live worker thread does not change the answer either.
+
+        Replay preserves the toolbar toggles unconditionally, so a tab
+        whose worker thread is still alive must come out of a history
+        load exactly as it went in."""
         tab_id = "tab-thread"
         _run_and_wait(
             self.server,
@@ -521,17 +505,16 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
             alive_thread.join(timeout=2)
 
     def test_history_load_preserves_state_during_live_run(self) -> None:
-        """The reset added to ``_replay_session`` is gated by a
-        ``tab_alive`` guard: when the loaded chat is being re-rendered
-        into the SAME tab that owns the live run, the in-flight
-        per-tab fields are the source of truth for
-        ``_get_history``'s sidebar metadata and must not be
-        clobbered.  Reproduce by simulating an active task (set
+        """The strongest case for preservation: a live run.
+
+        When the loaded chat is re-rendered into the SAME tab that owns
+        a live run, the in-flight per-tab fields are the source of
+        truth for ``_get_history``'s sidebar metadata, so rewriting
+        them would make the sidebar describe the wrong task.
+        Reproduce by simulating an active task (set
         ``is_task_active = True``) on the tab BEFORE calling
         ``_replay_session``, then assert the fields are unchanged."""
         tab_id = "tab-live"
-        # Spin up a chat by running a task to completion so a
-        # task_history row exists for the replay.
         _run_and_wait(
             self.server,
             tab_id=tab_id,
@@ -547,10 +530,6 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         task_id = cast(str, row["id"])
 
         tab = self.server._get_tab(tab_id)
-        # Simulate an in-flight run by flipping the "alive" flag.
-        # ``_replay_session``'s ``tab_alive`` guard reads both
-        # ``is_task_active`` and ``task_thread.is_alive``; setting
-        # the flag is the minimum repro.
         tab.is_task_active = True
         tab.use_worktree = True
         tab.use_parallel = True
@@ -561,8 +540,6 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
             self.server._replay_session(
                 chat_id=chat_id, tab_id=tab_id, task_id=task_id,
             )
-            # The guard prevents the reset, so the live values
-            # survive.
             assert tab.use_worktree is True, tab.use_worktree
             assert tab.use_parallel is True, tab.use_parallel
             assert tab.auto_commit_mode is True, tab.auto_commit_mode
@@ -607,8 +584,6 @@ class TestExtraForReplayUnit(unittest.TestCase):
     def test_dict_without_stripped_keys_passes_through(self) -> None:
         from kiss.server.server import _extra_for_replay
         payload = json.dumps({"work_dir": "/tmp/x", "startTs": 1})
-        # The implementation returns the ORIGINAL string when no
-        # stripped key was present (skips re-serialization).
         out = _extra_for_replay(payload)
         assert json.loads(out) == json.loads(payload)
 
@@ -636,7 +611,6 @@ class TestSubagentReplayStripsGlobalSettings(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect_db(self.tmpdir)
-        # No git repo needed: we seed task_history directly.
 
     def tearDown(self) -> None:
         _restore_db(self.saved)
@@ -644,8 +618,6 @@ class TestSubagentReplayStripsGlobalSettings(unittest.TestCase):
 
     def test_persisted_subagent_extras_are_stripped(self) -> None:
         chat_id = "chat-subs"
-        # Seed a parent row with a persisted extra that contains the
-        # stripped keys.
         parent_id, _ = th._add_task("parent", chat_id=chat_id)
         th._append_chat_event(
             {"type": "text_delta", "text": "parent-stream"},
@@ -666,8 +638,6 @@ class TestSubagentReplayStripsGlobalSettings(unittest.TestCase):
             },
             task_id=parent_id,
         )
-        # Seed two sub-agent rows whose extras also carry stripped
-        # keys + the subagent metadata.
         sub_ids: list[str] = []
         for i in range(2):
             sub_id, _ = th._add_task(f"sub {i}", chat_id=chat_id)
@@ -699,7 +669,6 @@ class TestSubagentReplayStripsGlobalSettings(unittest.TestCase):
             chat_id=chat_id, tab_id=parent_tab, task_id=parent_id,
         )
 
-        # Filter task_events for sub-agent tabs.
         sub_tab_ids = {f"{parent_tab}__sub_{sid}" for sid in sub_ids}
         with lock:
             sub_task_events = [
@@ -721,9 +690,6 @@ class TestSubagentReplayStripsGlobalSettings(unittest.TestCase):
                     f"sub-agent replay broadcast leaked stripped key "
                     f"{stripped!r}: {extra_json!r}"
                 )
-            # Preserved keys: startTs / endTs / work_dir survive so
-            # the sub-tab's "Running …" / "Done" header keeps working,
-            # and the subagent metadata is still present.
             assert extra_json.get("startTs", 0) > 0, extra_json
             assert extra_json.get("endTs", 0) > 0, extra_json
             assert extra_json.get("work_dir") == self.tmpdir, extra_json

@@ -15,12 +15,12 @@ the rest of the VS Code-extension Python tests.
 The test exercises the CSS reduction of the left-whitespace
 column reserved for each History row's status indicator:
 
-* ``.running-item`` ``padding-left`` must be halved from 26px to
-  13px.
+* ``.running-item`` ``padding-left`` must be 19px (13px dot
+  column plus a 6px gap between the status dot and the task
+  text so the two are not visually flush).
 * The compound ``.running-item > .sidebar-item-{failed,running,
   completed}`` rule must halve ``left`` from 10px to 5px so the
-  8px status dot still sits inside the now-narrower padding
-  column.
+  8px status dot still sits inside the padding column.
 """
 
 from __future__ import annotations
@@ -30,8 +30,6 @@ import subprocess
 import unittest
 from pathlib import Path
 
-# __file__ lives at src/kiss/tests/agents/vscode/<this file>.py — walk
-# back to ``src/kiss`` (parents[3]) and step into ``agents/vscode``.
 _KISS_ROOT = Path(__file__).resolve().parents[3]
 _VSCODE_DIR = _KISS_ROOT / "agents" / "vscode"
 _TEST_JS = _VSCODE_DIR / "test" / "historyTaskLeftPadding.test.js"

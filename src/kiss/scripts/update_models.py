@@ -54,19 +54,16 @@ def _find_project_root() -> Path:
     copy of the project would write to the extension directory instead of
     the actual source repository.
     """
-    # 1. KISS_WORKDIR env var — set by the agent runtime
     workdir = os.environ.get("KISS_WORKDIR", "")
     if workdir:
         p = Path(workdir)
         if (p / _EXPECTED_SUBPATH).exists():
             return p
 
-    # 2. CWD with .git marker (a real git checkout, not a bundled copy)
     cwd = Path.cwd()
     if (cwd / ".git").exists() and (cwd / _EXPECTED_SUBPATH).exists():
         return cwd
 
-    # 3. Fallback: derive from script location
     return Path(__file__).resolve().parent.parent.parent.parent
 
 
@@ -76,12 +73,6 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 MODEL_INFO_PATH = PROJECT_ROOT / "src" / "kiss" / "core" / "models" / "MODEL_INFO.json"
 README_PATH = PROJECT_ROOT / "README.md"
 
-# Provider prefixes we intentionally exclude from the bundled catalog.
-# These are removed on every run regardless of whether they still appear
-# in upstream APIs.  Currently used to keep MiniMax models out: we replaced
-# MiniMax API-key support with Z.AI and Moonshot AI, and several tests
-# (``test_zai_moonshot_keys.test_model_info_json_has_no_minimax_entries``)
-# assert that no minimax entries leak back into ``MODEL_INFO.json``.
 _EXCLUDED_PREFIXES: tuple[str, ...] = (
     "minimax-",
     "MiniMaxAI/",
@@ -90,9 +81,6 @@ _EXCLUDED_PREFIXES: tuple[str, ...] = (
 
 _SSL_CTX = ssl.create_default_context()
 
-# Context lengths at or above this threshold are capped at _CAPPED_CONTEXT_LENGTH
-# in the bundled catalog (both for freshly fetched vendor data and for entries
-# already present in MODEL_INFO.json).
 _CONTEXT_CAP_THRESHOLD = 1_000_000
 _CAPPED_CONTEXT_LENGTH = 500_000
 
@@ -342,6 +330,7 @@ def get_current_model_info() -> dict[str, dict]:
             "emb": info.is_embedding_supported,
             "gen": info.is_generation_supported,
             "thinking": info.thinking,
+            "alias_of": info.alias_of,
         }
         for name, info in MODEL_INFO.items()
     }
@@ -369,7 +358,7 @@ def _tiny_wav_bytes() -> bytes:
     import struct
 
     sample_rate = 8000
-    data = b"\x00\x00" * (sample_rate // 10)  # 0.1 s of silence
+    data = b"\x00\x00" * (sample_rate // 10)
     fmt_chunk = b"fmt " + struct.pack(
         "<IHHIIHH", 16, 1, 1, sample_rate, sample_rate * 2, 2, 16
     )
@@ -423,18 +412,244 @@ def test_embedding(model_name: str) -> bool:
         return False
 
 
-_THINKING_LEVELS_TO_PROBE: tuple[str, ...] = ("xhigh",)
+_THINKING_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh")
+"""The OpenAI-family ``reasoning_effort`` scale, in ascending order of effort.
+
+This is the default scale for every vendor without an entry in
+:func:`_thinking_scale_for`."""
+
+_MOONSHOT_THINKING_LEVELS: tuple[str, ...] = ("low", "high", "max")
+"""The Moonshot/Kimi ``reasoning_effort`` scale, in ascending order.
+
+Kimi K3 accepts ``low`` / ``high`` / ``max`` (vendor default ``max``);
+``medium`` and ``xhigh`` are rejected with HTTP 400, and thinking cannot
+be disabled. Source:
+https://platform.kimi.ai/docs/guide/use-reasoning-effort."""
+
+_ALL_THINKING_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+"""Union of every vendor scale, used when sweeping generated ``-{level}``
+aliases regardless of which scale produced them."""
+
+_MOONSHOT_MODEL_PREFIXES: tuple[str, ...] = (
+    "kimi-",
+    "moonshot-",
+    "moonshotai/",
+    "openrouter/moonshotai/",
+    "openrouter/~moonshotai/",
+)
+"""Catalog-key prefixes of Moonshot/Kimi models across every routing path:
+direct (``kimi-*`` / ``moonshot-*``), Together (``moonshotai/*``), and
+OpenRouter (``openrouter/moonshotai/*``)."""
+
+_GROK_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high")
+"""The xAI Grok ``reasoning_effort`` scale for the ``grok-4.3`` / ``grok-4.5``
+family. xAI docs (https://docs.x.ai/developers/model-capabilities/text/reasoning)
+document three levels; ``xhigh`` and ``max`` are rejected and thinking cannot
+be disabled entirely for these models."""
+
+_GROK_3_MINI_EFFORT_LEVELS: tuple[str, ...] = ("low", "high")
+"""The xAI ``grok-3-mini`` / ``grok-3-mini-beta`` ``reasoning_effort`` scale.
+Unlike ``grok-4.5``/``grok-4.3``, the mini family accepts ONLY ``low`` and
+``high`` — ``medium`` returns HTTP 400 (docs.x.ai). The alias-writer emits
+``-low`` and ``-high`` siblings only; a bogus ``-medium`` alias would be a
+correctness bug."""
+
+_XAI_MODEL_PREFIXES: tuple[str, ...] = (
+    "openrouter/x-ai/",
+    "openrouter/~x-ai/",
+)
+"""Catalog-key prefixes for xAI Grok models. Only routed through OpenRouter
+today; a direct-xAI namespace can be added here alongside if/when KISS adds
+a native xAI backend."""
+
+_GLM_5_2_EFFORT_LEVELS: tuple[str, ...] = ("high", "max")
+"""The z-ai ``GLM-5.2`` ``reasoning_effort`` scale. Per Zhipu docs the native
+levels are ``high`` and ``max``; OpenRouter's Zhipu routes accept both plus
+``xhigh`` as an alias for ``max``, so the source-of-truth 2-level ladder is
+preserved and ``xhigh`` is not materialized. Every other GLM (4.5 / 4.6 /
+4.7 / 5.0 / 5.1 / 5v-turbo) uses the older ``thinking.type`` boolean surface
+and is deliberately kept behind the probe gate."""
+
+_GLM_5_2_MODEL_PREFIXES: tuple[str, ...] = (
+    "zai-org/",
+    "openrouter/z-ai/",
+    "openrouter/~z-ai/",
+)
+"""Catalog-key prefixes under which a ``GLM-5.2`` model may appear. The
+narrower :func:`_is_glm_5_2_family` predicate refines the check to the
+5.2 base name; other GLMs sharing these prefixes stay gated out."""
+
+
+def _is_grok_effort_family(model_name: str) -> bool:
+    """Return True for xAI Grok models that accept ``reasoning_effort``.
+
+    Admits only the three ``reasoning_effort``-capable Grok families:
+    ``grok-4.5``, ``grok-4.3`` (three-level ladder), and ``grok-3-mini`` /
+    ``grok-3-mini-beta`` (two-level ladder). Every other Grok slug —
+    including the boolean-thinking ``grok-4`` / ``grok-4-fast`` /
+    ``grok-4.20`` / ``grok-4.20-multi-agent`` / ``grok-4.1-fast`` and every
+    non-reasoning legacy Grok (``grok-3``, ``grok-2*``, ``grok-code-*``,
+    ``grok-build-*``, ``grok-beta``, ``grok-vision-*``, ``grok-latest``) —
+    stays behind the probe gate: those models either don't accept the
+    parameter at all or repurpose it for agent count rather than depth.
+
+    The match is on the last ``/``-separated segment, case-insensitively,
+    so it covers both ``openrouter/x-ai/grok-4.5`` and any future direct
+    xAI routing.
+
+    Args:
+        model_name: The catalog key of the model.
+
+    Returns:
+        True when the model belongs to the Grok reasoning-effort family.
+    """
+    base = model_name.rsplit("/", 1)[-1].lower()
+    if base in ("grok-3-mini", "grok-3-mini-beta"):
+        return True
+    return base in ("grok-4.5", "grok-4.3")
+
+
+def _is_grok_3_mini_family(model_name: str) -> bool:
+    """Return True when ``model_name`` is a ``grok-3-mini`` variant.
+
+    ``grok-3-mini`` and ``grok-3-mini-beta`` accept only ``low`` and
+    ``high`` (no ``medium``), unlike ``grok-4.5``/``grok-4.3`` which
+    accept ``low``/``medium``/``high``. Distinguishing them is critical
+    to :func:`_thinking_scale_for`: emitting a ``-medium`` alias for a
+    ``grok-3-mini`` model would fabricate a level the API rejects.
+    """
+    base = model_name.rsplit("/", 1)[-1].lower()
+    return base in ("grok-3-mini", "grok-3-mini-beta")
+
+
+def _is_glm_5_2_family(model_name: str) -> bool:
+    """Return True when ``model_name`` is exactly a z-ai GLM-5.2 model.
+
+    Per the November 2026 audit, ``zai-org/GLM-5.2`` and
+    ``openrouter/z-ai/glm-5.2`` are the **only** Zhipu / GLM entries that
+    accept the ``reasoning_effort`` API surface (native values ``high`` and
+    ``max``). Every other GLM (4.5 / 4.6 / 4.7 / 5.0 / 5.1 / 5v-turbo /
+    ``glm-4.5-air`` etc.) uses the older ``thinking.type`` boolean and
+    must stay behind the probe gate.
+
+    The match requires:
+
+    * a recognized GLM-5.2 route prefix (``zai-org/``, ``openrouter/z-ai/``,
+      ``openrouter/~z-ai/``), AND
+    * a last-segment name equal to ``glm-5.2`` (case-insensitive) — so a
+      hypothetical ``glm-5.2v-turbo`` or ``glm-5.2-air`` stays gated out
+      unless it is separately verified to accept ``reasoning_effort``.
+
+    Args:
+        model_name: The catalog key of the model.
+
+    Returns:
+        True when the model is exactly a GLM-5.2 base.
+    """
+    if not model_name.startswith(_GLM_5_2_MODEL_PREFIXES):
+        return False
+    base = model_name.rsplit("/", 1)[-1].lower()
+    return base == "glm-5.2"
+
+
+def _is_together_gpt_oss(model_name: str) -> bool:
+    """Return True for the Together-route OpenAI gpt-oss family.
+
+    Together AI hosts the open-weight gpt-oss models under the ``openai/``
+    catalog namespace (``openai/gpt-oss-120b``, ``openai/gpt-oss-20b``).
+    That prefix does not overlap ``_OPENAI_PREFIXES`` (which starts with
+    ``gpt``, ``o1``, ``o3``, ``o4``, ``codex``, ``computer-use``), so
+    these entries would otherwise slip through the probe gate. They are
+    OpenAI-compatible chat-completions models and accept the OpenAI
+    ``reasoning_effort`` ladder (topping at ``high``); the standard
+    OpenAI scale returned by :func:`_thinking_scale_for` is correct for
+    them — the probe naturally lands at ``high`` and stops.
+
+    The check is scoped to ``openai/gpt-oss-*`` slugs specifically so
+    that no unrelated Together model is affected.
+    """
+    return model_name.startswith("openai/gpt-oss-")
+
+
+def _is_kimi_k3_family(model_name: str) -> bool:
+    """Return True when ``model_name`` is a Kimi K3-generation model.
+
+    ``reasoning_effort`` is a K3-introduced API surface: Moonshot's docs
+    define it (``low``/``high``/``max``) for ``kimi-k3*`` only, while
+    K2.x models control thinking via the separate ``thinking.type``
+    request field and ``moonshot-v1-*`` models have no thinking at all.
+    The probe gate in :func:`detect_thinking_level` therefore admits only
+    the K3 family — probing older Moonshot models through a gateway that
+    silently drops unknown parameters (e.g. a passthrough that ignores
+    ``reasoning_effort``) would otherwise fabricate alias levels the
+    model does not honor.
+
+    The check is on the last ``/``-separated segment, case-insensitively,
+    so it covers ``kimi-k3``, ``moonshotai/Kimi-K3`` (Together) and
+    ``openrouter/moonshotai/kimi-k3`` alike.
+
+    Args:
+        model_name: The catalog key of the model.
+
+    Returns:
+        True when the model belongs to the Kimi K3 family.
+    """
+    base = model_name.rsplit("/", 1)[-1].lower()
+    return base.startswith("kimi-k3")
+
+
+def _thinking_scale_for(model_name: str) -> tuple[str, ...]:
+    """Return the ascending ``reasoning_effort`` scale for ``model_name``.
+
+    The scale is vendor-specific:
+
+    * Moonshot/Kimi models use :data:`_MOONSHOT_THINKING_LEVELS`
+      (``low``/``high``/``max``).
+    * xAI ``grok-3-mini`` / ``grok-3-mini-beta`` use
+      :data:`_GROK_3_MINI_EFFORT_LEVELS` (``low``/``high``).
+    * xAI ``grok-4.5`` / ``grok-4.3`` use :data:`_GROK_EFFORT_LEVELS`
+      (``low``/``medium``/``high``).
+    * z-ai ``GLM-5.2`` uses :data:`_GLM_5_2_EFFORT_LEVELS`
+      (``high``/``max``).
+    * Every other model uses the OpenAI ladder :data:`_THINKING_LEVELS`
+      (``low``/``medium``/``high``/``xhigh``) — including Together's
+      OpenAI-compatible ``openai/gpt-oss-*`` entries, which naturally top
+      at ``high``.
+
+    Every scale is required to contain ``"high"`` — the level stored on
+    base entries when the detected maximum is higher (see
+    :func:`_write_entry_with_thinking_split`).
+
+    Args:
+        model_name: The catalog key of the model.
+
+    Returns:
+        The ordered tuple of levels the vendor accepts.
+    """
+    if model_name.startswith(_MOONSHOT_MODEL_PREFIXES):
+        return _MOONSHOT_THINKING_LEVELS
+    if model_name.startswith(_XAI_MODEL_PREFIXES) and _is_grok_effort_family(model_name):
+        if _is_grok_3_mini_family(model_name):
+            return _GROK_3_MINI_EFFORT_LEVELS
+        return _GROK_EFFORT_LEVELS
+    if _is_glm_5_2_family(model_name):
+        return _GLM_5_2_EFFORT_LEVELS
+    return _THINKING_LEVELS
 
 
 def detect_thinking_level(model_name: str) -> str | None:
     """Detect the highest ``reasoning_effort`` level the model accepts.
 
-    Probes each level in :data:`_THINKING_LEVELS_TO_PROBE` (currently just
-    ``"xhigh"``) by issuing a minimal generate call with
-    ``model_config={"reasoning_effort": <level>}`` explicitly so that the
-    OpenAI Chat Completions API itself decides the verdict, regardless of
-    whether the model is already flagged in ``MODEL_INFO``. Returns the
-    first level that succeeds, or ``None`` if none did.
+    Probes each level of the model's vendor scale (see
+    :func:`_thinking_scale_for`) in descending order — ``xhigh``,
+    ``high``, ``medium``, ``low`` for the OpenAI family; ``max``,
+    ``high``, ``low`` for Moonshot/Kimi — by issuing a minimal generate
+    call with ``model_config={"reasoning_effort": <level>}`` explicitly so
+    that the vendor's Chat Completions API itself decides the verdict,
+    regardless of whether the model is already flagged in ``MODEL_INFO``.
+    Returns the first (highest) level that succeeds, or ``None`` if none
+    did. Levels below the returned one are assumed supported too — the
+    probed vendors accept every level of their scale once they accept any.
 
     Returns ``None`` (without making any API call) for backends that don't
     accept ``reasoning_effort`` at all:
@@ -445,6 +660,20 @@ def detect_thinking_level(model_name: str) -> str | None:
       ``reasoning_effort``.
     * Variants known to reject ``reasoning_effort`` entirely (``-pro``,
       ``-chat-latest``, ``-image``).
+    * Moonshot models outside the Kimi K3 family (K2.x controls thinking
+      via ``thinking.type``, ``moonshot-v1-*`` has none; see
+      :func:`_is_kimi_k3_family`).
+    * xAI Grok models outside the reasoning-effort family: only
+      ``grok-4.5``, ``grok-4.3``, ``grok-3-mini``, and ``grok-3-mini-beta``
+      are probed (see :func:`_is_grok_effort_family`). The boolean-only
+      variants (``grok-4``, ``grok-4-fast``, ``grok-4.20*``, ``grok-4.1*``,
+      etc.) either don't accept ``reasoning_effort`` or repurpose the
+      levels for agent count rather than depth.
+    * GLMs other than exactly ``GLM-5.2`` (see :func:`_is_glm_5_2_family`).
+    * Every other vendor not yet verified to support the parameter (only
+      the OpenAI family — direct and via OpenRouter, plus Together's
+      ``openai/gpt-oss-*`` — Kimi K3, the xAI Grok effort family, and
+      z-ai GLM-5.2 are probed).
     """
     from kiss.core.models.model_info import _OPENAI_PREFIXES
 
@@ -456,12 +685,27 @@ def detect_thinking_level(model_name: str) -> str | None:
         "text-embedding"
     )
     is_openrouter_openai = model_name.startswith(("openrouter/openai/", "openrouter/~openai/"))
-    if not (is_openai or is_openrouter_openai):
+    is_together_gpt_oss = _is_together_gpt_oss(model_name)
+    is_moonshot_k3 = model_name.startswith(_MOONSHOT_MODEL_PREFIXES) and _is_kimi_k3_family(
+        model_name
+    )
+    is_grok_effort = model_name.startswith(_XAI_MODEL_PREFIXES) and _is_grok_effort_family(
+        model_name
+    )
+    is_glm_5_2 = _is_glm_5_2_family(model_name)
+    if not (
+        is_openai
+        or is_openrouter_openai
+        or is_together_gpt_oss
+        or is_moonshot_k3
+        or is_grok_effort
+        or is_glm_5_2
+    ):
         return None
 
     from kiss.core.models.model_info import model as create_model
 
-    for level in _THINKING_LEVELS_TO_PROBE:
+    for level in reversed(_thinking_scale_for(model_name)):
         try:
             m = create_model(
                 model_name,
@@ -569,7 +813,7 @@ def find_deprecated_models(
         if _is_excluded_provider(name):  # pragma: no branch
             deprecated.append({"name": name, "reason": "excluded provider"})
             continue
-        if name.endswith(_XHIGH_SUFFIX):
+        if name.endswith(_XHIGH_SUFFIX) or current[name].get("alias_of"):
             continue
         if name.startswith("codex/"):  # pragma: no branch
             if codex_slugs and name != "codex/default":
@@ -1022,98 +1266,209 @@ def _build_entry(
 _XHIGH_SUFFIX = "-xhigh"
 
 
-def _write_entry_with_xhigh_split(
+def _alias_base_name(name: str, entry: dict[str, Any]) -> str | None:
+    """Return the base model name when ``entry`` is a generated thinking alias.
+
+    A generated alias is recognized either by its explicit ``alias_of``
+    marker (written by :func:`_write_entry_with_thinking_split` on every
+    generated ``-{level}`` sibling) or — for catalogs written before the
+    marker existed — by the legacy ``-xhigh`` name suffix. The marker is
+    required for ``-low`` / ``-medium`` / ``-high`` because real upstream
+    models can end in those suffixes (e.g. ``openrouter/openai/o3-mini-high``)
+    and must never be mistaken for synthetic aliases.
+
+    Args:
+        name: The catalog key of the entry.
+        entry: The entry dict (may or may not carry ``alias_of``).
+
+    Returns:
+        The base model name, or ``None`` when ``entry`` is a real model.
+    """
+    alias_of = entry.get("alias_of")
+    if alias_of:
+        return str(alias_of)
+    if name.endswith(_XHIGH_SUFFIX):
+        return name.removesuffix(_XHIGH_SUFFIX)
+    return None
+
+
+def _expected_alias_entry(base_name: str, base: dict[str, Any], level: str) -> dict[str, Any]:
+    """Return the generated ``-{level}`` sibling expected for ``base``.
+
+    The sibling mirrors every field of ``base`` (context length, pricing,
+    ``fc`` / ``emb`` / ``gen``, ``comment``) except ``thinking``, which is
+    pinned to ``level``, and ``alias_of``, which records the base name so
+    runtime code and later runs can tell synthetic aliases apart from real
+    upstream models.
+    """
+    sibling = dict(base)
+    sibling["thinking"] = level
+    sibling["alias_of"] = base_name
+    return sibling
+
+
+def _pop_generated_aliases(
+    data: dict[str, dict],
+    name: str,
+    keep_levels: tuple[str, ...] = (),
+) -> None:
+    """Remove ``name``'s generated ``-{level}`` aliases not in ``keep_levels``.
+
+    Only entries recognized as generated aliases of ``name`` (via
+    :func:`_alias_base_name`) are removed; a real upstream model that
+    happens to be called ``{name}-high`` (e.g. ``o3-mini-high``) is left
+    untouched. The sweep covers :data:`_ALL_THINKING_LEVELS` (the union
+    of every vendor scale) so aliases left behind by a scale change are
+    cleaned up too.
+    """
+    for level in _ALL_THINKING_LEVELS:
+        if level in keep_levels:
+            continue
+        sibling_name = f"{name}-{level}"
+        sibling = data.get(sibling_name)
+        if sibling is not None and _alias_base_name(sibling_name, sibling) == name:
+            data.pop(sibling_name)
+
+
+def _write_entry_with_thinking_split(
     data: dict[str, dict],
     name: str,
     entry: dict[str, Any],
     *,
-    remove_stale_sibling: bool = True,
+    remove_stale_siblings: bool = True,
 ) -> None:
-    """Write ``entry`` under ``name`` in ``data``, splitting xhigh into two siblings.
+    """Write ``entry`` under ``name``, materializing one alias per thinking level.
 
-    When the resulting ``entry["thinking"]`` is ``"xhigh"`` the catalog
-    emits **two** entries instead of one:
+    When ``entry["thinking"]`` is a level on the model's vendor scale
+    (see :func:`_thinking_scale_for`), the catalog emits the base entry
+    **plus one generated sibling per supported level** — every level from
+    ``low`` up to the detected maximum:
 
-    * the base ``name`` with ``thinking`` downgraded to ``"high"`` so users
-      who reference the original model name still get a working
-      ``reasoning_effort`` setting, and
-    * a sibling at ``name + "-xhigh"`` with ``thinking="xhigh"`` so the
-      uncapped reasoning level is selectable explicitly.
+    * OpenAI family, ``thinking="xhigh"`` → base (downgraded to
+      ``thinking="high"``) and ``-low`` / ``-medium`` / ``-high`` /
+      ``-xhigh`` siblings;
+    * OpenAI family, ``thinking="high"`` → base and ``-low`` /
+      ``-medium`` / ``-high``;
+    * Moonshot/Kimi, ``thinking="max"`` → base (downgraded to
+      ``thinking="high"``) and ``-low`` / ``-high`` / ``-max`` siblings;
+    * lower levels analogously.
 
-    The sibling inherits every other field on ``entry`` (context length,
-    pricing, ``fc`` / ``emb`` / ``gen`` flags, ``comment``), so its
-    pricing / capability signature matches the base byte for byte aside
-    from the ``thinking`` key.
+    Each sibling inherits every other field on ``entry`` (context length,
+    pricing, ``fc`` / ``emb`` / ``gen`` flags, ``comment``) and carries an
+    ``alias_of`` marker naming the base, so its pricing / capability
+    signature matches the base byte for byte aside from ``thinking`` and
+    ``alias_of``.
 
-    When ``entry["thinking"]`` is anything other than ``"xhigh"`` (``None``,
-    ``"high"``, ``"medium"``, ...) this is a plain ``data[name] = entry``
-    write. When ``remove_stale_sibling`` is true, any pre-existing stale
-    ``name + "-xhigh"`` sibling left over from a previous run is removed so
-    the catalog stays consistent with the latest probe results: a model that
-    no longer accepts xhigh must not advertise the ``-xhigh`` alias. Set
-    ``remove_stale_sibling`` false for routine updates that did not explicitly
-    re-test ``thinking``; those updates are not evidence that xhigh support was
-    lost, so an existing sibling is preserved and synchronized.
+    When ``entry`` has no recognized ``thinking`` level this is a plain
+    ``data[name] = entry`` write. When ``remove_stale_siblings`` is true,
+    pre-existing generated aliases at unsupported levels are removed so the
+    catalog stays consistent with the latest probe results. Set it false
+    for routine updates that did not re-test ``thinking``: those are not
+    evidence that a level was lost, so an existing generated top-level
+    sibling (``-xhigh`` on the OpenAI scale, ``-max`` on the Moonshot
+    scale) is trusted as proof of top-level support and the full alias
+    set is regenerated (and synchronized) from it.
 
-    The helper short-circuits when ``name`` already ends in ``"-xhigh"`` to
-    keep the split idempotent on re-runs (we never produce
-    ``foo-xhigh-xhigh``).
+    The helper short-circuits with a plain write when ``name`` itself is a
+    generated alias (marker on the incoming or on-disk entry, or the legacy
+    ``-xhigh`` suffix), preserving the marker; we never produce nested
+    aliases like ``foo-xhigh-xhigh``.
     """
-    if name.endswith(_XHIGH_SUFFIX):
+    alias_base = entry.get("alias_of") or (data.get(name) or {}).get("alias_of")
+    if alias_base or name.endswith(_XHIGH_SUFFIX):
+        if alias_base:
+            entry = dict(entry)
+            entry["alias_of"] = alias_base
         data[name] = entry
         return
-    sibling_name = name + _XHIGH_SUFFIX
-    if entry.get("thinking") != "xhigh":
+    entry = dict(entry)
+    entry.pop("alias_of", None)
+    scale = _thinking_scale_for(name)
+    stored_level = entry.get("thinking")
+    if stored_level not in scale:
         data[name] = entry
-        if remove_stale_sibling:
-            data.pop(sibling_name, None)
-            return
-        if sibling_name in data:
-            data[sibling_name] = _expected_xhigh_sibling(entry)
+        if remove_stale_siblings:
+            _pop_generated_aliases(data, name)
         return
+    top_level = scale[-1]
+    max_level = stored_level
+    if not remove_stale_siblings and stored_level != top_level:
+        sibling_name = f"{name}-{top_level}"
+        sibling = data.get(sibling_name)
+        if sibling is not None and _alias_base_name(sibling_name, sibling) == name:
+            max_level = top_level
     base = dict(entry)
-    base["thinking"] = "high"
-    sibling = dict(entry)
-    sibling["thinking"] = "xhigh"
+    high_rank = scale.index("high")
+    max_rank = scale.index(max_level)
+    base["thinking"] = "high" if max_rank > high_rank else max_level
     data[name] = base
-    data[sibling_name] = sibling
-
-
-def _expected_xhigh_sibling(base: dict[str, Any]) -> dict[str, Any]:
-    """Return the generated ``-xhigh`` sibling expected for ``base``."""
-    sibling = dict(base)
-    sibling["thinking"] = "xhigh"
-    return sibling
-
-
-def _has_xhigh_normalization_changes(data: dict[str, dict]) -> bool:
-    """Return True when ``data`` needs generated xhigh alias normalization."""
-    for name, entry in data.items():
-        if name.endswith(_XHIGH_SUFFIX):
-            base_name = name.removesuffix(_XHIGH_SUFFIX)
-            base = data.get(base_name)
-            if base is None:
-                return True
-            if base.get("thinking") == "high" and entry != _expected_xhigh_sibling(base):
-                return True
-        elif entry.get("thinking") == "xhigh":
-            return True
-    return False
-
-
-def _normalize_xhigh_splits(data: dict[str, dict]) -> None:
-    """Normalize existing entries to the base-high plus ``-xhigh`` convention."""
-    for name, entry in list(data.items()):
-        if name.endswith(_XHIGH_SUFFIX):
-            base_name = name.removesuffix(_XHIGH_SUFFIX)
-            base = data.get(base_name)
-            if base is None:
-                data.pop(name, None)
-            elif base.get("thinking") == "high":
-                data[name] = _expected_xhigh_sibling(base)
+    supported = scale[: max_rank + 1]
+    for level in supported:
+        sibling_name = f"{name}-{level}"
+        existing = data.get(sibling_name)
+        if existing is not None and _alias_base_name(sibling_name, existing) != name:
+            # A real upstream model (e.g. o3-mini-high) or a foreign alias
+            # occupies this name; never clobber it with a generated alias.
             continue
-        if entry.get("thinking") == "xhigh":
-            _write_entry_with_xhigh_split(data, name, entry)
+        data[sibling_name] = _expected_alias_entry(name, base, level)
+    _pop_generated_aliases(data, name, keep_levels=supported)
+
+
+def _stored_max_thinking_level(
+    data: dict[str, dict],
+    name: str,
+    entry: dict[str, Any],
+) -> str | None:
+    """Return the max reasoning level recorded on disk for base entry ``name``.
+
+    The base entry stores at most ``"high"`` (see
+    :func:`_write_entry_with_thinking_split`), so a generated top-level
+    sibling — ``-xhigh`` on the OpenAI scale, ``-max`` on the Moonshot
+    scale — promotes the stored maximum to that top level.
+    """
+    scale = _thinking_scale_for(name)
+    level = entry.get("thinking")
+    if level not in scale:
+        return None
+    top_level = scale[-1]
+    if level != top_level:
+        sibling_name = f"{name}-{top_level}"
+        sibling = data.get(sibling_name)
+        if sibling is not None and _alias_base_name(sibling_name, sibling) == name:
+            return top_level
+    return str(level)
+
+
+def _normalize_thinking_splits(data: dict[str, dict]) -> None:
+    """Normalize entries to the base plus ``-{level}`` alias convention.
+
+    Two passes:
+
+    1. Drop orphan generated aliases whose base entry no longer exists.
+    2. For every base entry with a recognized ``thinking`` level, regenerate
+       the full set of ``-{level}`` siblings (repairing malformed ones and
+       adding the ``alias_of`` marker to legacy ``-xhigh`` siblings).
+    """
+    for name, entry in list(data.items()):
+        base_name = _alias_base_name(name, entry)
+        if base_name is not None and base_name not in data:
+            data.pop(name)
+    for name, entry in list(data.items()):
+        if _alias_base_name(name, entry) is not None:
+            continue
+        max_level = _stored_max_thinking_level(data, name, entry)
+        if max_level is None:
+            continue
+        normalized = dict(entry)
+        normalized["thinking"] = max_level
+        _write_entry_with_thinking_split(data, name, normalized)
+
+
+def _has_thinking_normalization_changes(data: dict[str, dict]) -> bool:
+    """Return True when ``data`` needs generated thinking-alias normalization."""
+    normalized = {name: dict(entry) for name, entry in data.items()}
+    _normalize_thinking_splits(normalized)
+    return normalized != data
 
 
 def _read_model_info_json(path: Path) -> dict[str, dict]:
@@ -1185,17 +1540,19 @@ def apply_updates_to_file(
             touching disk.
     """
     data = _read_model_info_json(MODEL_INFO_PATH)
-    _normalize_xhigh_splits(data)
+    _normalize_thinking_splits(data)
 
     deprecated_names = {d["name"] for d in deprecated}
     removed = 0
     for name in deprecated_names:
         if data.pop(name, None) is not None:
             removed += 1
-        # Also drop any auto-generated xhigh sibling so deprecation is
-        # complete (the sibling is meaningless without its base).
-        if data.pop(name + _XHIGH_SUFFIX, None) is not None:
-            removed += 1
+        for level in _ALL_THINKING_LEVELS:
+            sibling_name = f"{name}-{level}"
+            sibling = data.get(sibling_name)
+            if sibling is not None and _alias_base_name(sibling_name, sibling) == name:
+                data.pop(sibling_name)
+                removed += 1
 
     applied = 0
     for upd in updates:  # pragma: no branch
@@ -1216,11 +1573,11 @@ def apply_updates_to_file(
                 entry.pop("thinking", None)
             else:
                 entry[field] = value
-        _write_entry_with_xhigh_split(
+        _write_entry_with_thinking_split(
             data,
             name,
             entry,
-            remove_stale_sibling="thinking" in changes,
+            remove_stale_siblings="thinking" in changes,
         )
         applied += 1
 
@@ -1237,7 +1594,7 @@ def apply_updates_to_file(
             thinking=nm.get("thinking"),
             comment=comment,
         )
-        _write_entry_with_xhigh_split(data, nm["name"], entry)
+        _write_entry_with_thinking_split(data, nm["name"], entry)
         added += 1
 
     print(f"\n  Removed {removed} deprecated, applied {applied} updates, added {added} new")
@@ -1246,10 +1603,6 @@ def apply_updates_to_file(
         return
     _write_model_info_json(MODEL_INFO_PATH, data)
     print(f"  Written to {MODEL_INFO_PATH}")
-    # ``~/.kiss/MODEL_INFO.json`` is no longer maintained — the bundled
-    # MODEL_INFO.json is the runtime source of truth and is read directly
-    # from the installed package by ``kiss.core.models.model_info``.  User
-    # overrides live in ``~/.kiss/MY_MODELS.json`` instead.
 
 
 def _readme_provider_category(model_name: str) -> str:
@@ -1478,14 +1831,14 @@ def main() -> None:
     new_models = [nm for nm in new_models if nm["name"] not in deprecated_names]
 
     on_disk = _read_model_info_json(MODEL_INFO_PATH)
-    needs_xhigh_normalization = _has_xhigh_normalization_changes(on_disk)
+    needs_thinking_normalization = _has_thinking_normalization_changes(on_disk)
     needs_context_cap = _has_context_cap_changes(on_disk)
     if (  # pragma: no branch
         not updates
         and not new_models
         and not deprecated
         and not args.test_existing
-        and not needs_xhigh_normalization
+        and not needs_thinking_normalization
         and not needs_context_cap
     ):
         print("\nEverything is up to date!")
@@ -1519,14 +1872,15 @@ def main() -> None:
         print("\n  Re-testing existing models...")
         update_by_name = {upd["name"]: upd for upd in updates}
         for name, cur in current.items():  # pragma: no branch
-            if name.endswith(_XHIGH_SUFFIX):
+            if name.endswith(_XHIGH_SUFFIX) or cur.get("alias_of"):
                 continue
             caps = test_model_capabilities(name, verbose=args.verbose)
             fc_changed = caps["fc"] != cur["fc"]
             stored_thinking = cur.get("thinking")
-            sibling_thinking = current.get(name + _XHIGH_SUFFIX, {}).get("thinking")
-            if stored_thinking == "high" and sibling_thinking == "xhigh":
-                stored_thinking = "xhigh"
+            top_level = _thinking_scale_for(name)[-1]
+            sibling_thinking = current.get(f"{name}-{top_level}", {}).get("thinking")
+            if stored_thinking == "high" and sibling_thinking == top_level:
+                stored_thinking = top_level
             thinking_changed = caps["thinking"] != stored_thinking
             if not (fc_changed or thinking_changed):  # pragma: no branch
                 continue

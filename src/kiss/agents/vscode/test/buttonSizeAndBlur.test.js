@@ -2,40 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test: chat webview buttons are comfortably sized and no
-// button keeps keyboard focus after it is clicked.
-//
-// Locked-in behaviour:
-//
-//   * The buttons below the input textbox are bigger:
-//       - #send-btn / #stop-btn are at least 32x32 px circles with
-//         at-least-15px icons;
-//       - the icon-only footer buttons (#menu-btn, #model-btn,
-//         #upload-btn, #tricks-btn, #voice-btn) carry at-least-16px
-//         SVG icons.
-//   * The tab-bar "+" (.chat-tab-add) and settings
-//     (.chat-tab-settings) buttons are bigger: at least 28px wide,
-//     the "+" glyph at least 20px, the gear SVG at least 18px.
-//   * Every X (clear/close) button is bigger:
-//       - .chat-tab-close (tab headers): at least 20x20 px box with
-//         an at-least-16px glyph;
-//       - #input-clear-btn (task textbox): at least 16x16 px with an
-//         at-least-16px glyph;
-//       - .search-clear-btn (model/history search boxes): at least
-//         18x18 px with an at-least-16px glyph;
-//       - .tips-close (Tips window): at-least-26px glyph.
-//   * Clicking any of these buttons removes focus from it: a
-//     capture-phase document listener blurs the clicked control, so
-//     even handlers that call stopPropagation() (e.g. the tab-header
-//     X) cannot leave a focus ring behind.  The Tips window X blurs
-//     itself before removing the panel.
-//
-// Exercises the real ``media/chat.html`` + ``media/main.css`` +
-// ``media/main.js`` + ``media/tips.js`` in jsdom (same harness as
-// taskPanelExpandFullText.test.js).  Run directly with node:
-//
-//     node src/kiss/agents/vscode/test/buttonSizeAndBlur.test.js
 
 'use strict';
 
@@ -46,17 +12,10 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom window running the real chat webview (chat.html +
- * main.css + panelCopy.js + tips.js + main.js), mirroring the
- * production extension.
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
   html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  // Strip the production <script> tags — we eval the source files
-  // ourselves below so they pick up the jsdom globals.
   html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
 
   const dom = new JSDOM(html, {
@@ -82,9 +41,6 @@ function makeWebview() {
     };
   };
 
-  // Load the real stylesheet so getComputedStyle sees production
-  // sizes.  jsdom logs "Could not parse CSS" for a few modern
-  // functions (color-mix etc.); px box sizes still apply.
   const style = win.document.createElement('style');
   style.textContent = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
   win.document.head.appendChild(style);
@@ -92,11 +48,13 @@ function makeWebview() {
   win.__TIPS__ = {tips: [], show: false};
   win.eval(fs.readFileSync(path.join(MEDIA, 'tips.js'), 'utf8'));
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
   return {win, posted};
 }
 
-/** First stylesheet rule whose selector list contains ``selector``. */
 function cssRule(win, selector) {
   for (const sheet of win.document.styleSheets) {
     for (const rule of sheet.cssRules) {
@@ -108,7 +66,6 @@ function cssRule(win, selector) {
   return null;
 }
 
-/** Numeric pixel value of ``12px``-style strings (NaN otherwise). */
 function px(value) {
   return parseFloat(String(value));
 }
@@ -119,10 +76,6 @@ function assertAtLeast(actual, min, what) {
     what + ' must be at least ' + min + 'px, got "' + actual + '"',
   );
 }
-
-// ---------------------------------------------------------------------------
-// Size tests
-// ---------------------------------------------------------------------------
 
 function testInputFooterButtonsAreBigger() {
   const {win} = makeWebview();
@@ -154,7 +107,6 @@ function testInputFooterButtonsAreBigger() {
     assertAtLeast(svg.getAttribute('width'), 16, '#' + id + ' svg width');
     assertAtLeast(svg.getAttribute('height'), 16, '#' + id + ' svg height');
   }
-  // #upload-btn svg must not be shrunk back down by the stylesheet.
   const uploadSvg = cssRule(win, '#upload-btn svg');
   if (uploadSvg && uploadSvg.width) {
     assertAtLeast(uploadSvg.width, 16, '#upload-btn svg CSS width');
@@ -213,8 +165,6 @@ function testCloseButtonsAreBigger() {
   assertAtLeast(searchClear.height, 18, '.search-clear-btn height');
   assertAtLeast(searchClear.fontSize, 16, '.search-clear-btn font-size');
 
-  // Tips window X: mount the real <kiss-tips-panel> and inspect the
-  // shadow-DOM stylesheet it ships.
   win.__kissShowTipsPanel(['# Tip 1\nHello']);
   const panel = doc.querySelector('kiss-tips-panel');
   assert.ok(panel && panel.shadowRoot, 'tips panel must mount a shadow root');
@@ -226,13 +176,7 @@ function testCloseButtonsAreBigger() {
   console.log('  ok - all X buttons are bigger');
 }
 
-// ---------------------------------------------------------------------------
-// Blur-after-click tests
-// ---------------------------------------------------------------------------
-
 function clickAndAssertBlurred(win, el, what) {
-  // Real browsers focus a control on mousedown; simulate that state,
-  // then click.  After the click the control must NOT keep focus.
   if (el.tabIndex < 0) el.tabIndex = 0;
   el.focus();
   assert.strictEqual(
@@ -272,9 +216,6 @@ function testButtonsLoseFocusAfterClick() {
     clickAndAssertBlurred(win, el, '#' + id);
   }
 
-  // Tab-bar controls: the "+" button, the settings gear and the
-  // tab-header X.  The X handler calls stopPropagation(), so blurring
-  // must survive that (capture-phase listener).
   for (const sel of [
     '.chat-tab-add',
     '.chat-tab-settings',

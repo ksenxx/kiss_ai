@@ -2,20 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Integration test: the compiled extension (``SorcarSidebarView.js`` +
-// ``AgentClient.js``) must NEVER silently drop a ``submit`` that arrives
-// for a tab it already considers running.  Such a ``submit`` happens
-// when a re-opened webview has not yet re-learned the running state and
-// therefore sends ``submit`` instead of ``appendUserMessage``.  Rather
-// than discard the user's text, the extension must forward it to the
-// daemon as an ``appendUserMessage`` so it is injected into the live
-// agent — exactly like a tab that loaded the task.
-//
-// Drives the REAL compiled extension against a real UDS stub daemon;
-// only ``vscode`` is stubbed.
-//
-//     node src/kiss/agents/vscode/test/bughunt_submit_while_running.test.js
 
 'use strict';
 
@@ -91,10 +77,6 @@ Module._resolveFilename = function (request, parent, ...rest) {
   if (request === 'vscode') return require.resolve('./_vscode-stub.js');
   return origResolve.call(this, request, parent, ...rest);
 };
-// ``_vscode-stub.js`` is a git-tracked fixture shared by several tests
-// that run in parallel; it already contains
-// ``module.exports = global.__kissVscodeStub;`` — never write or delete
-// it here or concurrent tests lose their ``vscode`` module mid-run.
 global.__kissVscodeStub = vscodeStub;
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-sub-run-'));
@@ -123,7 +105,6 @@ const server = net.createServer(sock => {
       try {
         received.push(JSON.parse(line));
       } catch {
-        /* ignore */
       }
     }
   });
@@ -184,13 +165,9 @@ async function runTests() {
   wv.fireMessage({type: 'ready', tabId: TAB, restoredTabs: []});
   await waitForClient();
 
-  // Start a task and have the daemon confirm it's running so the
-  // extension records TAB in its _runningTabs set.
   wv.fireMessage({type: 'submit', prompt: 'long task', model: 'm', tabId: TAB});
   await daemonSend({type: 'status', running: true, tabId: TAB});
 
-  // Now the (desynced) webview sends a plain ``submit`` while the task
-  // is still running — the user's text must NOT be dropped.
   received.length = 0;
   wv.fireMessage({
     type: 'submit',
@@ -211,7 +188,6 @@ async function runTests() {
   );
   assert.strictEqual(appended[0].prompt, 'inject me into the running agent');
   assert.strictEqual(appended[0].tabId, TAB);
-  // It must NOT have started a second run.
   assert.ok(
     !received.some(c => c.type === 'run'),
     'a submit for a running tab must not start a second run',

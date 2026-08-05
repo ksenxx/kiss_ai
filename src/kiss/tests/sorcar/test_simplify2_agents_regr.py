@@ -165,14 +165,13 @@ class TestExtractResultSummary:
         assert self._extract(raw) == raw
 
     def test_raw_prefix_capped_at_500_chars(self) -> None:
-        raw = "word " * 300  # non-dict YAML, 1500 chars
+        raw = "word " * 300
         assert self._extract(raw) == raw[:500]
 
     def test_empty_string_returns_empty(self) -> None:
         assert self._extract("") == ""
 
     def test_dict_with_numeric_summary_dumped(self) -> None:
-        # Non-str, non-None scalar summary goes through safe_dump.
         expected = yaml.safe_dump(42, sort_keys=False).strip()
         assert self._extract("summary: 42") == expected
 

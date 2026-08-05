@@ -2,34 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Integration test for three SorcarSidebarView bugs, driven through the
-// REAL compiled ``SorcarSidebarView.js`` + ``AgentClient.js`` against a
-// real UDS daemon socket (only ``vscode`` is stubbed):
-//
-//   1. remote_url after reopen — ``_lastSentUrl`` deduping survived
-//      webview disposal, but the webview DOM does not: after closing and
-//      re-opening the sidebar, ``ready`` → ``_sendRemoteUrl`` early-
-//      returned on the dedup key and the welcome-page remote-URL panel
-//      stayed permanently blank.  The dedup key must be reset whenever a
-//      fresh webview is resolved.
-//
-//   2. Spurious "Process stopped" — the ``status running:false`` handler
-//      fired ``onCommitMessage {error:'Process stopped'}`` whenever ANY
-//      own tab stopped while ``_commitPendingTabs.size > 0``, even though
-//      the stopping tab was unrelated to the tab awaiting a commit
-//      message.  It must check ``.has(statusTabId)`` instead of
-//      ``.size > 0``.
-//
-//   3. commitMessage with tabId '' — ``generateCommitMessage`` always
-//      sends tabId ''; the daemon stamps the reply with the requester's
-//      tabId (''), but ``_isOwnTab('')`` was false (only ``undefined``
-//      was treated as global), so the reply was dropped and the SCM
-//      input box never received the generated message.
-//
-// Run directly with ``node`` (after ``tsc -p .``):
-//
-//     node src/kiss/agents/vscode/test/sidebarReopenUrlCommitPending.test.js
 
 'use strict';
 
@@ -39,10 +11,6 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const Module = require('module');
-
-// ---------------------------------------------------------------------------
-// Minimal ``vscode`` stub — only the surface SorcarSidebarView touches.
-// ---------------------------------------------------------------------------
 
 class StubEventEmitter {
   constructor() {
@@ -115,15 +83,7 @@ Module._resolveFilename = function (request, parent, ...rest) {
   return origResolve.call(this, request, parent, ...rest);
 };
 
-// ``_vscode-stub.js`` is a git-tracked fixture shared by tests running
-// in parallel; it already re-exports ``global.__kissVscodeStub`` — never
-// rewrite or delete it here (writeFileSync truncates first, racing a
-// concurrent ``require('vscode')`` in sibling test processes).
 global.__kissVscodeStub = vscodeStub;
-
-// ---------------------------------------------------------------------------
-// Real UDS daemon at ~/.kiss/sorcar.sock (HOME redirected to a tempdir).
-// ---------------------------------------------------------------------------
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-sbv-'));
 process.env.HOME = tmpHome;
@@ -131,7 +91,6 @@ process.env.USERPROFILE = tmpHome;
 fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
 const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
 
-// Remote tunnel URL the daemon-side helper wrote to disk.
 fs.writeFileSync(
   path.join(tmpHome, '.kiss', 'remote-url.json'),
   JSON.stringify({tunnel: 'https://tunnel.example.dev', local: 'http://localhost:8787'}),
@@ -218,7 +177,6 @@ async function runTests() {
 
   const TAB = 'tab-A';
 
-  // --- Open the sidebar; the welcome page needs the remote URL --------
   const wv1 = makeWebviewView();
   view.resolveWebviewView(wv1.webviewView, {}, {});
   wv1.fireMessage({type: 'ready', tabId: TAB, restoredTabs: []});
@@ -231,7 +189,6 @@ async function runTests() {
     'sanity: the first webview receives the remote_url event',
   );
 
-  // --- Test 1: close + reopen must re-send remote_url -----------------
   wv1.fireDispose();
   const wv2 = makeWebviewView();
   view.resolveWebviewView(wv2.webviewView, {}, {});
@@ -250,21 +207,16 @@ async function runTests() {
       'resolved, otherwise the welcome-page remote panel stays blank',
   );
 
-  // --- Test 2: unrelated tab stopping must NOT abort a pending
-  //     commit-message generation with "Process stopped" ----------------
   const commitEvents = [];
   const sub = view.onCommitMessage((e) => commitEvents.push(e));
 
-  // Tab TAB is a running chat tab owned by this window.
   await daemonSend({type: 'status', running: true, tabId: TAB});
 
-  // Kick off SCM commit-message generation (tabId '').
   let commitResolved = false;
   const commitPromise = view
     .generateCommitMessage(undefined, '')
     .then(() => (commitResolved = true));
 
-  // The unrelated chat tab finishes.
   await daemonSend({type: 'status', running: false, tabId: TAB});
   await sleep(150);
 
@@ -282,8 +234,6 @@ async function runTests() {
       'when an unrelated tab stops',
   );
 
-  // --- Test 3: the daemon reply stamped with the requester tabId ''
-  //     must be delivered (and resolve the pending generation) ----------
   await daemonSend({type: 'commitMessage', message: 'feat: add tests', tabId: ''});
   await sleep(150);
 
@@ -295,8 +245,6 @@ async function runTests() {
   await commitPromise;
   assert.strictEqual(commitResolved, true, 'commit generation resolves');
 
-  // --- The intended stop path still works: a stop for the commit
-  //     requester's own tabId ('') aborts the pending generation --------
   const p2 = view.generateCommitMessage(undefined, '');
   await daemonSend({type: 'status', running: false, tabId: ''});
   await sleep(150);

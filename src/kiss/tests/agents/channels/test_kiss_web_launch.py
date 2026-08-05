@@ -119,9 +119,6 @@ class _ApiLaunchBase(unittest.TestCase):
             self.loop,
         ).result(timeout=5)
 
-        # Route launches that do not pass ``sock_path`` explicitly
-        # (ChannelRunner, channel_main, the pollers) at this test's
-        # daemon instead of the process-global in-process one.
         self._saved_sock_override = launcher._SOCK_PATH_OVERRIDE
         launcher._SOCK_PATH_OVERRIDE = self.sock_path
 
@@ -263,8 +260,6 @@ class TestLaunchViaApi(_ApiLaunchBase):
         )
         assert self.stub_calls, "the daemon never ran the task"
         call = self.stub_calls[0]
-        # The API contract: the daemon builds its own chat agent — the
-        # passed third-party instance must NOT be executed.
         assert call["agent"] is not agent, (
             "the task must run on a daemon-built agent, not the passed "
             "third-party agent instance"
@@ -291,9 +286,6 @@ class TestLaunchViaApi(_ApiLaunchBase):
             sock_path=self.sock_path,
         )
         prompt = str(self.stub_calls[0]["kwargs"].get("prompt_template", ""))
-        # The channel guidance the old flow injected as a system
-        # prompt must now travel inside the task prompt (the API has
-        # no system-prompt field).
         assert "Slack Authentication" in prompt
         assert "start_slack_browser_auth" in prompt
 
@@ -314,8 +306,6 @@ class TestLaunchViaApi(_ApiLaunchBase):
 
         def on_run(self_agent: Any, kwargs: dict[str, Any]) -> str:
             tools = {t.__name__: t for t in (kwargs.get("tools") or [])}
-            # Slack auth tools (live closures over the agent instance)
-            # must be present as tools-file wrappers.
             for expected in (
                 "check_slack_auth",
                 "authenticate_slack",
@@ -325,17 +315,11 @@ class TestLaunchViaApi(_ApiLaunchBase):
             ):
                 assert expected in tools, f"missing bridged tool {expected}"
             wrapper = tools["mytool"]
-            # Proof of the tools-FILE path (not serialized callables):
-            # the daemon imported a generated module.
             assert wrapper is not mytool
             assert wrapper.__module__.startswith("_kiss_tools_file_")
             assert "Echo *text* repeated" in (wrapper.__doc__ or "")
-            # Invoking the wrapper reaches the live closure, with the
-            # original default applied for the omitted parameter.
             assert wrapper(text="hi") == "hi"
             assert wrapper("bye", repeat=2) == "byebye"
-            # The auth tool executes the real closure over the real
-            # SlackAgent instance (unauthenticated → guidance text).
             auth_out = tools["check_slack_auth"]()
             assert "Not authenticated with Slack" in auth_out
             return "tools bridged ok"
@@ -509,8 +493,6 @@ class TestLaunchViaApi(_ApiLaunchBase):
     def test_agent_failure_returns_failure_yaml(self) -> None:
         from kiss.agents.third_party_agents.slack_agent import SlackAgent
 
-        # ``RelentlessAgent.run``'s failure contract: broadcast a
-        # terminal ``result`` event and return the failure YAML.
         self._install_stub(summary="boom-fail happened", success=False)
         agent = SlackAgent()
         result = run_agent_via_kiss_web(
@@ -527,8 +509,6 @@ class TestLaunchViaApi(_ApiLaunchBase):
     def test_abrupt_agent_crash_maps_to_failure_yaml(self) -> None:
         from kiss.agents.third_party_agents.slack_agent import SlackAgent
 
-        # An abrupt crash (no terminal result event broadcast at all)
-        # must still yield a non-empty failure summary.
         self._install_stub(raise_exc=RuntimeError("boom-crash"))
         agent = SlackAgent()
         result = run_agent_via_kiss_web(
@@ -673,10 +653,6 @@ class TestCarrierAgentDirectRuns(_ApiLaunchBase):
         assert agent.last_run_result == result
 
     def test_worktree_agent_direct_run_records_interrupt(self) -> None:
-        # KeyboardInterrupt is a BaseException, so WorktreeSorcarAgent's
-        # own ``except Exception`` fallback does NOT swallow it — the
-        # carrier's except-branch must record the failure YAML before
-        # re-raising.
         self._install_stub(raise_exc=KeyboardInterrupt())
         agent = KissWebWorktreeSorcarAgent("Direct WT")
         with self.assertRaises(KeyboardInterrupt):
@@ -717,7 +693,7 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
         result = agent.run(
             prompt_template="direct slack",
             work_dir=self.repo,
-            use_worktree=True,  # chat-session-only kwarg must be popped
+            use_worktree=True,
             _skip_persistence=True,
         )
         assert yaml.safe_load(result)["summary"] == STUB_SUMMARY
@@ -807,8 +783,6 @@ class TestKissWebPollerAgents(_ApiLaunchBase):
             sock_path=self.sock_path,
         )
         assert resumed.chat_id == first_chat, "existing chat id must be kept"
-        # True continuation: the daemon persisted the second task under
-        # the same chat and fed the first task as context.
         assert "first task" in prompts[0], (
             "the resumed run must see the prior task as chat context"
         )
@@ -906,8 +880,6 @@ class TestChannelRunnerViaApi(_ApiLaunchBase):
 
         self._install_stub(on_run=on_run)
         runner._handle_message("C123", {"text": "hi", "ts": "1.0"})
-        # The agent called reply() itself, so the runner must NOT also
-        # send the summary.
         assert outbox == [("C123", "hello from the daemon agent", "1.0")]
 
     def test_handle_message_sends_summary_when_no_reply(self) -> None:
@@ -920,7 +892,6 @@ class TestChannelRunnerViaApi(_ApiLaunchBase):
         runner, outbox = self._make_runner()
         self._install_stub(summary="chan-blast happened", success=False)
         runner._handle_message("C9", {"text": "x", "ts": "2.0"})
-        # The daemon's failure summary is relayed as the reply.
         assert outbox, "an error reply must still be sent"
         channel, text, ts = outbox[0]
         assert channel == "C9" and ts == "2.0"
@@ -987,9 +958,6 @@ class TestNoDirectRunCallSites(unittest.TestCase):
             if py.name == "_kiss_web_launcher.py":
                 continue
             source = py.read_text()
-            # Use the AST so only executable code is scanned —
-            # docstrings ("Example:: agent.run(...)") are usage
-            # documentation, not launch call sites.
             tree = ast.parse(source, filename=str(py))
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):
@@ -997,8 +965,6 @@ class TestNoDirectRunCallSites(unittest.TestCase):
                 func = node.func
                 if not (isinstance(func, ast.Attribute) and func.attr == "run"):
                     continue
-                # ``super().run(...)`` — the agent class delegating up
-                # its own MRO — is fine.
                 base = func.value
                 if (
                     isinstance(base, ast.Call)
@@ -1006,8 +972,6 @@ class TestNoDirectRunCallSites(unittest.TestCase):
                     and base.func.id == "super"
                 ):
                     continue
-                # Only flag ``<something named *agent*>.run(...)`` —
-                # e.g. ``agent.run(...)`` / ``self._agent.run(...)``.
                 name = ""
                 if isinstance(base, ast.Name):
                     name = base.id

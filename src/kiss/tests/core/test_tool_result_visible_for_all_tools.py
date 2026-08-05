@@ -90,7 +90,6 @@ class TestFinishStillSuppressed:
         console.print("done", type="tool_result", tool_name="finish")
         browser.print("done", type="tool_result", tool_name="finish")
         assert _tool_results(browser) == []
-        # ConsolePrinter must not emit a RESULT rule for finish either.
         assert "RESULT" not in buf.getvalue()
 
 

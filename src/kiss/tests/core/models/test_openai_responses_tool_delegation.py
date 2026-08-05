@@ -51,10 +51,6 @@ import pytest
 from kiss.core.models.model import Attachment
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
 
-# ---------------------------------------------------------------------------
-# Capture server: serves both /chat/completions and /responses.
-# ---------------------------------------------------------------------------
-
 
 def _chat_response_json(text: str = "chat-ok") -> bytes:
     """Return a minimal /v1/chat/completions non-streaming JSON body."""
@@ -218,7 +214,6 @@ class _DelegationHandler(BaseHTTPRequestHandler):
     """Captures POST bodies; serves /chat/completions and /responses."""
 
     captured_requests: list[dict[str, Any]] = []
-    # FIFO of scripted /responses bodies; empty -> default text body.
     responses_queue: list[bytes] = []
 
     def do_POST(self) -> None:
@@ -234,7 +229,7 @@ class _DelegationHandler(BaseHTTPRequestHandler):
         if self.path.endswith("/chat/completions"):
             payload = _chat_response_json()
             content_type = "application/json"
-        else:  # /responses
+        else:
             if self.__class__.responses_queue:
                 payload = self.__class__.responses_queue.pop(0)
             elif streaming:
@@ -322,7 +317,6 @@ class TestReasoningEffortPreservedWithTools:
         assert body["reasoning"]["effort"] == "xhigh"
         assert "reasoning_effort" not in body
         assert "use_responses_api" not in body
-        # Tools must be in the flat Responses shape.
         assert body["tools"][0]["type"] == "function"
         assert body["tools"][0]["name"] == "echo"
         assert function_calls == [
@@ -386,7 +380,7 @@ class TestFollowUpTurns:
         types = [
             it.get("type") for it in body["input"] if isinstance(it, dict)
         ]
-        assert "reasoning" in types  # raw reasoning item replayed verbatim
+        assert "reasoning" in types
         fc = next(it for it in body["input"] if it.get("type") == "function_call")
         assert fc["call_id"] == "call_abc"
         assert fc["id"] == "fc_1"
@@ -395,7 +389,6 @@ class TestFollowUpTurns:
         )
         assert out["call_id"] == "call_abc"
         assert out["output"].startswith("hello")
-        # The original user prompt is still present as a message item.
         user = next(
             it
             for it in body["input"]
@@ -420,7 +413,6 @@ class TestFollowUpTurns:
             if isinstance(it, dict) and it.get("role") == "system"
         )
         assert system["content"] == "be terse"
-        # Not duplicated via the top-level ``instructions`` field.
         assert not body.get("instructions")
 
 
@@ -592,7 +584,6 @@ class TestUsageExtraction:
         _DelegationHandler.responses_queue = [_responses_text_json()]
         _, _, response = m.generate_and_process_with_tools({"echo": echo})
         counts = m.extract_input_output_token_counts_from_response(response)
-        # input_tokens=10 with 4 cached -> (6, 6, 4, 0)
         assert counts == (6, 6, 4, 0)
 
     def test_chat_usage_still_extracted(self, capture_server: str) -> None:
@@ -601,7 +592,7 @@ class TestUsageExtraction:
         m.initialize("hi")
         _DelegationHandler.responses_queue = [_responses_text_json()]
         m.generate_and_process_with_tools({"echo": echo})
-        _, response = m.generate()  # chat.completions path
+        _, response = m.generate()
         counts = m.extract_input_output_token_counts_from_response(response)
         assert counts == (7, 3, 0, 0)
 

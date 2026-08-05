@@ -5,8 +5,9 @@
 """Integration tests: the settings-panel "Server reset" button.
 
 The chat webview's "Server reset" button (next to "Update") posts a
-``serverReset`` command.  ``RemoteAccessServer._dispatch_client_command``
-routes it to :meth:`RemoteAccessServer._handle_server_reset`, which
+``serverReset`` command.  The server API
+(:meth:`kiss.server.sorcar.ServerApi.server_reset`) routes it to
+:meth:`RemoteAccessServer._handle_server_reset`, which
 broadcasts a ``notification`` acknowledgement to the requesting window
 and then schedules a ``SIGTERM`` to its own process so the supervising
 LaunchAgent / systemd unit respawns a fresh daemon.
@@ -80,10 +81,6 @@ class TestServerReset(IsolatedAsyncioTestCase):
             url_file=Path(self.tmpdir) / "remote-url.json",
             uds_path=self.uds_path,
         )
-        # Replace the self-SIGTERM trigger with a recorder so the test
-        # process is never killed.  ``_handle_server_reset`` calls
-        # ``self._trigger_server_reset`` — an instance attribute shadows
-        # the bound method.
         self._reset_fired = asyncio.Event()
 
         def _record_reset() -> None:
@@ -151,12 +148,8 @@ class TestServerReset(IsolatedAsyncioTestCase):
         self.assertEqual(notification.get("id"), "server-reset-restarting")
         self.assertEqual(notification.get("severity"), "info")
         self.assertIn("restart", str(notification["message"]).lower())
-        # The user requested a top-right notification, not a chat-output
-        # ``notice`` note — guard against accidental regressions.
         self.assertNotEqual(notification.get("type"), "notice")
 
-        # The restart trigger is scheduled via ``call_later`` and must
-        # fire shortly after the acknowledgement.
         await asyncio.wait_for(self._reset_fired.wait(), timeout=5.0)
         self.assertTrue(self._reset_fired.is_set())
 
@@ -169,16 +162,12 @@ class TestServerReset(IsolatedAsyncioTestCase):
 
         await self._send(writer_a, {"type": "serverReset"})
 
-        # Window A receives the notification.
         await self._drain_until(
             reader_a,
             lambda m: m.get("type") == "notification"
             and "web server" in str(m.get("message", "")).lower(),
         )
 
-        # Window B must NOT receive the notification.  Probe B with an
-        # ``activeTasksQuery`` (answered directly, bypassing broadcast)
-        # and assert no reset notification arrived ahead of the response.
         await self._send(writer_b, {"type": "activeTasksQuery"})
         seen_notification = False
 
@@ -206,7 +195,6 @@ class TestServerReset(IsolatedAsyncioTestCase):
         therefore silently drops the post-restart toast.
         """
         flag_path = self.server._server_reset_flag_path()
-        # Sanity: clean slate before the request.
         self.assertFalse(flag_path.exists())
 
         reader, writer = await self._connect()
@@ -252,8 +240,6 @@ class TestServerResetComplete(IsolatedAsyncioTestCase):
         self.port = _find_free_port()
         self.url_file = Path(self.tmpdir) / "remote-url.json"
 
-        # Pre-create the flag file BEFORE start_async so the
-        # freshly-bound server discovers it during _setup_server.
         flag_path = Path(self.tmpdir) / "server-reset-pending.json"
         flag_path.write_text(
             json.dumps({"requested_at": 0.0, "conn_id": ""}),
@@ -261,9 +247,6 @@ class TestServerResetComplete(IsolatedAsyncioTestCase):
         )
         self.flag_path = flag_path
 
-        # Shrink the post-restart delay so the test does not wait
-        # the full production window.  Stashed and restored in
-        # tearDown so other tests see the production value.
         self._saved_delay = web_server_mod._SERVER_RESET_COMPLETE_DELAY
         web_server_mod._SERVER_RESET_COMPLETE_DELAY = 0.1
 
@@ -321,9 +304,6 @@ class TestServerResetComplete(IsolatedAsyncioTestCase):
         self,
     ) -> None:
         """Flag file at startup ⇒ broadcast "Server restart complete"."""
-        # The flag must be consumed eagerly at startup so a *second*
-        # restart that crashes (no flag written) never replays the
-        # toast.
         self.assertFalse(
             self.flag_path.exists(),
             "_setup_server must delete the pending-reset flag eagerly",
@@ -340,8 +320,6 @@ class TestServerResetComplete(IsolatedAsyncioTestCase):
             "restart complete",
             str(notification.get("message", "")).lower(),
         )
-        # Top-right toast, not a chat-output banner — guard against
-        # accidental regression.
         self.assertNotEqual(notification.get("type"), "notice")
 
     async def test_complete_notification_reaches_every_window(
@@ -368,9 +346,6 @@ class TestServerResetComplete(IsolatedAsyncioTestCase):
             lambda m: m.get("type") == "notification"
             and m.get("id") == "server-reset-complete",
         )
-        # The broadcast must not be stamped with a ``connId`` —
-        # otherwise WebPrinter.broadcast would route it to a single
-        # connection and the other window would miss it.
         self.assertNotIn("connId", notif_a)
         self.assertNotIn("connId", notif_b)
 
@@ -432,10 +407,6 @@ class TestServerResetCompleteSuppressed(IsolatedAsyncioTestCase):
         )
         self._writers.append(writer)
 
-        # Wait well past the (shrunk) delay so a missed scheduling
-        # would have surfaced by now.  Use ``activeTasksQuery`` as
-        # a probe: its reply is direct (bypasses broadcast) and
-        # arrives after every queued startup broadcast would have.
         await asyncio.sleep(0.5)
         writer.write(
             json.dumps({"type": "activeTasksQuery"}).encode("utf-8") + b"\n",

@@ -2,36 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end tests for the EAGER "Thoughts" panel feature.
-//
-// REQUIREMENT: As soon as the agent has finished a tool call and got its
-// result (``tool_result``) — i.e. before the tool response / queued user
-// message is sent back to the model — the chat webview must immediately
-// append a new "Thoughts" ``.llm-panel`` to the transcript with a live
-// ``.panel-time`` footer ticking from its creation, exactly like the
-// other chat panels.  Later, when thought tokens stream from the model
-// (``thinking_start``/``thinking_delta``), they must land inside that
-// SAME panel (no second panel is created and the step count increments
-// exactly once).
-//
-// Additional invariants covered:
-//   * the eager panel is provisional: when the model's turn continues
-//     with ANOTHER tool call before any thinking/text (parallel tool
-//     calls in one turn), the still-empty panel is removed again so the
-//     transcript is not littered with empty Thoughts panels;
-//   * no eager panel is created after the ``finish`` tool's result;
-//   * the eager panel's footer keeps ticking while waiting for the
-//     model and its final value covers the waiting time;
-//   * the same behavior holds for background (non-active) tabs whose
-//     events stream into the tab's saved output fragment.
-//
-// Before the fix, the Thoughts panel is only created when the first
-// thinking/text token arrives, so these tests fail.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/thoughtPanelEagerToolResult.test.js
 
 'use strict';
 
@@ -42,12 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom window running the production chat webview: the real
- * ``chat.html`` body (placeholders blanked), ``panelCopy.js`` and
- * ``main.js`` evaluated in the window, and a recording
- * ``acquireVsCodeApi`` stub (the only host API the webview has).
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -64,7 +28,6 @@ function makeWebview() {
   win.Element.prototype.scrollIntoView = function () {};
   win.Element.prototype.scrollTo = function () {};
   win.HTMLElement.prototype.scrollTo = function () {};
-  // Synchronous rAF so streamed thinking/text deltas flush immediately.
   win.requestAnimationFrame = function (cb) {
     cb();
     return 0;
@@ -84,22 +47,22 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
 
-/** Dispatch a backend→webview event exactly like the extension does. */
 function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** Sleep for ``ms`` real milliseconds. */
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-/** Parse the textContent of a ``.panel-time`` footer into milliseconds. */
 function parsePanelTimeMs(text) {
   const t = String(text || '').trim();
   let m = t.match(/^(\d+)m\s+(\d+(?:\.\d+)?)s$/);
@@ -111,27 +74,19 @@ function parsePanelTimeMs(text) {
   return NaN;
 }
 
-/** All ``.llm-panel`` Thoughts panels under a root node. */
 function llmPanels(root) {
   return root.querySelectorAll('.llm-panel');
 }
 
-/** The single direct-child ``.panel-time`` footer of a panel (or null). */
 function panelFooter(panel) {
   const footers = panel.querySelectorAll(':scope > .panel-time');
   return footers.length === 1 ? footers[0] : null;
 }
 
-/** Steps metric text of the active tab's status bar. */
 function stepsText(win) {
   return win.document.getElementById('status-steps').textContent;
 }
 
-// ---------------------------------------------------------------------------
-// Test 1: the Thoughts panel appears EAGERLY right after tool_result —
-// before any thinking token — with a live ticking .panel-time footer,
-// and the later thinking tokens stream into that SAME panel.
-// ---------------------------------------------------------------------------
 async function testEagerPanelAfterToolResult() {
   const wv = makeWebview();
   const win = wv.win;
@@ -143,7 +98,6 @@ async function testEagerPanelAfterToolResult() {
   send(win, {type: 'clear', chat_id: 'chat-eager', tabId: TAB});
   send(win, {type: 'status', running: true, tabId: TAB, startTs: Date.now()});
 
-  // Turn 1: thinking then one tool call.
   send(win, {type: 'thinking_start', tabId: TAB});
   send(win, {type: 'thinking_delta', text: 'Plan: run ls.', tabId: TAB});
   send(win, {type: 'thinking_end', tabId: TAB});
@@ -168,8 +122,6 @@ async function testEagerPanelAfterToolResult() {
     tabId: TAB,
   });
 
-  // EAGER: the moment the tool result lands — before any thinking
-  // token — a fresh Thoughts panel must already be in the transcript.
   let panels = llmPanels(output);
   assert.strictEqual(
     panels.length,
@@ -183,13 +135,11 @@ async function testEagerPanelAfterToolResult() {
     eager.querySelector('.llm-panel-hdr'),
     'eager panel must carry the Thoughts header',
   );
-  // It must be the LAST transcript entry (after the tool-result panel).
   assert.strictEqual(
     output.lastElementChild,
     eager,
     'the eager Thoughts panel must be appended after the tool result',
   );
-  // It must show time-spent-since-start like the other chat panels.
   let footer = panelFooter(eager);
   assert.ok(
     footer,
@@ -202,14 +152,12 @@ async function testEagerPanelAfterToolResult() {
     'eager panel footer must show a parseable duration, got ' +
       JSON.stringify(footer.textContent),
   );
-  // The step counter must NOT advance for the still-empty panel.
   assert.strictEqual(
     stepsText(win),
     'Steps: 1',
     'step count must not advance until model output lands in the panel',
   );
 
-  // The footer keeps ticking while the agent waits for the model.
   await sleep(1150);
   footer = panelFooter(eager);
   const msTicked = parsePanelTimeMs(footer.textContent);
@@ -219,8 +167,6 @@ async function testEagerPanelAfterToolResult() {
       'the model (expected >= 1000ms after 1.15s, got ' + msTicked + 'ms)',
   );
 
-  // Thought tokens now stream from the model: they must land inside the
-  // SAME eager panel — no new panel, step count advances exactly once.
   send(win, {type: 'thinking_start', tabId: TAB});
   send(win, {type: 'thinking_delta', text: 'EAGER-TOKEN-XYZ', tabId: TAB});
   panels = llmPanels(output);
@@ -242,16 +188,12 @@ async function testEagerPanelAfterToolResult() {
       'arrives in the eager panel',
   );
   send(win, {type: 'thinking_end', tabId: TAB});
-  // A second thinking block in the same turn stays in the same panel
-  // and does not double-count the step.
   send(win, {type: 'thinking_start', tabId: TAB});
   send(win, {type: 'thinking_delta', text: 'more', tabId: TAB});
   send(win, {type: 'thinking_end', tabId: TAB});
   assert.strictEqual(llmPanels(output).length, 2);
   assert.strictEqual(stepsText(win), 'Steps: 2');
 
-  // Finish the task: finish tool_call/result + result must not create
-  // any further Thoughts panel.
   send(win, {type: 'tool_call', name: 'finish', tabId: TAB});
   send(win, {type: 'tool_result', content: 'done', tabId: TAB});
   assert.strictEqual(
@@ -263,9 +205,6 @@ async function testEagerPanelAfterToolResult() {
   send(win, {type: 'result', success: true, summary: 'ok', tabId: TAB});
   assert.strictEqual(llmPanels(output).length, 2);
 
-  // The eager panel was finalized at the finish tool_call: its footer
-  // must be frozen at a duration covering the >= 1.15s model wait and
-  // sit as the LAST child of the panel.
   footer = panelFooter(eager);
   const msFinal = parsePanelTimeMs(footer.textContent);
   assert.ok(
@@ -281,12 +220,6 @@ async function testEagerPanelAfterToolResult() {
   win.close();
 }
 
-// ---------------------------------------------------------------------------
-// Test 2: parallel tool calls — the eager panel opened by the first
-// tool_result is PROVISIONAL: the next tool_call (no thinking between)
-// must remove the still-empty panel again, leaving no empty Thoughts
-// panels and an unchanged step count.
-// ---------------------------------------------------------------------------
 async function testProvisionalPanelRemovedOnNextToolCall() {
   const wv = makeWebview();
   const win = wv.win;
@@ -308,8 +241,6 @@ async function testProvisionalPanelRemovedOnNextToolCall() {
     'first tool_result must open an eager Thoughts panel',
   );
 
-  // Second parallel tool call arrives with no thinking in between: the
-  // empty provisional panel must disappear.
   send(win, {type: 'tool_call', name: 'Read', file_path: '/x', tabId: TAB});
   assert.strictEqual(
     llmPanels(output).length,
@@ -329,7 +260,6 @@ async function testProvisionalPanelRemovedOnNextToolCall() {
     'the second tool_result must open a fresh eager Thoughts panel',
   );
 
-  // Model output fills the fresh panel.
   send(win, {type: 'thinking_start', tabId: TAB});
   send(win, {type: 'thinking_delta', text: 'SECOND-TURN-TOK', tabId: TAB});
   send(win, {type: 'thinking_end', tabId: TAB});
@@ -338,7 +268,6 @@ async function testProvisionalPanelRemovedOnNextToolCall() {
   assert.ok(panels[1].textContent.includes('SECOND-TURN-TOK'));
   assert.strictEqual(stepsText(win), 'Steps: 2');
 
-  // No empty Thoughts panel may remain anywhere in the transcript.
   for (const p of panels) {
     assert.ok(
       p.querySelector('.think, .txt'),
@@ -353,10 +282,6 @@ async function testProvisionalPanelRemovedOnNextToolCall() {
   win.close();
 }
 
-// ---------------------------------------------------------------------------
-// Test 3: text_delta (a model turn with no thinking block) also fills
-// the eager panel — same panel, one step increment.
-// ---------------------------------------------------------------------------
 async function testTextDeltaFillsEagerPanel() {
   const wv = makeWebview();
   const win = wv.win;
@@ -399,23 +324,16 @@ async function testTextDeltaFillsEagerPanel() {
   win.close();
 }
 
-// ---------------------------------------------------------------------------
-// Test 4: background tab — the same eager/provisional behavior must
-// apply to events routed into a non-active tab's output fragment, and
-// the panels must survive switching back to the tab.
-// ---------------------------------------------------------------------------
 async function testEagerPanelBackgroundTab() {
   const wv = makeWebview();
   const win = wv.win;
-  const api = win._demoApi;
+  const api = win._testApi;
   const tab1 = api.getActiveTabId();
 
-  // Open a second tab so tab1 becomes a background tab.
   api.createNewTab();
   const tab2 = api.getActiveTabId();
   assert.ok(tab2 && tab2 !== tab1, 'a fresh second tab must be active');
 
-  // Tab1's task streams while the user looks at tab2.
   send(win, {type: 'clear', chat_id: 'chat-bg', tabId: tab1});
   send(win, {type: 'status', running: true, tabId: tab1, startTs: Date.now()});
   send(win, {type: 'thinking_start', tabId: tab1});
@@ -423,28 +341,21 @@ async function testEagerPanelBackgroundTab() {
   send(win, {type: 'thinking_end', tabId: tab1});
   send(win, {type: 'tool_call', name: 'Bash', command: 'ls', tabId: tab1});
   send(win, {type: 'tool_result', content: 'x\n', tabId: tab1});
-  // Parallel second tool call: provisional bg panel removed again.
   send(win, {type: 'tool_call', name: 'Read', file_path: '/y', tabId: tab1});
   send(win, {type: 'tool_result', content: 'y-content', tabId: tab1});
-  // Model output fills the eager bg panel.
   send(win, {type: 'thinking_start', tabId: tab1});
   send(win, {type: 'thinking_delta', text: 'BG-EAGER-TOK', tabId: tab1});
   send(win, {type: 'thinking_end', tabId: tab1});
-  // finish tool's result must not open a bg panel.
   send(win, {type: 'tool_call', name: 'finish', tabId: tab1});
   send(win, {type: 'tool_result', content: 'done', tabId: tab1});
   send(win, {type: 'result', success: true, summary: 'ok', tabId: tab1});
 
-  // Nothing may leak into the ACTIVE tab.
   const activeOut = win.document.getElementById('output');
   assert.ok(
     !activeOut.textContent.includes('BG-EAGER-TOK'),
     'background-tab events must not render in the active tab',
   );
 
-  // Switch back to tab1: exactly two Thoughts panels (no empty
-  // provisional leftovers), the second contains the streamed tokens
-  // and a .panel-time footer.
   const tabEl = win.document.querySelector('.chat-tab[data-tab-id="' + tab1 + '"]');
   assert.ok(tabEl, 'tab1 element must exist in the tab bar');
   tabEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
@@ -478,14 +389,10 @@ async function testEagerPanelBackgroundTab() {
   win.close();
 }
 
-// ---------------------------------------------------------------------------
-// Test 5: eager panel created mid-stream survives a tab switch away and
-// back while still provisional, and the later thinking fills it.
-// ---------------------------------------------------------------------------
 async function testEagerPanelSurvivesTabSwitch() {
   const wv = makeWebview();
   const win = wv.win;
-  const api = win._demoApi;
+  const api = win._testApi;
   const tab1 = api.getActiveTabId();
   const output = win.document.getElementById('output');
 
@@ -498,7 +405,6 @@ async function testEagerPanelSurvivesTabSwitch() {
   send(win, {type: 'tool_result', content: 'z\n', tabId: tab1});
   assert.strictEqual(llmPanels(output).length, 2);
 
-  // Switch away (tab2) and back while the eager panel is provisional.
   api.createNewTab();
   const backEl = win.document.querySelector('.chat-tab[data-tab-id="' + tab1 + '"]');
   backEl.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
@@ -508,7 +414,6 @@ async function testEagerPanelSurvivesTabSwitch() {
     'the provisional eager panel must survive a tab switch',
   );
 
-  // Thinking streamed after the round-trip still fills the SAME panel.
   send(win, {type: 'thinking_start', tabId: tab1});
   send(win, {type: 'thinking_delta', text: 'AFTER-SWITCH-TOK', tabId: tab1});
   send(win, {type: 'thinking_end', tabId: tab1});
@@ -522,16 +427,10 @@ async function testEagerPanelSurvivesTabSwitch() {
   win.close();
 }
 
-// ---------------------------------------------------------------------------
-// Test 6: an eager panel still waiting for the model must RESUME live
-// footer ticking after the user switches away and back — the shared
-// 1s ticker prunes detached panels while the tab is in the background,
-// so the restore path must re-register still-active stamped panels.
-// ---------------------------------------------------------------------------
 async function testEagerPanelFooterTicksAfterTabRestore() {
   const wv = makeWebview();
   const win = wv.win;
-  const api = win._demoApi;
+  const api = win._testApi;
   const tab1 = api.getActiveTabId();
 
   send(win, {type: 'clear', chat_id: 'chat-tick-restore', tabId: tab1});
@@ -542,12 +441,9 @@ async function testEagerPanelFooterTicksAfterTabRestore() {
   send(win, {type: 'tool_call', name: 'Bash', command: 'ls', tabId: tab1});
   send(win, {type: 'tool_result', content: 'w\n', tabId: tab1});
 
-  // Switch away: tab1's DOM is detached into its fragment; the 1s
-  // ticker prunes the (disconnected) eager panel on its next tick.
   api.createNewTab();
   await sleep(1150);
 
-  // Switch back while the eager panel is STILL waiting for the model.
   const backEl = win.document.querySelector(
     '.chat-tab[data-tab-id="' + tab1 + '"]',
   );
@@ -556,8 +452,6 @@ async function testEagerPanelFooterTicksAfterTabRestore() {
   const eager = llmPanels(output)[1];
   assert.ok(eager, 'eager panel must survive the tab round-trip');
 
-  // The footer must resume ticking: after ~1.2s more it must show at
-  // least ~2s of accumulated waiting time (stamped before the switch).
   await sleep(1250);
   const footer = panelFooter(eager);
   assert.ok(footer, 'restored eager panel must still have a footer');
@@ -570,7 +464,6 @@ async function testEagerPanelFooterTicksAfterTabRestore() {
       're-registered it)',
   );
 
-  // Sanity: the panel still fills and finalizes normally afterwards.
   send(win, {type: 'thinking_start', tabId: tab1});
   send(win, {type: 'thinking_delta', text: 'RESUMED-TOK', tabId: tab1});
   send(win, {type: 'thinking_end', tabId: tab1});
@@ -581,11 +474,6 @@ async function testEagerPanelFooterTicksAfterTabRestore() {
   win.close();
 }
 
-// ---------------------------------------------------------------------------
-// Test 7: stopping the task while the eager panel is still waiting for
-// the model must DISCARD the empty provisional panel (no empty panel
-// ticking forever), and a later resumed stream gets a fresh panel.
-// ---------------------------------------------------------------------------
 async function testProvisionalPanelDiscardedOnTaskStop() {
   const wv = makeWebview();
   const win = wv.win;
@@ -601,7 +489,6 @@ async function testProvisionalPanelDiscardedOnTaskStop() {
   send(win, {type: 'tool_result', content: 'q\n', tabId: TAB});
   assert.strictEqual(llmPanels(output).length, 2);
 
-  // User clicks Stop while the agent waits for the model.
   send(win, {type: 'task_stopped', tabId: TAB});
   assert.strictEqual(
     llmPanels(output).length,
@@ -610,7 +497,6 @@ async function testProvisionalPanelDiscardedOnTaskStop() {
       'Thoughts panel instead of leaving it ticking forever',
   );
 
-  // A resumed/reattached stream later must open a fresh panel.
   send(win, {type: 'status', running: true, tabId: TAB, startTs: Date.now()});
   send(win, {type: 'thinking_start', tabId: TAB});
   send(win, {type: 'thinking_delta', text: 'RESUME-TOK', tabId: TAB});
@@ -625,20 +511,13 @@ async function testProvisionalPanelDiscardedOnTaskStop() {
   win.close();
 }
 
-// ---------------------------------------------------------------------------
-// Test 8: task end (stopped/error/interrupted) freezes a FILLED open
-// panel's footer, and a background tab's provisional panel is also
-// discarded when its task stops.
-// ---------------------------------------------------------------------------
 async function testTaskEndFreezesFilledPanelAndCleansBgTab() {
   const wv = makeWebview();
   const win = wv.win;
-  const api = win._demoApi;
+  const api = win._testApi;
   const tab1 = api.getActiveTabId();
   const output = win.document.getElementById('output');
 
-  // Active tab: a FILLED Thoughts panel is open when the task errors —
-  // its footer must freeze (finalized, not discarded).
   send(win, {type: 'clear', chat_id: 'chat-end', tabId: tab1});
   send(win, {type: 'status', running: true, tabId: tab1, startTs: Date.now()});
   send(win, {type: 'thinking_start', tabId: tab1});
@@ -658,7 +537,6 @@ async function testTaskEndFreezesFilledPanelAndCleansBgTab() {
       frozenMs + 'ms to ' + laterMs + 'ms)',
   );
 
-  // Background tab: provisional panel discarded on task_stopped.
   api.createNewTab();
   send(win, {type: 'clear', chat_id: 'chat-bg-stop', tabId: tab1});
   send(win, {type: 'status', running: true, tabId: tab1, startTs: Date.now()});

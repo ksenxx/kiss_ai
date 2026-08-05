@@ -57,15 +57,6 @@ from kiss.agents.sorcar.persistence import _default_kiss_dir
 
 logger = logging.getLogger(__name__)
 
-# ``---\n<yaml>\n---`` frontmatter block at the very start of the file.
-# Shared with custom_commands.py via :func:`parse_frontmatter`.
-# The YAML part is matched line-wise (``(?:.*\n)*?`` — zero or more
-# whole lines, non-greedy) so an EMPTY block (``---\n---\n``, legal in
-# every frontmatter dialect) is stripped too; the old ``\n(.*?)\n``
-# shape required at least one line between the markers and leaked the
-# literal ``---`` lines into the body.  The closing marker must start
-# at a line boundary; ``[^\S\n]*`` (whitespace except newline) allows
-# trailing spaces / a stray ``\r`` without swallowing following lines.
 _FRONTMATTER_RE = re.compile(r"\A---[^\S\n]*\n((?:.*\n)*?)---[^\S\n]*\n?")
 
 
@@ -101,10 +92,8 @@ def parse_frontmatter(path: Path) -> tuple[dict[str, Any], str] | None:
         the file is unreadable.
     """
     try:
-        # utf-8-sig drops a leading BOM (common in Windows-authored
-        # files) that would otherwise defeat the \A frontmatter match.
         text = path.read_text(encoding="utf-8-sig")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         logger.debug("unreadable definition file: %s", path, exc_info=True)
         return None
     meta: dict[str, Any] = {}
@@ -135,10 +124,8 @@ def collapse_whitespace(value: object) -> str:
     """
     return " ".join(str(value or "").split())
 
-# Maximum number of bundled resource files listed on activation.
 _MAX_RESOURCE_LISTING = 50
 
-# Directory names never listed as skill resources.
 _RESOURCE_SKIP_DIRS = {".git", "node_modules", "__pycache__"}
 
 
@@ -221,12 +208,8 @@ def _parse_skill_file(path: Path, name: str, source: str) -> Skill | None:
     if parsed is None:
         return None
     meta, body = parsed
-    # Collapse all whitespace (a YAML block scalar may span lines) so
-    # the description is the one-line summary the catalog and the
-    # /skills listing require.
     description = collapse_whitespace(meta.get("description", ""))
     if not description:
-        # Claude Code falls back to the first paragraph of the body.
         first_paragraph = body.strip().split("\n\n", 1)[0]
         description = collapse_whitespace(first_paragraph)
     if not description:
@@ -432,13 +415,11 @@ def load_skill_content(skill: Skill) -> str:
     """
     try:
         text = Path(skill.path).read_text(encoding="utf-8-sig")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return f"Error: skill file is no longer readable: {skill.path}"
     match = _FRONTMATTER_RE.match(text)
     body = text[match.end():].strip() if match else text.strip()
     skill_dir = skill.directory
-    # Escape the name exactly like the catalog does (attribute context
-    # additionally needs the double quote escaped).
     escaped_name = xml_escape(skill.name, {'"': "&quot;"})
     parts = [f'<skill_content name="{escaped_name}">', body, ""]
     parts.append(f"Skill directory: {skill_dir}")
@@ -482,8 +463,6 @@ def make_skill_tool(work_dir: str) -> Callable[[str], str] | None:
         return None
 
     def skill(name: str) -> str:
-        # The real docstring is assigned dynamically below so it can
-        # embed the discovered skill catalog.
         current = discover_skills(work_dir)
         found = current.get(name)
         if found is None:

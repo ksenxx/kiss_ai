@@ -19,7 +19,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from kiss.core.relentless_agent import (
+from kiss.agents.sorcar.relentless_agent import (
     IMPORTANT_INSTRUCTIONS,
     RelentlessAgent,
 )
@@ -108,7 +108,6 @@ class TestImportantInstructionsRendering(unittest.TestCase):
         """The real worktree path must appear in IMPORTANT_INSTRUCTIONS."""
         wt = "/Users/x/repo/.kiss-worktrees/kiss_wt-abc-123"
         rendered = IMPORTANT_INSTRUCTIONS.format(
-            step_threshold="98",
             work_dir=wt,
             current_pid="1",
         )
@@ -164,7 +163,6 @@ class TestPwdConsistencyEndToEnd(unittest.TestCase):
             wt_dir = repo / ".kiss-worktrees" / "kiss_wt-abc123-1234567890"
             wt_dir.mkdir(parents=True)
             sp = self._run_with_work_dir(str(wt_dir))
-        # The real worktree path must appear in the prompt.
         self.assertIn(str(wt_dir.resolve()), sp)
         self.assertIn(".kiss-worktrees", sp)
         self.assertIn("kiss_wt-abc123-1234567890", sp)

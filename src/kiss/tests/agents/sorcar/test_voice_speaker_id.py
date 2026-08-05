@@ -35,6 +35,8 @@ import wave
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from kiss.server.voice_wake import (
     SAMPLE_RATE,
     SpeakerRegistry,
@@ -111,7 +113,6 @@ def _two_english_voices() -> tuple[str, str] | None:
     voices = subprocess.run(
         ["say", "-v", "?"], capture_output=True, text=True, check=True,
     ).stdout
-    # Prefer well-known voices with very different timbre.
     preferred = ["Samantha", "Daniel", "Karen", "Moira", "Rishi", "Alex",
                  "Fred", "Tessa"]
     installed = []
@@ -136,18 +137,14 @@ class TestSpeakerRegistry(unittest.TestCase):
     def test_distinct_voice_gets_next_number(self) -> None:
         registry = SpeakerRegistry()
         self.assertEqual(registry.identify([1.0, 0.0, 0.0]), 1)
-        # Orthogonal vector: cosine distance 1.0 — clearly a new voice.
         self.assertEqual(registry.identify([0.0, 1.0, 0.0]), 2)
-        # A third distinct voice keeps counting up.
         self.assertEqual(registry.identify([0.0, 0.0, 1.0]), 3)
 
     def test_same_voice_keeps_its_number(self) -> None:
         registry = SpeakerRegistry()
         self.assertEqual(registry.identify([1.0, 0.0, 0.0]), 1)
         self.assertEqual(registry.identify([0.0, 1.0, 0.0]), 2)
-        # Nearly identical to speaker 1's embedding (tiny angle).
         self.assertEqual(registry.identify([0.99, 0.01, 0.0]), 1)
-        # And speaker 2 again.
         self.assertEqual(registry.identify([0.01, 0.99, 0.0]), 2)
 
     def test_exact_repeat_embedding_matches(self) -> None:
@@ -159,10 +156,7 @@ class TestSpeakerRegistry(unittest.TestCase):
     def test_zero_vector_is_a_new_speaker_not_a_crash(self) -> None:
         registry = SpeakerRegistry()
         self.assertEqual(registry.identify([1.0, 0.0]), 1)
-        # Degenerate all-zero embedding must not divide by zero; it
-        # cannot match anything, so it becomes a new speaker.
         self.assertEqual(registry.identify([0.0, 0.0]), 2)
-        # And a later real vector still matches its own speaker.
         self.assertEqual(registry.identify([1.0, 0.0]), 1)
 
     def test_empty_vector_is_a_new_speaker_not_a_crash(self) -> None:
@@ -176,7 +170,6 @@ class TestSpeakerRegistry(unittest.TestCase):
 class TestSpeakerIdFromWav(unittest.TestCase):
     """Distinct voices get distinct numbers; repeats keep theirs."""
 
-    # Keyword expected in each utterance's transcript, in spoken order.
     _EXPECTED_KEYWORDS = ("parser", "test", "documentation")
 
     @classmethod
@@ -203,6 +196,7 @@ class TestSpeakerIdFromWav(unittest.TestCase):
                 return f"{keyword!r} not found in transcript {text!r}"
         return None
 
+    @pytest.mark.slow
     def test_two_voices_numbered_in_order_and_repeat_matches(self) -> None:
         pair = _two_english_voices()
         if not pair:
@@ -226,10 +220,6 @@ class TestSpeakerIdFromWav(unittest.TestCase):
             wav = _concat_wavs(
                 tmpdir / "combined.wav", parts, gap_seconds=3.0,
             )
-            # Retry-tolerant against STT hallucinations only (see
-            # _stt_flaked): wake detection and speaker identification
-            # run locally and are asserted strictly on EVERY attempt;
-            # a genuine regression therefore fails all three runs.
             flake_details: list[str] = []
             for _attempt in range(3):
                 proc = _run_listener(wav)
@@ -278,11 +268,6 @@ class TestSpeakerIdFromWav(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, msg=proc.stderr[-2000:])
 
     def test_broken_speaker_model_degrades_to_null_speaker(self) -> None:
-        # A corrupt/unloadable speaker model must not break translation:
-        # the SPEECH payload arrives with speaker null and the failure
-        # is reported on stderr.  The wake model is reused from the
-        # default cache (symlinked), while the spk model directory
-        # exists but is empty, so SpkModel construction fails.
         from kiss.server.voice_wake import (
             DEFAULT_MODELS_DIR,
             MODEL_NAME,
@@ -298,7 +283,7 @@ class TestSpeakerIdFromWav(unittest.TestCase):
             (models_dir / MODEL_NAME).symlink_to(
                 DEFAULT_MODELS_DIR / MODEL_NAME
             )
-            (models_dir / SPK_MODEL_NAME).mkdir()  # empty => load fails
+            (models_dir / SPK_MODEL_NAME).mkdir()
             wake = _tts_wav(tmpdir, "wake", "Sorcar")
             speech = _tts_wav(tmpdir, "speech", "hello world")
             wav = _concat_wavs(

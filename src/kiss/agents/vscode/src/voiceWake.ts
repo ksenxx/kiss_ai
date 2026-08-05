@@ -2,70 +2,28 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-/**
- * Host-side "Sorcar" wake-word listener for the VS Code extension.
- *
- * Extension webviews cannot capture the microphone (VS Code denies
- * ``getUserMedia`` for webview origins), so the always-on listener runs
- * here in the extension host instead: a local Python process
- * (``kiss.server.voice_wake``) streams microphone audio into the
- * lightweight offline Vosk small English model and prints one line per
- * event on stdout:
- *
- * - ``READY``         — model loaded, microphone open, listening.
- * - ``WAKE``          — the wake word "Sorcar" was heard.
- * - ``TRANSCRIBING``  — speech capture ended; the gpt-audio call started.
- * - ``SPEECH <json>`` — the speech that followed the wake word, as a
- *   JSON object ``{"text": <english translation>, "speaker": <int or
- *   null>, "language": <language tag or null>}``; the text and the
- *   spoken language come from a KISS transcription agent, and the
- *   speaker number comes from local voice recognition (each distinct
- *   voice gets a unique number starting from 1).  Legacy plain
- *   JSON-string payloads are also accepted.
- * - ``NO_SPEECH``     — only silence followed the wake word.
- *
- * The service forwards those events to the webview, where voice.js
- * inserts the translated text into the task input and the listener
- * simply keeps running.  Wake-word detection is fully local; only the
- * post-wake utterance is sent to the GPT translation API.
- */
 
 import {spawn, spawnSync, ChildProcess} from 'child_process';
 import {findKissProject, findUvPath} from './kissPaths';
 
-/** Callback invoked whenever the wake word is detected. */
-export type WakeCallback = () => void;
+// A wake and the transcript that answers it carry the same round id. The
+// listener resumes wake detection while the previous utterance is still being
+// transcribed, so rounds overlap and can finish out of order; the id is what
+// lets the webview pair a transcript with the conversation that was on screen
+// when those particular words were spoken.
+export type WakeCallback = (roundId: number) => void;
 
-/** Callback reporting listener state changes to the UI. */
 export type StateCallback = (listening: boolean, error?: string) => void;
 
-/**
- * Callback receiving the English translation of the speech following
- * the wake word ('' when only silence was heard) plus the speaker
- * number assigned by voice recognition — a unique integer starting
- * from 1 per distinct voice — or undefined when identification was
- * unavailable, plus the language tag of the spoken speech (e.g.
- * "en", "fr") reported by the transcription agent, or undefined when
- * the language is unknown.
- */
 export type SpeechCallback = (
+  roundId: number,
   text: string,
   speaker?: number,
   language?: string,
 ) => void;
 
-/**
- * Callback invoked when the post-wake capture ends and the gpt-audio
- * transcription/translation call starts (the UI shows a "transcribing"
- * indicator until the speech or silence result arrives).
- */
 export type TranscribingCallback = () => void;
 
-/**
- * Extra CLI arguments for the Python listener, JSON-encoded in the
- * ``KISS_VOICE_WAKE_ARGS`` environment variable (e.g. ``["--wav",
- * "f.wav"]``).  Used by the end-to-end tests to feed recorded audio.
- */
 function extraListenerArgs(): string[] {
   const raw = process.env.KISS_VOICE_WAKE_ARGS;
   if (!raw) return [];
@@ -74,14 +32,21 @@ function extraListenerArgs(): string[] {
     if (Array.isArray(parsed) && parsed.every(a => typeof a === 'string')) {
       return parsed;
     }
-  } catch {
-    // Malformed override — ignore it.
-  }
+  } catch {}
   return [];
 }
 
 export class VoiceWakeService {
   private _proc: ChildProcess | undefined;
+
+  // Monotonic across the whole session, so a round id is never reused and a
+  // transcript can only ever be paired with the wake it came from.
+  private _roundId: number = 0;
+
+  // The round the listener is currently transcribing. voice_wake prints one
+  // SPEECH/NO_SPEECH per WAKE, in that order, so the id of the last WAKE is
+  // the id the next transcript answers.
+  private _speechRoundId: number = 0;
 
   constructor(
     private readonly _onWake: WakeCallback,
@@ -90,22 +55,10 @@ export class VoiceWakeService {
     private readonly _onTranscribing: TranscribingCallback,
   ) {}
 
-  /** Whether the listener process is currently running. */
   get running(): boolean {
     return this._proc !== undefined;
   }
 
-  /**
-   * Start the wake-word listener process (idempotent).
-   *
-   * Reports failures through the state callback instead of throwing so
-   * the webview toggle always settles into a definite on/off/error
-   * state.
-   *
-   * @param sensitivity Wake-word sensitivity 0..100 (settings-panel
-   *   slider), forwarded to the Python listener as ``--sensitivity``;
-   *   omitted or non-finite values fall back to the listener default.
-   */
   start(sensitivity?: number): void {
     if (this._proc) {
       this._onState(true);
@@ -139,14 +92,6 @@ export class VoiceWakeService {
           ...sensitivityArgs,
           ...extraListenerArgs(),
         ],
-        // On POSIX, ``detached`` puts the listener in its own process
-        // group so stop() can signal the WHOLE tree: killing only the
-        // ``uv run`` wrapper leaves the actual Python child alive as
-        // an orphan still holding the microphone (observed live).
-        // Windows has no negative-PID process-group signal; stop()
-        // uses taskkill /T there, so avoid detached's "keep running
-        // after parent exits" side effect on that platform.  stdio
-        // stays piped, so no unref() — the event loop keeps watching it.
         {
           cwd: kissProject,
           stdio: ['ignore', 'pipe', 'pipe'],
@@ -161,33 +106,26 @@ export class VoiceWakeService {
 
     let stdoutBuf = '';
     proc.stdout?.on('data', (chunk: Buffer) => {
-      if (this._proc !== proc) return; // stale output after stop/restart
+      if (this._proc !== proc) return;
       stdoutBuf += chunk.toString('utf-8');
       let idx = stdoutBuf.indexOf('\n');
       while (idx >= 0) {
         const line = stdoutBuf.slice(0, idx).trim();
         stdoutBuf = stdoutBuf.slice(idx + 1);
-        if (this._proc !== proc) return; // callback may have stopped us
-        if (line === 'WAKE') this._onWake();
-        else if (line === 'READY') this._onState(true);
+        if (this._proc !== proc) return;
+        if (line === 'WAKE') {
+          this._speechRoundId = ++this._roundId;
+          this._onWake(this._speechRoundId);
+        } else if (line === 'READY') this._onState(true);
         else if (line === 'TRANSCRIBING') this._onTranscribing();
-        else if (line === 'NO_SPEECH') this._onSpeech('');
+        else if (line === 'NO_SPEECH') this._onSpeech(this._speechRoundId, '');
         else if (line.startsWith('SPEECH ')) {
-          // Parse first, deliver once: a SPEECH line is the terminal
-          // event of a voice round, and dropping it (as the old code
-          // did for malformed payloads) leaked the webview's round
-          // counter, leaving the mic button blinking yellow after
-          // every later utterance.  A malformed or unusable payload
-          // therefore degrades to an empty terminal instead of no
-          // terminal, and the callback runs outside the try so its
-          // own exceptions are never mistaken for a parse failure.
           let text = '';
           let speaker: number | undefined;
           let language: string | undefined;
           try {
             const payload = JSON.parse(line.slice('SPEECH '.length));
             if (typeof payload === 'string') {
-              // Legacy payload shape: the bare translated text.
               text = payload;
             } else if (
               payload &&
@@ -201,10 +139,8 @@ export class VoiceWakeService {
                 speaker = spk;
               if (typeof lang === 'string' && lang) language = lang;
             }
-          } catch {
-            // Malformed JSON — fall through to the empty terminal.
-          }
-          this._onSpeech(text, speaker, language);
+          } catch {}
+          this._onSpeech(this._speechRoundId, text, speaker, language);
         }
         idx = stdoutBuf.indexOf('\n');
       }
@@ -212,7 +148,6 @@ export class VoiceWakeService {
 
     let stderrTail = '';
     proc.stderr?.on('data', (chunk: Buffer) => {
-      // Keep only the tail; vosk/kaldi are chatty on stderr.
       stderrTail = (stderrTail + chunk.toString('utf-8')).slice(-2000);
     });
 
@@ -224,7 +159,7 @@ export class VoiceWakeService {
     });
 
     proc.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
-      if (this._proc !== proc) return; // superseded or stopped on purpose
+      if (this._proc !== proc) return;
       this._proc = undefined;
       if (code === 0 || (code === null && signal === null)) {
         this._onState(false);
@@ -239,15 +174,6 @@ export class VoiceWakeService {
     });
   }
 
-  /**
-   * Stop the listener process tree (idempotent).
-   *
-   * The listener runs under a ``uv run`` wrapper; signalling only the
-   * wrapper can orphan the Python child, which keeps the microphone
-   * open (observed live).  The process was spawned detached into its
-   * own process group, so the whole tree is killed with one negative-
-   * PID signal, falling back to a plain kill of the wrapper.
-   */
   stop(): void {
     const proc = this._proc;
     this._proc = undefined;
@@ -270,15 +196,12 @@ export class VoiceWakeService {
       } catch {
         try {
           proc.kill();
-        } catch {
-          // Already dead — nothing to do.
-        }
+        } catch {}
       }
     }
     this._onState(false);
   }
 
-  /** Release all resources; the service must not be reused after this. */
   dispose(): void {
     this.stop();
   }

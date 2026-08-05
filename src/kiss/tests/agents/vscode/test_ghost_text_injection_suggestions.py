@@ -61,21 +61,13 @@ class TestGhostTextInjectionSuggestions:
         self._tmpdir = tempfile.mkdtemp()
         kiss_dir = Path(self._tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
-        # Pin the bundled tricks file via the env override so the
-        # daemon reads our fake INJECTIONS.md instead of the package
-        # copy.  ~/.kiss/MY_INJECTION.md is left empty so the user
-        # tricks list is empty and only the bundled fakes appear.
         fake_path = kiss_dir / "fake_INJECTIONS.md"
         fake_path.write_text(_FAKE_INJECTIONS)
-        # Empty MY_INJECTION.md so the auto-seed does not contribute
-        # extra tricks to the prefix-match dictionary.
         (kiss_dir / "MY_INJECTION.md").write_text("")
         self._saved_kiss_home = os.environ.get("KISS_HOME")
         self._saved_kiss_injections = os.environ.get("KISS_INJECTIONS_PATH")
         os.environ["KISS_HOME"] = str(kiss_dir)
         os.environ["KISS_INJECTIONS_PATH"] = str(fake_path)
-        # Isolate the persistence DB so _prefix_match_task can't shadow
-        # the trick lookup with a stray history match.
         self._saved_persistence = (th._DB_PATH, th._db_conn, th._KISS_DIR)
         th._DB_PATH = kiss_dir / "history.db"
         th._db_conn = None
@@ -113,10 +105,6 @@ class TestGhostTextInjectionSuggestions:
             "Expected a ghost suggestion when typing the start of an "
             "INJECTIONS.md trick — got empty string."
         )
-        # Concatenating with the typed text should reproduce the trick
-        # (modulo the one cursor-to-ghost separator space that
-        # clip_autocomplete_suggestion guarantees for identifier-style
-        # queries).
         completed = "Reproduce" + suggestion
         assert completed.strip() == (
             "Reproduce the issue by writing end-to-end test. "
@@ -158,8 +146,6 @@ class TestGhostTextInjectionSuggestions:
     def test_no_trick_suggested_mid_sentence(self) -> None:
         """No trick is offered when the partial sits mid-sentence."""
         server = VSCodeServer()
-        # "please Reproduce" — "Reproduce" is not at a sentence start;
-        # there is no period, question mark, or exclamation before it.
         suggestion = self._ghost_for(server, "please Reproduce")
         assert suggestion == "", (
             f"Expected NO trick suggestion when the matching partial "
@@ -196,8 +182,6 @@ class TestGhostTextInjectionSuggestions:
     def test_trick_suggested_after_newline(self) -> None:
         """A newline counts as a sentence boundary."""
         server = VSCodeServer()
-        # Period + newline is still a sentence boundary because the
-        # newline is whitespace.
         suggestion = self._ghost_for(server, "Done.\nReproduce")
         assert suggestion, (
             "Expected suggestion after '.\\n' — newline is whitespace."
@@ -206,8 +190,6 @@ class TestGhostTextInjectionSuggestions:
     def test_no_trick_when_partial_too_short(self) -> None:
         """A single-character partial is below the 2-char ghost threshold."""
         server = VSCodeServer()
-        # Only one character typed at the start of a sentence — should
-        # not flood the user with a suggestion.
         suggestion = self._ghost_for(server, "R")
         assert suggestion == "", (
             "A single character partial should not trigger a trick "
@@ -217,7 +199,6 @@ class TestGhostTextInjectionSuggestions:
     def test_case_sensitive_match(self) -> None:
         """Matching is case-sensitive (mirrors _prefix_match_task)."""
         server = VSCodeServer()
-        # Lowercase "reproduce" does not match the capitalised trick.
         suggestion = self._ghost_for(server, "reproduce")
         assert suggestion == "", (
             f"Expected case-sensitive matching to reject lowercase "
@@ -232,8 +213,6 @@ class TestGhostTextInjectionSuggestions:
             "Then fix the issue."
         )
         suggestion = self._ghost_for(server, full)
-        # The completed trick has no further continuation — the
-        # partial == full trick means trick[len(partial):] == "".
         assert suggestion == "", (
             f"Expected no suggestion when query already equals trick, "
             f"got {suggestion!r}"

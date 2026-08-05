@@ -2,22 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Early prompt-panel test: the server broadcasts optimistic
-// ``early``-flagged ``system_prompt`` / ``prompt`` events the moment a
-// task is submitted (``_broadcast_early_prompts`` in task_runner.py),
-// so the panels appear immediately instead of seconds later when the
-// inner agent emits the authoritative events.  When the authoritative
-// (non-early) events arrive, the webview must REPLACE the pending
-// early panels in place — never append duplicates.  Later sub-session
-// prompt events (no pending early panel) must still append.
-//
-// Drives the real ``media/main.js`` inside jsdom, exactly like
-// ``bughunt3_warning_event.test.js``.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/promptPanelEarlyReplace.test.js
 
 'use strict';
 
@@ -28,7 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/** Build a jsdom window running the production chat webview. */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -58,12 +41,14 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win};
 }
 
-/** Dispatch a backend→webview event exactly like the extension does. */
 function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
@@ -118,7 +103,6 @@ function testAuthoritativeEventReplacesEarlyPanel() {
   assert.ok(!pr[0].textContent.includes('early USER text'));
   assert.strictEqual(sys[0].dataset.early, undefined);
   assert.strictEqual(pr[0].dataset.early, undefined);
-  // Copy button must reproduce the authoritative markdown.
   assert.strictEqual(pr[0].dataset.rawText, 'authoritative FULL prompt');
   win.close();
   console.log('  ok - authoritative events replace early panels in place');
@@ -147,8 +131,6 @@ function testLaterSessionsStillAppend() {
 function testReplayWithoutEarlyEventsUnchanged() {
   const {win} = makeWebview();
 
-  // Persisted replay streams never contain early events: plain
-  // authoritative events must append exactly as before the fix.
   send(win, {type: 'system_prompt', text: 'replayed SYSTEM'});
   send(win, {type: 'prompt', text: 'replayed PROMPT'});
 

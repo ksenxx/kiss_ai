@@ -39,8 +39,6 @@ class TestCCOpusLiveThinking:
         an empty collapsible "Thinking" bar in the UI.
         """
         printer = JsonPrinter()
-        # Recording is keyed by the thread-local task id (``_task_key``);
-        # ``start_recording`` is a no-op without one.
         printer._thread_local.task_id = "cc-opus-live-thinking"
         printer.start_recording()
 

@@ -23,7 +23,7 @@ from typing import Any
 
 import yaml
 
-from kiss.core.relentless_agent import RelentlessAgent
+from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 
 
 def _auth_error_response() -> dict:
@@ -74,7 +74,6 @@ class TestFirstStepErrorResult:
 
             printer = ConsolePrinter()
 
-            # Track whether print(type="result") is called
             result_events: list[dict[str, Any]] = []
             original_print = printer.print
 
@@ -110,19 +109,16 @@ class TestFirstStepErrorResult:
 
             result = agent.perform_task([noop])
 
-            # Verify YAML result indicates failure
             parsed = yaml.safe_load(result)
             assert isinstance(parsed, dict)
             assert parsed["success"] is False
             assert parsed.get("is_continue", False) is False
 
-            # KEY ASSERTION: printer.print(type="result") must have been called
             assert len(result_events) >= 1, (
                 "Expected at least one result event from the printer, "
                 "but none were printed. This means the webview would show nothing."
             )
             result_content = result_events[0]["content"]
-            # The content should be a YAML string containing success: false
             result_parsed = yaml.safe_load(result_content)
             assert isinstance(result_parsed, dict)
             assert result_parsed["success"] is False

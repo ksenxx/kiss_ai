@@ -103,8 +103,6 @@ def _acquire_lock() -> Any:
         process lifetime so the lock is held until exit.
     """
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    # Open without truncating so a losing contender never clobbers the
-    # PID recorded by the current lock holder.
     fp = LOCK_FILE.open("a+", encoding="utf-8")
     try:
         fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -216,8 +214,6 @@ def _run_sorcar(prompt: str, chat_id: str) -> tuple[str, str]:
     else:
         agent.new_chat()
     full_prompt = prompt + SLACK_FORMATTING_HINT
-    # Launch as a kiss-web registered agent via ``_cmd_run`` so the
-    # task is live-visible / interactable from remote webviews.
     result = run_agent_via_kiss_web(
         agent,
         full_prompt,
@@ -337,8 +333,6 @@ def _poll_once(
         resp.get("messages", []), key=lambda m: float(m.get("ts", "0"))
     )
 
-    # Only process messages newer than the startup watermark so we never
-    # retroactively run old DM history as Sorcar tasks.
     min_ts = float(state.get("min_ts", "0"))
 
     for msg in messages:
@@ -352,10 +346,6 @@ def _poll_once(
         thread_ts = msg.get("thread_ts") or ts
         is_top_level = thread_ts == ts
         if not is_top_level:
-            # ``conversations_history`` only returns top-level messages
-            # of the channel, so reaching here means the parent was
-            # surfaced as ``thread_ts`` on a re-broadcast.  Treat it as
-            # a continuation by polling its thread.
             continue
         if msg.get("reply_count", 0) > 0:
             try:
@@ -398,7 +388,6 @@ def main() -> None:
         logging.exception("Startup failed")
         raise
 
-    # On first run, set a watermark so we only process messages from now on.
     state = _load_state()
     if "min_ts" not in state:
         state["min_ts"] = str(time.time())

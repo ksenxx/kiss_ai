@@ -57,10 +57,7 @@ class TestTunnelRestartKeepsServer(IsolatedAsyncioTestCase):
             url_file=tmp / "remote-url.json",
             uds_path=tmp / "sorcar.sock",
         )
-        # Bind the real HTTPS/WSS + UDS listeners (no tunnel yet).
         await self.server._setup_server()
-        # The watchdog / version-check loops are not needed here and
-        # would otherwise run their own checks during the test.
         for task in (
             self.server._watchdog_task,
             self.server._version_check_task,
@@ -72,8 +69,6 @@ class TestTunnelRestartKeepsServer(IsolatedAsyncioTestCase):
         self.assertIsNotNone(self._ws_server)
         self.assertTrue(self._ws_server.is_serving())
 
-        # Now pretend we are running in tunnel mode so the tunnel
-        # restart paths are active, but never spawn a real cloudflared.
         self.server.use_tunnel = True
         self._start_calls = 0
 
@@ -83,14 +78,9 @@ class TestTunnelRestartKeepsServer(IsolatedAsyncioTestCase):
 
         self.server._start_tunnel = fake_start_tunnel  # type: ignore[method-assign]
 
-        # Keep ntfy.sh posting (network) out of the test.
         self._orig_post = ws_mod._post_url_to_message_board
         ws_mod._post_url_to_message_board = lambda *_a, **_k: None  # type: ignore[assignment]
 
-        # A non-empty remote_password lets the no-process / dead-process
-        # restart branch proceed (it refuses to start a tunnel without
-        # one).  Patch the loader so the test does not touch the real
-        # ``~/.kiss/config.json``.
         self._orig_load_config = ws_mod.load_config
         ws_mod.load_config = lambda: {"remote_password": "test-pw"}  # type: ignore[assignment]
 
@@ -145,9 +135,7 @@ class TestTunnelRestartKeepsServer(IsolatedAsyncioTestCase):
 
         await self.server._check_and_restart_tunnel()
 
-        # Tunnel was restarted (fresh cloudflared) ...
         self.assertGreaterEqual(self._start_calls, 1)
-        # ... but the WSS server was untouched.
         self._assert_server_alive()
 
     async def test_deregistered_force_restart_keeps_server(self) -> None:
@@ -168,9 +156,7 @@ class TestTunnelRestartKeepsServer(IsolatedAsyncioTestCase):
         finally:
             ws_mod._probe_tunnel_ready = orig_probe  # type: ignore[assignment]
 
-        # The force-restart fired (cloudflared killed + respawned) ...
         self.assertIsNotNone(proc.poll())
         self.assertGreaterEqual(self._start_calls, 1)
         self.assertEqual(self.server._tunnel_force_restart_count, 1)
-        # ... and the WSS server stayed up the whole time.
         self._assert_server_alive()

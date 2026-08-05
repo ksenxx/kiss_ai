@@ -78,10 +78,6 @@ def kiss_db(tmp_path: Path):
     th._DB_PATH, th._db_conn, th._KISS_DIR, vc.CONFIG_DIR = saved
 
 
-# ---------------------------------------------------------------------------
-# (A) active-file identifier harvesting parity
-# ---------------------------------------------------------------------------
-
 _SAMPLE_SOURCE = (
     "alpha_one = compute_total(alpha_two)\n"
     "self.alpha_helper_long = os.path.join(base, name)\n"
@@ -98,7 +94,6 @@ def test_identifier_harvest_parity_daemon_vs_cli(
     query = "please rename alpha"
     partial = "alpha"
 
-    # Daemon surface: all matches, longest first.
     daemon_matches = _AutocompleteMixin._active_file_identifier_matches(
         _AutocompleteMixin(), query, snapshot_file=str(src),
     )
@@ -107,19 +102,16 @@ def test_identifier_harvest_parity_daemon_vs_cli(
     }
     assert daemon_matches == sorted(daemon_matches, key=lambda c: (-len(c), c))
 
-    # Shared harvesting core produces the identical candidate set.
     assert set(identifier_prefix_matches(_SAMPLE_SOURCE, partial)) == set(
         daemon_matches
     )
 
-    # CLI surface: the single longest suffix, clipped for one line.
     completer = CliCompleter(str(tmp_path), active_file=str(src))
     suffix = completer._active_file_suffix(query)
     longest = max(daemon_matches, key=len)
     assert suffix == clip_autocomplete_suggestion(
         query, longest[len(partial):],
     )
-    # And the predictive whole-line candidate splices it onto the query.
     assert completer._predictive_matches(query) == [query + suffix]
 
 
@@ -146,36 +138,25 @@ def test_identifier_harvest_edge_cases(tmp_path: Path, kiss_db) -> None:
     src = tmp_path / "sample.py"
     src.write_text(_SAMPLE_SOURCE, encoding="utf-8")
     completer = CliCompleter(str(tmp_path), active_file=str(src))
-    # Trailing token shorter than 2 chars.
     assert trailing_identifier("x") == ""
     assert completer._active_file_suffix("a") == ""
-    # Query not ending in an identifier.
     assert trailing_identifier("hello ") == ""
     assert _AutocompleteMixin._active_file_identifier_matches(
         _AutocompleteMixin(), "hello ", snapshot_file=str(src),
     ) == []
-    # Python's ``$`` regex anchor also matches before a final newline.
-    # The cursor is actually on a fresh line, so neither surface may
-    # complete the identifier from the preceding line.
     newline_query = "please use os.pa\n"
     assert trailing_identifier(newline_query) == ""
     assert _AutocompleteMixin._active_file_identifier_matches(
         _AutocompleteMixin(), newline_query, snapshot_file=str(src),
     ) == []
     assert completer._active_file_suffix(newline_query) == ""
-    # Unreadable file yields no content, hence no matches.
     assert read_active_file_head(str(tmp_path / "missing.py")) == ""
     gone = CliCompleter(str(tmp_path), active_file=str(tmp_path / "gone.py"))
     assert gone._active_file_suffix("please rename alpha") == ""
-    # Non-UTF-8 files are skipped, not raised.
     binary = tmp_path / "blob.bin"
     binary.write_bytes(b"\xff\xfe\x00alpha_bin\x00")
     assert read_active_file_head(str(binary)) == ""
 
-
-# ---------------------------------------------------------------------------
-# (B) /help body single-sourcing
-# ---------------------------------------------------------------------------
 
 def test_print_help_uses_shared_help_text(
     tmp_path: Path, kiss_db, capsys: pytest.CaptureFixture[str],
@@ -194,7 +175,6 @@ def test_help_text_contents(tmp_path: Path, kiss_db) -> None:
         assert f"  {cmd:<10} {desc}" in text
     assert "Input fast-completes (Tab): @path mentions files, " in text
     assert text.endswith("suggests its completion.")
-    # Custom commands are appended when discovered.
     cmd_dir = tmp_path / ".kiss" / "commands"
     cmd_dir.mkdir(parents=True, exist_ok=True)
     (cmd_dir / "mycmd.md").write_text(
@@ -240,10 +220,6 @@ def test_daemon_help_reply_matches_shared_help_text(
     assert replies[-1]["text"] == build_help_text(str(tmp_path))
 
 
-# ---------------------------------------------------------------------------
-# (C) model-picker ordering parity
-# ---------------------------------------------------------------------------
-
 def test_model_picker_order_parity_daemon_vs_cli(
     tmp_path: Path, kiss_db,
 ) -> None:
@@ -265,14 +241,8 @@ def test_model_picker_order_parity_daemon_vs_cli(
     if not ranked:
         pytest.skip("no provider credential configured in this environment")
     cli_names = [name for name, _ in picker_ordered_models("")]
-    # No usage recorded in the isolated DB: the CLI order is exactly
-    # the shared picker order.
     assert cli_names == ranked
 
-
-# ---------------------------------------------------------------------------
-# (D) shared backslash line-continuation read loop
-# ---------------------------------------------------------------------------
 
 def _reader_from(rows: list[str]):
     """Return a ``read_more`` callable yielding *rows* then EOFError."""
@@ -299,7 +269,6 @@ def test_read_continuations_no_marker_reads_nothing() -> None:
         raise AssertionError("read_more must not be called")
 
     assert read_continuations("plain line", _boom) == "plain line"
-    # An even (escaped-literal) number of backslashes submits verbatim.
     assert read_continuations("x \\\\", _boom) == "x \\\\"
 
 
@@ -338,10 +307,6 @@ def test_read_continuations_on_continue_runs_per_row() -> None:
     assert seen == ["row", "row"]
 
 
-# ---------------------------------------------------------------------------
-# (E) shared completion dispatch chain
-# ---------------------------------------------------------------------------
-
 def test_completion_branch_order(tmp_path: Path, kiss_db) -> None:
     """The shared dispatch classifies every category in menu order."""
     completer = CliCompleter(str(tmp_path))
@@ -368,17 +333,13 @@ def test_dispatch_parity_readline_vs_ptk(tmp_path: Path, kiss_db) -> None:
         event = CompleteEvent(completion_requested=True)
         return [c.text for c in ptk.get_completions(doc, event)]
 
-    # Slash-command branch: same command candidates on both frontends.
     menu = completer.build_menu("/he")
     assert [r for r, _ in menu] == ["/help "]
     assert _ptk_texts("/he") == ["/help "]
 
-    # @-mention branch: both offer the file, formatted per frontend.
     menu = completer.build_menu("see @some")
     assert menu and menu[0][0] == "see ./somefile.txt "
     assert _ptk_texts("see @some") == ["./somefile.txt "]
 
-    # Flag-value branch is terminal on both: no task history means no
-    # candidates, and neither frontend falls back to the option menu.
     assert completer.build_menu("/resume --task ") == []
     assert _ptk_texts("/resume --task ") == []

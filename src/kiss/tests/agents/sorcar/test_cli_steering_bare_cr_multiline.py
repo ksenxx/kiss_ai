@@ -237,10 +237,6 @@ def _run_steering_child(
     return text.split("\x1e")
 
 
-# ---------------------------------------------------------------------------
-# Reproduction: current (pre-fix) behaviour on Terminal.app
-# ---------------------------------------------------------------------------
-
 
 @pytest.mark.timeout(60)
 def test_reader_backslash_continuation_combines_lines_bare_cr(
@@ -298,9 +294,6 @@ def test_reader_plain_enter_without_continuation_still_submits_first_line(
     result = _run_reader_child(
         tmp_path,
         keystrokes_before_first_cr=b"line one",
-        # ``line two\r`` after the first CR is ignored by the exited
-        # child; we only care that the reader submitted the first
-        # line and exited.
         inter_cr_bytes=b"",
     )
     assert result == "line one", (

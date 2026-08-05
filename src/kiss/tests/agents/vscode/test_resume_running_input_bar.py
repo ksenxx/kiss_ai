@@ -84,19 +84,12 @@ class TestStartTimerRendersImmediately:
 
     def test_start_timer_renders_first_tick_before_interval(self) -> None:
         body = _extract_function_body(_read_main_js(), "startTimer")
-        # Both the synchronous first-paint and the setInterval body
-        # must update statusText.textContent.  We assert the
-        # synchronous one happens BEFORE setInterval is armed.
         interval_idx = body.find("setInterval(")
         assert interval_idx >= 0, (
             "startTimer must arm a setInterval to keep the timer "
             "updating"
         )
         head = body[:interval_idx]
-        # The head (everything before setInterval) must contain a
-        # call that writes the "Running …" label — either an inline
-        # statusText.textContent assignment or a call to a shared
-        # tick helper.
         has_inline = bool(
             re.search(
                 r"statusText\.textContent\s*=\s*['\"]Running",
@@ -118,7 +111,6 @@ class TestStartTimerRendersImmediately:
         live."""
         src = _read_main_js()
         body = _extract_function_body(src, "startTimer")
-        # If the tick helper is used, inline its body too.
         if "_renderTimerTick" in body:
             helper = _extract_function_body(src, "_renderTimerTick")
             body = body + "\n" + helper
@@ -196,11 +188,9 @@ class TestSetRunningStateShowsStopButton:
 
     def test_set_running_state_starts_timer_when_running(self) -> None:
         body = _extract_function_body(_read_main_js(), "setRunningState")
-        # The startTimer call must be inside the `if (running)` branch.
         m = re.search(r"if\s*\(\s*running\s*\)\s*\{", body)
         assert m, "setRunningState must branch on `if (running)`"
         branch_start = m.end()
-        # Find the matching close-brace of this if-block by tracking depth.
         depth = 1
         i = branch_start
         while i < len(body) and depth > 0:

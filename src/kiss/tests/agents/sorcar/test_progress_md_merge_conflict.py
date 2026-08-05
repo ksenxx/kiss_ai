@@ -125,7 +125,6 @@ class TestScratchMergeDriverOps:
 
     def test_cherry_pick_from_baseline_auto_resolves(self) -> None:
         """Exact incident replay: baseline + cherry-pick path succeeds."""
-        # User has a dirty PROGRESS.md when the worktree is created.
         (self.repo / "PROGRESS.md").write_text("# Task: dirty in-flight log\n")
         wt_dir = _create_worktree(self.repo, "kiss/wt-test-b")
         assert GitWorktreeOps.copy_dirty_state(self.repo, wt_dir)
@@ -135,7 +134,6 @@ class TestScratchMergeDriverOps:
         )
         baseline = GitWorktreeOps.head_sha(wt_dir)
         assert baseline is not None
-        # Discard main's dirty state (as stash_if_dirty would have).
         _git("checkout", "--", "PROGRESS.md", cwd=self.repo)
 
         self._diverge(wt_dir)
@@ -161,7 +159,6 @@ class TestScratchMergeDriverOps:
         result = GitWorktreeOps.squash_merge_branch(self.repo, "kiss/wt-test-c")
 
         assert result == MergeResult.CONFLICT
-        # The failed merge must leave the main tree clean (reset --hard).
         assert not GitWorktreeOps.has_uncommitted_changes(self.repo)
         assert (self.repo / "code.py").read_text() == "x = 3  # user\n"
 
@@ -178,7 +175,6 @@ class TestScratchMergeDriverOps:
             "config", "merge.kiss-scratch.driver", cwd=self.repo
         ).stdout.strip()
         assert "%A" in driver and "%B" in driver
-        # No tracked file may be touched by the installation.
         assert not GitWorktreeOps.has_uncommitted_changes(self.repo)
 
     def test_manual_cherry_pick_also_auto_resolves(self) -> None:

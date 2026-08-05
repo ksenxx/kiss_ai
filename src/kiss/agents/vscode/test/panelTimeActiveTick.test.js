@@ -2,26 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test for the "live panel time" feature.
-//
-// REQUIREMENT: While the model is thinking but has not produced any
-// thought tokens yet, the webview must already show the Thoughts
-// ``.llm-panel`` with a live ``.panel-time`` footer.  The footer must
-// keep updating every second while the panel is active — i.e. after
-// ``thinking_start`` and before ``thinking_end`` / ``result``.
-//
-// Before the fix, ``.panel-time`` was only rendered when the panel
-// closed, so an active tokenless Thoughts panel showed no visible
-// elapsed time at all.  This test reproduces that bug by opening a
-// Thoughts panel with ``thinking_start`` and intentionally sending no
-// ``thinking_delta`` events, waiting real wall-clock time, and
-// asserting that the tokenless panel exists, has a footer, and that
-// the footer value grows by ~1 second between ticks.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/panelTimeActiveTick.test.js
 
 'use strict';
 
@@ -32,18 +12,10 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom window running the production chat webview.
- *
- * @returns {{win: object, posted: object[]}} the jsdom window and a
- *   list capturing every ``vscode.postMessage`` payload.
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
   html = html.replace(/\{\{[A-Z_]+\}\}/g, '');
-  // Strip inline <script>...</script> tags that reference template
-  // placeholders that don't exist in tests.
   html = html.replace(/<script[^>]*>[\s\S]*?<\/script>/g, '');
 
   const dom = new JSDOM(html, {
@@ -67,22 +39,22 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
 
-/** Dispatch a backend→webview event exactly like the extension does. */
 function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** Sleep for ``ms`` real milliseconds. */
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-/** Parse the textContent of a ``.panel-time`` footer into milliseconds. */
 function parsePanelTimeMs(text) {
   const t = String(text || '').trim();
   let m = t.match(/^(\d+)m\s+(\d+(?:\.\d+)?)s$/);
@@ -101,7 +73,6 @@ async function runTests() {
   assert.ok(ready && ready.tabId, 'webview must post ready with a tabId');
   const TAB = ready.tabId;
 
-  // Hand the webview a backend chat id and mark the tab "running".
   send(win, {type: 'clear', chat_id: 'chat-active-tick', tabId: TAB});
   send(win, {
     type: 'status',
@@ -110,10 +81,6 @@ async function runTests() {
     startTs: Date.now(),
   });
 
-  // Open a Thoughts panel but DO NOT send any thought tokens and DO
-  // NOT close it — this reproduces the user-visible bug where the
-  // model is thinking but has not produced any thought tokens yet.
-  // The tokenless panel must still be visible with live elapsed time.
   send(win, {type: 'thinking_start', tabId: TAB});
 
   const output = win.document.getElementById('output');
@@ -143,7 +110,6 @@ async function runTests() {
       'footer immediately when thinking_start arrives.',
   );
 
-  // After ~2.2s the live ticker should have rendered at least once.
   await sleep(2200);
 
   const llmPanels = output.querySelectorAll('.llm-panel');
@@ -176,8 +142,6 @@ async function runTests() {
       firstMs + 'ms).  The webview is not ticking the active footer.',
   );
 
-  // After another ~1.2s the footer value must have strictly grown by
-  // at least ~800ms, proving the tick keeps firing each second.
   await sleep(1200);
   footers = panel.querySelectorAll(':scope > .panel-time');
   assert.strictEqual(
@@ -199,8 +163,6 @@ async function runTests() {
       firstMs + 'ms to ' + secondMs + 'ms).',
   );
 
-  // The .panel-time footer must stay anchored as the LAST child even
-  // while it is ticking live, so it always renders at the bottom.
   const last = panel.lastElementChild;
   assert.ok(
     last && last.classList.contains('panel-time'),
@@ -215,8 +177,6 @@ async function runTests() {
       'live time footer is ticking',
   );
 
-  // Closing the panel (via ``result``) must freeze the footer at the
-  // closing time and stop the live tick from mutating it further.
   send(win, {type: 'thinking_end', tabId: TAB});
   send(win, {
     type: 'result',

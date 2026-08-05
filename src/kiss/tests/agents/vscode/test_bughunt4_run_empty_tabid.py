@@ -68,7 +68,6 @@ class TestRunEmptyTabId(unittest.TestCase):
 
     def _run_cmd(self, cmd: dict[str, Any]) -> None:
         self.server._cmd_run(cmd)
-        # Give any (buggy) spawned task thread time to register state.
         deadline = time.time() + 10
         while time.time() < deadline:
             tab = _RunningAgentState.running_agent_states.get("")

@@ -69,10 +69,6 @@ def _bootstrap_live_model(agent: Any, model_name: str) -> None:
     agent.model_name = model_name
 
 
-# ---------------------------------------------------------------------------
-# Fixtures — isolate config and the sorcar DB so tests never touch real state.
-# ---------------------------------------------------------------------------
-
 @pytest.fixture(autouse=True)
 def _isolate_config(tmp_path: Path) -> Any:
     """Redirect vscode_config writes to a temp directory."""
@@ -103,10 +99,6 @@ def _isolate_sorcar_db(tmp_path: Path) -> Any:
     sorcar_persistence._DB_PATH = orig_db_path
 
 
-# ---------------------------------------------------------------------------
-# Tool presence
-# ---------------------------------------------------------------------------
-
 class TestChangeModelToolPresence:
     """``set_model`` appears in the agent's tool list."""
 
@@ -124,15 +116,9 @@ class TestChangeModelToolPresence:
         params = list(sig.parameters.values())
         assert len(params) == 1
         assert params[0].name == "model_name"
-        # The annotation may be a string under ``from __future__ import
-        # annotations`` — accept either form.
         ann = params[0].annotation
         assert ann is str or ann == "str"
 
-
-# ---------------------------------------------------------------------------
-# Behavior — no live model yet
-# ---------------------------------------------------------------------------
 
 class TestChangeModelNoLiveModel:
     """When ``self.model`` is unset, the tool just updates ``model_name``."""
@@ -159,10 +145,6 @@ class TestChangeModelNoLiveModel:
         assert agent.model_name == "gemini-2.5-pro"
         assert _load_last_model() == "claude-opus-4-7"
 
-
-# ---------------------------------------------------------------------------
-# Behavior — live model swap
-# ---------------------------------------------------------------------------
 
 class TestChangeModelLiveSwap:
     """With a live model, the tool replaces ``self.model`` with a fresh instance."""
@@ -207,8 +189,6 @@ class TestChangeModelLiveSwap:
 
         set_model("model-b")
 
-        # New model is also OpenAICompatibleModel built from the same
-        # base_url and api_key carried over via model_config.
         assert getattr(agent.model, "base_url", None) == original_base_url
         assert getattr(agent.model, "api_key", None) == original_api_key
 
@@ -252,10 +232,6 @@ class TestChangeModelLiveSwap:
         assert _load_last_model() == "claude-opus-4-7"
 
 
-# ---------------------------------------------------------------------------
-# Tool schema cache is rebuilt
-# ---------------------------------------------------------------------------
-
 class TestChangeModelToolSchemaCache:
     """The cached tools schema is invalidated/rebuilt after a swap."""
 
@@ -263,8 +239,6 @@ class TestChangeModelToolSchemaCache:
         agent, tools = _make_agent()
         _bootstrap_live_model(agent, "model-a")
 
-        # Simulate the state the agent is in mid-task: function_map and
-        # cached schema are both populated.
         def dummy_tool(x: str) -> str:
             """A dummy tool used to populate the schema cache."""
             return x
@@ -278,37 +252,26 @@ class TestChangeModelToolSchemaCache:
         set_model = _find_tool(tools, "set_model")
         set_model("model-b")
 
-        # The cache is rebuilt to a freshly-constructed (but equal) schema
-        # against the new model instance.  Verify both that it's a fresh
-        # object and that it still describes the same tool.
         assert agent._cached_tools_schema is not None
-        # Schema should still describe dummy_tool — round-trip identity.
         schema = agent._cached_tools_schema
         names = {
             entry["function"]["name"] for entry in schema
             if isinstance(entry, dict) and "function" in entry
         }
         assert "dummy_tool" in names
-        # And we rebuilt — not the same Python list object as before.
         assert agent._cached_tools_schema is not original_schema
 
     def test_no_function_map_no_crash(self) -> None:
         """Calling set_model before tools are wired up must not crash."""
         agent, tools = _make_agent()
         _bootstrap_live_model(agent, "model-a")
-        # function_map intentionally not set / empty.
         agent.function_map = {}
         agent._cached_tools_schema = None  # type: ignore[assignment]
         set_model = _find_tool(tools, "set_model")
 
         set_model("model-b")
-        # Cache should remain None when function_map is empty.
         assert agent._cached_tools_schema is None
 
-
-# ---------------------------------------------------------------------------
-# Next call uses the new model — end-to-end check.
-# ---------------------------------------------------------------------------
 
 class TestNextCallTargetsNewModel:
     """After set_model, ``self.model`` (which generate() targets) is the new one."""
@@ -326,7 +289,5 @@ class TestNextCallTargetsNewModel:
 
         set_model("model-c")
 
-        # The very next generate() will use this Model instance...
         assert agent.model.model_name == "model-c"
-        # ...and the agent's own bookkeeping matches.
         assert agent.model_name == "model-c"

@@ -19,6 +19,7 @@ Thread safety is achieved with:
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import math
@@ -37,10 +38,6 @@ from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Read-write lock
-# ---------------------------------------------------------------------------
 
 class _RWLock:
     """Writer-preferring read-write lock.
@@ -81,12 +78,6 @@ class _RWLock:
                 while self._writer or self._readers > 0:
                     self._cond.wait()
             except BaseException:
-                # An exception delivered while blocked in ``wait()`` (e.g.
-                # a ``KeyboardInterrupt`` injected into a task thread to
-                # stop it) must not leak the pending-writer count —
-                # otherwise every future ``read_lock()`` blocks forever on
-                # ``self._pending_writers > 0``.  Wake blocked readers so
-                # they re-check the predicate.
                 self._pending_writers -= 1
                 self._cond.notify_all()
                 raise
@@ -102,38 +93,11 @@ class _RWLock:
 
 _rw_lock = _RWLock()
 
-# Dedicated mutex for first-time DDL (``_init_tables``).  We intentionally
-# do NOT reuse ``_rw_lock`` because most query helpers acquire the read
-# lock *before* calling ``_get_db()`` — if ``_get_db()`` then tried to
-# upgrade to ``_rw_lock.write_lock()`` for ``_init_tables`` it would
-# self-deadlock against its own read lock.  Concurrent CREATE TABLE
-# IF NOT EXISTS statements across threads are serialized through this
-# small lock instead, which is independent of the reader/writer queue.
 _init_tables_lock = threading.Lock()
 
 
-# ---------------------------------------------------------------------------
-# Chat-context text cache
-# ---------------------------------------------------------------------------
-#
-# Autocomplete (`_complete_from_active_file`) calls ``_load_chat_context`` on
-# every keystroke when ``chat_id`` is supplied — that runs a SELECT against
-# ``task_history`` and re-joins every prior task/result text in the session.
-# The chat context only changes when a task is added or a task result is
-# saved, so we cache the joined text per ``chat_id`` and invalidate on both
-# write paths.  The cache lives at module scope (not on the server instance)
-# so any caller — VS Code autocomplete, parallel sub-agents reusing the same
-# chat — benefits transparently, and tests that swap the database connection
-# don't accumulate stale invalidator callbacks.
-
 _chat_context_text_cache: dict[str, str] = {}
 _chat_context_cache_lock = threading.Lock()
-# Invalidation generation counter.  Bumped on every cache invalidation
-# (per-chat or global).  Readers capture the generation *before* the
-# SQL read and only store their result if the generation hasn't
-# advanced — preventing a slow reader from overwriting a fresh cache
-# entry that a faster reader produced after a concurrent
-# write+invalidate.
 _chat_context_cache_gen: int = 0
 
 
@@ -151,10 +115,6 @@ def _invalidate_chat_context_cache(chat_id: str = "") -> None:
             _chat_context_text_cache.clear()
         _chat_context_cache_gen += 1
 
-
-# ---------------------------------------------------------------------------
-# Paths and constants
-# ---------------------------------------------------------------------------
 
 def _default_kiss_dir() -> Path:
     """Return the KISS data directory, respecting ``KISS_HOME`` env var."""
@@ -192,22 +152,6 @@ def _ensure_kiss_dir() -> None:
 
 _HistoryEntry = dict[str, object]
 
-
-# ---------------------------------------------------------------------------
-# ``extra`` JSON encoding / decoding
-# ---------------------------------------------------------------------------
-#
-# The ``task_history.extra`` column must always hold *valid RFC 8259*
-# JSON: the SQL predicate ``_HISTORY_NOT_SUBAGENT`` classifies rows
-# with SQLite's ``json_valid``/``json_type``, which reject the bare
-# ``NaN`` / ``Infinity`` / ``-Infinity`` tokens that Python's
-# ``json.dumps`` emits by default (``allow_nan=True``) and that
-# ``json.loads`` accepts by default.  A non-finite float (e.g. a NaN
-# ``cost``) written through plain ``json.dumps`` would therefore make
-# the SQL-side and Python-side sub-agent detectors disagree — a
-# sub-agent row would leak into the history sidebar while
-# ``_list_recent_chats`` burned a limit slot on its chat.  All writers
-# go through :func:`_dumps_extra` so the two sides can never diverge.
 
 def _safe_int(value: object, default: int = 0) -> int:
     """Coerce *value* to ``int``, returning *default* on failure.
@@ -299,16 +243,8 @@ def _dumps_extra(extra: dict[str, object]) -> str:
         return json.dumps(sanitized, allow_nan=False)
 
 
-# ---------------------------------------------------------------------------
-# Per-thread connection management
-# ---------------------------------------------------------------------------
-
-# Legacy backward-compat variable: tests save/restore/None-ify this.
-# Setting to None signals _get_db() to reconnect on the next call.
 _db_conn: sqlite3.Connection | None = None
 
-# Per-thread connection storage.  Each thread gets its own
-# sqlite3.Connection keyed by (_db_generation, _DB_PATH).
 _thread_local = threading.local()
 _db_generation: int = 0
 
@@ -322,11 +258,8 @@ def _close_db() -> None:
     next ``_get_db()`` call and replaced (and closed) there.
     """
     global _db_conn, _db_generation
-    # Drain and stop the background writer first so it doesn't keep a
-    # connection or seq cache that references the soon-to-be-replaced DB.
     _stop_event_writer()
     _db_generation += 1
-    # Close current thread's connection
     tl_conn: sqlite3.Connection | None = getattr(_thread_local, "conn", None)
     if tl_conn is not None:
         try:
@@ -357,8 +290,6 @@ def _close_thread_db() -> None:
             tl_conn.close()
         except Exception:
             pass
-        # ``_db_conn`` is a backward-compat alias for the last-created
-        # connection; never leave it pointing at a closed handle.
         if _db_conn is tl_conn:
             _db_conn = None
     _thread_local.conn = None
@@ -375,11 +306,8 @@ _HISTORY_SELECT = (
     "FROM task_history "
 )
 
-# SQL predicate that is TRUE for every row that is NOT a sub-agent row.
-# A sub-agent row carries a non-empty ``parent_task_id`` column.
 _HISTORY_NOT_SUBAGENT = "(parent_task_id IS NULL OR parent_task_id = '')"
 
-# Pattern for a task_history.id minted by ``uuid.uuid4().hex``.
 _TASK_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
@@ -417,29 +345,10 @@ def _row_to_extra_json(row: sqlite3.Row) -> str:
     """
     payload: dict[str, object] = {}
     try:
-        # r3-H3: emit every typed column consistently — including the
-        # falsy / zero cases — so consumers that test for key presence
-        # do not see a behaviour change between two rows that differ
-        # only in whether a numeric field happens to be zero.  Only
-        # the ``subagent`` nested dict remains gated on a non-empty
-        # ``parent_task_id`` because its absence is the canonical
-        # marker for a top-level (non-sub-agent) task in the
-        # downstream classifier.
-        # bughunt8: coerce through ``_safe_str`` — a BLOB stored in
-        # one of these TEXT columns made ``json.dumps`` raise
-        # ``TypeError`` out of ``_load_history``/``_search_history``.
         payload["model"] = _safe_str(row["model"])
         payload["work_dir"] = _safe_str(row["work_dir"])
         payload["version"] = _safe_str(row["version"])
         payload["auto_commit_mode"] = bool(row["auto_commit_mode"])
-        # bughunt2: use the finite-aware safe coercers instead of bare
-        # ``int()``/``float()``.  SQLite's dynamic typing lets a
-        # hand-edited / 3rd-party-source DB store TEXT (e.g. ``'abc'``)
-        # in the REAL/INTEGER columns; bare coercion raised
-        # ``ValueError`` — uncaught by the (KeyError, IndexError)
-        # handler below — which propagated out of ``_load_history`` /
-        # ``_search_history`` / ``_load_chat_events_by_task_id`` and
-        # blanked the whole history sidebar over one corrupt row.
         payload["tokens"] = _safe_int(row["tokens"], 0)
         payload["cost"] = _safe_float(row["cost"], 0.0)
         payload["steps"] = _safe_int(row["steps"], 0)
@@ -454,10 +363,6 @@ def _row_to_extra_json(row: sqlite3.Row) -> str:
             }
     except (KeyError, IndexError):
         return ""
-    # Route through ``_dumps_extra`` so any non-finite ``cost`` (e.g.
-    # from a hand-edited / 3rd-party-source DB) gets normalised
-    # rather than emitted as a bare ``NaN``/``Infinity`` token that
-    # SQLite's ``json_valid`` and downstream strict parsers reject.
     return _dumps_extra(payload) if payload else ""
 
 
@@ -511,7 +416,6 @@ def _is_failed_result(result: str) -> bool:
     )
 
 
-# Index DDL shared by ``_init_tables`` and the legacy-schema migration.
 _INDEX_DDL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_th_timestamp ON task_history(timestamp)",
     "CREATE INDEX IF NOT EXISTS idx_th_task ON task_history(task)",
@@ -593,12 +497,6 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
     Returns ``True`` when migration was performed, ``False`` when the
     DB already has the new schema or no ``task_history`` table yet.
     """
-    # r3-C2: do a FAST autocommit probe first so we can early-return
-    # without entering a write transaction when the DB already has
-    # the new schema.  The DEFINITIVE probe must re-run inside the
-    # write transaction below to defeat a TOCTOU race against a
-    # concurrent process that migrates between the probe and our
-    # ``BEGIN IMMEDIATE``.
     cols = {
         r[1]: (r[2] or "").upper()
         for r in conn.execute("PRAGMA table_info(task_history)").fetchall()
@@ -616,39 +514,13 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
         return v if isinstance(v, str) else str(v)
 
     def _bx(v: object) -> int:
-        # r6-persistence-H3: ``bool("false") == True`` and
-        # ``bool("0") == True`` — a naive ``bool(v)`` corrupts legacy
-        # JSON-extra payloads that happen to encode their flags as
-        # string literals ("false", "0", "False").  Normalise the
-        # common false-y string forms before falling back to
-        # ``bool()`` for everything else (int / real-bool / dict).
         if isinstance(v, str):
             return 0 if v.strip().lower() in {"", "0", "false", "no"} else 1
         return 1 if bool(v) else 0
 
-    # Wrap the entire migration body in an explicit transaction so a
-    # mid-migration crash leaves the DB unchanged.  The connection is
-    # in autocommit mode (``isolation_level=None``); ``BEGIN IMMEDIATE``
-    # opens a write transaction that is rolled back unless ``COMMIT``
-    # runs at the end.  IMPORTANT: only ``execute()`` calls may run
-    # inside the transaction — ``executescript()`` issues an implicit
-    # COMMIT before its body which would silently end the
-    # transaction and defeat the atomicity guarantee.
-    # r6-persistence-H7: temporarily disable foreign-key enforcement
-    # during the rename dance.  The CREATE TABLE for ``events__new``
-    # declares ``REFERENCES task_history__new(id)``; after we
-    # ALTER ... RENAME TO ``task_history`` the FK target name no
-    # longer matches under SQLite < 3.26 or with
-    # ``legacy_alter_table=1``, which can leave a stale FK and break
-    # later inserts.  Restoring ``foreign_keys=ON`` after the
-    # rename is safe because the orphan-events pre-scan above
-    # already excluded events that would fail FK.
     conn.execute("PRAGMA foreign_keys=OFF")
     conn.execute("BEGIN IMMEDIATE")
     try:
-        # r3-C2: re-probe inside the transaction so another process
-        # that migrated between our autocommit probe and our
-        # BEGIN IMMEDIATE is detected before we corrupt its work.
         cols_locked = {
             r[1]: (r[2] or "").upper()
             for r in conn.execute(
@@ -663,9 +535,6 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
             conn.execute("ROLLBACK")
             conn.execute("PRAGMA foreign_keys=ON")
             return False
-        # r3-H4: drop any leftover ``__new`` tables from a prior
-        # crashed migration INSIDE the transaction so the DROPs are
-        # atomic with the rest of the migration.
         conn.execute("DROP TABLE IF EXISTS task_history__new")
         conn.execute("DROP TABLE IF EXISTS events__new")
         conn.execute(
@@ -700,9 +569,6 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
             "timestamp REAL NOT NULL"
             ")"
         )
-        # Read every legacy task_history row in stable insertion order
-        # so the post-migration ``rowid`` tiebreaker preserves
-        # chronology across the upgrade.
         rows = conn.execute(
             "SELECT id, timestamp, task, has_events, result, chat_id, "
             "extra FROM task_history ORDER BY id ASC"
@@ -733,15 +599,7 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
                     isinstance(old_parent, str)
                     and _TASK_ID_RE.fullmatch(old_parent)
                 ):
-                    # Already-canonical UUID-shaped string survives.
-                    # Garbage strings (e.g. ``"123"`` from a buggy
-                    # 3rd-party migration) are rejected so they don't
-                    # land in the TEXT column as a value no future
-                    # query can resolve.
                     parent_task_id = old_parent
-            # Count any unknown keys for an after-the-fact warning so
-            # the upgrade is auditable; the new schema has no overflow
-            # column so unknown keys are necessarily lost.
             for k in extra:
                 if k not in known_extra_keys:
                     dropped_unknown_keys += 1
@@ -767,9 +625,6 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
                     _bx(extra.get("is_favorite")), parent_task_id,
                 ),
             )
-        # Probe for the events table — early/manually-wiped legacy DBs
-        # may have a task_history but no events table.  Without this
-        # guard the SELECT below raises and the migration aborts.
         has_events_table = conn.execute(
             "SELECT 1 FROM sqlite_master "
             "WHERE type='table' AND name='events'"
@@ -809,15 +664,11 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
             conn.execute("ROLLBACK")
         except sqlite3.Error:
             pass
-        # r6-persistence-H7: restore FK enforcement on the error path
-        # so the connection state remains symmetric with the OFF set
-        # above.
         try:
             conn.execute("PRAGMA foreign_keys=ON")
         except sqlite3.Error:
             pass
         raise
-    # r6-persistence-H7: restore FK enforcement on the success path.
     conn.execute("PRAGMA foreign_keys=ON")
     if dropped_unknown_keys:
         logger.warning(
@@ -867,14 +718,6 @@ def _get_db() -> sqlite3.Connection:
     tl_conn: sqlite3.Connection | None = getattr(tl, "conn", None)
     tl_gen: int = getattr(tl, "gen", -1)
     tl_path: str | None = getattr(tl, "path", None)
-    # Snapshot the generation ONCE, before any connection work.  A
-    # concurrent ``_close_db()`` can bump ``_db_generation`` at any
-    # point while this thread is creating a connection below; stamping
-    # ``tl.gen`` from a *re-read* of the global would tag a connection
-    # created under the old generation with the new one, making it
-    # survive an invalidation it should not.  With the snapshot, a
-    # bump that lands mid-creation leaves ``tl.gen`` stale, so the
-    # next ``_get_db()`` call detects it and reconnects.
     gen_snapshot = _db_generation
     current_path = str(_DB_PATH)
     current_id = _db_file_identity(current_path)
@@ -885,26 +728,11 @@ def _get_db() -> sqlite3.Connection:
         and tl_gen == gen_snapshot
         and tl_path == current_path
         and _db_conn is not None
-        # The file on disk must be the SAME file the cached connection
-        # was opened against.  A cached connection whose backing file
-        # was deleted — and possibly recreated at the same pathname by
-        # an independent ``sqlite3.connect`` (log rotation, a test
-        # cleaning up ``$KISS_HOME``, a user removing
-        # ``~/.kiss/sorcar.db`` while the daemon runs) — keeps writing
-        # into the orphaned inode: every subsequent INSERT silently
-        # disappears, while any NEW reader of ``_DB_PATH`` sees an
-        # empty database with no ``task_history`` table.  A bare
-        # existence check is not enough (the recreated file exists),
-        # so the ``(st_dev, st_ino)`` identity recorded when the
-        # connection was opened is compared instead; a mismatch falls
-        # through to the reconnect path, which (re)creates the file
-        # and its schema.
         and current_id is not None
         and getattr(tl, "file_id", None) == current_id
     ):
         return tl_conn
 
-    # Stale or missing — close old thread-local connection
     if tl_conn is not None:
         try:
             tl_conn.close()
@@ -912,19 +740,6 @@ def _get_db() -> sqlite3.Connection:
             pass
 
     _ensure_kiss_dir()
-    # Stale -wal/-shm cleanup for a deleted main database file.  Both
-    # the existence check and the unlink targets are derived from the
-    # ONE ``current_path`` snapshot taken above — never from a re-read
-    # of the ``_DB_PATH`` global.  Re-reading it here is a TOCTOU race:
-    # a test (or embedder) can redirect ``_DB_PATH`` to a scratch
-    # directory, delete that scratch database, and restore the original
-    # path at any moment.  With a re-read, this thread could observe
-    # "missing" for the SCRATCH file but compute the unlink targets
-    # from the freshly RESTORED path — deleting the live shared
-    # database's -wal/-shm side files out from under every open
-    # connection.  SQLite then fails all NEW connections to that
-    # database with a permanent ``disk I/O error`` for as long as any
-    # old connection keeps the unlinked -shm mapped.
     if not os.path.exists(current_path):
         for suffix in ("-wal", "-shm"):
             try:
@@ -935,36 +750,11 @@ def _get_db() -> sqlite3.Connection:
         current_path,
         check_same_thread=False,
         timeout=10,
-        isolation_level=None,  # true autocommit — no implicit BEGIN
+        isolation_level=None,
     )
-    # Arm the busy handler BEFORE the journal-mode switch: a fresh
-    # connection whose very first statement is ``PRAGMA
-    # journal_mode=WAL`` would otherwise race a concurrent writer with
-    # only the ``connect(timeout=...)`` handler, and the WAL switch is
-    # exactly the statement most likely to collide on a brand-new
-    # database (see below).
     conn.execute("PRAGMA busy_timeout=30000")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.row_factory = sqlite3.Row
-    # Serialize first-time DDL across concurrent threads so CREATE TABLE
-    # statements (run by every fresh thread-local connection) don't race
-    # and trigger "database is locked" errors under heavy parallelism.
-    # NOTE: must use a dedicated lock (not ``_rw_lock``) — many callers
-    # already hold ``_rw_lock.read_lock()`` when invoking ``_get_db()``,
-    # so reusing the RW lock for DDL would self-deadlock.
-    #
-    # The ``PRAGMA journal_mode=WAL`` switch must sit INSIDE the same
-    # critical section: entering WAL mode takes an exclusive lock on
-    # the database file, and SQLite returns SQLITE_BUSY *immediately*
-    # (without consulting the busy handler) when another connection
-    # holds a conflicting lock during the mode change.  Two parallel
-    # sub-agent threads opening their first connections against a
-    # fresh ``sorcar.db`` deterministically hit this: one thread is
-    # mid-DDL while the other executes the WAL pragma and dies with
-    # ``sqlite3.OperationalError: database is locked``.  The lock
-    # serialises in-process racers; the retry loop absorbs the same
-    # collision from OTHER processes sharing the database file (e.g.
-    # the kiss-web daemon starting while a CLI task initialises).
     with _init_tables_lock:
         wal_deadline = time.monotonic() + 30.0
         while True:
@@ -972,11 +762,6 @@ def _get_db() -> sqlite3.Connection:
                 conn.execute("PRAGMA journal_mode=WAL")
                 break
             except sqlite3.OperationalError as exc:
-                # Retry ONLY lock contention (SQLITE_BUSY /
-                # SQLITE_LOCKED) — other operational errors (readonly
-                # database, disk I/O, corrupt header) are permanent and
-                # must surface immediately.  The deadline mirrors the
-                # 30s ``busy_timeout`` configured above.
                 code = getattr(exc, "sqlite_errorcode", None)
                 busy = (
                     code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
@@ -993,11 +778,8 @@ def _get_db() -> sqlite3.Connection:
     tl.conn = conn
     tl.gen = gen_snapshot
     tl.path = current_path
-    # Record the identity of the file this connection is bound to.
-    # ``_init_tables`` above has materialised the main DB file even
-    # for a brand-new database, so the stat cannot miss.
     tl.file_id = _db_file_identity(current_path)
-    _db_conn = conn  # backward compat: expose last-created connection
+    _db_conn = conn
     return conn
 
 
@@ -1058,8 +840,6 @@ def _add_task(
     parent_task_id = ""
     sub = payload.get("subagent")
     flat_parent = payload.get("parent_task_id")
-    # r4-persistence-C1/C2/H5: accept all three shapes symmetric with
-    # ``_save_task_extra``.  Reject collisions explicitly.
     if sub is not None and flat_parent is not None:
         raise ValueError(
             "Cannot pass both 'parent_task_id' and 'subagent' to _add_task",
@@ -1067,16 +847,11 @@ def _add_task(
     if isinstance(sub, dict):
         parent_task_id = _coerce_parent_task_id(sub.get("parent_task_id"))
     elif isinstance(sub, str):
-        # convenience ``{"subagent": "<uuid>"}`` shape.
         parent_task_id = _coerce_parent_task_id(sub)
     elif flat_parent is not None:
         parent_task_id = _coerce_parent_task_id(flat_parent)
     with _rw_lock.write_lock():
         if chat_id == "":
-            # Mint through the SAME :func:`_allocate_chat_id` helper the
-            # agents use so the mint paths can never drift (e.g. if the
-            # helper ever gains reservation / collision-check side
-            # effects).
             chat_id = _allocate_chat_id()
         task_id = uuid.uuid4().hex
         db.execute(
@@ -1104,10 +879,6 @@ def _add_task(
             ),
         )
         db.commit()
-    # Invalidate the autocomplete chat-context cache so the new task's
-    # text becomes visible to ghost-text suggestions on the next
-    # keystroke.  Done outside the write lock to keep the critical
-    # section short.
     _invalidate_chat_context_cache(chat_id)
     return task_id, chat_id
 
@@ -1125,24 +896,6 @@ def _allocate_chat_id() -> str:
         A unique 32-character string suitable for use as a ``chat_id``.
     """
     return uuid.uuid4().hex
-
-
-def _get_task_chat_id(task_id: str) -> str:
-    """Return the chat_id of the task with the given row id, or ``""``.
-
-    Args:
-        task_id: The primary key of the task_history row.
-
-    Returns:
-        The chat_id string, or ``""`` if the row is not found or its
-        chat_id column is empty.
-    """
-    with _rw_lock.read_lock():
-        db = _get_db()
-        row = db.execute(
-            "SELECT chat_id FROM task_history WHERE id = ?", (task_id,),
-        ).fetchone()
-        return str(row["chat_id"]) if row and row["chat_id"] else ""
 
 
 def _get_task_start_ts(task_id: str) -> int:
@@ -1164,118 +917,6 @@ def _get_task_start_ts(task_id: str) -> int:
             "SELECT start_ts FROM task_history WHERE id = ?", (task_id,),
         ).fetchone()
         return _safe_int(row["start_ts"], 0) if row else 0
-
-
-def _chat_has_tasks(chat_id: str) -> bool:
-    """Return True if the given chat_id has at least one task row.
-
-    Args:
-        chat_id: The chat session identifier string.
-
-    Returns:
-        True when at least one ``task_history`` row carries this
-        ``chat_id``, otherwise False.  Returns False for ``""``.
-    """
-    if not chat_id:
-        return False
-    with _rw_lock.read_lock():
-        db = _get_db()
-        row = db.execute(
-            "SELECT 1 FROM task_history WHERE chat_id = ? LIMIT 1", (chat_id,),
-        ).fetchone()
-        return row is not None
-
-
-def _subagent_child_ids(
-    db: sqlite3.Connection, parent_task_id: str,
-) -> list[str]:
-    """Return ids of persisted sub-agent rows whose parent is *parent_task_id*.
-
-    Children are identified by the dedicated ``parent_task_id`` column.
-    Callers must hold ``_rw_lock`` (read or write).
-
-    Args:
-        db: Active database connection.
-        parent_task_id: Primary key of the parent ``task_history`` row.
-
-    Returns:
-        List of child row ids (possibly empty).
-    """
-    if not parent_task_id:
-        return []
-    rows = db.execute(
-        "SELECT id FROM task_history WHERE parent_task_id = ?",
-        (parent_task_id,),
-    ).fetchall()
-    return [str(r["id"]) for r in rows]
-
-
-def _delete_task(task_id: str) -> bool:
-    """Delete a task, its events, and its persisted sub-agent rows.
-
-    Removes the events table rows that reference the given task_id,
-    then removes the task_history row itself.  Sub-agent rows spawned
-    by this task's ``run_parallel`` call
-    (``extra.subagent.parent_task_id == task_id``) are cascade-deleted
-    together with their events — recursively, because a sub-agent is a
-    full ``ChatSorcarAgent`` that can itself fan out nested sub-agents
-    whose rows point at the *child's* id, not the top-level parent's.
-    They are reachable only through the parent chain (via
-    :func:`_load_subagent_rows_by_parent_task_id`), so leaving any
-    level behind would leak unreachable rows and make
-    :func:`_chat_has_tasks` report a visually-empty chat as non-empty.
-
-    Args:
-        task_id: The primary key of the task_history row to delete.
-
-    Returns:
-        True if the task existed and was deleted, False otherwise.
-    """
-    # Drain pending queued events for this (or any) task_id before we
-    # delete the row — otherwise the writer could insert an event row
-    # referencing a deleted task_history id.
-    _flush_chat_events()
-    db = _get_db()
-    with _rw_lock.write_lock():
-        row = db.execute(
-            "SELECT chat_id FROM task_history WHERE id = ?", (task_id,),
-        ).fetchone()
-        chat_id = (row["chat_id"] or "") if row is not None else ""
-        doomed_ids: list[str] = [task_id]
-        if row is not None:
-            # Breadth-first walk: a sub-agent is a full ChatSorcarAgent
-            # that can itself call ``run_parallel``, so grandchildren
-            # (and deeper) rows exist and must be cascade-deleted too.
-            # The ``seen`` set guards against corrupt self/cyclic
-            # ``parent_task_id`` references.
-            seen: set[str] = {task_id}
-            frontier: list[str] = [task_id]
-            while frontier:
-                next_frontier: list[str] = []
-                for parent_id in frontier:
-                    for child_id in _subagent_child_ids(db, parent_id):
-                        if child_id not in seen:
-                            seen.add(child_id)
-                            next_frontier.append(child_id)
-                doomed_ids.extend(next_frontier)
-                frontier = next_frontier
-        deleted = False
-        for did in doomed_ids:
-            db.execute("DELETE FROM events WHERE task_id = ?", (did,))
-            cursor = db.execute(
-                "DELETE FROM task_history WHERE id = ?", (did,)
-            )
-            if did == task_id:
-                deleted = (cursor.rowcount or 0) > 0
-            _next_seq_cache.pop(did, None)
-            _marked_has_events.discard(did)
-        db.commit()
-    # Invalidate the autocomplete chat-context cache so the deleted
-    # task/result text stops being served to ghost-text suggestions.
-    # Done outside the write lock to keep the critical section short.
-    if deleted:
-        _invalidate_chat_context_cache(chat_id)
-    return deleted
 
 
 def _load_history(limit: int = 0, offset: int = 0) -> list[_HistoryEntry]:
@@ -1346,26 +987,15 @@ def _prefix_match_tasks(query: str, limit: int = 8) -> list[str]:
     with _rw_lock.read_lock():
         db = _get_db()
         escaped = query.replace("[", "[[]").replace("*", "[*]").replace("?", "[?]")
-        # Over-fetch so that duplicate task strings (a single task run
-        # many times) still leave room for *limit* distinct entries.
         rows = db.execute(
             "SELECT task FROM task_history "
             "WHERE task GLOB ? AND LENGTH(task) > ? "
             f"AND {_HISTORY_NOT_SUBAGENT} "
-            "ORDER BY timestamp DESC, rowid DESC LIMIT ?",
-            (escaped + "*", len(query), limit * 4),
+            "GROUP BY task "
+            "ORDER BY MAX(timestamp) DESC, MAX(rowid) DESC LIMIT ?",
+            (escaped + "*", len(query), limit),
         ).fetchall()
-    seen: set[str] = set()
-    out: list[str] = []
-    for row in rows:
-        task = row["task"]
-        if task in seen:
-            continue
-        seen.add(task)
-        out.append(task)
-        if len(out) >= limit:
-            break
-    return out
+    return [row["task"] for row in rows]
 
 
 def _search_history(
@@ -1411,10 +1041,6 @@ def _resolve_task_id(
     Returns:
         The resolved row id, or ``None`` if not found.
     """
-    # r4-persistence-H3: reject non-string / malformed task_id values
-    # rather than letting them silently TEXT-coerce inside SQLite and
-    # never match.  Fall back to ``_most_recent_task_id`` so legacy
-    # JSON-RPC clients with stale int task_id are still resolvable.
     if isinstance(task_id, str) and task_id != "":
         if not is_task_history_id(task_id):
             return _most_recent_task_id(db, task)
@@ -1423,15 +1049,6 @@ def _resolve_task_id(
         ).fetchone()
         if row is not None:
             return str(row["id"])
-        # bughunt2: a WELL-FORMED ``uuid4().hex`` id that matches no
-        # row belongs to a DELETED task (user removed a running task
-        # from the history sidebar, or a stale finished-tab id).  The
-        # write must be dropped — falling back to
-        # ``_most_recent_task_id`` here redirected the deleted task's
-        # result/extra/event writes onto an unrelated task (callers
-        # pass ``task=None``, so the fallback resolved to the most
-        # recent row overall).  The legacy fallback above is only for
-        # malformed (pre-UUID) ids that can never collide this way.
         return None
     return _most_recent_task_id(db, task)
 
@@ -1481,13 +1098,6 @@ def _log_orphaned_task_forensics(
             try:
                 ev_data = json.loads(ev["event_json"])
                 ev_type = ev_data.get("type", "unknown")
-                # bughunt8: coerce through the finite-aware helper —
-                # SQLite's dynamic typing lets a hand-edited /
-                # 3rd-party-source DB store TEXT/BLOB in the REAL
-                # ``timestamp`` column, and the ``:.1f`` format below
-                # runs OUTSIDE this try, so a raw read raised
-                # ValueError out of ``_recover_orphaned_tasks`` and
-                # crashed the whole startup sweep over one corrupt row.
                 ev_ts = _safe_float(ev["timestamp"], 0.0)
             except Exception:
                 ev_type = "parse_error"
@@ -1560,11 +1170,6 @@ def _recover_orphaned_tasks(
         The number of rows whose ``result`` column was rewritten.
     """
     db = _get_db()
-    # r3-H5: use bound parameter placeholders for the active-task
-    # id list rather than inlining them as SQL string literals.
-    # SQLite's bound-parameter limit (~999) is far above any
-    # realistic active-task count and ``?`` placeholders sidestep
-    # the SQL-injection surface entirely.
     active_ids = [str(t) for t in active_task_ids]
     extra_clause = ""
     extra_params: list[object] = []
@@ -1593,9 +1198,6 @@ def _recover_orphaned_tasks(
             "Recovered %d orphaned task(s) from prior process kill",
             rowcount,
         )
-        # Updated rows could belong to any chat — clear the entire
-        # autocomplete chat-context cache so stale entries don't
-        # surface a stale "Agent Failed Abruptly" line.
         _invalidate_chat_context_cache("")
     return rowcount
 
@@ -1642,10 +1244,6 @@ def _shutdown_persist_in_flight_results(task_ids: set[str]) -> int:
     if not task_ids:
         return 0
     db = _get_db()
-    # r3-H5: use ``?`` placeholders for the id list rather than
-    # inlining string literals.  Eliminates the SQL-injection
-    # surface (defensive even though valid hex never contains a
-    # quote) and tightens contract.
     id_list = [str(t) for t in task_ids]
     placeholders = ",".join(["?"] * len(id_list))
     sql = (
@@ -1654,8 +1252,6 @@ def _shutdown_persist_in_flight_results(task_ids: set[str]) -> int:
     )
     affected_chat_ids: list[str] = []
     with _rw_lock.write_lock():
-        # Capture chat_ids of rows we are about to rewrite so we can
-        # invalidate the autocomplete chat-context cache afterwards.
         rows = db.execute(
             f"SELECT chat_id FROM task_history "
             f"WHERE id IN ({placeholders}) AND result = ?",
@@ -1734,10 +1330,6 @@ def _save_task_result(
     affected_chat_id = _update_task_column("result", result, task_id, task)
     if affected_chat_id is None:
         return
-    # Invalidate the autocomplete chat-context cache so the updated
-    # result text becomes visible to ghost-text suggestions on the next
-    # keystroke.  Done outside the write lock to keep the critical
-    # section short.
     _invalidate_chat_context_cache(affected_chat_id)
 
 
@@ -1766,10 +1358,6 @@ def _set_task_favorite(task_id: str, is_favorite: bool) -> bool:
         return (cursor.rowcount or 0) > 0
 
 
-# Maps each legacy ``extra`` key to its (column_name, caster, default)
-# tuple.  Keys absent from *extra* are NOT included in the UPDATE,
-# which automatically preserves any other column (e.g. ``is_favorite``
-# set independently via :func:`_set_task_favorite`).
 _EXTRA_COL_MAP: dict[str, tuple[str, object, object]] = {
     "model": ("model", str, ""),
     "work_dir": ("work_dir", str, ""),
@@ -1780,11 +1368,6 @@ _EXTRA_COL_MAP: dict[str, tuple[str, object, object]] = {
     "steps": ("steps", int, 0),
     "is_parallel": ("is_parallel", lambda v: 1 if v else 0, 0),
     "is_worktree": ("is_worktree", lambda v: 1 if v else 0, 0),
-    # r3-H1: ``is_favorite`` is intentionally NOT in this map.
-    # ``_set_task_favorite`` is the only sanctioned writer for the
-    # favorite flag; including it here would let a future caller of
-    # ``_save_task_extra({"is_favorite": False})`` silently clear a
-    # previously-set star.
     "startTs": ("start_ts", int, 0),
     "endTs": ("end_ts", int, 0),
 }
@@ -1820,13 +1403,6 @@ def _save_task_extra(
             return
         pairs: list[tuple[str, object]] = []
         for k, v in extra.items():
-            # r5-persistence-C2: ``is_favorite`` is intentionally NOT
-            # in ``_EXTRA_COL_MAP`` so the favorite flag (owned by
-            # ``_set_task_favorite``) is preserved across normal
-            # metadata updates.  Silently dropping a caller's
-            # ``{"is_favorite": True}`` would leave the caller
-            # convinced the flag was set when it wasn't.  Raise so
-            # the bug surfaces.
             if k == "is_favorite":
                 raise ValueError(
                     "_save_task_extra does not write 'is_favorite'; "
@@ -1834,15 +1410,7 @@ def _save_task_extra(
                 )
             mapping = _EXTRA_COL_MAP.get(k)
             if mapping is None:
-                # Top-level parent_task_id passthrough (new flat shape).
-                # r3-C1: only emit the UPDATE when the coerced value
-                # is a real UUID.  Writing ``""`` here would silently
-                # re-parent an existing sub-agent row to the
-                # top-level history sidebar (the same trap fixed for
-                # the ``subagent`` nested branch below).
                 if k == "parent_task_id":
-                    # r3-H2: refuse to silently honour both the flat
-                    # and nested shapes when both are present.
                     if "subagent" in extra:
                         raise ValueError(
                             "Cannot pass both 'parent_task_id' and "
@@ -1852,18 +1420,12 @@ def _save_task_extra(
                     if coerced:
                         pairs.append(("parent_task_id = ?", coerced))
                     continue
-                # Legacy nested {"subagent": {"parent_task_id": ...}}
-                # OR convenience {"subagent": "<uuid>"} shape.
                 if k == "subagent":
                     if isinstance(v, dict):
                         raw_parent = v.get("parent_task_id")
                     else:
                         raw_parent = v
                     coerced = _coerce_parent_task_id(raw_parent)
-                    # CRITICAL: only emit the UPDATE when the coerced
-                    # value is a real UUID.  Writing ``""`` here would
-                    # silently re-parent an existing sub-agent row to
-                    # the top-level history sidebar.
                     if coerced:
                         pairs.append(("parent_task_id = ?", coerced))
                 continue
@@ -1896,35 +1458,12 @@ def _save_task_extra(
         db.commit()
 
 
-# ---------------------------------------------------------------------------
-# Background event writer
-# ---------------------------------------------------------------------------
-#
-# Hot-path callers (every printer broadcast from every running agent + every
-# sub-agent thread) used to call ``_append_chat_event`` synchronously.  That
-# acquired the process-wide write lock per event and ran three SQL statements
-# plus a commit per call.  Under N parallel sub-agents this collapsed all
-# event traffic onto a single mutex, dropping throughput from ~10k ev/s at
-# N=1 to ~3k ev/s at N=8.
-#
-# The fix is a single background writer thread that drains events from a
-# queue in batches: one ``executemany`` insert plus at most one
-# ``UPDATE task_history`` per batch, under exactly one write-lock acquisition.
-# Producers call ``_queue_chat_event`` (sub-microsecond enqueue).  Callers
-# that depend on event-ordering relative to a subsequent ``UPDATE
-# task_history`` (``_save_task_result``, ``_save_task_extra``,
-# ``_append_chat_event``) call ``_flush_chat_events()`` first.
-
 _event_queue: queue.Queue = queue.Queue()
 _event_writer_thread: threading.Thread | None = None
 _event_writer_lock = threading.Lock()
 _event_writer_stop = threading.Event()
 _next_seq_cache: dict[str, int] = {}
 _marked_has_events: set[str] = set()
-# (path, file identity) key the seq/has_events caches were last
-# populated against.  When ``_DB_PATH`` is reassigned (test fixtures)
-# OR the file at the same pathname is replaced on disk, the caches are
-# stale and must be cleared on the next ``_get_db()`` reconnect.
 _caches_db_key: tuple[str, tuple[int, int] | None] | None = None
 _caches_lock = threading.Lock()
 
@@ -1950,16 +1489,8 @@ def _maybe_reset_caches(
         _next_seq_cache.clear()
         _marked_has_events.clear()
         _caches_db_key = key
-    # The chat-context text cache was seeded from the previous database
-    # too — and ``_load_chat_context_text`` consults it BEFORE any
-    # ``_get_db()`` reconnect, so without this it would keep serving the
-    # old database's task/result text forever after a swap or removal.
-    # ``_chat_context_cache_lock`` is a leaf lock, safe to take here.
     _invalidate_chat_context_cache("")
 
-# Per-batch tuning.  256 events at 50 µs JSON encoding ≈ 13 ms of producer
-# work bundled into one SQL transaction.  20 ms collection window keeps
-# end-to-end latency under ~25 ms for any single event.
 _BATCH_MAX = 256
 _BATCH_WINDOW_S = 0.020
 
@@ -1972,12 +1503,6 @@ def _start_event_writer() -> None:
     with _event_writer_lock:
         if _event_writer_thread is not None and _event_writer_thread.is_alive():
             return
-        # Each writer gets its OWN stop event (passed as an argument and
-        # published in ``_event_writer_stop`` alongside the thread, both
-        # under ``_event_writer_lock``).  Re-using one shared event
-        # required a ``clear()`` here, which could un-stop a concurrent
-        # ``_stop_event_writer``'s target writer and leave two live
-        # writers draining the same FIFO queue.
         stop = threading.Event()
         t = threading.Thread(
             target=_event_writer_loop,
@@ -2004,7 +1529,6 @@ def _event_writer_loop(stop: threading.Event) -> None:
         except queue.Empty:
             continue
         if first is None:
-            # Shutdown sentinel
             _event_queue.task_done()
             if stop.is_set():
                 return
@@ -2026,18 +1550,68 @@ def _event_writer_loop(stop: threading.Event) -> None:
                 break
             batch.append(item)
         try:
-            _write_event_batch(batch)
-        except Exception:
-            # WARNING, not DEBUG: a persistent failure (disk full, schema
-            # mismatch, corruption) silently discards up to _BATCH_MAX
-            # user-visible chat events per batch — it must be visible in
-            # default logging configurations.
-            logger.warning("event writer batch failed", exc_info=True)
+            _persist_batch_with_retry(batch)
         finally:
             for _ in batch:
                 _event_queue.task_done()
         if shutdown_pending:
             return
+
+
+def _persist_batch_with_retry(batch: list[tuple[str, str, float, str]]) -> None:
+    """Persist *batch*, retrying a few times before giving up.
+
+    Transient failures (e.g. external lock contention beyond the busy
+    timeout) must not silently drop events; a bounded retry keeps the
+    writer from stalling forever while still recovering the common
+    case.  Events are only abandoned — with an ``error`` log — after
+    every attempt fails.
+    """
+    attempts = 4
+    for attempt in range(attempts):
+        try:
+            _write_event_batch(batch)
+            return
+        except Exception:
+            if attempt < attempts - 1:
+                logger.warning("event writer batch failed; retrying", exc_info=True)
+                time.sleep(0.05 * (attempt + 1))
+            else:
+                _journal_failed_events(batch, attempts)
+
+
+def _journal_failed_events(
+    batch: list[tuple[str, str, float, str]], attempts: int,
+) -> None:
+    """Preserve a permanently unwritable batch in a durable sidecar file.
+
+    A batch that failed every write attempt must not be silently
+    acknowledged and lost — ``_flush_chat_events`` would then report
+    completion for events that were never persisted.  The rows are
+    appended as JSON lines to ``<db>.failed_events.jsonl`` next to the
+    database so they can be inspected or replayed, and the loss is
+    logged at ``error`` level with the sidecar path.
+    """
+    sidecar = _current_db_path() + ".failed_events.jsonl"
+    try:
+        with open(sidecar, "a", encoding="utf-8") as stream:
+            for task_id, event_json, timestamp, origin in batch:
+                stream.write(json.dumps({
+                    "task_id": task_id,
+                    "event_json": event_json,
+                    "timestamp": timestamp,
+                    "origin_db_path": origin,
+                }) + "\n")
+        logger.error(
+            "%d chat events could not be written after %d attempts; "
+            "preserved in %s", len(batch), attempts, sidecar, exc_info=True,
+        )
+    except OSError:
+        logger.error(
+            "dropping %d chat events after %d failed write attempts "
+            "(sidecar %s also unwritable)",
+            len(batch), attempts, sidecar, exc_info=True,
+        )
 
 
 def _write_event_batch(batch: list[tuple[str, str, float, str]]) -> None:
@@ -2057,60 +1631,72 @@ def _write_event_batch(batch: list[tuple[str, str, float, str]]) -> None:
         return
     db = _get_db()
     task_ids = {tid for (tid, _ej, _ts, _op) in batch}
-    # ``_caches_lock`` is held for the whole seed-then-consume sequence so a
-    # concurrent ``_maybe_reset_caches`` (triggered by a ``_DB_PATH`` swap in
-    # another thread's ``_get_db()``) cannot clear ``_next_seq_cache`` between
-    # seeding and consumption — which silently dropped events (``seq is
-    # None``) whose batch had already passed the origin-path filter.
-    # ``_caches_lock`` is a leaf lock: it is never held while acquiring
-    # ``_rw_lock``, so taking it inside the write lock cannot deadlock.
     with _rw_lock.write_lock(), _caches_lock:
-        # Initialise next-seq cache for any new task_ids.  All inserts for
-        # a given task_id are serialised through this single writer thread,
-        # so the cached counter is authoritative once seeded from the DB.
-        for tid in task_ids:
-            if tid not in _next_seq_cache:
-                # Validate the task_id exists in task_history; skip events
-                # whose task row was deleted.  Inserting a dangling event
-                # would raise an IntegrityError (FK violation) that aborts
-                # the whole batch, losing every other task's events.
-                exists = db.execute(
-                    "SELECT 1 FROM task_history WHERE id = ?", (tid,),
-                ).fetchone()
-                if exists is None:
-                    continue
-                row = db.execute(
-                    "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq "
-                    "FROM events WHERE task_id = ?",
-                    (tid,),
-                ).fetchone()
-                _next_seq_cache[tid] = row["next_seq"] if row else 0
-        rows: list[tuple[str, int, str, float]] = []
-        for tid, ev_json, ts, _op in batch:
-            seq = _next_seq_cache.get(tid)
-            if seq is None:
-                # Task row deleted — drop the dangling event, keep the rest.
+        try:
+            _write_event_batch_locked(db, batch, task_ids)
+        except Exception:
+            try:
+                db.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            # The seq cache may have advanced past rows that were
+            # rolled back; recompute from the database on retry.
+            for tid in task_ids:
+                _next_seq_cache.pop(tid, None)
+                _marked_has_events.discard(tid)
+            raise
+
+
+def _write_event_batch_locked(
+    db: sqlite3.Connection,
+    batch: list[tuple[str, str, float, str]],
+    task_ids: set[str],
+) -> None:
+    """Insert *batch* inside one explicit transaction.
+
+    Caller holds ``_rw_lock.write_lock()`` and ``_caches_lock`` and
+    rolls back + invalidates the seq caches on any failure, so a
+    mid-batch error can never diverge the cache from the database.
+    """
+    db.execute("BEGIN IMMEDIATE")
+    for tid in task_ids:
+        if tid not in _next_seq_cache:
+            exists = db.execute(
+                "SELECT 1 FROM task_history WHERE id = ?", (tid,),
+            ).fetchone()
+            if exists is None:
                 continue
-            _next_seq_cache[tid] = seq + 1
-            rows.append((tid, seq, ev_json, ts))
-        db.executemany(
-            "INSERT INTO events (task_id, seq, event_json, timestamp) "
-            "VALUES (?, ?, ?, ?)",
-            rows,
+            row = db.execute(
+                "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq "
+                "FROM events WHERE task_id = ?",
+                (tid,),
+            ).fetchone()
+            _next_seq_cache[tid] = row["next_seq"] if row else 0
+    rows: list[tuple[str, int, str, float]] = []
+    for tid, ev_json, ts, _op in batch:
+        seq = _next_seq_cache.get(tid)
+        if seq is None:
+            continue
+        _next_seq_cache[tid] = seq + 1
+        rows.append((tid, seq, ev_json, ts))
+    db.executemany(
+        "INSERT INTO events (task_id, seq, event_json, timestamp) "
+        "VALUES (?, ?, ?, ?)",
+        rows,
+    )
+    to_mark = [
+        tid for tid in task_ids
+        if tid in _next_seq_cache and tid not in _marked_has_events
+    ]
+    if to_mark:
+        placeholders = ",".join("?" * len(to_mark))
+        db.execute(
+            f"UPDATE task_history SET has_events = 1 "
+            f"WHERE id IN ({placeholders})",
+            to_mark,
         )
-        to_mark = [
-            tid for tid in task_ids
-            if tid in _next_seq_cache and tid not in _marked_has_events
-        ]
-        if to_mark:
-            placeholders = ",".join("?" * len(to_mark))
-            db.execute(
-                f"UPDATE task_history SET has_events = 1 "
-                f"WHERE id IN ({placeholders})",
-                to_mark,
-            )
-            _marked_has_events.update(to_mark)
-        db.commit()
+        _marked_has_events.update(to_mark)
+    db.execute("COMMIT")
 
 
 def _queue_chat_event(
@@ -2157,13 +1743,6 @@ def _flush_chat_events() -> None:
     thread — the writer thread also takes that lock per batch, so
     calling this while holding the write lock would deadlock.
     """
-    # Poll instead of a single liveness-check + ``Queue.join()``: a
-    # concurrent ``_stop_event_writer()`` can terminate the writer AFTER
-    # this thread's one-shot ``is_alive()`` check, stranding queued items
-    # with no live writer — ``join()`` would then block forever waiting
-    # for a ``task_done()`` no writer will ever call.  Re-checking writer
-    # liveness on every iteration (and restarting it while items remain)
-    # guarantees the backlog is always drained.
     while _event_queue.unfinished_tasks:
         t = _event_writer_thread
         if t is None or not t.is_alive():
@@ -2172,53 +1751,59 @@ def _flush_chat_events() -> None:
 
 
 def _stop_event_writer() -> None:
-    """Drain and stop the writer thread.  Used by ``_close_db``/tests."""
+    """Drain and stop the writer thread.  Used by ``_close_db``/tests.
+
+    A producer can enqueue an event *after* the drain below but
+    *before* the old writer observes its stop flag, in which case the
+    stopped writer exits without consuming it.  The loop re-checks the
+    queue after each stopped writer and drains again (starting a fresh
+    writer if needed) until nothing is left unfinished, so no queued
+    event is ever stranded.
+    """
     global _event_writer_thread, _caches_db_key
-    # Drain first: ``_flush_chat_events`` restarts a dead writer while
-    # items remain, so this cannot block forever on a queue no writer
-    # is draining (unlike a bare ``_event_queue.join()``).
-    _flush_chat_events()
-    # Snapshot thread + its paired stop event under the lock so a
-    # concurrent ``_start_event_writer`` cannot swap in a new pair
-    # between the two reads.  The join below deliberately happens
-    # OUTSIDE the lock so a wedged writer never blocks producers'
-    # ``_start_event_writer`` calls for the 5s join timeout.
-    with _event_writer_lock:
-        t = _event_writer_thread
-        stop = _event_writer_stop
-    if t is not None:
-        stop.set()
-        try:
-            _event_queue.put_nowait(None)
-        except queue.Full:  # pragma: no cover — unbounded queue
-            pass
-        t.join(timeout=5)
-        if t.is_alive():
-            # The writer is wedged (e.g. a slow batch on a locked DB).
-            # Leave the stop flag set so it exits as soon as it unwedges,
-            # and keep the thread reference so ``_start_event_writer``
-            # cannot spawn a second concurrent writer draining the same
-            # FIFO queue — two writers would interleave batches and break
-            # the per-task event ordering guarantee.  Caches are left for
-            # the zombie's in-flight batch; ``_maybe_reset_caches`` resets
-            # them on the next ``_get_db()`` after any path change.
-            logger.warning(
-                "event writer thread did not stop within 5s; "
-                "deferring writer cleanup until it exits"
-            )
-            return
+    while True:
+        _flush_chat_events()
         with _event_writer_lock:
-            # CAS-style: only null the reference if it still names the
-            # writer we just stopped.  A concurrent ``_start_event_writer``
-            # may have already published a fresh live writer (with its own
-            # stop event) that must not be clobbered — clobbering it would
-            # let a later start spawn a SECOND concurrent writer.
-            if _event_writer_thread is t:
-                _event_writer_thread = None
+            t = _event_writer_thread
+            stop = _event_writer_stop
+        if t is not None:
+            stop.set()
+            try:
+                _event_queue.put_nowait(None)
+            except queue.Full:  # pragma: no cover — unbounded queue
+                pass
+            t.join(timeout=5)
+            if t.is_alive():
+                logger.warning(
+                    "event writer thread did not stop within 5s; "
+                    "deferring writer cleanup until it exits"
+                )
+                return
+            with _event_writer_lock:
+                if _event_writer_thread is t:
+                    _event_writer_thread = None
+        if not _event_queue.unfinished_tasks:
+            break
     with _caches_lock:
         _next_seq_cache.clear()
         _marked_has_events.clear()
         _caches_db_key = None
+
+
+def _drain_events_at_exit() -> None:
+    """``atexit`` hook: flush queued events before interpreter teardown.
+
+    The writer is a daemon thread, so a process exiting right after
+    ``JsonPrinter`` enqueued events would otherwise lose them.  Thread
+    creation can fail during interpreter shutdown, hence best-effort.
+    """
+    try:
+        _stop_event_writer()
+    except Exception:  # pragma: no cover — interpreter shutdown edge
+        logger.debug("event drain at exit failed", exc_info=True)
+
+
+atexit.register(_drain_events_at_exit)
 
 
 def _append_chat_event(
@@ -2246,88 +1831,13 @@ def _append_chat_event(
     """
     if origin_db_path is not None and origin_db_path != _current_db_path():
         return
-    # Resolve (and validate) the row id up front — the queued write
-    # path requires a concrete, existing ``task_history`` id.
     with _rw_lock.read_lock():
         db = _get_db()
         resolved = _resolve_task_id(db, task_id, task)
     if resolved is None:
         return
-    # Reuse the single batched write path so the sync and async event
-    # writers can never diverge.  The FIFO queue guarantees this event
-    # lands AFTER any earlier ``_queue_chat_event`` calls for the same
-    # task; the flush makes the write synchronous.
     _queue_chat_event(event, resolved, origin_db_path)
     _flush_chat_events()
-
-
-def _amend_last_talk_tool_call_audio(
-    task_id: str, audio_b64: str, audio_mime: str,
-) -> bool:
-    """Attach a synthesized clip to the last persisted ``talk`` tool call.
-
-    The agentic loop persists a ``tool_call`` event for the ``talk``
-    tool BEFORE the tool executes, so the recorded event can never
-    carry the audio clip synthesized DURING execution.  Demo-mode
-    replay plays exactly ``extras.audioB64`` of that persisted event
-    (the synthesis fallback is gone), so without this amendment every
-    replayed ``talk`` narration would be silent.  Called by
-    :meth:`JsonPrinter.attach_talk_audio` right after synthesis
-    succeeds; finds the most recent ``talk`` ``tool_call`` event row
-    for *task_id* that does not yet carry audio and rewrites its
-    ``extras`` with the clip in place (an UPDATE — appending a second
-    copy would render the panel twice on replay).
-
-    Args:
-        task_id: Stable ``task_history`` row id the event was
-            persisted under.
-        audio_b64: Base64-encoded synthesized clip bytes.
-        audio_mime: The clip's MIME type (e.g. ``"audio/mpeg"``).
-
-    Returns:
-        ``True`` when a persisted event row was amended, ``False``
-        when no matching audio-less ``talk`` tool call exists.
-    """
-    if not task_id or not audio_b64:
-        return False
-    # The talk tool_call event reaches the events table through the
-    # asynchronous background writer; flush so the row we must amend
-    # is guaranteed to be visible (and so the UPDATE cannot be
-    # overtaken by its own INSERT).
-    _flush_chat_events()
-    with _rw_lock.write_lock():
-        db = _get_db()
-        rows = db.execute(
-            "SELECT id, event_json FROM events "
-            "WHERE task_id = ? AND event_json LIKE '%\"tool_call\"%' "
-            "AND event_json LIKE '%\"talk\"%' "
-            "ORDER BY seq DESC",
-            (task_id,),
-        ).fetchall()
-        for row in rows:
-            try:
-                event = json.loads(row["event_json"])
-            except (TypeError, ValueError):
-                continue
-            if event.get("type") != "tool_call" or event.get("name") != "talk":
-                continue
-            extras = event.get("extras")
-            if not isinstance(extras, dict):
-                extras = {}
-                event["extras"] = extras
-            if extras.get("audioB64"):
-                # Already amended (e.g. a retried synthesis); the most
-                # recent audio-less call is the one being spoken now.
-                continue
-            extras["audioB64"] = audio_b64
-            extras["audioMime"] = audio_mime
-            db.execute(
-                "UPDATE events SET event_json = ? WHERE id = ?",
-                (json.dumps(event), row["id"]),
-            )
-            db.commit()
-            return True
-    return False
 
 
 def _task_has_events(task_id: str) -> bool:
@@ -2383,11 +1893,6 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
     """
     with _rw_lock.read_lock():
         db = _get_db()
-        # Filter sub-agent rows inside the chat-selection query itself:
-        # a chat whose only rows are sub-agent rows must not consume one
-        # of the *limit* slots (it would then be skipped below, silently
-        # returning fewer chats than exist), and a chat's recency must
-        # be anchored to its latest REAL task, not a sub-agent row.
         chat_rows = db.execute(
             "SELECT chat_id, MAX(timestamp) AS latest "
             "FROM task_history WHERE chat_id != '' "
@@ -2405,16 +1910,6 @@ def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
                 "ORDER BY timestamp ASC, rowid ASC",
                 (cid,),
             ).fetchall()
-            # Surface both the row's own ``task_id`` (``id`` column)
-            # and its ``parent_task_id`` so callers — chiefly the CLI
-            # ``/resume`` listing — can display per-task identity and
-            # the sub-agent parent relationship.  Sub-agent rows are
-            # excluded by the shared ``_HISTORY_NOT_SUBAGENT`` SQL
-            # predicate (same classifier as every other reader) so the
-            # resume picker stays focused on the user-driven tasks;
-            # consequently every returned ``parent_task_id`` is the
-            # empty string here, but the key is always present for a
-            # stable schema.
             task_dicts = [
                 {"task": t["task"], "result": t["result"],
                  "timestamp": t["timestamp"],
@@ -2495,6 +1990,38 @@ def _events_session_dict(
     }
 
 
+def _load_events_session_row(
+    where_sql: str,
+    params: tuple[object, ...],
+) -> dict[str, object] | None:
+    """Load one ``task_history`` row and its events as a session dict.
+
+    Shared engine of :func:`_load_latest_chat_events_by_chat_id` and
+    :func:`_load_chat_events_by_task_id` — runs ``_HISTORY_SELECT``
+    plus *where_sql* under the read lock and converts the first
+    matching row via :func:`_events_session_dict`.
+
+    Args:
+        where_sql: SQL appended to ``_HISTORY_SELECT`` (the
+            WHERE/ORDER BY/LIMIT clauses).
+        params: Bind parameters for *where_sql*.
+
+    Returns:
+        A dict with ``task`` (str), ``task_id`` (str), ``events``
+        (list of event dicts), ``chat_id`` (str), and ``extra`` (str,
+        JSON metadata), or ``None`` when no row matches.
+    """
+    with _rw_lock.read_lock():
+        db = _get_db()
+        row = db.execute(_HISTORY_SELECT + where_sql, params).fetchone()
+        if row is None:
+            return None
+        return _events_session_dict(
+            db, str(row["id"]), row["task"], str(row["chat_id"] or ""),
+            _row_to_extra_json(row),
+        )
+
+
 def _load_latest_chat_events_by_chat_id(
     chat_id: str,
 ) -> dict[str, object] | None:
@@ -2523,24 +2050,11 @@ def _load_latest_chat_events_by_chat_id(
     """
     if not chat_id:
         return None
-    with _rw_lock.read_lock():
-        db = _get_db()
-        # Sub-agent rows are excluded by the shared
-        # ``_HISTORY_NOT_SUBAGENT`` SQL predicate — the same
-        # classifier every other history/chat reader uses — so only
-        # the single newest real row is fetched.
-        row = db.execute(
-            _HISTORY_SELECT
-            + f"WHERE chat_id = ? AND {_HISTORY_NOT_SUBAGENT} "
-            "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
-            (chat_id,),
-        ).fetchone()
-        if row is None:
-            return None
-        return _events_session_dict(
-            db, str(row["id"]), row["task"], chat_id,
-            _row_to_extra_json(row),
-        )
+    return _load_events_session_row(
+        f"WHERE chat_id = ? AND {_HISTORY_NOT_SUBAGENT} "
+        "ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+        (chat_id,),
+    )
 
 
 def _load_chat_events_by_task_id(
@@ -2560,18 +2074,7 @@ def _load_chat_events_by_task_id(
         (list of event dicts), ``chat_id`` (str), and ``extra`` (str,
         JSON metadata), or ``None`` if no such row exists.
     """
-    with _rw_lock.read_lock():
-        db = _get_db()
-        row = db.execute(
-            _HISTORY_SELECT + "WHERE id = ?",
-            (task_id,),
-        ).fetchone()
-        if not row:
-            return None
-        return _events_session_dict(
-            db, str(row["id"]), row["task"], str(row["chat_id"] or ""),
-            _row_to_extra_json(row),
-        )
+    return _load_events_session_row("WHERE id = ?", (task_id,))
 
 
 def _load_subagent_rows_by_parent_task_id(
@@ -2658,20 +2161,6 @@ def _get_adjacent_task_by_chat_id(
         ts = row["timestamp"]
         cur_rowid = row["rowid"]
 
-        # Sub-agent rows (those carrying a ``subagent`` marker in
-        # ``extra``) are internal implementation detail of the parent's
-        # ``run_parallel`` tool call and must NEVER appear when the user
-        # adjacent-scrolls between tasks in the chat webview — they
-        # already render inside the parent task's panel.  Filter them
-        # out at the SQL level so the LIMIT 1 lands on the next *parent*
-        # row rather than a sub-agent that happens to sit between two
-        # parent tasks chronologically.
-        # Adjacency uses the total order ``(timestamp, rowid)`` — the same
-        # rowid tiebreak as ``_load_latest_chat_events_by_chat_id``'s
-        # ``ORDER BY timestamp DESC, rowid DESC`` — so rows that share a
-        # timestamp value (concurrent inserts, imported databases)
-        # remain mutually reachable instead of strict ``<`` / ``>``
-        # timestamp comparison silently skipping them.
         if direction == "prev":
             adj = db.execute(
                 "SELECT id, task FROM task_history "
@@ -2805,18 +2294,8 @@ def _load_chat_context_text(chat_id: str) -> str:
     """
     if not chat_id:
         return ""
-    # Detect an on-disk swap/removal of the database BEFORE consulting
-    # the cache: the cache-hit path performs no ``_get_db()`` call, so
-    # without this probe a chat_id cached against a deleted or replaced
-    # database file would be served forever (``_maybe_reset_caches``
-    # clears the cache when the path or file identity changes).
     current_path = _current_db_path()
     _maybe_reset_caches(current_path, _db_file_identity(current_path))
-    # Capture the per-chat generation BEFORE the SQL read so that any
-    # concurrent ``_invalidate_chat_context_cache(chat_id)`` (driven by
-    # a writer that committed during our read) bumps the counter and
-    # makes us skip the store — preventing a stale overwrite of a
-    # fresher value another reader may have just published.
     with _chat_context_cache_lock:
         cached = _chat_context_text_cache.get(chat_id)
         snapshot_gen = _chat_context_cache_gen
@@ -2832,10 +2311,6 @@ def _load_chat_context_text(chat_id: str) -> str:
             parts.append(result)
     text = "\n".join(parts)
     with _chat_context_cache_lock:
-        # Only publish our result if no invalidation occurred between
-        # the pre-read snapshot and now.  Otherwise our data is
-        # potentially stale — leave whatever fresher entry (or empty
-        # slot) is already there alone.
         if _chat_context_cache_gen == snapshot_gen:
             _chat_context_text_cache[chat_id] = text
     return text
@@ -3019,5 +2494,3 @@ def _load_frequent_tasks(limit: int = 50) -> list[dict[str, object]]:
             {"task": r["task"], "count": r["count"], "timestamp": r["timestamp"]}
             for r in rows
         ]
-
-

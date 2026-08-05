@@ -85,8 +85,6 @@ class _WorktreeNoAutocommitBase(unittest.TestCase):
         Path(self.repo).mkdir(parents=True, exist_ok=True)
         _init_repo(self.repo)
 
-        # Redirect persistence to a temp DB so this test does not
-        # contaminate the user's real ``~/.kiss/sorcar.db``.
         self._saved_db = (
             _persistence._DB_PATH,
             _persistence._db_conn,
@@ -107,17 +105,12 @@ class _WorktreeNoAutocommitBase(unittest.TestCase):
 
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
-        # Save the stateful-agent parent's ``run`` for restoration; the
-        # individual tests patch it with a deterministic stub.
         self._parent_class = cast(Any, SorcarAgent.__mro__[1])
         self._original_run = self._parent_class.run
 
     def tearDown(self) -> None:
         self._parent_class.run = self._original_run
 
-        # Clean up any pending worktree from the agent before
-        # destroying the repo, so leftover ``git worktree`` metadata
-        # does not contaminate later tests.
         from kiss.agents.sorcar.running_agent_state import _RunningAgentState
         for tab in list(_RunningAgentState.running_agent_states.values()):
             if tab.agent is not None and tab.agent._wt_pending:
@@ -127,7 +120,6 @@ class _WorktreeNoAutocommitBase(unittest.TestCase):
                     pass
         _RunningAgentState.running_agent_states.clear()
 
-        # Restore persistence.
         if _persistence._db_conn is not None:
             _persistence._db_conn.close()
         (
@@ -233,12 +225,8 @@ class TestWorktreeBranchCreatedNoAutocommit(_WorktreeNoAutocommitBase):
             "model": "",
         })
 
-        # Sanity: the agent did broadcast a worktree_created event
-        # during the run, so the branch was created.
         assert "worktree_created" in self._types(), self._types()
 
-        # Bug repro: the branch should still exist after the run when
-        # auto-commit is off, even if no file changes were made.
         branches = _list_kiss_wt_branches(self.repo)
         assert len(branches) == 1, (
             f"BUG: when use_worktree=True and autoCommit=False, the "

@@ -2,37 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression test for the per-tab work_dir invariant.
-//
-// Invariant (INVARIANTS.md → Tabs & chat webview):
-//   When a tab has an associated chat-id of a REAL persisted task,
-//   changing the working directory in the settings page MUST NOT
-//   change the directory of that tab and chat id.
-//
-// The chat webview routes follow-up commands (submit, autocommitAction,
-// worktreeAction, mergeAction, …) through ``workDirForTab(tabId)``.
-// That helper used to return ``tab.workDir`` if known, else the
-// daemon-global ``configWorkDir`` reported by the latest ``configData``.
-//
-// Bug: when the daemon binds a chat-id to a tab via a ``clear`` event
-// (the normal path for a freshly-submitted task whose ``task_events``
-// replay hasn't run because the task is brand new), ``tab.workDir``
-// stays empty.  A later settings-panel change updates ``configWorkDir``
-// — and the very next command issued from that tab is routed to the
-// NEW directory, even though the bound chat-id still belongs to the
-// original task.  Auto-commit/merge then operate on the wrong repo;
-// follow-up submits inherit a wrong ``work_dir`` snapshot.
-//
-// Fix: pin ``tab.workDir`` from ``configWorkDir`` (when ``tab.workDir``
-// is still empty) the moment a chat-id is bound to a tab — both on the
-// ``clear`` event and on the ``task_events`` replay path — so a later
-// settings change cannot shift that tab's effective work_dir.
-//
-// This test drives production media/chat.html + panelCopy.js + main.js
-// in JSDOM.  Run directly with:
-//
-//     node src/kiss/agents/vscode/test/tabWorkDirSettingsInvariant.test.js
 
 'use strict';
 
@@ -73,7 +42,10 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
@@ -94,34 +66,17 @@ function initialTabId(posted) {
   return ready ? ready.tabId : '';
 }
 
-/**
- * Drive the chat webview through the exact event sequence the daemon
- * uses for a freshly-submitted task whose chat-id is bound via
- * ``clear``, then change the configured work_dir from the settings
- * panel, then trigger one autocommit prompt round-trip.  Returns the
- * ``workDir`` field of the ``autocommitAction`` message the webview
- * posts when the user clicks "Auto commit".
- */
 function workDirOnAutocommitAfterSettingsChange(initialWd, newWd, bindKind) {
   const {win, posted} = makeWebview();
   const tabId = initialTabId(posted);
   assert.ok(tabId, 'main.js must announce the initial tab id');
 
-  // (1) The daemon's startup ``configData`` reports the configured
-  // ``work_dir`` for this connection.
   send(win, {
     type: 'configData',
     config: {work_dir: initialWd},
     apiKeys: {},
   });
 
-  // (2) The daemon binds a REAL persisted chat-id to this tab.
-  // Two production paths reach this state:
-  //   * 'clear' is broadcast for a freshly-submitted task as soon as
-  //     the agent persists it in the DB (no ``task_events`` replay).
-  //   * 'task_events' is broadcast when the user reopens a chat from
-  //     the history sidebar (extra MAY carry the task's persisted
-  //     ``work_dir``; for older rows it does not).
   if (bindKind === 'clear') {
     send(win, {type: 'clear', tabId: tabId, chat_id: 'chat-real-task'});
   } else if (bindKind === 'task_events_no_extra_workdir') {
@@ -132,24 +87,18 @@ function workDirOnAutocommitAfterSettingsChange(initialWd, newWd, bindKind) {
       task_id: 42,
       task: 'Real persisted task',
       events: [],
-      // ``extra`` here intentionally omits ``work_dir`` to model the
-      // older persisted rows whose ``extra`` does not carry it.
       extra: JSON.stringify({startTs: 1_700_000_000_000}),
     });
   } else {
     throw new Error('unknown bindKind: ' + bindKind);
   }
 
-  // (3) The user opens the settings panel and changes the configured
-  //     work_dir.  This is the trigger that USED to leak into every
-  //     tab via ``workDirForTab``'s ``configWorkDir`` fallback.
   send(win, {
     type: 'configData',
     config: {work_dir: newWd},
     apiKeys: {},
   });
 
-  // (4) The daemon prompts the bound chat for autocommit.
   send(win, {
     type: 'autocommit_prompt',
     tabId: tabId,
@@ -206,10 +155,6 @@ function testInvariantHoldsAfterSettingsChange_TaskEventsBindNoExtraWorkdir() {
 }
 
 function testTaskEventsExtraWorkDirStillWinsOverConfig() {
-  // Sanity: when ``extra.work_dir`` is present it MUST pin the tab's
-  // ``workDir`` to the task's recorded directory regardless of any
-  // settings change (this path was already correct; the test guards
-  // against future regressions of the same invariant).
   const {win, posted} = makeWebview();
   const tabId = initialTabId(posted);
 

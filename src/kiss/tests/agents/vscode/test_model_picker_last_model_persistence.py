@@ -53,9 +53,6 @@ def _isolated_state(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     tmpdir = tempfile.mkdtemp()
     monkeypatch.setattr(pm, "_KISS_DIR", type(pm._KISS_DIR)(tmpdir))
     monkeypatch.setattr(pm, "_DB_PATH", type(pm._DB_PATH)(os.path.join(tmpdir, "sorcar.db")))
-    # ``CONFIG_DIR``/``CONFIG_PATH`` are PEP 562 lazy attributes;
-    # ``setattr`` would pin the computed (stale tmp) Path at teardown.
-    # ``setitem`` deletes the pin instead, restoring lazy resolution.
     monkeypatch.setitem(vars(vc), "CONFIG_DIR", Path(tmpdir))
     monkeypatch.setitem(
         vars(vc), "CONFIG_PATH", Path(tmpdir) / "config.json",
@@ -201,12 +198,6 @@ class TestModelPickerLastModelPersistence:
 
         server.printer.broadcast = capture  # type: ignore[method-assign]
 
-        # Stall ``_save_last_model`` so we can open the race window
-        # deterministically.  Thread A calls ``_cmd_select_model`` which
-        # updates ``self._default_model`` to ``claude-opus-4-8`` under
-        # the lock, releases the lock, then enters ``_record_model_usage``
-        # → ``_save_last_model`` which blocks here.  At that moment the
-        # main thread (B) calls ``_get_models``.
         save_started = threading.Event()
         proceed_save = threading.Event()
         real_save = pm._save_last_model
@@ -230,22 +221,13 @@ class TestModelPickerLastModelPersistence:
                 "test bug: _save_last_model not entered within timeout"
             )
 
-            # In-memory has been updated by _cmd_select_model, but disk
-            # still reflects the OLD value because slow_save hasn't
-            # called real_save yet.
             assert server._default_model == "claude-opus-4-8"
             assert load_config()["last_model"] == "gpt-5.5"
 
-            # Concurrent getModels must not revert the just-picked
-            # model.  Run it in a thread because, with the fix, the
-            # select thread holds ``_state_lock`` until the on-disk
-            # write completes, so ``_get_models`` will block waiting
-            # on the lock and only proceed AFTER the select finishes.
             get_thread = threading.Thread(
                 target=server._get_models, daemon=True,
             )
             get_thread.start()
-            # Let the racing _get_models start and reach the lock.
             time.sleep(0.05)
 
             proceed_save.set()
@@ -269,7 +251,6 @@ class TestModelPickerLastModelPersistence:
             "on-disk value; got selected="
             f"{event['selected']!r}"
         )
-        # And the daemon's in-memory state must reflect the user's pick.
         assert server._default_model == "claude-opus-4-8", (
             "_get_models clobbered self._default_model with the stale "
             "on-disk value; got "
@@ -325,9 +306,6 @@ class TestModelPickerLastModelPersistence:
                 "test bug: _save_last_model not entered within timeout"
             )
 
-            # In-memory has been updated by the select thread; disk
-            # still reflects the OLD value because slow_save is
-            # blocked.
             assert server._default_model == "claude-opus-4-8"
             assert load_config()["last_model"] == "gpt-5.5"
 
@@ -335,8 +313,6 @@ class TestModelPickerLastModelPersistence:
                 target=server._new_chat, args=("tabB",), daemon=True,
             )
             new_thread.start()
-            # Give _new_chat time to read disk (outside lock) before
-            # we unblock the select thread.
             time.sleep(0.05)
 
             proceed_save.set()

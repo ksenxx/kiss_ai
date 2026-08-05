@@ -2,18 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression test for History clicks and chat-tab identity.
-//
-// Invariant: one webview/client must not have two tabs displaying the same
-// backend chat id.  When the user clicks a History row whose chat id is already
-// open in another tab, the webview must switch to that tab instead of opening a
-// duplicate tab and issuing another resumeSession for the same chat.
-//
-// This drives the production media/chat.html + panelCopy.js + main.js in JSDOM.
-// Run directly with:
-//
-//     node src/kiss/agents/vscode/test/historyClickSwitchExistingChat.test.js
 
 'use strict';
 
@@ -54,7 +42,10 @@ function makeWebview(initialState) {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
@@ -102,8 +93,6 @@ function testHistoryClickSwitchesToExistingChatTab() {
   assert.ok(ready && ready.tabId, 'main.js must announce the initial tab id');
   const firstTabId = ready.tabId;
 
-  // Load a real persisted chat into the first tab.  This is the same event the
-  // daemon sends when a task is replayed or running task state is attached.
   send(win, {
     type: 'task_events',
     tabId: firstTabId,
@@ -121,7 +110,6 @@ function testHistoryClickSwitchesToExistingChatTab() {
     'sanity: the first tab displays the existing chat',
   );
 
-  // Open a second empty tab so the existing chat is no longer active.
   win.document.querySelector('.chat-tab-add').click();
   assert.strictEqual(chatTabs(win).length, 2, 'sanity: plus opens one new tab');
   assert.strictEqual(activeTabLabel(win), 'new chat', 'sanity: new tab is active');

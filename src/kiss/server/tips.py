@@ -21,7 +21,6 @@ import os
 import re
 from pathlib import Path
 
-#: Every line starting with ``# Tip`` begins a new tip section.
 _TIP_DELIMITER = re.compile(r"^# Tip.*$", re.MULTILINE)
 
 
@@ -34,8 +33,6 @@ def _bundled_tips_path() -> Path:
     override = os.environ.get("KISS_TIPS_PATH")
     if override:
         return Path(override)
-    # ``__file__`` is ``…/kiss/server/tips.py``; the bundled TIPS.md
-    # lives at ``…/kiss/TIPS.md`` (one ``parent`` up from ``server/``).
     return Path(__file__).parent.parent / "TIPS.md"
 
 

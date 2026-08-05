@@ -26,7 +26,6 @@ from urllib.request import Request, urlopen
 
 API = "https://openapi.api.govee.com/router/api/v1"
 
-# Devices to hide from `list` and from name lookups.
 EXCLUDED_NAMES = {"permanent outdoor lights", "string lights"}
 
 

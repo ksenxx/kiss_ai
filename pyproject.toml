@@ -38,6 +38,9 @@ dependencies = [
     "openai>=2.13.0",
     "anthropic>=0.40.0",
     "rich>=14.2.0",
+    # Markdown -> HTML conversion for finish()'s HTML summary guarantee
+    # (kiss.core.utils.ensure_html).
+    "markdown-it-py>=3.0.0",
     "docker>=7.0.0",
     "google-genai>=0.30.0",
     "pyyaml>=6.0.0",
@@ -73,11 +76,6 @@ dependencies = [
     # ./.venv/bin/bandit and ./.venv/bin/semgrep to flag dangerous sinks.
     "bandit>=1.9.4",
     "semgrep>=1.169.0",
-    # Local tree-sitter code knowledge graph (kiss.agents.sorcar.code_graph):
-    # deterministic, zero-LLM-cost AST extraction across ~300 languages with
-    # pre-compiled grammars downloaded on first use and cached locally.
-    "tree-sitter>=0.24.0",
-    "tree-sitter-language-pack>=1.10.0",
 ]
 
 [build-system]
@@ -150,13 +148,11 @@ gemini = [
     "google-genai>=0.30.0",
 ]
 
-# Core + dependencies for kiss.agents.sorcar (web tools, MCP, code graph)
+# Core + dependencies for kiss.agents.sorcar (web tools, MCP)
 sorcar = [
     {include-group = "core"},
     "playwright>=1.40.0",
     "mcp>=1.20.0",
-    "tree-sitter>=0.24.0",
-    "tree-sitter-language-pack>=1.10.0",
 ]
 
 # Sorcar (which includes core) + dependencies for kiss.server
@@ -189,14 +185,17 @@ markers = [
 ]
 # Disable timeout so tests run without time limit
 timeout = 0
-# Coverage is enabled by default via --cov/--cov-branch below. These flags are owned
-# by the pytest-cov plugin, so disabling it with `-p no:cov` would normally abort the
-# run with "unrecognized arguments: --cov=src/kiss --cov-branch". To keep
-# `uv run pytest ... -p no:cov` (and other plugin-less invocations) working, the root
-# conftest.py registers inert fallback --cov/--cov-branch options whenever pytest-cov
-# is not loaded, so these addopts always parse cleanly. Prefer `--no-cov` to turn off
-# coverage while keeping the plugin loaded.
-addopts = "--cov=src/kiss --cov-branch -m 'not slow and not process_killer'"
+# Coverage tracing (`--cov=src/kiss --cov-branch`) is *not* enabled by default
+# anymore because on the ~800-file, ~4200-test suite the branch-coverage tracer
+# was the single biggest slowdown (measured 5x-20x on representative subsets:
+# 6.5s -> 0.3s on the trivial two-test set, 3.1s -> 0.6s on 77 real tests).
+# The `pytest-cov` plugin is still loaded, so anyone who wants a coverage run
+# opts in explicitly, e.g.:
+#     uv run pytest --cov=src/kiss --cov-branch
+# The root conftest.py still registers inert `--cov` / `--cov-branch` fallbacks
+# so `pytest -p no:cov` (which strips the plugin's real options) keeps parsing
+# cleanly even if someone re-adds those flags to a local addopts.
+addopts = "-m 'not slow and not process_killer'"
 # Silence non-actionable third-party DeprecationWarnings that the test
 # session cannot fix locally:
 #   * ``google.genai`` re-exports ``typing._UnionGenericAlias`` (slated
@@ -364,7 +363,6 @@ Repository = "https://github.com/ksen/kiss"
 [project.scripts]
 check = "kiss.scripts.check:main"
 generate-api-docs = "kiss.scripts.generate_api_docs:main"
-kiss-backfill-talk-audio = "kiss.scripts.backfill_talk_audio:main"
 sorcar = "kiss.ui.cli.sorcar_cli:main"
 kiss-slack = "kiss.agents.third_party_agents.slack_agent:main"
 kiss-gmail = "kiss.agents.third_party_agents.gmail_agent:main"

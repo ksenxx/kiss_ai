@@ -2,41 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end integration test for the in-settings-panel **floating**
-// confirmation box for the "Server reset" button.
-//
-// Bug reproduced (before the fix)
-// -------------------------------
-// The previous fix surfaced the confirmation as a *native VS Code*
-// modal warning (``vscode.window.showWarningMessage`` with
-// ``{modal: true}``).  The user requested instead a floating box
-// rendered **inside the settings panel** of the webview.  This test
-// pins the new contract:
-//
-//   * Clicking "Server reset" while any tab has a running agent MUST
-//     render an in-webview floating dialog (``#server-reset-confirm-
-//     modal``) inside ``#settings-panel`` with both an OK and a
-//     Cancel button visible to the user.
-//   * The extension MUST NOT call ``vscode.window.showWarningMessage``
-//     (the previous system modal) for the reset confirmation.
-//   * No ``{type:'serverReset'}`` reaches the daemon until the user
-//     presses OK on the floating box.
-//   * Cancel closes the floating box and sends no command.
-//   * When no tab is running, the floating box is NOT shown and the
-//     reset is forwarded immediately (fast path).
-//   * Rapid double-click while the dialog is open neither re-stacks
-//     the dialog nor enqueues a second reset.
-//
-// What this test does
-// -------------------
-// It drives the *compiled* ``SorcarSidebarView`` (the extension host
-// side) against:
-//   * a real loopback Unix-domain-socket daemon stub,
-//   * a real JSDOM-rendered ``media/main.js`` + ``media/chat.html``.
-// The ``vscode`` module is stubbed so ``showWarningMessage`` invocations
-// are counted — the new contract is that this counter stays at zero
-// for the reset-confirmation flow.
 
 'use strict';
 
@@ -83,8 +48,6 @@ function makeUri(fsPath) {
 
 let workspaceFolders = [];
 
-// ``warningCalls`` records every call to ``showWarningMessage`` so the
-// test can assert that the NEW contract never raises the system modal.
 let warningCalls = [];
 let nativeInfoErrorCount = 0;
 
@@ -133,18 +96,12 @@ const vscodeStub = {
   commands: {executeCommand: () => Promise.resolve()},
 };
 
-// Route ``require('vscode')`` to the stub before loading the compiled
-// extension.
 const origResolve = Module._resolveFilename;
 Module._resolveFilename = function (request, parent, ...rest) {
   if (request === 'vscode') return require.resolve('./_vscode-stub.js');
   return origResolve.call(this, request, parent, ...rest);
 };
 const stubPath = path.join(__dirname, '_vscode-stub.js');
-// ``_vscode-stub.js`` is a tracked file that already re-exports
-// ``global.__kissVscodeStub`` — leave it on disk so we don't perturb
-// the working tree.  Plant the stub object on the global before the
-// first ``require('vscode')`` runs.
 if (!fs.existsSync(stubPath)) {
   fs.writeFileSync(
     stubPath,
@@ -170,7 +127,6 @@ if (process.platform === 'win32') {
   process.exit(0);
 }
 
-// Stub daemon: collects every line written by the AgentClient.
 let lastServerSock = null;
 const daemonLines = [];
 let daemonBuffer = '';
@@ -279,6 +235,10 @@ function makeDomWebview() {
     dom.getInternalVMContext(),
   );
   vm.runInContext(
+    fs.readFileSync(path.join(mediaDir, 'api.js'), 'utf8'),
+    dom.getInternalVMContext(),
+  );
+  vm.runInContext(
     fs.readFileSync(path.join(mediaDir, 'main.js'), 'utf8'),
     dom.getInternalVMContext(),
   );
@@ -341,8 +301,6 @@ async function runTests() {
     server.listen(sockPath, err => (err ? rej(err) : res())),
   );
 
-  // The floating modal element must exist in the settings panel, with
-  // both OK and Cancel buttons, BEFORE any click happens.
   {
     const domWebview = makeDomWebview();
     try {
@@ -381,12 +339,6 @@ async function runTests() {
     }
   }
 
-  // ============================================================
-  // Case 1 — Agent running, user presses OK on the floating box
-  // ============================================================
-  // Click "Server reset" → in-webview floating box opens (no system
-  // modal, no daemon post yet) → user clicks OK → exactly one
-  // ``serverReset`` reaches the daemon.
   {
     warningCalls = [];
     const before = daemonLines.length;
@@ -401,20 +353,17 @@ async function runTests() {
 
       clickInWindow(domWebview.win, 'cfg-server-reset-btn');
 
-      // Floating box must open.
       await waitFor(
         () => isFloatingModalOpen(domWebview.win),
         'click must open the in-settings-panel floating confirmation box',
       );
 
-      // No webview→extension message yet.
       assert.strictEqual(
         domWebview.posted.filter(m => m.type === 'serverReset').length,
         0,
         'the webview must NOT post serverReset until the user clicks OK',
       );
 
-      // No native VS Code modal must have been raised.
       assert.strictEqual(
         warningCalls.length,
         0,
@@ -423,7 +372,6 @@ async function runTests() {
           ' calls',
       );
 
-      // Forward whatever the webview posts to the extension.
       const forwardPosted = (() => {
         const seen = new Set();
         return () => {
@@ -436,16 +384,13 @@ async function runTests() {
         };
       })();
 
-      // User clicks OK on the floating box.
       clickInWindow(domWebview.win, 'server-reset-confirm-ok');
 
-      // Modal closes.
       await waitFor(
         () => !isFloatingModalOpen(domWebview.win),
         'OK must close the floating confirmation box',
       );
 
-      // Webview posts exactly one serverReset.
       const resets = domWebview.posted.filter(m => m.type === 'serverReset');
       assert.strictEqual(
         resets.length,
@@ -488,11 +433,6 @@ async function runTests() {
     }
   }
 
-  // ============================================================
-  // Case 2 — Agent running, user presses Cancel
-  // ============================================================
-  // Floating box opens, Cancel closes it, no command reaches the
-  // daemon, no system modal raised.
   {
     warningCalls = [];
     const before = daemonLines.length;
@@ -517,7 +457,6 @@ async function runTests() {
         'Cancel must close the floating confirmation box',
       );
 
-      // Forward any posted messages just in case.
       for (const m of domWebview.posted) {
         if (m.type === 'serverReset') wv.fireMessage(m);
       }
@@ -547,9 +486,6 @@ async function runTests() {
     }
   }
 
-  // ============================================================
-  // Case 3 — No agent running → fast path, no floating dialog
-  // ============================================================
   {
     warningCalls = [];
     const before = daemonLines.length;
@@ -557,7 +493,6 @@ async function runTests() {
     try {
       clickInWindow(domWebview.win, 'cfg-server-reset-btn');
 
-      // No floating modal must open in the fast path.
       await new Promise(r => setTimeout(r, 100));
       assert.strictEqual(
         isFloatingModalOpen(domWebview.win),
@@ -565,7 +500,6 @@ async function runTests() {
         'with no running agent, the floating confirmation box must NOT open',
       );
 
-      // Webview posts serverReset immediately.
       const posted = await waitFor(
         () => domWebview.posted.find(m => m.type === 'serverReset'),
         'no-agent click must post serverReset immediately',
@@ -589,12 +523,6 @@ async function runTests() {
     }
   }
 
-  // ============================================================
-  // Case 4 — Rapid double-click while floating box is open
-  // ============================================================
-  // The webview's own click handler must drop the second click while
-  // the floating box is open, so a single confirmation = a single
-  // serverReset to the daemon.
   {
     warningCalls = [];
     const before = daemonLines.length;
@@ -607,13 +535,11 @@ async function runTests() {
         startTs: Date.now(),
       });
 
-      // First click opens the floating dialog.
       clickInWindow(domWebview.win, 'cfg-server-reset-btn');
       await waitFor(
         () => isFloatingModalOpen(domWebview.win),
         'first click must open the floating confirmation box',
       );
-      // Second click while dialog is still open should be a no-op.
       clickInWindow(domWebview.win, 'cfg-server-reset-btn');
       assert.strictEqual(
         isFloatingModalOpen(domWebview.win),
@@ -621,14 +547,12 @@ async function runTests() {
         'second click must NOT close or re-stack the floating dialog',
       );
 
-      // OK once.
       clickInWindow(domWebview.win, 'server-reset-confirm-ok');
       await waitFor(
         () => !isFloatingModalOpen(domWebview.win),
         'OK must close the dialog',
       );
 
-      // Exactly one serverReset must be posted from the webview.
       const resets = domWebview.posted.filter(m => m.type === 'serverReset');
       assert.strictEqual(
         resets.length,
@@ -664,9 +588,6 @@ async function runTests() {
     }
   }
 
-  // ============================================================
-  // Case 5 — After Cancel, a fresh click reopens the dialog
-  // ============================================================
   {
     warningCalls = [];
     const {view, domWebview, wv} = await setupView();
@@ -710,7 +631,6 @@ async function runTests() {
         0,
         'no native VS Code modal must ever be raised',
       );
-      // Forward (defensive) and assert no daemon post.
       for (const m of domWebview.posted) {
         if (m.type === 'serverReset') wv.fireMessage(m);
       }
@@ -731,8 +651,6 @@ function cleanup() {
   try {
     fs.unlinkSync(sockPath);
   } catch {}
-  // Leave the tracked ``_vscode-stub.js`` in place — deleting it
-  // would dirty the working tree on every run.
   for (const dir of tmpDirs.slice().reverse()) {
     fs.rmSync(dir, {recursive: true, force: true});
   }

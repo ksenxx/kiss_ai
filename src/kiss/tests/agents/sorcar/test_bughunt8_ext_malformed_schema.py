@@ -33,9 +33,6 @@ from kiss.tests.agents.sorcar.test_sorcar_mcp import (  # noqa: F401
     isolated_homes,
 )
 
-# A real stdio MCP server (low-level API) whose tool schemas are
-# malformed-but-legal MCP data: ``properties`` is a list on one tool,
-# and ``required`` is a bare string on the other.
 _MALFORMED_SERVER_SCRIPT = '''
 import json
 
@@ -103,16 +100,10 @@ def test_malformed_schema_does_not_break_tool_building(
     assert "badschema_listprops" in names
     assert "badschema_strreq" in names
 
-    # The list-properties tool degrades to a parameterless wrapper that
-    # still round-trips a live call.
     listprops = next(t for t in tools if t.__name__ == "badschema_listprops")
     assert list(inspect.signature(listprops).parameters) == []
     assert json.loads(listprops()) == {}
 
-    # The string-required tool must not treat the characters
-    # 'q','u','e','r','y' as required property names: with no usable
-    # required list, ``query`` is optional (default None) and a live
-    # call still delivers it under its original name.
     strreq = next(t for t in tools if t.__name__ == "badschema_strreq")
     params = inspect.signature(strreq).parameters
     assert list(params) == ["query"]

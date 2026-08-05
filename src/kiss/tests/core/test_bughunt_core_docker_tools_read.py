@@ -22,7 +22,7 @@ they validate end-to-end behavior without any mocks.
 import subprocess
 from pathlib import Path
 
-from kiss.core.docker_tools import DockerTools
+from kiss.agents.sorcar.docker_tools import DockerTools
 
 
 def _local_bash(command: str, description: str) -> str:
@@ -45,7 +45,7 @@ def _local_bash(command: str, description: str) -> str:
 def test_read_last_line_without_trailing_newline(tmp_path: Path) -> None:
     """start_line pointing at an unterminated final line must return it."""
     f = tmp_path / "no_newline.txt"
-    f.write_bytes(b"line1\nline2")  # no trailing newline
+    f.write_bytes(b"line1\nline2")
     tools = DockerTools(_local_bash)
     result = tools.Read(str(f), start_line=2)
     assert "past EOF" not in result, result
@@ -55,7 +55,7 @@ def test_read_last_line_without_trailing_newline(tmp_path: Path) -> None:
 def test_read_truncation_marker_counts_unterminated_line(tmp_path: Path) -> None:
     """The truncated-lines marker must count a final unterminated line."""
     f = tmp_path / "no_newline.txt"
-    f.write_bytes(b"line1\nline2")  # 2 lines, no trailing newline
+    f.write_bytes(b"line1\nline2")
     tools = DockerTools(_local_bash)
     result = tools.Read(str(f), max_lines=1)
     assert "line1" in result
