@@ -103,7 +103,7 @@ Mandatory Instructions (MUST FOLLOW): You will be exploring, implementing, and e
 
 1. read + profile the data / tests / baseline, record baseline metric
 2. web-search for SOTA approaches, papers, repos, issues
-3. write ./tmp/ideas.md  (idea | rationale | status | metric)
+3. write ideas and rationale in ./tmp/ideas.md
 4. Pairwise judge the ideas to find a winner idea.
 5. Implement -> run real end-to-end evaluation -> log idea and metric in ./tmp/explored-ideas.md
     if better: keep, and try composing with prior winners
