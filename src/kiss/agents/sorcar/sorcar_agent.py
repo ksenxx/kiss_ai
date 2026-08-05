@@ -1071,6 +1071,17 @@ class SorcarAgent(RelentlessAgent):
         (plain console runs) and transport errors are ignored rather
         than allowed to fail the ``set_model`` tool call.
 
+        The printer resolves the watching tabs itself via its
+        transient all-watching-tabs primitive
+        (``JsonPrinter._transient_targets``, shared with
+        ``broadcast_transient``); the agent only supplies its ids —
+        ``_last_task_id`` keeps the fan-out working when the call is
+        made off the run thread or near teardown, after the printer's
+        thread-local task id has been cleared.  The model pick goes
+        through ``broadcast_agent_model_pick`` rather than the plain
+        primitive because the printer must also remember each target
+        for ``restore_model_pick``.
+
         Args:
             model_name: The model the agent just switched to.
         """

@@ -23,6 +23,14 @@ All tests drive the real code paths — real on-disk git worktrees for
 the auto-commit toasts, a real :class:`JsonPrinter` subscriber map,
 and the real ``run_tasks_parallel`` executor — with a capture
 printer that records ``broadcast`` payloads.
+
+Also covers the printer-side "transient, all-watching-tabs"
+primitive ``JsonPrinter.broadcast_transient`` (which the toast path
+now delegates to, and whose target resolution
+``broadcast_agent_model_pick`` shares), including the near-teardown
+scenario: ``cleanup_task`` has run and the thread-local ``task_id``
+is cleared, yet toasts and model-picker updates still reach every
+lingering subscriber tab via the agent's explicit ``_last_task_id``.
 """
 
 from __future__ import annotations
@@ -338,3 +346,190 @@ class TestNonUiSubagentDoneReachesAllTabs:
             e.get("tab_id") for e in printer.of_type("subagentDone")
         }
         assert done_tabs == {_VIEWER_TAB}
+
+
+class TestBroadcastTransientPrimitive:
+    """``JsonPrinter.broadcast_transient`` — the printer-side
+    "transient, all-watching-tabs" primitive: callers pass a plain
+    event plus their task id; the printer resolves the watching tabs
+    itself and stamps one ``tabId`` copy per tab, uniformly (no
+    owner/viewer distinction).
+    """
+
+    def setup_method(self) -> None:
+        agent_state.agent_states.clear()
+
+    def teardown_method(self) -> None:
+        agent_state.agent_states.clear()
+
+    def test_one_stamped_copy_per_watching_tab(self) -> None:
+        printer = _CapturePrinter()
+        printer.subscribe_tab("5151", "tab-a")
+        printer.subscribe_tab("5151", "tab-b")
+        assert printer._task_key() == ""  # thread-local unset
+
+        printer.broadcast_transient(
+            {"type": "notification", "id": "n1", "message": "hi"},
+            task_id="5151",
+        )
+
+        notifs = printer.of_type("notification")
+        assert {e["tabId"] for e in notifs} == {"tab-a", "tab-b"}
+        assert len(notifs) == 2
+        assert all(e["message"] == "hi" for e in notifs)
+
+    def test_seed_tab_is_one_more_uniform_target_deduped(self) -> None:
+        printer = _CapturePrinter()
+        printer.subscribe_tab("5252", "tab-a")
+
+        printer.broadcast_transient(
+            {"type": "notification", "id": "n1", "message": "hi"},
+            task_id="5252",
+            tab_id="tab-a",  # already subscribed: no duplicate
+        )
+        assert len(printer.of_type("notification")) == 1
+
+        printer.broadcast_transient(
+            {"type": "notification", "id": "n2", "message": "yo"},
+            task_id="5252",
+            tab_id="tab-new",  # unknown to the registry: still reached
+        )
+        second = [e for e in printer.of_type("notification") if e["id"] == "n2"]
+        assert {e["tabId"] for e in second} == {"tab-a", "tab-new"}
+
+    def test_thread_local_task_id_takes_precedence(self) -> None:
+        printer = _CapturePrinter()
+        printer.subscribe_tab("100", "tab-of-100")
+        printer.subscribe_tab("200", "tab-of-200")
+        printer._thread_local.task_id = "100"
+        try:
+            printer.broadcast_transient(
+                {"type": "notification", "id": "n1", "message": "hi"},
+                task_id="200",
+            )
+        finally:
+            printer._thread_local.task_id = None
+
+        notifs = printer.of_type("notification")
+        assert {e["tabId"] for e in notifs} == {"tab-of-100"}
+
+    def test_fallback_single_copy_when_nothing_resolvable(self) -> None:
+        """With no subscribers and no seed tab, exactly ONE copy with
+        ``tabId: ""`` still goes out — the stamp keeps the transient
+        semantics and printers that render locally (CLI console
+        toasts) still show it."""
+        printer = _CapturePrinter()
+        printer.broadcast_transient(
+            {"type": "notification", "id": "n1", "message": "hi"},
+        )
+        notifs = printer.of_type("notification")
+        assert len(notifs) == 1
+        assert notifs[0]["tabId"] == ""
+
+    def test_transient_copies_are_never_recorded(self) -> None:
+        printer = _CapturePrinter()
+        printer.subscribe_tab("5353", "tab-a")
+        printer.broadcast_transient(
+            {"type": "notification", "id": "n1", "message": "hi"},
+            task_id="5353",
+        )
+        assert printer._recordings == {}
+
+
+class TestTransientBroadcastNearTeardown:
+    """Auto-commit toasts and model-picker updates still reach every
+    watching tab when the printer's thread-local ``task_id`` has been
+    cleared near teardown (``cleanup_task`` already ran: ``_task_ui``
+    dropped, subscriber set lingering) — the agent's explicit
+    ``_last_task_id`` is the only remaining link.
+    """
+
+    def setup_method(self) -> None:
+        agent_state.agent_states.clear()
+
+    def teardown_method(self) -> None:
+        agent_state.agent_states.clear()
+
+    def _teardown_printer(self, task_id: str) -> _CapturePrinter:
+        """A printer in the near-teardown state for *task_id*."""
+        printer = _CapturePrinter()
+        printer.register_task_ui(task_id, "tab-launch", "conn-1")
+        printer.subscribe_tab(task_id, "tab-viewer")
+        printer._thread_local.task_id = task_id
+        printer.cleanup_task(task_id)  # drops _task_ui, subscribers linger
+        printer._thread_local.task_id = None  # run thread unbound
+        assert printer._task_key() == ""
+        assert printer.task_ui(task_id) == ("", "")
+        return printer
+
+    def test_autocommit_toasts_after_thread_local_cleared(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_str:
+            agent, wt_dir = _setup_worktree_agent(Path(tmp_str), "teardown")
+            (wt_dir / "new.txt").write_text("hello\n")
+
+            printer = self._teardown_printer("6161")
+            agent.printer = printer  # type: ignore[assignment]
+            agent._tab_id = "tab-launch"
+            agent._last_task_id = "6161"
+
+            with _LLMUnavailable():
+                assert agent._auto_commit_worktree() is True
+
+            notifs = printer.of_type("notification")
+            expected = {"tab-launch", "tab-viewer"}
+            assert {e["tabId"] for e in notifs} == expected
+            assert len(notifs) == 4  # two stages x two tabs
+            assert len({e["id"] for e in notifs}) == 1
+            assert printer._recordings == {}  # transient: nothing recorded
+
+    def test_model_pick_after_thread_local_cleared(self) -> None:
+        printer = self._teardown_printer("6262")
+
+        agent = ChatSorcarAgent("teardown-picker")
+        agent.printer = printer  # type: ignore[assignment]
+        agent._tab_id = "tab-launch"  # type: ignore[attr-defined]
+        agent._last_task_id = "6262"
+
+        agent._show_model_in_picker("model-t")
+
+        picks = printer.of_type("modelPick")
+        assert {e["tabId"] for e in picks} == {"tab-launch", "tab-viewer"}
+        assert all(e["model"] == "model-t" for e in picks)
+        # Both tabs are remembered so restore_model_pick hands the
+        # picker back when the task ends.
+        assert {"tab-launch", "tab-viewer"} <= printer._model_override_tabs
+
+
+class _BroadcastOnlyPrinter:
+    """A printer stub with ONLY a ``broadcast`` method — the degraded
+    path for third-party printers without the transient primitive."""
+
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+
+    def broadcast(self, event: dict[str, Any]) -> None:
+        self.events.append(dict(event))
+
+
+class TestPrimitiveLessPrinterDegradation:
+    """Printers exposing only ``broadcast`` still get one
+    ``tabId``-stamped toast copy (the pre-primitive behaviour)."""
+
+    def test_single_stamped_copy_on_broadcast_only_printer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_str:
+            agent, wt_dir = _setup_worktree_agent(Path(tmp_str), "degraded")
+            (wt_dir / "new.txt").write_text("hello\n")
+
+            printer = _BroadcastOnlyPrinter()
+            agent.printer = printer  # type: ignore[assignment]
+            agent._tab_id = "tab-solo"
+            agent._last_task_id = "7171"
+
+            with _LLMUnavailable():
+                assert agent._auto_commit_worktree() is True
+
+            notifs = [
+                e for e in printer.events if e.get("type") == "notification"
+            ]
+            assert len(notifs) == 2  # generating + committed, one tab each
+            assert all(e["tabId"] == "tab-solo" for e in notifs)

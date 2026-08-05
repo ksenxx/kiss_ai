@@ -600,6 +600,78 @@ class JsonPrinter(Printer):
                 return []
             return list(viewers)
 
+    def _transient_targets(self, task_id: Any, tab_id: str = "") -> list[str]:
+        """Resolve every tab id watching a task, for transient broadcasts.
+
+        The task is identified by the calling thread's task id when
+        one is bound, else by the explicit *task_id* fallback — the
+        latter covers calls made off the agent's run thread and calls
+        near task teardown, when the thread-local key has already
+        been cleared.  The watching tabs come from the subscriber
+        registry, which :meth:`cleanup_task` keeps alive for a few
+        minutes after the task ends precisely so post-task broadcasts
+        still reach their tabs (``_task_ui`` by contrast is dropped
+        at teardown, so it is deliberately not consulted here).
+
+        All tabs are treated uniformly — the tab a task was launched
+        from is subscribed like any viewer (see
+        :meth:`register_task_ui`), so no owner/viewer distinction
+        exists.  *tab_id* is simply one more uniform target, for
+        callers whose printer never saw a subscription (CLI runs,
+        plain recording printers in tests).
+
+        Args:
+            task_id: Explicit task id used when the calling thread
+                has no thread-local ``task_id`` bound.
+            tab_id: Extra tab id to include (deduplicated; ``""`` is
+                ignored).
+
+        Returns:
+            Sorted, deduplicated, non-empty tab ids.  Empty when no
+            watching tab is resolvable at all.
+        """
+        task_key = self._task_key() or self._coerce_task_id(task_id)
+        targets = {t for t in self._fanout_targets(task_key) if t}
+        if tab_id:
+            targets.add(tab_id)
+        return sorted(targets)
+
+    def broadcast_transient(
+        self,
+        event: dict[str, Any],
+        task_id: Any = None,
+        tab_id: str = "",
+    ) -> None:
+        """Broadcast one ``tabId``-stamped copy of *event* per watching tab.
+
+        The printer-side "transient, all-watching-tabs" primitive:
+        the caller supplies a plain event (no ``tabId``) plus the ids
+        identifying its task, and the printer resolves the watching
+        tabs itself (see :meth:`_transient_targets`) and broadcasts
+        one copy per tab.  The explicit per-copy ``tabId`` is what
+        makes the event transient: ``broadcast`` implementations
+        deliver such events only to clients (which filter by
+        ``tabId``) and never record or persist them, so replaying a
+        finished conversation cannot resurrect them.
+
+        When no watching tab is resolvable at all, ONE copy stamped
+        with *tab_id* (possibly ``""``) is still broadcast: the stamp
+        preserves the transient no-record semantics, and printers
+        that render events locally regardless of the stamp (e.g. the
+        CLI's console toasts) still show it.
+
+        Args:
+            event: The event to broadcast; must not carry ``tabId``.
+            task_id: Explicit task id used when the calling thread
+                has no thread-local ``task_id`` bound (off-thread
+                calls, task teardown).
+            tab_id: Extra tab id treated exactly like every resolved
+                watcher, and the sole (possibly empty) stamp of the
+                fallback copy when nothing is resolvable.
+        """
+        for target in self._transient_targets(task_id, tab_id) or [tab_id]:
+            self.broadcast({**event, "tabId": target})
+
     def open_ui_mirror(
         self,
         owner_tab_id: str,
@@ -825,6 +897,11 @@ class JsonPrinter(Printer):
         task (history-resume tabs, chat viewers) get the override, so
         each window watching the agent sees what it is actually
         running.  Every other tab keeps showing its own user's pick.
+        Target resolution is shared with :meth:`broadcast_transient`
+        (see :meth:`_transient_targets`); this method additionally
+        remembers each target so :meth:`restore_model_pick` can hand
+        the picker back, which is why it does not simply delegate to
+        the plain transient primitive.
 
         Each target is remembered so the picker can be handed back
         when the task ends — and only then, which is why a task whose
@@ -844,14 +921,12 @@ class JsonPrinter(Printer):
         if not model:
             return
         task_key = self._task_key() or self._coerce_task_id(task_id)
-        targets = set(self._fanout_targets(task_key))
-        if tab_id:
-            targets.add(tab_id)
+        targets = self._transient_targets(task_id, tab_id)
         with self._lock:
-            self._model_override_tabs |= targets
+            self._model_override_tabs.update(targets)
             if task_key:
                 self._task_model_override[task_key] = model
-        for target in sorted(targets):
+        for target in targets:
             self.broadcast_model_pick(model, "agent", target)
 
     def restore_model_pick(self, model: str, tab_id: str) -> None:
