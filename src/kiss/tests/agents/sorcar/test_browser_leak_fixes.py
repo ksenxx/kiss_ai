@@ -264,7 +264,7 @@ class TestStaleEscalationDirCleanup:
 
 
 class TestSubagentBrowserPolicy:
-    """Parallel sub-agents get headless, ephemeral-profile browsers."""
+    """Browsing is headless everywhere; sub-agents also get a throwaway profile."""
 
     def test_subagent_gets_headless_ephemeral_browser(self):
         from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
@@ -282,7 +282,7 @@ class TestSubagentBrowserPolicy:
             if agent.web_use_tool is not None:
                 agent.web_use_tool.close()
 
-    def test_top_level_agent_keeps_visible_persistent_browser(self):
+    def test_top_level_agent_keeps_headless_persistent_browser(self):
         from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 
         agent = ChatSorcarAgent("toplevel-browser-policy-test")
@@ -290,7 +290,7 @@ class TestSubagentBrowserPolicy:
             agent._get_tools()
             tool = agent.web_use_tool
             assert tool is not None
-            assert tool._headless is False
+            assert tool._headless is True
             assert tool._ephemeral_dir is None
         finally:
             if agent.web_use_tool is not None:

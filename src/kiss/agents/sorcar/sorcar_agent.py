@@ -747,12 +747,12 @@ class SorcarAgent(RelentlessAgent):
                 useful_tools.Read, useful_tools.Edit, useful_tools.Write,
             ]
         if self._use_web_tools and self.web_use_tool is None:
-            if getattr(self, "_subagent_info", None) is not None:
-                self.web_use_tool = WebUseTool(
-                    work_dir=self.work_dir, headless=True, ephemeral=True,
-                )
-            else:
-                self.web_use_tool = WebUseTool(work_dir=self.work_dir)
+            # Sub-agents run concurrently, so they get a throwaway profile
+            # instead of contending for the shared profile's Chromium lock.
+            self.web_use_tool = WebUseTool(
+                work_dir=self.work_dir,
+                ephemeral=getattr(self, "_subagent_info", None) is not None,
+            )
             tools.extend(self.web_use_tool.get_tools())
         def run_parallel(tasks: str, max_workers: str = "") -> str:
             """Run multiple independent tasks concurrently using parallel agents.

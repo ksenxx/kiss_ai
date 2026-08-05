@@ -4,13 +4,16 @@
 # add your name here
 """Browser automation tool for LLM agents using Playwright.
 
-Uses non-headless Playwright Chromium for page analysis and automation
-(accessibility tree, clicking, typing, screenshots).
+Uses headless Playwright Chromium for page analysis and automation
+(accessibility tree, clicking, typing, screenshots).  ``show_browser()``
+switches the session to a visible window when a page needs a human
+(interactive login, CAPTCHA, bot check).
 """
 
 from __future__ import annotations
 
 import atexit
+import json
 import logging
 import os
 import re
@@ -33,6 +36,12 @@ logger = logging.getLogger(__name__)
 _SINGLETON_FILES = ("SingletonLock", "SingletonCookie", "SingletonSocket")
 
 _ACCOUNTS_GOOGLE_URL_RE = re.compile(r"^https?://accounts\.google\.com/")
+
+# Headless Chromium reports "HeadlessChrome/<version>" in its user agent.
+# Many sites use that token alone to serve a bot challenge instead of the
+# page, so it is rewritten to the equivalent headed token.
+_HEADLESS_UA_TOKEN = "HeadlessChrome"
+_HEADED_UA_TOKEN = "Chrome"
 
 
 def _abort_route(route: Any) -> None:
@@ -340,11 +349,17 @@ def _number_interactive_elements(snapshot: str) -> tuple[str, list[dict[str, str
 
 
 class WebUseTool:
-    """Browser automation tool using non-headless Playwright Chromium.
+    """Browser automation tool using headless Playwright Chromium.
 
-    The user can see and interact with the Chromium window directly.
-    All browsing (including user-interaction flows like OAuth, CAPTCHAs)
-    happens in this single Chromium instance.
+    Browsing is headless by default: no window is opened, nothing steals
+    the user's focus, and screenshots still work because Chromium renders
+    off-screen exactly as it does on screen.  All browsing happens in a
+    single Chromium instance with a persistent profile, so logins survive
+    across sessions.
+
+    When a page needs a human — an interactive login, a CAPTCHA, a bot
+    check — :meth:`show_browser` reopens the same profile in a visible
+    window and re-navigates to the current page.
     """
 
     _DEFAULT_USER_DATA_DIR = "__kiss_default_browser_profile__"
@@ -353,7 +368,7 @@ class WebUseTool:
         self,
         viewport: tuple[int, int] = (1280, 900),
         user_data_dir: str | None = _DEFAULT_USER_DATA_DIR,
-        headless: bool = False,
+        headless: bool = True,
         work_dir: str | None = None,
         ephemeral: bool = False,
         **_kwargs: Any,
@@ -602,13 +617,23 @@ class WebUseTool:
         self._close_browser_only()
         from playwright.sync_api import sync_playwright
 
-        prev_app = _get_frontmost_app()
+        # A headless launch never raises a window, so there is no focus to
+        # save and restore.
+        prev_app = None if self._headless else _get_frontmost_app()
         try:
             if self._playwright is None:
                 self._playwright = sync_playwright().start()
             launcher = self._playwright.chromium
             kwargs: dict[str, Any] = {
                 "headless": self._headless,
+                # The "chromium" channel selects the full Chromium binary,
+                # which headless runs in Chrome's new headless mode: the
+                # same renderer as a headed window, so pages and
+                # screenshots look exactly as the user would see them.
+                # Without it Playwright launches chrome-headless-shell, a
+                # stripped-down binary with lower fidelity and no
+                # extension support.
+                "channel": "chromium",
                 "args": [
                     "--disable-blink-features=AutomationControlled",
                     "--disable-features=IsolateOrigins,site-per-process",
@@ -716,6 +741,31 @@ class WebUseTool:
         self._context.route(_ACCOUNTS_GOOGLE_URL_RE, _abort_route)
         self._context.on("close", self._on_browser_lost)
         self._adopt_page(page)
+        self._mask_headless_user_agent()
+
+    def _mask_headless_user_agent(self) -> None:
+        """Rewrite the ``HeadlessChrome`` user-agent token to ``Chrome``.
+
+        Headless Chromium advertises ``HeadlessChrome/<version>``, and many
+        sites treat that token alone as a bot signal and answer with a
+        challenge page instead of content.  It is rewritten in both places
+        a site can read it: the ``User-Agent`` request header (context
+        wide) and ``navigator.userAgent`` (an init script that runs in
+        every page and frame of the context).  A headed browser reports no
+        such token, so this is a no-op there.
+        """
+        try:
+            user_agent = self._page.evaluate("navigator.userAgent")
+            if _HEADLESS_UA_TOKEN not in user_agent:
+                return
+            headed = user_agent.replace(_HEADLESS_UA_TOKEN, _HEADED_UA_TOKEN)
+            self._context.set_extra_http_headers({"User-Agent": headed})
+            self._context.add_init_script(
+                "Object.defineProperty(navigator, 'userAgent', "
+                f"{{get: () => {json.dumps(headed)}}});",
+            )
+        except Exception:  # pragma: no cover — evaluate on a fresh page rarely fails
+            logger.debug("Could not mask the headless user agent", exc_info=True)
 
     def _get_ax_tree(self, max_chars: int = 50000) -> str:
         self._ensure_browser()
@@ -947,11 +997,12 @@ class WebUseTool:
             return f"Error scrolling {direction}: {e}"
 
     def screenshot(self, file_path: str = "screenshot.png") -> str:
-        """Capture the visible viewport of the Chromium browser as an image.
+        """Capture the current viewport of the Chromium browser as an image.
 
         Use to verify layout, captchas, or visual state of a web page currently
-        open in the browser. This does NOT capture or display local files,
-        attached images, or PDFs — it only screenshots the browser window.
+        open in the browser. Works the same whether the browser is headless
+        (the default) or visible. This does NOT capture or display local files,
+        attached images, or PDFs — it only screenshots the browser page.
 
         Args:
             file_path: Path where the PNG will be saved (default "screenshot.png"). Parent
@@ -1017,10 +1068,10 @@ class WebUseTool:
         return "Browser closed."
 
     def close_browser(self) -> str:
-        """Close the Chromium browser window and free its OS process.
+        """Close the Chromium browser and free its OS process.
 
         Use when you are done with web browsing for now (its purpose is
-        over) so the browser window does not stay open for the rest of a
+        over) so the browser does not stay running for the rest of a
         long task. Safe to call anytime: the next web tool call (e.g.
         go_to_url) automatically relaunches a fresh browser with the same
         profile, so logins are preserved.
@@ -1033,12 +1084,85 @@ class WebUseTool:
             "web tool call."
         )
 
+    def show_browser(self, visible: bool = True) -> str:
+        """Show the Chromium window on screen. Browsing is headless by default.
+
+        Call this when a page needs the human in front of the screen: an
+        interactive login or OAuth consent, a CAPTCHA, an "unusual traffic"
+        bot check, or when the user asks to watch what you are doing. The
+        same browser profile is reused, so cookies and logins carry over,
+        and the page you are on is reopened in the visible window. Pass
+        visible=False to go back to the headless window when the human
+        part is done.
+
+        Args:
+            visible: True to reopen the browser in a window the user can see
+                and interact with, False to return to headless browsing.
+
+        Returns:
+            The accessibility tree of the reopened page, or
+            "Browser is now visible."/"Browser is now headless." when no page
+            was open, or "Error <doing something>: <message>" on failure."""
+        state = "visible" if visible else "headless"
+        if self._headless == (not visible) and self._is_alive():
+            return f"Browser is already {state}."
+        url, cookies = self._capture_session()
+        self._close_browser_only()
+        self._headless = not visible
+        err = self._try_ensure_browser(f"making the browser {state}")
+        if err is not None:
+            return err
+        self._restore_cookies(cookies)
+        if url:
+            return self.go_to_url(url)
+        return f"Browser is now {state}."
+
+    def _capture_session(self) -> tuple[str, list[Any]]:
+        """Return the page to reopen and the cookies to carry across a relaunch.
+
+        Chromium cannot switch between headless and visible without being
+        restarted, and a restart drops every session-only cookie — exactly
+        the cookies a login or bot-check flow is in the middle of setting.
+        They are handed back to the new browser by
+        :meth:`_restore_cookies`.
+
+        Returns:
+            The URL to reopen (empty when nothing worth reopening is
+            loaded) and the cookies of the current context.
+        """
+        if not self._is_alive():
+            return "", []
+        # The user may have opened a tab themselves while the window was
+        # visible; that newest tab is the one worth carrying over.
+        self._check_for_new_tab()
+        url = self._page.url
+        if url.startswith("about:"):
+            url = ""
+        try:
+            return url, self._context.cookies()
+        except Exception:  # pragma: no cover — reading cookies rarely fails
+            logger.debug("Could not read cookies before relaunch", exc_info=True)
+            return url, []
+
+    def _restore_cookies(self, cookies: list[Any]) -> None:
+        """Add *cookies* to the freshly launched context.
+
+        Args:
+            cookies: Cookies captured by :meth:`_capture_session`.
+        """
+        if not cookies:
+            return
+        try:
+            self._context.add_cookies(cookies)
+        except Exception:  # pragma: no cover — a malformed cookie is rare
+            logger.debug("Could not restore cookies after relaunch", exc_info=True)
+
     def get_tools(self) -> list[Callable[..., str]]:
         """Return callable web tools for registration with an agent.
 
         Returns:
             List of callables: go_to_url, click, type_text, press_key, scroll, screenshot,
-            get_page_content, close_browser. Does not include close."""
+            get_page_content, show_browser, close_browser. Does not include close."""
         return [
             self.go_to_url,
             self.click,
@@ -1047,5 +1171,6 @@ class WebUseTool:
             self.scroll,
             self.screenshot,
             self.get_page_content,
+            self.show_browser,
             self.close_browser,
         ]

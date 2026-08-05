@@ -55,9 +55,9 @@ When doing Google Internet research (which is the default for every task):
   1. Do not proceed to synthesis until the counter reaches 10. Check the counter — if it says less than 10, keep visiting more sites.
   1. If results dry up, try different queries, synonyms, official docs, GitHub repos/issues, Stack Overflow, blogs, Reddit, papers, and API references.
   1. After reaching 10, review all findings and synthesize.
-- Ask the user for login help when a page requires authentication.
+- The browser is headless by default, so the user cannot see it. Call show_browser() first whenever a page needs the human — an interactive login, a CAPTCHA, or a bot check — then ask the user for help. Call show_browser(visible=False) once the human part is done.
 
-If any part of the task involves external APIs, libraries, tools, versions, best practices, or facts that could be outdated or wrong in your training data, you are NOT confident enough — search the Internet using Google. If Google search is blocked, open a random keyword search in the Chromium browser and ask the user to manually pass the bot check. If that fails, you can use other search engines.
+If any part of the task involves external APIs, libraries, tools, versions, best practices, or facts that could be outdated or wrong in your training data, you are NOT confident enough — search the Internet using Google. If Google search is blocked, call show_browser(), open a random keyword search in the Chromium browser, and ask the user to manually pass the bot check. If that fails, you can use other search engines.
 
 Real-Time Data — CRITICAL
 
