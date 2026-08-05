@@ -110,11 +110,8 @@ def test_clip_buf_equals_visible_line_window_at_end() -> None:
         assert shown == expected
         sanitized = buf.replace("\n", "⏎").replace("\t", " ")
         avail = (cols - 4) - display_width(PROMPT_MARKER)
-        # The visible slice is always a suffix of the sanitised text
-        # and never exceeds the available room.
         assert sanitized.endswith(shown)
         assert display_width(shown) <= max(avail, 0)
-        # When the whole text fits it is shown in full.
         if display_width(sanitized) <= avail:
             assert shown == sanitized
 
@@ -147,7 +144,6 @@ def test_steer_title_matches_idle_title_style() -> None:
     assert " . " not in cli_panel.STEER_TITLE
     assert "type a task" in cli_panel.STEER_TITLE
     assert not cli_panel.STEER_TITLE.startswith(" ")
-    # Both titles advertise the same completion / newline hints.
     for hint in ("Tab to autocomplete", "Alt+Enter/Shift+Enter for newline"):
         assert hint in cli_panel.IDLE_TITLE
         assert hint in cli_panel.STEER_TITLE

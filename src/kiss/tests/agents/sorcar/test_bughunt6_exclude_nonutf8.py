@@ -63,7 +63,7 @@ def test_ensure_excluded_survives_non_utf8_exclude_file(tmp_path: Path) -> None:
     exclude.parent.mkdir(parents=True, exist_ok=True)
     exclude.write_bytes(_LATIN1_EXCLUDE)
 
-    GitWorktreeOps.ensure_excluded(repo)  # raised UnicodeDecodeError pre-fix
+    GitWorktreeOps.ensure_excluded(repo)
 
     data = exclude.read_bytes()
     assert b".kiss-worktrees/" in data, "entry was not appended"
@@ -87,7 +87,7 @@ def test_worktree_stays_invisible_with_non_utf8_exclude(tmp_path: Path) -> None:
     try:
         GitWorktreeOps.ensure_excluded(repo)
     except Exception:
-        pass  # production swallows this (see _try_setup_worktree)
+        pass
 
     wt_dir = repo / ".kiss-worktrees" / "wt1"
     assert GitWorktreeOps.create(repo, "kiss/wt-bug6b1", wt_dir)

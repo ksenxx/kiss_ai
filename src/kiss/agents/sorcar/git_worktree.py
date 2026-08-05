@@ -25,15 +25,6 @@ logger = logging.getLogger(__name__)
 _repo_locks: dict[str, threading.RLock] = {}
 _repo_locks_guard = threading.Lock()
 
-# Repo-scoped git environment variables that OVERRIDE ``git -C``-based
-# repository discovery.  When KISS is launched from a context that
-# exports them — e.g. a git hook (``post-commit`` starting an agent),
-# ``git rebase --exec``, or a user shell export — every git call would
-# silently target the WRONG repository (the hook's repo) instead of the
-# ``cwd`` passed to :func:`_git`.  This mirrors the list git itself
-# clears before crossing repo boundaries (``local_repo_env`` — see
-# ``git submodule``).  Author/committer/SSH/config-file variables are
-# intentionally kept.
 _REPO_SCOPED_GIT_ENV = (
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -49,12 +40,6 @@ _REPO_SCOPED_GIT_ENV = (
 )
 
 
-# Canonical commit-message metadata block headings.  Single-sourced
-# here because :func:`_ensure_task_metadata`'s dedup detection depends
-# on byte-exact agreement with what the writers append — both this
-# module's stamping below and ``vscode/helpers._append_user_prompt`` /
-# ``_append_task_result`` (which import these constants) build blocks
-# as ``f"{HEADING}{text}"`` appended to an ``rstrip()``-ed message.
 USER_PROMPT_HEADING = "\n\nUser prompt:\n"
 TASK_RESULT_HEADING = "\n\nResult:\n"
 
@@ -139,10 +124,6 @@ def repo_lock(repo: Path) -> threading.RLock:
         return _repo_locks[key]
 
 
-# Local git operations can legitimately be slow in very large repositories
-# (``add -A``, stash, merge/cherry-pick, and user pre-commit hooks).  Five
-# minutes matches the Bash tool's normal execution budget while still putting
-# a hard ceiling on a wedged hook or git process.
 _GIT_TIMEOUT_SECONDS: float = 300.0
 
 
@@ -171,10 +152,6 @@ def _git(
     Returns:
         The completed process with stdout/stderr captured as text.
     """
-    # ``-c core.quotepath=false`` forces git to emit non-ASCII filenames
-    # verbatim (UTF-8) rather than as C-style ``\NNN`` octal escapes,
-    # regardless of the repo's local ``core.quotePath`` config.  All
-    # callers parse these outputs as plain UTF-8 paths.
     cmd = [
         "git",
         "-c",
@@ -183,22 +160,7 @@ def _git(
         str(cwd),
         *args,
     ]
-    # Scrub repo-scoped GIT_* variables so an inherited GIT_DIR /
-    # GIT_WORK_TREE / GIT_INDEX_FILE (e.g. from a git hook that
-    # launched this process) cannot redirect the command away from
-    # ``cwd`` (see :data:`_REPO_SCOPED_GIT_ENV`).
     env = {k: v for k, v in os.environ.items() if k not in _REPO_SCOPED_GIT_ENV}
-    # ``errors="surrogateescape"``: git paths are byte strings and may
-    # be invalid UTF-8 (e.g. Latin-1 filenames committed on Linux);
-    # with ``core.quotepath=false`` such bytes are emitted verbatim and
-    # a strict decode would raise UnicodeDecodeError out of EVERY git
-    # call.  Surrogate escapes round-trip through ``os.fsencode`` for
-    # filesystem operations, matching :func:`_unquote_git_path`.
-    # Use a fresh POSIX process group rather than ``subprocess.run``.
-    # Killing only the top-level git process on timeout is insufficient:
-    # a hung hook can keep the captured stdout/stderr pipes open, making
-    # ``run``'s post-timeout ``communicate()`` wait indefinitely even
-    # after git itself has died.
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -220,8 +182,6 @@ def _git(
             except ProcessLookupError:
                 pass
         else:  # pragma: no cover - Windows CI is not available here
-            # ``Popen.kill`` does not terminate hook descendants on
-            # Windows; taskkill's /T switch closes the whole tree.
             subprocess.run(  # noqa: S603, S607
                 ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
                 capture_output=True,
@@ -242,14 +202,13 @@ def _git(
                 exc.stderr.decode("utf-8", "surrogateescape")
                 if isinstance(exc.stderr, bytes) else (exc.stderr or "")
             )
-        # TimeoutExpired may expose bytes even for a text-mode process.
         if isinstance(stdout, bytes):
             stdout = stdout.decode("utf-8", "surrogateescape")
         if isinstance(stderr, bytes):
             stderr = stderr.decode("utf-8", "surrogateescape")
         return subprocess.CompletedProcess(
             args=cmd,
-            returncode=124,  # convention: timeout
+            returncode=124,
             stdout=stdout or "",
             stderr=stderr
             or f"git {args[0] if args else ''} timed out"
@@ -290,10 +249,29 @@ class MergeResult(enum.Enum):
     STASH_FAILED = "stash_failed"
 
 
-# Sentinel directory under which the framework creates per-task worktrees.
-# Layout: ``<repo>/.kiss-worktrees/kiss_wt-<slug>/...``.
 _WORKTREE_SUBDIR = ".kiss-worktrees"
 _WORKTREE_SLUG_PREFIX = "kiss_wt-"
+_WORKTREE_BRANCH_PREFIX = "kiss/wt-"
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    """Return True when both paths denote the same directory.
+
+    Symlinks (``/var`` -> ``/private/var`` on macOS) and relative
+    components are resolved first; unresolvable paths fall back to a
+    plain comparison so a missing directory never raises.
+
+    Args:
+        left: First path.
+        right: Second path.
+
+    Returns:
+        True when the two paths are the same location.
+    """
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:  # pragma: no cover — unreadable path components
+        return left == right
 
 
 def strip_worktree_suffix(path: str) -> str:
@@ -319,10 +297,6 @@ def strip_worktree_suffix(path: str) -> str:
     """
     if not path:
         return path
-    # Split on os-agnostic separators so the helper works on POSIX paths
-    # carried across platforms (tests, payloads from remote daemons).
-    # ``str.replace`` first folds Windows separators to ``/`` so the
-    # logic is uniform.
     norm = path.replace("\\", "/")
     parts = norm.split("/")
     for i, segment in enumerate(parts):
@@ -333,13 +307,7 @@ def strip_worktree_suffix(path: str) -> str:
         ):
             parent = "/".join(parts[:i])
             if parent:
-                # Normal case: ``/Users/x/proj/.kiss-worktrees/kiss_wt-…``
-                # → ``/Users/x/proj``.
                 return parent
-            # No parent segments before ``.kiss-worktrees``.  For an
-            # absolute path (``/.kiss-worktrees/kiss_wt-…``) the parent
-            # is the filesystem root; for a relative path
-            # (``.kiss-worktrees/kiss_wt-…``) it is the current dir.
             return "/" if norm.startswith("/") else "."
     return path
 
@@ -552,12 +520,17 @@ class GitWorktreeOps:
             repo: Git repo root path.
             wt_dir: Worktree directory to remove.
         """
+        if _same_path(wt_dir, repo):
+            # The main working tree is not an agent worktree: git
+            # rightly refuses to remove it, and the ``rmtree`` fallback
+            # below would delete the user's whole project.
+            logger.error(
+                "Refusing to remove %s: it is the main working tree, "
+                "not an agent worktree",
+                wt_dir,
+            )
+            return
         if not wt_dir.exists():
-            # The directory may have been deleted manually or by crash
-            # cleanup while git still holds a ``.git/worktrees/<name>``
-            # registration; without a prune the branch stays "checked
-            # out in a worktree" and ``git branch -d/-D`` refuses to
-            # delete it.
             GitWorktreeOps.prune(repo)
             return
         result = _git("worktree", "remove", str(wt_dir), "--force", cwd=repo)
@@ -654,8 +627,17 @@ class GitWorktreeOps:
 
         Returns:
             True if there are staged, unstaged, or untracked changes.
+            A failed status command (timeout, corrupt index, ...) is
+            reported as dirty so callers never destroy a worktree whose
+            cleanliness could not actually be verified.
         """
         status = _git("status", "--porcelain", cwd=wt_dir)
+        if status.returncode != 0:
+            logger.warning(
+                "git status failed in %s (rc=%s): %s; treating as dirty",
+                wt_dir, status.returncode, status.stderr.strip(),
+            )
+            return True
         return bool(status.stdout.strip())
 
     @staticmethod
@@ -724,14 +706,6 @@ class GitWorktreeOps:
         """
         if not GitWorktreeOps.has_uncommitted_changes(repo):
             return False
-        # ``git stash push`` exits 0 WITHOUT creating a stash ("No
-        # local changes to save") for dirtiness it cannot capture —
-        # e.g. a submodule with modified/untracked content, or a tree
-        # cleaned by a concurrent writer.  Returning True then makes
-        # the caller's later ``stash_pop`` consume an unrelated,
-        # pre-existing user stash.  Compare ``refs/stash`` before and
-        # after so the return value honors the "a stash entry was
-        # created" contract.
         before = _git("rev-parse", "-q", "--verify", "refs/stash", cwd=repo)
         result = _git(
             "stash",
@@ -770,15 +744,18 @@ class GitWorktreeOps:
         Returns:
             True if the pop succeeded, False on conflict or error.
         """
-        before = _git("status", "--porcelain", cwd=repo).stdout
+        before = _git("status", "--porcelain", cwd=repo)
         result = _git("stash", "pop", "--index", cwd=repo)
         if result.returncode == 0:
             return True
-        after = _git("status", "--porcelain", cwd=repo).stdout
-        if after != before:
-            # The failed ``--index`` attempt already modified the tree
-            # (partial application; the stash entry is retained by
-            # git).  Do not re-apply the same stash on top.
+        after = _git("status", "--porcelain", cwd=repo)
+        if (
+            before.returncode != 0
+            or after.returncode != 0
+            or after.stdout != before.stdout
+        ):
+            # Either the tree changed, or we cannot prove it did not
+            # (a status command failed) — never risk a double-apply.
             return False
         result = _git("stash", "pop", cwd=repo)
         return result.returncode == 0
@@ -834,12 +811,6 @@ class GitWorktreeOps:
         Returns:
             A non-empty commit message string.
         """
-        # bughunt8: terminate the revision list with ``--`` — without
-        # it, git refuses the command with "ambiguous argument
-        # '<branch>': both revision and filename" whenever the user's
-        # repo contains a file whose path equals the branch name,
-        # silently degrading every merge commit message to the
-        # synthetic fallback.
         result = _git("log", "-1", "--format=%B", branch, "--", cwd=repo)
         msg = result.stdout.rstrip()
         if result.returncode != 0 or not msg:
@@ -1011,9 +982,6 @@ class GitWorktreeOps:
             filename: File under ``info/`` (e.g. ``"exclude"``).
             entry: The exact line to ensure is present.
         """
-        # The read-check-append sequence below is not atomic; hold the
-        # per-repo lock so concurrent tabs setting up worktrees for the
-        # same repo cannot interleave and append duplicate entries.
         with repo_lock(repo):
             result = _git("rev-parse", "--git-common-dir", cwd=repo)
             git_common = Path(result.stdout.strip())
@@ -1023,20 +991,11 @@ class GitWorktreeOps:
             info_file.parent.mkdir(parents=True, exist_ok=True)
             content = ""
             if info_file.exists():
-                # Git treats these files as raw bytes — non-UTF-8
-                # patterns/comments are legal, so a strict decode would
-                # raise UnicodeDecodeError and silently skip the entry
-                # (the caller swallows exceptions), e.g. leaving
-                # ``?? .kiss-worktrees/`` polluting the user's git status
-                # forever.  Mirror :func:`_git`'s surrogateescape policy.
                 content = info_file.read_bytes().decode(
                     "utf-8", errors="surrogateescape"
                 )
                 if entry in content.splitlines():
                     return
-            # Prefix a newline only when the existing content lacks a
-            # trailing one; unconditionally writing ``"\n{entry}\n"``
-            # accumulated a blank line per append.
             prefix = "" if not content or content.endswith("\n") else "\n"
             with open(info_file, "a", encoding="utf-8") as f:
                 f.write(f"{prefix}{entry}\n")
@@ -1089,8 +1048,6 @@ class GitWorktreeOps:
             "KISS scratch file: keep the incoming task branch version",
             cwd=repo,
         )
-        # %A = temp file that must receive the merge result (starts as
-        # "ours"), %B = the other branch's version; exit 0 = resolved.
         _git("config", "merge.kiss-scratch.driver", "cp -f %B %A", cwd=repo)
 
     @staticmethod
@@ -1160,6 +1117,82 @@ class GitWorktreeOps:
         )
 
     @staticmethod
+    def _load_branch_config(repo: Path, branch: str, key: str) -> str | None:
+        """Read ``branch.<branch>.<key>`` from git config (best-effort).
+
+        Args:
+            repo: Git repo root path.
+            branch: The worktree branch name.
+            key: The config key set previously by
+                :meth:`_save_branch_config` (e.g. ``"kiss-original"``,
+                ``"kiss-baseline"``).
+
+        Returns:
+            The stored value, or ``None`` when the key is absent or
+            git itself failed.
+        """
+        result = _git("config", "--get", f"branch.{branch}.{key}", cwd=repo)
+        if result.returncode != 0:
+            return None
+        value = result.stdout.strip()
+        return value or None
+
+    @staticmethod
+    def load_original_branch(repo: Path, branch: str) -> str | None:
+        """Return the original branch stored for *branch*, or ``None``.
+
+        Reciprocal of :meth:`save_original_branch`.  Used by
+        :meth:`reclaim_orphaned_worktrees` to rehydrate a worktree
+        whose owning agent process died before it could publish or
+        release its work.
+        """
+        return GitWorktreeOps._load_branch_config(repo, branch, "kiss-original")
+
+    @staticmethod
+    def load_baseline_commit(repo: Path, branch: str) -> str | None:
+        """Return the baseline commit SHA stored for *branch*, or ``None``.
+
+        Reciprocal of :meth:`save_baseline_commit`.  Used by
+        :meth:`reclaim_orphaned_worktrees` to decide between
+        :meth:`squash_merge_from_baseline` (baseline present) and
+        :meth:`squash_merge_branch` (legacy worktree without a
+        baseline).
+        """
+        return GitWorktreeOps._load_branch_config(repo, branch, "kiss-baseline")
+
+    @staticmethod
+    def save_preserve_marker(repo: Path, branch: str) -> bool:
+        """Mark *branch* as intentionally preserved for manual review.
+
+        Persistent counterpart of the in-memory ``_pending_review``
+        flag on :class:`WorktreeSorcarAgent`.  When
+        :meth:`WorktreeSorcarAgent._preserve_pending_worktree_for_review`
+        deliberately leaves a worktree on disk (task stopped,
+        pre-commit hook rejection, or ``--no-auto-commit``), the
+        original agent process may die before the user chooses
+        merge/discard.  Reclaim on next startup must NOT silently
+        publish that preserved work — the persisted marker makes
+        that decision durable across process restarts.
+
+        Args:
+            repo: Git repo root path.
+            branch: The worktree branch name.
+
+        Returns:
+            True if the marker was saved successfully.
+        """
+        return GitWorktreeOps._save_branch_config(
+            repo, branch, "kiss-preserve", "1", "preserve-for-review marker",
+        )
+
+    @staticmethod
+    def load_preserve_marker(repo: Path, branch: str) -> bool:
+        """Return True when *branch* carries a preserve-for-review marker."""
+        return GitWorktreeOps._load_branch_config(
+            repo, branch, "kiss-preserve",
+        ) == "1"
+
+    @staticmethod
     def _remove_path(path: Path) -> None:
         """Remove *path* whatever it is (symlink, dir, file, or absent).
 
@@ -1191,67 +1224,69 @@ class GitWorktreeOps:
         Returns:
             True if any dirty state was copied, False if the main
             worktree was clean.
+
+        Raises:
+            OSError: If ``git status`` itself fails (timeout, corrupt
+                index, ...), so the caller falls back to direct
+                execution instead of silently running without the
+                user's dirty state.
         """
         status = _git("status", "--porcelain", "-uall", cwd=repo)
+        if status.returncode != 0:
+            raise OSError(
+                f"git status failed in {repo} (rc={status.returncode}): "
+                f"{status.stderr.strip()}"
+            )
         if not status.stdout.strip():
             return False
 
         copied = False
-        # Parse via the shared :func:`_porcelain_entries` helper (the
-        # same parser backing merge_flow's ``_porcelain_paths``) so the
-        # baseline-seeding and merge-flow porcelain parsers cannot
-        # drift apart (split on ``\n`` only, no strip, quote-aware
-        # rename splitting).
-        for _code, old_name, fname in _porcelain_entries(status.stdout):
+        for code, old_name, fname in _porcelain_entries(status.stdout):
             src = repo / fname
             dst = wt_dir / fname
 
             if old_name is not None:
-                # The rename's old path is gone from the main worktree
-                # regardless of what happened to the new path, so it
-                # must be removed from the task worktree even when the
-                # new file was subsequently deleted (e.g. status "RD").
                 old_dst = wt_dir / old_name
-                # is_symlink() is checked (by _remove_path) FIRST:
-                # is_dir()/exists() follow symlinks, so a symlink to a
-                # directory must be unlinked (not rmtree'd) and a
-                # broken symlink reports exists() == False.
                 if old_dst.is_symlink() or old_dst.exists():
                     GitWorktreeOps._remove_path(old_dst)
                     copied = True
 
             if src.is_symlink():
-                # Mirror the symlink itself (possibly broken); is_file()
-                # and copy2 would follow the link instead.
                 GitWorktreeOps._remove_path(dst)
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 os.symlink(os.readlink(src), dst)
                 copied = True
             elif src.is_file():
                 if dst.is_symlink():
-                    # A symlink was replaced by a regular file; copy2
-                    # onto the link would write THROUGH it into the
-                    # link's target inside the worktree.
                     dst.unlink()
                 elif dst.is_dir():
-                    # A tracked directory was replaced by a same-named
-                    # file; copy2 into the directory would create
-                    # dst/<basename> instead of replacing dst.
                     shutil.rmtree(str(dst))
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(str(src), str(dst))
                 copied = True
+            elif src.is_dir() and not code.startswith("?"):
+                # A dirty TRACKED submodule shows up in porcelain output
+                # as the submodule directory itself (worktree code M/m).
+                # Mirror its working tree (minus .git) so the agent sees
+                # the user's dirty submodule content in the new worktree.
+                # Untracked directory entries (``?? dir/``) are embedded
+                # foreign repos/worktrees — git refuses to recurse into
+                # them and they must not be mirrored (copying e.g. an
+                # agent worktree under the repo into itself recurses
+                # until "File name too long").
+                if dst.is_symlink() or dst.is_file():
+                    GitWorktreeOps._remove_path(dst)
+                dst.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(
+                    str(src), str(dst), dirs_exist_ok=True, symlinks=True,
+                    ignore=shutil.ignore_patterns(".git"),
+                )
+                copied = True
             elif dst.is_symlink():
-                # The path is gone in the main worktree but the fresh
-                # checkout has a (possibly broken) symlink there;
-                # exists() follows the link and would miss it.
                 dst.unlink()
                 copied = True
             elif dst.is_dir():
                 if not src.exists():
-                    # The path was deleted in the main worktree but the
-                    # fresh checkout has a directory there (file/dir
-                    # type change); unlink() would raise on a dir.
                     shutil.rmtree(str(dst))
                     copied = True
             elif dst.exists():
@@ -1377,10 +1412,6 @@ class GitWorktreeOps:
 
         cherry_pick_args = ["cherry-pick", "--no-commit"]
         if GitWorktreeOps._head_matches_baseline_parent(repo, baseline):
-            # Resolve hunk-level conflicts caused by the user's dirty
-            # edits living in ``baseline`` but not in ``HEAD`` in favor
-            # of the branch tip — see method docstring for the full
-            # 3-way-merge analysis.  Only safe when HEAD == baseline^.
             cherry_pick_args.extend(["-X", "theirs"])
         cherry_pick_args.append(f"{baseline}..{branch}")
         result = _git(*cherry_pick_args, cwd=repo)
@@ -1408,3 +1439,364 @@ class GitWorktreeOps:
         GitWorktreeOps.remove(repo, wt_dir)
         GitWorktreeOps.prune(repo)
         GitWorktreeOps.delete_branch(repo, branch)
+
+    @staticmethod
+    def checked_out_branches(repo: Path) -> set[str]:
+        """Return the branches currently checked out in any worktree.
+
+        A branch listed here is in use by a live worktree (including
+        the main working tree) and must never be deleted.
+
+        Args:
+            repo: Git repo root path.
+
+        Returns:
+            Set of branch names, empty if the listing fails.
+        """
+        result = _git("worktree", "list", "--porcelain", cwd=repo)
+        if result.returncode != 0:  # pragma: no cover — git failure
+            return set()
+        prefix = "branch refs/heads/"
+        return {
+            line[len(prefix):].strip()
+            for line in result.stdout.splitlines()
+            if line.startswith(prefix)
+        }
+
+    @staticmethod
+    def _config_branch_sections(repo: Path) -> set[str]:
+        """Return branch names that own a ``branch.<name>.*`` config section.
+
+        Only agent-minted ``kiss/wt-*`` names are reported; the user's
+        own branch sections are never touched.
+
+        Args:
+            repo: Git repo root path.
+
+        Returns:
+            Set of ``kiss/wt-*`` branch names present in git config.
+        """
+        prefix = "branch."
+        result = _git("config", "--get-regexp", rf"^{prefix}kiss/wt-", cwd=repo)
+        if result.returncode != 0:
+            # git config exits 1 when the regexp matches nothing.
+            return set()
+        # Each line is "branch.<name>.<setting> <value>"; strip the
+        # known prefix off the front and the setting off the tail.
+        return {
+            line.split(" ", 1)[0][len(prefix):].rpartition(".")[0]
+            for line in result.stdout.splitlines()
+        }
+
+    @staticmethod
+    def _branch_is_expendable(repo: Path, branch: str) -> bool:
+        """Whether *branch* holds no work that would be lost by deleting it.
+
+        A worktree branch is expendable once every one of its commits
+        is reachable from another ref — i.e. it was merged, or it never
+        diverged in the first place.  ``git branch -d`` applies exactly
+        this rule but only against HEAD, so ``--merged HEAD`` would
+        keep branches that were squash-merged into a different base.
+        Checking reachability from *all* other refs is both stricter
+        and cheaper than replaying the merge.
+
+        Args:
+            repo: Git repo root path.
+            branch: Branch name to test.
+
+        Returns:
+            True if the branch has no commits unique to it.
+        """
+        result = _git(
+            "rev-list",
+            "--count",
+            "--max-count=1",
+            branch,
+            "--not",
+            "--exclude=refs/heads/" + branch,
+            "--all",
+            cwd=repo,
+        )
+        if result.returncode != 0:  # pragma: no cover — git failure
+            return False
+        return result.stdout.strip() == "0"
+
+    @staticmethod
+    def sweep_orphaned_state(repo: Path) -> int:
+        """Delete leftover ``kiss/wt-*`` branches and config sections.
+
+        A crashed, killed, or refused cleanup leaves three kinds of
+        debris behind: a registered worktree whose directory is gone, a
+        branch nobody has checked out, and the ``branch.kiss/wt-*.*``
+        git config section that names it.  None of it is visible in
+        ``git status``, so it accumulates silently — the user only
+        notices as a swelling ``git branch`` listing.
+
+        Only debris is removed.  A branch is kept when it is checked
+        out by a live worktree (the task may still be running) or when
+        it holds commits no other ref can reach (unmerged work the user
+        could still want).  Config sections are only purged once their
+        branch is gone.
+
+        Args:
+            repo: Git repo root path.
+
+        Returns:
+            The number of branches deleted.
+        """
+        with repo_lock(repo):
+            GitWorktreeOps.prune(repo)
+            in_use = GitWorktreeOps.checked_out_branches(repo)
+            result = _git(
+                "for-each-ref",
+                "--format=%(refname:short)",
+                f"refs/heads/{_WORKTREE_BRANCH_PREFIX}*",
+                cwd=repo,
+            )
+            if result.returncode != 0:  # pragma: no cover — git failure
+                return 0
+            deleted = 0
+            for branch in result.stdout.split():
+                if branch in in_use:
+                    continue
+                if not GitWorktreeOps._branch_is_expendable(repo, branch):
+                    continue
+                # git refuses to delete a branch some worktree has
+                # checked out; the in_use guard skips those first so
+                # the sweep never logs a warning for a running task.
+                deleted += int(GitWorktreeOps.delete_branch(repo, branch))
+            for name in GitWorktreeOps._config_branch_sections(repo):
+                if not GitWorktreeOps.branch_exists(repo, name):
+                    GitWorktreeOps._remove_branch_config_section(repo, name)
+            return deleted
+
+    @staticmethod
+    def registered_worktrees(repo: Path) -> list[tuple[Path, str]]:
+        """Return ``(wt_dir, branch)`` for every registered worktree.
+
+        Parses ``git worktree list --porcelain``.  The main repo entry
+        (whose branch name is any user branch, e.g. ``main``) is
+        included alongside ``kiss/wt-*`` entries; callers filter by
+        the branch-name prefix themselves.
+
+        Detached-HEAD worktrees are skipped because they have no
+        branch name to reclaim by.
+
+        Args:
+            repo: Git repo root path.
+
+        Returns:
+            List of ``(wt_dir, branch)`` pairs in the order git
+            reports them, empty on git failure.
+        """
+        result = _git("worktree", "list", "--porcelain", cwd=repo)
+        if result.returncode != 0:  # pragma: no cover — git failure
+            return []
+        pairs: list[tuple[Path, str]] = []
+        cur_dir: Path | None = None
+        cur_branch: str | None = None
+        for raw in result.stdout.splitlines():
+            if raw.startswith("worktree "):
+                if cur_dir is not None and cur_branch is not None:
+                    pairs.append((cur_dir, cur_branch))
+                cur_dir = Path(raw[len("worktree "):].strip())
+                cur_branch = None
+            elif raw.startswith("branch refs/heads/"):
+                cur_branch = raw[len("branch refs/heads/"):].strip()
+        if cur_dir is not None and cur_branch is not None:
+            pairs.append((cur_dir, cur_branch))
+        return pairs
+
+    @staticmethod
+    def reclaim_orphaned_worktrees(
+        repo: Path,
+        *,
+        exclude_branches: set[str] | None = None,
+    ) -> int:
+        """Auto-commit and squash-merge orphan ``kiss/wt-*`` worktrees.
+
+        A Sorcar process that is killed / crashes / OOMs / reboots
+        while a worktree task is pending leaves its worktree
+        registered on disk with dirty uncommitted work.  No in-memory
+        ``self._wt`` state survives the restart, so no future
+        ``_release_worktree`` call ever runs — the work stays
+        stranded, invisible to :meth:`sweep_orphaned_state` (which
+        reaps plumbing debris only, never real work).
+
+        This reclaims each such worktree: it stages and commits any
+        dirty state under a generic ``"kiss: reclaim orphan
+        worktree"`` message, then squash-merges the branch into its
+        saved ``original_branch`` (from :meth:`load_original_branch`)
+        using the saved baseline commit (from
+        :meth:`load_baseline_commit`) when present, then removes the
+        worktree and deletes its branch.
+
+        Safety rules — a worktree is left completely untouched when
+        ANY of the following holds, so no work is ever destroyed:
+
+        * The branch is in *exclude_branches* (caller's live-agent
+          set — e.g. the current task's own worktree).
+        * The saved ``kiss-original`` config is missing (unknown
+          merge target).
+        * The saved original branch no longer exists in the repo.
+        * The main tree's current branch differs from the saved
+          original branch (reclaim never checks out for the user).
+        * The main tree's current HEAD is detached.
+        * ``git status --porcelain`` in the main tree reports dirty
+          state (a reclaim now would silently include the user's
+          uncommitted edits in the squash-merge commit).
+        * The auto-commit inside the worktree is rejected (e.g. a
+          pre-commit hook).
+        * The squash-merge returns anything other than
+          :attr:`MergeResult.SUCCESS` (conflict, cherry-pick failure).
+
+        Args:
+            repo: Git repo root path.
+            exclude_branches: Branches known to be owned by a still-
+                live agent in this process; they must not be
+                reclaimed.  ``None`` treats every registered
+                ``kiss/wt-*`` worktree as reclaimable.
+
+        Returns:
+            Number of worktrees successfully reclaimed (merged and
+            removed).
+        """
+        excluded = exclude_branches or set()
+        reclaimed = 0
+        with repo_lock(repo):
+            # ``.kiss-worktrees/`` under the main tree would otherwise
+            # show up as an untracked directory in ``git status`` and
+            # trip the "main tree is dirty" guard below.  ``ensure_
+            # excluded`` writes it to ``.git/info/exclude`` (never a
+            # tracked file) idempotently, so a reclaim can be called
+            # standalone (without the ``ensure_excluded`` that
+            # ``_try_setup_worktree`` normally runs just before it).
+            GitWorktreeOps.ensure_excluded(repo)
+            GitWorktreeOps.prune(repo)
+            current = GitWorktreeOps.current_branch(repo)
+            if current is None:
+                return 0
+            if GitWorktreeOps.has_uncommitted_changes(repo):
+                logger.info(
+                    "Skipping orphan-worktree reclaim in %s: main "
+                    "tree is dirty",
+                    repo,
+                )
+                return 0
+            for wt_dir, branch in GitWorktreeOps.registered_worktrees(repo):
+                if not branch.startswith(_WORKTREE_BRANCH_PREFIX):
+                    continue
+                if _same_path(wt_dir, repo):
+                    # ``git worktree list`` reports the main working
+                    # tree too.  A user checkout that merely sits on a
+                    # branch carrying the agent prefix (e.g. a machine
+                    # provisioned by ./sorcar-cloud from a worktree) is
+                    # not an orphan: reclaiming it would delete the
+                    # project directory.
+                    continue
+                if branch in excluded:
+                    continue
+                if not wt_dir.exists():  # pragma: no cover — prune above
+                    # ``prune`` at the top of this block already
+                    # dropped registrations whose directory is gone,
+                    # so this branch is only reachable on an rm-vs-
+                    # iteration race with an external process.
+                    continue
+                if GitWorktreeOps.load_preserve_marker(repo, branch):
+                    # The user (or the failed-task preserve path)
+                    # deliberately parked this worktree for manual
+                    # review; publishing its work here would violate
+                    # the "never silently merge unverified work"
+                    # contract.
+                    logger.info(
+                        "Skipping orphan-worktree reclaim of %s: "
+                        "branch '%s' is marked preserve-for-review",
+                        wt_dir, branch,
+                    )
+                    continue
+                original_branch = GitWorktreeOps.load_original_branch(
+                    repo, branch,
+                )
+                if not original_branch:
+                    # Legacy worktree without the kiss-original
+                    # config (created before that config landed, or
+                    # a save that failed silently).  Fall back to
+                    # the current branch of the main tree — that is
+                    # what the user is on right now, so it is the
+                    # branch a fresh task would merge into anyway.
+                    # The dirty-main and current-branch guards below
+                    # still protect against clobbering user state.
+                    logger.warning(
+                        "Orphan worktree %s (branch '%s') has no "
+                        "kiss-original config; falling back to the "
+                        "current branch '%s' of the main tree",
+                        wt_dir, branch, current,
+                    )
+                    original_branch = current
+                if not GitWorktreeOps.branch_exists(repo, original_branch):
+                    logger.warning(
+                        "Cannot reclaim orphan worktree %s: original "
+                        "branch '%s' no longer exists; preserving",
+                        wt_dir, original_branch,
+                    )
+                    continue
+                if original_branch != current:
+                    logger.info(
+                        "Skipping orphan-worktree reclaim of %s: "
+                        "main tree is on '%s' but the worktree "
+                        "targets '%s'",
+                        wt_dir, current, original_branch,
+                    )
+                    continue
+                if GitWorktreeOps.has_uncommitted_changes(wt_dir):
+                    GitWorktreeOps.stage_all(wt_dir)
+                    GitWorktreeOps.commit_all(
+                        wt_dir, "kiss: reclaim orphan worktree",
+                    )
+                    if GitWorktreeOps.has_uncommitted_changes(wt_dir):
+                        logger.warning(
+                            "Cannot reclaim orphan worktree %s: "
+                            "auto-commit failed (a pre-commit hook "
+                            "may have rejected it); preserving",
+                            wt_dir,
+                        )
+                        continue
+                baseline = GitWorktreeOps.load_baseline_commit(repo, branch)
+                try:
+                    GitWorktreeOps.ensure_scratch_merge_driver(repo)
+                except Exception:  # pragma: no cover — filesystem
+                    logger.warning(
+                        "Failed to install scratch merge driver",
+                        exc_info=True,
+                    )
+                if baseline:
+                    result = GitWorktreeOps.squash_merge_from_baseline(
+                        repo,
+                        branch,
+                        baseline,
+                        user_prompt=None,
+                        task_result=(
+                            "Auto-merged by orphan-worktree reclaim"
+                        ),
+                    )
+                else:
+                    result = GitWorktreeOps.squash_merge_branch(
+                        repo,
+                        branch,
+                        user_prompt=None,
+                        task_result=(
+                            "Auto-merged by orphan-worktree reclaim"
+                        ),
+                    )
+                if result != MergeResult.SUCCESS:
+                    logger.warning(
+                        "Reclaim of orphan worktree %s: squash "
+                        "merge into '%s' returned %s; preserving",
+                        wt_dir, original_branch, result.value,
+                    )
+                    continue
+                GitWorktreeOps.remove(repo, wt_dir)
+                GitWorktreeOps.prune(repo)
+                GitWorktreeOps.delete_branch(repo, branch)
+                reclaimed += 1
+        return reclaimed

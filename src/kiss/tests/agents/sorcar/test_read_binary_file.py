@@ -21,36 +21,24 @@ from pathlib import Path
 
 import pytest
 
+from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.core.models.model import parse_binary_attachments
 from kiss.core.printer import truncate_result
-from kiss.core.useful_tools import UsefulTools
 
-# 1x1 transparent PNG — starts with the classic 0x89 PNG signature byte that
-# triggers the UTF-8 decode failure reported by the user.
 _PNG_1x1 = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
     "890000000a49444154789c6300010000000500010d0a2db40000000049454e44"
     "ae426082"
 )
 
-# Minimal PDF skeleton (raw bytes start with ``%PDF-1.4`` which is ASCII —
-# decode succeeds, so to exercise the binary branch we mix in a couple of
-# 0x80+ bytes that would fail strict UTF-8 decoding).
 _PDF_BYTES = b"%PDF-1.4\n\x89\xc3\x28binarystream\n%%EOF"
 
-# Tiny synthetic WAV (44-byte RIFF header + a couple of PCM samples).  The
-# header begins with the ASCII tag ``RIFF`` but the embedded length fields
-# include non-ASCII bytes that fail UTF-8 decoding, so the Read tool hits
-# the binary branch.
 _WAV_BYTES = (
     b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00"
     b"\x44\xac\x00\x00\x88\x58\x01\x00\x02\x00\x10\x00"
     b"data\x00\x00\x00\x00"
 )
 
-# Tiny synthetic MP4 (just an ``ftyp`` box).  Triggers the binary branch
-# because byte ``\x18`` etc. are valid UTF-8 but the box payload contains
-# non-UTF-8 bytes.
 _MP4_BYTES = b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isomavc1\xff\xfe"
 
 
@@ -92,7 +80,6 @@ def test_read_png_returns_sentinel_with_base64_payload(temp_dir):
     assert len(attachments) == 1
     assert attachments[0].mime_type == "image/png"
     assert attachments[0].data == _PNG_1x1
-    # Sentinel + base64 payload must be removed from the plain text view.
     assert "<<KISS_BINARY_ATTACHMENT" not in plain
     assert expected_b64 not in plain
     assert "[attached image/png," in plain
@@ -121,7 +108,6 @@ def test_read_unsupported_binary_returns_friendly_error(temp_dir):
     assert "utf-8" not in result.lower()
     assert "Cannot read binary file" in result
     assert "weights.bin" in result
-    # No sentinel, because we refuse to inline arbitrary binaries.
     assert "<<KISS_BINARY_ATTACHMENT" not in result
 
 
@@ -149,8 +135,6 @@ def test_anthropic_tool_result_includes_image_block(temp_dir):
     read_output = UsefulTools().Read(str(png_path))
 
     model = AnthropicModel("claude-sonnet-4-5", api_key="sk-test")
-    # Prime the conversation with an assistant tool_use so the id matching
-    # path is exercised end to end.
     model.conversation = [
         {"role": "user", "content": "read it"},
         {
@@ -184,7 +168,6 @@ def test_anthropic_tool_result_includes_image_block(temp_dir):
     assert image_block["source"]["media_type"] == "image/png"
     assert image_block["source"]["type"] == "base64"
     assert base64.b64decode(image_block["source"]["data"]) == _PNG_1x1
-    # Sentinel must not leak into the text block(s).
     for b in content_blocks:
         if b["type"] == "text":
             assert "<<KISS_BINARY_ATTACHMENT" not in b["text"]
@@ -231,7 +214,7 @@ def test_printer_truncate_result_masks_base64_payload(temp_dir):
     png_path.write_bytes(_PNG_1x1)
     read_output = UsefulTools().Read(str(png_path))
     expected_b64 = base64.b64encode(_PNG_1x1).decode("ascii")
-    assert expected_b64 in read_output  # sanity
+    assert expected_b64 in read_output
 
     rendered = truncate_result(read_output)
     assert expected_b64 not in rendered
@@ -243,8 +226,6 @@ def test_default_tool_result_strips_base64_to_avoid_context_bloat(temp_dir):
     """For non-image-capable model backends the base64 payload is dropped."""
     from kiss.core.models.model import Model
 
-    # Build a minimal concrete Model so we can drive the default tool-result
-    # path without instantiating a real provider client.
     class _StubModel(Model):
         def initialize(self, prompt, attachments=None):  # pragma: no cover
             self.conversation = [{"role": "user", "content": prompt}]
@@ -347,14 +328,12 @@ def test_openai_tool_result_appends_image_user_message(temp_dir):
         [("Read", {"result": read_output})]
     )
 
-    # Tool message: plain text only, no base64.
     tool_msg = model.conversation[-2]
     assert tool_msg["role"] == "tool"
     assert tool_msg["tool_call_id"] == "call_42"
     assert "<<KISS_BINARY_ATTACHMENT" not in tool_msg["content"]
     assert "[attached image/png," in tool_msg["content"]
 
-    # Follow-up user message with image_url part carrying the data URL.
     user_msg = model.conversation[-1]
     assert user_msg["role"] == "user"
     assert isinstance(user_msg["content"], list)
@@ -433,8 +412,6 @@ def test_openai_tool_result_drops_video_with_no_follow_up(temp_dir):
         [("Read", {"result": read_output})]
     )
 
-    # Only the tool message should be appended — no follow-up user message
-    # because video has no supported content-part type.
     assert model.conversation[-1]["role"] == "tool"
     assert "[attached video/mp4," in model.conversation[-1]["content"]
 
@@ -470,7 +447,6 @@ def test_gemini_tool_result_routes_attachment_via_user_message(temp_dir):
         [("Read", {"result": read_output})]
     )
 
-    # Tool message comes first, follow-up user message with attachments next.
     tool_msg = model.conversation[-2]
     assert tool_msg["role"] == "tool"
     assert "<<KISS_BINARY_ATTACHMENT" not in tool_msg["content"]
@@ -482,8 +458,6 @@ def test_gemini_tool_result_routes_attachment_via_user_message(temp_dir):
     assert attachments[0].mime_type == "image/png"
     assert attachments[0].data == _PNG_1x1
 
-    # Confirm the conversion path produces a Part with inline_data of the
-    # right MIME type.
     contents = model._convert_conversation_to_gemini_contents()
     last = contents[-1]
     assert last.role == "user"
@@ -556,6 +530,5 @@ def test_anthropic_tool_result_drops_video(temp_dir):
 
     block = model.conversation[-1]["content"][0]
     types = [b["type"] for b in block["content"]]
-    # No image/document/audio block — video is dropped.  Only text remains.
     assert types == ["text"]
     assert "[attached video/mp4," in block["content"][0]["text"]

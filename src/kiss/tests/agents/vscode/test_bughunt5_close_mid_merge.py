@@ -128,8 +128,6 @@ class TestCloseTabMidMergeReview(IsolatedAsyncioTestCase):
         self._orig_cfg_path = vc.CONFIG_PATH
         vc.CONFIG_DIR = Path(self.tmpdir) / "config"
         vc.CONFIG_PATH = vc.CONFIG_DIR / "config.json"
-        # Shorten the deferred-close grace window so the test does not
-        # wait 10 real seconds for the timer to fire.
         self._orig_grace = web_server_module._TAB_CLOSE_GRACE
         web_server_module._TAB_CLOSE_GRACE = 0.3
 
@@ -224,8 +222,6 @@ class TestCloseTabMidMergeReview(IsolatedAsyncioTestCase):
         tab_id = "tab-close-mid-merge"
         await self._start_review(tab_id)
 
-        # A browser claims the tab (receives the replayed review), then
-        # disconnects without resolving the remaining hunks.
         ws = await self._connect_ok()
         await ws.send(json.dumps({
             "type": "ready", "tabId": tab_id, "restoredTabs": [],
@@ -234,9 +230,6 @@ class TestCloseTabMidMergeReview(IsolatedAsyncioTestCase):
         self.assertIsNotNone(replay, "in-flight review was not replayed")
         await ws.close()
 
-        # After the grace window the deferred close fires.  The merge
-        # lifecycle must END (all-done -> _finish_merge) so the closed
-        # tab is disposed instead of leaking in is_merging limbo.
         deadline = time.monotonic() + 8.0
         while time.monotonic() < deadline:
             if tab_id not in _RunningAgentState.running_agent_states:
@@ -273,8 +266,6 @@ class TestCloseTabMidMergeReview(IsolatedAsyncioTestCase):
         }))
         self.assertIsNotNone(await self._wait_for_event(ws, "merge_started"))
 
-        # The user closes the chat tab in the web UI; the connection
-        # itself stays open (no deferred-close timer is involved).
         await ws.send(json.dumps({"type": "closeTab", "tabId": tab_id}))
 
         deadline = time.monotonic() + 8.0
@@ -309,7 +300,6 @@ class TestCloseTabMidMergeReview(IsolatedAsyncioTestCase):
         self.assertIsNotNone(await self._wait_for_event(ws, "merge_started"))
         await ws.close()
 
-        # Reconnect immediately (well within the grace window).
         ws2 = await self._connect_ok()
         await ws2.send(json.dumps({
             "type": "ready", "tabId": tab_id, "restoredTabs": [],
@@ -318,7 +308,6 @@ class TestCloseTabMidMergeReview(IsolatedAsyncioTestCase):
             await self._wait_for_event(ws2, "merge_started"),
             "review must be replayed to the reconnecting client",
         )
-        # Give any (incorrectly surviving) close timer a chance to fire.
         await asyncio.sleep(1.0)
         tab = _RunningAgentState.running_agent_states.get(tab_id)
         self.assertIsNotNone(tab, "tab must survive a reload within grace")

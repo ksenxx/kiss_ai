@@ -2,21 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test reproducing the "talk voice overlaps and breaks"
-// bug: successive ``{type: 'talk'}`` events each created and played
-// their own Audio element IMMEDIATELY, so two talk() calls spoke on
-// top of each other.  The webview must serialize ALL talk playback
-// through one FIFO queue: clip N+1 starts only after clip N finishes
-// ('ended'), fails ('error' / 'abort' / rejected play()), or was
-// skipped.  The robotic Web Speech fallback is GONE: a talk without a
-// playable GPT-synthesized clip (no audioB64, Audio unavailable, or
-// play() rejected) degrades to SILENCE and completes immediately so
-// the queue advances — window.speechSynthesis is NEVER touched.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/talkAudioOverlap.test.js
 
 'use strict';
 
@@ -27,7 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/** Build a jsdom window running the production chat webview. */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -61,18 +45,14 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win};
 }
 
-/**
- * Install a recording Audio constructor whose instances track play()
- * calls and can fire their 'ended'/'error'/'abort' completion events
- * the way a real HTMLAudioElement does (onended/onerror properties).
- * *playResult* is the promise play() returns (resolved when omitted);
- * pass a function to choose the result per player instance.
- */
 function installAudio(win, playResult) {
   const players = [];
   win.Audio = function Audio(src) {
@@ -93,11 +73,6 @@ function installAudio(win, playResult) {
   return players;
 }
 
-/**
- * Install a CANARY Web Speech API on *win* (jsdom has none).  The
- * production webview must NEVER use it — every recorded utterance or
- * speak() call is a regression back to the robotic system voice.
- */
 function installSpeech(win) {
   const spoken = [];
   win.SpeechSynthesisUtterance = function SpeechSynthesisUtterance(text) {
@@ -114,7 +89,6 @@ function installSpeech(win) {
   return spoken;
 }
 
-/** Assert the robotic Web Speech engine was never touched. */
 function assertNoSpeech(spoken) {
   assert.strictEqual(
     spoken.length, 0,
@@ -122,12 +96,11 @@ function assertNoSpeech(spoken) {
       JSON.stringify(spoken.map(u => u.text)));
 }
 
-/** Dispatch a backend→webview event exactly like the extension does. */
 function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-const B64 = 'SUQzBAAAAAAAAA=='; // decodes to "ID3..." — an MP3 tag header
+const B64 = 'SUQzBAAAAAAAAA==';
 
 function talkEv(id, text, extra) {
   return Object.assign(
@@ -135,8 +108,6 @@ function talkEv(id, text, extra) {
     extra || {},
   );
 }
-
-// --- Overlap reproduction: two audio clips must not play together ---
 
 function testSecondAudioWaitsForFirstEnded() {
   const {win} = makeWebview();
@@ -181,8 +152,6 @@ function testThreeAudioClipsPlayInFifoOrder() {
   console.log('PASS: three audio clips play strictly one after another');
 }
 
-// --- 'error' must advance the queue, not deadlock it ---
-
 function testAudioErrorAdvancesQueue() {
   const {win} = makeWebview();
   const spoken = installSpeech(win);
@@ -199,8 +168,6 @@ function testAudioErrorAdvancesQueue() {
   console.log('PASS: audio error event advances the talk queue');
 }
 
-// --- A talk without audio is SILENT and never blocks the queue ---
-
 function testClipLessTalkIsSilentAndAdvancesQueue() {
   const {win} = makeWebview();
   const spoken = installSpeech(win);
@@ -213,8 +180,6 @@ function testClipLessTalkIsSilentAndAdvancesQueue() {
   assert.strictEqual(players.length, 1,
     'the queued clips wait for the first to end');
   players[0].fire('ended');
-  // The clip-less talk completes immediately (silence), so the third
-  // talk's clip starts in the same pump.
   assert.strictEqual(players.length, 2,
     'a clip-less talk must complete at once and advance the queue');
   assert.strictEqual(players[1].src, 'data:audio/mpeg;base64,' + B64);
@@ -230,16 +195,12 @@ function testLeadingClipLessTalkDoesNotDelayAudio() {
   send(win, talkEv('s1', 'no clip here'));
   send(win, talkEv('s2', 'audio second', {audioB64: B64}));
 
-  // The clip-less talk finished instantly (silently), so the audio
-  // clip is already playing.
   assert.strictEqual(players.length, 1,
     'audio must start immediately after the silent clip-less talk');
   assert.strictEqual(players[0].playCalls, 1);
   assertNoSpeech(spoken);
   console.log('PASS: a leading clip-less talk never delays the next clip');
 }
-
-// --- Rejected play() (autoplay policy): degrade to silence, advance ---
 
 async function testRejectedPlayDegradesSilentlyThenAdvances() {
   const {win} = makeWebview();
@@ -262,10 +223,6 @@ async function testRejectedPlayDegradesSilentlyThenAdvances() {
 }
 
 async function testLateErrorAfterRejectedPlayDoesNotDoubleAdvance() {
-  // Browsers fire BOTH a play() rejection and an 'error' event when a
-  // clip cannot be decoded.  The rejection already completed the talk
-  // (silently); the element's late 'error' must not complete it AGAIN
-  // and start the next-next talk over the one now playing.
   const {win} = makeWebview();
   const spoken = installSpeech(win);
   const players = installAudio(
@@ -283,7 +240,7 @@ async function testLateErrorAfterRejectedPlayDoesNotDoubleAdvance() {
   assert.strictEqual(players.length, 2,
     'the rejection advanced the queue to the second clip');
 
-  players[0].fire('error'); // late media error after the rejection
+  players[0].fire('error');
   assert.strictEqual(players.length, 2,
     "the element's late error must not advance the queue again while " +
     'the second clip is still playing');
@@ -296,8 +253,6 @@ async function testLateErrorAfterRejectedPlayDoesNotDoubleAdvance() {
 }
 
 function testAudioAbortAdvancesQueue() {
-  // 'abort' is a terminal media event (fetch/decode aborted); it must
-  // release the queue exactly like 'ended' and 'error'.
   const {win} = makeWebview();
   const spoken = installSpeech(win);
   const players = installAudio(win, Promise.resolve());
@@ -313,15 +268,11 @@ function testAudioAbortAdvancesQueue() {
   console.log('PASS: audio abort event advances the talk queue');
 }
 
-// --- Jobs that produce no sound must complete immediately ---
-
 function testUnspeakableTextDoesNotDeadlockQueue() {
   const {win} = makeWebview();
   const spoken = installSpeech(win);
   const players = installAudio(win, Promise.resolve());
 
-  // An emoji-only text without audio produces no sound → the job must
-  // finish at once instead of holding the queue forever.
   send(win, talkEv('z1', '\u{1F642}'));
   send(win, talkEv('z2', 'real clip', {audioB64: B64}));
 
@@ -333,9 +284,6 @@ function testUnspeakableTextDoesNotDeadlockQueue() {
 }
 
 function testMissingAudioApiDegradesToSilence() {
-  // A device without the Audio API cannot play the clip; the talk
-  // must degrade to SILENCE (never the robotic Web Speech voice) and
-  // release the queue immediately.
   const {win} = makeWebview();
   const spoken = installSpeech(win);
   win.Audio = undefined;
@@ -344,7 +292,6 @@ function testMissingAudioApiDegradesToSilence() {
   send(win, talkEv('n2', 'me neither', {audioB64: B64}));
 
   assertNoSpeech(spoken);
-  // The queue is not stuck: a later playable clip still plays.
   const players = installAudio(win, Promise.resolve());
   send(win, talkEv('n3', 'now playable', {audioB64: B64}));
   assert.strictEqual(players.length, 1,
@@ -352,8 +299,6 @@ function testMissingAudioApiDegradesToSilence() {
   assert.strictEqual(players[0].playCalls, 1);
   console.log('PASS: missing Audio API degrades to silence, no deadlock');
 }
-
-// --- Regression: single-talk behavior is unchanged ---
 
 function testSingleAudioTalkStillPlaysImmediately() {
   const {win} = makeWebview();

@@ -37,7 +37,6 @@ class TestResumeSessionWithTaskId:
             th._KISS_DIR = tmp_path
             th._DB_PATH = tmp_path / "sorcar.db"
 
-            # Create two tasks in the same chat session
             task_a_id, chat_id = th._add_task("task alpha", chat_id="0")
             events_a: list[dict[str, object]] = [
                 {"type": "text_delta", "text": "alpha response"},
@@ -64,14 +63,11 @@ class TestResumeSessionWithTaskId:
 
             server.printer.broadcast = capture  # type: ignore[assignment]
 
-            # --- Bug reproduction: without taskId, it loads the latest ---
             server._replay_session(chat_id, tab_id="tab-latest")
             te_latest = [e for e in captured if e.get("type") == "task_events"]
             assert len(te_latest) == 1
-            # Without the fix, this always loads task_b (the latest)
             assert te_latest[0]["task"] == "task beta"
 
-            # --- Fix verification: with taskId, load the specific task ---
             captured.clear()
             server._replay_session(
                 chat_id, tab_id="tab-specific", task_id=task_a_id,
@@ -155,7 +151,6 @@ class TestResumeSessionWithTaskId:
             assert isinstance(evts, list)
             assert len(evts) == 1
 
-            # Non-existent task_id returns None
             assert th._load_chat_events_by_task_id("999999") is None
         finally:
             th._close_db()
@@ -194,7 +189,6 @@ class TestResumeSessionWithTaskId:
 
             server.printer.broadcast = capture  # type: ignore[assignment]
 
-            # task_id=None should fall back to latest
             server._replay_session(chat_id, tab_id="tab-fb", task_id=None)
             te = [e for e in captured if e.get("type") == "task_events"]
             assert len(te) == 1
@@ -232,7 +226,6 @@ class TestResumeSessionWithTaskId:
 
             server.printer.broadcast = capture  # type: ignore[assignment]
 
-            # Non-existent task_id → should fall back to latest
             server._replay_session(
                 chat_id, tab_id="tab-inv", task_id="999999",
             )

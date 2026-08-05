@@ -113,7 +113,7 @@ class TestWriteBaseCopyPreservesCrlf(unittest.TestCase):
         self._git("commit", "-m", "add crlf file")
 
         merge_dir = self._tmp / "merge-temp"
-        ub_dir = self._tmp / "untracked-base"  # empty: no saved base copy
+        ub_dir = self._tmp / "untracked-base"
 
         base_path = _write_base_copy(
             str(self._tmp), merge_dir, ub_dir, "crlf.txt", "HEAD",
@@ -157,8 +157,6 @@ class TestRunningTaskNotMarkedFailed(_TempDbTestCase):
 
     def test_running_task_has_failed_false(self) -> None:
         task_id, _ = th._add_task("running task")
-        # While the task runs, its row still holds the
-        # "Agent Failed Abruptly" sentinel result.
 
         release = threading.Event()
         worker = threading.Thread(target=release.wait, daemon=True)
@@ -190,7 +188,7 @@ class TestRunningTaskNotMarkedFailed(_TempDbTestCase):
 
     def test_finished_sentinel_task_still_marked_failed(self) -> None:
         task_id, _ = th._add_task("crashed task")
-        del task_id  # no running tab: row keeps the sentinel result
+        del task_id
 
         self.server._handle_command({"type": "getHistory"})
 
@@ -221,8 +219,6 @@ class TestSubtaskFailureStepCount(_TempDbTestCase):
         def fake_run(**kwargs: Any) -> str:
             agent.total_tokens_used = 11
             agent.budget_used = 0.02
-            # RelentlessAgent-derived agents accumulate completed steps
-            # into ``total_steps``; ``step_count`` stays 0.
             agent.total_steps = 7
             raise RuntimeError("boom")
 

@@ -41,8 +41,6 @@ class _BlockingMergeAgent(WorktreeSorcarAgent):
 
     def __init__(self, repo_root: Path) -> None:
         super().__init__("Bughunt5 blocking-merge agent")
-        # A pending worktree: ``_wt_pending`` / ``_repo_root`` etc. are
-        # properties derived from ``self._wt``.
         self._wt = GitWorktree(
             repo_root=repo_root,
             branch="kiss/wt-bughunt5",
@@ -61,7 +59,6 @@ class _BlockingMergeAgent(WorktreeSorcarAgent):
             self.merge_calls += 1
         self.merge_entered.set()
         self.merge_release.wait(timeout=30)
-        # A real successful merge releases the worktree.
         self._wt = None
         return "Successfully merged worktree branch."
 
@@ -105,8 +102,6 @@ class TestDoubleMergeClick(unittest.TestCase):
             "first merge never started"
         )
 
-        # First merge is now in flight (inside wt.merge(), holding
-        # repo_lock, tab.is_merging=True).  The user double-clicks:
         def second_click() -> None:
             results["second"] = self.server._handle_worktree_action(
                 "merge", tab_id,
@@ -114,8 +109,6 @@ class TestDoubleMergeClick(unittest.TestCase):
 
         t2 = threading.Thread(target=second_click, daemon=True)
         t2.start()
-        # The second click must be refused promptly — it must NOT
-        # queue behind the in-flight merge.
         t2.join(timeout=5)
         was_queued = t2.is_alive()
         agent.merge_release.set()

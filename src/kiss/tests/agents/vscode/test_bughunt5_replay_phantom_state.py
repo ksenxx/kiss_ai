@@ -78,13 +78,9 @@ class TestReplayPhantomState(unittest.TestCase):
         viewer_tab = "viewer-tab-1"
         self.server._replay_session(chat_id=chat_id, tab_id=viewer_tab)
 
-        # The replay itself must have happened ...
         replays = [e for e in self.events if e.get("type") == "task_events"]
         assert len(replays) == 1 and replays[0]["tabId"] == viewer_tab
 
-        # ... but viewing a chat is a read-only operation: no
-        # _RunningAgentState (and no eagerly-created agent) may be
-        # registered for the pure-viewer tab.
         assert viewer_tab not in _RunningAgentState.running_agent_states, (
             "BUG: _replay_session minted a phantom _RunningAgentState "
             "(via _emit_pending_worktree -> _present_pending_worktree "

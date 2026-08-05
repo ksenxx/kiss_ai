@@ -65,9 +65,6 @@ def _init_git_repo(tmpdir: str) -> None:
     subprocess.run(["git", "config", "user.name", "T"], cwd=tmpdir,
                    capture_output=True)
     Path(tmpdir, ".gitkeep").touch()
-    # The redirected sorcar DB lives at <repo>/.kiss/; its -wal/-shm
-    # sidecar files appearing mid-task would otherwise trip the
-    # post-task dirty-files merge review and block follow-up runs.
     Path(tmpdir, ".gitignore").write_text(".kiss/\n")
     subprocess.run(["git", "add", "."], cwd=tmpdir, capture_output=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmpdir,
@@ -136,13 +133,6 @@ def _run_and_wait(server: VSCodeServer, tab_id: str, prompt: str,
         "model": "claude-fable-5", "workDir": work_dir,
         "tabId": tab_id,
     })
-    # ``_cmd_run`` stamps ``task_thread`` before returning, and the
-    # worker thread's outer ``finally`` (``_run_task``) resets it to
-    # None once the task finishes.  A near-instant run (e.g. one
-    # rejected by the ``is_merging`` merge-review guard) can complete
-    # before this thread reads the attribute, so ``None`` here means
-    # "already finished", not "never started" — only join a thread
-    # that is still registered.
     t = server._get_tab(tab_id).task_thread
     if t is not None:
         t.join(timeout=10)
@@ -208,8 +198,6 @@ class TestChainContextFirstRun(_ChainContextBase):
     """First run after open-by-task-id uses the parent-chain context."""
 
     def test_chain_context_spans_chats_and_orders_root_first(self) -> None:
-        # T1 <- T2 live in chat A; T3 (parent T2) lives in chat B, so
-        # chain context and chat context are observably different.
         rows = _seed_chain([
             ("t1 magic word apple", "r1 apple stored", "chatA"),
             ("t2 magic word pear", "r2 pear stored", "chatA"),
@@ -250,10 +238,6 @@ class TestChainContextFirstRun(_ChainContextBase):
 
         assert len(self.capture.prompts) == 2
         second = self.capture.prompts[1]
-        # Normal chat-context path for chat B: T3 is excluded from
-        # _load_chat_context (non-empty parent_task_id), but the first
-        # follow-up run in this tab is included.  Chain-only members
-        # from chat A must NOT leak in.
         assert "Previous tasks and results" in second, second
         assert "first follow-up quokka" in second, second
         assert "t1 magic word apple" not in second, second
@@ -273,12 +257,10 @@ class TestChainContextFirstRun(_ChainContextBase):
         _run_and_wait(self.server, tab, "trim check", self.tmpdir)
 
         prompt = self.capture.prompts[0]
-        # 13 entries -> del [2:5] -> keep 1,2 then 6..13 (10 total).
         for kept in (1, 2, 6, 7, 8, 9, 10, 11, 12, 13):
             assert f"sentinel{kept:02d}" in prompt, (kept, prompt)
         for dropped in (3, 4, 5):
             assert f"sentinel{dropped:02d}" not in prompt, (dropped, prompt)
-        # Numbering is contiguous after the trim.
         assert "### Task 1\nchain-task-01" in prompt, prompt
         assert "### Task 3\nchain-task-06" in prompt, prompt
         assert "### Task 10\nchain-task-13" in prompt, prompt
@@ -289,7 +271,6 @@ class TestChainContextFirstRun(_ChainContextBase):
             ("cyc-b task", "cyc-b result", "chatC"),
         ])
         a_id, b_id = rows[0][0], rows[1][0]
-        # Close the loop: a's parent = b (b's parent is already a).
         db = th._get_db()
         with th._rw_lock.write_lock():
             db.execute(
@@ -315,8 +296,6 @@ class TestChainContextFirstRun(_ChainContextBase):
 
         tab = "tab-chain-rejected"
         _open_by_task_id(self.server, tab, "chatB", t2_id)
-        # A submit rejected by the merge-review guard runs no task, so
-        # it must NOT consume the opened-by-task-id seed.
         self.server._get_tab(tab).is_merging = True
         _run_and_wait(self.server, tab, "rejected run", self.tmpdir)
         assert not self.capture.prompts, "rejected run must not reach agent"
@@ -356,15 +335,12 @@ class TestChainContextCleared(_ChainContextBase):
 
         tab = "tab-clear-resume"
         _open_by_task_id(self.server, tab, "chatA", t2_id)
-        # Re-open the same tab pointed at the chat WITHOUT a task id.
         self.server._handle_command({
             "type": "resumeSession", "chatId": "chatA", "tabId": tab,
         })
         _run_and_wait(self.server, tab, "post-clear check", self.tmpdir)
 
         prompt = self.capture.prompts[0]
-        # Chat-context path: T2 (non-empty parent_task_id) is filtered
-        # out; T1 remains.
         assert "t1 magic word apple" in prompt, prompt
         assert "t2 magic word pear" not in prompt, prompt
 
@@ -442,7 +418,6 @@ class TestChainContextPrimitives(_ChainContextBase):
         first = agent.build_chat_prompt("go")
         assert "### Task 1\nroot" in first
         assert "### Task 2\nleaf" in first
-        # Consumed: the next prompt uses the (empty) chat context.
         second = agent.build_chat_prompt("go again")
         assert second == "# Task\ngo again"
 

@@ -54,19 +54,16 @@ def test_explicit_copy_buttons_for_headerless_panels() -> None:
     (successful tool result), and the result card don't go through
     addCollapse, so they must call addCopyButton directly."""
     src = _read(MAIN_JS)
-    # bp: bash panel under .tc
     assert re.search(
         r"const\s+bp\s*=\s*mkEl\('div',\s*'bash-panel'\).*?addCopyButton\(bp\)",
         src,
         re.DOTALL,
     ), "the bash-panel inside a tool call (`bp`) must get addCopyButton(bp)"
-    # op: success bash panel
     assert re.search(
         r"const\s+op\s*=\s*mkEl\('div',\s*'bash-panel'\).*?addCopyButton\(op\)",
         src,
         re.DOTALL,
     ), "the success bash-panel (`op`) must get addCopyButton(op)"
-    # rc: result card
     assert re.search(
         r"hlBlock\(rc\);\s*addCopyButton\(rc\);",
         src,
@@ -97,11 +94,9 @@ def test_panel_copy_button_css_present() -> None:
     the positioning context (``position: relative``)."""
     css = _read(MAIN_CSS)
     assert ".panel-copy-btn" in css, "main.css must style .panel-copy-btn"
-    # `.copyable { position: relative; }` (whitespace-tolerant)
     assert re.search(
         r"\.copyable\s*\{[^}]*position:\s*relative", css
     ), ".copyable must set position: relative so the button anchors to the panel"
-    # Button must be absolutely positioned.
     assert re.search(
         r"\.panel-copy-btn\s*\{[^}]*position:\s*absolute", css
     ), ".panel-copy-btn must use position: absolute"
@@ -113,8 +108,6 @@ def test_collapsed_rules_keep_copy_button_visible() -> None:
     ``.panel-copy-btn`` so the button stays clickable when the panel is
     collapsed."""
     css = _read(MAIN_CSS)
-    # Stylelint's selector-not-notation rule requires complex :not() form:
-    # :not(A, B) instead of :not(A):not(B).
     assert ".tc.collapsed > :not(.tc-h, .panel-copy-btn)" in css, (
         ".tc collapsed rule must exempt .panel-copy-btn (via the "
         "complex :not(.tc-h, .panel-copy-btn) selector) so the copy "

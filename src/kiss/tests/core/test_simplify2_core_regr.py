@@ -74,7 +74,6 @@ def test_is_openrouter_anthropic_parity() -> None:
 def test_is_deepseek_reasoning_model_parity() -> None:
     for cls in MODEL_CLASSES:
         assert make(cls, "deepseek-ai/DeepSeek-R1")._is_deepseek_reasoning_model()
-        # The openrouter/ routing prefix is stripped before matching.
         assert make(cls, "openrouter/deepseek/deepseek-r1")._is_deepseek_reasoning_model()
         assert not make(cls, "gpt-4o")._is_deepseek_reasoning_model()
 

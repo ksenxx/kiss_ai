@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.core.useful_tools import UsefulTools
+from kiss.agents.sorcar.useful_tools import UsefulTools
 
 
 @pytest.fixture
@@ -107,7 +107,6 @@ def test_file_not_found_walks_up_to_existing_parent(temp_dir: Path) -> None:
     out = UsefulTools().Read(str(temp_dir / "no_such_dir" / "SORCR.md"))
 
     assert "File not found" in out
-    # The suggestion walks up to ``temp_dir`` and finds SORCAR.md.
     assert "SORCAR.md" in out
 
 
@@ -119,8 +118,6 @@ def test_stale_worktree_falls_back_to_repo(temp_dir: Path) -> None:
     target = repo / "src" / "module.py"
     target.write_text("REAL CONTENT\n")
 
-    # Simulate a worktree that has already been torn down: only the
-    # path string survives, nothing on disk.
     stale = (
         repo
         / ".kiss-worktrees"

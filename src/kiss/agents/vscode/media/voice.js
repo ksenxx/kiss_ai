@@ -2,47 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-/**
- * Voice wake-word support for KISS Sorcar.
- *
- * Always-on, fully local listener for the trigger word "Sorcar".  When
- * the wake word is heard, the mic button flashes RED and a large
- * blinking "Listening ..." overlay appears over the task input as
- * visual cues (no text is ever typed into the task input — the
- * literal word "sorcar" must never appear there) while the extension
- * host records the speech that follows.  When the host starts the
- * gpt-audio transcription/translation call it sends ``{type:
- * 'voiceTranscribing'}`` and the flash turns YELLOW (the overlay
- * hides); the resulting ``{type: 'voiceSpeech', text, speaker,
- * language}`` clears the flash, types the translated text into the
- * task input (or appends it to an existing draft) and submits it,
- * a spoken "Working on it." acknowledges the dictated task, and
- * listening continues.
- *
- * Two modes, selected by the ``window.__VOICE__`` config injected by
- * the page template:
- *
- * - ``browser`` (remote web app): the microphone is captured in the
- *   page itself and the wake word is recognized with vosk-browser, a
- *   WASM build of the lightweight Kaldi/Vosk small English model
- *   running in a Web Worker.  After a wake, the utterance that
- *   follows is captured right here (RMS endpointing that mirrors the
- *   Python listener's SpeechCapture), downsampled to 16kHz s16le PCM
- *   and posted to the server as ``{type: 'voiceTranscribe', audio:
- *   <base64 pcm>}``; the server runs the same gpt-audio translation
- *   as webview mode and replies with ``{type: 'voiceSpeech', text,
- *   speaker, language}``.  Wake-word detection never leaves the
- *   machine.
- *
- * - ``webview`` (VS Code extension): extension webviews cannot use
- *   getUserMedia (VS Code denies microphone access to webview
- *   origins), so the extension host runs the same Vosk small model in
- *   a local Python process and forwards wake events to this page as
- *   ``{type: 'voiceWake'}`` messages.  The toggle button posts
- *   ``{type: 'voiceToggle', enabled}`` back to the host through the
- *   ``kiss-voice-post`` bridge event handled in main.js (which owns
- *   the single allowed ``acquireVsCodeApi()`` instance).
- */
 (function () {
   'use strict';
 
@@ -51,78 +10,40 @@
   const inp = document.getElementById('task-input');
   if (!btn || !inp) return;
 
-  // "sorcar" is not in the small English model's vocabulary, so the
-  // grammar also lists in-vocabulary words/phrases that sound like
-  // "Sorcar".  Because the grammar forces every sound into an alias
-  // or [unk], detection is strict at the default sensitivity: the
-  // utterance has to decode to exactly one alias (allowing only a
-  // brief leading [unk] — the breathy onset of softly spoken speech,
-  // see wakeWithLeadingNoise), every alias word
-  // needs a sufficient confidence, and a partial result only fires
-  // after a short quiet pause proves the speaker paused instead of
-  // talking on ("soccer is my favorite sport").  The settings slider
-  // adjusts those gates; high sensitivity also accepts utterances
-  // that END with an alias ("[unk] sore car" from "hey there Sorcar")
-  // but never an alias followed by more speech/unknown audio.
-  // Common standalone words ("soccer", "circa", "so car", "saw car")
-  // are deliberately NOT aliases, keeping the grammar to genuinely
-  // Sorcar-shaped phrases; real human "Sorcar" decodes to "sir car"/
-  // "sore car"/"sar car" (verified live).
   const WAKE_ALIASES = ['sorcar', 'sir car', 'sore car', 'sar car'];
   const COOLDOWN_MS = 2000;
-  // Wake-word sensitivity (0..100, settings-panel slider).  The value
-  // scales the per-word confidence gate and the post-alias pause
-  // linearly, and at >= TRAILING_ALIAS_SENSITIVITY also accepts
-  // utterances that merely END with an alias ("hey there Sorcar"
-  // decodes to "[unk] sore car", measured live).  Sensitivity 50
-  // reproduces the historical gates (conf 0.4, pause 200ms); the
-  // default 80 is deliberately more sensitive (conf 0.16, pause at
-  // the 100ms floor, trailing-alias matching enabled).  Mirrors
-  // kiss/agents/vscode/voice_wake.py.
   const DEFAULT_SENSITIVITY = 80;
   const TRAILING_ALIAS_SENSITIVITY = 75;
   const SENSITIVITY_KEY = 'kissVoiceSensitivity';
+  const AUTO_SUBMIT_KEY = 'kissVoiceAutoSubmit';
 
-  /**
-   * Per-word confidence floor for a sensitivity: linear 0.8 -> 0.0.
-   * Vosk grammar-mode word confidences are posteriors in [0, 1] but
-   * do not separate true wakes from sound-alikes (real human "Sorcar"
-   * scored 0.53 live; TTS "soccer" force-fit 0.55) — the gate is a
-   * sanity net against egregious force-fits that a LOW slider setting
-   * raises high enough to reject sound-alikes.
-   */
   function sensitivityMinWordConf(s) {
     return 0.8 * (1 - s / 100);
   }
 
-  /**
-   * Quiet audio (ms) required after the alias before a partial result
-   * may fire the wake word: linear 400ms -> 100ms floor (without any
-   * pause continuous speech would fire mid-utterance).
-   */
   function sensitivityWakePauseMs(s) {
     return Math.max(100, 400 * (1 - s / 100));
   }
 
-  /** The stored slider value, or the default when absent/garbage. */
   function storedSensitivity() {
     try {
       const v = parseInt(localStorage.getItem(SENSITIVITY_KEY), 10);
       if (isFinite(v) && v >= 0 && v <= 100) return v;
-    } catch (_e) {
-      /* storage unavailable; use the default */
-    }
+    } catch (_e) {}
     return DEFAULT_SENSITIVITY;
   }
 
-  // Live wake-word sensitivity; updated by the settings-panel slider.
+  function storedAutoSubmit() {
+    try {
+      return localStorage.getItem(AUTO_SUBMIT_KEY) !== 'off';
+    } catch (_e) {
+      return true;
+    }
+  }
+
   let sensitivity = storedSensitivity();
-  // Blocks at or above this normalized RMS count as speech.
+  let autoSubmit = storedAutoSubmit();
   const SPEECH_RMS_THRESHOLD = 0.01;
-  // Browser-mode post-wake speech capture (mirrors SpeechCapture in
-  // kiss/agents/vscode/voice_wake.py): trailing silence that ends the
-  // utterance, silence-only timeout after the wake, hard length cap,
-  // and the PCM sample rate the server-side gpt-audio call expects.
   const CAPTURE_END_SILENCE_MS = 2000;
   const CAPTURE_NO_SPEECH_TIMEOUT_MS = 5000;
   const CAPTURE_MAX_MS = 30000;
@@ -143,17 +64,154 @@
     console.log('[voice] ' + kind + ':', JSON.stringify(text));
   }
 
-  let enabled = false; // user intent: wake-word listening is on
-  let busy = false; // async start/stop in progress (browser mode)
+  let enabled = false;
+  let busy = false;
   let lastWakeAt = 0;
-  // Webview mode: voice rounds (host WAKE events) whose terminal
-  // voiceSpeech result has not arrived yet.  Translations run on a
-  // background worker in the listener, so a second round can start
-  // before the first round's text arrives; a late terminal event must
-  // then NOT clear the flash that belongs to the newer round.
   let outstandingRounds = 0;
 
-  // Browser-mode audio pipeline handles.
+  // tableak-coverage:start
+  // The conversation that was on screen when each outstanding round began,
+  // keyed by that round's id. A transcript arrives seconds after the words
+  // were spoken and the user may have moved to a different task in the
+  // meantime, so submitting it against whatever tab is visible on arrival
+  // would put one task's words into another task's conversation.
+  //
+  // Rounds are keyed, not queued. They overlap -- the wake detector starts
+  // listening again while the previous utterance is still being transcribed
+  // -- and they finish out of order, and any of them can be cancelled
+  // mid-flight. Position in a queue therefore stops meaning anything: the
+  // shift that answers a late transcript from a cancelled round would hand
+  // it the owner of a round that is still waiting for its own words. The
+  // round id is carried through wake -> transcript by the producer, so it
+  // pairs each transcript with the utterance it actually belongs to.
+  const roundOwners = new Map();
+
+  // Owner recorded for a round that began in a page with no conversations at
+  // all -- voice.js also runs in hosts that have no tab machinery. Such a
+  // round has nothing to leak into, so it is not the same thing as a
+  // CANCELLED round, which must still fail closed.
+  const UNSCOPED = {unscoped: true};
+
+  // Owner recorded for a round that was cancelled while its audio was still
+  // being transcribed. The entry stays in the map so that the round's own
+  // late transcript is recognised and refused, instead of being charged to
+  // whichever round happens to be outstanding when it lands.
+  const CANCELLED = {cancelled: true};
+
+  // Rounds this webview started but could not name, because the producer sent
+  // no id. They can only be answered in order, so they keep the old
+  // positional behaviour among themselves.
+  const unkeyedOwners = [];
+
+  /**
+   * The conversation on screen, as `{tabId, taskId}`, or null when the
+   * webview has not published one.
+   */
+  function currentOwner() {
+    const read = window.kissVoiceOwner;
+    if (typeof read !== 'function') return null;
+    const owner = read();
+    return owner && owner.tabId ? owner : null;
+  }
+
+  /** The round id of a wake/speech message, or null when it carries none. */
+  function roundKey(msg) {
+    const id = msg ? msg.roundId : undefined;
+    if (id === undefined || id === null || id === '') return null;
+    return String(id);
+  }
+
+  /**
+   * Record the owner of an utterance that is starting now.
+   *
+   * `key` is the round id the producer will echo back with the transcript, or
+   * null when it sends none.
+   */
+  function markSpeechStart(key) {
+    const owner = currentOwner() || UNSCOPED;
+    if (key === null) unkeyedOwners.push(owner);
+    else roundOwners.set(key, owner);
+    outstandingRounds++;
+  }
+
+  /**
+   * Cancel every outstanding round, keeping each one recognisable.
+   *
+   * A cancelled round's transcript may still be on its way, so its id is kept
+   * with a CANCELLED marker: that is what makes the late words fail closed
+   * without stealing the owner of a round that is still live. Unkeyed rounds
+   * have nothing to be recognised by, so they are only counted.
+   */
+  function resetSpeechRounds() {
+    for (const key of roundOwners.keys()) roundOwners.set(key, CANCELLED);
+    cancelledUnkeyedRounds += unkeyedOwners.length;
+    unkeyedOwners.length = 0;
+    outstandingRounds = 0;
+  }
+
+  // Cancelled rounds that had no id. Their late transcripts must fail closed,
+  // but there is nothing to key them by, so they are charged only once every
+  // live unkeyed round has been answered.
+  let cancelledUnkeyedRounds = 0;
+
+  /**
+   * Close the round `key` names and hand back the owner it was started with.
+   *
+   * A round that is still on record returns its own owner -- CANCELLED when
+   * it was cancelled in flight, so its late words fail closed. An unkeyed
+   * transcript is answered from the unkeyed rounds in order, then from the
+   * cancelled unkeyed credit. With nothing outstanding at all the result is
+   * undefined: this transcript belongs to no round this webview ever saw --
+   * the host transcribes on its own too -- so it was never tied to a moment
+   * in time and there is no tab switch to detect.
+   */
+  function retireRound(key) {
+    if (key !== null && roundOwners.has(key)) {
+      const owner = roundOwners.get(key);
+      roundOwners.delete(key);
+      outstandingRounds = Math.max(0, outstandingRounds - 1);
+      return owner;
+    }
+    if (key !== null) return undefined;
+    outstandingRounds = Math.max(0, outstandingRounds - 1);
+    if (unkeyedOwners.length) return unkeyedOwners.shift();
+    if (cancelledUnkeyedRounds > 0) {
+      cancelledUnkeyedRounds--;
+      return CANCELLED;
+    }
+    return undefined;
+  }
+
+  /**
+   * True when an utterance recorded against `owner` may be typed into the
+   * conversation now on screen.
+   *
+   * Fails CLOSED whenever ownership cannot be proved: a round that was
+   * CANCELLED in flight, a page that has stopped publishing an owner, or a
+   * round whose owner is not the conversation now on screen. Two different
+   * tabs showing the SAME task are one conversation, which is the single
+   * exemption -- it matches isForActiveTab() in main.js.
+   *
+   * Two entries are not failures. `undefined` means no round was ever
+   * recorded for this transcript (see retireRound) -- the host transcribes
+   * on its own too. UNSCOPED means the round began in a page that has no
+   * conversations at all. Neither has another conversation to leak into.
+   */
+  function ownerIsOnScreen(owner) {
+    if (owner === undefined || owner === UNSCOPED) return true;
+    if (owner === CANCELLED) return false;
+    const now = currentOwner();
+    if (!now) return false;
+    if (owner.tabId === now.tabId) return true;
+    return !!owner.taskId && owner.taskId === now.taskId;
+  }
+
+  /** The tab an utterance was recorded against, or '' when it had none. */
+  function ownerTabId(owner) {
+    return owner && owner.tabId ? owner.tabId : '';
+  }
+  // tableak-coverage:end
+
   let model = null;
   let recognizer = null;
   let audioContext = null;
@@ -162,21 +220,14 @@
   let processorNode = null;
   let voskLoadPromise = null;
 
-  // The ask-user modal (main.js) carries its own mic button
-  // (.ask-user-mic, one per tab, mounted into the modal slot).  Every
-  // UI state and flash applied to the main #voice-btn is mirrored onto
-  // those buttons; the last applied values are remembered so a mic
-  // mounted later (the 'kiss-ask-mic-mounted' event) starts in sync.
   let lastUiState = 'off';
   let lastUiTip = "Voice trigger: listen for the word 'Sorcar'";
   let lastFlashCls = null;
 
-  /** Every ask-user mic button currently in the document. */
   function askMicButtons() {
     return document.querySelectorAll('.ask-user-mic');
   }
 
-  /** Apply the remembered UI state classes/tooltip to one mic button. */
   function applyUiClasses(el) {
     el.classList.remove(
       'voice-off',
@@ -190,20 +241,17 @@
     el.setAttribute('data-tooltip', lastUiTip);
   }
 
-  /** Apply the remembered flash class (or clear both) on one button. */
   function applyFlashClasses(el) {
     el.classList.remove('voice-triggered', 'voice-transcribing');
     if (lastFlashCls) el.classList.add(lastFlashCls);
   }
 
-  /** Apply the remembered flash to the main mic and every ask mic. */
   function applyFlashToAll() {
     applyFlashClasses(btn);
     const mics = askMicButtons();
     for (let i = 0; i < mics.length; i++) applyFlashClasses(mics[i]);
   }
 
-  /** Bring every ask-user mic in sync with the main mic's live state. */
   function syncAskMics() {
     const mics = askMicButtons();
     for (let i = 0; i < mics.length; i++) {
@@ -213,7 +261,6 @@
   }
 
   function setUi(state, message) {
-    // state: 'off' | 'loading' | 'listening' | 'error'
     let tip;
     if (state === 'listening') {
       tip =
@@ -239,14 +286,6 @@
       .trim();
   }
 
-  /**
-   * True when the whole normalized utterance is exactly one wake
-   * alias.  Substring matching is deliberately avoided; it fired on
-   * everyday sentences that merely contain an alias-sounding word.
-   * At high sensitivity an utterance that ENDS with an alias also
-   * matches ("hey there Sorcar" -> "[unk] sore car"), but a
-   * mid-utterance alias (anything after it) still never does.
-   */
   function matchesWake(text) {
     const t = normalize(text);
     if (!t) return false;
@@ -260,26 +299,8 @@
     return false;
   }
 
-  // Softly spoken "Sorcar" carries a breathy onset that the grammar
-  // decodes as a brief leading [unk] before the alias ("[unk] sore
-  // car" with a ~60ms [unk], measured with whispered speech); exact
-  // whole-utterance matching rejected those wakes, so the wake word
-  // seemed to need a loud voice.  Spoken-word prefixes decode to
-  // [unk] spans of ~0.5s and up ("hey there" 0.61s, "he wrecked his"
-  // 0.60s, measured), so this budget keeps sentences and "hey there
-  // Sorcar" rejected.  Mirrors kiss/agents/vscode/voice_wake.py.
   const MAX_LEADING_NOISE_SECONDS = 0.35;
 
-  /**
-   * True when `words` (the word list of a Vosk FINAL result, entries
-   * carrying word/start/end) is exactly one wake alias preceded only
-   * by [unk] noise totaling at most MAX_LEADING_NOISE_SECONDS —
-   * softly spoken "Sorcar" whose breathy onset decoded as a short
-   * [unk].  Word entries without numeric timings reject; anything
-   * after the alias rejects.  Companion to matchesWake; vosk-browser
-   * partial results carry no word list, so this gate only sees
-   * finals.
-   */
   function wakeWithLeadingNoise(words) {
     if (!Array.isArray(words) || words.length === 0) return false;
     let i = 0;
@@ -301,14 +322,6 @@
     return WAKE_ALIASES.indexOf(tail.join(' ')) !== -1;
   }
 
-  /**
-   * True when every recognized word clears the sensitivity-scaled
-   * confidence floor.  `words` is the word list of a Vosk result
-   * (each entry has a `conf` field when setWords(true) is on).  Only
-   * confidences on the [0, 1] posterior scale are gated; larger
-   * values and missing word lists pass, so the gate can only tighten
-   * detection, never lose a clean wake.
-   */
   function wordsConfident(words) {
     if (!Array.isArray(words)) return true;
     const minConf = sensitivityMinWordConf(sensitivity);
@@ -323,13 +336,6 @@
 
   let flashTimer = null;
 
-  /**
-   * Show or hide the blinking "Listening ..." overlay over the task
-   * input.  Visible exactly while the mic button flashes red (wake
-   * word heard, speech being captured); the CSS 'listening' class on
-   * #input-text-wrap drives the large blinking type.  A missing
-   * overlay element (older page fixtures) is a no-op.
-   */
   function showListening(on) {
     const overlay = document.getElementById('listening-overlay');
     const wrap = overlay && overlay.parentElement;
@@ -338,15 +344,6 @@
     else wrap.classList.remove('listening');
   }
 
-  /**
-   * Show a transient color state on the mic button: 'voice-triggered'
-   * (red — wake word heard, capturing speech) or 'voice-transcribing'
-   * (yellow — gpt-audio transcription in flight).  Passing a falsy
-   * class clears both.  Only one flash (and one safety timer) is
-   * active at a time.  The blinking "Listening ..." input overlay
-   * tracks the red state exactly: shown with 'voice-triggered',
-   * hidden on any other transition (yellow, clear, safety timeout).
-   */
   function flash(cls, timeoutMs) {
     if (flashTimer !== null) {
       clearTimeout(flashTimer);
@@ -361,51 +358,21 @@
       lastFlashCls = null;
       applyFlashToAll();
       showListening(false);
-      // The safety timer firing means the voice state machine stalled:
-      // no terminal voiceSpeech arrived for the whole timeout (VS Code
-      // drops postMessage to a hidden webview, a listener can die
-      // mid-round, ...).  Reset the round counter, or the leaked round
-      // would make EVERY later utterance keep the yellow transcribing
-      // flash blinking long after its text was already delivered.
-      outstandingRounds = 0;
+      resetSpeechRounds();
     }, timeoutMs);
   }
 
-  /**
-   * React to the wake word: flash the mic button red and focus the
-   * task input so the user sees they were heard.  No text is inserted
-   * — the literal word "sorcar" must never appear in the input box;
-   * the translated speech arrives later as a voiceSpeech message.
-   * Debounced so one long utterance (partial + final results) only
-   * triggers once; returns true when the wake actually fired (not
-   * debounced) so browser mode knows to start a speech capture.  The
-   * red flash persists while the speech that follows is captured —
-   * by the extension host in webview mode, by this page in browser
-   * mode — until the voiceTranscribing/voiceSpeech message that
-   * follows replaces or clears it (the long timeout is only a safety
-   * net beyond the 30s capture cap).
-   */
   function triggerWake() {
     const now = Date.now();
     if (now - lastWakeAt < COOLDOWN_MS) return false;
     lastWakeAt = now;
     try {
-      // While the agent's ask-user question is pending the speech
-      // will answer it, so show the user the answer box instead.
       (askAnswerInput() || inp).focus();
-    } catch (_e) {
-      /* focus can fail in background documents; ignore */
-    }
+    } catch (_e) {}
     flash('voice-triggered', 45000);
     return true;
   }
 
-  /**
-   * The ask-user modal's answer textarea when the modal is visible
-   * (the agent is waiting for the user's answer), else null.  main.js
-   * shows the modal with an inline ``display: flex`` and hides it
-   * with ``display: none``.
-   */
   function askAnswerInput() {
     const modal = document.getElementById('ask-user-modal');
     if (!modal || !modal.style.display || modal.style.display === 'none') {
@@ -414,33 +381,12 @@
     return modal.querySelector('.ask-user-input');
   }
 
-  /**
-   * Insert the English translation of the speech that followed the
-   * wake word into the task input and submit it to the agent of the
-   * highlighted tab.  When *speaker* is a positive integer (the
-   * host's voice-recognition speaker number, unique per distinct
-   * voice, starting from 1) the text is prefixed with
-   * ``Speaker #N says in the language X that: `` — X being the
-   * language tag the transcription agent detected (e.g. ``fr``) —
-   * so the agent knows who spoke and in what language.  When no
-   * language was detected (or an older host sent none) the prefix
-   * falls back to ``Speaker #N says that: ``.  An
-   * empty input receives the text; an existing draft is appended to
-   * with a space.  After a non-empty insert a ``kiss-voice-submit``
-   * window event asks main.js to send the input exactly like a click
-   * on the send button — a fresh task for an idle tab, or a steering
-   * user message injected into a running agent.  An empty translation
-   * (silence or a failed translation) never touches user text and
-   * never submits.  The mic-button flash is cleared unless
-   * *keepFlash* is true (a newer voice round is still in flight and
-   * owns the indicator).
-   *
-   * When the ask-user modal is visible (the agent is waiting for the
-   * user's answer) the speech is instead routed into the modal's
-   * answer box and a ``kiss-voice-answer`` event asks main.js to
-   * submit it as the ``userAnswer`` — never as a new task.
-   */
-  function insertSpeech(text, keepFlash, speaker, language) {
+  // owner is this round's conversation, already retired by the caller. It is
+  // taken as a parameter rather than read here so that the round is closed
+  // before anything can return early: an empty transcript still completes a
+  // round, and leaving its owner in the queue would pair the NEXT transcript
+  // with the wrong utterance.
+  function insertSpeech(text, keepFlash, speaker, language, owner) {
     if (!keepFlash) flash(null);
     let translated = String(typeof text === 'string' ? text : '').trim();
     if (!translated) return;
@@ -460,11 +406,20 @@
           translated
         : 'Speaker #' + speaker + ' says that: ' + translated;
     }
-    // A visible ask-user question routes the speech into the modal's
-    // answer box instead of the task input: the spoken text is the
-    // user's ANSWER to the agent's question.  'kiss-voice-answer'
-    // asks main.js to submit it exactly like a click on the modal's
-    // Submit button (a ``userAnswer`` message, never a new task).
+    // tableak-coverage:start
+    // The user switched tasks while speaking: the words belong to the
+    // conversation that was on screen when the utterance began, and that
+    // tab's input is no longer the one in the DOM. Hand the transcript back
+    // to the host instead of typing it into a stranger's conversation.
+    if (!ownerIsOnScreen(owner)) {
+      postToHost({
+        type: 'voiceDropped',
+        tabId: ownerTabId(owner),
+        text: translated,
+      });
+      return;
+    }
+    // tableak-coverage:end
     const askInp = askAnswerInput();
     if (askInp) {
       askInp.value = askInp.value
@@ -473,11 +428,17 @@
       askInp.dispatchEvent(new Event('input', {bubbles: true}));
       try {
         askInp.focus();
-      } catch (_e) {
-        /* focus can fail in background documents; ignore */
-      }
-      window.dispatchEvent(new CustomEvent('kiss-voice-answer'));
+      } catch (_e) {}
+      window.dispatchEvent(
+        new CustomEvent('kiss-voice-answer', {
+          detail: {tabId: ownerTabId(owner)},
+        }),
+      );
       speakWorkingOnIt();
+      return;
+    }
+    if (!autoSubmit) {
+      insertAtCursor(translated);
       return;
     }
     if (!inp.value) {
@@ -488,38 +449,40 @@
     inp.dispatchEvent(new Event('input', {bubbles: true}));
     try {
       inp.focus();
-    } catch (_e) {
-      /* focus can fail in background documents; ignore */
-    }
-    // Hand the spoken task to the agent: main.js owns sendMessage()
-    // (submit vs. steering of a running task) and listens for this
-    // event next to the 'kiss-voice-post' bridge.
-    window.dispatchEvent(new CustomEvent('kiss-voice-submit'));
+    } catch (_e) {}
+    window.dispatchEvent(
+      new CustomEvent('kiss-voice-submit', {
+        detail: {tabId: ownerTabId(owner)},
+      }),
+    );
     speakWorkingOnIt();
   }
 
-  /**
-   * Speak a short "Working on it." acknowledgement right after a
-   * voice-dictated task is submitted, so the user hears that Sorcar
-   * accepted the command — always with the GPT-synthesized natural
-   * clip (media/working-on-it.mp3, gpt-audio "marin" voice), never
-   * with the robotic Web Speech system voice (the "alien voice").
-   *
-   * In VS Code webview mode Chromium's autoplay policy rejects
-   * ``Audio.play()`` unless the user clicked the webview moments
-   * earlier (microsoft/vscode#197937) — and a voice-dictated task
-   * involves no click — so the clip is delegated to the extension
-   * HOST, which plays it natively on this machine's speakers (see the
-   * 'voiceAck' handler in SorcarSidebarView.ts), exactly like agent
-   * ``talk`` clips play natively on the daemon.
-   *
-   * In browser mode (remote chat page / webapp) the tab plays the
-   * clip itself via the ``cfg.ackAudioUrl`` the page template
-   * injects; a rejected play() or missing Audio API degrades to
-   * SILENCE.  The old Web Speech fallback is gone for good: a quiet
-   * ack is a far better failure than the loud robotic voice it was
-   * meant to avoid.
-   */
+  function insertAtCursor(text) {
+    const current = inp.value;
+    const start =
+      typeof inp.selectionStart === 'number'
+        ? inp.selectionStart
+        : current.length;
+    const end =
+      typeof inp.selectionEnd === 'number' ? inp.selectionEnd : current.length;
+    const before = current.slice(0, start);
+    const after = current.slice(end);
+    const leadPad = before.length === 0 || /\s$/.test(before) ? '' : ' ';
+    const trailPad = after.length === 0 || /^\s/.test(after) ? '' : ' ';
+    const injected = leadPad + text + trailPad;
+    inp.value = before + injected + after;
+    // Restore the caret before notifying listeners: assigning `value` parks
+    // the selection at the end, and main.js reads `selectionStart` inside its
+    // synchronous `input` handler to decide whether to request a completion.
+    const caret = start + leadPad.length + text.length;
+    try {
+      inp.focus();
+      inp.setSelectionRange(caret, caret);
+    } catch (_e) {}
+    inp.dispatchEvent(new Event('input', {bubbles: true}));
+  }
+
   function speakWorkingOnIt() {
     if (cfg.mode === 'webview') {
       postToHost({type: 'voiceAck'});
@@ -530,29 +493,20 @@
         const audio = new window.Audio(cfg.ackAudioUrl);
         const p = audio.play();
         if (p && typeof p.catch === 'function') {
-          p.catch(() => {
-            /* autoplay blocked — stay silent, never robotic */
-          });
+          p.catch(() => {});
         }
       }
-    } catch (_e) {
-      /* no audio output available; stay silent */
-    }
+    } catch (_e) {}
   }
 
-  // Browser-mode post-wake capture in progress, or null.  Owns every
-  // audio block while active (the wake recognizer does not hear
-  // capture audio, mirroring the Python listener).
   let capture = null;
 
-  /** Start capturing the utterance that follows a browser-mode wake. */
   function beginCapture() {
-    // Count the round at wake time (not when capture finishes), so a
-    // late voiceSpeech from an older transcription cannot clear the
-    // red flash that belongs to this newer capture.
-    outstandingRounds++;
+    // The browser pipeline captures, transcribes and answers one round at a
+    // time in this closure, so there is no id to carry: the round is unkeyed.
+    markSpeechStart(null);
     capture = {
-      chunks: [], // Int16Array blocks, already at CAPTURE_SAMPLE_RATE
+      chunks: [],
       sinceWakeMs: 0,
       elapsedMs: 0,
       speechStarted: false,
@@ -560,12 +514,6 @@
     };
   }
 
-  /**
-   * Convert one Float32 audio block at *sourceRate* into 16-bit PCM
-   * at CAPTURE_SAMPLE_RATE using linear interpolation.  Mic capture
-   * rates (44.1/48kHz) are at or above the 16kHz target, so simple
-   * interpolation without a low-pass filter is adequate for speech.
-   */
   function downsampleTo16k(samples, sourceRate) {
     sourceRate = Number(sourceRate);
     if (!Number.isFinite(sourceRate) || sourceRate <= 0) {
@@ -587,7 +535,6 @@
     return out;
   }
 
-  /** Base64-encode captured Int16Array blocks as little-endian PCM. */
   function pcmBase64(chunks) {
     let totalSamples = 0;
     for (let i = 0; i < chunks.length; i++) totalSamples += chunks[i].length;
@@ -609,18 +556,15 @@
     return window.btoa(binary);
   }
 
-  /**
-   * End the active capture.  With speech captured, the PCM is posted
-   * to the server for gpt-audio translation ({type: 'voiceTranscribe',
-   * audio: <base64 16kHz mono s16le>}) and the mic button turns
-   * yellow until the server's voiceSpeech reply arrives; silence just
-   * clears the red wake flash (the Python listener's NO_SPEECH).
-   */
   function finishCapture() {
     const done = capture;
     capture = null;
     if (!done.speechStarted || !done.chunks.length) {
-      outstandingRounds = Math.max(0, outstandingRounds - 1);
+      // This round produced no audio, so no transcript will ever come back
+      // for it. Retire its owner with it, or the next transcript would be
+      // paired with this abandoned utterance's conversation. beginCapture()
+      // records browser-pipeline rounds unkeyed, so this retires the oldest.
+      retireRound(null);
       if (outstandingRounds > 0) flash('voice-transcribing', 60000);
       else flash(null);
       return;
@@ -629,14 +573,6 @@
     postToHost({type: 'voiceTranscribe', audio: pcmBase64(done.chunks)});
   }
 
-  /**
-   * Feed one audio block to the active capture — the browser-mode
-   * mirror of SpeechCapture.feed in voice_wake.py.  Leading silence
-   * is skipped (until CAPTURE_NO_SPEECH_TIMEOUT_MS gives up), speech
-   * starts on the first loud block, and the capture ends after
-   * CAPTURE_END_SILENCE_MS of trailing silence or CAPTURE_MAX_MS of
-   * audio.
-   */
   function feedCapture(samples, rms, blockMs, sourceRate) {
     const loud = rms >= SPEECH_RMS_THRESHOLD;
     capture.sinceWakeMs += blockMs;
@@ -683,18 +619,14 @@
     if (processorNode) {
       try {
         processorNode.disconnect();
-      } catch (_e) {
-        /* already disconnected */
-      }
+      } catch (_e) {}
       processorNode.onaudioprocess = null;
       processorNode = null;
     }
     if (sourceNode) {
       try {
         sourceNode.disconnect();
-      } catch (_e) {
-        /* already disconnected */
-      }
+      } catch (_e) {}
       sourceNode = null;
     }
     if (mediaStream) {
@@ -705,17 +637,13 @@
     if (audioContext) {
       try {
         audioContext.close();
-      } catch (_e) {
-        /* already closed */
-      }
+      } catch (_e) {}
       audioContext = null;
     }
     if (recognizer) {
       try {
         recognizer.remove();
-      } catch (_e) {
-        /* worker already gone */
-      }
+      } catch (_e) {}
       recognizer = null;
     }
   }
@@ -742,7 +670,6 @@
       })
       .then(stream => {
         if (!enabled) {
-          // User toggled off while we were starting.
           const tracks = stream.getTracks();
           for (let i = 0; i < tracks.length; i++) tracks[i].stop();
           return;
@@ -773,8 +700,6 @@
         const Ctx = window.AudioContext || window.webkitAudioContext;
         audioContext = new Ctx();
         if (audioContext.state === 'suspended') {
-          // Autoplay policy can start the context suspended; the click
-          // that enabled voice counts as the required user gesture.
           audioContext.resume().catch(() => {});
         }
         const grammar = JSON.stringify(WAKE_ALIASES.concat(['[unk]']));
@@ -783,29 +708,10 @@
           grammar,
         );
         if (typeof recognizer.setWords === 'function') {
-          // Word-level confidences in final results (partial results
-          // carry no confidences in vosk-browser).
           recognizer.setWords(true);
         }
-        // Milliseconds of quiet audio since the last speech block;
-        // updated by onaudioprocess, read by the partial-result gate.
         let quietMs = 0;
-        // True while the 'result' event carrying the flushed wake
-        // utterance (the retrieveFinalResult() call in fireWake) is
-        // still in flight; that result's text is the wake word itself
-        // and must never re-trigger.
         let awaitingFlush = false;
-        // React to a recognized wake word: start the post-wake capture
-        // and flush/reset the recognizer.  Without the flush the
-        // decoded "sorcar" utterance stays pending inside Vosk while
-        // the capture owns the audio (the recognizer hears nothing),
-        // and the first silence endpoint AFTER the capture finalizes
-        // it as a stale wake-word result — re-arming a capture and
-        // transcribing speech nobody prefixed with "Sorcar".  Mirrors
-        // the Python listener's Reset() after a wake;
-        // retrieveFinalResult() is the only reset vosk-browser
-        // exposes, and it delivers the flushed utterance as one
-        // 'result' event that awaitingFlush consumes.
         function fireWake() {
           if (!triggerWake()) return;
           quietMs = 0;
@@ -826,20 +732,10 @@
           if (message && message.result) {
             debugLog('result', message.result.text);
             if (awaitingFlush) {
-              // The flushed final of the utterance that fired the
-              // wake; its text is the wake word and must not
-              // re-trigger.
               awaitingFlush = false;
               return;
             }
-            // A capture owns the current voice round; any result
-            // arriving now decodes pre-wake audio and must not wipe
-            // the capture by re-waking.
             if (capture) return;
-            // A final result means Vosk saw the endpoint: the whole
-            // utterance is over, so no pause gate is needed.  Softly
-            // spoken "Sorcar" decodes with a brief leading [unk]
-            // (breathy onset), which wakeWithLeadingNoise accepts.
             if (
               (matchesWake(message.result.text) ||
                 wakeWithLeadingNoise(message.result.result)) &&
@@ -854,11 +750,7 @@
             if (message.result.partial) {
               debugLog('partial', message.result.partial);
             }
-            // Stale partials decoded from pre-wake audio must not
-            // re-wake while the capture owns the round.
             if (capture) return;
-            // Fire only when the speaker paused right after the
-            // alias; continuous speech keeps quietMs at 0.
             if (
               quietMs >= sensitivityWakePauseMs(sensitivity) &&
               matchesWake(message.result.partial)
@@ -867,9 +759,6 @@
             }
           }
         });
-        // Debug-only free-decode recognizer (no grammar): logs what the
-        // model hears without grammar constraints so wake aliases can
-        // be tuned against real human speech.
         let freeRecognizer = null;
         if (debugEnabled()) {
           freeRecognizer = new model.KaldiRecognizer(audioContext.sampleRate);
@@ -906,8 +795,6 @@
             }
           }
           if (capture) {
-            // A post-wake capture owns the audio; the wake recognizer
-            // does not hear it (mirrors the Python listener).
             feedCapture(samples, rms, blockMs, event.inputBuffer.sampleRate);
             return;
           }
@@ -915,9 +802,7 @@
             recognizer.acceptWaveform(event.inputBuffer);
             if (freeRecognizer)
               freeRecognizer.acceptWaveform(event.inputBuffer);
-          } catch (_e) {
-            /* recognizer torn down mid-flight; ignore */
-          }
+          } catch (_e) {}
         };
         sourceNode.connect(processorNode);
         processorNode.connect(audioContext.destination);
@@ -932,13 +817,9 @@
       .then(() => {
         busy = false;
         if (!enabled && (mediaStream || audioContext)) {
-          // Turned off during a successful start: tear down now.
           stopBrowserPipeline();
           setUi('off');
         } else if (enabled && !processorNode) {
-          // Re-enabled while a cancelled start was unwinding (the
-          // off-toggle made this chain drop its stream): start over so
-          // the UI cannot get stuck in 'loading'.
           startBrowserPipeline();
         }
       });
@@ -947,23 +828,9 @@
   function persist() {
     try {
       localStorage.setItem(STORAGE_KEY, enabled ? '1' : '0');
-    } catch (_e) {
-      /* storage unavailable (private mode); voice still works */
-    }
+    } catch (_e) {}
   }
 
-  /**
-   * Whether wake-word listening should be on when the page loads.
-   *
-   * The mic stays CLOSED by default: on a fresh install (no stored
-   * preference) listening is OFF in both webview and browser modes,
-   * so Sorcar never responds to the wake word until the user
-   * explicitly turns the mic on.  Only an explicit opt-in (stored
-   * '1', written by clicking the mic button on) restores listening
-   * across reloads.  Browser mode (remote web app) could never
-   * auto-start anyway: getUserMedia without a user gesture would
-   * fail or prompt unexpectedly.
-   */
   function wasEnabled() {
     try {
       return localStorage.getItem(STORAGE_KEY) === '1';
@@ -973,18 +840,9 @@
   }
 
   function postToHost(message) {
-    // main.js owns the single acquireVsCodeApi() handle; it forwards
-    // 'kiss-voice-post' events to the extension host.
     window.dispatchEvent(new CustomEvent('kiss-voice-post', {detail: message}));
   }
 
-  // Settings-panel sensitivity slider (#cfg-voice-sensitivity).  The
-  // slider reflects the stored value on load and applies changes
-  // LIVE: browser mode reads the `sensitivity` variable on every
-  // recognizer result, and webview mode reports the value to the
-  // extension host, which restarts the Python listener with
-  // --sensitivity.  Pages without the settings panel (no slider in
-  // the DOM) keep working with the stored/default value.
   const sensSlider = document.getElementById('cfg-voice-sensitivity');
   const sensValue = document.getElementById('cfg-voice-sensitivity-value');
 
@@ -1001,9 +859,7 @@
       sensitivity = Math.min(100, Math.max(0, v));
       try {
         localStorage.setItem(SENSITIVITY_KEY, String(sensitivity));
-      } catch (_e) {
-        /* storage unavailable; the live value still applies */
-      }
+      } catch (_e) {}
       renderSensitivity();
       if (cfg.mode === 'webview') {
         postToHost({type: 'voiceSensitivity', value: sensitivity});
@@ -1011,53 +867,62 @@
     });
   }
 
+  const autoSubmitSelect = document.getElementById('cfg-voice-auto-submit');
+
+  function renderAutoSubmit() {
+    if (autoSubmitSelect) autoSubmitSelect.value = autoSubmit ? 'on' : 'off';
+  }
+
+  renderAutoSubmit();
+  if (autoSubmitSelect) {
+    autoSubmitSelect.addEventListener('change', () => {
+      autoSubmit = autoSubmitSelect.value !== 'off';
+      try {
+        localStorage.setItem(AUTO_SUBMIT_KEY, autoSubmit ? 'on' : 'off');
+      } catch (_e) {}
+    });
+  }
+
+  // Remote-web clients can have the same chat open in several same-origin
+  // tabs; keep them in step with the tab that changed the setting.
+  window.addEventListener('storage', event => {
+    if (!event || event.key !== AUTO_SUBMIT_KEY) return;
+    autoSubmit = event.newValue !== 'off';
+    renderAutoSubmit();
+  });
+
   function setEnabled(next) {
     if (enabled === next) return;
     enabled = next;
     persist();
-    // Turning listening off ends any in-flight voice round-trip; a
-    // stale red/yellow flash must not wait for a host message that
-    // may never come.
     if (!next) {
-      outstandingRounds = 0;
+      resetSpeechRounds();
       capture = null;
       flash(null);
     }
     if (cfg.mode === 'webview') {
       setUi(next ? 'loading' : 'off');
-      // The sensitivity rides along so the host can pass
-      // --sensitivity to the Python listener it starts.
       postToHost({type: 'voiceToggle', enabled: next, sensitivity});
       return;
     }
     if (next) {
-      // When a start/stop is already in flight, the running chain's
-      // finalizer notices ``enabled === true`` and restarts itself —
-      // launching a second chain here would leak a mic pipeline.
       if (!busy) startBrowserPipeline();
     } else if (!busy) {
       stopBrowserPipeline();
       setUi('off');
     }
-    // When busy, the start chain notices ``enabled === false`` and
-    // tears the pipeline down itself.
   }
 
   btn.addEventListener('click', () => {
     setEnabled(!enabled);
   });
 
-  // The ask-user modal's mic buttons (one per tab, created by main.js)
-  // toggle the same wake-word listener as the main mic.  Delegated:
-  // the buttons are (re)created and (re)mounted per question/tab.
   document.addEventListener('click', event => {
     const t = event.target;
     const mic = t && t.closest ? t.closest('.ask-user-mic') : null;
     if (mic) setEnabled(!enabled);
   });
 
-  // main.js announces every freshly mounted ask-user mic so it starts
-  // with the main mic's live state/flash classes.
   window.addEventListener('kiss-ask-mic-mounted', () => {
     syncAskMics();
   });
@@ -1066,26 +931,29 @@
     const msg = event && event.data;
     if (!msg || typeof msg !== 'object') return;
     if (msg.type === 'voiceWake') {
-      // Count every host WAKE (even one debounced visually): the
-      // listener emits exactly one terminal voiceSpeech per WAKE.
-      outstandingRounds++;
+      // tableak-coverage:start
+      // The host stamps a monotonic round id on the wake and echoes it on the
+      // transcript, so this owner is looked up by the round it belongs to
+      // rather than by its position among the rounds still outstanding.
+      markSpeechStart(roundKey(msg));
+      // tableak-coverage:end
       triggerWake();
     } else if (msg.type === 'voiceTranscribing') {
-      // Capture ended; the gpt-audio call is in flight — flash yellow
-      // until the voiceSpeech result clears it (60s safety timeout).
       flash('voice-transcribing', 60000);
     } else if (msg.type === 'voiceSpeech') {
-      // Terminal results arrive in spoken (FIFO) order; keep the
-      // flash when a newer round is still capturing or transcribing.
-      outstandingRounds = Math.max(0, outstandingRounds - 1);
-      insertSpeech(msg.text, outstandingRounds > 0, msg.speaker, msg.language);
+      // tableak-coverage:start
+      const owner = retireRound(roundKey(msg));
+      insertSpeech(
+        msg.text,
+        outstandingRounds > 0,
+        msg.speaker,
+        msg.language,
+        owner,
+      );
+      // tableak-coverage:end
     } else if (msg.type === 'voiceState') {
-      // Extension host reports the real listener state.  A listener
-      // that stopped (error or off) can no longer deliver the
-      // voiceTranscribing/voiceSpeech that would clear an in-flight
-      // flash, so clear it here.
       if (msg.error) {
-        outstandingRounds = 0;
+        resetSpeechRounds();
         flash(null);
         enabled = false;
         persist();
@@ -1093,7 +961,7 @@
       } else if (msg.listening) {
         setUi('listening');
       } else {
-        outstandingRounds = 0;
+        resetSpeechRounds();
         flash(null);
         if (!enabled) setUi('off');
       }
@@ -1101,9 +969,6 @@
   });
 
   setUi('off');
-  // Restore the mic at load only when the user explicitly opted in
-  // (stored '1'): the mic stays closed by default so a fresh install
-  // never responds to the wake word until the user turns it on.
   if (wasEnabled()) {
     setEnabled(true);
   }

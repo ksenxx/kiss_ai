@@ -54,15 +54,12 @@ class TestWakeMatchingStrictness(unittest.TestCase):
         self.assertTrue(matches_wake("sir car"))
 
     def test_common_words_are_not_aliases(self) -> None:
-        # Everyday standalone words must not be detection aliases.
         self.assertFalse(matches_wake("soccer"))
         self.assertFalse(matches_wake("circa"))
         self.assertFalse(matches_wake("so car"))
         self.assertFalse(matches_wake("saw car"))
 
     def test_alias_in_context_never_matches(self) -> None:
-        # The grammar decodes everyday speech to alias-in-[unk] context;
-        # none of these may wake (substring matching used to fire here).
         self.assertFalse(matches_wake("[unk] sir car [unk]"))
         self.assertFalse(matches_wake("[unk] sore car [unk]"))
         self.assertFalse(matches_wake("sir car [unk]"))
@@ -72,14 +69,10 @@ class TestWakeMatchingStrictness(unittest.TestCase):
         self.assertFalse(matches_wake(""))
 
     def test_word_confidence_gate(self) -> None:
-        # Real human "Sorcar" scores ~0.53 (must pass); the gate only
-        # rejects egregious low-confidence force-fits.
         human = [{"conf": 0.53, "word": "sir"}, {"conf": 1.0, "word": "car"}]
         garbage = [{"conf": 1.0, "word": "sore"}, {"conf": 0.2, "word": "car"}]
         self.assertTrue(words_confident(human))
         self.assertFalse(words_confident(garbage))
-        # Missing word lists and out-of-scale (acoustic) confidences
-        # must pass: the gate only ever tightens detection.
         self.assertTrue(words_confident(None))
         self.assertTrue(words_confident([]))
         self.assertTrue(words_confident([{"word": "sore"}]))
@@ -243,8 +236,6 @@ class TestVoiceWakeWordMicBrowser(unittest.TestCase):
             )
             try:
                 context = browser.new_context(ignore_https_errors=True)
-                # Pre-enable the voice toggle so voice.js starts the
-                # microphone pipeline on page load.
                 context.add_init_script(
                     "localStorage.setItem('kissVoiceEnabled', '1');"
                 )
@@ -254,21 +245,12 @@ class TestVoiceWakeWordMicBrowser(unittest.TestCase):
                     wait_until="load",
                     timeout=60_000,
                 )
-                # Record every value the task input ever takes so we
-                # can prove the literal wake word is never typed there.
                 page.evaluate(
                     "window.__seenInputValues = [];"
                     "const inp = document.getElementById('task-input');"
                     "if (inp) inp.addEventListener('input', () =>"
                     " window.__seenInputValues.push(inp.value));"
                 )
-                # Generous timeout: on a cold cache the server first
-                # downloads the ~40MB Vosk model archive, then the
-                # browser fetches and unpacks it inside the WASM
-                # recognizer worker before listening starts.  The wake
-                # event flashes the transient 'voice-triggered' class
-                # on the mic button for 600ms; wait_for_function polls
-                # every animation frame, so the flash cannot be missed.
                 page.wait_for_function(
                     "document.getElementById('voice-btn')"
                     " && document.getElementById('voice-btn')"

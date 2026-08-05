@@ -2,25 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test for ``downloadFile`` in ``DependencyInstaller``.
-//
-// Bug locked in: a mid-body connection failure (server truncates the
-// response before the advertised Content-Length) left the returned
-// promise PENDING FOREVER — ``pipe`` does not propagate source errors
-// to the write stream, and once the socket is gone the 60 s inactivity
-// timeout can never fire.  In production this wedged installUv /
-// installNode and the "KISS Sorcar: Setting up" progress notification
-// indefinitely.  The promise must settle (reject) promptly and clean up
-// the partial file.
-//
-// The test runs a REAL local TLS server (self-signed cert generated
-// with openssl; skipped when openssl is unavailable) and exercises the
-// real compiled helper — no mocks.
-//
-// Run directly with ``node`` (after ``npm run compile``):
-//
-//     node src/kiss/agents/vscode/test/downloadFileTruncatedBody.test.js
 
 'use strict';
 
@@ -34,7 +15,6 @@ const Module = require('module');
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-dl-'));
 
-// --- Self-signed cert (skip when openssl is unavailable) -----------------
 const keyPath = path.join(tmpDir, 'key.pem');
 const certPath = path.join(tmpDir, 'cert.pem');
 try {
@@ -53,15 +33,8 @@ try {
   process.exit(0);
 }
 
-// downloadFile has no CA injection point; trust the self-signed cert for
-// this test process only.
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
-// --- vscode stub so the compiled module loads outside the host -----------
-// ``_vscode-stub.js`` is a git-tracked fixture shared by tests running
-// in parallel; it already re-exports ``global.__kissVscodeStub || {}`` —
-// never rewrite or delete it here (writeFileSync truncates first, racing
-// a concurrent ``require('vscode')`` in sibling test processes).
 global.__kissVscodeStub = {
   workspace: {isTrusted: false, getConfiguration: () => ({get: () => undefined})},
   ProgressLocation: {Notification: 15},
@@ -91,7 +64,6 @@ const server = https.createServer(
   {key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath)},
   (req, res) => {
     if (req.url === '/truncated') {
-      // Advertise far more than we send, then kill the socket mid-body.
       res.writeHead(200, {'Content-Length': String(FULL_BODY.length * 100)});
       res.write(FULL_BODY);
       setTimeout(() => res.destroy(), 30);
@@ -111,7 +83,6 @@ async function runTests() {
   const port = server.address().port;
   const base = `https://127.0.0.1:${port}`;
 
-  // --- Bug: truncated body must settle the promise promptly ------------
   const dest1 = path.join(tmpDir, 'truncated.bin');
   const outcome = await Promise.race([
     downloadFile(`${base}/truncated`, dest1).then(
@@ -132,7 +103,6 @@ async function runTests() {
     'the partial download must be cleaned up on mid-body failure',
   );
 
-  // --- Success path still works ----------------------------------------
   const dest2 = path.join(tmpDir, 'ok.bin');
   await downloadFile(`${base}/ok`, dest2);
   assert.ok(fs.existsSync(dest2), 'successful download must exist');

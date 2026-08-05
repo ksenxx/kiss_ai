@@ -114,8 +114,6 @@ class TestHistoryDateRange:
             },
             task_id=sub_id,
         )
-        # The sub-agent row sits OUTSIDE the visible range on both
-        # sides at once is impossible — use the min side.
         _set_timestamp(sub_id, 10.0)
         assert th._history_date_range() == (5_000.0, 5_000.0)
 

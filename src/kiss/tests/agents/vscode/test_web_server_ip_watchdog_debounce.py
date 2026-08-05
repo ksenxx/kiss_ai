@@ -112,9 +112,6 @@ class _IpWatchdogTestBase(IsolatedAsyncioTestCase):
         )
         await self.server.start_async()
 
-        # Stop the watchdog that ``start_async`` started; the tests
-        # drive their own copy with a controlled tick interval and
-        # patched ``_get_local_ips``.
         if self.server._watchdog_task is not None:
             self.server._watchdog_task.cancel()
             try:
@@ -174,9 +171,6 @@ class TestSpuriousRestartFromTransientEmpty(_IpWatchdogTestBase):
         """A single ``frozenset()`` reading must NOT close the server."""
         real_ips = frozenset({"192.168.1.42"})
         self.server._last_ips = real_ips
-        # Sequence: real → empty (flake) → real → real → real → real ...
-        # The repeated trailing real reads also verify that the
-        # debounce state machine recovers cleanly after the flake.
         seq = _IpSequence([
             real_ips, frozenset(), real_ips, real_ips, real_ips, real_ips,
         ])
@@ -195,7 +189,6 @@ class TestSpuriousRestartFromTransientEmpty(_IpWatchdogTestBase):
             f"Watchdog spuriously restarted after a single empty "
             f"IP reading; {diag}",
         )
-        # The baseline must not have been poisoned by the flake.
         self.assertEqual(self.server._last_ips, real_ips)
         self.assertIsNone(self.server._pending_ip_change)
         self.assertEqual(self.server._pending_ip_change_count, 0)
@@ -247,7 +240,6 @@ class TestSustainedIpChangeStillRestarts(_IpWatchdogTestBase):
             restarted,
             "Watchdog failed to restart after a sustained IP change",
         )
-        # On confirmed change the baseline must advance to the new set.
         self.assertEqual(self.server._last_ips, new_ips)
 
 
@@ -270,7 +262,6 @@ class TestTunnelModeDoesNotRestart(_IpWatchdogTestBase):
             "Watchdog restarted in tunnel mode, but cloudflared "
             "should handle the edge-reconnection itself",
         )
-        # Baseline still advances so the log line records the change.
         self.assertEqual(self.server._last_ips, new_ips)
 
 
@@ -328,6 +319,4 @@ class TestFlappingSetsNeverConfirm(_IpWatchdogTestBase):
             "Watchdog confirmed a change despite oscillating "
             "candidates that never repeated consecutively",
         )
-        # The baseline must NOT advance to either alternating
-        # candidate, because neither ever reached quorum.
         self.assertEqual(self.server._last_ips, base_ips)

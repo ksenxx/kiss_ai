@@ -378,6 +378,5 @@ class TestSummaryStreamEndToEnd:
         assert thinking_events[:1] == [True]
         assert thinking_events[-1] is False
         assert "THINK-DELTA" in "".join(tokens)
-        # The regression half: the request itself must have opted in.
         body = _last_body()
         assert body.get("reasoning", {}).get("summary") == "auto"

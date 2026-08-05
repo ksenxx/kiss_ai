@@ -382,10 +382,6 @@ class TestAgentMergeCarriesPromptAndResult:
             agent_msg = _agent_manual_commit(wt_dir)
             agent._last_user_prompt = PROMPT
             agent._last_result_summary = RESULT
-            # PRODUCTION REPRO precondition: the worktree is clean
-            # after the agent's manual commit, so the framework
-            # auto-commit is a NO-OP (this is exactly why the merge
-            # message must append the blocks itself).
             head_before = GitWorktreeOps.head_sha(wt_dir)
             assert agent._auto_commit_worktree() is False
             assert GitWorktreeOps.head_sha(wt_dir) == head_before

@@ -61,11 +61,8 @@ def test_my_models_default_content_is_valid_json_with_docs_and_example() -> None
     """The auto-seeded default content must be valid JSON containing docs + example."""
     parsed = json.loads(MY_MODELS_DEFAULT_CONTENT)
     assert isinstance(parsed, dict)
-    # At least one "documentation" key starting with '_' must be present.
     doc_keys = [k for k in parsed if k.startswith("_") and "doc" in k.lower()]
     assert doc_keys, "expected a '_documentation' (or similar '_doc') key"
-    # At least one example entry (key starting with '_') with a model-shaped
-    # payload must be present so users can see the schema.
     example_entries = [
         v for k, v in parsed.items()
         if k.startswith("_") and isinstance(v, dict)
@@ -229,7 +226,7 @@ def test_loader_silently_ignores_unwritable_my_models(
     """A read-only HOME must not break import — MY_MODELS seed is skipped."""
     blocker = tmp_path / "blocker"
     blocker.write_text("")
-    fake_path = blocker / "MY_MODELS.json"  # parent is a regular file → mkdir fails
+    fake_path = blocker / "MY_MODELS.json"
     monkeypatch.setattr(mi_module, "USER_MY_MODELS_PATH", fake_path)
     table = _load_model_info()
     bundled = json.loads(PACKAGE_MODEL_INFO_PATH.read_text())

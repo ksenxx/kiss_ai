@@ -19,8 +19,6 @@ import sys
 from pathlib import Path
 
 NON_ASCII = "café ☕ — ünïcode"
-# Escape the non-ASCII text into pure-ASCII JSON so the script source
-# itself never depends on the child interpreter's locale decoding.
 NON_ASCII_JSON = json.dumps(NON_ASCII)
 
 
@@ -59,7 +57,7 @@ class TestUtf8Encoding:
         target = tmp_path / "unicode.txt"
         script = f"""
 import json
-from kiss.core.useful_tools import UsefulTools
+from kiss.agents.sorcar.useful_tools import UsefulTools
 
 text = json.loads({NON_ASCII_JSON!r})
 tools = UsefulTools(work_dir={str(tmp_path)!r})

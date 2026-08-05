@@ -115,16 +115,10 @@ sys.stdout.flush()
         while time.time() < deadline and not started.exists():
             out += _drain(fd, 0.2)
         assert started.exists(), f"agent never started; output: {out!r}"
-        # Stop draining: the worker fills the PTY buffer and blocks
-        # mid-write while *holding the terminal lock*.
         time.sleep(1.0)
-        # A typed key wakes the select loop; feed() -> redraw() then
-        # parks the main thread on the lock held by the blocked worker.
         os.write(fd, b"a")
         time.sleep(0.5)
-        # Ctrl+C now interrupts the lock wait, not the select call.
         os.write(fd, b"\x03")
-        # Resume draining so the blocked writes can complete.
         out += _drain(fd, 40.0, stop=re.compile(r"WORKER\[\w+\]"))
     finally:
         try:

@@ -58,9 +58,6 @@ from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.server.server import VSCodeServer
 from kiss.server.web_server import WebPrinter
 
-# Display events that belong to a single task's chat stream.  Any of
-# these broadcast without a ``tabId`` while two tabs run a task would
-# render into whichever tab is active on the frontend.
 _CONTENT_EVENT_TYPES = frozenset({
     "result", "text_delta", "text_end", "thinking_start", "thinking_delta",
     "thinking_end", "tool_call", "tool_result", "system_output",
@@ -69,10 +66,6 @@ _CONTENT_EVENT_TYPES = frozenset({
     "followup_suggestion",
 })
 
-
-# ---------------------------------------------------------------------------
-# Real fake OpenAI-compatible HTTP server
-# ---------------------------------------------------------------------------
 
 def _sse_chunks_for_tool_call(
     tool_name: str, arguments: str, model: str = "gpt-4o-mini",
@@ -152,7 +145,6 @@ def _write_sse_chunks(handler: BaseHTTPRequestHandler, chunks: list[dict[str, An
     handler.end_headers()
     for chunk in chunks:
         payload = b"data: " + json.dumps(chunk).encode() + b"\n\n"
-        # Chunked-transfer wrapper: <hex-len>\r\n<bytes>\r\n
         handler.wfile.write(f"{len(payload):x}\r\n".encode())
         handler.wfile.write(payload + b"\r\n")
         handler.wfile.flush()
@@ -160,7 +152,7 @@ def _write_sse_chunks(handler: BaseHTTPRequestHandler, chunks: list[dict[str, An
     done = b"data: [DONE]\n\n"
     handler.wfile.write(f"{len(done):x}\r\n".encode())
     handler.wfile.write(done + b"\r\n")
-    handler.wfile.write(b"0\r\n\r\n")  # zero-length chunk: end of body
+    handler.wfile.write(b"0\r\n\r\n")
     handler.wfile.flush()
 
 
@@ -241,10 +233,6 @@ def _start_fake_ask_then_finish() -> tuple[ThreadingHTTPServer, str]:
     return srv, f"http://127.0.0.1:{srv.server_port}/v1"
 
 
-# ---------------------------------------------------------------------------
-# Capturing printer
-# ---------------------------------------------------------------------------
-
 class _CapturingWebPrinter(WebPrinter):
     """Real :class:`WebPrinter` that records every wire payload.
 
@@ -264,10 +252,6 @@ class _CapturingWebPrinter(WebPrinter):
         with self._sent_lock:
             self.sent.append(json.loads(data))
 
-
-# ---------------------------------------------------------------------------
-# Setup helpers
-# ---------------------------------------------------------------------------
 
 def _git_init(repo: Path) -> None:
     """Initialise *repo* as a clean git repository with one empty commit."""
@@ -316,10 +300,6 @@ def _restore_config(saved: tuple) -> None:
     vc.CONFIG_DIR, vc.CONFIG_PATH = saved
 
 
-# ---------------------------------------------------------------------------
-# Base fixture
-# ---------------------------------------------------------------------------
-
 class _TwoTabFixture(unittest.TestCase):
     """Common setup/teardown for the two-tab interference tests.
 
@@ -344,12 +324,9 @@ class _TwoTabFixture(unittest.TestCase):
 
         self.srv, self.url = _start_fake_openai()
 
-        # Make ``get_available_models()`` accept ``gpt-4o-mini``.
         self._saved_openai_key = os.environ.get("OPENAI_API_KEY")
         os.environ["OPENAI_API_KEY"] = "test-key"
 
-        # Two distinct git repos so per-task pre-snapshots don't
-        # serialise on each other's repo_lock more than necessary.
         self.work_a = Path(self.tmp) / "repoA"
         self.work_b = Path(self.tmp) / "repoB"
         self.work_a.mkdir()
@@ -357,8 +334,6 @@ class _TwoTabFixture(unittest.TestCase):
         _git_init(self.work_a)
         _git_init(self.work_b)
 
-        # Seed the config so ``build_model_config`` returns our fake
-        # endpoint and ``_run_task_inner`` reads a sensible budget.
         vc.save_config({
             "custom_endpoint": self.url,
             "custom_api_key": "test-key",
@@ -383,8 +358,6 @@ class _TwoTabFixture(unittest.TestCase):
             ps._db_conn = None
         _restore_persistence(self.saved_persistence)
         _restore_config(self.saved_config)
-        # Reset the per-process tab registry so a later test starts
-        # from a clean slate (the registry is a class-level dict).
         with _RunningAgentState._registry_lock:
             _RunningAgentState.running_agent_states.clear()
         if self._saved_openai_key is None:
@@ -392,10 +365,6 @@ class _TwoTabFixture(unittest.TestCase):
         else:
             os.environ["OPENAI_API_KEY"] = self._saved_openai_key
         shutil.rmtree(self.tmp, ignore_errors=True)
-
-    # ------------------------------------------------------------------
-    # Helpers used by every test
-    # ------------------------------------------------------------------
 
     def _run_two_tasks(
         self,
@@ -429,11 +398,6 @@ class _TwoTabFixture(unittest.TestCase):
             "autoCommit": False,
         }
 
-        # Stagger by a few milliseconds so both task threads are
-        # concurrently inside ``ChatSorcarAgent.run`` (printer
-        # thread-local task_id set, subscriber registered, recording
-        # buffer active).  A random jitter in the fake server's
-        # response time surfaces interleaving races.
         self.server._cmd_run(cmd_a)
         time.sleep(random.uniform(0.0, 0.02))
         self.server._cmd_run(cmd_b)
@@ -442,7 +406,6 @@ class _TwoTabFixture(unittest.TestCase):
         tb = _RunningAgentState.running_agent_states["tabB"].task_thread
         assert ta is not None
         assert tb is not None
-        # Wait for both task threads to finish.
         ta.join(timeout=30)
         tb.join(timeout=30)
         assert not ta.is_alive(), "tab A task hung"
@@ -469,10 +432,6 @@ class _TwoTabFixture(unittest.TestCase):
             and (tab_id is None or e.get("tabId") == tab_id)
         ]
 
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 class TestTwoTabRealLLMNoCrossTabLeak(_TwoTabFixture):
     """H1 — no content event may leak globally while two tabs run."""
@@ -528,8 +487,6 @@ class TestTwoTabRealLLMPerTabFanout(_TwoTabFixture):
                     continue
                 pairs.setdefault(str(tid), set()).add(str(tab))
 
-        # At minimum we expect each tab to have run one task with at
-        # least one stamped fan-out copy.
         self.assertGreaterEqual(
             len(pairs), 2,
             "Expected at least two distinct task ids in the captured "
@@ -572,7 +529,6 @@ class TestTwoTabRealLLMTaskDoneRoutedToOwningTab(_TwoTabFixture):
             f"Expected exactly one task_done event for tabB; got {done_b!r}",
         )
 
-        # No task_done may carry the peer's tabId.
         with self.printer._sent_lock:
             all_done = [
                 e for e in self.printer.sent if e.get("type") == "task_done"
@@ -604,10 +560,6 @@ class TestTwoTabRealLLMUsageNotDoubleCounted(_TwoTabFixture):
         results_a = self._events_typed({"result"}, tab_id="tabA")
         results_b = self._events_typed({"result"}, tab_id="tabB")
 
-        # ``result`` is emitted by :meth:`ChatSorcarAgent.run` via
-        # :meth:`JsonPrinter._broadcast_result` — exactly once per
-        # task.  An additional ``result`` would indicate the no-model
-        # fallback fired (which would also fail the H1 test).
         self.assertGreaterEqual(
             len(results_a), 1,
             f"Expected a result event on tabA; got {results_a!r}",
@@ -736,23 +688,15 @@ class TestTwoTabRealLLMAskUserAnswerRouting(unittest.TestCase):
         time.sleep(random.uniform(0.0, 0.02))
         self.server._cmd_run(cmd_b)
 
-        # Wait for both agents to surface their question via askUser.
         ask_a = self._wait_for_askuser("tabA")
         ask_b = self._wait_for_askuser("tabB")
-        # Tab-routing sanity: the question text must include the right
-        # tab tag (so a swap would have been visible here too).
         self.assertIn("A", ask_a.get("question", ""))
         self.assertIn("B", ask_b.get("question", ""))
 
-        # Submit each tab's answer.  Stagger so the routing must
-        # decide which queue each answer goes to without relying on
-        # timing.
         self.server._cmd_user_answer({"tabId": "tabA", "answer": "ANSWER_A"})
         time.sleep(random.uniform(0.0, 0.02))
         self.server._cmd_user_answer({"tabId": "tabB", "answer": "ANSWER_B"})
 
-        # Wait for both task threads to finish (second LLM call must
-        # be a ``finish`` triggered by the answer arriving).
         ta = _RunningAgentState.running_agent_states["tabA"].task_thread
         tb = _RunningAgentState.running_agent_states["tabB"].task_thread
         assert ta is not None and tb is not None
@@ -761,7 +705,6 @@ class TestTwoTabRealLLMAskUserAnswerRouting(unittest.TestCase):
         self.assertFalse(ta.is_alive(), "tabA task hung after answering")
         self.assertFalse(tb.is_alive(), "tabB task hung after answering")
 
-        # Each tab must have completed with a tab-scoped task_done.
         done_a = [
             e for e in self.printer.sent
             if e.get("type") == "task_done" and e.get("tabId") == "tabA"
@@ -779,10 +722,6 @@ class TestTwoTabRealLLMAskUserAnswerRouting(unittest.TestCase):
             f"tabB task_done expected exactly once; got {done_b!r}",
         )
 
-        # The tool_result events captured per tab should show each
-        # agent received its own answer, not the peer's.  ``tool_result``
-        # is broadcast via the agent's thread-local task_id, then
-        # fanned out to the owning tab's subscriber.
         tr_a = [
             e for e in self.printer.sent
             if e.get("type") == "tool_result" and e.get("tabId") == "tabA"

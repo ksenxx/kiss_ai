@@ -87,8 +87,6 @@ class TestPromptLineContinuation:
     def test_escaped_double_backslash_submits_literal(
         self, tmp_path: Path,
     ) -> None:
-        # ``literal \\`` typed (i.e. two backslashes at the end of the
-        # user input) is an escaped literal — Enter submits.
         line = _drive(tmp_path, "literal \\\\\x00\r")
         assert line == "literal \\\\"
 
@@ -107,8 +105,6 @@ class TestPromptLineContinuation:
     def test_continuation_and_shift_enter_can_be_mixed(
         self, tmp_path: Path,
     ) -> None:
-        # First newline via ``\`` continuation (universal),
-        # second via CSI-u Shift+Enter (modern terminals).
         line = _drive(
             tmp_path,
             "one\\\x00\rtwo\x1b[13;2uthree\r",

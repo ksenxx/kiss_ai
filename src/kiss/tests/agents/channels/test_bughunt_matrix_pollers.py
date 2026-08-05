@@ -115,8 +115,6 @@ class TestMatrixPersistentLoop:
             assert backend._run(asyncio.sleep(0, result="first")) == "first"
             loop = backend._loop
             assert loop is not None
-            # Pre-fix, the asyncio.run() pattern gave every call a fresh
-            # loop and broke nio's cached aiohttp session on call two.
             assert backend._run(asyncio.sleep(0, result="second")) == "second"
             assert backend._loop is loop
             assert loop.is_running()
@@ -135,7 +133,6 @@ class TestMatrixPersistentLoop:
         assert backend._loop_thread is None
         assert not thread.is_alive()
         assert not loop.is_running()
-        # Lazy restart after disconnect.
         try:
             assert backend._run(asyncio.sleep(0, result=7)) == 7
         finally:
@@ -155,7 +152,6 @@ class TestMatrixPersistentLoop:
                 assert str(e) == "boom"
             else:  # pragma: no cover - failure path
                 raise AssertionError("expected ValueError")
-            # The loop must survive a failed coroutine.
             assert backend._run(asyncio.sleep(0, result="ok")) == "ok"
         finally:
             backend.disconnect()
@@ -257,13 +253,10 @@ class TestDmPollerWatermark:
                 for r in requests
                 if r["path"].endswith("/conversations.replies")
             ]
-            # The message newer than the watermark IS processed...
             assert _NEW_TS in replies_ts
-            # ...but the historical message below the watermark is skipped.
             assert _OLD_TS not in replies_ts, (
                 "DM poller retroactively processed a message older than min_ts"
             )
-            # No Sorcar task ran (bot already replied in the new thread).
             posts = [r for r in requests if r["path"].endswith("/chat.postMessage")]
             assert posts == []
             assert state["threads"] == {}

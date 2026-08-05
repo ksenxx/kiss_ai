@@ -82,12 +82,10 @@ class TestUnreachableMetricsDoesNotCountAsUnhealthy(IsolatedAsyncioTestCase):
         self.server._loop = self._loop
         self.server._tunnel_proc = self._proc
         self.server._tunnel_metrics_port = 1
-        # Past startup grace so the metrics check runs every tick.
         self.server._tunnel_started_at = (
             time.monotonic() - _TUNNEL_STARTUP_GRACE - 1
         )
         self.server._tunnel_unhealthy_ticks = 0
-        # Simulate "endpoint unreachable / unknown".
         self._orig_probe = ws_mod._probe_tunnel_ready
         ws_mod._probe_tunnel_ready = lambda _port: None  # type: ignore[assignment]
 
@@ -106,11 +104,9 @@ class TestUnreachableMetricsDoesNotCountAsUnhealthy(IsolatedAsyncioTestCase):
         for _ in range(_TUNNEL_UNHEALTHY_LIMIT_QUICK + 5):
             await self.server._check_and_restart_tunnel()
         self.assertEqual(self.server._tunnel_unhealthy_ticks, 0)
-        # The original subprocess is still alive — no force-kill happened.
         self.assertIsNotNone(self.server._tunnel_proc)
         assert self.server._tunnel_proc is not None
         self.assertIsNone(self.server._tunnel_proc.poll())
-        # And no cool-down state was advanced.
         self.assertEqual(self.server._tunnel_force_restart_count, 0)
         self.assertEqual(
             self.server._tunnel_force_restart_next_allowed, 0.0,
@@ -165,11 +161,8 @@ class TestConfirmedZeroStillRestarts(IsolatedAsyncioTestCase):
         """``False`` (confirmed) increments ticks; at the limit, restart fires."""
         for _ in range(_TUNNEL_UNHEALTHY_LIMIT_QUICK):
             await self.server._check_and_restart_tunnel()
-        # On the limit tick, the original proc was force-killed and
-        # ``_restart_tunnel_url`` was invoked exactly once.
         self.assertEqual(len(self.restart_calls), 1)
         self.assertIsNotNone(self._proc.poll())
-        # First force-restart bumps the cool-down ladder to rung 1.
         self.assertEqual(self.server._tunnel_force_restart_count, 1)
         self.assertGreater(
             self.server._tunnel_force_restart_next_allowed,
@@ -193,9 +186,6 @@ class TestLinkLocalAndMappedIpsFiltered(unittest.TestCase):
             def __init__(self, *_args: object, **_kwargs: object) -> None:
                 raise OSError("UDP discovery disabled in test")
 
-        # Disable the UDP-connect helper so only the patched
-        # ``getaddrinfo`` results feed the function.  ``_get_local_ips``
-        # already swallows ``OSError`` from the UDP probe.
         setattr(socket, "socket", _NoUdpSocket)  # noqa: B010
 
     def tearDown(self) -> None:
@@ -320,7 +310,6 @@ class TestChronicMetricsFlakeCoolsDown(IsolatedAsyncioTestCase):
             self._procs.append(new_proc)
             self.server._tunnel_proc = new_proc
             self.server._tunnel_metrics_port = 1
-            # Skip the startup grace so the next probe counts.
             self.server._tunnel_started_at = (
                 time.monotonic() - _TUNNEL_STARTUP_GRACE - 1
             )
@@ -348,7 +337,6 @@ class TestChronicMetricsFlakeCoolsDown(IsolatedAsyncioTestCase):
         dozens in the loop below.  With the cool-down it restarts once
         and then defers every subsequent force-restart.
         """
-        # Drive the equivalent of ~50 cycles worth of unhealthy ticks.
         for _ in range(_TUNNEL_UNHEALTHY_LIMIT_QUICK * 50):
             await self.server._check_and_restart_tunnel()
         self.assertEqual(
@@ -359,8 +347,6 @@ class TestChronicMetricsFlakeCoolsDown(IsolatedAsyncioTestCase):
             f"rotates `*.trycloudflare.com` URLs every ~10 minutes "
             f"forever.",
         )
-        # The cool-down counter advanced and the next-allowed window
-        # is in the future.
         self.assertEqual(self.server._tunnel_force_restart_count, 1)
         self.assertGreater(
             self.server._tunnel_force_restart_next_allowed,
@@ -376,13 +362,10 @@ class TestChronicMetricsFlakeCoolsDown(IsolatedAsyncioTestCase):
         seconds, an unrelated future flake should not inherit the
         elevated cool-down — the counter must reset to 0.
         """
-        # Pre-load the post-force-restart state.
         self.server._tunnel_force_restart_count = 3
         self.server._tunnel_force_restart_next_allowed = (
             time.monotonic() - 1
         )
-        # Make the replacement appear "started long ago and healthy
-        # ever since" — long enough to satisfy the reset threshold.
         self.server._tunnel_started_at = (
             time.monotonic()
             - _TUNNEL_FORCE_RESTART_RESET_AFTER_HEALTHY
@@ -411,7 +394,7 @@ class TestChronicMetricsFlakeCoolsDown(IsolatedAsyncioTestCase):
             (0, _TUNNEL_FORCE_RESTART_COOLDOWN_INITIAL),
             (1, _TUNNEL_FORCE_RESTART_COOLDOWN_INITIAL * 2),
             (2, _TUNNEL_FORCE_RESTART_COOLDOWN_INITIAL * 4),
-            (10, _TUNNEL_FORCE_RESTART_COOLDOWN_MAX),  # capped
+            (10, _TUNNEL_FORCE_RESTART_COOLDOWN_MAX),
         ):
             with self.subTest(previous_count=previous_count):
                 self.server._tunnel_force_restart_count = previous_count
@@ -419,8 +402,6 @@ class TestChronicMetricsFlakeCoolsDown(IsolatedAsyncioTestCase):
                 self.server._tunnel_unhealthy_ticks = (
                     _TUNNEL_UNHEALTHY_LIMIT_QUICK - 1
                 )
-                # Need a live proc the limit-tick can force-kill; the
-                # fake_restart in setUp recreates one each time.
                 if (
                     self.server._tunnel_proc is None
                     or self.server._tunnel_proc.poll() is not None

@@ -2,19 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression test for KISS Sorcar chat-webview notifications.
-//
-// Bug reproduced: extension-side events such as worktree_result used
-// VS Code's native showInformationMessage/showErrorMessage APIs, so the
-// user saw notifications in VS Code's workbench notification area rather
-// than at the top-right corner of the KISS chat webview.
-//
-// This test drives the real compiled SorcarSidebarView + AgentClient
-// against a real Unix-domain socket daemon stub.  Only the `vscode`
-// module is stubbed.  A daemon worktree_result event must be forwarded
-// to the resolved webview as a `notification` message and must not call
-// native VS Code notification APIs.
 
 'use strict';
 
@@ -114,10 +101,6 @@ Module._resolveFilename = function (request, parent, ...rest) {
   if (request === 'vscode') return require.resolve('./_vscode-stub.js');
   return origResolve.call(this, request, parent, ...rest);
 };
-// ``_vscode-stub.js`` is a git-tracked fixture shared by several tests
-// that run in parallel; it already contains
-// ``module.exports = global.__kissVscodeStub;`` — never write or delete
-// it here or concurrent tests lose their ``vscode`` module mid-run.
 global.__kissVscodeStub = vscodeStub;
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-webview-ntf-'));
@@ -205,6 +188,10 @@ function makeDomWebview() {
   };
   vm.runInContext(
     fs.readFileSync(path.join(mediaDir, 'panelCopy.js'), 'utf8'),
+    dom.getInternalVMContext(),
+  );
+  vm.runInContext(
+    fs.readFileSync(path.join(mediaDir, 'api.js'), 'utf8'),
     dom.getInternalVMContext(),
   );
   vm.runInContext(
@@ -410,10 +397,6 @@ async function runTests() {
   );
   notificationsApi.setWebviewNotificationPoster(undefined);
 
-  // Bug C: replacing the poster (e.g. webview re-resolved while the old
-  // webview's onDidDispose has not yet fired) must resolve pending action
-  // promises tied to the OLD poster — otherwise their notifications can
-  // never be acknowledged (the new webview does not know those IDs).
   const postedA = [];
   notificationsApi.setWebviewNotificationPoster(message => postedA.push(message));
   const oldPosterPending = notificationsApi.showWarningNotification(
@@ -429,9 +412,6 @@ async function runTests() {
     {settled: false},
     'pending action should remain pending while old poster is active',
   );
-  // Now swap to a NEW poster WITHOUT clearing first.  This mirrors the
-  // VS Code ordering where a fresh webview is resolved BEFORE the stale
-  // old webview's onDidDispose fires.
   const postedB = [];
   notificationsApi.setWebviewNotificationPoster(message => postedB.push(message));
   const oldPosterAfterSwap = await Promise.race([

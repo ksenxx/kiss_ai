@@ -125,11 +125,6 @@ class _BlockingFakeAgentRun:
         def _run_proxy(self_agent: object, **kwargs: object) -> str:
             self.entered_at_count = broadcast_counter[0]
             self.entered_event.set()
-            # Block here so the test can verify that at this point
-            # (i.e. the agent is RUNNING) a ``tasks_updated``
-            # broadcast has already been emitted by
-            # ``ChatSorcarAgent.run`` and the persisted row is
-            # visible.
             self.release_event.wait(timeout=10)
             printer = kwargs.get("printer")
             if printer is not None and hasattr(printer, "broadcast"):
@@ -159,19 +154,12 @@ class TestTaskStartRefreshesHistory(unittest.TestCase):
         self.server = VSCodeServer()
         self.events: list[dict[str, Any]] = []
         self.events_lock = threading.Lock()
-        # Sequence counter — incremented for every captured event.
-        # The blocking fake-run records its entry/exit counts so the
-        # test can pinpoint which broadcasts happened DURING vs. AFTER
-        # the agent run.
         self.broadcast_counter = [0]
 
         printer = self.server.printer
         real_broadcast = printer.broadcast
 
         def capture(event: dict[str, Any]) -> None:
-            # Run the printer's normal injection / persistence steps
-            # so this remains an end-to-end exercise of the
-            # broadcast pipeline (skip only the WSS transport).
             ev = printer._inject_task_id(event)
             with printer._lock:
                 printer._record_event(ev)
@@ -181,9 +169,6 @@ class TestTaskStartRefreshesHistory(unittest.TestCase):
                 self.events.append({
                     **ev, "_seq": self.broadcast_counter[0],
                 })
-            # Also call the real broadcast so any other registered
-            # side effects still fire.  This mirrors the wrapper
-            # used by other end-to-end tests in this directory.
             try:
                 real_broadcast(event)
             except Exception:
@@ -195,9 +180,6 @@ class TestTaskStartRefreshesHistory(unittest.TestCase):
         self.original_run = self.blocker.install(self.broadcast_counter)
 
     def tearDown(self) -> None:
-        # Always release the blocker so the task thread can exit
-        # before teardown — otherwise the daemon thread would still
-        # be holding references on next test setUp.
         self.blocker.release_event.set()
         try:
             tab = self.server._get_tab("tab-start")
@@ -228,9 +210,6 @@ class TestTaskStartRefreshesHistory(unittest.TestCase):
             "tabId": tab_id,
         })
 
-        # Wait until the agent's parent ``run`` is actually entered
-        # (i.e. ``ChatSorcarAgent.run`` has called ``_add_task`` and
-        # all the start-time setup is complete).
         assert self.blocker.entered_event.wait(timeout=10), (
             "patched parent ``SorcarAgent.run`` was never invoked; "
             "did ``_run_task_inner`` fail to start the agent?"
@@ -238,10 +217,6 @@ class TestTaskStartRefreshesHistory(unittest.TestCase):
         entered_seq = self.blocker.entered_at_count
         assert entered_seq is not None
 
-        # Assertion A: the task row exists in the persistence layer
-        # BEFORE the agent run produces any result.  This guards
-        # against a regression where ``_add_task`` would be deferred
-        # to the end of the run.
         rows = th._load_history(limit=10)
         assert rows, "expected at least one task_history row at start"
         assert rows[0]["task"] == (
@@ -249,10 +224,6 @@ class TestTaskStartRefreshesHistory(unittest.TestCase):
         ), f"unexpected task text in row: {rows[0]}"
         running_task_id = cast(str, rows[0]["id"])
 
-        # Assertion B (the fix): a ``tasks_updated`` broadcast must
-        # have been emitted by ``ChatSorcarAgent.run`` BEFORE the
-        # agent body started running — so the History sidebar
-        # refreshes while the task is still in progress.
         with self.events_lock:
             tasks_updated_before_run = [
                 e for e in self.events
@@ -268,11 +239,6 @@ class TestTaskStartRefreshesHistory(unittest.TestCase):
             f"{[e.get('type') for e in self.events]}"
         )
 
-        # Assertion C: a fresh ``_get_history`` from the production
-        # ``VSCodeServer`` API surfaces the running task — i.e.
-        # ``refreshHistory()`` on the frontend would now see the
-        # new row.  This is the user-visible effect of the fix.
-        # Pre-fix this row only appears after the task ends.
         before = len(self._filter("history"))
         self.server._get_history(query=None, offset=0)
         history_events = self._filter("history")
@@ -289,10 +255,7 @@ class TestTaskStartRefreshesHistory(unittest.TestCase):
             f"sidebar response while task is running: {sessions}"
         )
 
-        # Release the agent so the task can finish cleanly.
         self.blocker.release_event.set()
-        # Give the task thread a moment to wind down so tearDown
-        # doesn't race the post-task persistence path.
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
             try:

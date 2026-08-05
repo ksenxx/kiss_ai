@@ -53,8 +53,6 @@ class TestSubagentTaskEventsNoParentFallthrough:
         """
         src = _read_main_js()
 
-        # Find the task_events case body
-        # Look for `case 'task_events':` and extract the body up to the next top-level case
         match = re.search(
             r"case\s+'task_events':\s*\{(.*?)(?=\n\s*case\s+')",
             src,
@@ -63,9 +61,6 @@ class TestSubagentTaskEventsNoParentFallthrough:
         assert match, "Could not find case 'task_events' in main.js"
         body = match.group(1)
 
-        # Verify the guard: when teTabId !== activeTabId, there must be
-        # an early break for missing teTab BEFORE any replay logic.
-        # The fix pattern is: if (teTabId !== activeTabId) { if (!teTab) break; ... }
         guard_pattern = re.search(
             r"if\s*\(\s*teTabId\s*!==\s*activeTabId\s*\)\s*\{[^}]*"
             r"if\s*\(\s*!teTab\s*\)\s*break",
@@ -93,7 +88,6 @@ class TestSubagentTaskEventsNoParentFallthrough:
         assert match, "Could not find case 'task_events' in main.js"
         body = match.group(1)
 
-        # The active tab path should still call replayTaskEvents
         assert "replayTaskEvents" in body, (
             "The task_events handler must still call replayTaskEvents "
             "for events targeted at the active tab."

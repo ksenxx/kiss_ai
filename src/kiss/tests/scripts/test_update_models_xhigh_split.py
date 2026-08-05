@@ -82,7 +82,6 @@ def test_new_model_with_thinking_xhigh_emits_two_entries(
     assert data["gpt-5.5-xhigh"]["thinking"] == "xhigh", (
         "Sibling must carry thinking='xhigh'"
     )
-    # All non-thinking fields must match
     for field in (
         "context_length",
         "input_price_per_1M",
@@ -303,10 +302,6 @@ def test_xhigh_split_idempotent_on_rerun(
     mod.apply_updates_to_file([], new_models_first, [], {}, dry_run=False)
     first = _read(target)
 
-    # Second call: same input. The base + sibling should remain identical.
-    # We pass them through as updates (apply_updates_to_file should be a no-op
-    # for unchanged entries, but more importantly should not create
-    # gpt-5.5-xhigh-xhigh or duplicate fields).
     current = {
         name: {
             "context_length": entry["context_length"],
@@ -325,9 +320,14 @@ def test_xhigh_split_idempotent_on_rerun(
     mod.apply_updates_to_file(updates, [], [], current, dry_run=False)
     second = _read(target)
 
-    assert set(second.keys()) == {"gpt-5.5", "gpt-5.5-xhigh"}, (
-        f"Idempotency violated: keys={sorted(second.keys())}"
-    )
+    assert set(second.keys()) == {
+        "gpt-5.5",
+        "gpt-5.5-low",
+        "gpt-5.5-medium",
+        "gpt-5.5-high",
+        "gpt-5.5-xhigh",
+    }, f"Idempotency violated: keys={sorted(second.keys())}"
+    assert second == first, "Re-running the split must not change the catalog"
     assert "gpt-5.5-xhigh-xhigh" not in second
     assert second["gpt-5.5"]["thinking"] == "high"
     assert second["gpt-5.5-xhigh"]["thinking"] == "xhigh"
@@ -340,7 +340,6 @@ def test_xhigh_split_dry_run_does_not_write(
     """``dry_run=True`` must not write the file, even when xhigh-splitting."""
     target = tmp_path / "MODEL_INFO.json"
     _redirect_model_info(monkeypatch, target)
-    # Make the empty {} state distinctive
     target.write_text("{}\n")
     import kiss.scripts.update_models as mod
 
@@ -381,7 +380,7 @@ def test_xhigh_sibling_preserves_fc_emb_gen_flags(
             "input_price_per_1M": 1.0,
             "output_price_per_1M": 2.0,
             "source": "openai",
-            "fc": False,  # non-default
+            "fc": False,
             "emb": False,
             "gen": True,
             "thinking": "xhigh",
@@ -472,7 +471,6 @@ def test_update_with_xhigh_when_base_entry_missing_in_data(
     """
     target = tmp_path / "MODEL_INFO.json"
     _redirect_model_info(monkeypatch, target)
-    # Note: target was just initialized to {} by _redirect_model_info.
 
     import kiss.scripts.update_models as mod
 
@@ -646,6 +644,7 @@ def test_malformed_generated_xhigh_sibling_is_repaired(
     assert data["gpt-5.5-xhigh"] == {
         **data["gpt-5.5"],
         "thinking": "xhigh",
+        "alias_of": "gpt-5.5",
     }
 
 

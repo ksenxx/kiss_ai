@@ -6,11 +6,11 @@
 
 ```
 - [`kiss.core.kiss_agent`](#kisscorekiss_agent)
-- [`kiss.core.relentless_agent`](#kisscorerelentless_agent)
+  - [`kiss.agents.sorcar.relentless_agent`](#kissagentssorcarrelentless_agent)
   - [`kiss.agents.sorcar.sorcar_agent`](#kissagentssorcarsorcar_agent)
   - [`kiss.agents.sorcar.chat_sorcar_agent`](#kissagentssorcarchat_sorcar_agent)
-  - [`kiss.agents.sorcar.git_worktree`](#kissagentssorcargit_worktree)
   - [`kiss.agents.sorcar.worktree_sorcar_agent`](#kissagentssorcarworktree_sorcar_agent)
+- [`kiss.server.sorcar`](#kissserversorcar)
 ```
 
 </details>
@@ -31,7 +31,7 @@ ______________________________________________________________________
   - `system_prompt`: Optional system prompt to provide to the model. Default is empty string (no system prompt).
   - `tools`: The tools to use for the agent. If None, no tools are provided (only the built-in finish tool is added).
   - `is_agentic`: Whether the agent is agentic. Default is True.
-  - `max_steps`: The maximum number of steps to take. Default is 100.
+  - `max_steps`: The maximum number of steps to take. Default is 10000.
   - `max_budget`: The maximum budget to spend. Default is 10.0.
   - `model_config`: The model configuration to use for the agent. Default is None.
   - `printer`: Optional printer for streaming output. Default is None.
@@ -47,7 +47,7 @@ ______________________________________________________________________
 
 ______________________________________________________________________
 
-#### `kiss.core.relentless_agent` — *Base relentless agent with smart continuation for long tasks.*
+#### `kiss.agents.sorcar.relentless_agent` — *Base relentless agent with smart continuation for long tasks.*
 
 ##### `class RelentlessAgent(Base)` — Base agent with auto-continuation for long tasks.
 
@@ -63,7 +63,7 @@ ______________________________________________________________________
   - `prompt_template`: Task prompt template with format placeholders.
   - `arguments`: Dictionary of values to fill prompt_template placeholders.
   - `system_prompt`: System-level instructions passed to the underlying LLM via model_config. Defaults to empty string (no system instructions).
-  - `max_steps`: Maximum steps per sub-session. Defaults to 100.
+  - `max_steps`: Maximum steps per sub-session. Defaults to 10000.
   - `max_budget`: Maximum budget in USD. Defaults to 200.0.
   - `model_config`: Optional dictionary of additional model configuration parameters (e.g. temperature, top_p). Defaults to None.
   - `work_dir`: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
@@ -96,7 +96,7 @@ ______________________________________________________________________
   - `arguments`: Dictionary of values to fill prompt_template placeholders.
   - `system_prompt`: system prompt to be appended to the actual system prompt
   - `tools`: List of tools to be added in addition to bash and web tools.
-  - `max_steps`: Maximum steps per sub-session. Defaults to config value.
+  - `max_steps`: Maximum steps per sub-session. Defaults to 10000.
   - `max_budget`: Maximum budget in USD. Defaults to config value.
   - `work_dir`: Working directory for the agent. Defaults to artifact_dir/kiss_workdir.
   - `printer`: Printer instance for output display.
@@ -116,7 +116,7 @@ ______________________________________________________________________
 - `user_prompt`: The user's task prompt, woven into the commit message (or its fallback), or `None` when unavailable.
 - `message_fn`: Callable producing a commit message from `(commit_dir, user_prompt, task_result)`.
 - `task_result`: The task's result summary, appended to the commit message (or its fallback) under a `Result:` heading, or `None` when unavailable.
-- `notify_fn`: Optional UI callback invoked at two life-cycle points so the chat webview can render toasts: - `notify_fn("generating", "")` immediately before *message_fn* runs (typically a slow LLM call) so the user sees "Generating commit message" while the LLM works. - `notify_fn("committed", subject)` immediately after a successful commit, where *subject* is the first non-empty line of the committed message. Both hooks are SKIPPED when there is nothing to commit (no staged diff after the initial `stage_all`), so the webview never sees a misleading "Generating commit message" toast without a follow-up. The "committed" hook is also not invoked when `commit_staged` returns `False` after *message_fn* (e.g. pre-commit hook rejected the commit). All `notify_fn` exceptions are swallowed so a broken UI hook can never block the commit itself.
+- `notify_fn`: Optional UI callback invoked at two life-cycle points so the chat webview can render toasts: - `notify_fn("generating", "")` immediately before *message_fn* runs (typically a slow LLM call) so the user sees "Generating commit message" while the LLM works. - `notify_fn("committed", subject)` immediately after a successful commit, where *subject* is the first non-empty line of the committed message. Both hooks are SKIPPED when there is nothing to commit (no staged diff after the initial `stage_all`), so the webview never sees a misleading "Generating commit message" toast without a follow-up. When `commit_staged` returns `False` after *message_fn* (e.g. a pre-commit hook rejected the commit), `notify_fn("failed", "")` is invoked instead so the sticky "generating" toast always gets a terminal update. All `notify_fn` exceptions are swallowed so a broken UI hook can never block the commit itself.
 - **Returns:** True if a commit was created, False if nothing to commit.
 
 **`run_tasks_parallel`** — Execute multiple SorcarAgent tasks concurrently using threads. Each task gets its own `ChatSorcarAgent` instance and runs in a separate thread via :class:`~concurrent.futures.ThreadPoolExecutor`. This is ideal for I/O-bound workloads (LLM API calls, network requests) where the GIL is released during I/O waits. This helper is a pure parallel executor: it has no knowledge of backend task ids or any frontend concepts. It simply marks each spawned agent as a sub-agent (via `_subagent_info`) and the sub-agent itself owns any sub-agent-specific behaviour (such as broadcasting `new_tab` to a browser-based frontend) inside its own `run()` method.<br/>`def run_tasks_parallel(tasks: list[str], max_workers: int | None = None, model_name: str | None = None, work_dir: str | None = None, printer: Printer | None = None, totals_out: dict[str, float] | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, usage_monitor: _LiveUsageMonitor | None = None) -> list[str]`
@@ -175,172 +175,10 @@ ______________________________________________________________________
   - `**kwargs`: All other arguments forwarded to `SorcarAgent.run()`.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
-**`summary`** — MANDATORY every 5 steps: summarize your last 6 steps of work. Your tool call on every step that is a multiple of 5 (step 5, 10, 15, ...) MUST be this tool, BEFORE any other tool call (including finish). Any other tool call made on such a step is rejected until summary has been called. This requirement applies to every task, no matter how simple, and is never overridden by the task prompt. The tool itself performs no action: the chat webview groups the preceding six event panels under this call's panel and collapses them, hiding the step-by-step detail while keeping the description visible as a running digest for the user.<br/>`def summary(description: str) -> str`
+**`summary`** — MANDATORY every 5 steps: summarize your last 6 steps of work. Your tool call on every step that is a multiple of 5 (step 5, 10, 15, ...) MUST be this tool, BEFORE any other tool call (including finish). Any other tool call made on such a step is rejected until summary has been called. This requirement applies to every task, no matter how simple, and is never overridden by the task prompt. The tool itself performs no action: the chat webview groups the preceding six event panels under this call's panel and collapses them, hiding the step-by-step detail while keeping the description visible as a running digest for the user. The description is rendered as formatted Markdown in the panel.<br/>`def summary(description: str) -> str`
 
-- `description`: Natural language summary in 5-10 sentences of what the agent did in the last 6 steps.
+- `description`: Natural language summary in 5-10 sentences of what the agent did in the last 6 steps, written in Markdown format (use bullet lists for the steps, and `**bold**` / backtick code spans where helpful).
 - **Returns:** A short confirmation string.
-
-______________________________________________________________________
-
-#### `kiss.agents.sorcar.git_worktree` — *Git worktree operations and state.*
-
-##### `class GitWorktree` — Immutable snapshot of a pending worktree task.
-
-##### `class MergeResult(enum.Enum)` — Outcome of a merge operation.
-
-##### `class GitWorktreeOps` — Stateless helper class with all git worktree operations.
-
-- **discover_repo** — Find the git repo root containing *path*.<br/>`discover_repo(path: Path) -> Path | None`
-
-  - `path`: Directory to start searching from.
-  - **Returns:** The repo root path, or `None` if *path* is not in a repo.
-
-- **current_branch** — Return the current branch name, or `None` for detached HEAD.<br/>`current_branch(repo: Path) -> str | None`
-
-  - `repo`: Git repo root path.
-  - **Returns:** Branch name string, or `None` if HEAD is detached or empty.
-
-- **create** — Create a new worktree with a new branch.<br/>`create(repo: Path, branch: str, wt_dir: Path) -> bool`
-
-  - `repo`: Git repo root path.
-  - `branch`: New branch name to create.
-  - `wt_dir`: Directory for the new worktree.
-  - **Returns:** True if worktree was created successfully, False otherwise.
-
-- **remove** — Remove a worktree directory (best-effort, force). Every caller (`discard`, `cleanup_partial`, `_finalize_worktree`) intends permanent removal of an agent-owned directory, so failures of `git worktree remove` are escalated rather than abandoned: 1. Plain `--force` (handles dirty/untracked content). 2. `--force --force` (git requires force twice for worktrees locked via `git worktree lock`). 3. Direct `rmtree` + `git worktree prune` (handles corrupted worktrees — e.g. a deleted `.git` link file — that fail git's removal validation entirely).<br/>`remove(repo: Path, wt_dir: Path) -> None`
-
-  - `repo`: Git repo root path.
-  - `wt_dir`: Worktree directory to remove.
-
-- **prune** — Prune stale worktree bookkeeping entries.<br/>`prune(repo: Path) -> None`
-
-  - `repo`: Git repo root path.
-
-- **stage_all** — Stage all changes in the worktree (`git add -A`).<br/>`stage_all(wt_dir: Path) -> None`
-
-  - `wt_dir`: Worktree directory.
-
-- **commit_all** — Stage all changes and commit in the worktree.<br/>`commit_all(wt_dir: Path, message: str) -> bool`
-
-  - `wt_dir`: Worktree directory.
-  - `message`: Commit message.
-  - **Returns:** True if a commit was created, False if nothing to commit or the commit failed (e.g. pre-commit hook rejection).
-
-- **commit_staged** — Commit already-staged changes without re-staging. Unlike :meth:`commit_all`, this does **not** run `git add -A` first. Use when the caller has already staged the desired changes (e.g. via :meth:`stage_all`).<br/>`commit_staged(wt_dir: Path, message: str, *, no_verify: bool = False) -> bool`
-
-  - `wt_dir`: Worktree directory with pre-staged changes.
-  - `message`: Commit message.
-  - `no_verify`: If True, pass `--no-verify` to skip pre-commit and commit-msg hooks. Use for infrastructure commits (e.g. baseline snapshots) that must always succeed.
-  - **Returns:** True if a commit was created, False if nothing was staged or the commit failed (e.g. pre-commit hook rejection).
-
-- **has_uncommitted_changes** — Check if the working tree or index has uncommitted changes.<br/>`has_uncommitted_changes(wt_dir: Path) -> bool`
-
-  - `wt_dir`: Git working directory to check.
-  - **Returns:** True if there are staged, unstaged, or untracked changes.
-
-- **status_porcelain** — Return the raw `git status --porcelain` output. Used by failure-path warnings (e.g. :meth:`~kiss.agents.sorcar.worktree_sorcar_agent.WorktreeSorcarAgent._finalize_worktree`) to embed the exact leftover files in the log so an operator can tell a real pre-commit-hook rejection apart from a race leftover or a corrupt index without having to ssh in and run git themselves.<br/>`status_porcelain(wt_dir: Path) -> str`
-
-  - `wt_dir`: Git working directory to inspect.
-  - **Returns:** The stripped porcelain output (possibly empty).
-
-- **staged_diff** — Return the staged diff text for the worktree.<br/>`staged_diff(wt_dir: Path) -> str`
-
-  - `wt_dir`: Worktree directory (must have staged changes).
-  - **Returns:** The diff text, or empty string if no staged changes.
-
-- **checkout** — Checkout a branch in the main worktree.<br/>`checkout(repo: Path, branch: str) -> tuple[bool, str]`
-
-  - `repo`: Git repo root path.
-  - `branch`: Branch name to checkout.
-  - **Returns:** `(True, "")` on success, `(False, stderr)` on failure. The stderr string describes why the checkout failed (e.g. dirty working tree, missing branch).
-
-- **stash_if_dirty** — Stash uncommitted changes if the working tree or index is dirty. Uses `git stash push --include-untracked` so both staged and unstaged changes (including new files) are saved.<br/>`stash_if_dirty(repo: Path) -> bool`
-
-  - `repo`: Git repo root path.
-  - **Returns:** True if a stash entry was created, False if the tree was clean or nothing could be stashed.
-
-- **stash_pop** — Pop the latest stash entry, preserving the staging state. Tries `git stash pop --index` first so that files that were staged before the stash stay staged after the pop. If `--index` fails (e.g. the merge changed a file that was in the index), falls back to plain `git stash pop` which restores all changes as unstaged — but ONLY when the failed `--index` attempt left the working tree untouched. A failed `--index` pop can partially apply the stash (e.g. tracked changes applied while an untracked-file restore failed, or a conflicted merge) while keeping the stash entry; blindly re-applying the same stash on top of that state risks a double-apply, so in that case the stash is left for the caller to surface to the user.<br/>`stash_pop(repo: Path) -> bool`
-
-  - `repo`: Git repo root path.
-  - **Returns:** True if the pop succeeded, False on conflict or error.
-
-- **squash_merge_branch** — Squash-merge a branch and commit the result. Uses `git merge --squash` to apply all changes from *branch*, then commits the staged result using the HEAD commit message of *branch* (see :meth:`_merge_commit_message`) with the task prompt and result appended when provided and not already present in that message. On conflict, resets to a clean state with `git reset --hard`.<br/>`squash_merge_branch(repo: Path, branch: str, user_prompt: str | None = None, task_result: str | None = None) -> MergeResult`
-
-  - `repo`: Git repo root path.
-  - `branch`: Branch to squash-merge.
-  - `user_prompt`: The user's task prompt for the merge commit message, or `None`.
-  - `task_result`: The task's result summary for the merge commit message, or `None`.
-  - **Returns:** :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
-
-- **delete_branch** — Delete a branch and its git config section (best-effort). Tries `-d` first (safe delete), falls back to `-D` (force). Also removes the `branch.<name>.*` config section.<br/>`delete_branch(repo: Path, branch: str) -> bool`
-
-  - `repo`: Git repo root path.
-  - `branch`: Branch name to delete.
-  - **Returns:** True if the branch was deleted (or never existed), False if git refused both `-d` and `-D` — typically because the branch is the current HEAD of a worktree and cannot be deleted without first switching away.
-
-- **branch_exists** — Check if a branch exists.<br/>`branch_exists(repo: Path, branch: str) -> bool`
-
-  - `repo`: Git repo root path.
-  - `branch`: Branch name to check.
-  - **Returns:** True if the branch exists.
-
-- **ensure_excluded** — Add `.kiss-worktrees/` to local git exclude (not .gitignore). Uses `<git_common_dir>/info/exclude` so the agent never modifies any tracked file in the user's repo.<br/>`ensure_excluded(repo: Path) -> None`
-
-  - `repo`: Git repo root path.
-
-- **ensure_scratch_merge_driver** — Install a merge driver that auto-resolves agent scratch files. `PROGRESS.md` is a tracked per-task agent log that every task wholesale rewrites ("clear PROGRESS.md when a new task begins"), and `src/kiss/INJECTIONS.md` is an agent-maintained scratch prompt file that can drift between task baselines. Whenever main's copy diverged from the worktree's fork point, these scratch-file rewrites made three-way merges (`git merge --squash` and `git cherry-pick` alike) conflict — blocking the entire worktree merge over non-user source state. This registers a repo-local `kiss-scratch` merge driver that resolves content conflicts in such files by keeping the incoming branch's version (`%B`): the newest task's scratch state wins, matching the clear-on-new-task convention. Installation uses only untracked plumbing — `<git_common_dir>/info/attributes` plus repo-local config — so no tracked file is ever modified, and the driver equally fixes the *manual* merge/cherry-pick commands suggested to the user on merge failure.<br/>`ensure_scratch_merge_driver(repo: Path) -> None`
-
-  - `repo`: Git repo root path.
-
-- **save_original_branch** — Store the original branch in git config.<br/>`save_original_branch(repo: Path, branch: str, original: str) -> bool`
-
-  - `repo`: Git repo root path.
-  - `branch`: The worktree branch name.
-  - `original`: The original branch to store.
-  - **Returns:** True if config was saved successfully, False otherwise.
-
-- **save_baseline_commit** — Store the baseline commit SHA in git config. The baseline commit captures the user's dirty state (staged, unstaged, untracked files) at worktree creation time. Downstream operations diff against this SHA to isolate agent-only changes.<br/>`save_baseline_commit(repo: Path, branch: str, sha: str) -> bool`
-
-  - `repo`: Git repo root path.
-  - `branch`: The worktree branch name.
-  - `sha`: The baseline commit SHA to store.
-  - **Returns:** True if config was saved successfully, False otherwise.
-
-- **copy_dirty_state** — Copy uncommitted/staged/untracked files from main worktree. Reads `git status --porcelain` in *repo* and mirrors every dirty file into *wt_dir*. Files that exist in the main worktree are copied; files that were deleted are removed from *wt_dir*. The caller is expected to stage and commit the result as a baseline commit.<br/>`copy_dirty_state(repo: Path, wt_dir: Path) -> bool`
-
-  - `repo`: Git repo root (main worktree).
-  - `wt_dir`: Target worktree directory.
-  - **Returns:** True if any dirty state was copied, False if the main worktree was clean.
-
-- **head_sha** — Return the SHA of HEAD in the given directory.<br/>`head_sha(wt_dir: Path) -> str | None`
-
-  - `wt_dir`: Git working directory (repo root or worktree).
-  - **Returns:** The full SHA string, or `None` on failure.
-
-- **squash_merge_from_baseline** — Squash-merge only the agent's changes (after baseline) into HEAD. Uses `git cherry-pick --no-commit` to replay each commit after *baseline* onto the current HEAD. Cherry-pick performs a proper three-way merge per commit (using the commit's parent as the merge base), so it handles cases where the user's dirty state (captured in the baseline) diverges from the committed HEAD content. **The `-X theirs` strategy option is added precisely when — and only when — `HEAD == baseline^`** (i.e. main has not advanced since worktree creation). This is the common case and is exactly when the cherry-pick would otherwise fabricate a spurious modify/delete or modify/modify conflict: - `_do_merge` stashes the user's dirty edits on main before this call, so main HEAD == `baseline^` (clean). But the baseline commit captured the user's dirty state — so for the first cherry-picked commit the 3-way merge sees: base = baseline (user dirty edits) ours = main HEAD == baseline^ (no dirty edits) theirs = branch tip (dirty edits + agent diff) - `base → ours` is "revert the dirty edits"; when the agent deleted or modified the same hunk on the branch, plain cherry-pick raises a spurious conflict — even though the agent's actual net diff (`baseline..branch`) and main HEAD's actual content (`baseline^`) are perfectly compatible. - `-X theirs` is a hunk-level tie-breaker that resolves these spurious conflicts in favour of the branch tip (= the agent's intent), and is a NO-OP for hunks that already auto-merge. When `HEAD != baseline^` (the user committed independent work on main between WT creation and merge), `-X theirs` is deliberately NOT added: any conflict in that case is a real cross-branch divergence between the user's main commits and the agent's branch tip, and silently letting the branch win would destroy the user's intentional commits. Falls back to :meth:`squash_merge_branch` when *baseline* is `None` (legacy worktrees).<br/>`squash_merge_from_baseline(repo: Path, branch: str, baseline: str, user_prompt: str | None = None, task_result: str | None = None) -> MergeResult`
-
-  - `repo`: Git repo root path.
-  - `branch`: The worktree branch to merge from.
-  - `baseline`: SHA of the baseline commit to diff against.
-  - `user_prompt`: The user's task prompt for the merge commit message (see :meth:`_merge_commit_message`), or `None`.
-  - `task_result`: The task's result summary for the merge commit message, or `None`.
-  - **Returns:** :attr:`MergeResult.SUCCESS` or :attr:`MergeResult.CONFLICT`.
-
-- **cleanup_partial** — Remove a partially-created worktree and branch (best-effort).<br/>`cleanup_partial(repo: Path, branch: str, wt_dir: Path) -> None`
-
-  - `repo`: Git repo root path.
-  - `branch`: The branch name to delete.
-  - `wt_dir`: The worktree directory to remove.
-
-**`repo_lock`** — Return a per-repo re-entrant lock for multi-step git operations. Concurrent tabs operating on the same main repository must serialize their checkout → stash → merge → pop sequences to prevent interleaving that could corrupt the working tree. The lock is an :class:`threading.RLock` (re-entrant) so a caller holding the lock for an outer multi-step operation (e.g. `_try_setup_worktree` releasing a previous worktree before creating a new one) can safely call inner helpers (`_do_merge`, `discard`) that re-acquire the same lock on the same thread. Cross-thread acquisitions still block as expected.<br/>`def repo_lock(repo: Path) -> threading.RLock`
-
-- `repo`: Git repo root path.
-- **Returns:** A :class:`threading.RLock` specific to the resolved repo path.
-
-**`strip_worktree_suffix`** — Return *path* with the `.kiss-worktrees/kiss_wt-<slug>[/...]` suffix removed, leaving the parent repository path. Worktree directories are ephemeral — they are deleted when the worktree is merged or discarded. Persisting a worktree path in long-lived storage (e.g. `task_history.extra.work_dir`) would leave dangling references the user-visible UI cannot resolve. Use this helper at every persistence boundary that records a `work_dir` for later display or filtering. Paths that do not contain a `<repo>/.kiss-worktrees/kiss_wt-*` segment are returned unchanged, including the empty string.<br/>`def strip_worktree_suffix(path: str) -> str`
-
-- `path`: An absolute or relative filesystem path string.
-- **Returns:** The parent-repo path string, or the unchanged input when the path is not inside a KISS worktree.
 
 ______________________________________________________________________
 
@@ -350,9 +188,9 @@ ______________________________________________________________________
 
 **Constructor:** `WorktreeSorcarAgent(name: str) -> None`
 
-- **new_chat** — Reset to a new chat session, auto-merging any pending worktree. If a worktree task is pending from the previous session, it is auto-committed with a detailed LLM message and squash-merged into the original branch before the chat state is reset. When the release fails (merge conflict, checkout failure, stash failure, --no-auto-commit with uncommitted changes), `_release_worktree` sets a warning describing the manual recovery steps. Flush it to the attached printer NOW: if the user opens a new chat and never runs another task on this agent instance, no later `run()` will ever call `_flush_warnings` and the warning would be silently lost. When no printer is attached the warning is retained for the next `run()`'s flush (`_flush_warnings` no-ops without a `broadcast`-capable printer).<br/>`new_chat() -> None`
+- **new_chat** — Reset to a new chat session, retiring any pending worktree. If a worktree task is pending from the previous session it is retired through :meth:`_retire_previous_worktree`, so finished work is auto-committed and squash-merged into the original branch while work the user has not accepted yet — a failed or stopped task, flagged by `_pending_review` — is only committed to its own `kiss/wt-*` branch. Opening a new chat is not a decision about the old task's work. When the release fails (merge conflict, checkout failure, stash failure, --no-auto-commit with uncommitted changes), `_release_worktree` sets a warning describing the manual recovery steps. Flush it to the attached printer NOW: if the user opens a new chat and never runs another task on this agent instance, no later `run()` will ever call `_flush_warnings` and the warning would be silently lost. When no printer is attached the warning is retained for the next `run()`'s flush (`_flush_warnings` no-ops without a `broadcast`-capable printer).<br/>`new_chat() -> None`
 
-- **run** — Run a task on an isolated git worktree branch. Creates a new worktree and branch, redirects `work_dir` into the worktree, and delegates to `ChatSorcarAgent.run()`. Each call starts a fresh worktree; any previously pending branch from an earlier run is auto-committed and squash-merged into its original branch first (kept in git for manual resolution only when that auto-merge fails or conflicts). Falls back to direct execution (no worktree) when: - `use_worktree` kwarg is explicitly `False` - `work_dir` is not inside a git repo - The repo has no commits - HEAD is detached (no merge target) - Any git command fails during setup<br/>`run(prompt_template: str = '', **kwargs: Any) -> str`
+- **run** — Run a task on an isolated git worktree branch. Creates a new worktree and branch, redirects `work_dir` into the worktree, and delegates to `ChatSorcarAgent.run()`. Each call starts a fresh worktree; any previously pending branch from an earlier run is retired first by :meth:`_retire_previous_worktree` — auto-committed and squash-merged into its original branch (kept in git for manual resolution when that auto-merge fails or conflicts), or, when the earlier run failed or was stopped, committed to its own branch without ever touching the original one. Falls back to direct execution (no worktree) when: - `use_worktree` kwarg is explicitly `False` - `work_dir` is not inside a git repo - The repo has no commits - HEAD is detached (no merge target) - Any git command fails during setup<br/>`run(prompt_template: str = '', **kwargs: Any) -> str`
 
   - `prompt_template`: The task prompt.
   - `**kwargs`: All other arguments forwarded to `ChatSorcarAgent.run()`. The optional `use_worktree` kwarg (default `True`) gates the worktree behavior — when `False` the call is equivalent to `ChatSorcarAgent.run()`.
@@ -365,5 +203,160 @@ ______________________________________________________________________
 - **discard** — Throw away the task branch and worktree, checkout original. Every step is idempotent — safe to call multiple times. Acquires `repo_lock` to serialize against concurrent merge/release operations on the same repository.<br/>`discard() -> str`
 
   - **Returns:** Confirmation message (includes a warning if checkout to the original branch failed).
+
+______________________________________________________________________
+
+#### `kiss.server.sorcar` — *The Sorcar server API and a minimal synchronous client for it.*
+
+##### `class TaskResult` — Final outcome of one synchronous daemon task run.
+
+##### `class ApiCommand` — One command of the Sorcar server API.
+
+##### `class ApiContext` — Transport context of one in-flight server API call.
+
+##### `class ServerBackend(Protocol)` — Daemon capabilities the server API dispatches onto.
+
+##### `class ServerApi` — The Sorcar server's code-level API.
+
+**Constructor:** `ServerApi(backend: ServerBackend) -> None`
+
+- `backend`: The daemon object providing the transports and command implementations (in production the `RemoteAccessServer`).
+
+- **dispatch** — Route one client command to its API method. The single entry point of the code API. Applies, in order: 1. Silently drops :data:`DROPPED_COMMANDS` (host-consumed messages) BEFORE validation so they never surface errors. 2. Validates *cmd* against the catalog (:func:`validate_command`) and answers an invalid command with a direct `error` event to the sender only. 3. Records the command's `tabId` for the transport's deferred-close bookkeeping (:meth:`_record_tab`). 4. Stamps the connection's `conn_id` as `connId` — overwriting any client-supplied value so it cannot be spoofed — which keys the backend's per-connection autocomplete state. 5. Maintains the per-window work_dir invariant: a `setWorkDir` updates the connection's `work_dir`; every other command lacking an explicit `workDir` is stamped with it, so two VS Code windows sharing the daemon can never observe each other's folder through the daemon-global fallback. The CLI-bridge commands (:data:`_CLI_HANDLERS`) are exempt: they describe tasks the CLI runs itself, never read `workDir`, and must not be mutated on their way to the relay. 6. Invokes the :class:`ServerApi` method named by the command's catalog entry.<br/>`async dispatch(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The parsed JSON command dictionary (the transport guarantees a dict).
+  - `ctx`: The transport context of this call.
+
+- **authenticate** — Authenticate a remote WSS client with the `auth` handshake. The remote webapp's entry point into the API: before a browser connection may issue any catalog command, its very first frames must complete this handshake (the `_WS_SHIM_JS` shim served with the webapp sends `{"type": "auth", "password": ...}` as soon as the socket opens). Local UDS clients (the VS Code extension, the CLI) skip it — POSIX file permissions on the socket already gate access to the owning user. Protocol serviced here, in order: 1. A source IP that is still rate-limited after too many failed logins is answered with `auth_locked` (carrying `retry_after` seconds) and closed — telling the client WHY instead of leaving its loading overlay spinning. 2. Otherwise up to two `auth` attempts are read: a correct password (constant-time compare against the configured `remote_password`, which may be empty) is answered with `auth_ok`; the first wrong password elicits an `auth_required` retry prompt; the second failure is answered with an `error` event and the socket is closed. A first message that is not an `auth` at all closes the socket without counting a failed login. 3. Only NON-EMPTY wrong guesses count toward the brute-force lockout: every fresh page load probes with the (possibly empty) password stored in `localStorage`, and behind the shared cloudflared tunnel penalising that benign empty probe would let a handful of normal page loads lock the password prompt away from every visitor.<br/>`async authenticate(websocket: Any) -> bool`
+
+  - `websocket`: The remote client's WebSocket connection.
+  - **Returns:** `True` when the client authenticated; `False` when it failed (the socket is then already closed).
+
+- **forward** — Run *cmd* on the backend agent server. The default handler: commands with no daemon-side special casing (`run`, `stop`, `getModels`, `getConfig`, `getHistory`, `complete`, …) are executed by the backend `VSCodeServer` in the thread-pool executor.<br/>`async forward(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The validated, connection-stamped command.
+  - `ctx`: The transport context of the current call (unused).
+
+- **resume_session** — Resume a chat session in the issuing tab. Translates the webview wire field `id` to the backend's `chatId` (:func:`translate_webview_command`), then forwards.<br/>`async resume_session(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `resumeSession` command.
+  - `ctx`: The transport context of the current call.
+
+- **ready** — Initialize a (re)loaded chat webview. Sanitizes the command's `restoredTabs` ONCE (warnings included) and writes the cleaned list back so the backend's own sanitize pass finds nothing left to reject or truncate, then records every restored tab id in the connection's bookkeeping: the deferred-close contract is "schedule a closeTab for every tab id this connection touched", and `_handle_ready` re-claims (cancels the pending close of, and resumes) every `restoredTabs` entry — without recording them a later disconnect would never re-arm their deferred close, leaking the restored backend state forever. Finally fans the command out through the backend's ready handler (models / input history / config / session replay).<br/>`async ready(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `ready` command.
+  - `ctx`: The transport context of the current call.
+
+- **submit** — Start a task from a webview `submit`. The backend translates the webview `submit` into a `run` (path resolution, running-tab tracking) exactly as the VS Code TypeScript extension would.<br/>`async submit(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `submit` command.
+  - `ctx`: The transport context of the current call (unused).
+
+- **close_tab** — Dispose the backend state of a closed frontend tab. A WEB (WSS) client closing its chat tab destroys the only UI that could ever finish an in-flight (server-tracked) merge review for that tab, so the review is ended first (close = accept the remaining hunks; no disk writes) and the tab is disposed instead of leaking in `is_merging` limbo. UDS (VS Code) clients are exempt: their TypeScript MergeManager owns the review in real editor tabs that survive the chat tab's closure and will still send `all-done` — their `closeTab` forwards to the backend unchanged.<br/>`async close_tab(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `closeTab` command.
+  - `ctx`: The transport context of the current call.
+
+- **merge_action** — Advance a merge review (accept / reject / navigate / finish). Non-`all-done` actions are processed by the daemon's server-side merge engine (the web twin of the VS Code TypeScript `MergeManager`). An `all-done` arriving FROM a client is the extension's MergeManager finishing its editor-managed review (its per-hunk actions never reach the backend): the server-side shadow merge state registered when the `merge_data` event was broadcast is dropped — leaving it would replay a ZOMBIE review on the next webview reload, fire a spurious second all-done from the deferred-close path, and leak one state (with full file payloads) per finished review — and the command still falls through to the backend (`_cmd_merge_action` → `_finish_merge`).<br/>`async merge_action(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `mergeAction` command.
+  - `ctx`: The transport context of the current call.
+
+- **open_file** — Serve a file's content to a remote-web client. A remote-web (WSS) client clicked a file link in a chat webview. The browser has no editor to open the file in, so the daemon reads the file and replies with its content for an in-page content tab. UDS clients (VS Code windows) never take this path: their webview's `openFile` is consumed by the extension host, which opens the file in a real editor tab — so a UDS-delivered `openFile` is dropped as a defensive no-op.<br/>`async open_file(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `openFile` command.
+  - `ctx`: The transport context of the current call.
+
+- **check_paths** — Report which file paths exist to a remote-web client. The chat webview linkifies file-path-looking strings in event panel contents lazily: a path only becomes a clickable link after this check confirms that clicking it (`openFile`) would actually serve a file. UDS clients (VS Code windows) never take this path: their webview's `checkPaths` is consumed by the extension host, which checks the local filesystem itself — so a UDS-delivered `checkPaths` is dropped as a defensive no-op.<br/>`async check_paths(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `checkPaths` command.
+  - `ctx`: The transport context of the current call.
+
+- **voice_transcribe** — Transcribe a remote-web client's post-wake utterance. A remote-web (browser mode) client heard the "Sorcar" wake word and captured the utterance that followed in the page (VS Code webviews never send this: their speech is captured and translated by the extension host's local listener). The audio is translated with the same gpt-audio call the local listener uses and answered with the `voiceSpeech` message `voice.js` already handles.<br/>`async voice_transcribe(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `voiceTranscribe` command carrying the audio.
+  - `ctx`: The transport context of the current call.
+
+- **active_tasks_query** — Report in-flight agent tasks back to the requesting client.<br/>`async active_tasks_query(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `activeTasksQuery` command (unused).
+  - `ctx`: The transport context of the current call.
+
+- **get_welcome_suggestions** — Broadcast the welcome-screen suggestions.<br/>`async get_welcome_suggestions(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `getWelcomeSuggestions` command (unused).
+  - `ctx`: The transport context of the current call (unused).
+
+- **run_update** — Run the KISS Sorcar installer to update the checkout.<br/>`async run_update(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `runUpdate` command (unused).
+  - `ctx`: The transport context of the current call; supplies the requesting `conn_id` so acknowledgement notifications reach only the requesting window.
+
+- **server_reset** — Restart the kiss-web daemon at the user's request.<br/>`async server_reset(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `serverReset` command (unused).
+  - `ctx`: The transport context of the current call; supplies the requesting `conn_id` so acknowledgement notifications reach only the requesting window.
+
+- **cli_event** — Relay one CLI display event to subscribed webview tabs. CLI → daemon live-stream bridge: the sorcar CLI forwards every display event here so any chat webview subscribed to the task's chat id sees the event immediately instead of having to reload to replay it from the events DB.<br/>`async cli_event(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `cliEvent` envelope carrying the event.
+  - `ctx`: The transport context of the current call (unused).
+
+- **cli_tab_hello** — Register a sorcar CLI REPL's tab id for talk arbitration. A CLI REPL announces its tab id so talk-playback arbitration can tell CLI terminal players apart from webview tabs. Only local UDS peers are terminal players; a WSS/browser peer cannot suppress playback on the daemon machine.<br/>`async cli_tab_hello(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `cliTabHello` command.
+  - `ctx`: The transport context of the current call.
+
+- **cli_task_start** — Record a CLI-launched task as running. The CLI announces a fresh running task so a webview tab that later resumes it from the history sidebar is subscribed to the live stream and shows the blinking-green-circle "running" indicator.<br/>`async cli_task_start(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `cliTaskStart` command.
+  - `ctx`: The transport context of the current call.
+
+- **cli_task_end** — Mark a CLI-launched task as finished. The CLI announces the task finished; the daemon stops the running indicator on every subscribed webview tab.<br/>`async cli_task_end(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `cliTaskEnd` command.
+  - `ctx`: The transport context of the current call.
+
+- **trajectory_jobs** — List all trajectory jobs (the `/api/jobs` endpoint). Mirrors the `/api/jobs` endpoint of the standalone trajectory visualizer (:mod:`kiss.viz_trajectory.server`, imported lazily so this client-importable module stays light).<br/>`trajectory_jobs() -> tuple[int, str, bytes]`
+
+  - **Returns:** `(200, "application/json", body)` with the JSON job list.
+
+- **job_trajectories** — Serve one job's trajectory list (`/api/jobs/<job>/trajectories`). Mirrors the `/api/jobs/<job_name>/trajectories` endpoint of the standalone trajectory visualizer.<br/>`job_trajectories(path: str) -> tuple[int, str, bytes]`
+
+  - `path`: Request path of the form `/api/jobs/<job_name>/trajectories`. The transport has already URL-decoded it exactly once; the job segment must NOT be unquoted again or names containing literal percent-escapes would spuriously 404.
+  - **Returns:** `(200, "application/json", body)` with the trajectory list, a 400 reply for an invalid job name, or a 404 reply when the job directory does not exist.
+
+**`validate_command`** — Validate one client command against the server API catalog.<br/>`def validate_command(cmd: Any) -> str | None`
+
+- `cmd`: The parsed JSON value received from a client.
+- **Returns:** `None` when *cmd* is a valid API command, otherwise a human-readable error string (unknown command name or missing required field).
+
+**`translate_webview_command`** — Translate a webview wire command into a backend command. The chat webview (`media/main.js`) speaks the wire dialect of this API; the backend agent server expects slightly different field names for one command. Translation applied: * `resumeSession` → renames the `id` field to `chatId` (`media/main.js` posts `userAnswer` directly, so no `userActionDone` rewrite is needed here.)<br/>`def translate_webview_command(cmd: dict[str, Any]) -> dict[str, Any]`
+
+- `cmd`: Raw command dictionary received from a client.
+- **Returns:** The (possibly copied and modified) command dictionary ready for the backend agent server (`VSCodeServer._handle_command`).
+
+**`passwords_equal`** — Compare two passwords in constant time to defeat timing attacks. Encodes both strings to UTF-8 bytes and delegates to :func:`secrets.compare_digest`.<br/>`def passwords_equal(a: str, b: str) -> bool`
+
+- `a`: First password string.
+- `b`: Second password string.
+- **Returns:** `True` when the two strings are equal.
+
+**`run`** — Run *prompt* as a task on the local Sorcar daemon and block until done. Connects to the `sorcar web` daemon's Unix-domain socket, sends the same `run` command a chat webview would, streams the task's events, and returns once the daemon reports the task finished.<br/>`def run(prompt: str, *, work_dir: str = '', model: str = '', chat_id: str = '', tools: str | Path | None = None, use_worktree: bool = False, auto_commit: bool = False, max_budget: float | None = None, model_config: dict[str, Any] | None = None, web_tools: bool | None = None, is_parallel: bool = False, timeout: float = 3600.0, sock_path: str | Path | None = None) -> TaskResult`
+
+- `prompt`: The task instruction to run.
+- `work_dir`: Working directory for the task; the daemon's current default is used when empty.
+- `model`: Model name; the daemon's selected default when empty.
+- `chat_id`: Optional existing chat session id to continue. Pass the `chat_id` of a previous :class:`TaskResult` to run this task in the same chat — the agent then sees the prior tasks and results of that chat as context. A new chat is started when empty.
+- `tools`: Optional path to a Python file supplying extra tools for the agent. The daemon imports the file and registers every top-level public function that is suitable as a tool (plain synchronous functions whose parameters are all keyword-bindable; `*args`/`**kwargs`/positional-only parameters and coroutine/generator functions are skipped). Each function's name, docstring (Google-style `Args:` section for parameter descriptions), and annotated parameters define the tool schema the agent sees, exactly like a native tool. The functions are never serialized by the client — they run **in the daemon process**. The path is resolved against this process's working directory.
+- `use_worktree`: Run the task in an isolated git worktree.
+- `auto_commit`: Auto-commit the task's changes on success.
+- `max_budget`: Per-task budget override in USD; `None` uses the daemon's configured default.
+- `model_config`: Per-task model configuration override (custom endpoint / headers); `None` uses the daemon's configured model endpoint. Must be JSON-serializable.
+- `web_tools`: Per-task browser-tool enablement override; `None` uses the daemon's configured default.
+- `is_parallel`: Whether the agent may spawn parallel sub-agents.
+- `timeout`: Maximum seconds to wait for the task to finish.
+- `sock_path`: Daemon UDS path override (defaults to `$KISS_SORCAR_SOCK` or `$KISS_HOME/sorcar.sock`).
+- **Returns:** A :class:`TaskResult` with the result text, success flag, cost (USD), total tokens, step count, chat id, and task id of the task. `chat_id` is the daemon chat session id and `task_id` the persisted `task_history` row id — both usable later to look up or resume the run in the daemon's history.
 
 ______________________________________________________________________

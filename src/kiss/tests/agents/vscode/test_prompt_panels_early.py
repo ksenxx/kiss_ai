@@ -45,11 +45,7 @@ from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.server.server import VSCodeServer
 
-# Simulated duration of the slow pre-prompt setup (model construction,
-# tool-schema build, model.initialize) that the REAL inner agent
-# performs before printing the authoritative prompt events.
 _SLOW_SETUP_S = 1.5
-# The early panels must appear well before the slow setup completes.
 _EARLY_DEADLINE_S = 1.0
 
 
@@ -228,13 +224,8 @@ class TestPromptPanelsEarly(unittest.TestCase):
                 "no early 'system_prompt' event within "
                 f"{_EARLY_DEADLINE_S}s of submit: {snapshot}"
             )
-            # The early panel shows the user's prompt verbatim.
             assert early_prompt.get("text") == user_prompt
-            # The early system prompt is non-empty (SYSTEM_PROMPT text).
             assert str(early_sys.get("text") or "").strip()
-            # The slow setup is still running: the AUTHORITATIVE events
-            # must not have arrived yet — the early pair is the only
-            # reason the panels are visible this soon.
             authoritative = [
                 e for e in snapshot
                 if e.get("type") in ("prompt", "system_prompt")
@@ -245,9 +236,6 @@ class TestPromptPanelsEarly(unittest.TestCase):
             )
         finally:
             self._join_task(tab)
-        # After the run, the authoritative pair (emitted by the inner
-        # agent) reached the tab as well — the frontend replaces the
-        # early panels with these in place.
         post = self._events_snapshot()
         auth_types = {
             e.get("type") for e in post

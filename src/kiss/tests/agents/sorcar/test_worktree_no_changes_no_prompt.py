@@ -48,12 +48,10 @@ class TestNoWorktreePromptWhenEmpty(_WorktreeNoAutocommitBase):
             "autoCommit": False,
             "model": "",
         })
-        # The branch is still preserved (see test_worktree_no_autocommit_branch).
         branches = _list_kiss_wt_branches(self.repo)
         assert len(branches) == 1, (
             f"Expected the worktree branch to remain preserved; got {branches}"
         )
-        # But the frontend prompt must be silent — no worktree_done event.
         types = self._types()
         assert "worktree_done" not in types, (
             f"BUG: worktree_done was broadcast even though the worktree "

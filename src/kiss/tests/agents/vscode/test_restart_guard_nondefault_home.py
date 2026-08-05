@@ -70,8 +70,6 @@ class TestRestartGuardNonDefaultHome(unittest.TestCase):
         vc.CONFIG_DIR = Path(self._tmpdir)
         vc.CONFIG_PATH = Path(self._tmpdir) / "config.json"
 
-        # Stub launchctl/systemctl on a private PATH so a (pre-fix)
-        # restart is observable without kicking the real daemon.
         self._stub_bin = Path(self._tmpdir) / "bin"
         self._stub_bin.mkdir()
         self._marker = Path(self._tmpdir) / "restart-invoked.log"
@@ -83,8 +81,6 @@ class TestRestartGuardNonDefaultHome(unittest.TestCase):
         self._orig_env_path = os.environ.get("PATH", "")
         os.environ["PATH"] = str(self._stub_bin)
 
-        # conftest.py already points KISS_HOME at a per-run temp dir;
-        # pin it explicitly so the test is self-contained.
         self._orig_kiss_home = os.environ.get("KISS_HOME")
         os.environ["KISS_HOME"] = self._tmpdir
 

@@ -36,7 +36,7 @@ def _module_name_for(path: Path) -> str:
         path: Path to a ``.py`` file under ``src/``.
 
     Returns:
-        Dotted module path, e.g. ``kiss.core.useful_tools``.
+        Dotted module path, e.g. ``kiss.agents.sorcar.useful_tools``.
     """
     rel = path.relative_to(SRC_ROOT).with_suffix("")
     parts = list(rel.parts)
@@ -58,29 +58,62 @@ def _resolve_relative(module_name: str, is_package: bool, node: ast.ImportFrom) 
         The absolute dotted module path being imported from.
     """
     parts = module_name.split(".")
-    # For a plain module, level 1 refers to its parent package; for a
-    # package __init__, level 1 refers to the package itself.
     base = parts[: len(parts) - node.level + (1 if is_package else 0)]
     if node.module:
         base = [*base, *node.module.split(".")]
     return ".".join(base)
 
 
-def _dynamic_import_target(node: ast.Call) -> str | None:
-    """Return the literal module path of a dynamic import call, if any.
+def _static_str(node: ast.expr) -> str | None:
+    """Fold *node* into a string when it is statically knowable.
 
-    Recognises ``importlib.import_module("...")``, ``import_module("...")``
-    and ``__import__("...")`` with a string-literal first argument.
-    Non-literal arguments (e.g. a dict lookup) cannot be resolved
-    statically and are ignored — the runtime alias tests and the
-    static-literal check together keep the invariant honest.
+    Handles plain literals, implicit/explicit concatenation
+    (``"kiss.agents." + "sorcar.useful_tools"``) and f-strings whose
+    every part — including each ``{...}`` interpolation — is itself
+    statically knowable.  Anything genuinely dynamic (a name, a call, a
+    subscript) returns ``None``.
+
+    Args:
+        node: The expression to fold.
+
+    Returns:
+        The folded string, or ``None`` when *node* is not static.
+    """
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _static_str(node.left)
+        right = _static_str(node.right)
+        return None if left is None or right is None else left + right
+    if isinstance(node, ast.FormattedValue):
+        # ``f"...{expr}..."`` — only foldable when the interpolation is
+        # itself static and nothing reformats it.
+        if node.conversion not in (-1, ord("s")) or node.format_spec is not None:
+            return None
+        return _static_str(node.value)
+    if isinstance(node, ast.JoinedStr):
+        parts = [_static_str(value) for value in node.values]
+        return None if any(p is None for p in parts) else "".join(p or "" for p in parts)
+    return None
+
+
+def _dynamic_import_target(node: ast.Call) -> str | None:
+    """Return the module path of a dynamic import call, if resolvable.
+
+    Recognises ``importlib.import_module(...)``, ``import_module(...)``
+    and ``__import__(...)``, reading the module from the first
+    positional argument or the ``name=`` keyword.  The argument is
+    constant-folded by :func:`_static_str`, so string concatenation and
+    f-strings are caught rather than silently ignored.  Genuinely
+    dynamic arguments (a variable, a dict lookup) cannot be resolved
+    statically; the runtime import tests cover those.
 
     Args:
         node: The ``ast.Call`` node to inspect.
 
     Returns:
-        The literal module path, or ``None`` when the call is not a
-        recognised dynamic import with a string-literal argument.
+        The module path, or ``None`` when the call is not a recognised
+        dynamic import with a statically knowable argument.
     """
     func_name = ""
     if isinstance(node.func, ast.Name):
@@ -89,12 +122,16 @@ def _dynamic_import_target(node: ast.Call) -> str | None:
         func_name = node.func.attr
     if func_name not in ("import_module", "__import__"):
         return None
-    if not node.args:
+
+    argument: ast.expr | None = node.args[0] if node.args else None
+    if argument is None:
+        for keyword in node.keywords:
+            if keyword.arg == "name":
+                argument = keyword.value
+                break
+    if argument is None:
         return None
-    first = node.args[0]
-    if isinstance(first, ast.Constant) and isinstance(first.value, str):
-        return first.value
-    return None
+    return _static_str(argument)
 
 
 def _kiss_imports(path: Path) -> list[tuple[int, str]]:

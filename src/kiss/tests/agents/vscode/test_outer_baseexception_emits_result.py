@@ -140,7 +140,6 @@ def _drive_run_task_with_base_exception(
     task_thread.start()
     task_thread.join(timeout=15)
     assert not task_thread.is_alive(), "task thread did not finish"
-    # Allow late post-status broadcasts (none expected post-fix) to land.
     time.sleep(0.1)
     with lock:
         return list(events)
@@ -178,8 +177,6 @@ class TestOuterBaseExceptionEmitsResult(TestCase):
             f"in main.js. Broadcast types observed: "
             f"{[e.get('type') for e in events]!r}"
         )
-        # The result text must carry the recovered summary, not the
-        # webview fallback string and not the empty string.
         texts = [e.get("text", "") for e in result_events]
         assert all(texts), (
             f"`type: result` event has empty `text`: {result_events!r}"
@@ -188,15 +185,9 @@ class TestOuterBaseExceptionEmitsResult(TestCase):
             f"`type: result` event carries the literal fallback: "
             f"{result_events!r}"
         )
-        # The recovered text should reference the exception so the user
-        # gets diagnostic context (matches the format chosen by the
-        # outer ``except BaseException`` for non-``KeyboardInterrupt``
-        # cases: "Task failed: <type>: <msg>").
         assert any("_CustomBaseException" in t for t in texts), (
             f"expected exception type in result `text`, got {texts!r}"
         )
-        # The event must declare the failure outcome (``success: False``)
-        # so the webview renders the failure styling.
         assert all(e.get("success") is False for e in result_events), (
             f"result event missing success=False: {result_events!r}"
         )

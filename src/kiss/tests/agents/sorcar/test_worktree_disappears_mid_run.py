@@ -98,23 +98,17 @@ def test_worktree_disappears_mid_run_bash_falls_back(tmp_path, monkeypatch):
     def stub_run(self_kiss, *args, tools=None, **kwargs):
         captured["call_count"] += 1
         call_idx = captured["call_count"] - 1
-        # Pretend we used one step / no tokens / no budget so the
-        # surrounding ``RelentlessAgent`` loop's accounting stays sane.
         self_kiss.step_count = 1
         self_kiss.total_tokens_used = 0
         self_kiss.budget_used = 0.0
 
         bash_tool = _find_tool(tools, "Bash")
-        # ``Bash`` is a plain closure (grep-hint interception wrapper),
-        # so reach the shared ``UsefulTools`` instance through the
-        # still-bound ``Read`` tool.
         read_tool = _find_tool(tools, "Read")
         useful = getattr(read_tool, "__self__", None) if read_tool else None
         work_dir = useful.work_dir if useful else None
 
         if call_idx == 0:
             captured["session0_work_dir"] = work_dir
-            # Simulate worktree directory vanishing mid-task.
             assert work_dir is not None
             shutil.rmtree(work_dir)
             return yaml.dump({
@@ -123,10 +117,6 @@ def test_worktree_disappears_mid_run_bash_falls_back(tmp_path, monkeypatch):
                 "summary": "Worktree was removed mid-session.",
             })
 
-        # Second sub-session: ``self.work_dir`` on the shared
-        # ``UsefulTools`` instance still points at the now-deleted
-        # worktree.  Without the ``_spawn`` fallback fix this would
-        # raise ``FileNotFoundError: [Errno 2]`` from Popen.
         try:
             output = bash_tool("pwd", "probe")
         except FileNotFoundError as exc:
@@ -154,40 +144,29 @@ def test_worktree_disappears_mid_run_bash_falls_back(tmp_path, monkeypatch):
         is_parallel=False,
     )
 
-    # Two sub-sessions must have been executed (the continuation
-    # actually fired through the RelentlessAgent loop).
     assert captured["call_count"] == 2, (
         f"Expected 2 sessions, got {captured['call_count']}"
     )
 
-    # First session ran inside the per-task worktree dir.
     session0_wd = captured["session0_work_dir"]
     assert session0_wd is not None
     assert ".kiss-worktrees" in session0_wd, session0_wd
     assert "kiss_wt-" in session0_wd, session0_wd
 
-    # No FileNotFoundError must have propagated out of Bash.
     assert captured["session1_bash_exception"] is None, (
         captured["session1_bash_exception"]
     )
 
-    # The Bash output must NOT contain ``[Errno 2]`` / "No such file
-    # or directory" — the bug's exact failure signature.
     bash_out = captured["session1_bash_output"] or ""
     assert "Errno 2" not in bash_out, bash_out
     assert "No such file or directory" not in bash_out, bash_out
 
-    # ``pwd`` must report an existing directory (the fallback target).
     pwd_path = Path(bash_out.strip())
     assert pwd_path.exists(), (
         f"Bash reported a non-existent cwd: {bash_out!r}"
     )
 
-    # The fallback target should be the parent repo root (or anywhere
-    # under it), not the deleted worktree path.
     assert ".kiss-worktrees" not in str(pwd_path.resolve()), pwd_path
 
-    # The agent's run must complete without re-raising and must return
-    # a valid YAML payload.
     payload = yaml.safe_load(result)
     assert isinstance(payload, dict), result

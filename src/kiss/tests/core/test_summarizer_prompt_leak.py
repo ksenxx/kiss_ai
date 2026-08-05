@@ -33,9 +33,9 @@ from typing import Any
 
 import pytest
 
+from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.core.kiss_error import KISSError
 from kiss.core.printer import Printer
-from kiss.core.relentless_agent import RelentlessAgent
 
 _MODEL = "gpt-4o-mini"
 _TASK = "Do nothing forever."
@@ -281,7 +281,6 @@ class TestSummarizerPromptDoesNotLeakIntoEvents:
             f"event stream as a type='prompt' event: {leaked[0][:200]!r}"
         )
 
-        # Every remaining prompt event must be the actual task prompt.
         non_task = [p for p in prompt_events if _TASK not in p]
         assert not non_task, (
             "unexpected non-task prompt event(s) leaked into the "

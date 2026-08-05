@@ -89,8 +89,6 @@ class TestCustomCommandUsesCallerSubmit(CliClientBase):
         )
         self.assertFalse(result)
         self.assertEqual(submitted, ["Hello world"])
-        # The expanded prompt must NOT have been sent as a raw ``run``
-        # with default flags behind the caller's back.
         run_cmds = [
             c for c in self.harness.received_cmds if c.get("type") == "run"
         ]
@@ -166,17 +164,6 @@ class TestErrorEventNullText(CliClientBase):
         )
         client.start(timeout=5.0)
         try:
-            # ``start()`` returns once the UDS connection is open and the
-            # hello commands are written, but the daemon registers the
-            # connection for broadcasts (``add_uds_writer``) only when its
-            # accept handler runs on the server loop — a broadcast issued
-            # before that is legitimately dropped (broadcasts reach current
-            # subscribers only).  A request/reply round-trip closes the
-            # race deterministically: the handler registers the writer
-            # BEFORE reading any command, so once the ``models`` reply
-            # arrives the client is guaranteed subscribed.  The reply
-            # must actually arrive (non-empty) — a timed-out round-trip
-            # would leave the race unsynchronised.
             self.assertGreater(len(_request_models(client)), 0)
             self.harness.server._printer.broadcast(
                 {"type": "error", "text": None},
@@ -208,7 +195,6 @@ class TestSockPathSharedBehaviour(CliClientBase):
     """Issue 4: both modules must resolve the exact same socket path."""
 
     def test_env_override_honoured_and_modules_agree(self) -> None:
-        # CliClientBase's harness exports KISS_SORCAR_SOCK.
         expected = Path(os.environ["KISS_SORCAR_SOCK"])
         self.assertEqual(cli_client_mod._sock_path(), expected)
         self.assertEqual(cli_daemon_bridge._sock_path(), expected)

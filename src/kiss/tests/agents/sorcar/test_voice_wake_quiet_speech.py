@@ -83,8 +83,6 @@ class TestLeadingNoiseGate(unittest.TestCase):
     """wake_with_leading_noise accepts brief noise, nothing more."""
 
     def test_measured_soft_sorcar_decode_wakes(self) -> None:
-        # The exact decode of whispered "Sorcar" measured live: a 60ms
-        # breathy-onset [unk] then the alias.  This is the bug's shape.
         self.assertTrue(
             wake_with_leading_noise([
                 {"word": "[unk]", "start": 0.0, "end": 0.06, "conf": 0.51},
@@ -94,8 +92,6 @@ class TestLeadingNoiseGate(unittest.TestCase):
         )
 
     def test_long_unk_prefix_rejects(self) -> None:
-        # Spoken-word prefixes decode to [unk] spans of ~0.5s and up
-        # ("hey there" 0.61s measured); they must stay rejected.
         self.assertFalse(
             wake_with_leading_noise([
                 {"word": "[unk]", "start": 0.0, "end": 0.61},
@@ -113,12 +109,10 @@ class TestLeadingNoiseGate(unittest.TestCase):
         ]
         self.assertGreater(0.4, MAX_LEADING_NOISE_SECONDS)
         self.assertFalse(wake_with_leading_noise(words))
-        words[1]["end"] = 0.3  # total 0.25s, within the budget
+        words[1]["end"] = 0.3
         self.assertTrue(wake_with_leading_noise(words))
 
     def test_anything_after_the_alias_rejects(self) -> None:
-        # "yes sir the car is ready" decodes [unk] sir car [unk]; the
-        # utterance does not END with the alias so it must not wake.
         self.assertFalse(
             wake_with_leading_noise([
                 {"word": "[unk]", "start": 0.0, "end": 0.21},
@@ -129,8 +123,6 @@ class TestLeadingNoiseGate(unittest.TestCase):
         )
 
     def test_non_alias_tail_rejects(self) -> None:
-        # "he wrecked his car" decodes [unk] car; "car" alone is not
-        # an alias.
         self.assertFalse(
             wake_with_leading_noise([
                 {"word": "[unk]", "start": 0.0, "end": 0.06},
@@ -139,8 +131,6 @@ class TestLeadingNoiseGate(unittest.TestCase):
         )
 
     def test_alias_without_noise_prefix_is_not_this_gates_job(self) -> None:
-        # A clean alias is matches_wake's case; this gate demands at
-        # least one leading [unk] so it never widens exact matching.
         self.assertFalse(
             wake_with_leading_noise([
                 {"word": "sore", "start": 0.0, "end": 0.3},
@@ -149,8 +139,6 @@ class TestLeadingNoiseGate(unittest.TestCase):
         )
 
     def test_missing_timings_reject(self) -> None:
-        # Without numeric start/end the noise span is unknowable; the
-        # gate only opens on evidence.
         self.assertFalse(
             wake_with_leading_noise([
                 {"word": "[unk]"},
@@ -175,11 +163,6 @@ class TestQuietSpeechWake(unittest.TestCase):
     """Soft breathy 'Sorcar' wakes; word-prefixed sentences never do."""
 
     def test_soft_breathy_sorcar_wakes_every_time(self) -> None:
-        # The Whisper voice renders soft breathy speech; its first
-        # utterance decodes as '[unk] sore car' (60ms breathy-onset
-        # [unk], deterministic).  Every one of the three utterances
-        # must wake — before the fix only two did, which is exactly
-        # the "I have to speak loudly" bug.
         with tempfile.TemporaryDirectory() as tmp:
             pcm = _tts_pcm(
                 Path(tmp),
@@ -191,8 +174,6 @@ class TestQuietSpeechWake(unittest.TestCase):
         self.assertEqual(_count_wakes(pcm), 3)
 
     def test_sentences_with_word_prefixes_still_never_wake(self) -> None:
-        # Spoken words before an alias-sounding tail decode to long
-        # [unk] spans; the leading-noise budget must reject them all.
         with tempfile.TemporaryDirectory() as tmp:
             pcm = _tts_pcm(
                 Path(tmp),

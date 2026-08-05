@@ -130,10 +130,10 @@ def _find_consecutive_tool_calls_end(content: str) -> int:
             else:
                 between = content[last_tc_end:start]
                 if between.strip():
-                    break  # Non-whitespace between blocks → stop
+                    break
                 last_tc_end = end
         elif last_tc_end != -1:
-            break  # Non-tool-calls JSON after tool_calls → stop
+            break
     return last_tc_end
 
 
@@ -177,21 +177,8 @@ class ClaudeCodeModel(CLITextModel):
             thinking_callback=thinking_callback,
         )
         self._cli_model = model_name[3:] if model_name.startswith("cc/") else model_name
-        # Thinking-block text from the most recent generation.  Captured so
-        # that text-based tool-call parsing can fall back to thinking content
-        # when reasoning models (e.g. ``cc/opus``) emit the ``tool_calls``
-        # JSON inside an extended-thinking block instead of a text block.
         self._last_thinking_content: str = ""
-        # Text accumulated from ``content_block_delta`` events *before* the
-        # ``result`` event replaces it.  The ``result`` event's ``result``
-        # field is authoritative for display, but it can be empty or
-        # stripped even when the streaming deltas carried valid content
-        # (including ``tool_calls`` JSON).  Keeping the pre-result snapshot
-        # lets :meth:`generate_and_process_with_tools` recover tool calls
-        # that would otherwise be lost.
         self._pre_result_content: str = ""
-        # Set by :meth:`_parse_stream_events` when it exits early because
-        # a complete ``tool_calls`` JSON block was found in the stream.
         self._stopped_for_tool_calls: bool = False
 
     def _build_prompt(self) -> str:
@@ -219,13 +206,6 @@ class ClaudeCodeModel(CLITextModel):
             List of CLI arguments.
         """
         cli = _find_claude_cli()
-        # ``--print`` and ``--disable-slash-commands`` make the CLI behave as
-        # a pure single-shot LLM: no hooks, LSP, plugin sync, auto-memory,
-        # background prefetches, keychain reads, CLAUDE.md auto-discovery,
-        # skills, or agents.  Combined with ``--tools ""`` and
-        # ``--no-session-persistence`` the CLI does a single API call and
-        # returns the raw model response — exactly what we want when the
-        # Sorcar agent is the one orchestrating tools.
         args = [
             cli,
             "--print",
@@ -286,15 +266,6 @@ class ClaudeCodeModel(CLITextModel):
         self._stopped_for_tool_calls = False
         assert proc.stdout is not None
 
-        # Enforce the timeout on the ENTIRE stream read, not just the
-        # final proc.wait(): without a deadline, a hung or stalled
-        # ``claude`` CLI blocks the agent forever regardless of the
-        # configured timeout.  A daemon reader thread drains stdout into
-        # a queue while THIS thread consumes the queue with a deadline
-        # and runs the event parsing — the token/thinking callbacks must
-        # execute on the calling thread because printers attribute
-        # events by thread-local ``task_id`` (see the identical
-        # constraint in ``UsefulTools._bash_streaming``).
         stdout = proc.stdout
         out_queue: queue.Queue[str | None] = queue.Queue()
 
@@ -303,8 +274,6 @@ class ClaudeCodeModel(CLITextModel):
                 for line in stdout:
                     out_queue.put(line)
             finally:
-                # EOF sentinel — also emitted when readline raises so
-                # the consumer can never wait on a dead reader.
                 out_queue.put(None)
 
         threading.Thread(target=_drain_stdout, daemon=True).start()
@@ -342,8 +311,6 @@ class ClaudeCodeModel(CLITextModel):
                 proc.wait()
         else:
             proc.wait(timeout=timeout)
-            # Allow -15 (SIGTERM) which can happen if the process was
-            # terminated slightly before we reach wait().
             if proc.returncode not in (
                 0,
                 -15,
@@ -402,12 +369,7 @@ class ClaudeCodeModel(CLITextModel):
         seen_assistant_id: str | None = None
         saw_content_block = False
         thinking_started = False
-        # Fast-path guard: only start expensive JSON parsing once we have
-        # seen the ``"tool_calls"`` substring somewhere in the content.
         seen_tool_calls_hint = False
-        # Two-phase tool-calls collection: after the first tool_calls block
-        # is found, keep streaming to collect consecutive blocks.  Stop when
-        # non-JSON trailing content appears.
         found_tool_calls = False
         last_tc_end = -1
 
@@ -488,26 +450,13 @@ class ClaudeCodeModel(CLITextModel):
             elif event_type == "result":
                 result_json = event
                 pre_result_content = content
-                # When tool_calls were found during streaming, keep the
-                # accumulated content (which contains the JSON) instead of
-                # replacing it with the result event text (which may be
-                # empty or stripped).
                 if not found_tool_calls:
                     content = event.get("result", content)
 
-        # Post-loop fixup: if tool_calls were detected but no trailing
-        # hallucinated text caused an early stop (model finished normally),
-        # truncate to the last tool_calls block and set the flag.
         if found_tool_calls and not self._stopped_for_tool_calls:
             content = content[:last_tc_end]
             self._stopped_for_tool_calls = True
 
-        # When we stopped early for tool_calls, continue reading the
-        # stream to capture the "result" event which carries usage data
-        # (input/output/cache token counts).  The "result" event always
-        # arrives AFTER all content blocks, so it was skipped by the
-        # early break above.  Without this, every agentic Claude Code
-        # call reports 0 tokens / $0 cost.
         if self._stopped_for_tool_calls and not result_json:
             for event in events:
                 if event.get("type") == "result":
@@ -548,11 +497,6 @@ class ClaudeCodeModel(CLITextModel):
         finally:
             self.model_config = original_config
 
-        # Merge tool calls from all content sources.  The ``result`` event
-        # can replace accumulated content with a version missing some tool
-        # calls, and reasoning models may emit tool_calls inside thinking
-        # blocks.  Parsing all three sources and de-duplicating ensures
-        # nothing is lost.
         all_sources = [content]
         if self._pre_result_content:
             all_sources.append(self._pre_result_content)

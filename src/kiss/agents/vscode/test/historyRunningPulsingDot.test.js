@@ -2,45 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Integration test for the "pulsing green circle" running-task
-// indicator inside the History sidebar's per-task rows.
-//
-// Requirement driven by this test:
-//
-//   Every history row whose backend-supplied ``is_running`` flag
-//   is ``true`` MUST render a ``<span class="sidebar-item-running">``
-//   FIRST inside the row (before the text span).  The dot is the
-//   green pulsing indicator the user sees in the History panel:
-//
-//     * Computed ``background-color`` matches ``#2e7d32``
-//       (rgb(46, 125, 50)) — VS Code's "running" green.
-//     * Computed ``animation-name`` is ``sidebar-running-pulse``.
-//     * The ``sidebar-running-pulse`` @keyframes rule is wired up
-//       in ``main.css`` (so the dot actually pulses in a real
-//       browser, not just sits there static).
-//     * The dot is the FIRST child of its row so it sits to the
-//       left of the task title.
-//
-//   Rows whose ``is_running`` is ``false`` MUST NOT render the
-//   ``.sidebar-item-running`` dot.
-//
-//   When the backend broadcasts a ``status`` event signalling that
-//   a task started running, the frontend MUST refresh the history
-//   panel (via ``getHistory``).  After the new history reply
-//   arrives with the row's ``is_running`` flipped to ``true``, the
-//   pulsing-green-dot indicator MUST appear on that row WITHOUT a
-//   full page reload.  Conversely, when ``status`` flips back to
-//   ``false`` and the history reply reflects ``is_running:false``,
-//   the dot MUST disappear.
-//
-// This test drives the production ``media/main.js`` (plus the real
-// ``media/chat.html`` markup and ``media/panelCopy.js``) inside jsdom,
-// exactly like ``historyTaskDuration.test.js``.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/historyRunningPulsingDot.test.js
 
 'use strict';
 
@@ -93,20 +54,16 @@ function makeWebview() {
     };
   };
 
-  // Inject the real main.css too — the test asserts on computed
-  // background-color and animation-name of the dot, both of which
-  // come from main.css's ``.sidebar-item-running`` rule.  The
-  // chat.html shipped to VS Code's webview pulls main.css via a
-  // ``<link>`` tag whose href is templated to a webview-only
-  // ``vscode-webview://...`` URL — jsdom can't fetch that, so we
-  // inline the stylesheet here.
   const cssText = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
   const styleEl = win.document.createElement('style');
   styleEl.textContent = cssText;
   win.document.head.appendChild(styleEl);
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
@@ -116,8 +73,6 @@ function send(win, data) {
 }
 
 function openSidebar(win) {
-  // Many code paths gate refreshHistory() on the sidebar being
-  // ``.open``.  Status events don't trigger a refetch otherwise.
   const sidebar = win.document.getElementById('sidebar');
   if (sidebar && !sidebar.classList.contains('open')) {
     sidebar.classList.add('open');
@@ -165,8 +120,6 @@ function rowsByTaskId(win) {
   const rows = list.querySelectorAll('.sidebar-item');
   const map = {};
   rows.forEach(r => {
-    // The frontend doesn't yet stamp data-task-id on each row, so
-    // fall back to the row's title to identify it.
     const t = r.querySelector('.sidebar-item-text');
     if (!t) return;
     map[t.textContent] = r;
@@ -210,45 +163,33 @@ function testDotRendersForRunningRow() {
   const dot = dotOf(running);
   assert.ok(dot, 'running row must carry .sidebar-item-running dot');
 
-  // The dot must be the FIRST child so it sits to the left of the
-  // task title in the History row.
   assert.strictEqual(
     running.firstElementChild,
     dot,
     'running dot must be the first child of the row (left of text)',
   );
 
-  // Computed style must reflect the green pulsing rule.  rgb(46, 125, 50)
-  // == ``#2e7d32``.
   const cs = win.getComputedStyle(dot);
   assert.strictEqual(
     cs.backgroundColor,
     'rgb(46, 125, 50)',
     `dot background must be #2e7d32 (rgb(46, 125, 50)); got: ${cs.backgroundColor}`,
   );
-  // jsdom doesn't fully expand the ``animation`` shorthand on every
-  // version, but it does expose ``animation-name`` when the
-  // longhand is parseable.  Accept either path: the explicit
-  // ``animation-name`` longhand, or the unexpanded ``animation``
-  // shorthand string that mentions the keyframe name.
   const animName = cs.getPropertyValue('animation-name') || '';
   const animShort = cs.getPropertyValue('animation') || '';
   assert.ok(
-    animName.indexOf('sidebar-running-pulse') >= 0 ||
-      animShort.indexOf('sidebar-running-pulse') >= 0,
-    `dot must animate via 'sidebar-running-pulse'; got animation-name=` +
+    animName.indexOf('running-pulse') >= 0 ||
+      animShort.indexOf('running-pulse') >= 0,
+    `dot must animate via 'running-pulse'; got animation-name=` +
       `"${animName}" animation="${animShort}"`,
   );
 
-  // The keyframe rule must actually exist in main.css.
   const cssText = fs.readFileSync(path.join(MEDIA, 'main.css'), 'utf8');
   assert.ok(
-    /@keyframes\s+sidebar-running-pulse\b/.test(cssText),
-    'main.css must define @keyframes sidebar-running-pulse',
+    /@keyframes\s+running-pulse\b/.test(cssText),
+    'main.css must define @keyframes running-pulse',
   );
 
-  // The row must also stamp ``data-category=running`` so the
-  // history filter bar can show/hide it.
   assert.strictEqual(running.dataset.category, 'running');
 
   win.close();
@@ -256,12 +197,6 @@ function testDotRendersForRunningRow() {
 }
 
 function testDotAppearsLiveOnStatusRunningTrue() {
-  // Reproduce the "user starts a new task while the History panel
-  // is open" flow: an initial history reply has the row marked
-  // ``is_running:false``; then a backend ``status`` event flips it
-  // to running, prompting the frontend to refetch history; the new
-  // reply carries ``is_running:true`` and the dot must appear on
-  // the same row (identified by task_id) WITHOUT a page reload.
   const {win, posted} = makeWebview();
   openSidebar(win);
   uncheckWorkspaceFilter(win);
@@ -279,9 +214,6 @@ function testDotAppearsLiveOnStatusRunningTrue() {
     'no dot before the task starts running',
   );
 
-  // Backend broadcasts that the task started.  The frontend's
-  // ``status`` handler calls ``refreshHistory()``, which posts
-  // ``getHistory``.  We assert that round-trip kicks off.
   posted.length = 0;
   send(win, {
     type: 'status',
@@ -297,10 +229,6 @@ function testDotAppearsLiveOnStatusRunningTrue() {
       'posted=' + JSON.stringify(posted),
   );
 
-  // Backend reply carries the same row with is_running flipped.
-  // The generation field MUST match the one the frontend bumped
-  // when posting ``getHistory`` — otherwise renderHistory drops
-  // the reply as stale.
   const generation = sent.generation;
   const live = [
     makeRow({task_id: 7, title: 'live task', is_running: true, endTs: 0}),
@@ -331,8 +259,6 @@ function testDotAppearsLiveOnStatusRunningTrue() {
 }
 
 function testDotDisappearsLiveOnStatusRunningFalse() {
-  // Mirror of the previous test: a running row's dot must be
-  // removed once the backend signals the task ended.
   const {win, posted} = makeWebview();
   openSidebar(win);
   uncheckWorkspaceFilter(win);

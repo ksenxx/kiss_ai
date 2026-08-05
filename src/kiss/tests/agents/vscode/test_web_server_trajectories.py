@@ -68,8 +68,6 @@ class TestTrajectoryRoutes(IsolatedAsyncioTestCase):
             self._orig_config = CONFIG_PATH.read_text()
         save_config({"remote_password": ""})
 
-        # Redirect the server's jobs-root resolver to a private temp dir so
-        # the test does not depend on (or pollute) the real artifact dir.
         self._jobs_root = Path(tempfile.mkdtemp(prefix="kiss_traj_test_")) / "jobs"
         self._jobs_root.mkdir(parents=True)
         _write_trajectory(self._jobs_root, "job_2024_01_01_00_00_00_1", "Agent A")

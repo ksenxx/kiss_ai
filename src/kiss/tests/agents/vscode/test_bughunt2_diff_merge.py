@@ -77,19 +77,16 @@ def test_gitattributes_binary_text_file_is_reviewable(tmp_path: Path) -> None:
     """An edited attr-binary (but text-on-disk) file must appear in review."""
     repo, original = _make_repo(tmp_path)
 
-    # Pre-task capture, exactly as task_runner does it.
     pre_hunks = _parse_diff_hunks(str(repo))
     pre_untracked = _capture_untracked(str(repo))
     pre_hashes = _snapshot_files(
         str(repo), pre_untracked | set(pre_hunks.keys()),
     )
 
-    # Agent action: edit the attribute-binary file with pure text bytes.
     (repo / "data.dat").write_text(
         original.replace("record 5\n", "record 5 changed\n"),
     )
 
-    # Sanity: git really reports this as a hunk-less binary diff.
     diff = subprocess.run(
         ["git", "diff", "-U0", "--no-renames", "HEAD", "--no-color"],
         cwd=repo, capture_output=True, text=True, check=False,
@@ -102,7 +99,6 @@ def test_gitattributes_binary_text_file_is_reviewable(tmp_path: Path) -> None:
         str(repo), str(data_dir), pre_hunks, pre_untracked, pre_hashes,
     )
 
-    # The bug made the only change invisible: {"error": "No changes"}.
     assert result.get("status") == "opened", result
 
     manifest = json.loads((data_dir / "pending-merge.json").read_text())
@@ -110,8 +106,6 @@ def test_gitattributes_binary_text_file_is_reviewable(tmp_path: Path) -> None:
     assert "data.dat" in entries, sorted(entries)
     entry = entries["data.dat"]
 
-    # It must be reviewed as a whole-file binary decision, and its base
-    # copy must hold the pre-task bytes so rejecting restores them.
     assert entry.get("binary") is True, entry
     assert Path(entry["base"]).read_bytes() == original.encode()
     assert Path(entry["current"]).read_text() != original

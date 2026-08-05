@@ -63,11 +63,9 @@ class TestAskUserStaleAnswer:
         the line lands in ``_answer_q`` with no waiter to consume it.
         """
         session, _state = _make_session("bh9-ask-chat")
-        # --- reproduce the race window deterministically ---
         session._question_pending.set()
         session._on_submit("stale answer from previous question")
         session._question_pending.clear()
-        # --- next question must NOT return the stale leftover ---
         answers: list[str] = []
 
         def _worker() -> None:
@@ -75,8 +73,6 @@ class TestAskUserStaleAnswer:
 
         thread = threading.Thread(target=_worker, daemon=True)
         thread.start()
-        # The question must still be pending (i.e. NOT answered by the
-        # stale leftover) so the user's real submit is what resolves it.
         assert session._question_pending.wait(timeout=5.0), (
             "ask_user_question resolved before any user submit — it"
             " consumed the stale leftover answer"
@@ -101,7 +97,6 @@ class TestAskUserStaleAnswer:
         thread.join(timeout=5.0)
         assert not thread.is_alive()
         assert answers == ["blue"]
-        # Submits after the question completes go to the steering queue.
         session._on_submit("follow-up instruction")
         assert _state.pending_user_messages == ["follow-up instruction"]
 
@@ -124,9 +119,6 @@ class TestMenuAutoDismissClearsReplacements:
         assert box._open_completion_menu()
         assert box._menu_open
         assert box._menu_repls == ["/alpha", "/beta"]
-        # Grow the buffer so tall (500+ body rows) that no terminal can
-        # fit a single menu row above the box: room collapses to zero
-        # and the menu must auto-dismiss completely.
         box.buf = "x" + "\n" * 500
         with box.lock:
             assert box._menu_h() == 0
@@ -140,8 +132,6 @@ class TestMenuAutoDismissClearsReplacements:
 class TestNormalizeCandidatesEmbeddedNewlines:
     def test_embedded_newlines_flattened_in_display(self) -> None:
         repls, displays = _normalize_candidates(
-            # Mixed str/tuple candidates are supported at runtime even
-            # though the annotation advertises homogeneous lists.
             [("task-1", "task-1: fix the\nlogin bug\n"), "plain\ncand\n"],  # type: ignore[arg-type]
         )
         assert repls == ["task-1", "plain\ncand"]
@@ -174,6 +164,5 @@ class TestNormalizeCandidatesEmbeddedNewlines:
         ]
         for item in box._menu_items:
             assert "\n" not in item and "\r" not in item
-        # Accept still inserts the (unflattened) replacement text.
         box._menu_accept()
         assert box.buf == "one"

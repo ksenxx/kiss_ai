@@ -198,13 +198,13 @@ class TestF4BufLockDiscipline(unittest.TestCase):
         self.assertEqual(box.buf, "abc")
         box.feed(b"\x7f", lines.append, _noop_abort)
         self.assertEqual(box.buf, "ab")
-        box.feed(b"\n", lines.append, _noop_abort)  # Ctrl+J newline insert
+        box.feed(b"\n", lines.append, _noop_abort)
         self.assertEqual(box.buf, "ab\n")
-        box.feed(b"c\r", lines.append, _noop_abort)  # Enter submits
+        box.feed(b"c\r", lines.append, _noop_abort)
         self.assertEqual(lines, ["ab\nc"])
         self.assertEqual(box.buf, "")
-        box.feed(b"\x1b[A", lines.append, _noop_abort)  # Up: history
-        self.assertEqual(box.buf, "")  # history list not fed here — no-op
+        box.feed(b"\x1b[A", lines.append, _noop_abort)
+        self.assertEqual(box.buf, "")
 
 
 class TestF5TitleStatusLockDiscipline(unittest.TestCase):
@@ -292,7 +292,7 @@ class TestF6InterruptWorker(unittest.TestCase):
         worker.join(timeout=5.0)
         self.assertFalse(worker.is_alive())
         t0 = time.monotonic()
-        session._interrupt_worker(worker)  # must not raise
+        session._interrupt_worker(worker)
         self.assertLess(time.monotonic() - t0, 1.0)
 
 
@@ -344,8 +344,6 @@ class TestF13HistoryFormats(unittest.TestCase):
         self.assertIn("BASE_EXISTS False", proc.stdout)
         self.assertIn("SIBLING_EXISTS True", proc.stdout)
         self.assertIn("RELOADED w2 history entry", proc.stdout)
-        # The anchored REPL's view of the base path stays empty — the
-        # readline format never contaminates it.
         self.assertEqual(_load_history_lines(self.base), [])
 
     def test_anchored_load_skips_legacy_libedit_header(self) -> None:
@@ -367,7 +365,7 @@ class TestF13HistoryFormats(unittest.TestCase):
 class TestF19NoImportTimeGlobalMutation(unittest.TestCase):
     """F19: importing cli_prompt must not strip prompt_toolkit globals."""
 
-    SEQ = "\\x1b[27;2;13~"  # Shift+Enter (modifyOtherKeys)
+    SEQ = "\\x1b[27;2;13~"
 
     def test_import_leaves_ansi_sequences_intact(self) -> None:
         script = (
@@ -562,7 +560,6 @@ class TestF22StartBeforeEvents(_PrinterTestBase):
                     "taskId": task_id,
                 }
             )
-        # start + 4 events + result event + end = 7 envelopes per task.
         self.server.wait_for(7 * len(task_ids))
         envelopes = self.server.snapshot()
         for task_id in task_ids:

@@ -99,10 +99,6 @@ class TestSaveConfigJunkTypes(_ConfigIsolationMixin):
         self.assertIn("models", [e.get("type") for e in events])
 
     def test_junk_remote_password_not_persisted(self) -> None:
-        # A truthy non-string password (e.g. 123456) must neither be
-        # persisted (it would lock the user out of web auth) nor be
-        # treated as a genuine password change (which restarts the
-        # kiss-web daemon, killing every in-flight task).
         server, _ = self._server()
         server._handle_command(
             {"type": "saveConfig", "config": {"remote_password": 123456}},
@@ -117,9 +113,6 @@ class TestHandEditedConfigJunkTypes(_ConfigIsolationMixin):
         self._write_config({"custom_endpoint": 123})
         server, events = self._server()
         events.clear()
-        # Pre-fix: AttributeError ('int' object has no attribute
-        # 'rstrip') escaped _handle_command; in production the models
-        # reply was silently dropped forever.
         server._handle_command({"type": "getModels"})
         self.assertIn("models", [e.get("type") for e in events])
 
@@ -147,7 +140,6 @@ class TestHandEditedConfigJunkTypes(_ConfigIsolationMixin):
         self.assertEqual(cfg["work_dir"], "")
         self.assertEqual(cfg["last_model"], "")
         self.assertIs(cfg["use_web_browser"], True)
-        # Non-DEFAULTS keys pass through untouched.
         self.assertEqual(cfg["tunnel_token"], ["keep", "me"])
 
 

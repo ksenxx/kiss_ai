@@ -2,39 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression test: discarding a worktree branch must be
-// SILENT — no notification toast in the chat webview and no printed
-// line in the chat transcript.
-//
-// Bug reproduced: when the user clicked "Discard" on the worktree
-// action bar the extension (SorcarSidebarView) opened a
-// "Discarding worktree…" progress toast, and when the daemon
-// broadcast the successful ``worktree_result`` with the message
-// ``Discarded branch '<name>'.`` it unconditionally called
-// ``showInformationNotification`` — popping pointless toasts over
-// the chat webview for an action whose visible effect (the worktree
-// bar disappearing) is already obvious.
-//
-// This test drives the real compiled SorcarSidebarView + AgentClient
-// against a real Unix-domain-socket daemon stub (only the `vscode`
-// module is stubbed), plus the real media/main.js chat webview in a
-// JSDOM.  It asserts:
-//   1. The REAL discard click path (webview worktreeAction command +
-//      daemon worktree_result) produces NO notification of any kind —
-//      no progress toast, no result toast, no native VS Code
-//      notification.
-//   2. The merge click path still shows a progress toast and a result
-//      notification, and closes the toast on completion (regression
-//      guard).
-//   3. A discard result carrying a warning still produces a
-//      notification (the user must see warnings).
-//   4. A FAILED discard still produces an error notification.
-//   5. The chat webview (main.js) does not append a transcript line
-//      for a plain successful discard — neither on the active tab nor
-//      buffered into a background tab's restored transcript — while
-//      merge results, warning-carrying discards, and failures are
-//      still printed.
 
 'use strict';
 
@@ -131,8 +98,6 @@ Module._resolveFilename = function (request, parent, ...rest) {
   if (request === 'vscode') return require.resolve('./_vscode-stub.js');
   return origResolve.call(this, request, parent, ...rest);
 };
-// ``_vscode-stub.js`` is a git-tracked fixture shared by several tests
-// that run in parallel; never write or delete it here.
 global.__kissVscodeStub = vscodeStub;
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-wt-discard-'));
@@ -223,6 +188,10 @@ function makeDomWebview() {
     dom.getInternalVMContext(),
   );
   vm.runInContext(
+    fs.readFileSync(path.join(mediaDir, 'api.js'), 'utf8'),
+    dom.getInternalVMContext(),
+  );
+  vm.runInContext(
     fs.readFileSync(path.join(mediaDir, 'main.js'), 'utf8'),
     dom.getInternalVMContext(),
   );
@@ -263,10 +232,6 @@ async function testExtensionSide() {
   wv.fireMessage({type: 'ready', tabId: TAB, restoredTabs: []});
   await waitForClient();
 
-  // 1. The REAL discard click path: webview posts a worktreeAction
-  //    discard command, then the daemon replies with the result.
-  //    Neither step may open any notification — not even a
-  //    "Discarding worktree…" progress toast.
   wv.fireMessage({type: 'worktreeAction', action: 'discard', tabId: TAB});
   await new Promise(r => setTimeout(r, 120));
   assert.strictEqual(
@@ -301,8 +266,6 @@ async function testExtensionSide() {
     'a plain successful discard must NOT show a native VS Code notification',
   );
 
-  // 2. The REAL merge click path → progress toast AND result
-  //    notification still shown (regression guard).
   wv.fireMessage({type: 'worktreeAction', action: 'merge', tabId: TAB});
   await new Promise(r => setTimeout(r, 120));
   assert.strictEqual(
@@ -328,8 +291,6 @@ async function testExtensionSide() {
     'the merge progress toast must be closed when the result arrives',
   );
 
-  // 3. Discard with a warning → notification still shown so the user
-  //    sees the warning.
   await daemonSend({
     type: 'worktree_result',
     success: true,
@@ -345,7 +306,6 @@ async function testExtensionSide() {
     'a discard result carrying a warning must still show a notification',
   );
 
-  // 3b. Partial discard (branch could not be deleted) → still shown.
   await daemonSend({
     type: 'worktree_result',
     success: true,
@@ -361,7 +321,6 @@ async function testExtensionSide() {
     'a partial-discard result must still show a notification',
   );
 
-  // 4. Failed discard → error notification still shown.
   await daemonSend({
     type: 'worktree_result',
     success: false,
@@ -392,7 +351,6 @@ async function testWebviewSide() {
     assert.ok(ready && ready.tabId, 'DOM webview must post ready with tabId');
     const activeTab = ready.tabId;
 
-    // Active tab: plain successful discard → nothing printed in chat.
     send(win, {
       type: 'worktree_result',
       success: true,
@@ -405,7 +363,6 @@ async function testWebviewSide() {
       'a plain successful discard must not print a line in the chat webview',
     );
 
-    // Active tab: merge result → printed (regression guard).
     send(win, {
       type: 'worktree_result',
       success: true,
@@ -418,7 +375,6 @@ async function testWebviewSide() {
       'a merge result must still be printed in the chat webview',
     );
 
-    // Active tab: discard with warning → printed so the warning shows.
     send(win, {
       type: 'worktree_result',
       success: true,
@@ -432,12 +388,8 @@ async function testWebviewSide() {
       'a discard result with a warning must still be printed',
     );
 
-    // Background tab: make the current tab a real background tab by
-    // opening a second tab, deliver a plain silent discard plus a
-    // failed discard for the backgrounded tab, then switch back and
-    // inspect the restored transcript.
-    const api = win._demoApi;
-    assert.ok(api, '_demoApi must be exposed by main.js');
+    const api = win._testApi;
+    assert.ok(api, '_testApi must be exposed by main.js');
     const tab1 = api.getActiveTabId();
     api.createNewTab();
     const tab2 = api.getActiveTabId();
@@ -454,14 +406,12 @@ async function testWebviewSide() {
       message: 'discard failed: worktree locked BGERR1',
       tabId: tab1,
     });
-    // Neither event may leak into the ACTIVE (tab2) transcript.
     const activeText = win.document.getElementById('output').textContent;
     assert.ok(
       !activeText.includes("Discarded branch 'kiss/wt-bg'.") &&
         !activeText.includes('BGERR1'),
       'background-tab worktree results must not render in the active tab',
     );
-    // Switch back to tab1 (the real user gesture).
     const tabEl = win.document.querySelector(
       '.chat-tab[data-tab-id="' + tab1 + '"]',
     );

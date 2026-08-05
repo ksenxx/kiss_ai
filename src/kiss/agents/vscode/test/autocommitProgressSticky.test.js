@@ -2,42 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression test for the autocommit progress notification.
-//
-// Bug: ``SorcarSidebarView._showActionProgress`` armed a 120-second
-// ``setTimeout`` that auto-resolved the progress promise.  When the LLM
-// driving "Generating commit message…" took longer than 120 s the toast
-// was dismissed even though ``autocommit_done`` had NOT arrived yet —
-// the user lost the in-progress feedback while the commit was still
-// being prepared in the background.
-//
-// Fix: pass ``timeoutMs = undefined`` for the autocommit branch so the
-// progress notification stays sticky until ``autocommit_done`` arrives
-// (or the view is disposed).
-//
-// This test drives the real compiled SorcarSidebarView + AgentClient
-// against a real Unix-domain socket daemon stub, exactly like
-// ``webviewNotifications.test.js``.  Only the ``vscode`` module is
-// stubbed.
-//
-// Reproduction strategy
-// ---------------------
-// The original 120 s production timeout is impractical to wait out in
-// a unit test.  ``SorcarSidebarView`` exposes
-// ``_autocommitProgressTimeoutMs`` as a test hook: setting it to a
-// small finite value re-enables the old "buggy" code path by arming a
-// short safety timer.  The test runs the autocommit flow TWICE:
-//
-//   1. With ``_autocommitProgressTimeoutMs = 200`` (BUG REPRODUCTION).
-//      Send ``autocommit_progress`` events, wait > 200 ms, and assert
-//      a ``{close: true}`` post arrived even though
-//      ``autocommit_done`` never did — this exactly mirrors the
-//      original report.
-//   2. With ``_autocommitProgressTimeoutMs = undefined`` (PRODUCTION
-//      DEFAULT / FIX).  Same flow, wait > 400 ms, assert NO
-//      ``{close: true}`` post arrived; then send ``autocommit_done``
-//      and verify the close is now posted.
 
 'use strict';
 
@@ -122,10 +86,6 @@ Module._resolveFilename = function (request, parent, ...rest) {
   if (request === 'vscode') return require.resolve('./_vscode-stub.js');
   return origResolve.call(this, request, parent, ...rest);
 };
-// ``_vscode-stub.js`` is a git-tracked fixture shared by several tests
-// that run in parallel; it already contains
-// ``module.exports = global.__kissVscodeStub;`` — never write or delete
-// it here or concurrent tests lose their ``vscode`` module mid-run.
 global.__kissVscodeStub = vscodeStub;
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-autoc-ntf-'));
@@ -158,7 +118,6 @@ const server = net.createServer(sock => {
       try {
         daemonReceived.push(JSON.parse(line));
       } catch {
-        // ignore parse errors from heartbeats / framing
       }
     }
   });
@@ -250,16 +209,6 @@ async function runTests() {
   wv.fireMessage({type: 'ready', tabId: TAB, restoredTabs: []});
   await waitForClient();
 
-  // ----- Scenario 1a: BUG REPRODUCTION ---------------------------------
-  //
-  // Re-enable the old "buggy" code path by setting the autocommit
-  // safety timeout to a small finite value (200 ms).  Trigger an
-  // autocommit, send only autocommit_progress events (never
-  // autocommit_done), wait > 200 ms, and verify the notification was
-  // prematurely closed by the safety timer.  This is the exact failure
-  // mode the user reported when the LLM-driven "Generating commit
-  // message…" step exceeded the production timeout.
-
   view._autocommitProgressTimeoutMs = 200;
   const buggyTab = 'tab-autocommit-buggy';
   view._ownTabs.add(buggyTab);
@@ -307,13 +256,6 @@ async function runTests() {
     800,
   );
 
-  // ----- Scenario 1b: FIX (production default) -------------------------
-  //
-  // Reset to the production default (``undefined``) which disables the
-  // safety timer.  Drive the same flow; the notification must stay
-  // open across a quiet window of autocommit_progress events and only
-  // close once autocommit_done arrives.
-
   view._autocommitProgressTimeoutMs = undefined;
   const fixBeforeCount = notificationsByType(wv.posted).length;
   wv.fireMessage({
@@ -323,7 +265,6 @@ async function runTests() {
     workDir: ws,
   });
 
-  // (a) the initial progress notification was posted by withWebviewNotificationProgress
   const initial = await waitFor(
     () =>
       notificationsByType(wv.posted)
@@ -340,7 +281,6 @@ async function runTests() {
   assert.ok(initial.id, 'notification must have an id');
   const NOTIF_ID = initial.id;
 
-  // (b) the autocommitAction command reached the daemon
   await waitFor(
     () =>
       daemonReceived.some(
@@ -353,7 +293,6 @@ async function runTests() {
     'autocommitAction command was not forwarded to the daemon',
   );
 
-  // Daemon broadcasts the staged progress events, mirroring merge_flow.py.
   await daemonSend({
     type: 'autocommit_progress',
     message: 'Staging…',
@@ -365,7 +304,6 @@ async function runTests() {
     tabId: TAB,
   });
 
-  // (c) the progress notification was updated with the new message
   await waitFor(
     () =>
       notificationsByType(wv.posted).some(
@@ -377,14 +315,6 @@ async function runTests() {
     '"Generating commit message…" progress update was not posted to webview',
   );
 
-  // (d) the heart of the bug: wait long enough for any "short fuse" race
-  // and assert the progress notification has NOT been closed.  The
-  // production timeout was 120 s — way too long to wait — so the test
-  // instead asserts on the per-notification invariant: no close:true
-  // message must be posted while only autocommit_progress events have
-  // arrived.  Combined with Scenario 2 below (which proves the timeout
-  // machinery still works when callers opt in), this catches any
-  // future regression that re-introduces an unconditional dismissal.
   const QUIET_MS = 400;
   await new Promise(r => setTimeout(r, QUIET_MS));
   const prematureClose = notificationsByType(wv.posted).find(
@@ -396,7 +326,6 @@ async function runTests() {
     `progress notification ${NOTIF_ID} was closed before autocommit_done arrived`,
   );
 
-  // After autocommit_done arrives the notification must be closed.
   await daemonSend({
     type: 'autocommit_done',
     success: true,
@@ -410,13 +339,6 @@ async function runTests() {
       ),
     'progress notification was not closed after autocommit_done',
   );
-
-  // ----- Scenario 2: timeout machinery still works for opt-in callers ---
-  //
-  // _showActionProgress is also used by the worktree-action handler with
-  // its default 120 s safety timer.  Drive it directly with a short
-  // timeout to prove the timer code path is alive — this guards against
-  // an accidental over-removal of the setTimeout block.
 
   const fastTab = 'tab-fast-timeout';
   const progressMap = new Map();
@@ -446,15 +368,6 @@ async function runTests() {
     1000,
   );
 
-  // ----- Scenario 2b: daemon disconnect closes the toast ---------------
-  //
-  // With the safety timer removed, the only fallbacks for an in-flight
-  // autocommit are ``autocommit_done`` and dispose.  But the daemon
-  // can disconnect (e.g. ``serverReset`` / installer restart) before
-  // autocommit_done arrives — its per-connection state is wiped, so
-  // the event would never come.  The disconnect handler must drain
-  // the resolver maps so the sticky toast does not linger.
-
   view._autocommitProgressTimeoutMs = undefined;
   const disconnectTab = 'tab-autocommit-disconnect';
   view._ownTabs.add(disconnectTab);
@@ -473,7 +386,6 @@ async function runTests() {
     'auto-commit toast not posted before simulated disconnect',
   );
   const disconnectId = disconnectInitial.id;
-  // Simulate the daemon dropping the socket from the daemon side.
   if (lastServerSock) lastServerSock.destroy();
   lastServerSock = null;
   await waitFor(
@@ -484,19 +396,7 @@ async function runTests() {
     'autocommit progress toast was not closed after daemon disconnect',
     2000,
   );
-  // Re-accept the next reconnection from AgentClient so cleanup can
-  // proceed cleanly when the server closes.
   await waitForClient();
-
-  // ----- Scenario 3: dispose drains the resolver map --------------------
-  //
-  // Even with no timeout, disposing the view must drain
-  // ``_autocommitActionResolves`` via ``_resolveAllWorktreeActions`` so
-  // the inner promise resolves promptly.  The chat webview is being
-  // torn down at the same time, so we don't expect a ``close: true``
-  // post to reach it (the poster has already been cleared) — what we
-  // care about is the resolver map being emptied so background timers
-  // don't keep references alive.
 
   const tab2 = 'tab-autocommit-2';
   view._ownTabs.add(tab2);

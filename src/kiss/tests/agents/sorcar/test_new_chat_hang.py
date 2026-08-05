@@ -97,8 +97,6 @@ class TestTaskEndEventOrdering(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _run_and_wait(self, prompt: str) -> None:
-        # Count the completion (``status running:false``) events seen so
-        # far so we can wait for THIS run's completion without racing.
         with self.lock:
             before = sum(
                 1 for e in self.events
@@ -109,13 +107,6 @@ class TestTaskEndEventOrdering(unittest.TestCase):
             "model": "claude-opus-4-6", "workDir": self.tmpdir,
             "tabId": "0",
         })
-        # The patched agent returns almost instantly, so the worker
-        # thread's ``finally`` can already have reset ``tab.task_thread``
-        # to None by the time we read it here — asserting it is non-None
-        # is a race.  Join the handle only if it is still present, then
-        # wait on the broadcast ``status running:false`` event, which is
-        # the authoritative signal that the run finished regardless of
-        # scheduling.
         t = self.server._get_tab("0").task_thread
         if t is not None:
             t.join(timeout=10)

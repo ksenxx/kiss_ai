@@ -199,26 +199,14 @@ class TestStaleMergeLock(IsolatedAsyncioTestCase):
         tab_id = "tab-a3"
         server = self.server
         server._register_merge_state(tab_id, _one_hunk_data(self.work, "r1"))
-        # The lock object H (and the queued waiter W) will use.
         lock1 = server._merge_action_lock(tab_id)
 
         cmd = {"type": "mergeAction", "action": "reject", "tabId": tab_id}
-        # Install a gate that blocks H's reject-executor work until we
-        # can prove W has queued on ``lock1``.  Without it, H's single
-        # ungated reject can complete, pop the state and dispatch
-        # all-done before W ever runs its membership check — W would
-        # then legitimately return early and never enter the race we
-        # want to exercise.  The gate is consumed on H's dispatch so
-        # W's later reject (in the second phase) is not blocked.
         first_reject_gate = threading.Event()
         self.executor.first_reject_gate = first_reject_gate
-        # H completes review 1 (single hunk): pops state+lock entry,
-        # then suspends in the gated all-done dispatch, HOLDING lock1.
         h_task = asyncio.ensure_future(
             server._handle_web_merge_action(dict(cmd)),
         )
-        # W passes the membership check while review 1 still exists and
-        # queues on lock1 (H is inside its reject executor await).
         w_task = asyncio.ensure_future(
             server._handle_web_merge_action(dict(cmd)),
         )
@@ -227,7 +215,6 @@ class TestStaleMergeLock(IsolatedAsyncioTestCase):
             waiters = getattr(lock1, "_waiters", None) or ()
             return any(not w.done() for w in waiters)
 
-        # Wait until W has queued on lock1 (H is parked in reject).
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
             if lock1.locked() and _has_pending_waiter():
@@ -237,12 +224,8 @@ class TestStaleMergeLock(IsolatedAsyncioTestCase):
             _has_pending_waiter(),
             "W must have queued on lock1 before H proceeds",
         )
-        # Release H's reject; H now finishes review 1's on-disk work,
-        # pops the state and parks in the gated all-done dispatch
-        # while still holding lock1.
         first_reject_gate.set()
 
-        # Wait until H popped the state (it is now parked in all-done).
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline:
             with server._merge_states_lock:
@@ -255,29 +238,21 @@ class TestStaleMergeLock(IsolatedAsyncioTestCase):
         self.assertTrue(lock1.locked(), "H must still hold the old lock")
         self.assertFalse(w_task.done(), "W must still be queued on lock1")
 
-        # The agent starts a NEW review for the same tab while H is
-        # still parked in all-done (real registration path).
         server._register_merge_state(tab_id, _two_hunk_data(self.work, "r2"))
         with server._merge_states_lock:
             state2 = server._merge_states[tab_id]
 
-        # X arrives via the normal path and mints a FRESH lock.
         self.executor.reject_barrier = threading.Barrier(2)
         x_task = asyncio.ensure_future(
             server._handle_web_merge_action(dict(cmd)),
         )
         await asyncio.sleep(0.05)
 
-        # Release H: it finishes all-done and releases lock1; W wakes
-        # on the STALE lock object.
         self.executor.all_done_gate.set()
         await asyncio.wait_for(
             asyncio.gather(h_task, w_task, x_task), timeout=15,
         )
 
-        # Serialised correctly, W and X reject DISTINCT hunks; under
-        # the stale-lock race both reject hunk (0, 0) and hunk (0, 1)
-        # is lost forever.
         self.assertTrue(state2.is_resolved(0, 0))
         self.assertTrue(
             state2.is_resolved(0, 1),

@@ -66,7 +66,6 @@ class TestRLimitNoFileBump(unittest.TestCase):
         if sys.platform == "win32":
             self.skipTest("RLIMIT_NOFILE bump is POSIX-only.")
 
-        # tests/test_rlimit_nofile_bump.py -> tests -> kiss -> src -> repo root
         repo_root = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", "..", "..")
         )
@@ -89,8 +88,6 @@ class TestRLimitNoFileBump(unittest.TestCase):
             """
         ).lstrip()
 
-        # Write the child program to a tempfile to bypass all shell-quoting
-        # hazards (the script contains newlines, single quotes, parens, etc.).
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".py", delete=False, encoding="utf-8"
         ) as tf:
@@ -131,8 +128,6 @@ class TestRLimitNoFileBump(unittest.TestCase):
             f"bump left RLIMIT_NOFILE soft={after_value} (expected >= 4096). "
             f"Full output:\n{combined}",
         )
-        # And sanity: BEFORE must really have been 256, otherwise the test
-        # isn't exercising the macOS-default starting point.
         before_value = int(
             combined.split("BEFORE=", 1)[1].split()[0].strip().rstrip(",;")
         )

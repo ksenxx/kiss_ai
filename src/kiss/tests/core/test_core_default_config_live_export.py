@@ -44,7 +44,6 @@ def test_package_export_tracks_add_config_rebind() -> None:
     finally:
         sys.argv = saved_argv
         config_module.DEFAULT_CONFIG = orig
-    # Restoring the binding must also be observed live.
     assert kiss.core.DEFAULT_CONFIG is orig
 
 

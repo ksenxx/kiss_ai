@@ -45,8 +45,6 @@ def kiss_db(tmp_path: Path):
     th._KISS_DIR = kiss_dir
     th._DB_PATH = kiss_dir / "sorcar.db"
     th._db_conn = None
-    # ``_record_model_usage`` also persists the last-selected model to
-    # ``config.json``; point that at the same isolated directory.
     vc.CONFIG_DIR = kiss_dir
     yield kiss_dir
     if th._db_conn is not None:
@@ -70,10 +68,6 @@ def _meta(completion) -> str:
     """Return a completion's display meta as a plain string."""
     return "".join(t for _, t in completion.display_meta)
 
-
-# ---------------------------------------------------------------------------
-# ``--task`` value completion — recent task ids
-# ---------------------------------------------------------------------------
 
 
 def test_task_flag_lists_recent_task_ids_newest_first(
@@ -124,8 +118,6 @@ def test_ptk_task_candidates_show_id_colon_description(
     comps = _ptk_completions(completer, "/resume --task ")
     assert len(comps) == 1
     assert _display(comps[0]) == f"{task_id}: fix the parser bug"
-    # Accepting the candidate replaces the whole line with the bare id
-    # (no colon, no description).
     assert comps[0].text == f"/resume --task {task_id} "
     assert comps[0].start_position == -len("/resume --task ")
     assert _meta(comps[0]) == "task"
@@ -146,10 +138,6 @@ def test_task_description_is_one_clipped_line(tmp_path: Path, kiss_db) -> None:
     assert desc.endswith("…")
 
 
-# ---------------------------------------------------------------------------
-# ``--model`` value completion — picker-ordered model names
-# ---------------------------------------------------------------------------
-
 
 def test_model_flag_lists_models_in_picker_order(
     tmp_path: Path, kiss_db,
@@ -160,8 +148,6 @@ def test_model_flag_lists_models_in_picker_order(
     assert matches, "the model candidate list must never be empty"
     names = [m[len("/mycmd --model "):-1] for m in matches]
     assert all(m.endswith(" ") for m in matches)
-    # No usage recorded: the order is (vendor order, price descending),
-    # exactly like the daemon's ``_get_models`` picker payload.
     def picker_key(name: str) -> tuple[int, float]:
         info = MODEL_INFO[name]
         price = float(info.input_price_per_1M) + float(info.output_price_per_1M)
@@ -196,7 +182,6 @@ def test_recently_used_models_come_first_by_usage(
     assert [name for name, _ in ordered[:2]] == [twice, once]
     assert ordered[0][1] == "recently used"
     assert ordered[1][1] == "recently used"
-    # The remaining (unused) models keep the picker's base order.
     assert [name for name, _ in ordered[2:]] == [
         name for name in baseline if name not in {once, twice}
     ]

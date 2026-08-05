@@ -63,10 +63,6 @@ def _retry_on_busy[T](op: Callable[[], T], attempts: int = 8) -> T:
     assert last is not None
     raise last
 
-# ---------------------------------------------------------------------------
-# Fake OpenAI-compatible server that always returns a ``finish`` tool call
-# ---------------------------------------------------------------------------
-
 def _finish_response(model: str = "gpt-4o-mini") -> dict:
     """OpenAI chat-completion body that calls ``finish``."""
     return {
@@ -86,7 +82,7 @@ def _finish_response(model: str = "gpt-4o-mini") -> dict:
                             "function": {
                                 "name": "finish",
                                 "arguments": json.dumps(
-                                    {"success": "true", "summary": "done"}
+                                    {"success": "true", "summary_in_html": "done"}
                                 ),
                             },
                         }
@@ -125,10 +121,6 @@ def _start_server() -> tuple[ThreadingHTTPServer, str]:
     return srv, f"http://127.0.0.1:{srv.server_port}/v1"
 
 
-# ---------------------------------------------------------------------------
-# DB-redirect helpers (same pattern as test_stateful_sorcar_agent.py)
-# ---------------------------------------------------------------------------
-
 def _redirect(tmpdir: str) -> tuple:
     """Point the persistence module at a temp directory and reset the conn."""
     old = (th._DB_PATH, th._db_conn, th._KISS_DIR)
@@ -143,10 +135,6 @@ def _redirect(tmpdir: str) -> tuple:
 def _restore(saved: tuple) -> None:
     (th._DB_PATH, th._db_conn, th._KISS_DIR) = saved
 
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
 
 
 class TestSequentialSharedChatId:
@@ -172,7 +160,6 @@ class TestSequentialSharedChatId:
         """
         model_config = {"base_url": self.url, "api_key": "test-key"}
 
-        # Agent 1 — starts a new chat session
         agent1 = ChatSorcarAgent("seq-1")
         agent1.run(
             prompt_template="task alpha",
@@ -183,7 +170,6 @@ class TestSequentialSharedChatId:
         chat_id = agent1.chat_id
         assert chat_id, "agent1 should have received a chat_id"
 
-        # Agent 2 — resumes the same session
         agent2 = ChatSorcarAgent("seq-2")
         agent2.resume_chat_by_id(chat_id)
         agent2.run(
@@ -194,7 +180,6 @@ class TestSequentialSharedChatId:
         )
         assert agent2.chat_id == chat_id
 
-        # Agent 3 — also resumes
         agent3 = ChatSorcarAgent("seq-3")
         agent3.resume_chat_by_id(chat_id)
         agent3.run(
@@ -205,15 +190,13 @@ class TestSequentialSharedChatId:
         )
         assert agent3.chat_id == chat_id
 
-        # Verify all 3 tasks are in the same chat history
         context = _load_chat_context(chat_id)
         assert len(context) == 3
         tasks = [e["task"] for e in context]
         assert tasks == ["task alpha", "task bravo", "task charlie"]
 
-        # Verify results were saved (finish tool returns "done")
         for entry in context:
-            assert entry["result"] == "done"
+            assert entry["result"] == "<p>done</p>"
 
     def test_results_are_persisted_for_each_agent(self) -> None:
         """Each agent's result is individually persisted under the shared chat."""
@@ -239,7 +222,7 @@ class TestSequentialSharedChatId:
 
         context = _load_chat_context(chat_id)
         assert len(context) == 2
-        assert all(e["result"] == "done" for e in context)
+        assert all(e["result"] == "<p>done</p>" for e in context)
 
 
 class TestParallelFlowSimulation:
@@ -272,7 +255,6 @@ class TestParallelFlowSimulation:
         """
         model_config = {"base_url": self.url, "api_key": "test-key"}
 
-        # Parent runs first
         parent = ChatSorcarAgent("parent")
         parent.run(
             prompt_template="parent task",
@@ -287,7 +269,6 @@ class TestParallelFlowSimulation:
         assert len(context_before) == 1
         assert context_before[0]["task"] == "parent task"
 
-        # Sub-agents resume the same chat (as _run_tasks_parallel does)
         sub_tasks = ["sub-task-one", "sub-task-two", "sub-task-three"]
         for task_name in sub_tasks:
             agent = ChatSorcarAgent(f"Parallel-{task_name[:40]}")
@@ -299,9 +280,8 @@ class TestParallelFlowSimulation:
                 work_dir=self.tmpdir,
             )
 
-        # All tasks should be in the same chat session
         context_after = _load_chat_context(chat_id)
-        assert len(context_after) == 4  # parent + 3 sub-tasks
+        assert len(context_after) == 4
         recorded_tasks = {e["task"] for e in context_after}
         assert "parent task" in recorded_tasks
         for st in sub_tasks:
@@ -323,7 +303,6 @@ class TestParallelFlowSimulation:
             )
             agents.append(agent)
 
-        # Each agent should have its own chat_id
         chat_ids = {a.chat_id for a in agents}
         assert len(chat_ids) == 2, (
             f"Expected 2 distinct chat_ids, got {len(chat_ids)}: {chat_ids}"
@@ -342,13 +321,12 @@ class TestParallelFlowSimulation:
         )
         chat_id = parent.chat_id
 
-        # Sub-agent resumes and builds prompt
         sub = ChatSorcarAgent("sub")
         sub.resume_chat_by_id(chat_id)
         prompt = sub.build_chat_prompt("follow-up task")
 
         assert "initial setup task" in prompt
-        assert "done" in prompt  # parent's result
+        assert "done" in prompt
         assert "follow-up task" in prompt
 
 
@@ -368,18 +346,15 @@ class TestChatContextVisibleToSubAgents:
 
     def test_sub_agent_sees_prior_tasks_in_prompt(self) -> None:
         """A sub-agent with a shared chat_id sees prior tasks in build_chat_prompt."""
-        # Seed a chat with 2 tasks
         chat_id = _allocate_chat_id()
         t1, chat_id = _add_task("first task", chat_id=chat_id)
         _save_task_result(result="first result", task_id=t1)
         t2, chat_id = _add_task("second task", chat_id=chat_id)
         _save_task_result(result="second result", task_id=t2)
 
-        # Create a sub-agent with the same chat_id
         sub_agent = ChatSorcarAgent("sub")
         sub_agent.resume_chat_by_id(chat_id)
 
-        # build_chat_prompt should include prior tasks
         prompt = sub_agent.build_chat_prompt("new task for sub-agent")
         assert "first task" in prompt
         assert "first result" in prompt
@@ -393,18 +368,15 @@ class TestChatContextVisibleToSubAgents:
         t1, chat_id = _add_task("task-a", chat_id=chat_id)
         _save_task_result(result="result-a", task_id=t1)
 
-        # First sub-agent sees 1 prior task
         sub1 = ChatSorcarAgent("sub1")
         sub1.resume_chat_by_id(chat_id)
         prompt1 = sub1.build_chat_prompt("sub-task-1")
         assert "task-a" in prompt1
         assert "result-a" in prompt1
 
-        # Add another task
         t2, chat_id = _add_task("task-b", chat_id=chat_id)
         _save_task_result(result="result-b", task_id=t2)
 
-        # Second sub-agent sees 2 prior tasks
         sub2 = ChatSorcarAgent("sub2")
         sub2.resume_chat_by_id(chat_id)
         prompt2 = sub2.build_chat_prompt("sub-task-2")
@@ -440,7 +412,6 @@ class TestConcurrentThreadPoolExecutor:
         """
         model_config = {"base_url": self.url, "api_key": "test-key"}
 
-        # Parent establishes the chat session
         parent = ChatSorcarAgent("parent")
         parent.run(
             prompt_template="parent task",
@@ -454,7 +425,6 @@ class TestConcurrentThreadPoolExecutor:
         sub_tasks = [f"concurrent-task-{i}" for i in range(5)]
 
         def run_sub(task_name: str) -> str:
-            # Random sleep < 0.1s to surface race conditions
             time.sleep(random.uniform(0.01, 0.08))
             agent = ChatSorcarAgent(f"P-{task_name}")
             agent.resume_chat_by_id(chat_id)
@@ -468,19 +438,16 @@ class TestConcurrentThreadPoolExecutor:
         with ThreadPoolExecutor(max_workers=5) as pool:
             results = list(pool.map(run_sub, sub_tasks))
 
-        # All sub-agents should have returned results
         assert len(results) == 5
 
-        # All tasks (parent + 5 concurrent) in the same chat
         context = _load_chat_context(chat_id)
-        assert len(context) == 6  # 1 parent + 5 sub-tasks
+        assert len(context) == 6
         recorded_tasks = {e["task"] for e in context}
         assert "parent task" in recorded_tasks
         for st in sub_tasks:
             assert st in recorded_tasks
-        # All results should be "done"
         for entry in context:
-            assert entry["result"] == "done"
+            assert entry["result"] == "<p>done</p>"
 
     def test_concurrent_db_writes_no_errors(self) -> None:
         """Direct concurrent writes to the DB don't raise errors.
@@ -548,15 +515,12 @@ class TestConcurrentThreadPoolExecutor:
             time.sleep(random.uniform(0.005, 0.03))
             try:
                 ctx = _retry_on_busy(lambda: _load_chat_context(chat_id))
-                # Every entry that has been committed should have
-                # consistent task/result pairs
                 for entry in ctx:
                     assert entry["task"] is not None
             except Exception as exc:
                 read_errors.append(f"reader-{idx}: {exc}")
 
         with ThreadPoolExecutor(max_workers=12) as pool:
-            # 8 writers + 8 readers interleaved
             futures = []
             for i in range(8):
                 futures.append(pool.submit(writer, i))
@@ -578,7 +542,6 @@ class TestConcurrentThreadPoolExecutor:
         """
         model_config = {"base_url": self.url, "api_key": "test-key"}
         chat_id = _allocate_chat_id()
-        # Seed one task so the chat exists
         t0, chat_id = _add_task("seed-task", chat_id=chat_id)
         _save_task_result(result="seed-result", task_id=t0)
 
@@ -605,18 +568,12 @@ class TestConcurrentThreadPoolExecutor:
         assert not errors, f"Agent errors: {errors}"
 
         context = _load_chat_context(chat_id)
-        # seed-task + 8 stress tasks
         assert len(context) == 9
         recorded = {e["task"] for e in context}
         assert "seed-task" in recorded
         for tn in task_names:
             assert tn in recorded
 
-
-# ---------------------------------------------------------------------------
-# Regression: ``_run_tasks_parallel`` must reject bare-string ``tasks``
-# instead of iterating it character-by-character.
-# ---------------------------------------------------------------------------
 
 
 class TestBareStringTasksDoesNotIterateCharacters:

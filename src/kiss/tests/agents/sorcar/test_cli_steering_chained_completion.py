@@ -73,13 +73,10 @@ def test_single_tab_chains_all_menu_levels(tmp_path: Path, kiss_db) -> None:
     new_id, _ = th._add_task("write release notes", chat_id="c2")
     box, submitted = _make_box(str(tmp_path))
 
-    # Typing ``/resu`` previews the single matching command.
     _feed(box, b"/resu", submitted)
     assert box._menu_open is True
     assert box._menu_repls == ["/resume "]
 
-    # Tab 1: accept ``/resume`` -> buffer completed AND the argument
-    # option menu pops by itself, showing each option with its help.
     _feed(box, b"\t", submitted)
     assert box.buf == "/resume "
     assert box._menu_open is True
@@ -87,9 +84,6 @@ def test_single_tab_chains_all_menu_levels(tmp_path: Path, kiss_db) -> None:
     assert box._menu_items[0].startswith("--task — ")
     assert box._menu_items[1].startswith("--limit — ")
 
-    # Tab 2: accept ``--task`` -> the recent task-id menu pops by
-    # itself, newest first, each row showing ``<id>: <description>``
-    # while the replacement inserts only the bare id.
     _feed(box, b"\t", submitted)
     assert box.buf == "/resume --task "
     assert box._menu_open is True
@@ -102,16 +96,12 @@ def test_single_tab_chains_all_menu_levels(tmp_path: Path, kiss_db) -> None:
         f"/resume --task {old_id} ",
     ]
 
-    # Tab 3: accept the highlighted (newest) task id -> only the bare
-    # id lands in the buffer (no colon, no description) AND the
-    # remaining unused option menu pops by itself.
     _feed(box, b"\t", submitted)
     assert box.buf == f"/resume --task {new_id} "
     assert box._menu_open is True
     assert box._menu_repls == [f"/resume --task {new_id} --limit "]
     assert box._menu_items[0].startswith("--limit — ")
 
-    # Enter submits the typed buffer as-is (never a completion).
     _feed(box, b"\r", submitted)
     assert submitted == [f"/resume --task {new_id} "]
     assert box.buf == ""
@@ -128,11 +118,10 @@ def test_down_arrow_then_tab_accepts_navigated_candidate(
     _feed(box, b"/resume --task ", submitted)
     assert box._menu_open is True
     assert box._menu_sel == 0
-    _feed(box, b"\x1b[B", submitted)  # Down arrow
+    _feed(box, b"\x1b[B", submitted)
     assert box._menu_sel == 1
     _feed(box, b"\t", submitted)
     assert box.buf == f"/resume --task {old_id} "
-    # Chained menu with the remaining option pops immediately.
     assert box._menu_open is True
     assert box._menu_repls == [f"/resume --task {old_id} --limit "]
 
@@ -160,7 +149,7 @@ def test_plain_string_completer_still_works(tmp_path: Path) -> None:
     assert box._menu_repls == ["alpha", "beta"]
     _feed(box, b"\t", submitted)
     assert box.buf == "alpha"
-    assert box._menu_open is False  # non-slash: no chained menu
+    assert box._menu_open is False
 
 
 def test_model_flag_value_rows_show_picker_group(
@@ -169,7 +158,7 @@ def test_model_flag_value_rows_show_picker_group(
     """``--model`` value rows display ``<name> — <group>``, insert the name."""
     box, submitted = _make_box(str(tmp_path))
     _feed(box, b"/parallel --model ", submitted)
-    if not box._menu_open:  # no models completable in this environment
+    if not box._menu_open:
         pytest.skip("no completable models in this environment")
     first_repl = box._menu_repls[0]
     first_disp = box._menu_items[0]

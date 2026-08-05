@@ -2,22 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression for Settings → Update installs hanging at
-// ``npm run package``.
-//
-// ``@vscode/vsce package`` implicitly runs the manifest's
-// ``vscode:prepublish`` script before it starts writing the VSIX.  Our update
-// installer already needs to run those build steps explicitly (compile +
-// copy-kiss) so it can show clear progress and fail at the exact step that
-// broke.  If the final packaging command invokes vsce's implicit prepublish
-// again, the terminal appears stuck immediately after:
-//
-//   > vsce package --no-dependencies --allow-missing-repository -o kiss-sorcar.vsix
-//
-// and the build can repeat expensive work with very little feedback.  The
-// package-vsix helper below must therefore call vsce's lower-level pack API,
-// which writes a real VSIX without executing ``vscode:prepublish``.
 
 'use strict';
 

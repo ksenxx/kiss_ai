@@ -67,9 +67,6 @@ class TestJunkBudgetDoesNotRaise(unittest.TestCase):
         server = VSCodeServer()
         events: list[dict[str, Any]] = []
         server.printer.broadcast = events.append  # type: ignore[assignment]
-        # Pre-fix this raised ValueError out of _handle_command, which
-        # in production kills the transport's receive loop (the whole
-        # client connection).
         server._handle_command(
             {"type": "saveConfig", "config": {"max_budget": "abc"}},
         )

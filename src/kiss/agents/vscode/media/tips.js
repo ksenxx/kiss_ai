@@ -2,33 +2,12 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Fresh-install Tips window for the chat webview.
-//
-// Defines the ``<kiss-tips-panel>`` web component: a fixed-size modal
-// panel (min(560px, 90vw) x min(520px, 82vh)) centered horizontally
-// and vertically that renders one tip at a time as formatted HTML
-// (markdown via window.marked, loaded by chat.html before this
-// script) with Previous / Next / Close controls.  The tip body
-// scrolls when content overflows, every fenced code block gets a
-// Copy-to-clipboard button, and the markdown is styled with the
-// Rosé Pine Moon palette.
-//
-// The tip list and the show-on-startup flag arrive via
-// ``window.__TIPS__ = {tips: [...], show: bool}`` injected by the HTML
-// builder (``SorcarTab.buildChatHtml`` in the extension,
-// ``web_server._build_html`` on the remote webapp).  ``show`` is true
-// exactly once — on the first chat render after a fresh installation.
 
 /* global customElements */
 
 (function () {
   'use strict';
 
-  // Rosé Pine Moon palette: #232136 background, #2a273f surfaces,
-  // #44415a borders, #e0def4 text, #908caa muted, #c4a7e7 headings,
-  // #9ccfd8 links/hover, #f6c177 inline code, #ea9a97 accents,
-  // #3e8fb0 buttons.
   const PANEL_CSS =
     '.tips-overlay {' +
     '  position: fixed;' +
@@ -145,10 +124,6 @@
     '  cursor: default;' +
     '}';
 
-  /**
-   * Copy ``text`` via a hidden textarea + ``document.execCommand('copy')``.
-   * Returns true when the copy command reports success.
-   */
   function copyViaExecCommand(text) {
     const area = document.createElement('textarea');
     area.value = text;
@@ -167,11 +142,6 @@
     return ok;
   }
 
-  /**
-   * Copy ``text`` to the clipboard, preferring the async clipboard API
-   * and falling back to ``execCommand('copy')``.  Resolves to true on
-   * success and false on failure.
-   */
   function copyTextToClipboard(text) {
     const clip = navigator.clipboard;
     if (clip && typeof clip.writeText === 'function') {
@@ -189,10 +159,6 @@
     return Promise.resolve(copyViaExecCommand(text));
   }
 
-  /**
-   * Flash "Copied!" / "Failed" feedback on a copy button, then restore
-   * the "Copy" label after 1.5 seconds.
-   */
   function flashCopyResult(btn, ok) {
     btn.textContent = ok ? 'Copied!' : 'Failed';
     setTimeout(() => {
@@ -200,10 +166,6 @@
     }, 1500);
   }
 
-  /**
-   * Click handler for copy buttons: copy the text of the code block
-   * sharing the button's ``.tips-code`` wrapper and flash feedback.
-   */
   function onCopyClick(event) {
     const btn = event.currentTarget;
     const code = btn.parentElement.querySelector('pre code');
@@ -213,14 +175,6 @@
     });
   }
 
-  /**
-   * Centered modal panel showing one markdown tip at a time.
-   *
-   * Set ``el.tips`` to a list of markdown strings; the panel renders
-   * the first tip and enables Previous / Next / Close with the usual
-   * semantics (Previous disabled on the first tip, Next disabled on
-   * the last, Close removes the panel from the DOM).
-   */
   class KissTipsPanel extends HTMLElement {
     constructor() {
       super();
@@ -292,14 +246,11 @@
         }
       });
       this._close.addEventListener('click', () => {
-        // Drop focus before removing the panel so no focus ring (or
-        // stale activeElement) survives the click.
         self._close.blur();
         self.remove();
       });
     }
 
-    /** Markdown tip strings shown by the panel, one at a time. */
     get tips() {
       return this._tips;
     }
@@ -311,22 +262,10 @@
       this._update();
     }
 
-    /**
-     * Self-remove when mounted without ``.tips`` ever assigned.
-     *
-     * Only ``showTipsPanel()`` — which assigns ``.tips`` before
-     * mounting — may show a panel.  A ``<kiss-tips-panel>`` upgraded
-     * from parsed HTML (e.g. a chat transcript mentioning the tag,
-     * injected via ``innerHTML`` through a path that bypasses the
-     * sanitizer) would otherwise cover the chat as a blank
-     * full-viewport overlay.  An empty-tips panel keeps working
-     * because ``showTipsPanel([])`` still assigns ``.tips``.
-     */
     connectedCallback() {
       if (!this._tipsAssigned) this.remove();
     }
 
-    /** Re-render the current tip, counter, and button states. */
     _update() {
       const total = this._tips.length;
       const text = total > 0 ? this._tips[this._index] : '';
@@ -345,10 +284,6 @@
       this._next.disabled = this._index >= total - 1;
     }
 
-    /**
-     * Wrap every fenced code block (``pre > code``) in the rendered
-     * tip with a ``.tips-code`` container and attach a Copy button.
-     */
     _addCopyButtons() {
       for (const pre of this._body.querySelectorAll('pre')) {
         if (!pre.querySelector('code')) continue;
@@ -369,11 +304,6 @@
 
   customElements.define('kiss-tips-panel', KissTipsPanel);
 
-  /**
-   * Create a ``<kiss-tips-panel>`` for ``tips`` and mount it on
-   * document.body.  Exposed for reuse (e.g. a future "Show tips" menu
-   * entry) and for tests.
-   */
   function showTipsPanel(tips) {
     const el = document.createElement('kiss-tips-panel');
     el.tips = tips;
@@ -383,18 +313,11 @@
 
   window.__kissShowTipsPanel = showTipsPanel;
 
-  /** Tips from ``window.__TIPS__``, or ``[]`` when absent/malformed. */
   function configuredTips() {
     const cfg = window.__TIPS__;
     return cfg && Array.isArray(cfg.tips) ? cfg.tips : [];
   }
 
-  /**
-   * Wire the settings-panel Tips button (``#tips-btn``): clicking it
-   * shows the tips window.  Only one panel instance may exist at a
-   * time — clicking while it is open is a no-op.  No-op when the
-   * button is absent (e.g. non-chat pages reusing tips.js).
-   */
   function wireTipsButton() {
     const btn = document.getElementById('tips-btn');
     if (!btn) return;

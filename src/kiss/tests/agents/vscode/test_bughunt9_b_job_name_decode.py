@@ -7,7 +7,7 @@
 ``_process_request`` URL-decodes the whole request path before dispatch;
 ``_trajectory_job_response`` must NOT unquote the job segment a second
 time, or a job directory whose name contains a literal percent-escape
-(e.g. ``job%20a`` on disk) is double-decoded to ``job a`` and spuriously
+(e.g. ``job_%20a`` on disk) is double-decoded to ``job_ a`` and spuriously
 404s.  The standalone visualizer decodes exactly once.
 """
 
@@ -72,8 +72,7 @@ class TestJobNameSingleDecode(IsolatedAsyncioTestCase):
 
         self._jobs_root = Path(tempfile.mkdtemp(prefix="kiss_traj_pct_")) / "jobs"
         self._jobs_root.mkdir(parents=True)
-        # A job directory whose on-disk name contains a literal ``%20``.
-        _write_trajectory(self._jobs_root, "job%20a", "Agent Pct")
+        _write_trajectory(self._jobs_root, "job_%20a", "Agent Pct")
         _write_trajectory(self._jobs_root, "job_plain", "Agent Plain")
         self._orig_get_jobs_root = web_server.get_jobs_root
         web_server.get_jobs_root = lambda *a, **k: self._jobs_root
@@ -110,8 +109,8 @@ class TestJobNameSingleDecode(IsolatedAsyncioTestCase):
         return await asyncio.get_event_loop().run_in_executor(None, _fetch)
 
     async def test_percent_escaped_job_name_resolves(self) -> None:
-        """A dir literally named ``job%20a`` is reachable via ``job%2520a``."""
-        status, body = await self._http_get("/api/jobs/job%2520a/trajectories")
+        """A dir literally named ``job_%20a`` is reachable via ``job_%2520a``."""
+        status, body = await self._http_get("/api/jobs/job_%2520a/trajectories")
         self.assertEqual(status, 200)
         trajectories = json.loads(body)
         self.assertEqual(len(trajectories), 1)

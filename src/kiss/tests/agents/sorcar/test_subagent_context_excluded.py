@@ -141,14 +141,11 @@ class TestSubagentRowsExcludedFromChatContext:
         parent_id, chat_id = _add_task("parent task", chat_id="")
         _save_task_result("parent-result", task_id=parent_id)
 
-        # Three sub-agents, all sharing the parent's chat_id and tagged
-        # with ``extra.subagent.parent_task_id`` like ``run_parallel`` does.
         for i in range(3):
             self._insert_subagent_row(
                 parent_id, chat_id, f"sub task {i}", f"sub result {i}",
             )
 
-        # The DB has 4 rows under this chat_id ...
         with th._rw_lock.read_lock():
             db = th._get_db()
             total = db.execute(
@@ -157,7 +154,6 @@ class TestSubagentRowsExcludedFromChatContext:
             ).fetchone()["n"]
         assert total == 4
 
-        # ... but _load_chat_context filters out the 3 sub-agent rows.
         context = _load_chat_context(chat_id)
         assert len(context) == 1, (
             f"Expected only the parent row, got {len(context)}: {context}"
@@ -181,10 +177,8 @@ class TestSubagentRowsExcludedFromChatContext:
         agent.resume_chat_by_id(chat_id)
         augmented = agent.build_chat_prompt("next user message")
 
-        # The parent task / result appears exactly once.
         assert "orig parent prompt" in augmented
         assert "orig parent result" in augmented
-        # No sub-agent task or result text leaks into the LLM prompt.
         for i in range(3):
             assert f"hidden sub task {i}" not in augmented, (
                 "Sub-agent task leaked into build_chat_prompt output"
@@ -192,7 +186,6 @@ class TestSubagentRowsExcludedFromChatContext:
             assert f"hidden sub result {i}" not in augmented, (
                 "Sub-agent result leaked into build_chat_prompt output"
             )
-        # Only one "### Task" / "### Result" pair (the parent's).
         assert augmented.count("### Task 1") == 1
         assert "### Task 2" not in augmented
 
@@ -231,7 +224,6 @@ class TestSubagentRowsExcludedFromChatContext:
                 work_dir=self.tmpdir,
             )
 
-        # All 4 rows exist in the DB ...
         with th._rw_lock.read_lock():
             db = th._get_db()
             total = db.execute(
@@ -240,7 +232,6 @@ class TestSubagentRowsExcludedFromChatContext:
             ).fetchone()["n"]
         assert total == 4, f"Expected 4 rows under chat, got {total}"
 
-        # ... but the chat context only returns the parent.
         context = _load_chat_context(chat_id)
         assert len(context) == 1, (
             f"Expected only parent row in context, got {len(context)}: "
@@ -248,7 +239,6 @@ class TestSubagentRowsExcludedFromChatContext:
         )
         assert context[0]["task"] == "kick off run_parallel"
 
-        # And the next turn's prompt augmentation is parent-only.
         nxt = ChatSorcarAgent("next-turn")
         nxt.resume_chat_by_id(chat_id)
         augmented = nxt.build_chat_prompt("follow-up")

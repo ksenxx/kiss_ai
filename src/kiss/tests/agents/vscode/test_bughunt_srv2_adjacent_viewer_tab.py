@@ -41,15 +41,10 @@ class TestAdjacentTaskFromViewerTab(unittest.TestCase):
     def test_adjacent_prev_resolves_chat_of_viewer_tab(self) -> None:
         """A history-opened viewer tab can navigate to the previous task."""
         t1, chat_id = _add_task("first task in chat")
-        # Distinct timestamps: the adjacent lookup compares strictly.
         time.sleep(0.02)
         t2, _ = _add_task("second task in chat", chat_id)
 
         viewer_tab = "srv2-viewer-tab"
-        # Simulate the user clicking task t2 in the history sidebar:
-        # the frontend allocates a fresh tab and round-trips a
-        # resumeSession command.  No task ever ran in this tab, so no
-        # registry entry exists — only the chat-viewer association.
         self.server._handle_command({
             "type": "resumeSession",
             "chatId": chat_id,
@@ -58,7 +53,6 @@ class TestAdjacentTaskFromViewerTab(unittest.TestCase):
         })
         self.printer.emitted.clear()
 
-        # The user presses the "previous task" arrow in that tab.
         self.server._handle_command({
             "type": "getAdjacentTask",
             "tabId": viewer_tab,

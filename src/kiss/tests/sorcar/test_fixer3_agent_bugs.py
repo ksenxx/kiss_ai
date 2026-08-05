@@ -114,8 +114,6 @@ class _Base(unittest.TestCase):
         ) = self._saved_db
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    # -- worktree helpers -------------------------------------------------
-
     def _setup_worktree_agent(self) -> WorktreeSorcarAgent:
         """Real worktree on a fresh branch with one uncommitted file."""
         agent = WorktreeSorcarAgent("fixer3-wt")
@@ -176,15 +174,10 @@ class TestSubagentSentinelConvention(_Base):
             printer=printer,
         )
 
-        # The sub-agent's ``new_tab`` broadcast reads
-        # ``_subagent_info["parent_tab_id"]``; with the harmonized
-        # sentinel dict it must be the empty string (never None).
         new_tabs = [e for e in events if e.get("type") == "new_tab"]
         self.assertTrue(new_tabs, f"no new_tab in {events!r}")
         self.assertEqual(new_tabs[0].get("parent_tab_id"), "")
 
-        # The persisted sub-agent row must carry the empty-string
-        # "no persisted parent" sentinel in the parent_task_id column.
         conn = _persistence._get_db()
         rows = conn.execute(
             "SELECT parent_task_id FROM task_history"
@@ -243,7 +236,6 @@ class TestMergeNoAutoCommitMessage(_Base):
 
         self.assertIn("auto-commit is disabled", msg)
         self.assertNotIn("pre-commit hook", msg)
-        # Worktree must be preserved with the change still uncommitted.
         self.assertTrue(wt.wt_dir.exists())
         self.assertIn("uncommitted.txt", self._porcelain(wt.wt_dir))
         agent.discard()
@@ -277,16 +269,12 @@ class TestPreserveForReviewNoAutoCommit(_Base):
         preserved = agent._preserve_pending_worktree_for_review()
 
         self.assertTrue(preserved)
-        # The worktree directory is preserved for manual review …
         self.assertTrue(wt.wt_dir.exists())
-        # … the user's changes are still UNCOMMITTED …
         self.assertIn("uncommitted.txt", self._porcelain(wt.wt_dir))
-        # … and no forced "late-arriving" commit landed on the branch.
         log = _run_git(
             str(wt.wt_dir), "log", "--format=%s",
         ).stdout
         self.assertNotIn("late-arriving", log)
-        # Agent state is reset.
         self.assertIsNone(agent._wt)
         self.assertFalse(agent._pending_review)
 

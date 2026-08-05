@@ -2,38 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test for the History filter bar's From/To date
-// AUTO-FILL: the backend's ``history`` event now carries a
-// ``dateRange`` payload with the FIRST and LAST task timestamps
-// (epoch seconds) from ~/.kiss/sorcar.db, and the webview fills the
-// empty ``#hf-from`` / ``#hf-to`` date inputs from it.
-//
-// Requirements driven by this test:
-//
-//   1. On a ``history`` event with
-//      ``dateRange: {min: <sec>, max: <sec>}``, the empty From/To
-//      inputs are filled with the LOCAL calendar dates of those
-//      timestamps (``YYYY-MM-DD``, same format the inputs produce).
-//
-//   2. The auto-filled [min, max] range is inclusive: every history
-//      row stays visible after the fill.
-//
-//   3. A later ``history`` event with a wider range updates the
-//      auto-filled values (the user has not touched the inputs).
-//
-//   4. Once the USER sets a date (a ``change`` event on the input),
-//      subsequent ``history`` events must NOT overwrite it.
-//
-//   5. A ``#hf-date-clear`` button clears both dates, un-hides all
-//      rows, is hidden while both inputs are empty, and marks the
-//      range as user-managed so refreshes do not re-fill it.
-//
-//   6. A missing / null ``dateRange`` leaves the inputs empty.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/historyFilterDateAutofill.test.js
 
 'use strict';
 
@@ -73,7 +41,10 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win};
 }
@@ -82,7 +53,6 @@ function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-/** Local-timezone YYYY-MM-DD of an epoch-seconds timestamp. */
 function localIso(sec) {
   const d = new Date(sec * 1000);
   const p = n => (n < 10 ? '0' + n : '' + n);
@@ -118,7 +88,6 @@ function session(id, ts) {
   };
 }
 
-// Fixed timestamps: three tasks over three distinct days.
 const TS_FIRST = Date.UTC(2024, 0, 15, 12, 0, 0) / 1000;
 const TS_MID = Date.UTC(2024, 5, 10, 12, 0, 0) / 1000;
 const TS_LAST = Date.UTC(2024, 11, 24, 12, 0, 0) / 1000;
@@ -150,7 +119,6 @@ function testAutofillFromDateRange() {
     'To must be auto-filled with the LAST task date',
   );
 
-  // The auto-filled range is inclusive — nothing gets hidden.
   assert.strictEqual(
     visibleCount(win),
     3,
@@ -173,7 +141,6 @@ function testAutofillUpdatesWhileUntouched() {
   });
   assert.strictEqual(doc.getElementById('hf-to').value, localIso(TS_MID));
 
-  // A newer task arrives; the backend now reports a wider range.
   send(win, {
     type: 'history',
     sessions: SESSIONS,
@@ -201,8 +168,6 @@ function testUserValueWins() {
     dateRange: {min: TS_FIRST, max: TS_LAST},
   });
 
-  // The user narrows the From date (same path the custom picker
-  // takes: set .value then dispatch a change event).
   const hfFrom = doc.getElementById('hf-from');
   hfFrom.value = localIso(TS_MID);
   hfFrom.dispatchEvent(new win.Event('change', {bubbles: true}));
@@ -264,7 +229,6 @@ function testClearButton() {
     'clear button hides again after clearing',
   );
 
-  // A refresh must NOT re-fill the range the user just cleared.
   send(win, {
     type: 'history',
     sessions: SESSIONS,
@@ -314,7 +278,6 @@ function testEmptyDatabaseClearsUntouchedAutofill() {
   });
   assert.notStrictEqual(doc.getElementById('hf-from').value, '');
 
-  // All tasks are deleted while the dates remain program-managed.
   send(win, {
     type: 'history',
     sessions: [],

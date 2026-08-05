@@ -4,20 +4,20 @@
 # add your name here
 """Root pytest configuration.
 
-Coverage is enabled by default through ``--cov``/``--cov-branch`` in the
-``addopts`` setting of ``pyproject.toml``. Those flags are registered by the
-``pytest-cov`` plugin, so disabling it with ``pytest -p no:cov`` removes the
-options and pytest aborts with::
+Coverage is *no longer* on by default: ``pyproject.toml``'s ``addopts`` was
+dropping ~5x-20x of runtime on the full suite because branch-coverage tracing
+(``--cov=src/kiss --cov-branch`` with ``parallel=true`` +
+``concurrency=["greenlet","thread"]``) instruments every executed line. To
+speed the default ``uv run pytest`` invocation we removed those flags from
+``addopts``; users who want a coverage report opt in explicitly with, e.g.::
 
-    error: unrecognized arguments: --cov=src/kiss --cov-branch
+    uv run pytest --cov=src/kiss --cov-branch
 
-To keep ``pytest -p no:cov`` (and any other plugin-less invocation) working
-without editing the command line, this module registers inert fallback
-``--cov``/``--cov-branch`` options *only when the pytest-cov plugin is not
-loaded*. They simply absorb the leftover ``addopts`` flags and do nothing, so
-coverage stays off (the plugin is gone) while argument parsing still succeeds.
-When pytest-cov is active these fallbacks are skipped so its real options are
-used.
+The ``pytest-cov`` plugin is still loaded. This module registers inert
+fallback ``--cov``/``--cov-branch`` options *only when the pytest-cov plugin
+is not loaded* (i.e., under ``-p no:cov``). They simply absorb any leftover
+flags and do nothing, so pytest still parses cleanly if someone re-adds the
+coverage flags to a local ``addopts`` while also passing ``-p no:cov``.
 
 This module also raises ``RLIMIT_NOFILE`` (the per-process file-descriptor
 soft limit) to at least ``_MIN_NOFILE_SOFT`` at import time. macOS ships with a

@@ -60,11 +60,6 @@ class TestVSCodeServerStop(unittest.TestCase):
             return False
 
         try:
-            # The dispatcher must return promptly (_cmd_run starts the
-            # task in a background thread).  Dispatch on a helper
-            # thread and require it to return within 5s so a
-            # regression that makes ``run`` block the dispatcher loop
-            # fails loudly here instead of hanging the test.
             dispatched = threading.Event()
             dispatch_errors: list[BaseException] = []
 
@@ -98,12 +93,8 @@ class TestVSCodeServerStop(unittest.TestCase):
                 snapshot = list(events)
             assert got_running, f"Never saw status running=true. Events: {snapshot}"
 
-            # The stop command must be processed while the task is running.
             server._handle_command({"type": "stop", "tabId": tab_id})
 
-            # Direct proof that the stop was processed: the tab's
-            # cooperative stop event must be set (a naturally-finishing
-            # task could otherwise fake the terminal event below).
             with _RunningAgentState._registry_lock:
                 tab = _RunningAgentState.running_agent_states.get(tab_id)
                 stop_event = tab.stop_event if tab is not None else None

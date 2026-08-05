@@ -52,11 +52,24 @@ from __future__ import annotations
 import asyncio
 import atexit
 import functools
+import hashlib
 import inspect
 import json
 import keyword
 import logging
+import os
 import threading
+import time
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover — Windows has no fcntl
+    fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt  # type: ignore[import-not-found]
+except ImportError:  # POSIX has no msvcrt
+    msvcrt = None  # type: ignore[assignment]
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -67,16 +80,10 @@ from kiss.agents.sorcar.skills import load_permission_rules, skill_permission
 
 logger = logging.getLogger(__name__)
 
-# Seconds to wait for a server to connect / a tool call to return.
 CONNECT_TIMEOUT = 60.0
-# After a connect() timeout, how long a straggler task stuck
-# mid-handshake is given to unwind gracefully (via its ``stop`` event)
-# before it is cancelled outright so the transport child is reaped.
 _CONNECT_STRAGGLER_GRACE_S = 5.0
 CALL_TIMEOUT = 300.0
 
-# JSON-schema type → Python annotation used when synthesizing wrapper
-# signatures (so kiss's schema builder round-trips the MCP inputSchema).
 _JSON_TO_PY: dict[str, type] = {
     "string": str,
     "integer": int,
@@ -169,7 +176,6 @@ def _parse_server_entry(name: str, raw: Any, source: str) -> MCPServerConfig | N
     url = str(raw.get("url", "") or "")
     transport = str(raw.get("type", "") or raw.get("transport", "") or "").lower()
     if transport not in ("stdio", "http", "sse"):
-        # Claude Code's leniency: infer from the fields present.
         transport = "stdio" if command else "http"
     if transport == "stdio" and not command:
         logger.debug("mcp server %s: stdio without command; skipping", name)
@@ -254,18 +260,19 @@ def save_mcp_server(cfg: MCPServerConfig, scope: str, work_dir: str) -> Path:
         else project_mcp_config_path(work_dir)
     )
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        raw = {}
-    if not isinstance(raw, dict):
-        raw = {}
-    entries = raw.setdefault("mcpServers", {})
-    if not isinstance(entries, dict):  # pragma: no cover - corrupt file guard
-        entries = {}
-        raw["mcpServers"] = entries
-    entries[cfg.name] = cfg.to_json()
-    path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+    with _file_lock(path.with_suffix(".lock")):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        entries = raw.setdefault("mcpServers", {})
+        if not isinstance(entries, dict):  # pragma: no cover - corrupt file guard
+            entries = {}
+            raw["mcpServers"] = entries
+        entries[cfg.name] = cfg.to_json()
+        _atomic_write_config(path, raw)
     return path
 
 
@@ -285,16 +292,28 @@ def remove_mcp_server(name: str, work_dir: str) -> list[Path]:
         claude_project_mcp_config_path(work_dir),
         project_mcp_config_path(work_dir),
     ):
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        entries = raw.get("mcpServers") if isinstance(raw, dict) else None
-        if isinstance(entries, dict) and name in entries:
-            del entries[name]
-            path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
-            removed.append(path)
+        with _file_lock(path.with_suffix(".lock")):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            entries = raw.get("mcpServers") if isinstance(raw, dict) else None
+            if isinstance(entries, dict) and name in entries:
+                del entries[name]
+                _atomic_write_config(path, raw)
+                removed.append(path)
     return removed
+
+
+def _atomic_write_config(path: Path, raw: dict[str, Any]) -> None:
+    """Atomically replace the MCP config *path* with *raw* as JSON.
+
+    An interrupted in-place ``write_text`` could leave invalid JSON;
+    write-to-temp + ``os.replace`` cannot.
+    """
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def load_mcp_permissions() -> dict[str, str]:
@@ -325,6 +344,84 @@ def mcp_tool_permission(tool_name: str, rules: dict[str, str]) -> str:
     return skill_permission(tool_name, rules)
 
 
+@contextmanager
+def _file_lock(lock_path: Path) -> Any:
+    """Hold an exclusive advisory inter-process lock on *lock_path*.
+
+    Serializes read-modify-write cycles on shared JSON files (MCP
+    configs, OAuth token stores) across CLI processes, daemons, and
+    event loops.  The lock file itself is created mode ``0600``.
+
+    Cross-platform: ``fcntl.flock`` on POSIX, ``msvcrt.locking`` on
+    Windows (where ``fcntl`` does not exist — an unconditional import
+    would make every MCP feature unavailable there).  When neither
+    primitive exists the lock degrades to best-effort no-op rather
+    than breaking MCP entirely.
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if fcntl is not None:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        elif msvcrt is not None:  # pragma: no cover — Windows-only branch
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            while True:
+                try:
+                    msvcrt.locking(  # pyright: ignore[reportAttributeAccessIssue]
+                        descriptor,
+                        msvcrt.LK_LOCK,  # pyright: ignore[reportAttributeAccessIssue]
+                        1,
+                    )
+                    break
+                except OSError:
+                    time.sleep(0.05)
+        yield
+    finally:
+        try:
+            if fcntl is not None:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            elif msvcrt is not None:  # pragma: no cover — Windows-only branch
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                with suppress(OSError):
+                    msvcrt.locking(  # pyright: ignore[reportAttributeAccessIssue]
+                        descriptor,
+                        msvcrt.LK_UNLCK,  # pyright: ignore[reportAttributeAccessIssue]
+                        1,
+                    )
+        finally:
+            os.close(descriptor)
+
+
+_RESERVED_BASENAMES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{i}" for i in range(1, 10)}
+    | {f"lpt{i}" for i in range(1, 10)}
+)
+
+
+def _token_file_name(server_name: str) -> str:
+    """Return an injective, filesystem-safe token file name.
+
+    Plain ``_sanitize`` maps distinct names such as ``a/b`` and
+    ``a b`` to the same ``a_b``, which would make two servers share
+    (and leak) each other's OAuth credentials.  Only all-lowercase
+    already-safe names keep their historical file name: macOS and
+    Windows filesystems are typically case-insensitive, so ``GitHub``
+    and ``github`` would otherwise alias one credential file.  Every
+    other name gets a short digest of the exact original appended,
+    which keeps distinct names distinct even after case folding.
+    Windows reserved device basenames (``con``, ``nul``, ...) are
+    prefixed as well.
+    """
+    safe = _sanitize(server_name)
+    reserved = safe.lower() in _RESERVED_BASENAMES
+    if safe == server_name and server_name == server_name.lower() and not reserved:
+        return f"{safe}.json"
+    digest = hashlib.sha256(server_name.encode("utf-8")).hexdigest()[:12]
+    prefix = "s_" if reserved else ""
+    return f"{prefix}{safe}.{digest}.json"
+
+
 class FileTokenStorage:
     """MCP SDK :class:`~mcp.client.auth.TokenStorage` backed by a JSON file.
 
@@ -334,7 +431,8 @@ class FileTokenStorage:
     """
 
     def __init__(self, server_name: str) -> None:
-        self.path = mcp_auth_dir() / f"{_sanitize(server_name)}.json"
+        self.path = mcp_auth_dir() / _token_file_name(server_name)
+        self._lock_path = self.path.with_suffix(".lock")
 
     def _read(self) -> dict[str, Any]:
         """Read the stored JSON payload (empty dict when absent/bad)."""
@@ -345,13 +443,29 @@ class FileTokenStorage:
             return {}
 
     def _write(self, data: dict[str, Any]) -> None:
-        """Write *data* to the token file with owner-only permissions."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        """Atomically write *data*, owner-only from the very first byte.
+
+        The temp file is created mode ``0600`` *before* any content is
+        written, and ``os.replace`` swaps it in atomically — so the
+        credentials are never observable with wider permissions and a
+        crash can never leave a partial file.
+        """
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
-            self.path.chmod(0o600)
-        except OSError:  # pragma: no cover - permission error
-            logger.debug("could not chmod token file", exc_info=True)
+            # mkdir applies the mode only on creation; repair a
+            # pre-existing world-readable auth dir too.
+            os.chmod(self.path.parent, 0o700)
+        except OSError:  # pragma: no cover — permission error
+            logger.debug("could not chmod auth dir", exc_info=True)
+        tmp = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
+        descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(json.dumps(data, indent=2) + "\n")
+            os.replace(tmp, self.path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
 
     async def get_tokens(self) -> Any:
         """Return the stored :class:`~mcp.shared.auth.OAuthToken`, if any."""
@@ -368,9 +482,10 @@ class FileTokenStorage:
 
     async def set_tokens(self, tokens: Any) -> None:
         """Persist *tokens* (an :class:`~mcp.shared.auth.OAuthToken`)."""
-        data = self._read()
-        data["tokens"] = tokens.model_dump(mode="json", exclude_none=True)
-        self._write(data)
+        with _file_lock(self._lock_path):
+            data = self._read()
+            data["tokens"] = tokens.model_dump(mode="json", exclude_none=True)
+            self._write(data)
 
     async def get_client_info(self) -> Any:
         """Return the stored OAuth client registration, if any."""
@@ -387,9 +502,12 @@ class FileTokenStorage:
 
     async def set_client_info(self, client_info: Any) -> None:
         """Persist the dynamically registered OAuth client information."""
-        data = self._read()
-        data["client_info"] = client_info.model_dump(mode="json", exclude_none=True)
-        self._write(data)
+        with _file_lock(self._lock_path):
+            data = self._read()
+            data["client_info"] = client_info.model_dump(
+                mode="json", exclude_none=True
+            )
+            self._write(data)
 
     def clear(self) -> bool:
         """Delete the token file (``sorcar mcp logout``).
@@ -470,21 +588,11 @@ class _Connection:
 
     config: MCPServerConfig
     ready: threading.Event = field(default_factory=threading.Event)
-    # Created eagerly (asyncio.Event is loop-agnostic until awaited) so
-    # a stop request arriving before the connection task's first line
-    # runs is never lost — it is only ever set on the manager loop via
-    # call_soon_threadsafe, and the task sees it when it parks.
     stop: asyncio.Event = field(default_factory=asyncio.Event)
     session: Any = None
     tools: list[Any] = field(default_factory=list)
     error: str = ""
     task: Any = None
-    # Set as the LAST act of ``_maintain_connection`` — i.e. only after
-    # the transport contexts have fully unwound (child process reaped).
-    # ``task`` (a ``concurrent.futures.Future``) is marked done the
-    # instant it is *cancelled*, while the wrapped asyncio task is
-    # still unwinding on the loop, so waiting on ``task`` alone lets
-    # ``shutdown`` stop the loop mid-unwind and leak the child.
     finished: threading.Event = field(default_factory=threading.Event)
 
 
@@ -558,9 +666,6 @@ async def _maintain_connection(conn: _Connection, auth: Any) -> None:
     finally:
         conn.session = None
         conn.ready.set()
-        # Signal full unwind (transports closed, child reaped) LAST —
-        # ``disconnect_all`` waits on this after a cancel so it never
-        # stops the loop while this task is still tearing down.
         conn.finished.set()
 
 
@@ -583,11 +688,6 @@ class MCPManager:
         )
         self._thread.start()
         self._connections: dict[str, _Connection] = {}
-        # Connections evicted from ``_connections`` by a connect()
-        # timeout whose task has not finished yet.  ``disconnect_all``
-        # tears these down too — without this list a task stuck
-        # mid-handshake (which ``stop.set()`` cannot unwind) would keep
-        # its transport child alive forever, invisible to shutdown.
         self._orphans: list[_Connection] = []
         self._lock = threading.Lock()
         self._shut_down = False
@@ -615,56 +715,30 @@ class MCPManager:
         Returns:
             The connection record; ``error`` is non-empty on failure.
         """
+        key = _connection_key(config)
         with self._lock:
             if self._shut_down:
-                # Fail fast: the manager loop is stopped, so a scheduled
-                # coroutine would never run and ready.wait() would burn
-                # the full CONNECT_TIMEOUT on a stale manager reference.
                 conn = _Connection(config=config)
                 conn.error = "manager shut down"
                 conn.ready.set()
                 return conn
-            existing = self._connections.get(config.name)
-            if (
-                existing is not None
-                and existing.config == config
-                and existing.error == ""
-            ):
+            existing = self._connections.get(key)
+            if existing is not None and existing.error == "":
                 conn = existing
             else:
                 if existing is not None:
-                    # Stop the stale connection's task so its server
-                    # subprocess/stream is closed, not leaked.
                     self._loop.call_soon_threadsafe(existing.stop.set)
                 if config.transport in ("http", "sse") and auth is None:
                     auth = build_oauth_provider(config)
                 conn = _Connection(config=config)
-                self._connections[config.name] = conn
+                self._connections[key] = conn
                 conn.task = asyncio.run_coroutine_threadsafe(
                     _maintain_connection(conn, auth), self._loop,
                 )
         if not conn.ready.wait(CONNECT_TIMEOUT):
-            # Tear the straggler down instead of leaving a poisoned
-            # record: if the server finished connecting just after the
-            # deadline, the record would be live (session set) yet
-            # marked failed — contradictory state that a later
-            # connect() would needlessly tear down and that
-            # format_mcp_listing would report inconsistently.
-            #
-            # Setting ``stop`` only unwinds a task that reached its
-            # ``stop.wait()`` park; one still stuck mid-handshake (a
-            # stdio child that never speaks MCP) ignores it and holds
-            # the transport child alive forever.  So the straggler is
-            # (a) kept visible to ``disconnect_all`` via ``_orphans``
-            # and (b) cancelled after a grace period even without an
-            # explicit shutdown.
             with self._lock:
-                if self._connections.get(config.name) is conn:
-                    del self._connections[config.name]
-                # Stamp the error under the lock: the connection task may
-                # be finishing concurrently (setting conn.error in its
-                # except clause) and other threads read conn.error through
-                # lock-guarded paths.
+                if self._connections.get(key) is conn:
+                    del self._connections[key]
                 conn.error = conn.error or "connection timed out"
                 if conn.task is not None and not conn.task.done():
                     self._orphans.append(conn)
@@ -697,8 +771,6 @@ class MCPManager:
                 task,
             )
         except RuntimeError:
-            # Loop already closed (shutdown raced us) — disconnect_all
-            # has taken (or will take) care of the orphan list.
             pass
 
     def _forget_orphan(self, conn: _Connection, _future: Any) -> None:
@@ -713,31 +785,37 @@ class MCPManager:
         """Call *tool* on *server* and return the textual result.
 
         Args:
-            server: The configured server name (must be connected).
+            server: The connection key from :func:`_connection_key`
+                (or a bare configured server name, matched when it is
+                unambiguous).  Two agents may configure *different*
+                servers under one conventional name (e.g. ``github``);
+                keys are config-derived so one agent's calls can never
+                be routed to the other agent's server.
             tool: The MCP tool name on that server.
             arguments: The tool arguments.
 
         Returns:
             The flattened result text (``Error: ...`` on tool errors).
         """
+        display = _key_display_name(server)
         with self._lock:
             if self._shut_down:
-                # The manager loop is stopped: no connection can be live
-                # and a scheduled coroutine would never run.
                 return (
-                    f"Error: MCP server {server!r} is not connected "
+                    f"Error: MCP server {display!r} is not connected "
                     f"(manager shut down)"
                 )
             conn = self._connections.get(server)
-        # Snapshot the session exactly once: the manager-loop thread
-        # nulls conn.session whenever the connection dies or is stopped
-        # (_maintain_connection's finally), so re-reading the attribute
-        # after the check would race an AttributeError out of the tool
-        # wrapper instead of returning the friendly error string.
+            if conn is None:
+                named = [
+                    c for k, c in self._connections.items()
+                    if _key_display_name(k) == server
+                ]
+                if len(named) == 1:
+                    conn = named[0]
         session = conn.session if conn is not None else None
         if conn is None or session is None:
             why = conn.error if conn else "never connected"
-            return f"Error: MCP server {server!r} is not connected ({why})"
+            return f"Error: MCP server {display!r} is not connected ({why})"
         future = asyncio.run_coroutine_threadsafe(
             session.call_tool(
                 tool, arguments,
@@ -768,9 +846,6 @@ class MCPManager:
         with self._lock:
             conns = list(self._connections.values())
             self._connections.clear()
-            # Include stragglers evicted by connect() timeouts: their
-            # tasks may still be stuck mid-handshake holding a live
-            # transport child that only a cancel can reap.
             conns.extend(self._orphans)
             self._orphans.clear()
         for conn in conns:
@@ -780,19 +855,8 @@ class MCPManager:
                 try:
                     conn.task.result(timeout=10)
                 except BaseException:  # noqa: BLE001 — CancelledError is BaseException
-                    # ``CancelledError`` (raised when the straggler
-                    # grace timer cancelled the future) does NOT
-                    # inherit ``Exception`` — a plain ``except
-                    # Exception`` would let it blow up the whole
-                    # teardown loop.
                     conn.task.cancel()
                     logger.debug("MCP disconnect error", exc_info=True)
-                    # The future is marked done the moment it is
-                    # cancelled, but the wrapped asyncio task is still
-                    # unwinding on the loop.  Wait for the unwind to
-                    # actually finish (transport closed, child reaped)
-                    # so ``shutdown`` cannot stop the loop mid-teardown
-                    # and orphan the server subprocess.
                     conn.finished.wait(timeout=10)
             conn.session = None
             conn.error = conn.error or "disconnected"
@@ -841,8 +905,45 @@ def _result_text(result: Any) -> str:
 
 
 def _sanitize(name: str) -> str:
-    """Restrict *name* to characters safe in tool names and file names."""
-    return "".join(c if c.isalnum() or c in "_-" else "_" for c in name)
+    """Restrict *name* to characters safe in tool names and file names.
+
+    ASCII-only: Unicode "alphanumerics" (``½``, combining marks, ...)
+    are rejected by several providers' function-name grammars, so they
+    become ``_`` like every other unsafe character.
+    """
+    return "".join(
+        c if (c.isascii() and c.isalnum()) or c in "_-" else "_" for c in name
+    )
+
+
+def _connection_key(config: MCPServerConfig) -> str:
+    """Return the manager registry key for *config*.
+
+    Keys embed a digest of the full configuration, so two concurrent
+    agents/projects that both configure a conventional name such as
+    ``github`` — with different commands, URLs, or headers — get two
+    isolated connections instead of silently sharing (and hijacking)
+    one.
+    """
+    canonical = json.dumps(config.to_json(), sort_keys=True)
+    digest = hashlib.sha256(f"{config.name}\n{canonical}".encode()).hexdigest()[:16]
+    return f"{config.name}#{digest}"
+
+
+def _key_display_name(server: str) -> str:
+    """Return the configured server name behind a registry key.
+
+    Server names may themselves contain ``#`` (``foo#bar``), so only a
+    trailing ``#<16 hex>`` digest — the exact shape
+    :func:`_connection_key` appends — is stripped; a bare name is
+    returned unchanged.  A naive ``split("#", 1)`` would truncate
+    ``foo#bar`` to ``foo``, breaking bare-name lookups and error
+    messages for such servers.
+    """
+    base, sep, tail = server.rpartition("#")
+    if sep and len(tail) == 16 and all(c in "0123456789abcdef" for c in tail):
+        return base
+    return server
 
 
 def _json_schema_to_annotation(prop: Any) -> type:
@@ -875,7 +976,9 @@ def _python_param_name(prop_name: str, used: set[str]) -> str:
     Returns:
         A valid Python identifier not present in *used*.
     """
-    name = "".join(c if c.isalnum() or c == "_" else "_" for c in prop_name)
+    name = "".join(
+        c if (c.isascii() and c.isalnum()) or c == "_" else "_" for c in prop_name
+    )
     if not name or name[0].isdigit():
         name = "p_" + name
     if keyword.iskeyword(name) or keyword.issoftkeyword(name):
@@ -890,7 +993,7 @@ def _python_param_name(prop_name: str, used: set[str]) -> str:
 
 
 def make_mcp_tool_wrapper(
-    manager: MCPManager, server: str, tool: Any,
+    manager: MCPManager, server: str, tool: Any, connection_key: str | None = None,
 ) -> Any:
     """Wrap one MCP tool as a kiss-compatible Python function.
 
@@ -903,6 +1006,9 @@ def make_mcp_tool_wrapper(
         manager: The live connection manager.
         server: The configured server name.
         tool: The MCP ``Tool`` (name, description, inputSchema).
+        connection_key: The :func:`_connection_key` of the live
+            connection to route calls to; defaults to *server* (only
+            unambiguous when a single connection has that name).
 
     Returns:
         The wrapper callable, named ``<server>_<tool>``.
@@ -910,18 +1016,12 @@ def make_mcp_tool_wrapper(
     tool_name = str(tool.name)
     full_name = f"{_sanitize(server)}_{_sanitize(tool_name)}"
     schema = tool.inputSchema if isinstance(tool.inputSchema, dict) else {}
-    # Nothing in MCP constrains the schema's inner values; be lenient
-    # with malformed shapes (e.g. a list ``properties`` or a string
-    # ``required``) so one bad tool never breaks agent startup.
     props = schema.get("properties")
     if not isinstance(props, dict):
         props = {}
     required_raw = schema.get("required")
     required = set(required_raw) if isinstance(required_raw, list) else set()
 
-    # (is_required, Parameter, doc line) per property; the Python
-    # parameter name may differ from the JSON property name (which can
-    # be hyphenated or a keyword), so param_map maps it back.
     entries: list[tuple[bool, inspect.Parameter, str]] = []
     param_map: dict[str, tuple[str, bool]] = {}
     used_names: set[str] = set()
@@ -943,8 +1043,6 @@ def make_mcp_tool_wrapper(
         suffix = "" if is_required else " (optional)"
         doc_line = f"    {py_name}: {desc or 'See tool description.'}{suffix}"
         entries.append((is_required, param, doc_line))
-    # Required parameters must precede optional ones in a Python
-    # signature; JSON object properties carry no such ordering.
     entries.sort(key=lambda e: not e[0])
     params = [e[1] for e in entries]
     doc_args = [e[2] for e in entries]
@@ -956,7 +1054,7 @@ def make_mcp_tool_wrapper(
             if value is None and not is_required:
                 continue
             arguments[original] = value
-        return manager.call_tool(server, tool_name, arguments)
+        return manager.call_tool(connection_key or server, tool_name, arguments)
 
     description = _one_line(tool.description or f"MCP tool {tool_name} on server {server}.")
     doc = f"{description}\n"
@@ -970,6 +1068,20 @@ def make_mcp_tool_wrapper(
         params, return_annotation=str,
     )
     return wrapper
+
+
+# Names of the agent's built-in tools.  A synthesized MCP tool name
+# colliding with any of these (e.g. server "run" + tool "parallel" →
+# "run_parallel") would make KISSAgent._add_functions() raise and abort
+# the whole tool loop, so such names are pre-reserved and the MCP tool
+# gets a numeric suffix instead.
+_RESERVED_TOOL_NAMES = frozenset({
+    "Bash", "Read", "Edit", "Write", "finish",
+    "go_to_url", "click", "type_text", "press_key", "scroll",
+    "screenshot", "get_page_content", "show_browser", "close_browser",
+    "skill", "ask_user_question", "talk", "set_model",
+    "run_parallel", "number_of_cores", "summary", "web_search",
+})
 
 
 def make_mcp_tools(work_dir: str) -> list[Any]:
@@ -993,6 +1105,7 @@ def make_mcp_tools(work_dir: str) -> list[Any]:
     rules = load_mcp_permissions()
     manager = MCPManager.instance()
     tools: list[Any] = []
+    taken_names: set[str] = set(_RESERVED_TOOL_NAMES)
     for name, config in servers.items():
         conn = manager.connect(config)
         if conn.session is None:
@@ -1000,9 +1113,33 @@ def make_mcp_tools(work_dir: str) -> list[Any]:
                 "MCP server %s unavailable: %s", name, conn.error or "unknown error",
             )
             continue
+        key = _connection_key(config)
         for tool in conn.tools:
-            wrapper = make_mcp_tool_wrapper(manager, name, tool)
-            if rules and mcp_tool_permission(wrapper.__name__, rules) == "deny":
+            try:
+                wrapper = make_mcp_tool_wrapper(
+                    manager, name, tool, connection_key=key,
+                )
+            except Exception:
+                # One malformed tool schema must not suppress every
+                # other MCP tool for the run.
+                logger.warning(
+                    "could not wrap MCP tool %s on server %s; skipping",
+                    getattr(tool, "name", "?"), name, exc_info=True,
+                )
+                continue
+            # Sanitized <server>_<tool> names are not injective (e.g.
+            # server 'a' tool 'b_c' vs server 'a_b' tool 'c'); a
+            # duplicate registration would abort the agent's tool loop.
+            base = wrapper.__name__
+            full_name = base
+            counter = 2
+            while full_name in taken_names:
+                full_name = f"{base}_{counter}"
+                counter += 1
+            taken_names.add(full_name)
+            wrapper.__name__ = full_name
+            wrapper.__qualname__ = full_name
+            if rules and mcp_tool_permission(full_name, rules) == "deny":
                 continue
             tools.append(wrapper)
     return tools

@@ -4,15 +4,15 @@
 # add your name here
 """E2E tests: remote-webapp task-panel-matched typography + history rows.
 
-Three features on the remote webapp (served by ``RemoteAccessServer``):
+Features on the remote webapp (served by ``RemoteAccessServer``):
 
-1. Chat-panel CONTENTS use the same font family, style, and size as the
-   pinned task panel (``#task-panel``): the task panel renders in the
-   page's sans-serif ``--vscode-font-family`` at
-   ``--vscode-editor-font-size`` (16px), while main.css puts tool
-   paths/bodies/results, system output, bash output, merge hunks and
-   all ``code``/``pre`` content in a monospace editor font, and
-   renders thinking content in italic.  Colors must NOT change.
+1. The pinned task panel (``#task-panel``) inherits main.css's
+   inverted look verbatim (the remote page merely swaps the palette
+   variables), sized by the page's injected 16px
+   ``--vscode-editor-font-size``.  The event panels likewise inherit
+   the extension's main.css typography — that extension-parity
+   contract is pinned end to end by
+   ``test_remote_panels_match_extension.py``.
 2. History rows (``.running-item``) drop their per-chat pastel
    BACKGROUND color; the per-chat color moves to a thick LEFT border.
    The VS Code webview keeps its pastel look via an equivalent
@@ -40,72 +40,69 @@ import asyncio
 import re
 import threading
 from pathlib import Path
+from typing import TypedDict
 
 import pytest
+from playwright.sync_api import Page, sync_playwright
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-from playwright.sync_api import sync_playwright
 
-MEDIA_DIR = (
-    Path(__file__).resolve().parents[3] / "agents" / "vscode" / "media"
-)
+MEDIA_DIR = Path(__file__).resolve().parents[3] / "agents" / "vscode" / "media"
 CODEX_CSS = MEDIA_DIR / "remote-codex.css"
 MAIN_CSS = MEDIA_DIR / "main.css"
 MAIN_JS = MEDIA_DIR / "main.js"
-WEB_SERVER_PY = (
-    Path(__file__).resolve().parents[3] / "server" / "web_server.py"
-)
+WEB_SERVER_PY = Path(__file__).resolve().parents[3] / "server" / "web_server.py"
+
+
+def _dark_palette(css: str) -> dict[str, str]:
+    """Return the custom properties declared on ``body.remote-chat``.
+
+    That block holds the remote page's DEFAULT (dark) palette; the
+    light theme re-declares the same names under
+    ``body.remote-chat.light-theme``.
+
+    Args:
+        css: Full text of ``remote-codex.css``.
+
+    Returns:
+        Mapping of custom-property name (e.g. ``--fg``) to its declared
+        value (e.g. ``#ececec``) in the dark theme.
+    """
+    m = re.search(r"\nbody\.remote-chat\s*\{(.*?)\n\}", css, re.DOTALL)
+    assert m, "body.remote-chat palette block missing from remote-codex.css"
+    return dict(re.findall(r"(--[\w-]+):\s*([^;]+);", m.group(1)))
+
+
+def _resolve_palette_vars(decls: str, palette: dict[str, str]) -> str:
+    """Substitute every themed ``var(--name)`` in *decls* with its value.
+
+    Colors in ``remote-codex.css`` are routed through the palette
+    custom properties so the light theme can re-theme the page, so the
+    static assertions below have to compare resolved values instead of
+    literal declarations. ``var()`` references to properties outside
+    the palette (e.g. the per-chat ``--task-color`` written by main.js)
+    are left untouched.
+
+    Args:
+        decls: CSS declarations to expand.
+        palette: Custom properties as returned by :func:`_dark_palette`.
+
+    Returns:
+        *decls* with palette ``var()`` references replaced by their
+        dark-theme values.
+    """
+    for name, value in palette.items():
+        decls = re.sub(rf"var\({re.escape(name)}\s*(?:,[^()]*)?\)", value, decls)
+    return decls
 
 
 def _find_rule(css: str, selector: str) -> str:
     """Return the union of declaration bodies of every
-    ``body.remote-chat``-scoped rule for *selector*, or fail."""
-    pattern = (
-        r"body\.remote-chat[^{,]*"
-        + re.escape(selector)
-        + r"\s*(?:,[^{]*)?\{([^}]*)\}"
-    )
-    bodies = re.findall(pattern, CODEX_CSS.read_text(encoding="utf-8"))
+    ``body.remote-chat``-scoped rule for *selector*, with palette
+    ``var()`` references resolved to their dark-theme values, or fail."""
+    pattern = r"body\.remote-chat[^{,]*" + re.escape(selector) + r"\s*(?:,[^{]*)?\{([^}]*)\}"
+    bodies = re.findall(pattern, css)
     assert bodies, f"body.remote-chat scoped rule for {selector!r} missing"
-    return "\n".join(bodies)
-
-
-# ── 1. Task-panel-matched typography (static) ───────────────────────
-
-# Every chat-panel content surface that main.css (or the browser's UA
-# stylesheet, for pre/code) puts in a monospace editor font.  The
-# remote stylesheet must repin each one to the task panel's sans
-# --vscode-font-family stack.
-MONO_CONTENT_SELECTORS = [
-    ".tp",
-    ".tc-b",
-    ".tr",
-    ".sys",
-    ".bash-panel-content",
-    ".merge-ctx",
-    ".merge-hunk",
-    "#output pre",
-    "#output code",
-]
-
-
-@pytest.mark.parametrize("selector", MONO_CONTENT_SELECTORS)
-def test_panel_content_uses_task_panel_font_family(selector: str) -> None:
-    """remote-codex.css repins *selector* to var(--vscode-font-family)."""
-    rule = _find_rule(CODEX_CSS.read_text(encoding="utf-8"), selector)
-    assert "font-family: var(--vscode-font-family" in rule, (
-        f"{selector} must use the task panel's sans "
-        f"var(--vscode-font-family) stack; got declarations: {rule!r}"
-    )
-
-
-def test_thinking_content_font_style_matches_task_panel() -> None:
-    """main.css italicises .think .cnt; the task panel is upright, so
-    the remote page must set font-style: normal on thinking content."""
-    rule = _find_rule(CODEX_CSS.read_text(encoding="utf-8"), ".think .cnt")
-    assert "font-style: normal" in rule, (
-        ".think .cnt must drop the italic style to match the task "
-        f"panel; got declarations: {rule!r}"
-    )
+    return _resolve_palette_vars("\n".join(bodies), _dark_palette(css))
 
 
 def test_remote_page_font_size_vars_match_task_panel() -> None:
@@ -116,9 +113,6 @@ def test_remote_page_font_size_vars_match_task_panel() -> None:
     src = WEB_SERVER_PY.read_text(encoding="utf-8")
     assert "--vscode-font-size: 16px" in src
     assert "--vscode-editor-font-size: 16px" in src
-
-
-# ── 2. History-row colors (static) ──────────────────────────────────
 
 
 def test_main_js_history_rows_use_task_color_var_not_inline() -> None:
@@ -137,9 +131,9 @@ def test_main_js_history_rows_use_task_color_var_not_inline() -> None:
     assert "style.color = '#1a1a1a'" not in body, (
         "renderHistory must not set an inline text color on history rows"
     )
-    assert (
-        "setProperty('--task-color', chatIdBgColor(String(s.id)))" in body
-    ), "renderHistory must set the --task-color custom property per row"
+    assert "setProperty('--task-color', chatIdBgColor(String(s.id)))" in body, (
+        "renderHistory must set the --task-color custom property per row"
+    )
 
 
 def test_main_css_keeps_webview_pastel_look_via_task_color() -> None:
@@ -154,20 +148,16 @@ def test_main_css_keeps_webview_pastel_look_via_task_color() -> None:
         f"var(--task-color) in the webview; got: {rule!r}"
     )
     assert "color: #1a1a1a" in rule, (
-        ".running-item must keep the webview's dark text on the pastel "
-        f"background; got: {rule!r}"
+        f".running-item must keep the webview's dark text on the pastel background; got: {rule!r}"
     )
 
 
 def test_remote_history_row_color_moves_to_left_border() -> None:
     """On the remote page the row background is neutral and the
     per-chat color paints a thick left border instead."""
-    rule = _find_rule(
-        CODEX_CSS.read_text(encoding="utf-8"), ".running-item"
-    )
+    rule = _find_rule(CODEX_CSS.read_text(encoding="utf-8"), ".running-item")
     assert "border-left: 4px solid var(--task-color" in rule, (
-        "the per-chat color must move to the row's left border; "
-        f"got: {rule!r}"
+        f"the per-chat color must move to the row's left border; got: {rule!r}"
     )
     assert "background-color: rgb(255 255 255 / 4%)" in rule, (
         f"the row background must be a neutral dark tint; got: {rule!r}"
@@ -182,16 +172,14 @@ REMOTE_METADATA_COLOR_RULES = [
     (".running-item-workspace", "color: #8e8e8e"),
     (".running-item-ids", "color: #8e8e8e"),
     (".running-item .ids-copy-btn", "color: #ececec"),
-    (".running-item .sidebar-item-delete", "color: #ececec"),
+    (".running-item .sidebar-item-collapse", "color: #ececec"),
     (".running-item .sidebar-item-copy", "color: #ececec"),
     (".running-item .sidebar-item-favorite", "color: #ececec"),
 ]
 
 
 @pytest.mark.parametrize(("selector", "decl"), REMOTE_METADATA_COLOR_RULES)
-def test_remote_history_metadata_readable_on_dark(
-    selector: str, decl: str
-) -> None:
+def test_remote_history_metadata_readable_on_dark(selector: str, decl: str) -> None:
     """main.css metadata/buttons colors are near-black (designed for
     the pastel background); the remote's dark neutral rows need light
     replacements."""
@@ -199,21 +187,15 @@ def test_remote_history_metadata_readable_on_dark(
     assert decl in rule, f"{selector} must set {decl}; got: {rule!r}"
 
 
-# ── 3. Single-line wrapping metadata (static) ───────────────────────
-
-
 def test_remote_metadata_container_flows_as_one_line() -> None:
     """.running-item-info must stop stacking the three spans as flex
     columns so they flow inline as one wrapping line."""
-    rule = _find_rule(
-        CODEX_CSS.read_text(encoding="utf-8"), ".running-item-info"
-    )
+    rule = _find_rule(CODEX_CSS.read_text(encoding="utf-8"), ".running-item-info")
     assert "display: block" in rule, (
         f".running-item-info must be a block flow container; got: {rule!r}"
     )
     assert "overflow-wrap: anywhere" in rule, (
-        "long unbroken tokens (work dirs, ids) must wrap; "
-        f"got: {rule!r}"
+        f"long unbroken tokens (work dirs, ids) must wrap; got: {rule!r}"
     )
 
 
@@ -240,12 +222,8 @@ def test_remote_metadata_separator_between_groups(selector: str) -> None:
     """The workspace and ids groups join the single line with the same
     dot separator used inside each group."""
     rule = _find_rule(CODEX_CSS.read_text(encoding="utf-8"), selector)
-    assert "\u2022" in rule, (
-        f"{selector} must insert a ' \u2022 ' separator; got: {rule!r}"
-    )
+    assert "\u2022" in rule, f"{selector} must insert a ' \u2022 ' separator; got: {rule!r}"
 
-
-# ── Live end-to-end ─────────────────────────────────────────────────
 
 _INJECT_PAGE_JS = r"""
 (() => {
@@ -311,10 +289,10 @@ _INJECT_PAGE_JS = r"""
     <div class="ev wt-result-ok">Committed 2 files.</div>`);
 
   // Result card through the PRODUCTION renderer.
-  if (!window._demoApi || typeof window._demoApi.processEvent !== 'function') {
+  if (!window._testApi || typeof window._testApi.processEvent !== 'function') {
     throw new Error('production output renderer is unavailable');
   }
-  window._demoApi.processEvent({
+  window._testApi.processEvent({
     type: 'result',
     success: false,
     is_continue: true,
@@ -327,17 +305,11 @@ _INJECT_PAGE_JS = r"""
 })()
 """
 
-# History row with EVERY metadata field, rendered through the
-# production renderHistory (window message -> handleEvent).  On the
-# desktop remote page the docked sidebar issues its own getHistory on
-# boot, bumping the private ``historyGeneration`` counter, so the
-# event is posted once per plausible generation — renderHistory
-# ignores every stale generation and renders exactly the matching one.
 _INJECT_HISTORY_JS = r"""
 (() => {
   // Lay the sidebar out (the desktop remote page auto-docks it, but
-  // be explicit) and disable the Workspace filter: it is on by
-  // default and would display:none a row whose work_dir differs
+  // be explicit) and keep the Workspace filter off (its default):
+  // when on it would display:none a row whose work_dir differs
   // from the client's workspace — the wrap-geometry probes need the
   // row rendered.
   document.getElementById('sidebar').classList.add('open');
@@ -387,54 +359,8 @@ _INJECT_HISTORY_JS = r"""
 })()
 """
 
-# Chat-panel CONTENT probes whose computed font family/size must equal
-# the task panel's.
-_TYPOGRAPHY_PROBES = {
-    "txt": ".ev.txt",
-    "txtCode": ".ev.txt code",
-    "txtPreCode": ".ev.txt pre code",
-    "txtTh": ".ev.txt th",
-    "txtTd": ".ev.txt td",
-    "thinkCnt": ".ev.think .cnt",
-    "tcB": ".tc-b",
-    "tcArg": ".tc-arg",
-    "tp": ".tp",
-    "tcPre": ".tc-b pre",
-    "tcPreCode": ".tc-b pre code",
-    "bashContent": ".bash-panel-content",
-    "tr": ".tr .tr-content",
-    "sys": ".ev.sys",
-    "llmTxt": ".llm-panel .txt",
-    "systemPromptBody": ".system-prompt-body",
-    "promptBody": ".prompt-body",
-    "mergeInfoHdr": ".merge-info-hdr",
-    "mergeInfoBody": ".merge-info-body",
-    "mergeCtx": ".merge-ctx",
-    "mergeHunk": ".merge-hunk",
-    "mergeFileName": ".merge-file-name",
-    "wtResultOk": ".wt-result-ok",
-    "rcH3": ".rc-h h3",
-    "rs": ".rs",
-    "rsB": ".rs b",
-    "rcBody": ".rc-body",
-    "rcStatus": ".rc-status",
-}
-
-_PROBE_STYLES_JS = (
-    "(() => { const probes = "
-    + repr(_TYPOGRAPHY_PROBES).replace("'", '"')
-    + r""";
-  const fonts = {};
-  for (const key of Object.keys(probes)) {
-    const el = document.querySelector(probes[key]);
-    if (!el) { fonts[key] = 'MISSING'; continue; }
-    const cs = getComputedStyle(el);
-    fonts[key] = cs.fontFamily + ' | ' + cs.fontSize;
-  }
+_PROBE_STYLES_JS = r"""(() => {
   const tp = getComputedStyle(document.getElementById('task-panel'));
-  const thinkCnt = document.querySelector('.ev.think .cnt');
-  const txtEl = document.querySelector('.ev.txt');
-  const trContent = document.querySelector('.tr .tr-content');
 
   // Expected per-chat accent: same djb2 hash as chatIdBgColor,
   // resolved to an rgb() string via a probe element.
@@ -472,16 +398,9 @@ _PROBE_STYLES_JS = (
     infoClipped = info.scrollWidth > info.clientWidth + 1;
   }
   return {
-    fonts,
-    taskPanelFont: tp.fontFamily + ' | ' + tp.fontSize,
-    taskPanelFontStyle: tp.fontStyle,
+    taskPanelFontSize: tp.fontSize,
     taskPanelColor: tp.color,
     taskPanelBg: tp.backgroundColor,
-    thinkFontStyle: thinkCnt ? getComputedStyle(thinkCnt).fontStyle
-      : 'MISSING',
-    thinkColor: thinkCnt ? getComputedStyle(thinkCnt).color : 'MISSING',
-    txtColor: txtEl ? getComputedStyle(txtEl).color : 'MISSING',
-    trColor: trContent ? getComputedStyle(trContent).color : 'MISSING',
     infoLineRects,
     infoClipped,
     expectedAccent,
@@ -503,7 +422,6 @@ _PROBE_STYLES_JS = (
     idsSep: ids ? getComputedStyle(ids, '::before').content : 'MISSING',
   };
 })()"""
-)
 
 
 def _start_live_server(
@@ -541,9 +459,7 @@ def _start_live_server(
             await server.start_async()
             started = True
             assert server._ws_server is not None
-            state["port"] = next(
-                iter(server._ws_server.sockets)
-            ).getsockname()[1]
+            state["port"] = next(iter(server._ws_server.sockets)).getsockname()[1]
             ready.set()
             while not done.is_set():
                 await asyncio.sleep(0.02)
@@ -561,10 +477,10 @@ def _start_live_server(
 def test_live_task_panel_typography_and_history_rows(
     tmp_path: Path,
 ) -> None:
-    """Served page + real Chromium: chat-panel contents share the task
-    panel's computed font family/style/size; history rows paint the
-    per-chat color on the left border over a neutral background; all
-    metadata flows as one wrapping line."""
+    """Served page + real Chromium: the pinned task panel keeps the
+    extension's inverted look under the remote palette; history rows
+    paint the per-chat color on the left border over a neutral
+    background; all metadata flows as one wrapping line."""
     ready = threading.Event()
     done = threading.Event()
     state: dict[str, object] = {}
@@ -578,15 +494,11 @@ def test_live_task_panel_typography_and_history_rows(
         assert ready.wait(30), "RemoteAccessServer failed to start"
         startup_error = state.get("error")
         if isinstance(startup_error, BaseException):
-            raise AssertionError(
-                "RemoteAccessServer startup failed"
-            ) from startup_error
+            raise AssertionError("RemoteAccessServer startup failed") from startup_error
         port = state["port"]
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                args=["--ignore-certificate-errors"]
-            )
+            browser = p.chromium.launch(args=["--ignore-certificate-errors"])
             try:
                 page = browser.new_page(
                     ignore_https_errors=True,
@@ -599,25 +511,11 @@ def test_live_task_panel_typography_and_history_rows(
                 page.wait_for_selector("#output", state="attached")
                 count = page.evaluate(_INJECT_PAGE_JS)
                 assert count >= 9, "transcript injection failed"
-                # Let the page's own boot-time getHistory round-trip
-                # settle BEFORE injecting: the server serves the real
-                # task database, so the boot response renders either
-                # real history rows or the empty placeholder — wait
-                # for either deterministically.  (The old swallowed
-                # 5s ``.sidebar-empty`` wait always timed out on a
-                # machine with a non-empty DB, and under
-                # parallel-suite load a late offset-0 boot render
-                # could wipe the injected row.)
                 page.wait_for_selector(
-                    "#history-list .sidebar-empty, "
-                    "#history-list .sidebar-item",
+                    "#history-list .sidebar-empty, #history-list .sidebar-item",
                     state="attached",
                     timeout=60000,
                 )
-                # Inject the fixed history session.  Retry in case a
-                # straggling backend history response (the boot flow
-                # can issue more than one getHistory) re-renders the
-                # list over the injected row.
                 for attempt in range(3):
                     page.evaluate(_INJECT_HISTORY_JS)
                     try:
@@ -630,11 +528,148 @@ def test_live_task_panel_typography_and_history_rows(
                     except PlaywrightTimeoutError:
                         if attempt == 2:
                             raise
-                # Wait for the metadata layout to settle: the info
-                # container must have real text rects (i.e. its inline
-                # children have been laid out) before probing.  Under
-                # heavy parallel load a fixed sleep was not enough and
-                # ``getClientRects`` occasionally returned 0.
+                # History panels are collapsed by default: only the
+                # clamped task text shows, the metadata is hidden, and
+                # there is no delete button (replaced by the collapse
+                # chevron).
+                collapse_probe = page.evaluate(
+                    """() => {
+                        const row = document.querySelector(
+                            '#history-list .running-item'
+                        );
+                        const info = row.querySelector(
+                            '.running-item-info'
+                        );
+                        return {
+                            collapsed: row.classList.contains(
+                                'collapsed'
+                            ),
+                            infoDisplay: getComputedStyle(info)
+                                .display,
+                            deleteButtons: row.querySelectorAll(
+                                '.sidebar-item-delete'
+                            ).length,
+                            toggles: row.querySelectorAll(
+                                '.sidebar-item-collapse'
+                            ).length,
+                        };
+                    }"""
+                )
+                assert collapse_probe["collapsed"] is True, (
+                    "history panel must be collapsed by default: " + repr(collapse_probe)
+                )
+                assert collapse_probe["infoDisplay"] == "none", (
+                    "collapsed panel must hide the metadata block: " + repr(collapse_probe)
+                )
+                assert collapse_probe["deleteButtons"] == 0, (
+                    "history panels must not render a delete button: " + repr(collapse_probe)
+                )
+                assert collapse_probe["toggles"] == 1, (
+                    "history panels must render one collapse toggle: " + repr(collapse_probe)
+                )
+                # The collapsed task panel must hug its content: no
+                # forced min-height and no oversized padding leaving
+                # blank bands above/below the task text.
+                spacing_probe = page.evaluate(
+                    """() => {
+                        const row = document.querySelector(
+                            '#history-list .running-item'
+                        );
+                        const text = row.querySelector(
+                            '.sidebar-item-text'
+                        );
+                        const actions = row.querySelector(
+                            '.sidebar-item-actions'
+                        );
+                        const cs = getComputedStyle(row);
+                        const rowBox = row.getBoundingClientRect();
+                        const textBox = text.getBoundingClientRect();
+                        const actionsBox =
+                            actions.getBoundingClientRect();
+                        return {
+                            minHeight: cs.minHeight,
+                            paddingTop: parseFloat(cs.paddingTop),
+                            paddingBottom: parseFloat(
+                                cs.paddingBottom
+                            ),
+                            spaceAbove: textBox.top - rowBox.top,
+                            spaceBelow:
+                                rowBox.bottom - textBox.bottom,
+                            actionsHeight: actionsBox.height,
+                            textToActions:
+                                actionsBox.top - textBox.bottom,
+                            actionsToBottom:
+                                rowBox.bottom - actionsBox.bottom,
+                        };
+                    }"""
+                )
+                assert spacing_probe["minHeight"] in ("0px", "auto"), (
+                    "collapsed history panel must not reserve a min-height: " + repr(spacing_probe)
+                )
+                assert spacing_probe["paddingTop"] <= 8, (
+                    "history panel must not pad extra space above "
+                    "the task text: " + repr(spacing_probe)
+                )
+                assert spacing_probe["paddingBottom"] <= 8, (
+                    "history panel must not pad extra space below "
+                    "the task text: " + repr(spacing_probe)
+                )
+                # The blank band between the panel edge and the task
+                # text itself must stay small: padding plus border
+                # plus at most a few px of flex centering slack.
+                assert spacing_probe["spaceAbove"] <= 12, (
+                    "extra space above the task text in a history panel: " + repr(spacing_probe)
+                )
+                # Below the task text sits the action strip on a line
+                # of its own, so the only slack that may remain is the
+                # gap to the strip plus the strip itself plus the
+                # panel's bottom padding.
+                assert spacing_probe["textToActions"] >= 0, (
+                    "the action strip must start below the task text, "
+                    "not beside it: " + repr(spacing_probe)
+                )
+                assert spacing_probe["textToActions"] <= 12, (
+                    "extra space between the task text and its action strip: " + repr(spacing_probe)
+                )
+                assert 16 <= spacing_probe["actionsHeight"] <= 20, (
+                    "the action strip must be exactly as tall as the "
+                    "compact 16px buttons: " + repr(spacing_probe)
+                )
+                assert spacing_probe["actionsToBottom"] >= 0, (
+                    "the action strip must stay inside the panel: " + repr(spacing_probe)
+                )
+                assert spacing_probe["actionsToBottom"] <= 12, (
+                    "extra space below the action strip in a history panel: " + repr(spacing_probe)
+                )
+                # Expand the row via its chevron so the metadata
+                # becomes visible.
+                page.click("#history-list .running-item .sidebar-item-collapse")
+                # Collapse it back, then expand again: the toggle must
+                # round-trip in the real browser.
+                page.click("#history-list .running-item .sidebar-item-collapse")
+                recollapsed = page.evaluate(
+                    """() => document.querySelector(
+                        '#history-list .running-item'
+                    ).classList.contains('collapsed')"""
+                )
+                assert recollapsed is True, (
+                    "clicking the chevron again must collapse the panel back"
+                )
+                page.click("#history-list .running-item .sidebar-item-collapse")
+                # Park the mouse away from the row so the style probe
+                # below does not read the :hover background, and wait
+                # out the 0.15s background transition
+                # (body.remote-chat .sidebar-item in remote-codex.css).
+                page.mouse.move(0, 0)
+                page.wait_for_function(
+                    """() => getComputedStyle(
+                        document.querySelector(
+                            '#history-list .running-item'
+                        )
+                    ).backgroundColor === 'rgba(255, 255, 255, 0.04)'
+                    """,
+                    timeout=10000,
+                )
                 page.wait_for_function(
                     """() => {
                         const info = document.querySelector(
@@ -656,45 +691,22 @@ def test_live_task_panel_typography_and_history_rows(
     assert not thread.is_alive(), "RemoteAccessServer failed to stop"
     thread_error = state.get("error")
     if isinstance(thread_error, BaseException):
-        raise AssertionError(
-            "RemoteAccessServer thread failed"
-        ) from thread_error
+        raise AssertionError("RemoteAccessServer thread failed") from thread_error
 
-    # 1. Typography: every content probe == task panel font + size.
-    task_panel_font = probes["taskPanelFont"]
-    assert " | 16px" in task_panel_font, probes
-    fonts = probes["fonts"]
-    missing = [k for k, v in fonts.items() if v == "MISSING"]
-    assert not missing, f"probe elements missing from the page: {missing}"
-    mismatched = {
-        k: v for k, v in fonts.items() if v != task_panel_font
-    }
-    assert not mismatched, (
-        "chat-panel contents do not match the task panel typography "
-        f"({task_panel_font!r}); mismatches: {mismatched!r}"
+    assert probes["taskPanelFontSize"] == "16px", (
+        "the task panel must size itself from the injected 16px "
+        "--vscode-editor-font-size: " + repr(probes)
     )
-    assert probes["thinkFontStyle"] == probes["taskPanelFontStyle"], (
-        "thinking content font style must match the task panel: "
-        + repr(probes)
+    assert probes["taskPanelColor"] == "rgb(13, 13, 13)", (
+        "the task panel text must use the inverted #0d0d0d foreground "
+        "(main.css --panel-fg: var(--bg) under the remote palette): " + repr(probes)
     )
-    # The pinned task panel is a dark right-aligned bubble that
-    # blends with the thread: light #ececec text on the composer's
-    # #212121 surface (not the old light #ececec card).
-    assert probes["taskPanelColor"] == "rgb(236, 236, 236)", probes
-    assert probes["taskPanelBg"] == "rgb(33, 33, 33)", (
-        "the task panel background must be the dark #212121 surface: "
-        + repr(probes)
-    )
-    assert probes["thinkColor"] == "rgb(142, 142, 142)", (
-        "thinking content must keep its muted #8e8e8e color: "
-        + repr(probes)
-    )
-    assert probes["trColor"] == "rgb(175, 175, 175)", (
-        "tool results must keep their muted #afafaf color: "
-        + repr(probes)
+    assert probes["taskPanelBg"] == "rgb(236, 236, 236)", (
+        "the task panel background must be the inverted light #ececec "
+        "surface (main.css --panel-bg: var(--fg) under the remote "
+        "palette): " + repr(probes)
     )
 
-    # 2. History-row colors: accent on the left border, neutral bg.
     row = probes["row"]
     assert row != "MISSING", "history row was not rendered"
     accent = probes["expectedAccent"]
@@ -710,7 +722,6 @@ def test_live_task_panel_typography_and_history_rows(
         f"row text must be light (not the old #1a1a1a); row: {row}"
     )
 
-    # 3. Metadata: one wrapping inline flow with all fields present.
     assert probes["infoDisplay"] == "block", probes
     for key in ("metrics", "workspace", "ids"):
         assert probes[key] == "inline | normal | visible", (
@@ -718,28 +729,197 @@ def test_live_task_panel_typography_and_history_rows(
         )
     assert "\u2022" in probes["workspaceSep"], probes
     assert "\u2022" in probes["idsSep"], probes
-    # The combined metadata is far wider than the sidebar: the single
-    # inline flow must WRAP over multiple line boxes, never clip.
     assert probes["infoLineRects"] >= 2, (
-        "the single metadata line must wrap over multiple line boxes: "
-        + repr(probes)
+        "the single metadata line must wrap over multiple line boxes: " + repr(probes)
     )
     assert probes["infoClipped"] is False, (
-        "the metadata flow must not be clipped horizontally: "
-        + repr(probes)
+        "the metadata flow must not be clipped horizontally: " + repr(probes)
     )
     assert "3 steps" in probes["metricsText"], probes
     assert "1,234 tok" in probes["metricsText"], probes
     assert "$0.5000" in probes["metricsText"], probes
     assert "00:01:01" in probes["metricsText"], probes
-    # Full date AND wall-clock time (timestamp 1700000000 → Nov 14/15,
-    # 2023 depending on the machine's timezone).
-    assert re.search(
-        r"Nov 1[45], 2023, \d{1,2}:\d{2}\s?[AP]M", probes["metricsText"]
-    ), probes
+    assert re.search(r"Nov 1[45], 2023, \d{1,2}:\d{2}\s?[AP]M", probes["metricsText"]), probes
     assert (
         probes["workspaceText"]
         == "/tmp/w \u2022 gpt-x \u2022 wt \u2022 parallel \u2022 auto-commit"
     ), probes
     assert "chat chat-abc123" in probes["idsText"], probes
     assert "task 42" in probes["idsText"], probes
+
+
+class ActionRowGeometry(TypedDict):
+    """Rendered geometry of a history task panel's action strip."""
+
+    buttonCount: int
+    stripBelowText: float
+    stripLeftInset: int
+    stripWidth: int
+    contentWidth: int
+    buttons: list[list[int]]
+    icons: list[list[int]]
+    textBottom: float
+    actionsTop: float
+
+
+_PROBE_ACTION_ROW_JS = r"""(() => {
+  const row = document.querySelector('#history-list .running-item');
+  const text = row.querySelector('.sidebar-item-text');
+  const actions = row.querySelector('.sidebar-item-actions');
+  const rowBox = row.getBoundingClientRect();
+  const textBox = text.getBoundingClientRect();
+  const actionsBox = actions.getBoundingClientRect();
+  const rowCs = getComputedStyle(row);
+  const buttons = [...actions.querySelectorAll('button')];
+  const measure = el => {
+    const b = el.getBoundingClientRect();
+    return [Math.round(b.width), Math.round(b.height)];
+  };
+  return {
+    buttonCount: buttons.length,
+    // The strip starts on a line of its own: its top edge is at or
+    // below the bottom edge of the task text.
+    stripBelowText: actionsBox.top - textBox.bottom,
+    // ... and it starts back at the row's own content edge instead of
+    // being pushed to the far right of the title's line.  clientLeft /
+    // clientWidth exclude the panel's 1px border, so the content box
+    // is derived from them rather than from the border-box rect.
+    stripLeftInset: Math.round(
+      actionsBox.left
+        - (rowBox.left + row.clientLeft + parseFloat(rowCs.paddingLeft)),
+    ),
+    stripWidth: Math.round(actionsBox.width),
+    contentWidth: Math.round(
+      row.clientWidth
+        - parseFloat(rowCs.paddingLeft)
+        - parseFloat(rowCs.paddingRight),
+    ),
+    buttons: buttons.map(measure),
+    icons: buttons.map(b => measure(b.querySelector('svg'))),
+    textBottom: textBox.bottom,
+    actionsTop: actionsBox.top,
+  };
+})()"""
+
+
+def _measure_history_action_row(page: Page) -> ActionRowGeometry:
+    """Seed one history row on *page* and return its rendered
+    action-strip geometry."""
+    page.wait_for_selector(
+        "#history-list .sidebar-empty, #history-list .sidebar-item",
+        state="attached",
+        timeout=60000,
+    )
+    for attempt in range(3):
+        page.evaluate(_INJECT_HISTORY_JS)
+        try:
+            page.wait_for_selector(
+                "#history-list .running-item .sidebar-item-actions button",
+                state="visible",
+                timeout=10000,
+            )
+            break
+        except PlaywrightTimeoutError:
+            if attempt == 2:
+                raise
+    geometry: ActionRowGeometry = page.evaluate(_PROBE_ACTION_ROW_JS)
+    return geometry
+
+
+def _assert_action_row_layout(geometry: ActionRowGeometry, surface: str) -> None:
+    """Assert the action strip owns a line at the compact button size.
+
+    The strip keeps the full-width line of its own below the task text,
+    but the buttons are drawn at the same size as every other sidebar
+    list: a 12x12 icon inside a 12x16 box.  The 18x18-in-18x24
+    enlargement the panel briefly carried has been reverted.
+    """
+    assert geometry["buttonCount"] >= 2, (
+        f"{surface}: the task panel must render its action buttons: " + repr(geometry)
+    )
+    assert geometry["stripBelowText"] >= 0, (
+        f"{surface}: the action strip must render on a line below the "
+        "task text, not beside it: " + repr(geometry)
+    )
+    assert geometry["stripBelowText"] <= 12, (
+        f"{surface}: the action strip must follow the task text "
+        "directly, with no blank band between them: " + repr(geometry)
+    )
+    assert abs(geometry["stripLeftInset"]) <= 1, (
+        f"{surface}: the action strip must start at the panel's own "
+        "content edge, i.e. own the whole line: " + repr(geometry)
+    )
+    assert geometry["stripWidth"] == geometry["contentWidth"], (
+        f"{surface}: the action strip must span the panel's full content width: " + repr(geometry)
+    )
+    assert geometry["buttons"] == [[12, 16]] * geometry["buttonCount"], (
+        f"{surface}: every action button must render at the compact "
+        "12x16 sidebar size, not the reverted 18x24 one: " + repr(geometry)
+    )
+    assert geometry["icons"] == [[12, 12]] * geometry["buttonCount"], (
+        f"{surface}: every action icon must render at the compact 12x12 "
+        "sidebar size, not the reverted 18x18 one: " + repr(geometry)
+    )
+
+
+@pytest.mark.timeout(180)
+def test_live_history_action_buttons_own_a_compact_line(
+    tmp_path: Path,
+) -> None:
+    """Served page + real Chromium: in a task panel of the task
+    history, the favourite/copy/collapse buttons render on a line of
+    their own below the task text, at the compact sidebar button size.
+
+    Both shipped surfaces are measured from real layout boxes: the
+    remote webapp exactly as ``RemoteAccessServer`` serves it
+    (``body.remote-chat`` + remote-codex.css), and the VS Code webview,
+    which loads the same ``chat.html``/``main.css`` without that body
+    class.
+    """
+    ready = threading.Event()
+    done = threading.Event()
+    state: dict[str, object] = {}
+    thread = threading.Thread(
+        target=_start_live_server,
+        args=(tmp_path, ready, done, state),
+        daemon=True,
+    )
+    thread.start()
+    try:
+        assert ready.wait(30), "RemoteAccessServer failed to start"
+        startup_error = state.get("error")
+        if isinstance(startup_error, BaseException):
+            raise AssertionError("RemoteAccessServer startup failed") from startup_error
+        port = state["port"]
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(args=["--ignore-certificate-errors"])
+            try:
+                page = browser.new_page(
+                    ignore_https_errors=True,
+                    viewport={"width": 1400, "height": 900},
+                )
+                page.goto(
+                    f"https://127.0.0.1:{port}/",
+                    wait_until="domcontentloaded",
+                )
+                assert page.evaluate("document.body.classList.contains('remote-chat')"), (
+                    "the served page must be the remote webapp"
+                )
+                remote = _measure_history_action_row(page)
+                # The VS Code webview loads the same chat.html and
+                # main.css without the remote body class.
+                page.evaluate("document.body.classList.remove('remote-chat')")
+                extension = _measure_history_action_row(page)
+            finally:
+                browser.close()
+    finally:
+        done.set()
+        thread.join(timeout=30)
+    assert not thread.is_alive(), "RemoteAccessServer failed to stop"
+    thread_error = state.get("error")
+    if isinstance(thread_error, BaseException):
+        raise AssertionError("RemoteAccessServer thread failed") from thread_error
+
+    _assert_action_row_layout(remote, "remote webapp")
+    _assert_action_row_layout(extension, "vscode extension")

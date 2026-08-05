@@ -62,9 +62,6 @@ def _write_skill(root: Path, name: str, description: str = "", body: str = "") -
     return skill_dir
 
 
-# ---------------------------------------------------------------------------
-# Discovery
-
 
 def test_discovers_project_kiss_skills(isolated_homes: Path) -> None:
     """Skills in ``<project>/.kiss/skills`` are discovered."""
@@ -155,15 +152,11 @@ def test_bundled_plugin_skills_namespaced(isolated_homes: Path) -> None:
         import shutil
 
         shutil.rmtree(bundled / "test-plugin-xyz")
-        # Remove claude_skills only if this test created it and it is empty.
         try:
             bundled.rmdir()
         except OSError:
             pass
 
-
-# ---------------------------------------------------------------------------
-# Parsing
 
 
 def test_description_falls_back_to_first_paragraph(isolated_homes: Path) -> None:
@@ -212,9 +205,6 @@ def test_name_derived_from_directory(isolated_homes: Path) -> None:
     assert "dirname" in discover_skills(str(project))
 
 
-# ---------------------------------------------------------------------------
-# Permissions
-
 
 def test_skill_permission_default_allow() -> None:
     """With no matching rule the skill is allowed."""
@@ -235,15 +225,12 @@ def test_skill_permission_last_rule_wins() -> None:
     rules = {"internal-*": "deny", "internal-ok": "allow"}
     assert skill_permission("internal-ok", rules) == "allow"
     assert skill_permission("internal-bad", rules) == "deny"
-    # Reversed order: the catch-all deny at the end wins.
     rules2 = {"internal-ok": "allow", "internal-*": "deny"}
     assert skill_permission("internal-ok", rules2) == "deny"
 
 
 def test_load_skill_permissions_from_config(isolated_homes: Path) -> None:
     """``skill_permissions`` is read from ``$KISS_HOME/config.json``."""
-    # NOTE: vscode_config.CONFIG_PATH is bound at import time to the
-    # session-level KISS_HOME set by conftest.py, so write there.
     from kiss.core.vscode_config import CONFIG_PATH
 
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -287,9 +274,6 @@ def test_denied_skills_hidden_from_discovery(isolated_homes: Path) -> None:
             CONFIG_PATH.write_text(original)
 
 
-# ---------------------------------------------------------------------------
-# Activation (load_skill_content) and the skill tool
-
 
 def test_load_skill_content_strips_frontmatter(isolated_homes: Path) -> None:
     """Activation returns the body without frontmatter, in skill_content tags."""
@@ -320,7 +304,6 @@ def test_load_skill_content_lists_resources(isolated_homes: Path) -> None:
     assert "<file>scripts/extract.py</file>" in content
     assert "<file>references/forms.md</file>" in content
     assert "<file>SKILL.md</file>" not in content
-    # Resource contents are never inlined.
     assert "print('x')" not in content
 
 
@@ -352,9 +335,8 @@ def test_skill_tool_docstring_is_catalog(isolated_homes: Path) -> None:
     assert "<available_skills>" in doc
     assert "<name>git-release</name>" in doc
     assert "<description>Cut releases</description>" in doc
-    # Token efficiency: the body is NOT in the catalog.
     assert "SECRET-BODY-MARKER" not in doc
-    assert "Args:" in doc  # schema builder needs the Args section
+    assert "Args:" in doc
 
 
 def test_skill_tool_loads_content(isolated_homes: Path) -> None:
@@ -394,9 +376,6 @@ def test_skill_tool_picks_up_new_skill_after_creation(
     assert "Second body." in tool("second")
 
 
-# ---------------------------------------------------------------------------
-# Listing (used by the /skills REPL command)
-
 
 def test_format_skill_listing_empty_hint(isolated_homes: Path) -> None:
     """The empty listing explains where to create skills."""
@@ -419,9 +398,6 @@ def test_format_skill_listing_alignment(isolated_homes: Path) -> None:
     assert "(claude-user)" in text
     assert "Deploy the app" in text
 
-
-# ---------------------------------------------------------------------------
-# Agent integration: the tool is in the agent's toolset
 
 
 def test_sorcar_agent_gets_skill_tool(isolated_homes: Path) -> None:
@@ -451,6 +427,3 @@ def test_sorcar_agent_no_skill_tool_without_skills(
     agent._use_web_tools = False
     names = [t.__name__ for t in agent._get_tools()]
     assert "skill" not in names
-
-
-

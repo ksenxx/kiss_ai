@@ -88,7 +88,6 @@ class TestDiscardCorruptedWorktree:
             branch = "kiss/wt-bh3-corrupt"
             agent, wt_dir = _setup_pending_agent(repo, branch)
 
-            # Corrupt the worktree: its .git link file disappears.
             (wt_dir / ".git").unlink()
 
             msg = agent.discard()
@@ -124,6 +123,5 @@ class TestDiscardLockedWorktree:
             )
             assert "⚠️" not in msg, msg
             assert agent._wt is None
-            # Registration must be gone too.
             listing = _git("worktree", "list", "--porcelain", cwd=repo).stdout
             assert str(wt_dir) not in listing

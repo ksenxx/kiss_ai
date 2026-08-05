@@ -117,7 +117,6 @@ def test_helper_matches_bare_and_dated_and_passthrough() -> None:
     assert _is_excluded_openai_responses_only("o3-pro-2025-06-10")
     assert _is_excluded_openai_responses_only("openrouter/openai/o1-pro")
     assert _is_excluded_openai_responses_only("openrouter/openai/o3-pro")
-    # not excluded:
     assert not _is_excluded_openai_responses_only("o3-mini")
     assert not _is_excluded_openai_responses_only("o4-mini")
     assert not _is_excluded_openai_responses_only("gpt-5-pro")

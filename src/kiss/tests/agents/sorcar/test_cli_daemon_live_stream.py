@@ -89,19 +89,9 @@ class TestCliDaemonLiveStream(unittest.TestCase):
         )
         self.loop_thread.start()
 
-        # A real RemoteAccessServer: gives us the actual ``_uds_handler``
-        # the production daemon uses (so the dispatcher under test runs
-        # on the real code path), wired to a temp UDS so concurrent
-        # tests can't race on the shared ``~/.kiss/sorcar.sock``.
         self.server = RemoteAccessServer(uds_path=self.sock_path)
-        # ``_schedule_send`` (used by ``_send_to_ws_clients``) requires
-        # the printer's loop to be set; production sets this inside
-        # ``_setup_server`` which we don't run here.
         self.server._printer._loop = self.loop
 
-        # Stand the UDS endpoint up on our loop using the SAME handler
-        # production uses — the CLI bridge connects here, and the
-        # ``cliEvent`` envelope flows through the real dispatcher.
         self.uds_server: asyncio.Server = asyncio.run_coroutine_threadsafe(
             asyncio.start_unix_server(
                 self.server._uds_handler, path=self.sock_path,
@@ -109,8 +99,6 @@ class TestCliDaemonLiveStream(unittest.TestCase):
             self.loop,
         ).result(timeout=5)
 
-        # Capture this test's KISS_SORCAR_SOCK override so the CLI
-        # bridge connects to OUR temp daemon, not the user's real one.
         self._saved_env = os.environ.get("KISS_SORCAR_SOCK")
         os.environ["KISS_SORCAR_SOCK"] = self.sock_path
         _reset_cli_daemon_writer()
@@ -119,9 +107,6 @@ class TestCliDaemonLiveStream(unittest.TestCase):
         self._reader_task: concurrent.futures.Future[None] | None = None
 
     def tearDown(self) -> None:
-        # Restore env BEFORE shutting down the loop so any stray
-        # bridge calls during teardown can't accidentally hit a
-        # half-closed socket.
         if self._saved_env is None:
             os.environ.pop("KISS_SORCAR_SOCK", None)
         else:
@@ -135,11 +120,6 @@ class TestCliDaemonLiveStream(unittest.TestCase):
                     await self._viewer_writer.wait_closed()
             except Exception:
                 pass
-            # Close registered UDS writers + wait for pending tasks
-            # so every transport FD is released before
-            # ``loop.close()``.  Without this the per-process FD
-            # soft-limit (256 on macOS) is hit when the surrounding
-            # test chunk runs hundreds of tests in one process.
             with self.server._printer._ws_lock:
                 writers = list(self.server._printer._uds_writers)
             for writer in writers:
@@ -237,32 +217,18 @@ class TestCliDaemonLiveStream(unittest.TestCase):
         with the viewer tab's ``tabId`` stamped in.
         """
         task_id = "cli-live-task-1"
-        # The viewer tab subscribes BEFORE the CLI broadcast — this
-        # is the "I had the chat open when the CLI task started"
-        # scenario the user reported.
         self.server._printer.subscribe_tab(task_id, "tab-viewer")
         _reader, received, got = self._open_viewer()
-        # Two writers expected in ``_uds_writers`` once both peers
-        # have connected: the viewer above plus the CLI bridge below.
         self._wait_for_uds_writer(1)
 
-        # CLI side: install a real ``RecordingConsolePrinter`` and
-        # broadcast a single event under the task's thread-local id.
-        # This is the SAME printer the CLI installs at runtime.
         cli_printer = RecordingConsolePrinter()
         cli_printer._thread_local.task_id = task_id
         cli_printer.broadcast({"type": "text_delta", "text": "hello-cli"})
 
-        # Within a generous window the viewer must receive a JSON
-        # line carrying the event with the viewer's ``tabId``
-        # stamped — exactly what ``WebPrinter.broadcast`` would have
-        # produced if the daemon itself had emitted the event.
         assert got.wait(timeout=3.0), (
             "viewer received NO data — bridge or relay broken; "
             f"received so far: {received}"
         )
-        # Drain a tiny extra window so we don't miss a payload that
-        # is in flight at the moment ``got`` flipped to set.
         time.sleep(0.1)
 
         matches: list[dict[str, Any]] = []
@@ -298,7 +264,6 @@ class TestCliDaemonLiveStream(unittest.TestCase):
         _reader, received, got = self._open_viewer()
         self._wait_for_uds_writer(1)
 
-        # Snapshot the daemon printer's recording BEFORE the CLI emits.
         recording_before = list(
             self.server._printer._recordings.get(task_id, ()),
         )
@@ -312,9 +277,6 @@ class TestCliDaemonLiveStream(unittest.TestCase):
         recording_after = list(
             self.server._printer._recordings.get(task_id, ()),
         )
-        # The fan-out is purely a transport — the daemon's recording
-        # must be unchanged.  (The CLI's own printer's recording
-        # has the event, which is the source of truth replays use.)
         assert recording_after == recording_before, (
             "daemon double-recorded the CLI event: "
             f"before={recording_before} after={recording_after}"

@@ -127,7 +127,6 @@ def test_model_command_takes_precedence_over_predictive(tmp_path: Path, kiss_db)
     completer = CliCompleter(str(tmp_path))
     matches = completer._build_matches("/model gpt")
     assert all(m.startswith("/model ") for m in matches)
-    # Not the predictive single-line ghost from history.
     assert matches != ["/model something from history"]
 
 
@@ -271,9 +270,6 @@ def test_main_no_task_enters_repl(tmp_path: Path) -> None:
     own ``$KISS_HOME/sorcar.sock`` so the CLI subprocess never touches
     a developer's real ``~/.kiss/sorcar.sock`` daemon.
     """
-    # A short mkdtemp path keeps $KISS_HOME/sorcar.sock under the
-    # AF_UNIX sun_path limit (~104 bytes on macOS); pytest's deeply
-    # nested tmp_path is too long to bind a UDS on.
     kiss_home = Path(tempfile.mkdtemp(prefix="kissh-"))
     env = dict(os.environ, KISS_HOME=str(kiss_home))
     env.pop("KISS_SORCAR_SOCK", None)
@@ -291,8 +287,6 @@ def test_main_no_task_enters_repl(tmp_path: Path) -> None:
         )
         assert proc.returncode == 0, proc.stderr
         assert "interactive mode" in proc.stdout
-        # The CLI really performed its handshake against the scripted
-        # daemon at $KISS_HOME/sorcar.sock (not some ambient daemon).
         assert daemon.wait_for("setWorkDir", timeout=1.0) is not None
         assert daemon.wait_for("ready", timeout=1.0) is not None
     finally:
@@ -368,7 +362,6 @@ def _read_line_over_pty(typed: str) -> tuple[str, str]:
             out += chunk
         return out.decode("utf-8", "ignore")
 
-    # Let the fresh interpreter import and draw the idle prompt box.
     time.sleep(2.0)
     os.write(fd, typed.encode())
     before = drain(1.0)
@@ -454,11 +447,11 @@ def _complete_line_over_pty(
             out += chunk
         return out.decode("utf-8", "ignore")
 
-    time.sleep(2.0)  # let the fresh interpreter import and draw the prompt
-    out = drain(0.5)  # capture the startup CAND lines + prompt
+    time.sleep(2.0)
+    out = drain(0.5)
     for chunk in chunks:
         os.write(fd, chunk.encode())
-        out += drain(0.4)  # one completion action settles per keystroke
+        out += drain(0.4)
     os.write(fd, b"\r")
     out += drain(1.5)
     os.close(fd)
@@ -472,6 +465,7 @@ def _complete_line_over_pty(
     not hasattr(os, "fork") or not _gnu_readline_active(),
     reason="cycling needs a POSIX pty and GNU readline (menu-complete)",
 )
+@pytest.mark.slow
 def test_tab_cycles_forward_through_candidates(tmp_path: Path, kiss_db) -> None:
     """Pressing Tab repeatedly cycles forward through the candidates.
 
@@ -487,17 +481,11 @@ def test_tab_cycles_forward_through_candidates(tmp_path: Path, kiss_db) -> None:
     three_tab, c3 = _complete_line_over_pty(
         str(tmp_path), ["@alpha", "\t", "\t", "\t"],
     )
-    # Ordering is deterministic, so each child cycles the same candidates.
     assert len(cands) >= 3 and cands == c2 == c3, (cands, c2, c3)
-    # The first Tab inserts the best candidate; the candidates carry a
-    # trailing space which ``input`` returns verbatim.
     assert one_tab == cands[0], (one_tab, cands)
-    # Each completion landed on a real candidate from the menu.
     assert {one_tab, two_tab, three_tab} <= set(cands), (
         one_tab, two_tab, three_tab, cands,
     )
-    # Three Tabs visited three *distinct* candidates — i.e. cycling, not
-    # merely re-inserting one common-prefix completion every time.
     assert len({one_tab, two_tab, three_tab}) == 3, (
         one_tab, two_tab, three_tab,
     )
@@ -507,6 +495,7 @@ def test_tab_cycles_forward_through_candidates(tmp_path: Path, kiss_db) -> None:
     not hasattr(os, "fork") or not _gnu_readline_active(),
     reason="cycling needs a POSIX pty and GNU readline (menu-complete)",
 )
+@pytest.mark.slow
 def test_shift_tab_cycles_backward(tmp_path: Path, kiss_db) -> None:
     """Shift-Tab steps back through the menu after Tab moved forward.
 
@@ -524,8 +513,6 @@ def test_shift_tab_cycles_backward(tmp_path: Path, kiss_db) -> None:
         str(tmp_path), ["@alpha", "\t", "\t", "\x1b[Z"],
     )
     assert len(cands) >= 3, cands
-    # Shift-Tab landed on a real candidate and moved the selection back
-    # to a different one than the two-forward-Tab position.
     assert back in cands, (back, cands)
     assert back != two_tab, (back, two_tab)
 
@@ -539,13 +526,7 @@ def test_idle_prompt_box_closed_while_typing() -> None:
     submitting), so the box is never left visually open at the bottom.
     """
     before, full = _read_line_over_pty("hello task")
-    # Both the top and the bottom rounded-border rows are emitted before
-    # the user submits, so the box is already closed while typing.
     assert "╭" in before and "╮" in before, before
     assert "╰" in before and "╯" in before, before
-    # The body line is fully framed: a left ``│`` (from the prompt) *and*
-    # a right ``│`` vertical border are drawn, so the right edge is never
-    # missing while typing.
     assert before.count("│") >= 2, before
-    # The line still submits correctly once Enter is pressed.
     assert "RESULT[hello task]" in full, full

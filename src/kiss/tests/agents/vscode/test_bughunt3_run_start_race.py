@@ -103,14 +103,10 @@ class TestRunStartRace(unittest.TestCase):
         assert self.first_clear_entered.wait(timeout=30), (
             "first _cmd_run never reached its clear broadcast"
         )
-        # First submit is now mid-broadcast: task_thread assigned but
-        # NOT yet started (is_alive() == False) — the exact race window.
         self.server._cmd_run(dict(cmd))
         self.release.set()
         t1.join(timeout=30)
 
-        # Wait for whatever task threads ran to finish (the finally
-        # resets task_thread to None).
         deadline = time.time() + 30
         while time.time() < deadline:
             tab = _RunningAgentState.running_agent_states.get(tab_id)

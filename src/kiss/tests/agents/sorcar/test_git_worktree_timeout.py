@@ -48,10 +48,6 @@ class TestGitTimeout:
         """A hung git yields returncode 124 with a timeout message."""
         bin_dir = _install_hanging_git(tmp_path)
         monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-        # Tune ONLY the timeout duration so the test does not need to
-        # wait the production timeout; the real subprocess timeout path
-        # (subprocess.TimeoutExpired -> synthesized CompletedProcess)
-        # is exercised unmodified.
         saved_timeout = git_worktree._GIT_TIMEOUT_SECONDS
         git_worktree._GIT_TIMEOUT_SECONDS = 1.0
         try:

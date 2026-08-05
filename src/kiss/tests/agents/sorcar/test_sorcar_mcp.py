@@ -164,9 +164,6 @@ def real_stdin(
         os.close(master_fd)
 
 
-# ---------------------------------------------------------------------------
-# Configuration files
-
 
 def test_save_and_load_user_scope(isolated_homes: Path) -> None:
     """A server saved in the user scope is loaded back with source=user."""
@@ -253,20 +250,15 @@ def test_to_json_roundtrip_remote(isolated_homes: Path) -> None:
     assert loaded.transport == "http"
 
 
-# ---------------------------------------------------------------------------
-# Permission wildcards
-
 
 def test_permission_wildcards_last_rule_wins() -> None:
     """Wildcard rules cover MCP tools with last-match-wins semantics."""
     rules = {"*": "allow", "mymcp_*": "deny"}
     assert mcp_tool_permission("mymcp_search", rules) == "deny"
     assert mcp_tool_permission("other_search", rules) == "allow"
-    # Later allow rule re-enables one tool of a denied server.
     rules = {"mymcp_*": "deny", "mymcp_safe": "allow"}
     assert mcp_tool_permission("mymcp_safe", rules) == "allow"
     assert mcp_tool_permission("mymcp_rm", rules) == "deny"
-    # Default is allow when no rule matches.
     assert mcp_tool_permission("anything", {}) == "allow"
 
 
@@ -277,9 +269,6 @@ def test_load_mcp_permissions_from_config(mcp_permission_rules) -> None:
     assert rules == {"*": "allow", "internal_*": "deny"}
     assert mcp_tool_permission("internal_x", rules) == "deny"
 
-
-# ---------------------------------------------------------------------------
-# Live stdio server: manager, wrappers, tool calls
 
 
 def test_make_mcp_tools_live_call(
@@ -383,9 +372,6 @@ def test_wrapper_docstring_carries_schema_descriptions() -> None:
     assert params["limit"].default is None
 
 
-# ---------------------------------------------------------------------------
-# OAuth: token storage, callback server, non-interactive guard
-
 
 def test_file_token_storage_roundtrip(isolated_homes: Path) -> None:
     """Tokens and client info persist to a 0600 file and clear()."""
@@ -403,7 +389,12 @@ def test_file_token_storage_roundtrip(isolated_homes: Path) -> None:
     )
     asyncio.run(storage.set_client_info(info))
 
-    assert storage.path.name == "my_server.json"
+    # Sanitization is lossy for "my/server", so an injective digest
+    # suffix keeps it from sharing a file with e.g. "my server".
+    assert storage.path.name.startswith("my_server.")
+    assert storage.path.name.endswith(".json")
+    assert storage.path.name != "my_server.json"
+    assert FileTokenStorage("my server").path != storage.path
     assert (storage.path.stat().st_mode & 0o777) == 0o600
     back = asyncio.run(storage.get_tokens())
     assert back is not None and back.access_token == "at-1"
@@ -435,9 +426,6 @@ def test_noninteractive_oauth_refuses_browser_flow() -> None:
     with pytest.raises(RuntimeError, match="sorcar mcp auth"):
         asyncio.run(_noninteractive_redirect("https://auth.example/authorize"))
 
-
-# ---------------------------------------------------------------------------
-# ``sorcar mcp`` CLI (in-process)
 
 
 def test_cli_add_list_get_remove(
@@ -562,9 +550,6 @@ def test_cli_debug_connection_failure(
     assert run_mcp_cli(["debug", "bad"], project) == 1
     assert "✗ Connection failed" in capsys.readouterr().out
 
-
-# ---------------------------------------------------------------------------
-# Subprocesses: the real ``sorcar mcp`` entry point and the REPL ``/mcp``
 
 
 def _subprocess_env(homes: Path) -> dict[str, str]:

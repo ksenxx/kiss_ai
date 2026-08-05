@@ -50,16 +50,9 @@ from kiss.ui.cli.cli_steering import (
     _InputBox,
 )
 
-# Stripping ANSI SGR (``ESC[…m``) escapes makes the rendered frame
-# legible for the row-counting assertions below.
 _SGR_RE = re.compile(r"\x1b\[[0-9;]*m")
-# CSI cursor-positioning escapes (``ESC[<row>;<col>H``) carve the
-# rendered stream into per-row writes that we walk to count visible
-# body rows.
 _CUP_RE = re.compile(r"\x1b\[(\d+);(\d+)H")
 
-# Number of body rows the idle / steering input panel must always show
-# (one chevron+placeholder/text row plus two padding rows).
 _MIN_BODY_ROWS = 3
 
 
@@ -90,12 +83,7 @@ def _count_body_rows(rendered: str) -> int:
     input-area rows we want to count.
     """
     stripped = _SGR_RE.sub("", rendered)
-    # The rendered stream interleaves cursor-positioning escapes with
-    # the row contents; splitting on the CUP escape yields one segment
-    # per absolute row write.
     segments = _CUP_RE.split(stripped)
-    # segments come out as [pre, row1, col1, content1, row2, col2,
-    # content2, …]; we only want the content slices.
     contents = segments[3::3]
     in_box = False
     body = 0
@@ -193,11 +181,8 @@ def test_box_body_height_helpers_enforce_three_row_minimum() -> None:
     """
     assert _box_body_h("") == _MIN_BODY_ROWS
     assert _box_body_h("only one line") == _MIN_BODY_ROWS
-    # Two ``\n`` → three buffer lines: still exactly the minimum.
     assert _box_body_h("one\ntwo\nthree") == _MIN_BODY_ROWS
-    # Three ``\n`` → four buffer lines: dynamic growth past the floor.
     assert _box_body_h("one\ntwo\nthree\nfour") == 4
-    # ``_box_h_for`` = 2 borders + body rows.
     assert _box_h_for("") == 2 + _MIN_BODY_ROWS
     assert _BOX_H == 2 + _MIN_BODY_ROWS, (
         f"the steering box's minimum height constant must equal "
@@ -217,22 +202,14 @@ def test_panel_body_returns_minimum_three_rows() -> None:
     rows, is_placeholder = panel_body("", 60)
     assert is_placeholder
     assert len(rows) == _MIN_BODY_ROWS
-    # At cols=60 the inner width is 60 - 4 = 56 columns; the chevron
-    # prefix "› " (2 cols) plus the 57-char placeholder exceeds it, so
-    # panel_body clips row 0 to the widest fitting prefix.
     inner_w = 60 - 4
     assert rows[0] == "› " + PLACEHOLDER[: inner_w - 2]
     assert rows[0] == "› Add an instruction for the agent while it works to ste"
-    # At a width where chevron + placeholder fits (default 80-col
-    # terminals), the full placeholder is shown untruncated.
     wide_rows, wide_is_placeholder = panel_body("", 80)
     assert wide_is_placeholder
     assert PLACEHOLDER in wide_rows[0]
-    # Padding rows are blank (no chevron, no placeholder leak).
     for blank in rows[1:]:
         assert blank.strip() == ""
-    # Override: a caller can drop the floor to 1 (legacy single-row
-    # behaviour) without recompiling the module.
     legacy, _ = panel_body("", 60, min_rows=1)
     assert len(legacy) == 1
 
@@ -250,10 +227,6 @@ def test_ptk_line_reader_enforces_three_row_minimum(tmp_path) -> None:
     completer = CliCompleter(str(tmp_path))
     reader = PtkLineReader(completer, tmp_path / "hist")
     layout = reader.session.layout
-    # Walk every Window in the layout: the input Buffer is the one
-    # bound to the default buffer; its enclosing Window must declare a
-    # minimum height of 3 so prompt_toolkit reserves three terminal
-    # rows for the input area even when the buffer holds one line.
     from prompt_toolkit.layout.containers import Window
 
     input_window = None

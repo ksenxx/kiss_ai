@@ -2,43 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end tests for ``macLaunchd.js`` — the drain-aware LaunchAgent
-// restart that fixes the "kiss-web launch takes a lot of time after an
-// update" bug.
-//
-// Bug being locked in
-// -------------------
-// ``restartKissWebDaemon`` used to run ``launchctl bootout →
-// bootstrap → kickstart -k`` back to back.  When the old job instance
-// was still draining (the kiss-web daemon takes ~5 s to unwind after
-// SIGTERM), launchd accepted the ``bootstrap`` but the still-pending
-// ``bootout`` removed the WHOLE service — including the fresh
-// registration — the moment the old instance exited.  Unified-log
-// evidence from the 2026-07-19 14:30:58Z update:
-//
-//   07:31:03.301 launchd: removing service: com.kiss.web-server
-//   07:31:13.539 launchd: service inactive: com.kiss.web-server
-//   07:31:23.561 launchd: Successfully spawned kiss-web[90306]
-//                because inefficient
-//
-// Nothing was loaded for 15 s (until ``verifyDaemonStartup`` re-issued
-// the restart) and the respawn was then throttled ~10 more seconds —
-// ~26.4 s from SIGTERM to "Server starting" on EVERY restart.
-//
-// These tests use the REAL launchd (a throwaway LaunchAgent with a
-// unique test label) to first REPRODUCE the race — the naive sequence
-// leaves the service unloaded with no new instance — and then prove
-// ``restartLaunchAgent`` brings a fresh instance up promptly.  Edge
-// branches (fail-closed stuck drain, inconclusive probes from a
-// hanging or missing launchctl, bootstrap retry/fallback, kickstart
-// failure) are driven through REAL controlled ``launchctl``-shaped
-// executables run as normal child processes — no project code is
-// mocked.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/macLaunchdRestart.test.js
 
 'use strict';
 
@@ -61,8 +24,6 @@ async function test(name, fn) {
   console.log(`  ok - ${name}`);
 }
 
-/** Lines currently in the start-marker file (one line per payload
- * process start). */
 function markerLines(markerFile) {
   try {
     return fs
@@ -74,7 +35,6 @@ function markerLines(markerFile) {
   }
 }
 
-/** Poll until the marker file has at least ``n`` lines. */
 async function waitForStarts(markerFile, n, timeoutMs) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -93,9 +53,6 @@ function tryLaunchctl(args) {
   }
 }
 
-/** The OLD, racy restart sequence (verbatim behaviour of the previous
- * ``reissueRestart``): bootout, bootstrap immediately, ``load -w``
- * fallback, kickstart — with no drain wait. */
 function naiveRestartSequence(serviceTarget, domainTarget, plistFile) {
   tryLaunchctl(['bootout', serviceTarget]);
   if (!tryLaunchctl(['bootstrap', domainTarget, plistFile])) {
@@ -103,10 +60,6 @@ function naiveRestartSequence(serviceTarget, domainTarget, plistFile) {
   }
   tryLaunchctl(['kickstart', '-k', serviceTarget]);
 }
-
-// ---------------------------------------------------------------------------
-// Part A — REAL launchd: reproduce the drain race, verify the fix.
-// ---------------------------------------------------------------------------
 
 async function realLaunchdTests() {
   const uid = execFileSync('id', ['-u'], {encoding: 'utf-8'}).trim();
@@ -117,8 +70,6 @@ async function realLaunchdTests() {
   const markerFile = path.join(tmp, 'starts.txt');
   const payload = path.join(tmp, 'payload.sh');
 
-  // A long-running payload that records every start and — like the
-  // kiss-web daemon — takes ~3 s to drain after SIGTERM.
   fs.writeFileSync(
     payload,
     '#!/bin/sh\n' +
@@ -154,7 +105,6 @@ async function realLaunchdTests() {
   );
 
   try {
-    // Load the agent and wait for the first payload instance.
     execFileSync('launchctl', ['bootstrap', domainTarget, plistFile], {
       stdio: 'ignore',
       timeout: 5000,
@@ -170,9 +120,6 @@ async function realLaunchdTests() {
       async () => {
         const baseline = markerLines(markerFile).length;
         naiveRestartSequence(serviceTarget, domainTarget, plistFile);
-        // Old instance drains ~3 s; give launchd ample time to spawn a
-        // replacement if the bootstrap registration had survived
-        // (RunAtLoad + ThrottleInterval=1 spawn within ~2 s).
         await sleep(6_000);
         assert.strictEqual(
           markerLines(markerFile).length,
@@ -211,8 +158,6 @@ async function realLaunchdTests() {
           Date.now() - t0 < 12_000,
           `restart must beat the old 15s+10s penalty (took ${Date.now() - t0}ms)`,
         );
-        // A plain kickstart (no -k) must NOT kill the fresh instance
-        // and force a second start.
         await sleep(1_500);
         assert.strictEqual(
           markerLines(markerFile).length,
@@ -264,16 +209,10 @@ async function realLaunchdTests() {
         });
         assert.strictEqual(res.drained, true);
         assert.strictEqual(res.bootstrapped, false);
-        // ``registered`` is NOT asserted here: the real ``launchctl
-        // load`` notoriously exits 0 even when it loads nothing
-        // (which is exactly why bootstrap is the primary path).
         assert.strictEqual(res.kickstarted, false);
       },
     );
   } finally {
-    // Robust teardown: bootout (retried) and poll until launchd
-    // positively no longer knows the service before deleting the
-    // payload/plist files it references.
     let gone = false;
     for (let i = 0; i < 40 && !gone; i++) {
       tryLaunchctl(['bootout', serviceTarget]);
@@ -285,21 +224,6 @@ async function realLaunchdTests() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Part B — controlled launchctl-shaped executables: edge branches.
-// ---------------------------------------------------------------------------
-
-/** Write a real executable that behaves like launchctl, driven by
- * state files in its own directory:
- *   - ``print``      exits 0 while ``present`` exists, hangs (past the
- *                    5s command timeout) while ``hang`` exists, else
- *                    exits 113 ("Could not find service");
- *   - ``bootout``    removes ``present`` only if ``bootout_removes``
- *                    exists (a stuck drain otherwise);
- *   - ``bootstrap``  succeeds from the Nth call (``bootstrap_ok_after``);
- *   - ``load``       fails while ``load_fail`` exists;
- *   - ``kickstart``  fails while ``kick_fail`` exists.
- */
 function writeControlledLaunchctl(dir) {
   const bin = path.join(dir, 'launchctl');
   fs.writeFileSync(
@@ -468,7 +392,7 @@ async function controlledBinaryTests() {
         assert.strictEqual(res.drained, true);
         assert.strictEqual(res.bootstrapped, false);
         assert.strictEqual(res.bootstrapAttempts, 2);
-        assert.strictEqual(res.registered, true); // load -w succeeded
+        assert.strictEqual(res.registered, true);
         assert.strictEqual(res.kickstarted, false);
         assert.ok(
           logs.some(m => m.includes('load -w fallback succeeded')),

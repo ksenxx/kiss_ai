@@ -80,8 +80,6 @@ class TestCostRegression(CliClientBase):
             total_tokens_used=4321,
             chat_id="stale-agent-chat-id",
         )
-        # ``tab.chat_id`` must win over the agent's (stale) chat id —
-        # see A1.a in the round-2 review.
         tab.chat_id = "chat-abc"
         _RunningAgentState.register(self.client.tab_id, tab)
         try:
@@ -102,20 +100,8 @@ class TestModelCurrentPerClient(unittest.TestCase):
     """Review #6 — ``/model`` no-arg must reflect *this* client's selection."""
 
     def setUp(self) -> None:
-        # Register every cleanup the moment its resource is acquired so
-        # a partial setUp (e.g. one ``start()`` raising) still releases
-        # everything constructed up to that point.  ``addCleanup`` runs
-        # in LIFO order — the harness shuts down last, after both
-        # clients have closed and their devnull FDs have been
-        # released.  Without this, an exception in ``client_b.start``
-        # would leak ``client_a``'s loop FDs and the harness's UDS
-        # listener, fanning out into ``OSError [Errno 24] Too many
-        # open files`` for the rest of the suite.
         self.harness = _DaemonHarness()
         self.addCleanup(self.harness.shutdown)
-        # Force a final ``gc.collect()`` so any sockets / loops still
-        # held only by lingering references (e.g. closed dispatcher
-        # task wrappers) are reclaimed before the next test runs.
         self.addCleanup(gc.collect)
 
         self._devnull_a = open(os.devnull, "w")
@@ -129,9 +115,6 @@ class TestModelCurrentPerClient(unittest.TestCase):
             tab_id=uuid.uuid4().hex,
             printer=ConsolePrinter(file=self._devnull_a),
         )
-        # Register cleanup BEFORE ``start`` so a failure mid-start
-        # still releases whatever sockets / threads the client did
-        # manage to acquire.
         self.addCleanup(self._safe_close, self.client_a)
         self.client_a.start(timeout=5.0)
 
@@ -164,16 +147,11 @@ class TestModelCurrentPerClient(unittest.TestCase):
         m_a = models[0]["name"]
         m_b = models[1]["name"]
 
-        # Each client picks a distinct model.  Client B's selection is
-        # the most recent one, so the server-wide ``_default_model``
-        # ends up holding ``m_b`` — but ``cliInfo modelCurrent`` reads
-        # ``tab.selected_model`` so client A still sees ``m_a``.
         self.client_a.send({"type": "selectModel", "model": m_a,
                             "tabId": self.client_a.tab_id})
         self.client_b.send({"type": "selectModel", "model": m_b,
                             "tabId": self.client_b.tab_id})
 
-        # Wait for the server to apply both updates.
         def _both_applied() -> bool:
             tabs = _RunningAgentState.running_agent_states
             tab_a = tabs.get(self.client_a.tab_id)
@@ -228,9 +206,6 @@ class TestStaleCliInfoReplyRace(CliClientBase):
     """
 
     def test_stale_reply_with_old_request_id_is_dropped(self) -> None:
-        # Stale ``mcp`` reply tagged with an unrelated requestId — the
-        # filter must drop it and keep waiting for the real ``help``
-        # reply.
         self.client.dispatcher.cli_info_q.put({
             "type": "cliInfo",
             "subtype": "mcp",
@@ -285,8 +260,6 @@ class TestPrintElapsedRoutesThroughPrinter(CliClientBase):
 
     def test_elapsed_line_lands_in_printer_file(self) -> None:
         buf = StringIO()
-        # Swap the dispatcher's printer for one whose output goes
-        # into a buffer we can read; no monkey-patching of methods.
         self.client.dispatcher.printer = ConsolePrinter(file=buf)
         _print_elapsed(self.client, time.time() - 1.5)
         output = buf.getvalue()
@@ -323,14 +296,9 @@ class TestSkillsErrorHandling(CliClientBase):
         )
         self.assertIs(reply.get("error"), True)
         self.assertIn("Unknown skill", reply.get("text", ""))
-        # ``errorMessage`` carries the human text — review A5 round 2.
         self.assertIn("Unknown skill",
                       reply.get("errorMessage", ""))
 
-
-# ===========================================================================
-# Round-3 tests covering the new fixes
-# ===========================================================================
 
 
 class TestStatusBroadcastCarriesTaskId(CliClientBase):
@@ -345,11 +313,6 @@ class TestStatusBroadcastCarriesTaskId(CliClientBase):
     def test_run_command_status_events_echo_task_id(self) -> None:
         my_task_id = uuid.uuid4().hex
         before = len(self.harness.captured)
-        # Drive a real ``run`` through the daemon.  An empty / invalid
-        # prompt is fine: ``_run_task`` broadcasts ``running=true``
-        # BEFORE calling ``_run_task_inner``, so even if the agent
-        # fails fast (no API key, empty prompt) we still observe both
-        # the start and end status events.
         self.client.send({
             "type": "run",
             "prompt": "ping",
@@ -375,7 +338,6 @@ class TestStatusBroadcastCarriesTaskId(CliClientBase):
             f"saw {[e for e in self.harness.captured[before:] if e.get('type')=='status']!r}",
         )
 
-        # Eventually a running=false broadcast must also carry our id.
         def _saw_taskid_on_running_false() -> bool:
             for ev in self.harness.captured[before:]:
                 if (ev.get("type") == "status"
@@ -399,28 +361,18 @@ class TestSubmitTaskTaskIdRaceRealDaemon(CliClientBase):
     """
 
     def test_stale_status_false_before_new_run_is_ignored(self) -> None:
-        # Pre-arm dispatcher with a stale ``status:false`` from a
-        # different task id.  Without the per-task filter ``_submit_task``
-        # would see ``task_active`` toggled by the stale event and
-        # return immediately.
         self.client.dispatcher.current_task_id = "old-task-id"
         self.client.dispatcher.task_active.set()
-        # Now simulate a stale ``status:false`` for that OLD task id
-        # arriving just before the new submit:
         self.client.dispatcher.dispatch({
             "type": "status", "running": False, "taskId": "old-task-id",
         })
-        # task_active should be cleared because it matches the armed id.
         self.assertFalse(self.client.dispatcher.task_active.is_set())
 
-        # Now arm with a NEW id and verify a stale ``status:false`` for
-        # the OLD id is filtered (kept armed).
         self.client.dispatcher.current_task_id = "new-task-id"
         self.client.dispatcher.task_active.set()
         self.client.dispatcher.dispatch({
             "type": "status", "running": False, "taskId": "stale-different-id",
         })
-        # Must remain SET because the stale id does not match.
         self.assertTrue(
             self.client.dispatcher.task_active.is_set(),
             "Stale status:false with mismatched taskId was not filtered",
@@ -431,8 +383,6 @@ class TestCurrentTaskIdResetOnExit(CliClientBase):
     """Review B1 round 2 — ``current_task_id`` must reset on every exit path."""
 
     def test_disconnect_path_resets_current_task_id(self) -> None:
-        # Pre-close the client; ``_submit_task`` should take the
-        # disconnect path and the finally must reset ``current_task_id``.
         self.client._closed.set()
         _submit_task(
             self.client, "noop",
@@ -449,13 +399,7 @@ class TestCurrentTaskIdResetOnExit(CliClientBase):
         )
 
     def test_no_ack_timeout_path_resets_current_task_id(self) -> None:
-        # Pre-arm the dispatcher with an old id so we can detect a
-        # stale leak.  Then call _submit_task with a tiny timeout
-        # WITHOUT a daemon ack (we don't send anything through the
-        # daemon, so the no-ack-timeout branch fires).
         self.client.dispatcher.current_task_id = "leftover-id"
-        # Disable the daemon connection so the run is not actually
-        # processed — the simplest way is to close the client first.
         self.client._closed.set()
         _submit_task(
             self.client, "noop",
@@ -477,17 +421,8 @@ class TestCustomCommandDisconnectDoesNotPrintTrue(CliClientBase):
         with contextlib.redirect_stdout(buf):
             _handle_client_slash(self.client, "/somecustomcmd-that-does-not-exist foo")
         output = buf.getvalue()
-        # The old code printed "True\n" because ``error`` carried a
-        # bool which str()-converted to "True"; the new path reads
-        # ``errorMessage`` (string) and falls back to a human message.
         self.assertNotIn("True", output,
                          f"Disconnect printed literal True: {output!r}")
-        # The message should mention the daemon connection issue or
-        # fall back to a generic "Unknown command".
-        # Tightened from a 4-way disjunction (round 2 D7) to a
-        # precise expectation — the disconnect-sentinel always
-        # populates ``errorMessage`` so the printed line must contain
-        # "Daemon" (review T15 round 3).
         self.assertIn("Daemon", output,
                       f"Bad output on disconnect: {output!r}")
 
@@ -513,9 +448,6 @@ class TestAutocommitDisconnectFastFail(CliClientBase):
         with contextlib.redirect_stdout(buf):
             _handle_client_slash(self.client, "/autocommit")
         elapsed = time.monotonic() - start
-        # Without the fix, this blocks for the full 30 s
-        # ``commit_q.get(timeout=30)``.  With it, the polling loop
-        # bails on _closed within one 0.25 s tick.
         self.assertLess(
             elapsed, 2.0,
             f"/autocommit took {elapsed:.2f}s after disconnect (expected <2 s)",
@@ -551,9 +483,6 @@ class TestExitStopsRunningTask(CliClientBase):
         )
 
     def test_exit_without_active_task_does_not_send_stop(self) -> None:
-        # When no task is running, /exit must not send a redundant
-        # stop — the existing closeTab from the outer finally is
-        # sufficient.
         self.assertFalse(self.client.dispatcher.task_active.is_set())
         before = len(self.harness.received_cmds)
         self.assertTrue(_handle_client_slash(self.client, "/exit"))

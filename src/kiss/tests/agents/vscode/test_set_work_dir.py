@@ -101,9 +101,6 @@ def test_set_work_dir_updates_field_and_invalidates_caches(
     """
     a, b = two_workspaces
     server = _make_server(a)
-    # Seed the caches with values that came from folder A.  The
-    # active-file snapshots are keyed per connection (``connId``);
-    # direct calls use the shared "" key.
     with server._state_lock:
         server._file_cache = {a: ["alpha.txt"]}
         server._last_active_file[""] = os.path.join(a, "alpha.txt")
@@ -166,8 +163,6 @@ def test_get_files_returns_new_workspace_after_set_work_dir(
     server = _make_server(a)
     captured = _capture_files_events(server)
 
-    # Prime the cache with folder A by calling _get_files once and
-    # waiting for the background scan to publish results.
     server._handle_command({"type": "getFiles", "prefix": ""})
     _wait_for(
         lambda: any(
@@ -187,11 +182,9 @@ def test_get_files_returns_new_workspace_after_set_work_dir(
     )
     assert "beta.txt" not in _names(a_files)
 
-    # User opens folder B in VS Code; extension sends setWorkDir.
     captured.clear()
     server._handle_command({"type": "setWorkDir", "workDir": b})
 
-    # Next autocomplete request must trigger a fresh scan rooted at B.
     server._handle_command({"type": "getFiles", "prefix": ""})
     _wait_for(
         lambda: any(
@@ -238,10 +231,6 @@ def test_set_work_dir_syncs_web_printer_work_dir(
         "setWorkDir must sync WebPrinter.work_dir to the new folder"
     )
 
-    # A configData event with an empty work_dir is filled in place by
-    # the printer from its own ``work_dir`` attribute, so it must now
-    # report folder B (no WebSocket/UDS clients are attached, so the
-    # broadcast is otherwise a no-op).
     cfg: dict[str, Any] = {"work_dir": ""}
     event: dict[str, Any] = {"type": "configData", "config": cfg}
     printer.broadcast(event)

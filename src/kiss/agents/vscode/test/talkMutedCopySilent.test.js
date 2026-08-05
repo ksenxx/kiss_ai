@@ -2,30 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression test: a ``talk`` copy stamped ``muted: true``
-// by the daemon must NOT be played by the webview.
-//
-// The daemon mutes a talk copy when another player on the SAME
-// machine already owns the utterance — e.g. a task launched with the
-// ``sorcar`` CLI plays the clip on the terminal speakers and forwards
-// the event to the daemon, whose UDS peers (this webview among them)
-// are all on that same machine.  Before this arbitration the webview
-// played the relayed copy too: the same clip sounded twice, slightly
-// offset — distorted, overlapping speech.
-//
-// A muted copy must also NOT poison the talkId dedupe set: a later
-// playable (unmuted) copy of the same talkId must still play.
-//
-// Playback is the GPT-synthesized clip carried in ``audioB64`` (the
-// robotic Web Speech fallback is gone — a canary stub asserts the
-// speech engine is never touched).
-//
-// Runs the REAL production ``media/main.js`` in jsdom (only the
-// vscode host API, Audio, and the Web Speech API are recording stubs,
-// as in every webview test).  Run with:
-//
-//     node test/talkMutedCopySilent.test.js
 
 'use strict';
 
@@ -36,13 +12,8 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-const B64 = 'SUQzBAAAAAAAAA=='; // decodes to "ID3..." — an MP3 tag header
+const B64 = 'SUQzBAAAAAAAAA==';
 
-/**
- * Build a jsdom window running the production chat webview with a
- * recording Audio stub (clips end immediately so the talk queue keeps
- * flowing) and a CANARY Web Speech stub that must never record a call.
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -80,7 +51,6 @@ function makeWebview() {
     this.src = src;
     played.push(this);
     this.play = () => {
-      // Complete at once so a played clip never blocks the queue.
       if (typeof this.onended === 'function') this.onended({type: 'ended'});
       return Promise.resolve();
     };
@@ -96,7 +66,10 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   const ready = posted.find(m => m.type === 'ready');
   assert.ok(ready && ready.tabId, 'webview must post ready with its tab id');
@@ -122,8 +95,6 @@ function test(name, fn) {
   }
 }
 
-// ---------------------------------------------------------------------------
-
 test('a muted talk copy stays silent', () => {
   const {win, played, spoken, tabId} = makeWebview();
   send(win, {
@@ -138,10 +109,6 @@ test('a muted talk copy stays silent', () => {
 });
 
 test('a muted copy does not block a later playable copy', () => {
-  // The mute decision is per COPY, not per utterance: a muted copy
-  // must not add its talkId to the spoken set, otherwise a playable
-  // copy that legitimately reaches this webview later (e.g. after a
-  // subscription change) would be wrongly suppressed.
   const {win, played, spoken, tabId} = makeWebview();
   send(win, {
     type: 'talk', language: 'en-US', text: 'first muted',
@@ -166,8 +133,6 @@ test('an unmuted copy still plays exactly once', () => {
   assert.strictEqual(played[0].src, 'data:audio/mpeg;base64,' + B64);
   assert.strictEqual(spoken.length, 0, 'Web Speech must never be used');
 });
-
-// ---------------------------------------------------------------------------
 
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length) {

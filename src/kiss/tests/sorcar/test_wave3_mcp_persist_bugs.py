@@ -46,13 +46,9 @@ import pytest
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.mcp_servers import MCPManager, MCPServerConfig
+from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
-from kiss.core.useful_tools import UsefulTools
 from kiss.ui.cli.mcp_cli import run_mcp_cli
-
-# ---------------------------------------------------------------------------
-# A-F2: _stop_event_writer racing _start_event_writer
-# ---------------------------------------------------------------------------
 
 
 def _redirect(tmpdir: str) -> tuple:
@@ -155,9 +151,6 @@ class TestStopStartEventWriterRace:
             f"{max_seen[0]} concurrent kiss-event-writer threads observed"
         )
 
-        # Final stop must leave zero live writers: a clobbered-but-live
-        # orphan (its reference nulled and its stop flag cleared by the
-        # racing stop path) would survive here forever pre-fix.
         th._flush_chat_events()
         th._stop_event_writer()
         deadline = time.monotonic() + 5
@@ -172,10 +165,6 @@ class TestStopStartEventWriterRace:
         assert len(texts) == 4 * 40, f"expected 160 events, got {len(texts)}"
         assert len(set(texts)) == 4 * 40, "duplicate events persisted"
 
-
-# ---------------------------------------------------------------------------
-# A-F3: background-tab crash must not clear the healthy active page
-# ---------------------------------------------------------------------------
 
 
 def test_background_tab_crash_keeps_active_page() -> None:
@@ -203,16 +192,11 @@ def test_background_tab_crash_keeps_active_page() -> None:
         assert not switched.startswith("Error"), switched
         assert tool._page is page2
 
-        # Crash the BACKGROUND tab's renderer for real.  The navigation
-        # itself raises once the renderer dies.
         try:
             page_a.goto("chrome://crash", timeout=10000)
         except Exception:
             pass
 
-        # The sync Playwright API delivers the pending crash event only
-        # during later Playwright calls; pump a few so the (buggy)
-        # handler gets its chance to null the active page.
         out = ""
         for _ in range(5):
             out = tool.go_to_url(
@@ -229,10 +213,6 @@ def test_background_tab_crash_keeps_active_page() -> None:
     finally:
         tool.close()
 
-
-# ---------------------------------------------------------------------------
-# A-F5: connect()/call_tool() on a shut-down manager fail fast
-# ---------------------------------------------------------------------------
 
 
 def test_connect_after_shutdown_fails_fast() -> None:
@@ -270,10 +250,6 @@ def test_call_tool_after_shutdown_fails_fast() -> None:
     assert "shut down" in out, out
 
 
-# ---------------------------------------------------------------------------
-# C-2: Read must validate max_lines
-# ---------------------------------------------------------------------------
-
 
 class TestReadMaxLinesValidation:
     """``Read`` rejects ``max_lines < 1`` with a clear error."""
@@ -299,10 +275,6 @@ class TestReadMaxLinesValidation:
         assert out.startswith("l1\nl2\n"), out
         assert "[truncated: 3 more lines]" in out
 
-
-# ---------------------------------------------------------------------------
-# C-4: `sorcar mcp add` rejects silently-ignored options/arguments
-# ---------------------------------------------------------------------------
 
 
 class TestMcpAddRejectsIgnoredOptions:

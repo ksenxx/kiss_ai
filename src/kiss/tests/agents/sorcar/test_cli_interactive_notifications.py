@@ -82,8 +82,6 @@ class TestEventDispatcherRendersNotifications(unittest.TestCase):
         )
         out = self.buf.getvalue()
         self.assertIn("Disk space low", out)
-        # Severity label must surface so the operator can tell info
-        # from warning from error at a glance.
         self.assertIn("WARNING", out.upper())
 
     def test_error_notification_shows_severity_label(self) -> None:
@@ -145,8 +143,6 @@ class TestEventDispatcherRendersNotifications(unittest.TestCase):
     def test_notification_with_empty_message_does_not_crash(self) -> None:
         """A defensive zero-content event must be silently rendered
         without raising; the chat webview tolerates it the same way."""
-        # No assertion on output content — just that dispatch returns
-        # cleanly with no exception.
         self.disp.dispatch({"type": "notification", "id": "n-x"})
 
     def test_unrelated_events_still_silently_ignored(self) -> None:
@@ -174,11 +170,6 @@ class TestRecordingConsolePrinterRendersNotificationsLocally(
     """
 
     def setUp(self) -> None:
-        # Build a RecordingConsolePrinter then swap its inner
-        # ConsolePrinter for one that writes into a StringIO so we
-        # can assert on the captured terminal output.  We cannot use
-        # the printer's own constructor knobs because it defaults to
-        # the real ``sys.stdout``.
         self.buf = io.StringIO()
         self.printer = RecordingConsolePrinter()
         self.printer._console = ConsolePrinter(file=self.buf)

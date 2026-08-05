@@ -2,33 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Bug-hunt integration test for ``MergeManager._doOpenMerge``'s
-// ``isNewFile`` classification.
-//
-// Bug locked in:
-//
-//   ``isNewFile`` was computed as ``processed.every(h => h.oc === 0)``
-//   — "every hunk has zero old lines".  But the Python side
-//   (``diff_merge._hunk_to_dict`` / ``_file_as_new_hunks``) produces
-//   ``bc = 0`` (⇒ ``oc = 0``) hunks for ANY pure insertion, including
-//   appends to a file that existed long before the task.  Only a
-//   brand-new file gets an EMPTY base copy
-//   (``diff_merge._write_base_copy`` writes ``b""`` when git has no
-//   blob).  So when the agent merely appended lines to an existing
-//   file and the user clicked "Reject File" (or "Reject Rest"), the
-//   extension treated the file as agent-created and DELETED it from
-//   disk via ``_deleteNewFile`` — destroying the user's pre-existing
-//   file instead of just reverting the appended lines.
-//
-// This test drives the real compiled ``MergeManager.js`` (no mocks of
-// project code) with an in-memory ``vscode`` stub that performs real
-// file deletions for ``WorkspaceEdit.deleteFile`` — exactly what the
-// VS Code host does.
-//
-// Run directly with ``node`` (after ``npm run compile``):
-//
-//     node src/kiss/agents/vscode/test/bughunt_isNewFile.test.js
 
 'use strict';
 
@@ -38,11 +11,7 @@ const os = require('os');
 const path = require('path');
 const Module = require('module');
 
-// ---------------------------------------------------------------------------
-// In-memory text-document model shared by the vscode stub.
-// ---------------------------------------------------------------------------
-
-const docs = new Map(); // fsPath -> doc model
+const docs = new Map();
 
 function offsetOf(text, line, character) {
   const lines = text.split('\n');
@@ -116,10 +85,6 @@ function makeEditor(doc) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// vscode stub
-// ---------------------------------------------------------------------------
-
 class StubWorkspaceEdit {
   constructor() {
     this._textOps = [];
@@ -187,12 +152,10 @@ const vscodeStub = {
         if (op.kind === 'insert') d._applyInsert(op.pos, op.txt);
         else d._applyReplace(op.range, op.txt);
       }
-      // Real VS Code deletes the file from disk for deleteFile().
       for (const uri of edit._deletes) {
         try {
           fs.rmSync(uri.fsPath, {force: true});
         } catch {
-          /* ignore */
         }
         docs.delete(uri.fsPath);
       }
@@ -207,15 +170,7 @@ Module._resolveFilename = function (request, parent, ...rest) {
   if (request === 'vscode') return require.resolve('./_vscode-stub.js');
   return origResolve.call(this, request, parent, ...rest);
 };
-// ``_vscode-stub.js`` is a git-tracked fixture shared by tests running
-// in parallel; it already re-exports ``global.__kissVscodeStub`` — never
-// rewrite or delete it here (writeFileSync truncates first, racing a
-// concurrent ``require('vscode')`` in sibling test processes).
 global.__kissVscodeStub = vscodeStub;
-
-// ---------------------------------------------------------------------------
-// Test driver
-// ---------------------------------------------------------------------------
 
 const compiled = path.join(__dirname, '..', 'out', 'MergeManager.js');
 assert.ok(
@@ -229,17 +184,12 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-isnewfile-'));
 
 async function testRejectFileOnExistingFileWithAppendOnlyHunk() {
   docs.clear();
-  // Pre-existing file: the agent appended one line ("D") at the end.
-  // The pre-task base copy (written by diff_merge._write_base_copy)
-  // is NON-empty — proof the file existed before the task.
   const basePath = path.join(tmpDir, 'base-existing.txt');
   const curPath = path.join(tmpDir, 'existing.txt');
   fs.writeFileSync(basePath, 'A\nB\nC\n');
   fs.writeFileSync(curPath, 'A\nB\nC\nD\n');
 
   const mgr = new MergeManager();
-  // Insertion-only hunk exactly as diff_merge emits it for an append:
-  // bc=0 (no old lines) ⇒ the TS side computes oc=0 for every hunk.
   await mgr.openMerge({
     files: [
       {
@@ -257,7 +207,6 @@ async function testRejectFileOnExistingFileWithAppendOnlyHunk() {
   });
 
   await mgr.rejectFile();
-  // Let the saveAll/allDone promise chain settle.
   await new Promise((r) => setTimeout(r, 50));
 
   assert.ok(
@@ -279,8 +228,6 @@ async function testRejectFileOnExistingFileWithAppendOnlyHunk() {
 
 async function testRejectFileOnGenuinelyNewFileStillDeletes() {
   docs.clear();
-  // Brand-new file: diff_merge._write_base_copy writes an EMPTY base
-  // when git has no blob for the file.
   const basePath = path.join(tmpDir, 'base-new.txt');
   const curPath = path.join(tmpDir, 'new.txt');
   fs.writeFileSync(basePath, '');

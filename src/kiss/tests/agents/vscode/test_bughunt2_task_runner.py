@@ -71,16 +71,11 @@ class TestViewerStopWithStaleSubscription(unittest.TestCase):
         new_state = _register_state(new_launcher)
         _register_state(viewer)
 
-        # Task 8101 ran earlier from old_launcher and FINISHED: its
-        # stop_event was cleared by _run_task's finally, but the
-        # subscriber set survives (cleanup_task preserves it).
         self.server.printer.subscribe_tab("8101", old_launcher)
         self.server.printer.subscribe_tab("8101", viewer)
         old_state.stop_event = None
         old_state.task_thread = None
 
-        # Task 8202 is RUNNING from new_launcher; the viewer is
-        # subscribed to it too (e.g. via _reattach_running_chat).
         self.server.printer.subscribe_tab("8202", new_launcher)
         self.server.printer.subscribe_tab("8202", viewer)
         stop_event = threading.Event()
@@ -122,18 +117,12 @@ class TestAnswerQueueCrossTaskHijack(unittest.TestCase):
         viewer = "bh2-viewer-b"
 
         owner_state = _register_state(owner)
-        # Real per-tab state + real WorktreeSorcarAgent via _get_tab.
         viewer_state = self.server._get_tab(viewer)
 
-        # Both tabs are subscribed to task 8301 (owner launched it,
-        # viewer watches it).  The owner tab has since been closed:
-        # its user_answer_queue was reset to None.
         self.server.printer.subscribe_tab("8301", owner)
         self.server.printer.subscribe_tab("8301", viewer)
         owner_state.user_answer_queue = None
 
-        # The viewer tab is itself running its OWN task 8999 and owns
-        # a live answer queue for it.
         assert viewer_state.agent is not None
         viewer_state.agent._last_task_id = "8999"
         viewer_state.is_task_active = True
@@ -141,7 +130,6 @@ class TestAnswerQueueCrossTaskHijack(unittest.TestCase):
         viewer_state.user_answer_queue = viewer_queue
         self.server.printer.subscribe_tab("8999", viewer)
 
-        # Task 8301's agent thread asks a question.
         self.server.printer._thread_local.task_id = "8301"
         resolved = self.server._resolve_task_answer_queue()
 

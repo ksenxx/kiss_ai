@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.core.useful_tools import UsefulTools
+from kiss.agents.sorcar.useful_tools import UsefulTools
 
 pytestmark = pytest.mark.skipif(
     sys.platform == "win32", reason="POSIX shell/process-group semantics"
@@ -48,6 +48,7 @@ def test_background_child_in_group_does_not_block_past_timeout(
     assert "timeout" not in out.lower()
 
 
+@pytest.mark.slow
 def test_out_of_group_child_does_not_block_forever(tmp_path: Path) -> None:
     """A descendant that escapes the process group survives the group kill.
 

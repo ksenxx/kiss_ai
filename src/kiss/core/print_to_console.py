@@ -13,6 +13,7 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.text import Text
 
+from kiss.core.html_render import html_to_rich
 from kiss.core.printer import (
     Printer,
     extract_extras,
@@ -21,8 +22,6 @@ from kiss.core.printer import (
     truncate_result,
 )
 
-# All notification toasts render in yellow (border and message text)
-# regardless of severity; only the leading label distinguishes them.
 _NOTIFICATION_STYLES = {
     "error": ("yellow", "✕ ERROR"),
     "warning": ("yellow", "⚠ WARNING"),
@@ -33,23 +32,10 @@ _NOTIFICATION_STYLES = {
 class ConsolePrinter(Printer):
     def __init__(self, file: Any = None) -> None:
         self._console = Console(highlight=False, file=file)
-        # Store only the explicit file (if any).  ``_file`` is resolved
-        # lazily via the property below so that a later swap of
-        # ``sys.stdout`` (e.g. the sorcar CLI's :class:`_StdoutProxy`,
-        # which is installed AFTER this printer is constructed) is
-        # honoured for direct ``self._file.write`` calls.  Without
-        # lazy resolution, ``bash_stream`` / ``_flush_newline`` /
-        # ``_print_tool_result`` writes bypass the proxy and land at
-        # the current cursor position — inside the bottom input box.
         self._explicit_file: Any = file
         self._mid_line = False
         self._bash_streamed = False
         self._current_block_type = ""
-        # Per-task usage offsets, mirroring ``JsonPrinter``.  The agentic
-        # loop sets these (``printer.tokens_offset = ...`` etc.) so that
-        # sub-agent / continued-session usage accumulated into the parent
-        # is included in the Result panel and usage line -- exactly like
-        # the webview status bar.  Default 0 for a simple single-agent run.
         self.tokens_offset = 0
         self.budget_offset = 0.0
         self.steps_offset = 0
@@ -98,17 +84,13 @@ class ConsolePrinter(Printer):
         if data is None:
             return Markdown(raw)
         parts: list[Any] = []
-        # Mirror the webview Result panel exactly (see ``main.js`` "result"
-        # case): a continuation shows a yellow "Status: Continue", an
-        # explicit failure shows a red "Status: FAILED", and a plain
-        # success shows NO status banner at all.
         if data.get("is_continue"):
             parts.append(Text("Status: Continue", style="bold yellow"))
             parts.append(Text(""))
         elif data.get("success") is False:
             parts.append(Text("Status: FAILED", style="bold red"))
             parts.append(Text(""))
-        parts.append(Markdown(str(data["summary"])))
+        parts.append(html_to_rich(str(data["summary"])))
         return Group(*parts)
 
     def _flush_newline(self) -> None:
@@ -147,14 +129,9 @@ class ConsolePrinter(Printer):
             str: Always the empty string.
         """
         if type == "text":
-            # Match JsonPrinter: silently drop empty / whitespace-only
-            # text so a blank line never appears in the terminal when nothing
-            # would have been shown in the browser.
             if not str(content).strip():
                 return ""
             self._flush_newline()
-            # Default ``markup=True`` to mirror the browser printer, which
-            # also lets Rich parse markup before flattening to plain text.
             self._console.print(content, **kwargs)
             return ""
         if type == "system_prompt":
@@ -184,13 +161,6 @@ class ConsolePrinter(Printer):
             return ""
         if type == "bash_stream":
             if not self._bash_streamed:
-                # First streamed chunk of a Bash tool call: open the
-                # RESULT rule HERE so the live-streamed output renders
-                # INSIDE the Result panel (between the opening RESULT
-                # rule and the closing rule the matching ``tool_result``
-                # event will emit) — without this, every streamed
-                # chunk lands above the opening rule and the panel
-                # body is empty.
                 self._flush_newline()
                 self._console.rule("RESULT", style="green", align="center")
             self._file.write(str(content))
@@ -201,22 +171,11 @@ class ConsolePrinter(Printer):
         if type == "tool_call":
             self._flush_newline()
             if self._bash_streamed:
-                # Defensive: a previous Bash call opened the RESULT
-                # rule via the bash_stream path but never received a
-                # matching ``tool_result`` (e.g. the call was
-                # cancelled mid-stream).  Close the panel now so the
-                # next tool_call's blue panel doesn't render inside
-                # the still-open Result panel.
                 self._console.rule(style="green")
                 self._bash_streamed = False
             self._format_tool_call(str(content), kwargs.get("tool_input", {}))
             return ""
         if type == "tool_result":
-            # Match JsonPrinter: show every tool's return value
-            # so the console mirrors the webview.  Suppress only the
-            # ``finish`` tool result -- the agentic loop renders that as
-            # a dedicated "result" panel immediately after, so emitting
-            # it here would be a duplicate.
             is_error = bool(kwargs.get("is_error", False))
             tool_name = kwargs.get("tool_name", "")
             tool_input = kwargs.get("tool_input")
@@ -230,31 +189,12 @@ class ConsolePrinter(Printer):
                 )
             return ""
         if type == "usage_info":
-            # Match JsonPrinter: surface per-step usage info so the
-            # terminal user sees the same token / cost / step updates as
-            # the webview status bar.  The ``content`` string is already
-            # a human-readable summary built by KISSAgent.
             text = str(content)
             if text.strip():
                 self._flush_newline()
                 self._console.print(text, style="dim", highlight=False)
             return ""
         if type == "notification":
-            # Render webview-style toast notifications (e.g. the
-            # auto-commit life-cycle messages "Generating commit
-            # message" / "Committed <subject>", or the server-reset
-            # toast "Restarting the KISS Sorcar web server…") as a
-            # compact Rich panel on the terminal so an operator using
-            # the sorcar CLI sees the same notifications a chat
-            # webview user sees.  Every severity renders in yellow
-            # (border and message text); only the leading label —
-            # matching ``media/main.js::notificationTitle`` /
-            # ``notificationIcon`` — distinguishes them:
-            #     info     ⇒ "ℹ INFO" label
-            #     warning  ⇒ "⚠ WARNING" label
-            #     error    ⇒ "✕ ERROR" label
-            # A ``progressMessage`` (the dim subtitle on the webview
-            # toast) is rendered below the main message in dim yellow.
             severity = str(kwargs.get("severity", "info")).lower()
             border, label = _NOTIFICATION_STYLES.get(severity, _NOTIFICATION_STYLES["info"])
             message = str(content) if content is not None else ""
@@ -391,10 +331,6 @@ class ConsolePrinter(Printer):
             return False
         if display.strip() == "(file is empty)":
             return False
-        # Binary files emit a "Read binary file ... content attached
-        # below." header followed by an attachment marker that
-        # ``truncate_result`` already strips out.  Don't try to
-        # syntax-highlight the leftover header text as source code.
         if display.startswith("Read binary file "):
             return False
         return True
@@ -409,8 +345,6 @@ class ConsolePrinter(Printer):
         label = "FAILED" if is_error else "RESULT"
         style = "red" if is_error else "green"
         if not self._bash_streamed:
-            # Normal (non-streamed) path: open the panel here, write
-            # the full captured content, then close it.
             self._console.rule(label, style=style, align="center")
             display = truncate_result(content)
             if self._should_syntax_highlight_read(
@@ -440,12 +374,6 @@ class ConsolePrinter(Printer):
                     self._file.flush()
             self._console.rule(style=style)
         else:
-            # The ``bash_stream`` handler already opened the RESULT
-            # rule and printed the live output INSIDE the panel.  All
-            # that's left to do is close the panel.  When the command
-            # failed, surface a "FAILED" label on the closing rule so
-            # the user still sees the error status without a duplicate
-            # dump of the streamed content.
             if is_error:
                 self._console.rule(label, style=style, align="center")
             else:

@@ -49,15 +49,9 @@ from kiss.core.models.openai_compatible_model import (
     _model_thinking_level,
     _provider_model_name,
 )
+from kiss.core.models.stream_abort import stop_aware_events
 
-# The Responses API ``input_audio`` part only accepts ``mp3`` and ``wav``
-# formats (vs the broader Chat-Completions set), so unsupported audio
-# MIME types are normalised to ``mp3`` to keep the bytes addressable.
 _RESPONSES_INPUT_AUDIO_FORMATS = {"mp3", "wav"}
-# Allow-list of image MIME types accepted by the Responses API's
-# ``input_image`` content part.  Other ``image/*`` MIME types (svg,
-# tiff, avif, bmp, heic, …) are rejected by the server with an
-# ``invalid_request_error``.
 _RESPONSES_INPUT_IMAGE_MIME_TYPES = {
     "image/png",
     "image/jpeg",
@@ -111,20 +105,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         )
         self.base_url = base_url
         self.api_key = api_key
-        # FIFO of pending model-produced tool calls (most recent batch).
-        # Each entry: {"name": ..., "call_id": ...}.  Consumed by
-        # ``add_function_results_to_conversation_and_return`` so incremental
-        # (one-result-at-a-time) result submissions keep using the model's
-        # original ``call_id`` values regardless of intervening
-        # ``function_call_output`` items in the conversation.
         self._pending_function_calls: list[dict[str, str]] = []
-        # Per-stream mapping of item_id → original ``output_index`` for
-        # every output item observed (message / function_call / reasoning).
-        # Reset at the start of each ``_consume_stream`` call.  Used by
-        # the replay merge in ``generate_and_process_with_tools`` to
-        # order stream-only function_calls against compacted terminal
-        # ``response.output`` items by their TRUE original output_index
-        # rather than by the compacted list position.
         self._last_stream_item_indexes: dict[str, int] = {}
         self._last_stream_message_output_index: int | None = None
         self._api_model_name = _provider_model_name(model_name)
@@ -149,10 +130,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         )
 
     __repr__ = __str__
-
-    # ------------------------------------------------------------------
-    # Initialization
-    # ------------------------------------------------------------------
 
     def initialize(
         self, prompt: str, attachments: list[Attachment] | None = None
@@ -191,10 +168,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 }
             )
 
-    # ------------------------------------------------------------------
-    # Helpers: attribute / mapping access
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _get_attr_or_key(obj: Any, key: str, default: Any = None) -> Any:
         """Return ``obj.key`` or ``obj[key]``, falling back to ``default``.
@@ -217,10 +190,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             return obj.get(key, default)
         return getattr(obj, key, default)
 
-    # ------------------------------------------------------------------
-    # Attachment conversion
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _attachment_to_content_part(att: Attachment) -> dict[str, Any] | None:
         """Convert a single :class:`Attachment` to a Responses-API content part.
@@ -234,11 +203,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             the Responses API (e.g. video).
         """
         if att.mime_type.startswith("image/"):
-            # The Responses API only accepts a small allow-list of
-            # image MIME types.  Anything else (svg, tiff, avif, bmp,
-            # heic, …) is rejected by the server with an
-            # ``invalid_request_error`` — drop locally and warn the
-            # caller so they aren't paying for a wasted round-trip.
             if att.mime_type not in _RESPONSES_INPUT_IMAGE_MIME_TYPES:
                 logger.warning(
                     "OpenAI Responses API does not support %s image "
@@ -299,10 +263,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 parts.append(part)
         return parts
 
-    # ------------------------------------------------------------------
-    # Conversation walking helpers
-    # ------------------------------------------------------------------
-
     def _consume_pending_call_id(
         self,
         func_name: str,
@@ -339,10 +299,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                             "empty call_id"
                         )
                     return call_id
-            # No pending call_id matches ``func_name`` by name.  Silently
-            # pairing a result with the wrong call_id corrupts the
-            # conversation; raise so the caller fixes the mismatch
-            # explicitly.
             pending_names = [
                 p.get("name", "") for p in self._pending_function_calls
             ]
@@ -350,11 +306,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 f"No pending function_call named {func_name!r}; "
                 f"pending calls are {pending_names!r}"
             )
-        # Restored / reconstructed conversations may have no pending
-        # queue but still carry the model's original ``function_call``
-        # items in ``self.conversation``.  Match by name against every
-        # unanswered call (not just the trailing run) so restoration
-        # workflows can still pair results with the correct call_id.
         if fallback_unanswered is not None:
             for j, pending in enumerate(fallback_unanswered):
                 if pending.get("name") == func_name:
@@ -372,9 +323,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         if i < len(trailing) and trailing[i][1]:
             trailing_name, call_id = trailing[i]
             if trailing_name and trailing_name != func_name:
-                # Never silently pair a result with a different
-                # function_call's call_id — that would tell the model the
-                # wrong tool produced the result.
                 raise KISSError(
                     f"Trailing function_call mismatch for result "
                     f"{func_name!r}; trailing call at index {i} is "
@@ -435,10 +383,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 and tool.get("type") == "function"
                 and isinstance(tool.get("function"), dict)
             ):
-                # Hoist every nested function-level field
-                # (name, description, parameters, strict, ...) onto the
-                # top-level dict — dropping only the nested wrapper key
-                # — so optional flags like ``strict`` survive the flatten.
                 base = {k: v for k, v in tool.items() if k != "function"}
                 base.update(tool["function"])
                 base["type"] = "function"
@@ -505,23 +449,12 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 out.append(item)
                 continue
             if item.get("role") is None:
-                # Internal sentinel for deferred tool-result attachments
-                # — must NEVER be forwarded to the Responses API.
                 if item.get("type") == "_kiss_pending_tool_result_attachment":
                     continue
-                # ``message`` items REQUIRE a ``role`` per the Responses
-                # API contract.  Some OpenAI-compatible gateways return
-                # role-less ``message`` items in ``response.output``;
-                # forwarding them back unchanged on the next turn would
-                # produce an ``invalid_request_error``.  Infer
-                # ``assistant`` (the only legal role for replayed
-                # output) and continue normalization.
                 if item.get("type") == "message":
                     item = dict(item)
                     item["role"] = "assistant"
                 else:
-                    # Standalone item (function_call,
-                    # function_call_output, reasoning, ...).
                     out.append(item)
                     continue
             content = item.get("content")
@@ -538,9 +471,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                             if not str(part.get("text", "")).strip():
                                 continue
                         elif ptype == "refusal":
-                            # Empty refusal parts violate the same
-                            # ``invalid_request_error`` contract as
-                            # empty text parts; drop them before resend.
                             if not str(part.get("refusal", "")).strip():
                                 continue
                     filtered.append(part)
@@ -549,15 +479,9 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     new_item["content"] = filtered
                     out.append(new_item)
                 continue
-            # Role-bearing message item with absent / ``None`` /
-            # unsupported ``content`` shape — drop it.  Forwarding it
-            # would produce an ``invalid_request_error`` from the
-            # Responses API ("content is required" or similar).
             continue
         return out
 
-    # Item types native to the Responses API ``input`` array (plus the
-    # internal attachment sentinel) that must never be re-converted.
     _NATIVE_INPUT_ITEM_TYPES = {
         "function_call",
         "function_call_output",
@@ -565,7 +489,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         "item_reference",
         "_kiss_pending_tool_result_attachment",
     }
-    # Content-part types accepted by Responses ``message`` items.
     _NATIVE_INPUT_PART_TYPES = {
         "input_text",
         "output_text",
@@ -600,15 +523,8 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             return True
         role = item.get("role")
         if role is None:
-            # Unknown role-less standalone item; ``_normalize_input``
-            # already knows how to filter/repair these.
             return True
         if role == "tool" or "tool_calls" in item or item.get("attachments"):
-            # ``tool_calls`` marks a Chat-Completions assistant message
-            # even when its value is ``None``/``[]`` (older GeminiModel
-            # turns stored ``tool_calls: None``); the Responses API
-            # rejects the key outright, so such messages always need
-            # conversion (which drops the empty key).
             return False
         content = item.get("content")
         if isinstance(content, list):
@@ -720,11 +636,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         """
         if old_idx == new_idx:
             return new_idx
-        # Snapshot marker membership for BOTH source and destination
-        # indexes BEFORE any mutation.  Updating these sets
-        # incrementally as the dict mutates (the previous approach)
-        # could lose markers when both slots had state — e.g. both
-        # `old_idx` and `new_idx` in ``args_from_added``.
         moving_in_delta = old_idx in args_from_delta
         moving_in_added = old_idx in args_from_added
         occupant_in_delta = new_idx in args_from_delta
@@ -746,8 +657,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 item_to_idx[occupant_iid] = relocated_idx
                 occupant_relocated_to = relocated_idx
             else:
-                # Same item OR occupant has no item_id — merge missing
-                # fields from the moving slot into the existing one.
                 for field_name in ("id", "name", "arguments", "item_id"):
                     if not occupant.get(field_name) and moving.get(field_name):
                         occupant[field_name] = moving[field_name]
@@ -758,7 +667,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         if item_id:
             item_to_idx[item_id] = new_idx
 
-        # Atomically re-establish marker membership using the snapshot.
         args_from_delta.discard(old_idx)
         args_from_delta.discard(new_idx)
         args_from_added.discard(old_idx)
@@ -768,7 +676,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         if moving_in_added:
             args_from_added.add(new_idx)
         if occupant_merged:
-            # Merged slot inherits the OR of both contributors' markers.
             if occupant_in_delta:
                 args_from_delta.add(new_idx)
             if occupant_in_added:
@@ -951,17 +858,8 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         system_instruction = kwargs.pop("system_instruction", None)
         reasoning_effort = kwargs.pop("reasoning_effort", None)
         kwargs.pop("enable_cache", None)
-        # v1-only transport-selection flag; meaningless on the Responses
-        # transport, so drop it like the Chat-Completions-only keys below.
         kwargs.pop("use_responses_api", None)
-        # Anthropic-only client knob; arrives here when a live conversation
-        # (and its config) is handed over from an AnthropicModel via the
-        # Sorcar ``set_model`` tool.  Not a Responses-API parameter.
         kwargs.pop("stream_stall_timeout", None)
-        # Chat-Completions-only / legacy keys that the Responses API does
-        # not accept (streaming controls, sampling knobs, legacy
-        # function-calling fields).  Drop silently so v1-shaped configs
-        # keep working.
         for key in (
             "stream_options",
             "stream",
@@ -980,9 +878,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         ):
             kwargs.pop(key, None)
 
-        # max_tokens / max_completion_tokens → max_output_tokens.  The
-        # newer ``max_completion_tokens`` takes precedence when both
-        # legacy keys are present (mirrors v1).
         max_tokens = kwargs.pop("max_tokens", None)
         max_completion_tokens = kwargs.pop("max_completion_tokens", None)
         if "max_output_tokens" not in kwargs:
@@ -991,9 +886,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             elif max_tokens is not None:
                 kwargs["max_output_tokens"] = max_tokens
 
-        # response_format → text.format.  The Responses API uses
-        # ``text={"format": {"type": "json_object", ...}}`` instead of
-        # the top-level Chat-Completions ``response_format`` key.
         response_format = kwargs.pop("response_format", None)
         if response_format is not None:
             existing_text = kwargs.get("text")
@@ -1019,28 +911,12 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             kwargs["instructions"] = system_instruction
         if reasoning_effort is not None:
             existing = kwargs.get("reasoning")
-            # Shallow-copy the caller-supplied nested ``reasoning`` dict
-            # before mutating it so the caller's ``model_config`` stays
-            # pristine across calls.
             if isinstance(existing, dict):
                 existing = dict(existing)
             else:
                 existing = {}
-            # The explicit top-level ``reasoning_effort`` (the v1
-            # compatibility key) is authoritative — it overrides any
-            # nested ``reasoning.effort`` that may also be present so the
-            # v1 → v2 translation contract holds.
             existing["effort"] = reasoning_effort
             kwargs["reasoning"] = existing
-        # Opt in to reasoning summaries whenever an effort is requested
-        # (covers both the ``reasoning_effort`` compatibility key handled
-        # above AND a caller-native ``reasoning: {"effort": ...}`` dict).
-        # OpenAI returns reasoning items with EMPTY summaries — and emits
-        # no ``response.reasoning_summary_text.delta`` stream events —
-        # unless the request carries ``reasoning.summary``; ``"auto"``
-        # yields the most detailed summary available.  A caller-supplied
-        # ``summary`` wins, and non-reasoning requests (no effort) never
-        # get a ``reasoning`` dict attached.
         reasoning_cfg = kwargs.get("reasoning")
         if (
             isinstance(reasoning_cfg, dict)
@@ -1050,15 +926,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             reasoning_cfg = dict(reasoning_cfg)
             reasoning_cfg["summary"] = "auto"
             kwargs["reasoning"] = reasoning_cfg
-        # ``tools`` from ``model_config`` is overridden by the explicit
-        # ``tools`` argument for THIS call.  Pop it so callers can't
-        # accidentally leak a baseline tool list into the no-tools path
-        # or into the DeepSeek text-based fallback.
         kwargs.pop("tools", None)
-        # ``tool_choice`` and ``parallel_tool_calls`` are native-tool
-        # controls; they are meaningless (and rejected by some gateways)
-        # when no ``tools`` are sent.  Pop them unconditionally and
-        # re-attach only when this call actually carries tools.
         tool_choice = kwargs.pop("tool_choice", None)
         parallel_tool_calls = kwargs.pop("parallel_tool_calls", None)
         if tools:
@@ -1137,10 +1005,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             if not isinstance(item, dict):
                 continue
             itype = item.get("type")
-            # A new ``role="user"`` message before all outstanding
-            # function_calls have been answered violates the Responses
-            # API conversation contract.  Reject locally so callers see
-            # the error immediately.
             if item.get("role") == "user" and outstanding:
                 raise KISSError(
                     "user message appears before function_call_output "
@@ -1250,10 +1114,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             p.get("call_id") or p.get("name") or "<unknown>"
             for p in self._pending_function_calls
         ]
-        # ``_validate_function_call_conversation`` raises on orphan /
-        # duplicate / missing-call_id problems and otherwise returns the
-        # set of prior ``function_call`` items that have not yet
-        # received a matching ``function_call_output``.
         outstanding = self._validate_function_call_conversation()
         if pending or outstanding:
             raise KISSError(
@@ -1280,10 +1140,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         return self._shape_responses_kwargs(
             input_items=self.conversation, tools=tools
         )
-
-    # ------------------------------------------------------------------
-    # Streaming
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _reasoning_inner_index(event: Any) -> int:
@@ -1396,75 +1252,32 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             fallback).
         """
         content = ""
-        # Ordered dict: output_index → {"id","name","arguments"}.
         tool_calls: dict[int, dict[str, str]] = {}
-        # Track which slots have accumulated argument deltas so that an
-        # ``output_item.added`` event carrying full authoritative
-        # arguments can repair a partial/invalid streamed prefix.
         args_from_delta: set[int] = set()
-        # Slots whose ``arguments`` were populated from a full
-        # ``output_item.added`` payload.  Some gateways then also emit
-        # ``arguments.delta`` events that repeat the same JSON; the
-        # duplicate would corrupt the buffer ("{}{}"-style result) so
-        # we drop redundant deltas for those slots.
         args_from_added: set[int] = set()
-        # Map item_id → output_index so argument-delta events can find the
-        # right slot regardless of arrival order.
         item_to_idx: dict[str, int] = {}
-        # Per-content-part text buffers keyed by
-        # ``(output_index, content_index)``.  Deltas append, ``.done``
-        # overrides.  Used by the terminal merge to recover full text
-        # even when the gateway never commits the message into
-        # ``response.completed.response.output`` — preserves both
-        # delta-only parts AND ``.done``-only parts.
         text_part_buffers: dict[tuple[int, int], str] = {}
-        # Provisional message text captured from a complete-message
-        # ``response.output_item.added`` event.  Some gateways send the
-        # full message text in ``output_item.added`` AND emit normal
-        # ``output_text.delta``/``.done`` events for the same key —
-        # storing the added text here (rather than in
-        # ``text_part_buffers``) prevents duplication.  At terminal
-        # merge time the added-only text is folded back in only when
-        # no delta/done events arrived for that key.
         added_message_buffers: dict[tuple[int, int], str] = {}
-        # Track which (output_index, content_index) message-text parts
-        # have already been streamed via ``.delta`` events.  Used by the
-        # ``.done`` handlers to decide whether to forward the final
-        # text to ``token_callback`` (gateways that emit ONLY ``.done``
-        # must still drive the streaming callback).
         text_delta_seen: set[tuple[int, int]] = set()
-        # Same idea for reasoning summaries, keyed by
-        # ``(output_index, summary_or_content_index)`` so a done-only
-        # reasoning summary still emits a proper True/False thinking
-        # bracket plus the text token.
         reasoning_delta_seen: set[tuple[int, int]] = set()
-        # Accumulator for reasoning ``.delta`` events so a later
-        # authoritative ``.done`` event with a longer final value can
-        # emit the missing suffix to ``token_callback`` (mirrors
-        # ``text_part_buffers`` for output_text/refusal).
         reasoning_part_buffers: dict[tuple[int, int], str] = {}
         response: Any = None
         saw_completed = False
         in_reasoning = False
-        # Reset the per-stream item-id → output_index mapping at the
-        # start of every streaming generation so stale data from a
-        # prior call can never leak into the replay merge.
         item_output_indexes: dict[str, int] = {}
         self._last_stream_item_indexes = item_output_indexes
-        # Track the smallest output_index seen for any streamed text
-        # part. Used by ``generate_and_process_with_tools`` to insert
-        # a synthetic assistant message at the correct position when
-        # the terminal ``response.output`` omits the message item.
         self._last_stream_message_output_index = None
 
-        for event in stream:
+        # stop_aware_events aborts the request the moment the user
+        # presses Stop; a bare `for event in stream` would hold the agent
+        # inside recv() until the client's own timeout expires
+        # (reports/stop_button_delay_2026-08-05.html).
+        for event in stop_aware_events(
+            stream,
+            on_abort=self._close_thinking_if_open,
+            name="openai-responses-stream-abort-watchdog",
+        ):
             etype = self._event_type(event)
-            # Record the true original ``output_index`` for every item_id
-            # we observe in the stream (whether the event carries
-            # ``item_id`` directly or a nested ``item.id``).  Used by
-            # the replay merge to sort stream-only function calls
-            # against terminal ``response.output`` items by their
-            # ORIGINAL ordering.
             ev_item_id = str(getattr(event, "item_id", "") or "")
             if not ev_item_id:
                 nested_item = getattr(event, "item", None)
@@ -1501,10 +1314,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     in_reasoning = True
                     self._invoke_thinking_callback(True)
                 output_index = self._stream_output_index(event, 0)
-                # Reasoning summaries use ``summary_index``; reasoning
-                # text uses ``content_index``.  Use the explicit helper
-                # so ``summary_index=0`` (a real, valid index) is not
-                # mis-treated as falsy/missing.
                 inner_index = self._reasoning_inner_index(event)
                 key = (output_index, inner_index)
                 reasoning_delta_seen.add(key)
@@ -1517,14 +1326,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 "response.reasoning_text.done",
                 "response.reasoning_summary_text.done",
             ):
-                # Done-only reasoning streams (no preceding ``.delta``
-                # events) must still receive a proper True/False
-                # thinking bracket and the token-callback push, or
-                # consumers won't see the reasoning at all.  When deltas
-                # already streamed a strict prefix of the authoritative
-                # final value, emit only the missing suffix so the
-                # thinking-callback consumer sees the same final
-                # reasoning text as the model returned.
                 output_index = self._stream_output_index(event, 0)
                 inner_index = self._reasoning_inner_index(event)
                 key = (output_index, inner_index)
@@ -1558,11 +1359,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 "response.output_text.done",
                 "response.refusal.done",
             ):
-                # Capture the authoritative final text/refusal value for
-                # this content part so we can return it when the
-                # terminal ``response.completed.response.output`` is
-                # missing (some gateways stream only ``.done`` events and
-                # commit no message text in the final response object).
                 if in_reasoning:
                     in_reasoning = False
                     self._invoke_thinking_callback(False)
@@ -1572,10 +1368,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     final_text = str(getattr(event, "text", "") or "")
                 else:
                     final_text = str(getattr(event, "refusal", "") or "")
-                # ``.done`` overrides the per-part buffer with the
-                # authoritative final value; done-only streams forward
-                # the final value (or the delta-to-final suffix) to the
-                # streaming callback so consumers see the tokens.
                 emitted = self._commit_final_text(
                     (output_index, content_index),
                     final_text,
@@ -1586,11 +1378,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     content += emitted
                     self._invoke_token_callback(emitted)
             elif etype == "response.content_part.done":
-                # Some gateways commit the final assistant text/refusal
-                # via ``response.content_part.done`` (no
-                # ``output_text.done`` / ``refusal.done``).  Mirror the
-                # done-handler behavior so the text survives an empty
-                # terminal ``response.completed.response.output``.
                 if in_reasoning:
                     in_reasoning = False
                     self._invoke_thinking_callback(False)
@@ -1620,19 +1407,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     self._invoke_thinking_callback(False)
                 item = getattr(event, "item", None)
                 if item is not None and getattr(item, "type", "") == "message":
-                    # Some gateways emit a complete assistant message in
-                    # ``output_item.added`` (no subsequent ``output_text.delta``
-                    # / ``.done`` events) and then send an empty
-                    # ``response.completed.response.output``.  Capture the
-                    # message text PROVISIONALLY so it is available as
-                    # a fallback. Do NOT emit to ``content`` or
-                    # ``token_callback`` immediately: if later
-                    # ``output_text.delta`` / ``.done`` events arrive
-                    # for the same (output_index, content_index) the
-                    # provisional text would be duplicated.  The
-                    # provisional buffer is consumed in the terminal
-                    # merge step only when no real delta/done events
-                    # were seen for that key.
                     output_index = self._stream_output_index(event, 0)
                     parts = getattr(item, "content", None) or []
                     for content_index, part in enumerate(parts):
@@ -1650,12 +1424,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     call_id = str(getattr(item, "call_id", "") or "")
                     name = str(getattr(item, "name", "") or "")
                     args = str(getattr(item, "arguments", "") or "")
-                    # Re-key the slot when ``output_item.added`` carries a
-                    # real ``output_index`` that differs from the
-                    # provisional index allocated by an earlier
-                    # ``arguments.delta`` event (which may have arrived
-                    # without ``output_index``).  This preserves the
-                    # gateway's original output ordering on replay.
                     event_idx = self._stream_output_index(event, len(tool_calls))
                     has_real_index = (
                         getattr(event, "output_index", None) is not None
@@ -1676,18 +1444,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                             idx = old_idx
                     else:
                         idx = event_idx
-                        # If a slot already occupies ``event_idx`` and
-                        # belongs to a DIFFERENT item_id (the typical
-                        # case is an out-of-order ``arguments.delta``
-                        # for some other call that was provisionally
-                        # placed at ``len(tool_calls)`` before the
-                        # real index arrived), relocate one of them.
-                        # When ``has_real_index`` is True we trust the
-                        # event's index for THIS item and bump the
-                        # occupant elsewhere; when False, we don't
-                        # know this item's real index either, so move
-                        # the NEW item to a fresh slot to avoid
-                        # clobbering the existing one.
                         occupant = tool_calls.get(event_idx)
                         if occupant is not None:
                             occupant_iid = str(
@@ -1723,39 +1479,17 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                         slot["id"] = call_id
                     if name and not slot.get("name"):
                         slot["name"] = name
-                    # Some gateways send the entire function call in a
-                    # single ``output_item.added`` event with the
-                    # arguments already populated on the item.  Capture
-                    # that string here (no subsequent ``.delta`` will be
-                    # sent for these gateways).  When earlier
-                    # ``arguments.delta`` events seeded a partial buffer
-                    # and the delta prefix is not yet valid JSON, treat
-                    # the full ``args`` string as authoritative — it
-                    # repairs the partial streamed prefix.
                     if args:
                         existing_args = slot.get("arguments", "")
                         if not existing_args:
                             slot["arguments"] = args
                         elif idx in args_from_delta:
-                            # The full ``arguments`` payload on
-                            # ``output_item.added`` is authoritative
-                            # over any previously accumulated
-                            # out-of-order ``arguments.delta`` buffer
-                            # — including the case where the delta
-                            # parses as syntactically valid JSON but
-                            # is semantically not the final value
-                            # (e.g. delta='{}', then item.arguments
-                            # ='{"text":"final"}').
                             slot["arguments"] = args
                         args_from_added.add(idx)
                     if item_id:
                         slot["item_id"] = item_id
                         item_to_idx[item_id] = idx
             elif etype == "response.function_call_arguments.delta":
-                # Function-call argument events imply the model has left
-                # any open reasoning block — close it before recording
-                # the delta so out-of-order streams still get a clean
-                # True/False pair per reasoning block.
                 if in_reasoning:
                     in_reasoning = False
                     self._invoke_thinking_callback(False)
@@ -1763,21 +1497,8 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     event, tool_calls, item_to_idx, args_from_delta, args_from_added
                 )
                 arg_delta: str = str(getattr(event, "delta", "") or "")
-                # If the full arguments payload already arrived via
-                # ``output_item.added`` and this delta would restart /
-                # duplicate the same JSON, drop it.  Some gateways
-                # emit both forms; concatenating produces invalid
-                # JSON like ``{"text":"hi"}{"text":"hi"}``.
                 if idx in args_from_added and arg_delta:
                     existing_arg_str: str = str(slot.get("arguments", "") or "")
-                    # Once a full, syntactically valid JSON arguments
-                    # payload is already captured from
-                    # ``output_item.added``, ALL subsequent argument
-                    # deltas for this slot are duplicate/replay noise.
-                    # Drop them regardless of whether each chunk
-                    # individually starts with ``{`` — chunked
-                    # mid-stream pieces like ``:"hi"}`` would
-                    # otherwise be appended and corrupt the buffer.
                     if (
                         existing_arg_str == arg_delta
                         or self._is_valid_json(existing_arg_str)
@@ -1787,9 +1508,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 if arg_delta:
                     args_from_delta.add(idx)
             elif etype == "response.function_call_arguments.done":
-                # Some gateways send the final argument string only on the
-                # ``done`` event.  Trust it over the accumulated delta if
-                # provided so we never end up with a partial JSON string.
                 if in_reasoning:
                     in_reasoning = False
                     self._invoke_thinking_callback(False)
@@ -1803,14 +1521,8 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 "response.output_item.done",
                 "response.output_item.completed",
             ):
-                # Late-bind ``call_id`` / ``name`` / final ``arguments`` from
-                # the terminating output_item event.  Some OpenAI-compatible
-                # gateways emit empty metadata on ``output_item.added`` and
-                # only fill it in here.
                 item = getattr(event, "item", None)
                 if item is not None and getattr(item, "type", "") == "function_call":
-                    # The model just finalized a function-call item; any
-                    # open reasoning block is logically over.
                     if in_reasoning:
                         in_reasoning = False
                         self._invoke_thinking_callback(False)
@@ -1835,15 +1547,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                             idx = old_idx
                     else:
                         idx = real_idx
-                        # Collision handling: a different item already
-                        # occupies ``real_idx`` (typical when an
-                        # earlier ``output_item.added`` provisionally
-                        # allocated a slot at ``len(tool_calls)`` for
-                        # a different item).  Relocate the occupant
-                        # to a free index so this new tool call gets
-                        # its real ``output_index`` without dropping
-                        # the provisional one.  Mirrors the
-                        # ``output_item.added`` collision branch.
                         if has_real_index:
                             occupant = tool_calls.get(real_idx)
                             if occupant is not None:
@@ -1871,10 +1574,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                         slot["id"] = call_id
                     if name:
                         slot["name"] = name
-                    # Authoritative final arguments: even an empty
-                    # string ``""`` MUST overwrite any partial/malformed
-                    # streamed prefix.  Only skip when the attribute is
-                    # absent or ``None``.
                     if hasattr(item, "arguments"):
                         raw_args = getattr(item, "arguments")
                         if raw_args is not None:
@@ -1883,12 +1582,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                         slot["item_id"] = item_id
                         item_to_idx[item_id] = idx
                 elif item is not None and getattr(item, "type", "") == "message":
-                    # Gateways that don't emit ``output_text.delta``
-                    # / ``output_text.done`` events can deliver the
-                    # final assistant text only here.  Treat the
-                    # ``output_text`` and ``refusal`` parts as
-                    # authoritative if no delta was seen for that
-                    # (output_index, content_index) pair.
                     if in_reasoning:
                         in_reasoning = False
                         self._invoke_thinking_callback(False)
@@ -1913,9 +1606,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                             content += emitted
                             self._invoke_token_callback(emitted)
             elif etype in ("response.failed", "error"):
-                # Surface server-side failures to the caller. Close any
-                # open thinking-callback bracket first so listeners see a
-                # clean True/False pair before the exception unwinds.
                 if in_reasoning:
                     in_reasoning = False
                     self._invoke_thinking_callback(False)
@@ -1933,10 +1623,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     + (f": {message}" if message else "")
                 )
             elif etype == "response.incomplete":
-                # Streaming-terminal incomplete event (e.g. when the
-                # server stops because ``max_output_tokens`` was hit).
-                # Surface to the caller so they don't act on partial
-                # output or a half-formed function_call.
                 if in_reasoning:
                     in_reasoning = False
                     self._invoke_thinking_callback(False)
@@ -1971,10 +1657,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 "Responses API stream completed without a response payload."
             )
 
-        # Expose the smallest streamed text output_index so the
-        # caller (``generate_and_process_with_tools``) can insert a
-        # synthetic assistant message at its true position when the
-        # terminal ``response.output`` omits the message item.
         all_text_keys = (
             set(text_part_buffers.keys()) | set(added_message_buffers.keys())
         )
@@ -1983,39 +1665,10 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 key[0] for key in all_text_keys
             )
 
-        # Surface ``status="failed"`` carried in ``response.completed`` so
-        # streaming callers see the same error as non-streaming callers
-        # instead of silently returning an empty content/tool-call tuple.
         self._raise_for_failed_response(response)
 
-        # The terminal ``response.completed.response.output`` is authoritative.
-        # Some OpenAI-compatible gateways emit empty ``call_id``/``name``
-        # during streaming and only fill the real metadata into the final
-        # response object.  Merge those values in (without clobbering any
-        # values we already collected from the stream).  Match the final
-        # function_call by ``item_id`` first, then by ``output_index`` —
-        # never by compact enumeration, which mis-keys when the final
-        # output array contains non-function_call items at lower indexes.
         final_content, final_tool_calls = self._parse_non_streaming(response)
-        # When the terminal response carries a message/refusal part, treat
-        # it as authoritative even when its text is empty.  Some gateways
-        # send partial/incomplete deltas during streaming and then commit
-        # an empty (or filtered/refused) final message; we must surface
-        # that final state rather than the speculative streamed prefix.
-        # Fold in any provisional ``output_item.added`` message text for
-        # (output_index, content_index) pairs that never saw a real
-        # delta/done event AND for which no buffered streamed text
-        # already exists.  This lets gateways that emit a complete
-        # message ONLY in ``output_item.added`` still surface their
-        # content while never duplicating text from gateways that emit
-        # both ``output_item.added`` AND ``output_text.delta`` events.
         if self._response_has_message_text(response):
-            # When the terminal response's final text extends the text
-            # already streamed via deltas, push the missing suffix
-            # through ``token_callback`` so streaming consumers see the
-            # same final text as the caller.  Only safe for true
-            # prefixes — arbitrary non-prefix replacements would
-            # duplicate or contradict already-emitted tokens.
             if final_content.startswith(content):
                 suffix = final_content[len(content):]
                 if suffix:
@@ -2036,10 +1689,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 content = "".join(
                     text_part_buffers[k] for k in sorted(text_part_buffers)
                 )
-        # Build a call_id → slot-index map so terminal items lacking
-        # ``item_id`` can still be matched to the slot streaming created
-        # (Responses gateways often compact the final ``response.output``
-        # array and drop the ``id`` field from function_call objects).
         call_id_to_idx: dict[str, int] = {
             str(slot.get("id", "")): idx
             for idx, slot in tool_calls.items()
@@ -2060,22 +1709,8 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     )
                 except (ValueError, TypeError):
                     candidate_idx = len(tool_calls)
-                # If the terminal item lacks any stable identity
-                # (item_id / call_id / name), do NOT manufacture a
-                # new slot when stream-collected tool calls already
-                # exist. Such items are stale/compacted gateway
-                # placeholders; merging them creates an invalid
-                # tool_call that downstream validation will reject.
-                # However, when no stream tool calls were collected,
-                # this identityless terminal item is the ONLY function
-                # call surfaced by the gateway — surface a contract
-                # error immediately rather than silently dropping it.
                 if not iid and not fcid and not fname:
                     if tool_calls:
-                        # Stale/compacted gateway placeholder; never
-                        # merge by compact index — doing so would
-                        # overwrite a valid stream-collected slot's
-                        # authoritative arguments.
                         continue
                     raise KISSError(
                         "Responses API returned identityless function_call "
@@ -2085,18 +1720,11 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             slot = tool_calls.setdefault(
                 idx, {"id": "", "name": "", "arguments": "", "item_id": ""}
             )
-            # The terminal completed-response output is authoritative for
-            # ``id`` / ``name`` / ``arguments`` — when present it MUST
-            # override anything we accumulated from streaming deltas
-            # (which may be partial or malformed for some gateways).
             if final_tc.get("id"):
                 slot["id"] = final_tc["id"]
                 call_id_to_idx[final_tc["id"]] = idx
             if final_tc.get("name"):
                 slot["name"] = final_tc["name"]
-            # Use key presence (not truthiness) so an authoritative
-            # final ``arguments=""`` overrides a partial/malformed
-            # streamed prefix.
             if "arguments" in final_tc:
                 slot["arguments"] = final_tc["arguments"]
             if not slot.get("item_id") and iid:
@@ -2106,19 +1734,9 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         ordered: list[dict[str, str]] = []
         for k in sorted(tool_calls):
             slot = tool_calls[k]
-            # Stamp the original streaming ``output_index`` onto the
-            # slot so downstream code (e.g. the tools-path replay
-            # branch in ``generate_and_process_with_tools``) can
-            # preserve the gateway's original item ordering when the
-            # terminal ``response.completed.response.output`` omits a
-            # function call.
             slot.setdefault("output_index", str(k))
             ordered.append(slot)
         return content, ordered, response
-
-    # ------------------------------------------------------------------
-    # Non-streaming response parsing
-    # ------------------------------------------------------------------
 
     @classmethod
     def _response_output(cls, response: Any) -> list[Any]:
@@ -2318,10 +1936,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             )
         return out
 
-    # ------------------------------------------------------------------
-    # Public surface: generate
-    # ------------------------------------------------------------------
-
     def generate(self) -> tuple[str, Any]:
         """Generate a response with no tools.
 
@@ -2331,9 +1945,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             final ``response`` field of the terminating ``response.completed``
             event when streaming).
         """
-        # Convert any handed-off foreign conversation items (Chat
-        # Completions / Anthropic / Gemini formats) to native Responses
-        # input items before building the request.
         self.conversation = self._foreign_items_to_native_input(self.conversation)
         kwargs = self._build_request_kwargs(tools=None)
         if self.token_callback is not None:
@@ -2347,28 +1958,15 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
 
         if self._is_deepseek_reasoning_model():
             _, content = _extract_deepseek_reasoning(content)
-            # The raw ``response.output`` still contains the original
-            # ``<think>...</think>`` block — replaying it would leak the
-            # private reasoning into the next request.  Store the
-            # cleaned assistant text as a plain string.
             if content.strip():
                 self.conversation.append(
                     {"role": "assistant", "content": content}
                 )
             return content, response
 
-        # Replay raw ``response.output`` items as the next turn's input
-        # so reasoning items, message items, and any other Responses-API
-        # output types survive into the next request.  Fall back to a
-        # plain assistant string when output is unavailable (older
-        # gateways).
         raw_items = self._response_output_items_to_input_items(response)
         if raw_items:
             self.conversation.extend(raw_items)
-            # When streaming saw assistant text but the terminal
-            # ``response.output`` contains only non-message items
-            # (e.g. ``reasoning``), append a synthetic assistant
-            # message so the text survives into the next request.
             if content.strip() and not self._raw_items_have_message_text(
                 raw_items
             ):
@@ -2378,10 +1976,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         else:
             self.conversation.append({"role": "assistant", "content": content})
         return content, response
-
-    # ------------------------------------------------------------------
-    # Public surface: generate_and_process_with_tools
-    # ------------------------------------------------------------------
 
     def generate_and_process_with_tools(
         self,
@@ -2403,9 +1997,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         Returns:
             ``(function_calls, content, response)`` matching the v1 contract.
         """
-        # Convert any handed-off foreign conversation items (Chat
-        # Completions / Anthropic / Gemini formats) to native Responses
-        # input items before building the request.
         self.conversation = self._foreign_items_to_native_input(self.conversation)
         if self._is_deepseek_reasoning_model():
             return self._generate_with_text_based_tools(function_map)
@@ -2423,11 +2014,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             self._raise_for_failed_response(response)
             content, raw_tool_calls = self._parse_non_streaming(response)
 
-        # Reject malformed tool-call items: every Responses-API
-        # ``function_call`` MUST carry a non-empty ``call_id`` and
-        # ``name`` so the follow-up ``function_call_output`` can be
-        # paired correctly.  Surface the problem here rather than
-        # silently sending broken conversation items in the next turn.
         for tc in raw_tool_calls:
             if not tc.get("id"):
                 raise KISSError(
@@ -2440,20 +2026,8 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
 
         function_calls = self._build_function_calls(raw_tool_calls)
 
-        # Replay raw ``response.output`` items in original order so
-        # reasoning items, message items, and function_call items all
-        # survive to the next turn.  Fall back to manual reconstruction
-        # when the gateway doesn't expose a ``response.output`` array.
         raw_items = self._response_output_items_to_input_items(response)
         if raw_items:
-            # Patch existing ``function_call`` items in ``raw_items``
-            # with stream-collected metadata before replay.  Streaming
-            # may collect valid ``call_id``/``name`` from
-            # ``output_item.done`` events but the terminal
-            # ``response.completed.response.output`` can carry stale
-            # ``output_item.added`` snapshots (empty call_id/name).
-            # Without this patch the conversation would replay invalid
-            # ``function_call`` items and break the next request.
             tool_by_item_id = {
                 tc.get("item_id"): tc
                 for tc in raw_tool_calls
@@ -2462,12 +2036,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             tool_by_call_id = {
                 tc.get("id"): tc for tc in raw_tool_calls if tc.get("id")
             }
-            # Last-resort fallback: a terminal raw ``function_call``
-            # carrying no usable identity (no ``id``, empty ``call_id``,
-            # empty ``name``) is matched to whichever stream-collected
-            # tool_call has not yet been used for patching.  This
-            # rescues gateways whose ``response.completed`` carries
-            # placeholder/stale function_call items.
             used_patches: set[int] = set()
             stale_indexes: list[int] = []
             for raw_i, item in enumerate(raw_items):
@@ -2480,8 +2048,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     item.get("id")
                 ) or tool_by_call_id.get(item.get("call_id"))
                 if patch is None:
-                    # Try a positional fallback against the as-yet
-                    # unused stream-collected tool_calls.
                     if not item.get("call_id") and not item.get("name"):
                         for tc_idx, tc in enumerate(raw_tool_calls):
                             if tc_idx in used_patches:
@@ -2495,9 +2061,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                             used_patches.add(tc_idx)
                             break
                 if patch is None:
-                    # Still no identity to apply: mark for removal so
-                    # the next request doesn't fail with
-                    # ``function_call item missing call_id``.
                     if not item.get("call_id") or not item.get("name"):
                         stale_indexes.append(raw_i)
                     continue
@@ -2509,7 +2072,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     item["arguments"] = patch["arguments"]
                 if patch.get("item_id") and not item.get("id"):
                     item["id"] = patch["item_id"]
-                # Final safety: still invalid after patching?  Drop it.
                 if not item.get("call_id") or not item.get("name"):
                     stale_indexes.append(raw_i)
             for raw_i in reversed(stale_indexes):
@@ -2524,18 +2086,9 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 for item in raw_items
                 if isinstance(item, dict) and item.get("type") == "function_call"
             }
-            # Merge stream-only function calls back into ``raw_items``
-            # sorted by ORIGINAL stream ``output_index`` (per the
-            # mapping populated in :meth:`_consume_stream`).  Direct
-            # list insertion by ``output_index`` is wrong when the
-            # terminal ``response.output`` is COMPACTED — gateways may
-            # omit reasoning / function_call items from the final
-            # response and the surviving terminal items would then sit
-            # at lower list positions than their true output_index.
             item_output_indexes = dict(self._last_stream_item_indexes)
             combined: list[tuple[int, int, dict[str, Any]]] = []
             used_orders: set[int] = set()
-            # 1. Place raw items with KNOWN stream-observed output indexes.
             unknown_raw: list[tuple[int, dict[str, Any]]] = []
             for fallback_i, item in enumerate(raw_items):
                 item_id = str(item.get("id", "") or "")
@@ -2545,7 +2098,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 else:
                     used_orders.add(known_order)
                     combined.append((known_order, fallback_i, item))
-            # 2. Compute stream-only function-call orders and reserve them.
             stream_only_orders_list: list[tuple[int, int, dict[str, Any]]] = []
             for tc_i, tc in enumerate(raw_tool_calls):
                 if (
@@ -2562,8 +2114,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 item_id = tc.get("item_id", "")
                 if item_id:
                     fc_item["id"] = item_id
-                # Prefer the streaming-observed output_index for this
-                # item_id; fall back to the slot's stamped value.
                 resolved_order = item_output_indexes.get(item_id)
                 if resolved_order is None:
                     try:
@@ -2574,8 +2124,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     (resolved_order, len(raw_items) + tc_i, fc_item)
                 )
                 used_orders.add(resolved_order)
-            # 3. Assign next-available output index to unknown raw items,
-            # preserving their terminal relative order.
             next_order = 0
             for fallback_i, item in unknown_raw:
                 while next_order in used_orders:
@@ -2583,24 +2131,13 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 used_orders.add(next_order)
                 combined.append((next_order, fallback_i, item))
                 next_order += 1
-            # 4. Add stream-only function calls.
             combined.extend(stream_only_orders_list)
-            # 5. When streaming saw assistant text but the terminal
-            # output omitted the message item, insert a synthetic
-            # assistant message at its TRUE output_index so it appears
-            # BEFORE the sibling function_call(s) in the replayed
-            # conversation (rather than being naively appended at the
-            # end).  This preserves the model's original message →
-            # function_call ordering for the next request.
             if content.strip() and not any(
                 self._raw_items_have_message_text([entry[2]])
                 for entry in combined
             ):
                 msg_order = self._last_stream_message_output_index
                 if msg_order is None:
-                    # Place AFTER all known items so trailing-append
-                    # semantics still hold for gateways that don't
-                    # report any output_index for the text.
                     msg_order = (
                         max(used_orders) + 1 if used_orders else len(raw_items)
                     )
@@ -2631,19 +2168,11 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 if item_id:
                     fc_item["id"] = item_id
                 self.conversation.append(fc_item)
-        # Seed the pending queue so incremental
-        # ``add_function_results_to_conversation_and_return`` calls keep
-        # using the model's original call_ids even when previous tool
-        # outputs already separate the trailing run.
         self._pending_function_calls = [
             {"name": tc.get("name", ""), "call_id": tc.get("id", "")}
             for tc in raw_tool_calls
         ]
         return function_calls, content, response
-
-    # ------------------------------------------------------------------
-    # DeepSeek text-based tool calling fallback
-    # ------------------------------------------------------------------
 
     def _generate_with_text_based_tools(
         self, function_map: dict[str, Callable[..., Any]]
@@ -2660,8 +2189,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         """
         tools_prompt = _build_text_based_tools_prompt(function_map)
 
-        # Re-build the input array with the tools prompt prepended to the
-        # first user message (mirroring v1).
         modified = list(self.conversation)
         if modified:
             first = modified[0]
@@ -2671,7 +2198,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     new_parts = [
                         dict(p) if isinstance(p, dict) else p for p in parts
                     ]
-                    # Find the first input_text part and extend it.
                     found = False
                     for p in new_parts:
                         if isinstance(p, dict) and p.get("type") == "input_text":
@@ -2699,9 +2225,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     },
                 )
 
-        # Share the request-shaping logic with the normal path so any
-        # future parameter translation (e.g. response_format,
-        # max_completion_tokens) automatically applies to DeepSeek too.
         self._ensure_no_pending_function_calls()
         kwargs = self._shape_responses_kwargs(input_items=modified, tools=None)
 
@@ -2717,18 +2240,10 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         _, content_clean = _extract_deepseek_reasoning(content)
         function_calls = _parse_text_based_tool_calls(content_clean)
 
-        # Store the cleaned assistant text (without the ``<think>`` block)
-        # as plain string content so it is a valid Responses-API input
-        # message and the private reasoning is never replayed.
         if content_clean.strip():
             self.conversation.append(
                 {"role": "assistant", "content": content_clean}
             )
-        # Store each parsed tool call as a Responses-API ``function_call``
-        # input item so that ``add_function_results_to_conversation_and_return``
-        # can match the ``call_id`` on the follow-up ``function_call_output``.
-        # ``_parse_text_based_tool_calls`` already assigned a unique
-        # ``id`` per call; reuse it for ``call_id``.
         for fc in function_calls:
             self.conversation.append(
                 {
@@ -2742,10 +2257,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             {"name": fc["name"], "call_id": fc["id"]} for fc in function_calls
         ]
         return function_calls, content, response
-
-    # ------------------------------------------------------------------
-    # Public surface: add_function_results
-    # ------------------------------------------------------------------
 
     def add_function_results_to_conversation_and_return(
         self, function_results: list[tuple[str, dict[str, Any]]]
@@ -2763,17 +2274,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 the same order as the preceding function_call items in
                 the conversation.
         """
-        # Convert any handed-off foreign conversation items (Chat
-        # Completions / Anthropic / Gemini formats) to native Responses
-        # input items so trailing foreign tool calls (e.g. the Sorcar
-        # ``set_model`` call that triggered the handoff) are visible to
-        # the unanswered-function_call scanning below.
         self.conversation = self._foreign_items_to_native_input(self.conversation)
-        # Snapshot pre-call state so we can roll back on a partial
-        # error and keep the conversation atomic.  Callers that pass a
-        # batch with one mismatched name must not be left with the
-        # earlier outputs already appended and the earlier pending
-        # call_ids already consumed.
         conv_snapshot_len = len(self.conversation)
         pending_snapshot = list(self._pending_function_calls)
         try:
@@ -2788,17 +2289,12 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
     ) -> None:
         """Inner mutating implementation guarded by atomic snapshots."""
         trailing = self._trailing_function_call_ids()
-        # Compute once: a mutable list of unanswered (name, call_id) pairs
-        # used to recover call_ids when ``_pending_function_calls`` was
-        # lost (e.g. restored conversation after a process restart).
         fallback_unanswered = (
             self._unanswered_function_calls_from_conversation_with_names()
             if not self._pending_function_calls
             else None
         )
         for i, (func_name, result_dict) in enumerate(function_results):
-            # ``function_call_output.output`` MUST be a string per the
-            # Responses API contract.
             result_content = _tool_result_to_string(result_dict)
             result_content, attachments = parse_binary_attachments(result_content)
             if self.usage_info_for_messages:
@@ -2815,12 +2311,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     "output": result_content,
                 }
             )
-            # For every attachment lifted from this tool result, append a
-            # durable sentinel item so the attachment survives conversation
-            # serialization / process restart and can be flushed as a
-            # follow-up user message once every outstanding function_call
-            # has an output.  ``_normalize_input`` strips these sentinels
-            # before sending to the API.
             for att in attachments:
                 self.conversation.append(
                     {
@@ -2830,9 +2320,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     }
                 )
 
-        # Collect every sentinel attachment currently in the conversation
-        # (covers both attachments appended above and ones persisted from
-        # earlier incremental submissions or a restored conversation).
         sentinel_indexes = [
             i
             for i, item in enumerate(self.conversation)
@@ -2840,23 +2327,11 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             and item.get("type") == "_kiss_pending_tool_result_attachment"
         ]
 
-        # Flush the buffered attachments only when EVERY outstanding
-        # function_call from the prior model turn has received an
-        # output — both via the in-memory pending queue AND via the
-        # conversation itself.  Restored / reconstructed conversations
-        # may have an empty pending queue while still carrying multiple
-        # unanswered ``function_call`` items in ``self.conversation``;
-        # without the second guard the first incremental result with an
-        # attachment would interleave a ``user`` message before the
-        # sibling ``function_call_output`` items.
         if (
             not self._pending_function_calls
             and not self._unanswered_function_calls_from_conversation()
             and sentinel_indexes
         ):
-            # Reconstruct ``Attachment`` objects from the durable
-            # sentinels (this covers BOTH the live and restored cases
-            # because every live attachment is mirrored as a sentinel).
             sentinel_attachments = [
                 Attachment(
                     data=base64.b64decode(
@@ -2868,7 +2343,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 )
                 for i in sentinel_indexes
             ]
-            # Remove sentinels (in reverse so indexes stay valid).
             for i in reversed(sentinel_indexes):
                 del self.conversation[i]
             parts = self._attachments_to_content_parts(sentinel_attachments)
@@ -2880,10 +2354,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     }
                 )
                 self.conversation.append({"role": "user", "content": parts})
-
-    # ------------------------------------------------------------------
-    # Public surface: token usage
-    # ------------------------------------------------------------------
 
     def extract_input_output_token_counts_from_response(
         self, response: Any
@@ -2931,10 +2401,6 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             cached_tokens,
             cache_write_tokens,
         )
-
-    # ------------------------------------------------------------------
-    # Public surface: embeddings
-    # ------------------------------------------------------------------
 
     def get_embedding(
         self, text: str, embedding_model: str | None = None

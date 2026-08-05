@@ -2,23 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Integration test for the per-tab running/done timer in ``media/main.js``.
-//
-// Requirement: EVERY tab must show the running time as the actual time
-// spent since the start of the task while it runs, and as the difference
-// between the task's end timestamp and start timestamp once it has ended
-// — regardless of tab switches and regardless of newer runs started in
-// other windows (the daemon broadcasts tab-stamped events to every
-// connected client).
-//
-// This test drives the real ``media/main.js`` (plus the real
-// ``media/chat.html`` markup and ``media/panelCopy.js``) inside jsdom —
-// no mocks of project code — exactly like ``bughunt2_status_timer.test.js``.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/tab_timer_per_tab.test.js
 
 'use strict';
 
@@ -29,12 +12,6 @@ const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
 
-/**
- * Build a jsdom window running the production chat webview: the real
- * ``chat.html`` body (placeholders blanked), ``panelCopy.js`` and
- * ``main.js`` evaluated in the window, and a recording
- * ``acquireVsCodeApi`` stub (the only host API the webview has).
- */
 function makeWebview() {
   let html = fs.readFileSync(path.join(MEDIA, 'chat.html'), 'utf8');
   html = html.replace(/\{\{MODEL_NAME\}\}/g, 'test-model');
@@ -65,12 +42,14 @@ function makeWebview() {
   };
 
   win.eval(fs.readFileSync(path.join(MEDIA, 'panelCopy.js'), 'utf8'));
-  win.eval(fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
+
+  win.eval(fs.readFileSync(path.join(MEDIA, 'api.js'), 'utf8'));
+  win.eval(
+fs.readFileSync(path.join(MEDIA, 'main.js'), 'utf8'));
 
   return {win, posted};
 }
 
-/** Dispatch a backend→webview event exactly like the extension does. */
 function send(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
@@ -83,7 +62,6 @@ function statusOf(win) {
   return win.document.getElementById('status-text').textContent;
 }
 
-/** Click the tab-bar tab whose ``data-tab-id`` matches ``tabId``. */
 function clickTab(win, tabId) {
   const el = win.document.querySelector(
     `.chat-tab[data-tab-id="${tabId}"]`,
@@ -98,7 +76,6 @@ async function testForeignNewerRunDoesNotClobberActiveTimer() {
   assert.ok(ready && ready.tabId, 'webview must post ready with a tabId');
   const activeId = ready.tabId;
 
-  // Active tab's agent started 65 s ago.
   send(win, {
     type: 'status',
     running: true,
@@ -107,7 +84,6 @@ async function testForeignNewerRunDoesNotClobberActiveTimer() {
   });
   assert.match(statusOf(win), /^Running 1m [0-9]s$/);
 
-  // A NEWER run starts in ANOTHER window (unknown tab id, startTs ~now).
   send(win, {
     type: 'status',
     running: true,
@@ -122,7 +98,6 @@ async function testForeignNewerRunDoesNotClobberActiveTimer() {
       `tab's running timer (header now "${statusOf(win)}")`,
   );
 
-  // The other window's run finishes — tab-stamped task_done + status.
   send(win, {
     type: 'task_done',
     tabId: 'other-window-tab',
@@ -151,7 +126,6 @@ async function testActiveTaskDoneShowsEndMinusStart() {
     tabId: activeId,
     startTs: Date.now() - 5_000,
   });
-  // The agent reports its true wall-clock: ran for exactly 2m 7s.
   const endTs = Date.now();
   send(win, {
     type: 'task_done',
@@ -172,13 +146,12 @@ async function testBackgroundTaskDoneShowsDurationAfterSwitch() {
   const {win, posted} = makeWebview();
   const activeId = posted.find(m => m.type === 'ready').tabId;
 
-  // Materialise a LOCAL background tab the way the backend does it.
   send(win, {
     type: 'openSubagentTab',
     tab_id: 'bg-tab',
+    parent_tab_id: activeId,
     description: 'background work',
   });
-  // The user keeps working in the original (still active) tab.
   send(win, {
     type: 'status',
     running: true,
@@ -187,8 +160,6 @@ async function testBackgroundTaskDoneShowsDurationAfterSwitch() {
   });
   assert.match(statusOf(win), /^Running [2-6]s$/);
 
-  // The background tab's agent runs: its status event must NOT
-  // clobber the foreground tab's header.
   const bgEnd = Date.now();
   send(win, {
     type: 'status',
@@ -198,7 +169,6 @@ async function testBackgroundTaskDoneShowsDurationAfterSwitch() {
   });
   assert.match(statusOf(win), /^Running [2-6]s$/);
 
-  // The background tab finishes: 3m 21s of agent time.
   send(win, {
     type: 'task_done',
     tabId: 'bg-tab',
@@ -207,10 +177,6 @@ async function testBackgroundTaskDoneShowsDurationAfterSwitch() {
   });
   send(win, {type: 'status', running: false, tabId: 'bg-tab'});
 
-  // ``task_done`` for a LOCAL tab auto-switches focus to it (product
-  // contract since ``focusFinishedTab``: the result panel must be
-  // immediately visible) and the header MUST show the done duration
-  // computed from the agent's own timestamps.
   const activeEl = win.document.querySelector('.chat-tab.active');
   assert.strictEqual(
     activeEl && activeEl.getAttribute('data-tab-id'),
@@ -224,15 +190,12 @@ async function testBackgroundTaskDoneShowsDurationAfterSwitch() {
       'endTs - startTs once focused',
   );
 
-  // Switching back to the original tab restores its own running
-  // timer untouched…
   clickTab(win, activeId);
   assert.match(
     statusOf(win),
     /^Running [2-6]s$/,
     "the original tab's running timer must survive the auto-switch",
   );
-  // …and returning to the finished tab re-renders its done duration.
   clickTab(win, 'bg-tab');
   assert.strictEqual(
     statusOf(win),
@@ -265,10 +228,10 @@ async function testDoneLabelSurvivesTabSwitches() {
   send(win, {type: 'status', running: false, tabId: activeId});
   assert.strictEqual(statusOf(win), 'Done (45s)');
 
-  // Open a sub-agent tab (switches away), then come back.
   send(win, {
     type: 'openSubagentTab',
     tab_id: 'sub-x',
+    parent_tab_id: activeId,
     description: 'sub work',
   });
   clickTab(win, 'sub-x');
@@ -290,10 +253,9 @@ async function testBackgroundReplayWithExtraTimestamps() {
   send(win, {
     type: 'openSubagentTab',
     tab_id: 'hist-tab',
+    parent_tab_id: activeId,
     description: 'history task',
   });
-  // Replay a FINISHED task into the background tab (history load):
-  // extra carries the agent's persisted start/end timestamps.
   const end = Date.now() - 60_000;
   send(win, {
     type: 'task_events',
@@ -328,6 +290,7 @@ async function testRunningTabKeepsAnchorAcrossSwitches() {
   send(win, {
     type: 'openSubagentTab',
     tab_id: 'sub-y',
+    parent_tab_id: activeId,
     description: 'detour',
   });
   clickTab(win, 'sub-y');

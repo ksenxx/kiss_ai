@@ -56,11 +56,6 @@ from kiss.server.web_server import RemoteAccessServer
 _SENTINEL = "Agent Failed Abruptly"
 _RECOVERED = "Task terminated unexpectedly (process killed)"
 
-# The freshly-started server must accept UDS connections well within
-# this budget even while the database write lock is held.  Before the
-# fix, startup blocked for the full 30 s ``busy_timeout`` (or longer),
-# so this bound cleanly separates the two behaviours while leaving
-# ample headroom for slow CI machines.
 _STARTUP_BUDGET_SECS = 12.0
 
 
@@ -93,7 +88,6 @@ class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
         tmp = Path(self.tmpdir)
         kiss_dir = tmp / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
-        # Point the sorcar persistence layer at a per-test database.
         self._saved = (
             _persistence._DB_PATH,
             _persistence._db_conn,
@@ -139,23 +133,18 @@ class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
         4. Release the lock and verify the background sweep still
            recovers the orphaned row.
         """
-        # 1. Seed an orphaned ("Agent Failed Abruptly") row.
         orphan_id, _chat = _persistence._add_task(
             "orphan left by daemon killed during install.sh",
             chat_id="install-restart-chat",
         )
         assert _row_result(self.db_path, orphan_id) == _SENTINEL
-        # Drop the cached thread-local connection so only the explicit
-        # locker below holds the file.
         _persistence._close_db()
 
-        # 2. Hold the write lock, as the dying previous daemon would.
         self.locker = sqlite3.connect(
             str(self.db_path), isolation_level=None,
         )
         self.locker.execute("BEGIN IMMEDIATE")
 
-        # 3. Construct + start the real server under the held lock.
         started = time.monotonic()
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -184,15 +173,10 @@ class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
             f"sorcar.db was write-locked — startup is blocked on the "
             f"orphan-task sweep (pre-fix behaviour: ~30s busy_timeout)"
         )
-        # The sweep must NOT have completed yet: the lock is still held,
-        # proving the sweep genuinely contends for the database and the
-        # fast startup was not a fluke of an idle sweep.
         assert _row_result(self.db_path, orphan_id) == _SENTINEL, (
             "orphan row was rewritten while the write lock was held"
         )
 
-        # 4. Release the lock; the background sweep must finish the
-        # recovery on its own.
         self.locker.rollback()
         self.locker.close()
         self.locker = None

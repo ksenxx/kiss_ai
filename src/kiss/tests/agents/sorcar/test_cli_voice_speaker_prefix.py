@@ -90,7 +90,7 @@ def repl() -> AnchoredRepl:
     """An anchored REPL whose box renders into a captured StringIO."""
     r = AnchoredRepl()
     r.box._out = io.StringIO()
-    r.box._active = True  # render without owning a real terminal
+    r.box._active = True
     return r
 
 
@@ -116,10 +116,6 @@ def _capture_anchored(
     finally:
         session.close()
 
-
-# ---------------------------------------------------------------------------
-# Anchored REPL (background pump): the submitted line must be prefixed
-# ---------------------------------------------------------------------------
 
 
 class TestAnchoredSpeakerPrefix:
@@ -238,14 +234,8 @@ class TestAnchoredSpeakerPrefix:
                 _speech_line("real task", 1, None),
             ],
         )
-        # The blank utterance was skipped; the first line read is the
-        # real one.
         assert lines == ["Speaker #1 says that: real task"]
 
-
-# ---------------------------------------------------------------------------
-# Plain fallback REPL (modal capture): same prefix contract
-# ---------------------------------------------------------------------------
 
 
 class TestPlainSpeakerPrefix:
@@ -278,7 +268,6 @@ class TestPlainSpeakerPrefix:
             ["WAKE", "TRANSCRIBING", _speech_line("hola", 4, "es")],
         )
         assert text == "Speaker #4 says in the language es that: hola"
-        # The 🎤 echo shows the exact submitted (prefixed) line.
         assert "🎤 Speaker #4 says in the language es that: hola" in (
             capsys.readouterr().out
         )
@@ -310,10 +299,6 @@ class TestPlainSpeakerPrefix:
         assert text == "Speaker #5 says in the language en that: next"
 
 
-# ---------------------------------------------------------------------------
-# Shared helper: exact behavioural parity with voice.js insertSpeech
-# ---------------------------------------------------------------------------
-
 
 class TestSpeakerPrefixedTextParity:
     """Case-for-case parity with ``insertSpeech`` in media/voice.js."""
@@ -321,32 +306,25 @@ class TestSpeakerPrefixedTextParity:
     @pytest.mark.parametrize(
         ("text", "speaker", "language", "expected"),
         [
-            # Qualifying speakers (finite integer number >= 1).
             ("hi", 1, "fr", "Speaker #1 says in the language fr that: hi"),
             ("hi", 2, None, "Speaker #2 says that: hi"),
             ("hi", 2, "", "Speaker #2 says that: hi"),
             ("hi", 2, "  ", "Speaker #2 says that: hi"),
             ("hi", 12, " en-US ", "Speaker #12 says in the language en-US that: hi"),
-            # JSON numbers have no int/float split in JS: an integral
-            # float qualifies (Math.floor(2.0) === 2.0).
             ("hi", 2.0, None, "Speaker #2 says that: hi"),
-            # Non-qualifying speakers → bare text.
             ("hi", None, "fr", "hi"),
             ("hi", 0, "fr", "hi"),
             ("hi", -3, "fr", "hi"),
             ("hi", 1.5, "fr", "hi"),
-            ("hi", True, "fr", "hi"),  # JS typeof true !== 'number'
+            ("hi", True, "fr", "hi"),
             ("hi", "tester", "fr", "hi"),
             ("hi", float("inf"), "fr", "hi"),
             ("hi", float("nan"), "fr", "hi"),
-            # Text trimming; empty text yields "" (caller never submits).
             ("  hi  ", 1, None, "Speaker #1 says that: hi"),
             ("   ", 1, "fr", ""),
             ("", None, None, ""),
-            # Non-string text behaves like JS String(undefined-guard): "".
             (None, 1, "fr", ""),
             (42, 1, "fr", ""),
-            # Non-string language behaves like no language.
             ("hi", 1, 7, "Speaker #1 says that: hi"),
         ],
     )

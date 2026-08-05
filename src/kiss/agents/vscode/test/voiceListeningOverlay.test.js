@@ -2,30 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test for the voice-round UX added around the wake word:
-//
-//  - When the "Sorcar" wake word fires (mic button flashes RED), the
-//    blinking "Listening ..." overlay over the task input appears:
-//    #input-text-wrap gains the 'listening' class that main.css turns
-//    into large blinking type.
-//  - The overlay disappears on every non-red transition: yellow
-//    voiceTranscribing, terminal voiceSpeech, and silence.
-//  - After a voice-dictated task is inserted and submitted, voice.js
-//    says "Working on it.".  In webview mode it delegates the
-//    GPT-synthesized clip to the extension host ({type: 'voiceAck'}
-//    bridge post — the webview's own Audio.play() is rejected by the
-//    autoplay policy without a recent click); in browser mode it
-//    plays cfg.ackAudioUrl itself.  The robotic Web Speech fallback
-//    is gone: a missing clip or a rejected playback degrades to
-//    silence, never to the "alien" system voice.
-//  - An empty translation (silence) never speaks the ack.
-//  - A page without the overlay element still works (no throw).
-//
-// This test runs the real ``media/voice.js`` against a real jsdom
-// document (no mocks for the code under test).
-//
-// Run directly with ``node test/voiceListeningOverlay.test.js``.
 
 'use strict';
 
@@ -51,12 +27,6 @@ function test(name, fn) {
   }
 }
 
-/**
- * Build a fresh jsdom window with the real input structure from
- * chat.html (#input-text-wrap wrapping the overlay and the textarea),
- * inject the webview-mode config plus optional Audio/speechSynthesis
- * stubs, and execute the real voice.js.
- */
 function makeWindow(opts) {
   opts = opts || {};
   const overlayHtml = opts.noOverlay
@@ -76,14 +46,11 @@ function makeWindow(opts) {
   win.__VOICE__ = {mode: opts.mode || 'webview'};
   if (opts.ackAudioUrl) win.__VOICE__.ackAudioUrl = opts.ackAudioUrl;
 
-  // Recorder for 'kiss-voice-post' bridge posts (webview mode
-  // delegates the ack to the extension host with {type: 'voiceAck'}).
   win.__posts = [];
   win.addEventListener('kiss-voice-post', event => {
     win.__posts.push(event.detail);
   });
 
-  // Audio stub: records constructed URLs and play() calls.
   win.__audioPlays = [];
   if (opts.audio === 'reject') {
     win.Audio = function (url) {
@@ -103,7 +70,6 @@ function makeWindow(opts) {
     win.Audio = undefined;
   }
 
-  // Web Speech API stub: records spoken utterances.
   win.__spoken = [];
   if (opts.speech !== 'none') {
     win.SpeechSynthesisUtterance = function (text) {
@@ -132,8 +98,6 @@ function wrapListening(win) {
     .getElementById('input-text-wrap')
     .classList.contains('listening');
 }
-
-// ---------------------------------------------------------------------------
 
 test('wake shows the blinking "Listening ..." overlay', () => {
   const win = makeWindow();
@@ -182,8 +146,6 @@ test('submitted speech delegates the ack clip to the extension host', () => {
   const win = makeWindow({ackAudioUrl: 'https://localhost/ack.mp3'});
   sendHostMessage(win, {type: 'voiceWake'});
   sendHostMessage(win, {type: 'voiceSpeech', text: 'Fix the parser bug'});
-  // JSON round-trip: the posts were created in the jsdom realm, whose
-  // Object prototype differs from the test realm's.
   assert.deepStrictEqual(
     JSON.parse(JSON.stringify(win.__posts.filter(m => m && m.type === 'voiceAck'))),
     [{type: 'voiceAck'}],
@@ -233,12 +195,6 @@ test('a page without the overlay element still handles the wake', () => {
   );
 });
 
-// ---------------------------------------------------------------------------
-
-/**
- * Async case: a rejected browser-mode clip playback degrades to
- * silence — never to the robotic Web Speech system voice.
- */
 async function rejectedPlaybackFallsBack() {
   const win = makeWindow({
     mode: 'browser',

@@ -2,32 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end tests for the wake-word sensitivity slider.
-//
-// The settings panel gains a range input (#cfg-voice-sensitivity,
-// 0..100, default 80) that must ACTUALLY change how eagerly the
-// "Sorcar" wake word fires:
-//
-// - Browser mode (remote webapp): media/voice.js applies the value
-//   live — the per-word confidence gate is 0.8*(1 - s/100), the
-//   post-alias pause gate is max(100, 400*(1 - s/100)) ms, and at
-//   sensitivity >= 75 an utterance that merely ENDS with an alias
-//   (e.g. "[unk] sore car" from "hey there Sorcar") wakes too.
-// - Webview mode (VS Code): voice.js reports the value to the
-//   extension host ({type:'voiceSensitivity', value}) and includes it
-//   in the initial voiceToggle so the host can pass --sensitivity to
-//   the Python listener.
-// - The value persists in localStorage ('kissVoiceSensitivity') and
-//   the slider + label reflect the stored value on load.
-//
-// These tests run the REAL production media/voice.js in jsdom with a
-// stub audio pipeline and stub Vosk recognizer (jsdom cannot run the
-// vosk-browser WASM worker); real-voice coverage for the same
-// behavior lives in test_voice_wake_sensitivity.py (Python CLI +
-// Playwright Chromium) and voiceWakeSensitivityService.test.js.
-//
-// Run directly with ``node test/voiceSensitivitySlider.test.js``.
 
 'use strict';
 
@@ -37,7 +11,7 @@ const path = require('path');
 const {JSDOM} = require('jsdom');
 
 const VOICE_JS_PATH = path.join(__dirname, '..', 'media', 'voice.js');
-const BLOCK = 4096; // frames per ScriptProcessor block
+const BLOCK = 4096;
 
 let passed = 0;
 const failures = [];
@@ -70,12 +44,6 @@ const PAGE_HTML =
   '</label></div>' +
   '</body></html>';
 
-/**
- * Build a jsdom window running the REAL media/voice.js on top of a
- * stub audio pipeline and stub Vosk recognizer.  ``mode`` selects the
- * voice config ('browser' or 'webview'); ``storedSensitivity`` seeds
- * localStorage before voice.js loads.
- */
 async function makeVoice({mode = 'browser', storedSensitivity} = {}) {
   const dom = new JSDOM(PAGE_HTML, {
     runScripts: 'dangerously',
@@ -85,8 +53,6 @@ async function makeVoice({mode = 'browser', storedSensitivity} = {}) {
   if (storedSensitivity !== undefined) {
     win.localStorage.setItem('kissVoiceSensitivity', storedSensitivity);
   }
-  // The mic is closed by default (fresh install) in every mode; opt
-  // in like a returning user so the pipeline under test starts.
   win.localStorage.setItem('kissVoiceEnabled', '1');
   win.__VOICE__ =
     mode === 'browser'
@@ -187,7 +153,6 @@ async function makeVoice({mode = 'browser', storedSensitivity} = {}) {
   };
 }
 
-/** Words list of a final Vosk result. */
 function words(...pairs) {
   return pairs.map(([word, conf]) => ({word, conf}));
 }
@@ -221,9 +186,6 @@ async function main() {
     'low sensitivity rejects a low-confidence force-fit that the ' +
       'default accepts',
     async () => {
-      // "soccer" force-fits onto "sar car" at conf ~0.55 (measured
-      // live).  Default (80): gate 0.16 -> wakes.  Slider 10: gate
-      // 0.72 -> rejected.
       const v = await makeVoice({mode: 'browser'});
       v.recognizer.handlers.result({
         result: {
@@ -253,7 +215,6 @@ async function main() {
   await test(
     'trailing alias: the default accepts what low sensitivity rejects',
     async () => {
-      // "hey there Sorcar" decodes to "[unk] sore car" (measured).
       const finalResult = {
         result: {
           text: '[unk] sore car',
@@ -266,14 +227,12 @@ async function main() {
         !v.btn.classList.contains('voice-triggered'),
         'sensitivity 50 must reject an alias in [unk] context',
       );
-      // Move the slider live: the SAME result must now wake.
       v.setSlider(85);
       v.recognizer.handlers.result(finalResult);
       assert.ok(
         v.btn.classList.contains('voice-triggered'),
         'sensitivity 85 must accept a trailing alias',
       );
-      // A fresh default (80) accepts trailing aliases out of the box.
       const fresh = await makeVoice({mode: 'browser'});
       fresh.recognizer.handlers.result(finalResult);
       assert.ok(
@@ -288,7 +247,6 @@ async function main() {
       'sensitivity',
     async () => {
       const v = await makeVoice({mode: 'browser', storedSensitivity: '85'});
-      // Continuous speech: no quiet audio yet -> must not fire.
       v.recognizer.handlers.partialresult({
         result: {partial: '[unk] sore car'},
       });
@@ -296,7 +254,6 @@ async function main() {
         !v.btn.classList.contains('voice-triggered'),
         'no pause yet: a trailing-alias partial must not fire',
       );
-      // 300ms of quiet audio satisfies the pause gate.
       v.quiet(300);
       v.recognizer.handlers.partialresult({
         result: {partial: '[unk] sore car'},

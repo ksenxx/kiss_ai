@@ -222,9 +222,6 @@ def _assert_full_width(m: dict) -> None:
         "width) — the panel with the input textbox and buttons must be "
         "as wide as the chat webview"
     )
-    # The composer gutter spans the same chat column as the chat
-    # thread (#output).  On desktop the docked sidebar shifts the
-    # whole column right, so compare against the thread, not the body.
     assert abs(m["areaWidth"] - m["outputWidth"]) <= 1
     assert m["outputWidth"] <= m["bodyWidth"]
 

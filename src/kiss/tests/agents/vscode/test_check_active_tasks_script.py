@@ -113,9 +113,6 @@ class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
             uds_path=self.uds_path,
         )
         await self.server.start_async()
-        # Ensure the registry is clean across tests — a leftover fake
-        # tab from a different test in the same process would flip our
-        # idle assertion.
         with _RunningAgentState._registry_lock:
             self._registry_snapshot = dict(
                 _RunningAgentState.running_agent_states,
@@ -140,16 +137,11 @@ class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
             _SCRIPT_PATH.exists(),
             f"missing helper script at {_SCRIPT_PATH}",
         )
-        # Mode 0o111 bits — readable and executable by owner at minimum.
         mode = _SCRIPT_PATH.stat().st_mode
         self.assertTrue(mode & 0o100, f"script not executable: {oct(mode)}")
 
     async def test_idle_daemon_exits_zero(self) -> None:
         """Helper exits 0 when the daemon's UDS reports count=0."""
-        # Run subprocess in a worker so the asyncio loop is not blocked
-        # while the helper does its synchronous UDS probe (the helper
-        # itself talks to the asyncio UDS server we just started, so
-        # the loop must remain free to serve it).
         result = await asyncio.get_event_loop().run_in_executor(
             None, _run_helper, self.uds_path,
         )
@@ -233,9 +225,6 @@ class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
                 return
             try:
                 conn.settimeout(5.0)
-                # Drain the incoming activeTasksQuery before responding
-                # so the helper's ``sendall`` does not race with the
-                # close.
                 buf = b""
                 while b"\n" not in buf:
                     chunk = conn.recv(4096)
@@ -332,14 +321,10 @@ class TestCheckActiveTasksScript(IsolatedAsyncioTestCase):
         """
         scratch = Path(tempfile.mkdtemp())
         stale_sock = scratch / "stale.sock"
-        # Bind+close to create the file then unlink the listener by
-        # closing the socket — leaves the inode but no acceptor.
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             s.bind(str(stale_sock))
             s.close()
-            # ``bind`` leaves the inode behind; without ``listen`` the
-            # connect attempt is refused.
             result = _run_helper(stale_sock)
             self.assertEqual(
                 result.returncode, 0,

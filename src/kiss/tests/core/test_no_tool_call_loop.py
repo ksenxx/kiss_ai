@@ -92,12 +92,10 @@ class TestNoToolCallLoop:
                     "api_key": "sk-test",
                 },
             )
-            # Should return within MAX_CONSECUTIVE_NO_TOOL_CALLS steps
             assert agent.step_count <= MAX_CONSECUTIVE_NO_TOOL_CALLS, (
                 f"Agent looped {agent.step_count} times; expected "
                 f"≤{MAX_CONSECUTIVE_NO_TOOL_CALLS} for a no-tool-call model"
             )
-            # The result should contain the model's response text
             assert "Hi" in result
         finally:
             server.shutdown()
@@ -116,7 +114,6 @@ class TestNoToolCallLoop:
                 idx = call_count[0]
                 call_count[0] += 1
                 if idx == 0:
-                    # First call: model calls finish tool
                     resp: dict[str, Any] = {
                         "id": "chatcmpl-test",
                         "object": "chat.completion",
@@ -177,7 +174,6 @@ class TestNoToolCallLoop:
                     "api_key": "sk-test",
                 },
             )
-            # finish was called on the first step
             assert agent.step_count == 1
             assert "Done!" in result
         finally:

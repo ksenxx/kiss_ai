@@ -2,30 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test for the speaker prefix and the auto-submit signal in
-// media/voice.js (VS Code webview mode).
-//
-// After the "Sorcar" wake word, the extension host translates the
-// speech that followed and identifies the speaker; the webview
-// receives ``{type: 'voiceSpeech', text, speaker}``.  voice.js must:
-//
-//  1. Insert the translation prefixed with ``Speaker #N says that: ``
-//     when a speaker number is present.
-//  2. Insert the bare translation when no speaker was identified
-//     (legacy string payloads or a failed speaker model).
-//  3. Raise exactly one ``kiss-voice-submit`` window event per
-//     non-empty translation, so main.js submits the task to the agent
-//     in the highlighted tab (or steers a running one).
-//  4. Never raise the submit event (nor touch the input) for empty,
-//     blank, or non-string translations.
-//  5. Reject bogus speaker values (0, negatives, fractions, strings)
-//     by inserting without a prefix.
-//
-// Runs the real media/voice.js in a real jsdom document — no mocks
-// for the code under test.  Run with:
-//
-//     node test/voiceSpeakerPrefixSubmit.test.js
 
 'use strict';
 
@@ -51,12 +27,6 @@ function test(name, fn) {
   }
 }
 
-/**
- * Build a fresh jsdom window with the elements voice.js needs, inject
- * the webview-mode config, run the real voice.js and count both
- * 'input' events on the textarea and 'kiss-voice-submit' events on
- * the window.
- */
 function makeWindow() {
   const dom = new JSDOM(
     '<!DOCTYPE html><html><body>' +
@@ -85,8 +55,6 @@ function sendHostMessage(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
 
-// ---------------------------------------------------------------------------
-
 test('speaker payload inserts prefixed text and submits once', () => {
   const {win, counters} = makeWindow();
   const inp = win.document.getElementById('task-input');
@@ -102,7 +70,7 @@ test('each speaker number appears in its own prefix', () => {
   const inp = win.document.getElementById('task-input');
   sendHostMessage(win, {type: 'voiceSpeech', text: 'first task', speaker: 1});
   assert.strictEqual(inp.value, 'Speaker #1 says that: first task');
-  inp.value = ''; // main.js clears the input after a real submit
+  inp.value = '';
   sendHostMessage(win, {type: 'voiceSpeech', text: 'second task', speaker: 2});
   assert.strictEqual(inp.value, 'Speaker #2 says that: second task');
   sendHostMessage(win, {type: 'voiceSpeech', text: 'third task', speaker: 1});
@@ -174,8 +142,6 @@ test('the word sorcar never reaches the input on wake', () => {
   sendHostMessage(win, {type: 'voiceWake'});
   assert.strictEqual(inp.value, '');
 });
-
-// ---------------------------------------------------------------------------
 
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length > 0) {

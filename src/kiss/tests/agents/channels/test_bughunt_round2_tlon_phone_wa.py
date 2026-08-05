@@ -80,7 +80,6 @@ class _RecordingHandler(BaseHTTPRequestHandler):
                 },
             )
         else:
-            # Graph API phone-number lookup used by WhatsApp connect().
             self._respond_json(
                 200, {"verified_name": "Test Biz", "display_phone_number": "+1555"}
             )

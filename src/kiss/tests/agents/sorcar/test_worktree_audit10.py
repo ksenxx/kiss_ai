@@ -133,7 +133,7 @@ class TestBug49StashPopOnMergeFailure:
         )
         agent._wt = wt
 
-        result, stash_warning = agent._do_merge(wt)
+        result, stash_warning, _cleanup_warning = agent._do_merge(wt)
         assert result == MergeResult.CONFLICT
 
         status = subprocess.run(
@@ -192,7 +192,7 @@ class TestBug49StashPopOnMergeFailure:
         )
         agent._wt = wt
 
-        result, stash_warning = agent._do_merge(wt)
+        result, stash_warning, _cleanup_warning = agent._do_merge(wt)
         assert result == MergeResult.MERGE_FAILED
 
         status = subprocess.run(
@@ -235,7 +235,7 @@ class TestBug49StashPopOnMergeFailure:
         )
         agent._wt = wt
 
-        result, stash_warning = agent._do_merge(wt)
+        result, stash_warning, _cleanup_warning = agent._do_merge(wt)
         assert result == MergeResult.SUCCESS
 
         status = subprocess.run(

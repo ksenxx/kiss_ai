@@ -57,10 +57,6 @@ class TestSaveConfigDaemonRestart(unittest.TestCase):
         vc.CONFIG_DIR = Path(self._tmpdir)
         vc.CONFIG_PATH = Path(self._tmpdir) / "config.json"
 
-        # Stub launchctl/systemctl on a private PATH.  The stubs append
-        # their argv to a marker file so the test can observe whether the
-        # restart subprocess actually ran — without kicking the real
-        # daemon (which would kill in-flight work on a dev machine).
         self._stub_bin = Path(self._tmpdir) / "bin"
         self._stub_bin.mkdir()
         self._marker = Path(self._tmpdir) / "restart-invoked.log"
@@ -72,12 +68,6 @@ class TestSaveConfigDaemonRestart(unittest.TestCase):
         self._orig_env_path = os.environ.get("PATH", "")
         os.environ["PATH"] = str(self._stub_bin)
 
-        # Simulate a production daemon: `_restart_kiss_web_daemon` only
-        # dispatches when KISS_HOME is the default ~/.kiss (the guard
-        # added after the 2026-06-11 incident where a test process
-        # SIGTERMed the live daemon).  Config reads/writes stay fully
-        # isolated via the patched vc.CONFIG_DIR/CONFIG_PATH above, and
-        # the restart subprocess only ever reaches the PATH stubs.
         self._orig_kiss_home = os.environ.get("KISS_HOME")
         os.environ["KISS_HOME"] = str(Path.home() / ".kiss")
 

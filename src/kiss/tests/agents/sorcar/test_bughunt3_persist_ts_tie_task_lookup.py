@@ -76,7 +76,7 @@ class TestTaskTextLookupTimestampTie(_TempDbTestBase):
 
     def test_most_recent_task_id_returns_latest_run(self) -> None:
         _t1, chat1 = _add_task("deploy app")
-        t2, chat2 = _add_task("deploy app")  # new, separate session
+        t2, chat2 = _add_task("deploy app")
         assert chat1 != chat2
         self._force_all_timestamps(1000.0)
 
@@ -99,14 +99,10 @@ class TestTaskTextLookupTimestampTie(_TempDbTestBase):
             r2 = db.execute(
                 "SELECT result FROM task_history WHERE id = ?", (t2,)
             ).fetchone()["result"]
-        # The NEWEST run must receive the result; the older row keeps
-        # whatever it had ("Agent Failed Abruptly" sentinel here).
         assert r2 == "done OK"
         assert r1 == "Agent Failed Abruptly"
 
     def test_distinct_timestamps_still_ordered_by_time(self) -> None:
-        # Sanity: the id tiebreak must not override genuine timestamp
-        # ordering (older row with a larger id).
         t1, _chat1 = _add_task("run tests")
         _t2, _chat2 = _add_task("run tests")
         db = th._get_db()

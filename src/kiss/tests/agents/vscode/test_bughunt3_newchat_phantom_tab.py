@@ -29,12 +29,6 @@ class TestEmptyTabIdPhantom(unittest.TestCase):
     """Empty tabId must not create an undisposable registry entry."""
 
     def setUp(self) -> None:
-        # ``selectModel`` persists ``last_model`` into config.json and
-        # increments the bogus test model's ("m-x") count in the SQLite
-        # ``model_usage`` table via ``_record_model_usage``.  Redirect
-        # BOTH stores into a private temp dir so neither the developer's
-        # real ``~/.kiss`` data nor later tests in this process (e.g.
-        # ``_load_model_usage() == {}`` assertions) get polluted.
         _pm._close_db()
         self._tmpdir = tempfile.mkdtemp(prefix="kiss-bughunt3-")
         self._saved_paths = (
@@ -74,7 +68,6 @@ class TestEmptyTabIdPhantom(unittest.TestCase):
             "BUG: selectModel without tabId minted a phantom registry "
             'entry keyed "" that _cmd_close_tab can never dispose'
         )
-        # The daemon-wide default is still updated.
         assert self.server._default_model == "m-x"
 
 

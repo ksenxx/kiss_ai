@@ -45,7 +45,6 @@ class TestCodexStreamTimeout:
         thinking/running commands forever).  ``generate()`` must raise
         ``KISSError`` within a few seconds, not hang indefinitely.
         """
-        # Create a fake codex script that emits events forever
         fake_codex = tmp_path / "codex"
         fake_codex.write_text(textwrap.dedent("""\
             #!/bin/bash

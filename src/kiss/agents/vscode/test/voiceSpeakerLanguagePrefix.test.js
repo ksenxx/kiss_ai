@@ -2,32 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end test for the language-aware speaker prefix in
-// media/voice.js (both VS Code webview mode and browser mode share
-// the same window ``message`` handler).
-//
-// After the "Sorcar" wake word, the transcription KISSAgent returns
-// both the English text and the language of the speech; the page
-// receives ``{type: 'voiceSpeech', text, speaker, language}``.
-// voice.js must:
-//
-//  1. Insert the translation prefixed with
-//     ``Speaker #N says in the language X that: `` when both a
-//     speaker number and a language tag are present.
-//  2. Fall back to ``Speaker #N says that: `` when the language is
-//     missing or bogus (empty, blank, non-string), so older hosts
-//     that do not send a language keep working.
-//  3. Insert the bare translation when no speaker was identified,
-//     even if a language is present (the prefix names the speaker).
-//  4. Trim the language tag and still raise exactly one
-//     ``kiss-voice-submit`` event per non-empty translation.
-//  5. Never let a language turn an empty translation into an insert.
-//
-// Runs the real media/voice.js in a real jsdom document — no mocks
-// for the code under test.  Run with:
-//
-//     node test/voiceSpeakerLanguagePrefix.test.js
 
 'use strict';
 
@@ -53,12 +27,6 @@ function test(name, fn) {
   }
 }
 
-/**
- * Build a fresh jsdom window with the elements voice.js needs, inject
- * the webview-mode config, run the real voice.js and count both
- * 'input' events on the textarea and 'kiss-voice-submit' events on
- * the window.
- */
 function makeWindow() {
   const dom = new JSDOM(
     '<!DOCTYPE html><html><body>' +
@@ -86,8 +54,6 @@ function makeWindow() {
 function sendHostMessage(win, data) {
   win.dispatchEvent(new win.MessageEvent('message', {data}));
 }
-
-// ---------------------------------------------------------------------------
 
 test('speaker + language payload inserts the language-aware prefix', () => {
   const {win, counters} = makeWindow();
@@ -120,7 +86,7 @@ test('each round carries its own speaker and language', () => {
     inp.value,
     'Speaker #1 says in the language en that: first task',
   );
-  inp.value = ''; // main.js clears the input after a real submit
+  inp.value = '';
   sendHostMessage(win, {
     type: 'voiceSpeech',
     text: 'second task',
@@ -256,8 +222,6 @@ test('a language never turns an empty translation into an insert', () => {
   assert.strictEqual(counters.input, 0);
   assert.strictEqual(counters.submit, 0);
 });
-
-// ---------------------------------------------------------------------------
 
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length > 0) {

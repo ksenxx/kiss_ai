@@ -69,9 +69,6 @@ class TestBadAttachment(unittest.TestCase):
     def test_malformed_attachments_do_not_kill_task_thread(self) -> None:
         work_dir = str(Path(self.tmpdir) / "plain")
         Path(work_dir).mkdir()
-        # Synchronous call on this thread: pre-fix the binascii.Error /
-        # AttributeError escapes _run_task and fails this test exactly
-        # the way it kills the real daemon's task thread.
         self.server._run_task({
             "type": "run",
             "prompt": "bughunt3 bad attachment task",
@@ -86,15 +83,11 @@ class TestBadAttachment(unittest.TestCase):
                 {"data": "aGk=", "mimeType": "text/plain"},
             ],
         })
-        # The lifecycle guarantee must hold: a final running=False status.
         finals = [
             e for e in self.events
             if e.get("type") == "status" and e.get("running") is False
         ]
         assert finals, "missing final status running=False broadcast"
-        # When the agent actually ran (models available in the test
-        # env), the one valid attachment must have been decoded and
-        # the two malformed ones skipped.
         if self.run_calls:
             atts = self.run_calls[0].get("attachments")
             assert atts is not None

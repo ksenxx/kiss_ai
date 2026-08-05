@@ -129,11 +129,6 @@ def test_interactive_escaped_trailing_backslash_submits(tmp_path: Path) -> None:
         _drain(fd, 0.5)
         os.write(fd, b"NEXT\r")
         tail = _drain(fd, 0.5)
-        # Feed one spare line so the buggy code (which swallows NEXT as
-        # a continuation and then blocks in the second _read_line) still
-        # terminates and reveals its wrong answers.  With correct code
-        # the child has already exited, so the write may fail with EIO —
-        # that is fine, the answers are already in the drained output.
         try:
             os.write(fd, b"SPARE\r")
         except OSError:

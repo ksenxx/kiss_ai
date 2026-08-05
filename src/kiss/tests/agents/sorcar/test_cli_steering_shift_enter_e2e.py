@@ -56,10 +56,6 @@ import pytest
 
 from kiss.ui.cli.cli_steering import _InputBox
 
-# ---------------------------------------------------------------------------
-# 1. start()/stop() emit the enable / disable CSI sequences
-# ---------------------------------------------------------------------------
-
 
 class TestStartEmitsEnableSequences:
     """The core reproduction: without these bytes, terminals collapse
@@ -91,8 +87,6 @@ class TestStartEmitsEnableSequences:
             sys.stdin = orig_stdin
             stdin_file.close()
             os.close(master)
-            # slave was closed via stdin_file's underlying fd; do not
-            # double-close if closefd=False left it open.
             try:
                 os.close(slave)
             except OSError:
@@ -148,10 +142,6 @@ class TestStartEmitsEnableSequences:
         assert paste_off >= 0 and modify_off > paste_off and kitty_off > paste_off
 
 
-# ---------------------------------------------------------------------------
-# 2. Resume from Ctrl+Z re-arms the enable sequences
-# ---------------------------------------------------------------------------
-
 
 class TestSigcontReEnablesExtendedKeys:
     """A shell suspend (``Ctrl+Z``) followed by ``fg`` hands the
@@ -186,10 +176,6 @@ class TestSigcontReEnablesExtendedKeys:
             except OSError:
                 pass
 
-
-# ---------------------------------------------------------------------------
-# 3. Realistic tmux-driven end-to-end reproduction / regression check
-# ---------------------------------------------------------------------------
 
 
 _TMUX = shutil.which("tmux")
@@ -269,9 +255,6 @@ class TestTmuxShiftEnterMultiLine:
     def _run_driver(
         self, tmp_path: Path, key_between_lines: str
     ) -> list[str]:
-        # Narrow ``_TMUX`` from ``str | None`` to ``str`` for the type
-        # checker; the ``@pytest.mark.skipif(not _has_tmux())`` on the
-        # class already guarantees this at runtime.
         assert _TMUX is not None
         tmux: str = _TMUX
         conf = self._tmux_config(tmp_path)
@@ -279,7 +262,6 @@ class TestTmuxShiftEnterMultiLine:
         driver.write_text(_DRIVER_SRC)
         out_json = tmp_path / "submissions.json"
         session = f"stest{os.getpid()}"
-        # Kill any stale session with the same name first.
         subprocess.run(
             [tmux, "-f", str(conf), "kill-session", "-t", session],
             check=False,
@@ -310,7 +292,6 @@ class TestTmuxShiftEnterMultiLine:
             check=True,
         )
         try:
-            # Wait for the driver to draw its initial box (small sleep).
             time.sleep(0.8)
             subprocess.run(
                 [tmux, "send-keys", "-t", session, "line1"], check=True
@@ -334,11 +315,9 @@ class TestTmuxShiftEnterMultiLine:
                 [tmux, "send-keys", "-t", session, "line3"], check=True
             )
             time.sleep(0.15)
-            # Plain Enter submits.
             subprocess.run(
                 [tmux, "send-keys", "-t", session, "Enter"], check=True
             )
-            # Wait for the driver to record its submission and exit.
             deadline = time.time() + 5.0
             data: list[str] = []
             while time.time() < deadline:

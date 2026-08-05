@@ -48,9 +48,6 @@ RED = "\x1b[31m"
 BLINK = "\x1b[5m"
 YELLOW = "\x1b[33m"
 RESET = "\x1b[0m"
-# Header prefixes: the top border opens "╭─" (cyan) and the indicator
-# follows immediately — steady red before the wake word, blinking red
-# after it.
 HDR_PLAIN = f"{CYAN}╭─{RESET}{RED}"
 HDR_BLINK = f"{CYAN}╭─{RESET}{BLINK}{RED}"
 
@@ -121,7 +118,7 @@ def stdin_pipe() -> Any:
 def box() -> _InputBox:
     """An anchored input box rendering into a captured StringIO."""
     b = _InputBox(threading.RLock(), io.StringIO())
-    b._active = True  # render without owning a real terminal
+    b._active = True
     return b
 
 
@@ -169,14 +166,9 @@ class TestHeaderIndicator:
             monkeypatch, tmp_path, box, ["READY", _speech("hi")],
         )
         assert text == "hi"
-        # Indicator opens the top border, steady red (no blink pre-wake).
         assert HDR_PLAIN + "Listening ..." in rendered
         assert BLINK + RED + "Listening ..." not in rendered
-        # The box's normal title follows the indicator on the same top
-        # border (voice no longer swaps in a modal title — the box
-        # stays fully typeable).
         assert f"{RED}Listening ...{RESET}{CYAN}Dynamic steer" in rendered
-        # The body never shows the indicator (chevron row is buffer/placeholder).
         assert "› Listening" not in rendered
 
     def test_blink_starts_on_wake(
@@ -366,10 +358,8 @@ class TestYellowNotifications:
         out = buf.getvalue()
         assert "something happened" in out
         assert "details" in out
-        # Yellow border + yellow message text + dim-yellow progress
-        # text; no cyan/red panel chrome.
         assert "\x1b[33" in out
         assert "\x1b[33msomething happened" in out
         assert "\x1b[2;33mdetails" in out
-        assert "\x1b[36" not in out  # info no longer cyan
-        assert "\x1b[31" not in out  # error no longer red
+        assert "\x1b[36" not in out
+        assert "\x1b[31" not in out

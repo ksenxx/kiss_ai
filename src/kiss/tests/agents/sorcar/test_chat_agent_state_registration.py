@@ -133,8 +133,6 @@ class TestChatSorcarAgentStateRegistration:
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect(self.tmpdir)
         self.srv, self.url = _start_server()
-        # Start from a clean registry so concurrent test pollution
-        # cannot mask the invariant being checked here.
         with _RunningAgentState._registry_lock:
             _RunningAgentState.running_agent_states.clear()
         ChatSorcarAgent.running_agents.clear()
@@ -167,7 +165,7 @@ class TestChatSorcarAgentStateRegistration:
         observed: dict[str, Any] = {}
 
         def observer_poll() -> None:
-            for _ in range(2000):  # up to ~2s
+            for _ in range(2000):
                 with _RunningAgentState._registry_lock:
                     snapshot = list(
                         _RunningAgentState.running_agent_states.items()
@@ -208,12 +206,7 @@ class TestChatSorcarAgentStateRegistration:
             "_RunningAgentState.running_agent_states while run() was "
             "executing — the per-tab state registry invariant is broken"
         )
-        # ``is_task_active`` must be True so the live-task consumer
-        # paths (``_reattach_running_chat``, ``_get_running_task_ids``)
-        # treat the agent as in-flight.
         assert observed["is_task_active"] is True
-        # The agent's own ``chat_id`` must propagate into the state so
-        # by-chat lookups (e.g. multi-viewer subscribe) can find it.
         assert observed["chat_id"] != ""
         assert observed["chat_id"] == agent.chat_id
 
@@ -305,9 +298,7 @@ class TestChatSorcarAgentStateRegistration:
         observed: dict[str, Any] = {}
 
         def observer_poll() -> None:
-            for _ in range(2000):  # up to ~2s
-                # Exact production scan from
-                # ``ChatSorcarAgent._run_tasks_parallel``.
+            for _ in range(2000):
                 parent_tab_id = ""
                 with _RunningAgentState._registry_lock:
                     for tid, st in (

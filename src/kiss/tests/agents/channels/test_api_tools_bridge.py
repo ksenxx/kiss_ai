@@ -94,14 +94,9 @@ class ApiToolsBridgeTest(unittest.TestCase):
         assert "Who to greet." in (wrapper.__doc__ or "")
         params = inspect.signature(wrapper).parameters
         assert list(params) == ["name", "times"]
-        # Annotation fidelity: the wrapper's PEP 563 annotation string
-        # matches a native postponed-annotations tool exactly.
         assert params["times"].annotation == "int"
         assert params["name"].annotation == "str"
-        # The wrapper's default is the ORIGINAL default object.
         assert params["times"].default == 2
-        # Dispatch reaches the live closure; omitted params use the
-        # original default.
         assert wrapper(name="ada") == "hi hi ada"
         assert wrapper("bob", times=1) == "hi bob"
         assert calls == [("ada", 2), ("bob", 1)]
@@ -216,7 +211,6 @@ class ApiToolsBridgeTest(unittest.TestCase):
         assert not Path(path).exists(), "release must delete the tools file"
         with self.assertRaises(RuntimeError):
             wrapper()
-        # Releasing twice is a no-op.
         bridge.release_tools(token)
 
     def test_dispatch_unknown_token_or_tool_raises(self) -> None:
@@ -264,9 +258,9 @@ class ApiToolsBridgeTest(unittest.TestCase):
             return _hidden
 
         cases: list[Any] = [
-            [ok, ok],  # duplicate names
-            ["not callable"],  # not callable
-            [lambda x: x],  # lambda → invalid tool name
+            [ok, ok],
+            ["not callable"],
+            [lambda x: x],
             [star_args],
             [star_kwargs],
             [underscore_param],
@@ -274,7 +268,6 @@ class ApiToolsBridgeTest(unittest.TestCase):
         for tools in cases:
             with self.assertRaises(ValueError, msg=repr(tools)):
                 bridge.register_tools(tools)
-        # Positional-only parameters cannot be bound by keyword.
         with self.assertRaises(ValueError):
             bridge.register_tools([divmod])
 
@@ -300,9 +293,6 @@ class ApiToolsBridgeTest(unittest.TestCase):
         odd.__annotations__["x"] = "not valid ("
         _token, path = self._register([odd])
         (wrapper,) = load_tools_file(path)
-        # PEP 563 stores the fallback string literal's SOURCE text
-        # (quotes included); the point is that the generated module
-        # still compiles and the tool still works.
         assert (
             inspect.signature(wrapper).parameters["x"].annotation
             == repr("not valid (")

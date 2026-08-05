@@ -67,14 +67,8 @@ class TestChatContextCacheStaleWrite:
 
     def test_stale_cache_write(self) -> None:
         chat_id = "race-chat"
-        # Seed one task so the SQL read returns non-empty data.
         th._add_task("task-zero", chat_id=chat_id)
 
-        # Drive the race deterministically with explicit barriers.
-        # R1 enters _load_chat_context, reads, and BLOCKS before
-        # returning.  While R1 is blocked, the writer commits and
-        # invalidates, then R2 runs fast through a fresh read+store.
-        # Only then is R1 allowed to return and store its stale data.
         r1_in_sql = threading.Event()
         let_r1_finish = threading.Event()
 
@@ -88,10 +82,7 @@ class TestChatContextCacheStaleWrite:
                 n = call_count["n"]
             data = original(cid)
             if n == 1:
-                # R1 — block AFTER reading so the writer sees R1's
-                # stale view, then let R2 read fresh.
                 r1_in_sql.set()
-                # Random small sleep < 0.1s as suggested in CONTRIBUTING.
                 time.sleep(random.uniform(0.001, 0.05))
                 let_r1_finish.wait(timeout=5)
             return data
@@ -106,12 +97,8 @@ class TestChatContextCacheStaleWrite:
             t_r1.start()
             assert r1_in_sql.wait(timeout=5)
 
-            # While R1 is blocked, the writer commits a new task and
-            # invalidates the cache.
             th._add_task("task-one", chat_id=chat_id)
 
-            # R2 misses, reads fresh (call_count == 2 — no block),
-            # and stores the fresh value.
             def reader_two() -> None:
                 th._load_chat_context_text(chat_id)
 
@@ -119,16 +106,11 @@ class TestChatContextCacheStaleWrite:
             t_r2.start()
             t_r2.join(timeout=5)
 
-            # Sanity: fresh cache entry now includes "task-one".
             assert "task-one" in th._load_chat_context_text(chat_id)
 
-            # Release R1 — it will store its stale data over R2's fresh
-            # value if the race exists.
             let_r1_finish.set()
             t_r1.join(timeout=5)
 
-            # The cache MUST still reflect the latest committed state.
-            # Without the fix, R1 overwrites R2's fresh entry.
             cached_after = th._load_chat_context_text(chat_id)
             assert "task-one" in cached_after, (
                 "stale chat-context cache survived a concurrent invalidation"
@@ -155,19 +137,15 @@ class TestAutocompleteWorkerDoubleSpawn:
 
         from kiss.server.autocomplete import _AutocompleteMixin
 
-        # Build a bare instance carrying only the attributes touched
-        # by ``_ensure_complete_worker``.
         instance = _AutocompleteMixin()
         instance._state_lock = threading.RLock()  # type: ignore[attr-defined]
         instance._complete_queue = None  # type: ignore[attr-defined]
         instance._complete_worker = None  # type: ignore[attr-defined]
 
-        # Make the worker loop a no-op so the test doesn't block.
         def fake_loop(self_ref: object) -> None:
             q = getattr(self_ref, "_complete_queue", None)
             if q is None:
                 return
-            # Drain forever; daemon thread exits with the process.
             while True:
                 try:
                     item = q.get(timeout=0.5)
@@ -180,10 +158,6 @@ class TestAutocompleteWorkerDoubleSpawn:
         _AutocompleteMixin._complete_worker_loop = fake_loop  # type: ignore[assignment]
 
         try:
-            # Insert a sleep right before the queue+thread construction
-            # by wrapping ``_ensure_complete_worker`` with a sleep
-            # injected after the None-check.  Easier: monkey-patch
-            # ``queue.Queue`` to add the delay.
             original_q_init = queue_mod.Queue.__init__
 
             def slow_init(self: object, *args: object, **kwargs: object) -> None:
@@ -204,10 +178,6 @@ class TestAutocompleteWorkerDoubleSpawn:
             finally:
                 queue_mod.Queue.__init__ = original_q_init  # type: ignore[method-assign]
 
-            # Count alive daemon threads created with our loop.  In a
-            # correctly-locked implementation, exactly one worker
-            # thread should exist.  Inspect threading.enumerate() to
-            # count.
             alive_workers = []
             for t in threading.enumerate():
                 target = getattr(t, "_target", None)
@@ -219,14 +189,9 @@ class TestAutocompleteWorkerDoubleSpawn:
                     continue
                 if getattr(target, "__name__", "") == "fake_loop":
                     alive_workers.append(t)
-            # With a fix, the published worker matches a single
-            # surviving Thread.  Without it, multiple Threads are
-            # spawned from the racing init paths.
             assert len(alive_workers) <= 1, (
                 f"double-spawn race: {len(alive_workers)} workers alive"
             )
-            # Final sanity: the published queue must be the same one
-            # the worker is consuming from (no orphaned queue).
             assert instance._complete_queue is not None
             assert instance._complete_worker is not None
             assert instance._complete_worker.is_alive()
@@ -234,7 +199,6 @@ class TestAutocompleteWorkerDoubleSpawn:
             _AutocompleteMixin._complete_worker_loop = (  # type: ignore[method-assign]
                 original_loop
             )
-            # Wake the worker so the daemon exits promptly.
             if instance._complete_queue is not None:
                 try:
                     instance._complete_queue.put_nowait(None)

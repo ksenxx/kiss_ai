@@ -2,44 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// Regression test for the install-time "^C aborted my install" bug.
-//
-// The bug
-// -------
-// ``install.sh``'s step [5/6] runs ``tsc`` which rewrites the
-// running-extension's ``out/extension.js`` ~5–15 s BEFORE the rest of
-// the install (``copy-kiss.sh``, daemon restart, ``code
-// --install-extension``) completes.  The extension used to also watch
-// ``out/extension.js`` with a 2 s ``fs.watchFile`` poll, so the
-// mid-install rewrite triggered ``workbench.action.reloadWindow``.
-// VS Code's ``reloadWindow`` tears down the integrated terminal that
-// is running ``install.sh``; the terminal shutdown writes ``\x03`` to
-// the PTY (which is why users saw an unexplained ``^C``) and the
-// install aborted.
-//
-// The fix
-// -------
-// ``extension.ts`` now watches ONLY ``~/.kiss/.extension-updated``.
-// All install scripts touch that marker as their *final* step (after
-// ``code --install-extension`` has returned and the kiss-web daemon
-// has been restarted), so a stat change on it signals "extension is
-// fully installed; safe to reload".  Modifying ``out/extension.js``
-// alone must NOT trigger a reload, because doing so races with an
-// in-flight ``install.sh``.
-//
-// What this test exercises
-// ------------------------
-// The REAL compiled ``out/extension.js`` activate(), with stubs for
-// the dependent modules, against a real on-disk filesystem.  We
-// redirect ``$HOME`` to a tmpdir so the marker we touch is the one
-// the extension is watching, and we record every
-// ``vscode.commands.executeCommand`` call so we can assert whether
-// ``workbench.action.reloadWindow`` was issued.
-//
-// Run directly with ``node``:
-//
-//     node src/kiss/agents/vscode/test/reloadOnMarkerOnly.test.js
 
 'use strict';
 
@@ -57,22 +19,14 @@ assert.ok(
   `compiled extension missing: ${OUT_DIR}/extension.js — run \`npm run compile\` first`,
 );
 
-// ---- 1. Redirect HOME so the marker path lives in our tmpdir --------
-// ``extension.ts`` derives ``markerPath`` from ``os.homedir()`` at
-// activate() time, so we must override before requiring it.
 const TMP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-reload-home-'));
 const ORIG_HOME = process.env.HOME;
 process.env.HOME = TMP_HOME;
 fs.mkdirSync(path.join(TMP_HOME, '.kiss'), {recursive: true});
 const markerPath = path.join(TMP_HOME, '.kiss', '.extension-updated');
 const sockPath = path.join(TMP_HOME, '.kiss', 'sorcar.sock');
-// A pre-existing daemon socket lets the settle gate's ``socketUp``
-// branch fire immediately so the reload is observed quickly instead
-// of having to wait the full 3 s grace window.
 fs.writeFileSync(sockPath, '');
 
-// ---- 2. vscode module stub ------------------------------------------
-// Captures executeCommand invocations.
 const executedCommands = [];
 
 function makeDisposable() {
@@ -136,7 +90,6 @@ Module._resolveFilename = function (request, parent, ...rest) {
   return origResolve.call(this, request, parent, ...rest);
 };
 
-// ---- 3. Stub the heavy dependency modules ----------------------------
 class FakeSidebarView {
   constructor() {}
   syncWorkDir() {}
@@ -182,9 +135,6 @@ stubModule(path.join(OUT_DIR, 'DependencyInstaller.js'), {
 stubModule(path.join(OUT_DIR, 'gitApi.js'), {
   getGitApi: () => Promise.resolve(undefined),
 });
-// The real reloadGuard's ``isReloadReady`` checks an extension.js
-// path; we want the settle gate to clear immediately once it polls,
-// so always report ``codeReady`` + ``socketUp``.
 stubModule(path.join(OUT_DIR, 'reloadGuard.js'), {
   isReloadReady: () => ({
     ready: true,
@@ -194,12 +144,10 @@ stubModule(path.join(OUT_DIR, 'reloadGuard.js'), {
   }),
 });
 
-// Force a fresh load.
 const extensionPath = path.join(OUT_DIR, 'extension.js');
 delete require.cache[require.resolve(extensionPath)];
 const extension = require(extensionPath);
 
-// ---- 4. ExtensionContext helpers ------------------------------------
 function makeMemento() {
   const store = new Map();
   return {
@@ -215,9 +163,6 @@ function makeMemento() {
 
 function makeContext() {
   const tmpExtPath = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-ext-'));
-  // Mimic the on-disk layout of an installed extension: ``out/extension.js``
-  // must be a real file so the watcher (had we kept it) and the settle
-  // gate's stat probes can see it.
   const extOutDir = path.join(tmpExtPath, 'out');
   fs.mkdirSync(extOutDir, {recursive: true});
   const installedExtJs = path.join(extOutDir, 'extension.js');
@@ -238,7 +183,6 @@ function disposeContext(ctx) {
     try {
       d.dispose && d.dispose();
     } catch {
-      // ignore
     }
   }
   fs.rmSync(ctx._tmpExtPath, {recursive: true, force: true});
@@ -252,28 +196,17 @@ function countReloads() {
   ).length;
 }
 
-// The watcher polls at 2000 ms; allow generous headroom so a stray
-// reload, if any, has time to fire.
 const POLL_INTERVAL_MS = 2000;
 const WAIT_AFTER_TOUCH_MS = POLL_INTERVAL_MS * 3 + 1000;
-// After writing the marker we also need the settle gate (500 ms ticks)
-// to clear, which our stub returns ready immediately on the first poll.
 const WAIT_AFTER_MARKER_MS = POLL_INTERVAL_MS * 2 + 1500;
 
 async function runTests() {
   let failures = 0;
 
-  // ------------------------------------------------------------------
-  // Test 1: rewriting ``out/extension.js`` must NOT trigger a reload.
-  // This is what install.sh's tsc step did mid-install, killing the
-  // terminal running install.sh.
-  // ------------------------------------------------------------------
   const ctx = makeContext();
   extension.activate(ctx);
   const beforeTouch = countReloads();
 
-  // Simulate ``tsc`` rewriting the file: change mtime + content + size
-  // so any naive watchFile callback (mtime, ino, size) would fire.
   await sleep(50);
   fs.writeFileSync(ctx._installedExtJs, '// recompiled bundle larger now');
   const nowSec = Date.now() / 1000;
@@ -296,12 +229,6 @@ async function runTests() {
     console.log(`  FAIL - extension.js touch trigger: ${err.message}`);
   }
 
-  // ------------------------------------------------------------------
-  // Test 2: writing the ``~/.kiss/.extension-updated`` marker MUST
-  // trigger a reload.  install.sh writes this marker as its final
-  // step, when the extension is fully installed and the daemon is
-  // back up — exactly when a reload is wanted.
-  // ------------------------------------------------------------------
   const beforeMarker = countReloads();
   fs.writeFileSync(markerPath, new Date().toISOString());
 
@@ -332,7 +259,6 @@ runTests().then(
     try {
       fs.unlinkSync(stubPath);
     } catch {
-      // ignore
     }
     fs.rmSync(TMP_HOME, {recursive: true, force: true});
     if (ORIG_HOME === undefined) delete process.env.HOME;
@@ -348,7 +274,6 @@ runTests().then(
     try {
       fs.unlinkSync(stubPath);
     } catch {
-      // ignore
     }
     fs.rmSync(TMP_HOME, {recursive: true, force: true});
     if (ORIG_HOME === undefined) delete process.env.HOME;

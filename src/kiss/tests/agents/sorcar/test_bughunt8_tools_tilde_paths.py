@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.core.useful_tools import UsefulTools
+from kiss.agents.sorcar.useful_tools import UsefulTools
 
 
 @pytest.fixture()
@@ -39,9 +39,7 @@ def test_write_tilde_path_targets_home_not_literal_dir(
     out = tools.Write("~/notes.txt", "HELLO\n")
 
     assert "Successfully wrote" in out, out
-    # Must land in the (fake) home directory...
     assert (fake_home / "notes.txt").read_text() == "HELLO\n"
-    # ...and must NOT create a literal '~' directory in the work dir.
     assert not (work_dir / "~").exists()
 
 

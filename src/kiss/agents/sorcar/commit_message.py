@@ -159,14 +159,20 @@ def generate_commit_message_from_diff(
             "changes. Return ONLY the commit message text, no "
             "quotes or markdown fences.\n\n{context}"
         )
-    msg = _run_oneshot_llm(
-        agent_name="Commit Message Generator",
-        prompt_template=template,
-        arguments={"context": context},
-        model=get_fast_model(),
-        fallback=fallback,
-        failure_log="Commit message generation failed",
-    )
+    try:
+        model = get_fast_model()
+    except Exception:
+        logger.debug("Commit message model selection failed", exc_info=True)
+        msg = fallback
+    else:
+        msg = _run_oneshot_llm(
+            agent_name="Commit Message Generator",
+            prompt_template=template,
+            arguments={"context": context},
+            model=model,
+            fallback=fallback,
+            failure_log="Commit message generation failed",
+        )
     msg = _append_user_prompt(msg, user_prompt) if user_prompt else msg
     return _append_task_result(msg, task_result) if task_result else msg
 
@@ -188,9 +194,6 @@ def _append_user_prompt(message: str, user_prompt: str) -> str:
     trimmed = user_prompt.strip()
     if not trimmed:
         return message
-    # USER_PROMPT_HEADING is single-sourced in git_worktree.py: its
-    # ``_ensure_task_metadata`` dedup detection depends on byte-exact
-    # agreement with the block appended here.
     return f"{message.rstrip()}{USER_PROMPT_HEADING}{trimmed}"
 
 
@@ -211,6 +214,4 @@ def _append_task_result(message: str, task_result: str) -> str:
     trimmed = task_result.strip()
     if not trimmed:
         return message
-    # TASK_RESULT_HEADING is single-sourced in git_worktree.py (see
-    # ``_append_user_prompt``).
     return f"{message.rstrip()}{TASK_RESULT_HEADING}{trimmed}"

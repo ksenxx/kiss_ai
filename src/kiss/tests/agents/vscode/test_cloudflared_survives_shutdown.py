@@ -73,17 +73,12 @@ class TestDetachTunnelLeavesProcessAlive(unittest.TestCase):
 
             server._detach_tunnel()
 
-            # State has been cleared so the next adoption attempt
-            # starts from a clean slate.
             self.assertIsNone(server._tunnel_proc)
             self.assertIsNone(server._tunnel_metrics_port)
             self.assertIsNone(server._tunnel_started_at)
             self.assertEqual(server._tunnel_failure_count, 0)
             self.assertIsNone(server._active_url)
 
-            # Critical property: the spawned cloudflared (here a
-            # stand-in ``sleep``) is still running.  Without this,
-            # every kiss-web restart would mint a new public URL.
             time.sleep(0.2)
             self.assertIsNone(proc.poll())
             self.assertTrue(_child_is_alive(proc.pid))
@@ -127,16 +122,6 @@ class TestDetachTunnelLeavesProcessAlive(unittest.TestCase):
                 proc.wait()
 
 
-# ---------------------------------------------------------------------------
-# End-to-end: ``kiss-web`` SIGTERM finally does not kill cloudflared
-# ---------------------------------------------------------------------------
-
-# A driver subprocess that mirrors the exact shutdown structure of
-# :meth:`RemoteAccessServer.start` -- ``try / except KeyboardInterrupt /
-# finally`` with the same cleanup calls -- and wires a long-running
-# ``sleep`` child in as the "spawned cloudflared".  The parent sends
-# SIGTERM, the driver unwinds through the finally, and the parent then
-# verifies the child is still alive.
 _DRIVER = r"""
 import os, signal, sys, time
 from pathlib import Path
@@ -203,15 +188,12 @@ class TestCloudflaredSurvivesKissWebShutdown(unittest.TestCase):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                # New session so our SIGTERM hits only the driver, not
-                # the pytest runner that spawned us.
                 start_new_session=True,
             )
             try:
                 ready = self._wait_for_line(proc, "READY", timeout=30.0)
                 self.assertTrue(ready, "driver never reached READY")
 
-                # Read the cloudflared stand-in pid the driver recorded.
                 deadline = time.monotonic() + 10.0
                 while not pid_file.exists() and time.monotonic() < deadline:
                     time.sleep(0.02)
@@ -219,10 +201,6 @@ class TestCloudflaredSurvivesKissWebShutdown(unittest.TestCase):
                 child_pid = int(pid_file.read_text().strip())
                 self.assertTrue(_child_is_alive(child_pid))
 
-                # Deliver the same signal VS Code's ``pkill kiss-web``
-                # delivers.  The driver's signal handler raises
-                # KeyboardInterrupt, the finally runs, and the driver
-                # exits 0 -- WITHOUT killing the cloudflared stand-in.
                 proc.send_signal(signal.SIGTERM)
                 stdout, stderr = proc.communicate(timeout=30.0)
 
@@ -233,12 +211,6 @@ class TestCloudflaredSurvivesKissWebShutdown(unittest.TestCase):
                 )
                 self.assertIn("CLEAN_EXIT", stdout)
 
-                # The point of the whole exercise: the spawned
-                # cloudflared stand-in must still be running after the
-                # kiss-web driver has fully exited.  Pre-fix this
-                # assertion failed because ``_stop_tunnel`` called
-                # ``proc.terminate()`` on the spawned child as part of
-                # the shutdown ``finally``.
                 self.assertTrue(
                     _child_is_alive(child_pid),
                     "cloudflared stand-in was killed by kiss-web shutdown",
@@ -307,25 +279,15 @@ class TestStderrDrainShim(unittest.TestCase):
             start_new_session=True,
         )
         try:
-            # Hand off the stderr pipe to the drain shim.
             shim = RemoteAccessServer._spawn_stderr_drain_shim(child)
             self.assertIsNotNone(shim)
 
-            # Simulate kiss-web closing its end: drop the parent's
-            # reference to the pipe's read end.  The shim still
-            # holds a dup'd copy of the fd, so the kernel keeps the
-            # read end open and the child does not get SIGPIPE.
             assert child.stderr is not None
             child.stderr.close()
 
-            # Give the child plenty of time to overflow the pipe
-            # buffer.  Without the shim, ~64 KiB / 200 B per write =
-            # ~320 writes ≈ 1.6 s and it would either block or die.
             time.sleep(3.0)
 
-            # The child must still be running.
             self.assertIsNone(child.poll(), "child died despite drain shim")
-            # And the shim must still be running, draining bytes.
             assert shim is not None
             self.assertIsNone(shim.poll(), "drain shim exited prematurely")
         finally:
@@ -335,7 +297,6 @@ class TestStderrDrainShim(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 child.kill()
                 child.wait()
-            # The shim should now exit cleanly on EOF.
             if shim is not None:
                 try:
                     shim.wait(timeout=5)
@@ -348,7 +309,6 @@ class TestStderrDrainShim(unittest.TestCase):
         proc: subprocess.Popen[str] = subprocess.Popen(
             ["sleep", "5"],
             stdout=subprocess.DEVNULL,
-            # Note: NO stderr=PIPE -- this proc has no captured stderr.
             text=True,
             start_new_session=True,
         )

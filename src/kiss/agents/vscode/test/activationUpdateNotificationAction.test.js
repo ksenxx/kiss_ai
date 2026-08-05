@@ -2,25 +2,6 @@
 // Contributors:
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
-//
-// End-to-end regression test for the activation-time update notification.
-//
-// Requirement: clicking the update button in an update notification must take
-// the same action as clicking the Update button in the settings panel.  The
-// settings-panel button posts `{type: 'runUpdate'}` and SorcarSidebarView runs
-// the updater by locating `~/kiss_ai/install.sh`, showing an install
-// notification, opening the `KISS Sorcar Update` terminal, and sending the
-// installer command.  The activation-time notification used to handle its
-// `Update now` action by opening a blank terminal via
-// `workbench.action.terminal.new`, which did not run the updater at all.
-//
-// This test drives the real compiled `out/extension.js` activate() end-to-end
-// with only VS Code and side-effectful dependencies stubbed.  It forces
-// `UpdateChecker.checkForExtensionUpdate()` to report an available update,
-// forces the notification promise to resolve as if the user clicked
-// `Update now`, and asserts that the same SorcarSidebarView updater entrypoint
-// used by the settings-panel `runUpdate` path is invoked, with no blank
-// terminal command executed.
 
 'use strict';
 
@@ -219,7 +200,6 @@ function disposeContext(ctx) {
     try {
       if (d && typeof d.dispose === 'function') d.dispose();
     } catch {
-      // ignore cleanup failures
     }
   }
   fs.rmSync(ctx._tmpExtPath, {recursive: true, force: true});

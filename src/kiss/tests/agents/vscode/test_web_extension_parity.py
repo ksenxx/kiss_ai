@@ -78,8 +78,6 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
             url_file=Path(self.tmpdir) / "remote-url.json",
             uds_path=self.uds_path,
         )
-        # Point the updater paths at per-test temp locations so the
-        # tests never touch the real ~/kiss_ai or ~/.kiss/update.log.
         self.install_root = Path(self.tmpdir) / "kiss_ai"
         self.server._install_root = self.install_root
         self.server._update_log_path = Path(self.tmpdir) / "update.log"
@@ -189,14 +187,12 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                 "An update of KISS Sorcar is getting installed",
                 str(notice.get("text", "")),
             )
-            # The script runs detached; poll for its side effect.
             for _ in range(100):
                 if marker.is_file():
                     break
                 await asyncio.sleep(0.05)
             self.assertTrue(marker.is_file(), "install.sh did not run")
             self.assertEqual(marker.read_text().strip(), "updated")
-            # Script stdout was captured in the update log.
             log = self.server._update_log_path
             for _ in range(100):
                 if log.is_file() and "done" in log.read_text():
@@ -218,9 +214,6 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                 writer,
                 {"type": "sizeReport", "innerWidth": 100, "screenWidth": 200},
             )
-            # activeTasksQuery acts as a synchronisation barrier: its
-            # response arrives after any (hypothetical) error from the
-            # preceding sizeReport would have been broadcast.
             await self._send(writer, {"type": "activeTasksQuery"})
             _, seen = await self._drain_until(reader, "activeTasksResponse")
             self._assert_no_unknown_command(seen)
@@ -284,11 +277,8 @@ class TestWebExtensionParity(IsolatedAsyncioTestCase):
                     "useParallel": False,
                     "autoCommit": True,
                 })
-                # The submit handler echoes setTaskText before running.
                 _, seen = await self._drain_until(reader, "setTaskText")
                 self._assert_no_unknown_command(seen)
-                # auto_commit_mode is set on the worker thread just
-                # before the agent runs; wait for the stub to start.
                 self.assertTrue(
                     await asyncio.get_running_loop().run_in_executor(
                         None, ran.wait, 10.0,
