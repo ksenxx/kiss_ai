@@ -42,12 +42,34 @@ from kiss.server.diff_merge import (
     _merge_data_dir,
     _prepare_merge_view,
 )
-from kiss.server.helpers import generate_commit_message_from_diff
+from kiss.server.helpers import (
+    generate_commit_message_from_diff,
+    tab_busy_with_other_task,
+)
 
 if TYPE_CHECKING:
     from kiss.server.json_printer import JsonPrinter
 
 logger = logging.getLogger(__name__)
+
+
+def _tab_task_key(tab: _RunningAgentState | None) -> str | None:
+    """Return the task id *tab* last ran, preferring the live agent's.
+
+    Args:
+        tab: The per-tab state to inspect, or ``None``.
+
+    Returns:
+        The task id, or ``None`` when the tab never ran a task.
+    """
+    if tab is None:
+        return None
+    task_id = tab.task_history_id
+    if task_id is None:
+        task_id = tab.last_task_id
+    if task_id is None and tab.agent is not None:
+        task_id = tab.agent._last_task_id
+    return task_id
 
 
 def _unquoted_name_lines(output: str) -> list[str]:
@@ -202,6 +224,48 @@ class _MergeFlowMixin:
         """
         return tab.agent
 
+    def _open_ui_mirror(self, tab_id: str, work_dir: str = "") -> None:
+        """Mirror *tab_id*'s interactive UI onto the other clients' tabs.
+
+        The merge review, the auto-commit prompt and the worktree
+        merge/discard strip all block the user until they are answered,
+        so every tab showing the same chat must show them — a question
+        the user cannot see in the window they happen to be looking at
+        is a question they cannot answer.  Tab ids are per-client, so
+        "the same chat elsewhere" means the tabs subscribed to this
+        tab's task.  A co-subscriber that has since started a task of
+        its own is skipped: the subscriber set of a finished task is
+        deliberately retained, and that tab's UI belongs to its own
+        task now.
+
+        Args:
+            tab_id: The tab that owns the UI.
+            work_dir: The owner's working directory, remembered so an
+                action arriving from a viewer is applied to the
+                owner's repository rather than the viewer's folder.
+        """
+        if not tab_id:
+            return
+        viewers: list[str] = []
+        with self._state_lock:
+            task_id = _tab_task_key(
+                _RunningAgentState.running_agent_states.get(tab_id),
+            )
+            task_key = self.printer._coerce_task_id(task_id)
+            if task_key:
+                for viewer_tab_id in self.printer._fanout_targets(task_key):
+                    viewer = _RunningAgentState.running_agent_states.get(
+                        viewer_tab_id,
+                    )
+                    if viewer is not None and tab_busy_with_other_task(
+                        viewer, task_key,
+                    ):
+                        continue
+                    viewers.append(viewer_tab_id)
+        self.printer.open_ui_mirror(
+            tab_id, viewers, work_dir or self.work_dir, task_key,
+        )
+
     def _start_merge_session(
         self, merge_json_path: str, tab_id: str = "", work_dir: str = "",
     ) -> bool:
@@ -249,12 +313,17 @@ class _MergeFlowMixin:
                 if resolved_tab_id is not None:
                     merge_data_event["tabId"] = resolved_tab_id
                     merge_started_event["tabId"] = resolved_tab_id
-                self.printer.broadcast(merge_data_event)
-                self.printer.broadcast(merge_started_event)
+                    self._open_ui_mirror(
+                        resolved_tab_id, merge_data["work_dir"],
+                    )
+                self.printer.broadcast_tab_ui(merge_data_event)
+                self.printer.broadcast_tab_ui(merge_started_event)
             except BaseException:
                 with self._state_lock:
                     if resolved_tab is not None:
                         resolved_tab.is_merging = False
+                if resolved_tab_id is not None:
+                    self.printer.close_ui_mirror(resolved_tab_id)
                 raise
             return True
         except (OSError, json.JSONDecodeError, KeyError):
@@ -346,7 +415,7 @@ class _MergeFlowMixin:
             with self._state_lock:
                 tab.is_merging = False
             try:
-                self.printer.broadcast(
+                self.printer.broadcast_tab_ui(
                     {"type": "merge_ended", "tabId": tab_id}
                 )
             except Exception:
@@ -407,7 +476,8 @@ class _MergeFlowMixin:
         """
         changed = self._main_dirty_files(work_dir)
         if changed:
-            self.printer.broadcast({
+            self._open_ui_mirror(tab_id, work_dir)
+            self.printer.broadcast_tab_ui({
                 "type": "autocommit_prompt",
                 "tabId": tab_id,
                 "changedFiles": changed,
@@ -443,7 +513,7 @@ class _MergeFlowMixin:
         }
         if commit_message is not None:
             event["commitMessage"] = commit_message
-        self.printer.broadcast(event)
+        self.printer.broadcast_tab_ui(event)
         return event
 
     def _handle_autocommit_action(
@@ -491,7 +561,7 @@ class _MergeFlowMixin:
                 )
                 return
             with repo_lock(repo):
-                self.printer.broadcast({
+                self.printer.broadcast_tab_ui({
                     "type": "autocommit_progress",
                     "message": "Staging changes…",
                     "tabId": tab_id,
@@ -512,7 +582,7 @@ class _MergeFlowMixin:
                         message="Nothing to commit.",
                     )
                     return
-                self.printer.broadcast({
+                self.printer.broadcast_tab_ui({
                     "type": "autocommit_progress",
                     "message": "Generating commit message…",
                     "tabId": tab_id,
@@ -535,7 +605,7 @@ class _MergeFlowMixin:
                     )
                     or "Auto-commit"
                 )
-                self.printer.broadcast({
+                self.printer.broadcast_tab_ui({
                     "type": "autocommit_progress",
                     "message": "Committing…",
                     "tabId": tab_id,
@@ -551,14 +621,9 @@ class _MergeFlowMixin:
                 )
                 if tab_id:
                     with self._state_lock:
-                        tab = _RunningAgentState.running_agent_states.get(tab_id)
-                    task_id: str | None = None
-                    if tab is not None:
-                        task_id = tab.task_history_id
-                        if task_id is None:
-                            task_id = tab.last_task_id
-                        if task_id is None and tab.agent is not None:
-                            task_id = tab.agent._last_task_id
+                        task_id = _tab_task_key(
+                            _RunningAgentState.running_agent_states.get(tab_id),
+                        )
                     if task_id is not None:
                         _append_chat_event(done_event, task_id=task_id)
             else:
@@ -761,7 +826,7 @@ class _MergeFlowMixin:
             with self._state_lock:
                 tab.is_merging = False
             self._dispose_if_closed(tab_id)
-        self.printer.broadcast(
+        self.printer.broadcast_tab_ui(
             {"type": "worktree_result", "tabId": tab_id, **result},
         )
         return _PendingOutcome.FINALIZED
@@ -871,7 +936,8 @@ class _MergeFlowMixin:
             "hasConflict": self._check_merge_conflict(tab_id),
             "tabId": tab_id,
         }
-        self.printer.broadcast(event)
+        self._open_ui_mirror(tab_id, str(wt_agent._wt_dir))
+        self.printer.broadcast_tab_ui(event)
         return False
 
     def _check_merge_conflict(self, tab_id: str = "") -> bool:
@@ -1201,7 +1267,7 @@ class _MergeFlowMixin:
                     }
                     if tab_id:
                         progress_event["tabId"] = tab_id
-                    self.printer.broadcast(progress_event)
+                    self.printer.broadcast_tab_ui(progress_event)
                     msg = wt.merge()
                     success = "Successfully merged" in msg
                     return {"success": success, "message": msg}

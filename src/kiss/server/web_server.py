@@ -1884,7 +1884,15 @@ class WebPrinter(JsonPrinter):
         if event.get("type") == "merge_data":
             event = _augment_merge_data(event)
             evt_tab = event.get("tabId", "")
-            if evt_tab and self._merge_state_callback is not None:
+            # Copies mirrored onto other clients' tabs (see
+            # JsonPrinter.broadcast_tab_ui) describe the SAME review:
+            # registering a hunk cursor per copy would give each client
+            # its own cursor and fire one "all-done" per client.
+            if (
+                evt_tab
+                and not event.get("mirrorOf")
+                and self._merge_state_callback is not None
+            ):
                 self._merge_state_callback(evt_tab, event.get("data", {}))
 
         if "tabId" in event:
@@ -5012,18 +5020,25 @@ class RemoteAccessServer:
         endpoint.  Sends are targeted at *websocket* only — sibling
         windows already received the original broadcast.
 
+        A tab that only MIRRORS someone else's review (this client
+        joined a chat another client is reviewing) has no state of its
+        own, so the owner's review is replayed to it — stamped with
+        this tab's id, exactly as ``broadcast_tab_ui`` stamps the live
+        events.
+
         Args:
             tab_id: The tab the connection (re-)claimed.
             websocket: The reconnecting client connection.
         """
         if not tab_id:
             return
-        lock = await self._acquire_merge_action_lock(tab_id)
+        owner_tab_id = self._printer.ui_mirror_owner(tab_id, "merge_data")
+        lock = await self._acquire_merge_action_lock(owner_tab_id)
         if lock is None:
             return
         try:
             with self._merge_states_lock:
-                state = self._merge_states.get(tab_id)
+                state = self._merge_states.get(owner_tab_id)
             if state is None or not state.remaining:
                 return
             assert self._loop is not None
@@ -5050,6 +5065,9 @@ class RemoteAccessServer:
                 ),
                 "resolved": state.resolutions(),
             }
+            if owner_tab_id != tab_id:
+                event["mirrorOf"] = owner_tab_id
+                nav["mirrorOf"] = owner_tab_id
             try:
                 await self._endpoint_send(websocket, json.dumps(event))
                 await self._endpoint_send(
@@ -5238,7 +5256,7 @@ class RemoteAccessServer:
         """
         fname = file_data.get("name") or file_data.get("target") or "file"
         logger.warning("Merge reject failed for %s: %s", fname, exc)
-        self._printer.broadcast({
+        self._printer.broadcast_tab_ui({
             "type": "error",
             "text": f"Failed to reject changes in {fname}: {exc}",
             "tabId": tab_id,
@@ -5262,12 +5280,14 @@ class RemoteAccessServer:
             cmd: The ``mergeAction`` command from the browser, with
                 ``action`` and ``tabId`` fields.
         """
-        tab_id = cmd.get("tabId", "")
+        tab_id = self._printer.ui_mirror_owner(
+            cmd.get("tabId", ""), "merge_data",
+        )
         lock = await self._acquire_merge_action_lock(tab_id)
         if lock is None:
             return
         try:
-            await self._apply_web_merge_action(cmd)
+            await self._apply_web_merge_action({**cmd, "tabId": tab_id})
         finally:
             lock.release()
 
@@ -5373,7 +5393,7 @@ class RemoteAccessServer:
                     state.mark_resolved(fi, hi, "rejected")
 
         cur_after = state.current()
-        self._printer.broadcast({
+        self._printer.broadcast_tab_ui({
             "type": "merge_nav",
             "tabId": tab_id,
             "remaining": state.remaining,

@@ -47,6 +47,7 @@ from kiss.agents.sorcar.git_worktree import (
     GitWorktreeOps,
 )
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
 
 
@@ -78,10 +79,11 @@ def _make_repo(path: Path) -> Path:
     return path
 
 
-class _RecordingPrinter:
+class _RecordingPrinter(JsonPrinter):
     """Concrete printer that records broadcasts and can optionally raise."""
 
     def __init__(self, *, raise_on: str | None = None) -> None:
+        super().__init__()
         self.events: list[dict[str, Any]] = []
         self._raise_on = raise_on
 

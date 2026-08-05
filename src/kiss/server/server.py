@@ -568,6 +568,19 @@ class VSCodeServer(
         if cleanup_tab is not None:
             cleanup_tab(tab_id)
 
+    def _printer_close_owner_ui(self, tab_id: str) -> None:
+        """Take *tab_id*'s interactive UI off the other clients' screens.
+
+        Resolved via ``getattr`` for the same reason as
+        :meth:`_printer_cleanup_tab`.
+
+        Args:
+            tab_id: The frontend tab being disposed.
+        """
+        close_owner_ui = getattr(self.printer, "close_owner_ui", None)
+        if close_owner_ui is not None:
+            close_owner_ui(tab_id)
+
     def _get_models(self, conn_id: str = "") -> None:
         """Send available models list with usage counts and pricing.
 
@@ -960,6 +973,7 @@ class VSCodeServer(
                     wt_agent._flush_warnings(self.printer)
             except Exception:
                 logger.debug("Worktree release on tab close failed", exc_info=True)
+        self._printer_close_owner_ui(tab_id)
         self._printer_cleanup_tab(tab_id)
         with self._state_lock:
             self._tab_chat_views.pop(tab_id, None)
@@ -1122,6 +1136,16 @@ class VSCodeServer(
         ):
             self.printer.subscribe_tab(str(rebound_task_id), tab_id)
             rebound_running = True
+        if (
+            not rebound_running
+            and rebound_task_id is not None
+            and self.printer.has_ui_mirror_for_task(rebound_task_id)
+        ):
+            # The task is over but another window is still holding a
+            # merge review or an auto-commit prompt open on it.
+            # Joining replays that UI into this tab, so opening the
+            # chat here shows the same question instead of nothing.
+            self.printer.subscribe_tab(str(rebound_task_id), tab_id)
 
         with self._state_lock:
             tab = _RunningAgentState.running_agent_states.get(tab_id)

@@ -961,7 +961,11 @@ class ServerApi:
             return
         tab_id = cmd.get("tabId", "")
         if isinstance(tab_id, str) and tab_id:
-            self._backend._pop_merge_state(tab_id)
+            # The finishing client may be one of the other windows
+            # mirroring the review; the shadow state is the owner's.
+            self._backend._pop_merge_state(
+                self._backend._printer.ui_mirror_owner(tab_id, "merge_data"),
+            )
         await self.forward(cmd, ctx)
 
     async def open_file(self, cmd: dict[str, Any], ctx: ApiContext) -> None:

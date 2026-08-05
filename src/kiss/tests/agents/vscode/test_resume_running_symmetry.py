@@ -43,6 +43,7 @@ from unittest.mock import patch
 import pytest
 
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
 
 MAIN_JS = (
@@ -76,18 +77,15 @@ def _extract_case_body(src: str, case_name: str) -> str:
 
 
 
-class _StubPrinter:
+class _StubPrinter(JsonPrinter):
     """Capture broadcast events in order."""
 
     def __init__(self) -> None:
+        super().__init__()
         self.events: list[dict[str, Any]] = []
-        self._persist_agents: dict[str, Any] = {}
 
     def broadcast(self, event: dict[str, Any]) -> None:
         self.events.append(event)
-
-    def subscribe_tab(self, source_tab_id: str, viewer_tab_id: str) -> None:
-        pass
 
     def rebind_tab(self, old: str, new: str) -> None:
         pass
