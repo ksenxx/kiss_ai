@@ -95,17 +95,17 @@ When fixing bugs, issues, or race conditions, write an end-to-end test that repr
 
 ## AI discovery, auto research, optimization, and adversarial testing
 
-Mandatory Instructions (MUST FOLLOW): You will be exploring, implementing, and evaluating novel ideas while doing AI discovery or auto research or software optimization. 
+Mandatory Instructions (MUST FOLLOW): You will be exploring, implementing, and evaluating novel ideas while doing AI discovery or auto research or software optimization.
 
 1. read + profile the data / tests / baseline, record baseline metric
-2. web-search for SOTA approaches, papers, repos, issues
-3. write ideas and rationale in ./tmp/ideas.md
-4. Pairwise judge the ideas to find a winner idea.
-5. Implement -> run real end-to-end evaluation -> log idea, aspect of improvement, and metric in ./tmp/explored-ideas.md
-    if better: keep, and try composing with prior winners on different aspects
-    if worse:  mark as failed so it is never retried
-5. search again for fresh ideas based on previous experience and exclude ideas that have been explored in ./tmp/explored-ideas.md; go to 4
-6. stop when the user's metric goal is met, with a
+1. web-search for SOTA approaches, papers, repos, issues
+1. write ideas and rationale in ./tmp/ideas.md
+1. Pairwise judge the ideas to find a winner idea.
+1. Implement -> run real end-to-end evaluation -> log idea, aspect of improvement, and metric in ./tmp/explored-ideas.md
+   if better: keep, and try composing with prior winners on different aspects
+   if worse: mark as failed so it is never retried
+1. search again for fresh ideas based on previous experience and exclude ideas that have been explored in ./tmp/explored-ideas.md; go to 4
+1. stop when the user's metric goal is met, with a
    held-out / generalization check to prove it is not overfit
 
 ## Adversrial testing
