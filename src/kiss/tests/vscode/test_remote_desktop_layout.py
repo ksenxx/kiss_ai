@@ -285,7 +285,11 @@ def test_settings_panel_is_narrow_on_desktop(
             "#settings-panel",
             "el => el.getBoundingClientRect().width",
         )
-        assert panel_width <= 460, (
+        # --settings-panel-w is 480px: wide enough for the "Tips",
+        # "Git Commit", "Update" and "Reset Server" buttons to sit on
+        # one line (see remote-codex.css), yet still a narrow drawer
+        # rather than the 90vw mobile sheet.
+        assert panel_width <= 480, (
             f"settings panel is {panel_width}px wide at viewport {width}px; "
             "it must stay narrow like the VS Code extension sidebar"
         )

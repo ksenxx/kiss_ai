@@ -111,19 +111,28 @@ def test_process_output_event_for_bg_tab_tool_call_sets_pending_true() -> None:
 
 
 def test_replay_events_into_tool_call_sets_pending_true() -> None:
-    """replayEventsInto must set rPendingPanel = true on tool_call."""
+    """The replay path must set rPendingPanel = true on tool_call.
+
+    ``replayEventsInto`` is a thin wrapper that delegates the actual
+    event rendering to ``renderReplayedEvents`` (refactor b08ee852),
+    so the invariant lives in the helper's body.
+    """
     src = _read_main_js()
-    body = _extract_function_body(src, "replayEventsInto")
+    wrapper = _extract_function_body(src, "replayEventsInto")
+    assert "renderReplayedEvents(" in wrapper, (
+        "replayEventsInto must delegate to renderReplayedEvents"
+    )
+    body = _extract_function_body(src, "renderReplayedEvents")
 
     m = re.search(
         r"t\s*===\s*'tool_call'[^}]*?rPendingPanel\s*=\s*(\w+)",
         body,
     )
     assert m, (
-        "replayEventsInto must set rPendingPanel on tool_call"
+        "renderReplayedEvents must set rPendingPanel on tool_call"
     )
     assert m.group(1) == "true", (
-        f"replayEventsInto sets rPendingPanel = {m.group(1)} "
+        f"renderReplayedEvents sets rPendingPanel = {m.group(1)} "
         "on tool_call; must be true."
     )
 
