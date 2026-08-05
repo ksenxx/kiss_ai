@@ -816,7 +816,9 @@ class JsonPrinter(Printer):
             },
         )
 
-    def broadcast_agent_model_pick(self, model: str, tab_id: str) -> None:
+    def broadcast_agent_model_pick(
+        self, model: str, tab_id: str, task_id: Any = None,
+    ) -> None:
         """Show a running agent's *model* in every tab watching its task.
 
         The launching tab plus every viewer subscribed to the agent's
@@ -832,10 +834,16 @@ class JsonPrinter(Printer):
             model: The model the agent just switched to.
             tab_id: The tab the agent's task was launched in (``""``
                 when the agent runs outside a tab, e.g. from the CLI).
+            task_id: Optional explicit task id used to look up the
+                viewer tabs when the calling thread has no
+                thread-local ``task_id`` bound (e.g. a call made off
+                the agent's run thread).  Ignored when the
+                thread-local key is available, which is the normal
+                on-thread case.
         """
         if not model:
             return
-        task_key = self._task_key()
+        task_key = self._task_key() or self._coerce_task_id(task_id)
         targets = set(self._fanout_targets(task_key))
         if tab_id:
             targets.add(tab_id)

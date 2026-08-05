@@ -1078,7 +1078,11 @@ class SorcarAgent(RelentlessAgent):
         if not callable(show):
             return
         try:
-            show(model_name, getattr(self, "_tab_id", "") or "")
+            show(
+                model_name,
+                getattr(self, "_tab_id", "") or "",
+                getattr(self, "_last_task_id", None),
+            )
         except Exception:
             logger.warning("model picker update failed", exc_info=True)
 
@@ -1478,12 +1482,32 @@ def run_tasks_parallel(
             # never folds its in-flight executor session's spend into the
             # agent totals, so the folded-only read would undercount it.
             sub_usage[idx] = _live_agent_usage(agent)
-            if printer is not None and parent_key:
-                _broadcast_subagent_done(
-                    printer,
-                    [f"task-{parent_key}__sub_{idx}"],
-                    model_name or "",
-                )
+            if printer is not None:
+                # Notify every tab watching the sub-agent: the
+                # synthetic child tab derived from the parent's task id
+                # plus any viewer tabs subscribed to the sub-agent's
+                # own task stream (mirrors the fan-out in
+                # ChatSorcarAgent._run_tasks_parallel).
+                try:
+                    viewer_ids: list[str] = []
+                    fanout = getattr(printer, "_fanout_targets", None)
+                    sub_task_id = getattr(agent, "_last_task_id", None)
+                    if callable(fanout) and sub_task_id is not None:
+                        found = fanout(sub_task_id)
+                        if isinstance(found, list):
+                            viewer_ids = [v for v in found if v]
+                    if parent_key:
+                        sub_tab_id = f"task-{parent_key}__sub_{idx}"
+                        if sub_tab_id not in viewer_ids:
+                            viewer_ids.append(sub_tab_id)
+                    if viewer_ids:
+                        _broadcast_subagent_done(
+                            printer, viewer_ids, model_name or "",
+                        )
+                except Exception:
+                    logger.debug(
+                        "subagentDone broadcast failed", exc_info=True,
+                    )
             # Pool workers are reused and the binding is per THREAD, so
             # leaving it behind would let an unrelated sibling inherit a
             # stop meant for this task.

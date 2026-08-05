@@ -183,9 +183,12 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         ``broadcast`` method is attached: ``"Generating commit
         message"`` immediately before the (typically slow) LLM call
         that produces the commit message, and ``"Committed
-        <subject>"`` once the commit lands in git.  The notifications
-        are routed by tab so they appear on the owning chat webview,
-        not on every open tab.
+        <subject>"`` once the commit lands in git.  Each
+        notification is fanned out to every tab watching this task —
+        the owning chat webview plus any subscribed viewer tabs — one
+        ``tabId``-stamped copy per tab (see
+        :meth:`_notification_tab_ids`), while unrelated tabs are left
+        alone.
 
         Returns:
             True if a commit was created, False if nothing to commit.
@@ -244,6 +247,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         if printer is None or not hasattr(printer, "broadcast"):
             return
         severity = "info"
+        tab_ids = self._notification_tab_ids(printer)
         if stage == "generating":
             message = "Generating commit message"
         elif stage == "committed":
@@ -259,19 +263,63 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             severity = "warning"
         else:
             return
-        event: dict[str, object] = {
-            "type": "notification",
-            "id": notification_id,
-            "severity": severity,
-            "message": message,
-            "tabId": self._tab_id,
-        }
-        if stage == "generating":
-            event["sticky"] = True
-        try:
-            printer.broadcast(event)
-        except Exception:  # pragma: no cover — best-effort UI hook
-            logger.debug("autocommit notification broadcast failed", exc_info=True)
+        for tab_id in tab_ids:
+            event: dict[str, object] = {
+                "type": "notification",
+                "id": notification_id,
+                "severity": severity,
+                "message": message,
+                "tabId": tab_id,
+            }
+            if stage == "generating":
+                event["sticky"] = True
+            try:
+                printer.broadcast(event)
+            except Exception:  # pragma: no cover — best-effort UI hook
+                logger.debug(
+                    "autocommit notification broadcast failed", exc_info=True,
+                )
+
+    def _notification_tab_ids(self, printer: Any) -> list[str]:
+        """Return every tab id that should see this task's notifications.
+
+        The owning tab (``_tab_id``, injected by the server when the
+        task was launched from a webview) plus every viewer tab
+        subscribed to the task's event stream via the printer's
+        fan-out registry — history-resume tabs, remote kiss-web
+        clients watching the same chat, and so on.  Each caller
+        broadcasts one ``tabId``-stamped copy per returned id because
+        connected clients filter events by ``tabId``, so a single
+        stamped copy reaches exactly one tab.
+
+        Best-effort by design: printers without ``_fanout_targets``
+        (plain recording printers in tests, console runs) and lookup
+        errors degrade to ``[self._tab_id]`` — the pre-fan-out
+        behaviour — and the list is never empty so the stamped
+        broadcast keeps its "targeted system event" semantics (no
+        recording/persistence) even when no tab is known.
+
+        Args:
+            printer: The attached printer (already known non-``None``).
+
+        Returns:
+            Deduplicated tab ids, the owning tab first.
+        """
+        targets: list[str] = [self._tab_id] if self._tab_id else []
+        fanout = getattr(printer, "_fanout_targets", None)
+        task_id = getattr(self, "_last_task_id", None)
+        if callable(fanout) and task_id:
+            try:
+                viewers = fanout(task_id)
+                if isinstance(viewers, list):
+                    for tab_id in viewers:
+                        if tab_id and tab_id not in targets:
+                            targets.append(tab_id)
+            except Exception:  # pragma: no cover — best-effort UI hook
+                logger.debug("notification fan-out lookup failed", exc_info=True)
+        if not targets:
+            targets = [self._tab_id]
+        return targets
 
 
     def _commit_and_clean_worktree(
