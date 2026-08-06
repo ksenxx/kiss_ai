@@ -32,7 +32,7 @@ Can you read \<<url>>, and thoroughly and precisely check for **wrong assumption
 
 ## Task
 
-Sorcar for AI Discovery: Can you AI discover the lightest and fastest AI model that will give the best accuracy and recall on the data at \<</path/to/data>> at the cheapest price? Use 'modal' CLI to train your models on GPUs and evaluate if needed. The total budget for Modal.com is $ 1,000. Do not STOP until accuracy/recall reaches 99% and price per query on the model is less that $0.5.  Craete a report.
+Sorcar for AI Discovery: Can you AI discover the lightest and fastest AI model that will give the best accuracy and recall on the data at \<</path/to/data>> at the cheapest price? Use 'modal' CLI to train your models on GPUs and evaluate if needed. The total budget for Modal.com is $ 1,000. Do not STOP until accuracy/recall reaches 99% and price per query on the model is less that $0.5. Craete a report.
 
 ## Task
 

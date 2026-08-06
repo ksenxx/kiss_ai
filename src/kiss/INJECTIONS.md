@@ -13,4 +13,3 @@ Can you use the instructions in the file @ to perform the task?
 ## Trick
 
 Can you check the following message for a merge conflict and help me fix it?
-

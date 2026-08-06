@@ -901,7 +901,6 @@ Full model list:
 
 </details>
 
-
 ## 🤗 Contributing
 
 Contributions in the form of issues are welcome. KISS Sorcar should be able to help implement and review them.
