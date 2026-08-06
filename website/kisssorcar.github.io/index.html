@@ -4,14 +4,14 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.</title>
-  <meta name="description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 538 models. Works as a VS Code extension, a Claude-Code-style CLI, and a web app.">
+  <meta name="description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 603 models. Works as a VS Code extension, a Claude-Code-style CLI, and a web app.">
   <link rel="canonical" href="https://kisssorcar.github.io/">
   <link rel="alternate" type="text/markdown" href="https://kisssorcar.github.io/index.html.md" title="This page as Markdown">
   <link rel="llms-txt" type="text/plain" href="https://kisssorcar.github.io/llms.txt" title="LLM-friendly content index">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://kisssorcar.github.io/">
   <meta property="og:title" content="KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.">
-  <meta property="og:description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 538 models.">
+  <meta property="og:description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 603 models.">
   <meta property="og:image" content="https://kisssorcar.github.io/assets/KISS-Sorcar.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
@@ -1951,7 +1951,7 @@
     <h1>Tell it what to do, in any language and give it a concrete goal. It picks the best LLMs, runs on your laptop, and ships the work.</h1>
     <div class="hero-trust" aria-label="At a glance">
       <span><strong>Apache 2.0</strong> · open source</span>
-      <span><strong>538 models</strong> · 9 providers</span>
+      <span><strong>603 models</strong> · 9 providers</span>
       <span><strong>~2,850 lines</strong> of core agents code</span>
     </div>
   </div>
@@ -2081,7 +2081,7 @@
             </tr>
             <tr>
               <th class="cap">Models in bundled catalog</th>
-              <td class="kiss">538 across 9 provider categories</td>
+              <td class="kiss">603 across 9 provider categories</td>
               <td>Claude family only</td>
               <td>Subset chosen by Cursor</td>
             </tr>
@@ -2127,7 +2127,7 @@
   <section id="prompts" class="section-card">
     <span class="num">§ 02 — All you need is a short prompt in KISS Sorcar to do big complex tasks</span>
     <h2>All You Need is a Short Prompt in KISS Sorcar to do Big Complex Tasks.<a href="#prompts" class="anchor">¶</a></h2>
-    <p class="sub" style="font-size:0.88rem; line-height:1.55;">KISS Sorcar ships with a curated set of <strong>sample tasks</strong> (long-horizon prompts you can drop straight into the CLI or VS Code extension or Web app) and <strong>promptlet tricks</strong> (short reusable directives that steer Sorcar's behaviour by injecting to the prompt). The tasks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md"><code>src/kiss/SAMPLE_TASKS.md</code></a>; the tricks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md"><code>src/kiss/INJECTIONS.md</code></a>. You can add your tasks at <code>~/.kiss/MY_TASK_TEMPLATES.md</code> and your promptlets at <code>~/.kiss/MY_INJECTIONS.md</code>.</p>
+    <p class="sub" style="font-size:0.88rem; line-height:1.55;">KISS Sorcar ships with a curated set of <strong>sample tasks</strong> (long-horizon prompts you can drop straight into the CLI or VS Code extension or Web app) and <strong>promptlet tricks</strong> (short reusable directives that steer Sorcar's behaviour by injecting to the prompt). The tasks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/SAMPLE_TASKS.md"><code>src/kiss/SAMPLE_TASKS.md</code></a>; the tricks live in <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/INJECTIONS.md"><code>src/kiss/INJECTIONS.md</code></a>. You can add your tasks at <code>~/.kiss/MY_TASK_TEMPLATES.md</code> and your promptlets at <code>~/.kiss/MY_INJECTION.md</code>.</p>
     <div class="section-body">
 
       <div class="prompt-carousel" id="prompt-carousel" aria-roledescription="carousel" aria-label="Sample tasks and promptlet tricks">
@@ -2166,7 +2166,7 @@
           </div>
           <p class="panel-desc">Have Sorcar log you into a Slack workspace using the bundled Slack agent, so it can send and receive messages on your behalf.</p>
           <div class="prompt-body">
-            <pre>can you authenticate me with the &lt;&lt;workspace name&gt;&gt; workspace on Slack using the Slack agent?</pre>
+            <pre>Can you authenticate me with the &lt;&lt;workspace name&gt;&gt; workspace on Slack using the Slack agent?</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2177,9 +2177,9 @@
             <h3 class="panel-title">Run a Slack-driven cron job</h3>
             <span class="panel-badge">Task</span>
           </div>
-          <p class="panel-desc">Spin up a named cron job that polls a Slack channel for unanswered messages, runs them as Sorcar tasks in arrival order, and replies with Slack-formatted results.</p>
+          <p class="panel-desc">Spin up a named cron job that polls a Slack channel for the latest unanswered messages, runs them as Sorcar tasks in arrival order, and replies with Slack-formatted results.</p>
           <div class="prompt-body">
-            <pre>Can you create a cron job with a name prefixed with "kiss-" which will check every 3 seconds if there are latest unanswered messages from /&lt;&lt;user name&gt;&gt; in the channel sorcar using the Slack agent, then it will run the messages as tasks one-by-one in the order of arrival and respond with the result suitably formatted for Slack.</pre>
+            <pre>Can you create a cron job with a name prefixed with "kiss-" which will check every 3 seconds if there are the latest unanswered messages from /&lt;&lt;user name&gt;&gt; in the channel sorcar using the Slack agent, then it will run the messages as tasks one-by-one in the order of arrival and respond with the result suitably formatted for Slack.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2192,7 +2192,7 @@
           </div>
           <p class="panel-desc">Connect Sorcar to your iMessage account so it can send and receive texts directly from macOS.</p>
           <div class="prompt-body">
-            <pre>can you authenticate me with the iMessage agent?</pre>
+            <pre>Can you authenticate me with the iMessage agent?</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2205,7 +2205,7 @@
           </div>
           <p class="panel-desc">Dispatch a one-line SMS to any phone number through Sorcar's messaging agents — no scripting required.</p>
           <div class="prompt-body">
-            <pre>can you send "Hello" to 1-800-772-1213?</pre>
+            <pre>Can you send "Hello from Sorcar!" to 1-510-289-3391?</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2218,7 +2218,7 @@
           </div>
           <p class="panel-desc">Walk through the OAuth login flow for Gmail using the bundled Gmail agent, with the browser handling consent and Sorcar storing the token locally.</p>
           <div class="prompt-body">
-            <pre>can you authenticate me with Gmail using the Gmail agent? Use the user's default browser to ask the user to log in and to get the authentication token.</pre>
+            <pre>Can you authenticate me with Gmail using the Gmail agent? Use the user's default browser to prompt the user to log in and obtain the authentication token.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2229,9 +2229,9 @@
             <h3 class="panel-title">Audit a paper or repo for fraud</h3>
             <span class="panel-badge">Task</span>
           </div>
-          <p class="panel-desc">Have Sorcar fact-check a URL for wrong assumptions, cheating, irreproducibility, fraud, AI slop, and security vulnerabilities — verifying every claim and shipping an HTML report.</p>
+          <p class="panel-desc">Have Sorcar fact-check a URL for wrong assumptions, cheating, irreproducibility, fraud, AI slop, and security vulnerabilities — verifying every claim and shipping a report.</p>
           <div class="prompt-body">
-            <pre>Can you read &lt;&lt;url&gt;&gt;, and thoroughly and precisely check for **wrong assumptions**, **cheating**, **irreproducibility issues**, **fraud**, **potential for cheating in evaluation**, **AI Slop**, and **security vulnerabilities**? Use internet search extensively and do not believe what people say -- verify them yourself. Do not hesitate to download code and run it to validate results. For security vulnerabilities, create a POC and test it. Generate an html report in ./sorcar_reported_frauds/ and open in the user's default browser. Thoroughly fact check everything you claim in the report.</pre>
+            <pre>Can you read &lt;&lt;url&gt;&gt;, and thoroughly and precisely check for **wrong assumptions**, **cheating**, **irreproducibility issues**, **fraud**, **potential for cheating in evaluation**, **AI Slop**, and **security vulnerabilities**? Use the internet extensively and do not believe what people say -- verify it yourself. Do not hesitate to download code and run it to validate results. For security vulnerabilities, create a POC and test it. Create a report.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2242,9 +2242,9 @@
             <h3 class="panel-title">Sorcar for AI Discovery</h3>
             <span class="panel-badge">Task</span>
           </div>
-          <p class="panel-desc">Let Sorcar search, train, and benchmark candidate models on your data to find the lightest, fastest, cheapest model that hits a target accuracy and recall — without reward-hacking the evals.</p>
+          <p class="panel-desc">Let Sorcar search, train, and benchmark candidate models on your data to find the lightest, fastest, cheapest model that hits your target accuracy, recall, and price-per-query.</p>
           <div class="prompt-body">
-            <pre>Sorcar for AI Discovery: Can you discover the lightest and fastest AI model that will give the best accuracy and recall on the data at &lt;&lt;/path/to/data&gt;&gt; at the cheapest price? Analyze the data and search the internet extensively to propose the first few models. Implement and experiment with each of your proposals. Note down the ideas you used to optimize the accuracy/recall and speed/cost metrics achieved in a file, so that you can use the file to not repeat ideas that have already been tried and/or failed. You can also use the file to combine ideas that have been successful in the past. Separate 20% of the data for evals, and your discovery strategy must not look at the evals data. Use 'modal' CLI to train your models on GPUs and evaluate if needed. Total budget for Modal.com is $1000. Experiment with a smaller subset of data and fewer parameters in a model to do experiments quickly, and then extrapolate. Use internet search extensively at every step. MAKE SURE THAT YOU DO NOT DO REWARD HACKING OR CHEATING IN THE MODELS OR AGENTS YOU ARE IMPLEMENTING TO FIT DATA. YOUR SOLUTION MUST GENERALIZE BEYOND THE DATA PROVIDED. Do not STOP until accuracy/recall reaches 95% on evals and you can process each query in less than 600 seconds and under 50 USD per query amortized over all queries. Create an html report with diagrams and illustrations in ./reports and open it in the user's default browser?</pre>
+            <pre>Sorcar for AI Discovery: Can you AI discover the lightest and fastest AI model that will give the best accuracy and recall on the data at &lt;&lt;/path/to/data&gt;&gt; at the cheapest price? Use 'modal' CLI to train your models on GPUs and evaluate if needed. The total budget for Modal.com is $ 1,000. Do not STOP until accuracy/recall reaches 99% and price per query on the model is less that $0.5.  Craete a report.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2255,9 +2255,9 @@
             <h3 class="panel-title">Sorcar for Optimization</h3>
             <span class="panel-badge">Task</span>
           </div>
-          <p class="panel-desc">Run a command in the background, let Sorcar instrument and monitor its output, and iteratively rewrite the code to hit your speed, accuracy, recall, and cost targets.</p>
+          <p class="panel-desc">Run a command, let Sorcar instrument and monitor its output, then iteratively rewrite the code and apply AI discovery to hit your speed, accuracy, recall, and cost targets.</p>
           <div class="prompt-body">
-            <pre>Sorcar for Optimization: Can you run the command &lt;&lt;command&gt;&gt; in the background and monitor its output in real time to optimize the code at &lt;&lt;folder_name_or_url&gt;&gt; with respect to the following metrics: &lt;&lt;speed,accuracy,recall,cost&gt;&gt;. You can add diagnostic code which will print the metrics, such as running time at a finer level of granularity. Check for opportunities to optimize the code on the basis of the metrics information. If you discover any opportunities to optimize the metric based on the code, logs, events, and the command output, optimize the code and run the command again. Note down the ideas you used to optimize the code and the metric you achieved in a file, so that you can use the file to not repeat ideas that have already been tried and failed. You can also use the file to combine ideas that have been successful in the past. Repeat the process. Do not forget to remove the diagnostic code after the optimization is complete. You MUST NOT STOP until the metrics achieve the following values:&lt;&lt;give_concrete_values_for_metrics&gt;&gt;. Use the internet extensively to get new ideas for optimization. Create an html report with diagrams and illustrations in ./reports and open it in the user's default browser?</pre>
+            <pre>Sorcar for Optimization: Can you run the command &lt;&lt;command&gt;&gt; and optimize it with respect to the following metrics: &lt;&lt;speed, accuracy, recall, cost&gt;&gt;. Then use AI discovery to optimize. You can add a diagnostic code that prints metrics, such as running time, at a finer granularity. Do not forget to remove the diagnostic code after the optimization is complete. You MUST NOT STOP until the metrics achieve the following values: &lt;&lt;give_concrete_values_for_metrics&gt;&gt;. Create a report.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2270,28 +2270,28 @@
           </div>
           <p class="panel-desc">Run a full GEPA Pareto-frontier prompt-optimization loop over your dataset to evolve the best prompt for a <code>ChatSorcarAgent</code>, with cross-model review and no reward hacking.</p>
           <div class="prompt-body">
-            <pre>Sorcar GEPA Prompt Optimizer: Can you optimize a prompt for a ChatSorcarAgent of the kiss-agent-framework Python library using the following GEPA algorithm on the data at &lt;&lt;url_or_db_file_of_data&gt;&gt; using claude-opus-4-7? You can find the trajectory events of an agent execution in ~/.kiss/sorcar.db after the agent has finished its execution. Split the dataset into 50% dev set and 50% val set.
+            <pre>Sorcar GEPA Prompt Optimizer: Can you optimize a prompt for a ChatSorcarAgent of the kiss-agent-framework Python library using the following GEPA algorithm on the data at &lt;&lt;url_or_db_file_of_data&gt;&gt; using claude-fable-5? You can find the trajectory events of an agent execution in ~/.kiss/sorcar.db after the agent has finished its execution. Split the dataset into a 50% dev set and a 50% val set.
 
-RUN_GEPA: Sample 100 data points from the val set and call it sval set. Maintain a pareto frontier in the folder ./pareto where we have a sub-folder for each node in the frontier. A node contains a prompt file (prompt.md) and a json file, say score.json, containing the list of datapoints (ids) from the sval set that were correctly predicted with the prompt. When you add a node to the pareto frontier make sure that the list of correctly predicted datapoints is not a subset or equal to an existing list of datpoints in some node in the frontier. If such a node exists, do not add the new node. After adding a node, remove all nodes whose list of datapoints is a subset or equal to the list of datapoints in the added node. Then run the following algorithm.
+RUN_GEPA: Sample 100 data points from the val set and call it the sval set. Maintain a Pareto frontier in the folder ./pareto, with a sub-folder for each node in the frontier. A node contains a prompt file (prompt.md) and a JSON file, say score.json, containing the list of data points (ids) from the sval set that were correctly predicted by the prompt. When you add a node to the Pareto frontier, make sure that the list of correctly predicted data points is not a subset or equal to an existing list of data points in some node in the frontier. If such a node exists, do not add the new node. After adding a node, remove all nodes whose list of datapoints is a subset or equal to the list of datapoints in the added node. Then run the following algorithm.
 
-1. pick a node from the pareto frontier with probability 0.5
+1. pick a node from the Pareto frontier with probability 0.5
    a. sample a minibatch of 5 datapoints from the dev set
    b. run the agent with the prompt from the node on the minibatch
-   c. if the agent incorrectly predicts for some datapoints, analyze and reflect on the trajectory events of the agent on those datapoints available at ~/.kiss/sorcar.db and propose a new prompt which will fix the mistakes made by the agent on datapoints incorrectly predicted.
+   c. If the agent incorrectly predicts for some datapoints, analyze and reflect on the trajectory events of the agent on those datapoints available at ~/.kiss/sorcar.db and propose a new prompt that will fix the mistakes made by the agent on datapoints incorrectly predicted
    d. if the agent predicts correctly on the minibatch, then evaluate it on the sval set and create the list of datapoints on which the agent with the new prompt predicts correctly.
-   e. Add the new prompt and the list of datapoints to the pareto frontier
+   e. Add the new prompt and the list of datapoints to the Pareto frontier
 
-2. pick two nodes from the pareto frontier randomly with the remaining probability.
-   a. sample a minibatch of 5 datapoints from the dev set
-   b. merge the prompts from the two nodes into a new prompt.
-   c. if the agent predicts correctly on the minibatch with the new prompt, then evaluate it on the sval set and create the list of datapoints on which the agent with the new prompt predicts correctly.
-   d. Add the new prompt and the list of datapoints to the pareto frontier
+1. Pick two nodes from the Pareto frontier randomly with the remaining probability.
+   a. Sample a minibatch of 5 datapoints from the dev set
+   b. Merge the prompts from the two nodes into a new prompt.
+   c. If the agent predicts correctly on the minibatch with the new prompt, then evaluate it on the sval set and create the list of datapoints on which the agent with the new prompt predicts correctly.
+   d. Add the new prompt and the list of datapoints to the Pareto frontier
 
-3. Repeat steps 1 and 2 until there is no change in the prompt after 3 iterations.
-END_RUN_GEPA
-Repeat RUN_GEPA until there is no change in the prompt after 3 iterations.
+1. Repeat steps 1 and 2 until there is no change in the prompt after 3 iterations.
+   END_RUN_GEPA
+   Repeat RUN_GEPA until there is no change in the prompt after 3 iterations.
 
-In each step, keep track of the best prompt which has the maximum number of successfully predicted datapoints in ./pareto/optimal.md. MAKE SURE THAT YOU DO NOT DO REWARD HACKING OR CHEATING IN THE AGENT YOU ARE IMPLEMENTING TO FIT DATA. YOUR SOLUTION MUST GENERALIZE BEYOND THE DATA PROVIDED. Use internet search extensively at every step. Do not worry about budget. Create an html report with diagrams and illustrations in ./reports and open it in the user's default browser. Do NOT STOP until you could not improve the accuracy and recall after three consecutive rollouts. Use gpt-5.6-sol-xhigh model (not codex) for thorough review of the work done at every step by the other model.</pre>
+At each step, keep track of the best prompt, which has the maximum number of successfully predicted data points, in ./pareto/optimal.md. MAKE SURE THAT YOU DO NOT DO REWARD HACKING OR CHEATING IN THE AGENT YOU ARE IMPLEMENTING TO FIT DATA. YOUR SOLUTION MUST GENERALIZE BEYOND THE DATA PROVIDED. Use internet search extensively at every step. Do not worry about budget. Create an HTML report with diagrams and illustrations in ./reports and open it in the user's default browser. Do NOT STOP until you cannot improve the accuracy and recall after three consecutive rollouts. Use gpt-5.6-sol model (not codex) for a thorough review of the work done at every step by the other model.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2304,7 +2304,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
           </div>
           <p class="panel-desc">A one-liner to invoke <code>gepa.py</code> on the HotpotQA dataset with <code>gpt-4o-mini</code> as both the task model and the optimizer.</p>
           <div class="prompt-body">
-            <pre>Can you run gepa.py on hotpotqa using gpt-4o-mini as both models</pre>
+            <pre>Can you run gepa.py on hotpotqa using gpt-4o-mini as both models?</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2312,12 +2312,12 @@ In each step, keep track of the best prompt which has the maximum number of succ
 
         <article class="inner-card prompt-panel" style="--i:0">
           <div class="panel-head">
-            <h3 class="panel-title">Force exhaustive web search</h3>
+            <h3 class="panel-title">Pair-program with multi-model review</h3>
             <span class="panel-badge trick">Trick</span>
           </div>
-          <p class="panel-desc">Drop this trick into any task so Sorcar grounds its reasoning in current web evidence instead of stale training data.</p>
+          <p class="panel-desc">Use Claude Fable as the implementer and GPT-5.6 Sol as a read-only reviewer/debugger &mdash; capped at 20% of the task budget and told not to invent new problems &mdash; so missed code, missing wirings, and silent bugs are caught before they ship.</p>
           <div class="prompt-body">
-            <pre>Search internet extensively.</pre>
+            <pre>Use 'claude-fable-5' model for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs. Use at most 20% of task budget in gpt-5.6-sol for reviewing and debugging, and ask the model to not invent new problems. Use the model names literally without hallucinating new model names.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2325,12 +2325,12 @@ In each step, keep track of the best prompt which has the maximum number of succ
 
         <article class="inner-card prompt-panel" style="--i:1">
           <div class="panel-head">
-            <h3 class="panel-title">Reproduce with end-to-end tests</h3>
+            <h3 class="panel-title">Reproduce invariant violations</h3>
             <span class="panel-badge trick">Trick</span>
           </div>
-          <p class="panel-desc">Enforce a test-first workflow for bug fixes &mdash; write failing end-to-end tests that reproduce the issue before changing any production code.</p>
+          <p class="panel-desc">Codify suspected invariant breaks as end-to-end tests with 100% coverage first, then let Sorcar fix the offending code so the invariant holds forever.</p>
           <div class="prompt-body">
-            <pre>Reproduce the issue by writing end-to-end tests. Then fix the issue.</pre>
+            <pre>Reproduce any violation of the invariant by writing end-to-end tests with 100% coverage. Then fix the issue.</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2338,12 +2338,12 @@ In each step, keep track of the best prompt which has the maximum number of succ
 
         <article class="inner-card prompt-panel" style="--i:2">
           <div class="panel-head">
-            <h3 class="panel-title">Pair-program with multi-model review</h3>
+            <h3 class="panel-title">Run a task from an instructions file</h3>
             <span class="panel-badge trick">Trick</span>
           </div>
-          <p class="panel-desc">Use Claude Fable as the implementer and GPT-5.6 Sol as the reviewer/debugger so missed code paths, missing wirings, and silent bugs are caught before they ship.</p>
+          <p class="panel-desc">Point Sorcar at a file of instructions and have it follow them to carry out the task &mdash; handy for reusable runbooks and playbooks. Replace <code>@</code> with the path to your file.</p>
           <div class="prompt-body">
-            <pre>Use claude-fable-5 model for all tasks including software development. Use gpt-5.6-sol (not codex) for thorough review and debugging of the work done by the other model. You MUST thoroughly check if the other model has missed code or wirings or has introduced bugs. No need to check if the models exist.</pre>
+            <pre>Can you use the instructions in the file @ to perform the task?</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2351,116 +2351,12 @@ In each step, keep track of the best prompt which has the maximum number of succ
 
         <article class="inner-card prompt-panel" style="--i:3">
           <div class="panel-head">
-            <h3 class="panel-title">Run a task from an instructions file</h3>
-            <span class="panel-badge trick">Trick</span>
-          </div>
-          <p class="panel-desc">Point Sorcar at a file of instructions and have it follow them to carry out the task &mdash; handy for reusable runbooks and playbooks.</p>
-          <div class="prompt-body">
-            <pre>Can you use the instructions in the following file to perform the following task?</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:4">
-          <div class="panel-head">
-            <h3 class="panel-title">Generate an HTML report</h3>
-            <span class="panel-badge trick">Trick</span>
-          </div>
-          <p class="panel-desc">Have Sorcar package its findings into a polished HTML report with diagrams and illustrations under <code>./reports</code>, and open it in your default browser.</p>
-          <div class="prompt-body">
-            <pre>Create an html report with diagrams and illustrations in ./reports and open it in the user's default browser?</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:5">
-          <div class="panel-head">
-            <h3 class="panel-title">Reproduce invariant violations</h3>
-            <span class="panel-badge trick">Trick</span>
-          </div>
-          <p class="panel-desc">Codify suspected invariant breaks as end-to-end tests first, then let Sorcar fix the offending code so the invariant holds forever.</p>
-          <div class="prompt-body">
-            <pre>Reproduce any violation of the invariant by writing end-to-end tests. Then fix the issue.</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:6">
-          <div class="panel-head">
-            <h3 class="panel-title">Use GLM-5.2 with dual review</h3>
-            <span class="panel-badge trick">Trick</span>
-          </div>
-          <p class="panel-desc">Switch the implementer to OpenRouter's GLM-5.2 and have both GPT-5.6 Sol and Claude Fable carefully review its output for bugs and missing code.</p>
-          <div class="prompt-body">
-            <pre>Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, and test creation. ALWAYS use gpt-5.6-sol (not codex) to carefully and thoroughly review and debug the work done by openrouter/z-ai/glm-5.2 for bugs and missing code. Then use claude-fable-5 to do the same thing.</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:7">
-          <div class="panel-head">
-            <h3 class="panel-title">Split tests across cores in parallel</h3>
-            <span class="panel-badge trick">Trick</span>
-          </div>
-          <p class="panel-desc">Have Sorcar triage the entire test suite &mdash; splitting the tests by method count into (cores &minus; 2) shards, running them with <code>run_parallel</code>, then classifying and fixing each failure as a project bug or a test bug.</p>
-          <div class="prompt-body">
-            <pre>Can you run all tests and report the cause of failing tests? Do not modify any code. Running all tests, collecting information, and fixing them is time consuming. So split the set of tests by the number of test methods into number of cores - 2, and run all splits in parallel using `run_parallel` tool. Determine which test failures are due to a bug in the project or a bug in the test. Fix them accordingly.</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:8">
-          <div class="panel-head">
             <h3 class="panel-title">Resolve a merge conflict</h3>
             <span class="panel-badge trick">Trick</span>
           </div>
           <p class="panel-desc">Paste the merge-conflict message after this trick and let Sorcar analyse the diff and resolve the conflict for you.</p>
           <div class="prompt-body">
-            <pre>Can you check the following message on merge conflict and help me fix it? </pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:9">
-          <div class="panel-head">
-            <h3 class="panel-title">Guard against reward hacking</h3>
-            <span class="panel-badge trick">Trick</span>
-          </div>
-          <p class="panel-desc">Add this guard so Sorcar audits its own implementation for shortcuts, overfitting, or cheating that would inflate metrics but fail to generalise.</p>
-          <div class="prompt-body">
-            <pre>Make sure that there is no reward hacking and cheating when reviewing your implementation.</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:10">
-          <div class="panel-head">
-            <h3 class="panel-title">Build paper &amp; screenshot-check formatting</h3>
-            <span class="panel-badge trick">Trick</span>
-          </div>
-          <p class="panel-desc">Have Sorcar compile your LaTeX paper, take screenshots of the rendered PDF, and iterate on the source until the layout is right.</p>
-          <div class="prompt-body">
-            <pre>Build the paper, and take screenshots to check and fix formatting.</pre>
-            <div class="prompt-fade"></div>
-          </div>
-          <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
-        </article>
-
-        <article class="inner-card prompt-panel" style="--i:11">
-          <div class="panel-head">
-            <h3 class="panel-title">Debug the last failure</h3>
-            <span class="panel-badge trick">Trick</span>
-          </div>
-          <p class="panel-desc">Analyse the previous task's logs and trajectory events, reproduce the issue with an integration test, then fix the underlying cause.</p>
-          <div class="prompt-body">
-            <pre>Why did the last task failed? Thoroughly and precisely analyze the logs and the events of the task. Reproduce the issue by writing an integration test. Then fix the issue.</pre>
+            <pre>Can you check the following message for a merge conflict and help me fix it?</pre>
             <div class="prompt-fade"></div>
           </div>
           <button class="prompt-more" type="button">more <span class="chev">▾</span></button>
@@ -2732,21 +2628,21 @@ In each step, keep track of the best prompt which has the maximum number of succ
   <div class="section-wrap">
   <section id="models" class="section-card">
     <span class="num">§ 09 — Models Supported</span>
-    <h2>🤖 538 models. 9 provider categories.<a href="#models" class="anchor">¶</a></h2>
-    <p class="sub">KISS Sorcar ships a catalog of <strong>538 models</strong> across <strong>9 provider categories</strong>, with built-in prices, context lengths, and capability flags (<code>fc</code> function calling, <code>gen</code> generation, <code>emb</code> embedding). The source of truth is <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/models/MODEL_INFO.json">src/kiss/core/models/MODEL_INFO.json</a>.</p>
+    <h2>🤖 603 models. 9 provider categories.<a href="#models" class="anchor">¶</a></h2>
+    <p class="sub">KISS Sorcar ships a catalog of <strong>603 models</strong> across <strong>9 provider categories</strong>, with built-in prices, context lengths, and capability flags (<code>fc</code> function calling, <code>gen</code> generation, <code>emb</code> embedding). The source of truth is <a href="https://github.com/ksenxx/kiss_ai/blob/main/src/kiss/core/models/MODEL_INFO.json">src/kiss/core/models/MODEL_INFO.json</a>.</p>
 
     <div class="section-body">
       <div class="grid-2">
         <div class="inner-card" style="--i:0">
           <h3>Provider categories</h3>
           <div style="margin-top:0.5rem;">
-            <div class="provider-row"><span class="label">OpenAI</span><span class="count">84</span></div>
-            <div class="provider-row"><span class="label">Anthropic</span><span class="count">14</span></div>
+            <div class="provider-row"><span class="label">OpenAI</span><span class="count">105</span></div>
+            <div class="provider-row"><span class="label">Anthropic</span><span class="count">13</span></div>
             <div class="provider-row"><span class="label">Gemini / Google</span><span class="count">27</span></div>
-            <div class="provider-row"><span class="label">Together AI</span><span class="count">79</span></div>
+            <div class="provider-row"><span class="label">Together AI</span><span class="count">86</span></div>
             <div class="provider-row"><span class="label">Z.AI</span><span class="count">8</span></div>
-            <div class="provider-row"><span class="label">Moonshot AI</span><span class="count">7</span></div>
-            <div class="provider-row"><span class="label">OpenRouter</span><span class="count">307</span></div>
+            <div class="provider-row"><span class="label">Moonshot AI</span><span class="count">10</span></div>
+            <div class="provider-row"><span class="label">OpenRouter</span><span class="count">342</span></div>
             <div class="provider-row"><span class="label">Claude Code CLI (<code>cc/*</code>)</span><span class="count">3</span></div>
             <div class="provider-row"><span class="label">Codex CLI (<code>codex/*</code>)</span><span class="count">9</span></div>
           </div>
@@ -2757,15 +2653,15 @@ In each step, keep track of the best prompt which has the maximum number of succ
           <p>Across all bundled providers, the catalog currently reports:</p>
           <div class="stat-row">
             <div class="stat-pill">
-              <div class="n">521</div>
+              <div class="n">586</div>
               <div class="l">generation-capable models</div>
             </div>
             <div class="stat-pill">
-              <div class="n">369</div>
+              <div class="n">428</div>
               <div class="l">function-calling-capable models</div>
             </div>
             <div class="stat-pill">
-              <div class="n">10</div>
+              <div class="n">8</div>
               <div class="l">embedding models</div>
             </div>
           </div>
@@ -3543,7 +3439,7 @@ In each step, keep track of the best prompt which has the maximum number of succ
     (function () {
       if (!('IntersectionObserver' in window)) return;
       const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      // Find hero-trust strong elements containing numeric content (e.g. "538 models").
+      // Find hero-trust strong elements containing numeric content (e.g. "603 models").
       const strongs = document.querySelectorAll('.hero-trust strong');
       const items = [];
       strongs.forEach(el => {
