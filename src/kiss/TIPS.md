@@ -6,7 +6,7 @@ Please look at the commit messages at [https://github.com/ksenxx/kiss_ai/commits
 
 **Always write precise 1-6 sentence prompts.** Long prompts confuse models. **Do not plan ahead of time.** Let KISS Sorcar plan dynamically, which is always better than AI-written static plans. The waterfall model does not work that well in contemporary times.
 
-**No need to use generic skills for debugging, code review, etc.**  Frontier models have been trained on those skills.
+**No need to use generic skills for debugging, code review, etc.** Frontier models have been trained on those skills.
 
 # Tip
 
@@ -160,5 +160,3 @@ Click the burger menu button in the bottom-left corner to see all agents in KISS
 ## Settings
 
 Click on the settings button at the top right corner. You can get the URL for the remote web/mobile app, set the remote web app access password, set the budget limit per task, set the working directory, and set various API keys and a custom model endpoint using the Settings interface.
-
-
