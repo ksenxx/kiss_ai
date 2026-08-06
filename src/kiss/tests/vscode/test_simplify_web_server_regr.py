@@ -11,8 +11,6 @@ simplification pass:
   merge).
 * ``WebPrinter`` endpoint add/remove + broadcast fan-out over a real
   Unix-domain socket connection (shared add/remove helper refactor).
-* ``cliTaskStart`` / ``cliTaskEnd`` dispatch through a real UDS client
-  (merged dispatch branch).
 * ``_handle_run_update`` connId-stamped ``error`` / ``notice`` events
   (shared stamped-broadcast helper).
 * Merge-action completion popping both ``_merge_states`` and
@@ -326,37 +324,6 @@ class TestLiveServerPaths(unittest.IsolatedAsyncioTestCase):
             if msg.get("type") == wanted_type:
                 return msg
         raise AssertionError(f"no {wanted_type!r} event observed")
-
-    async def test_cli_task_start_end_dispatch(self) -> None:
-        """cliTaskStart/cliTaskEnd toggle the CLI-running registry."""
-        reader, writer = await self._connect_uds()
-        await self._send(
-            writer, {"type": "cliTaskStart", "taskId": "task-42"},
-        )
-        for _ in range(100):
-            if self.server._is_cli_task_running("task-42"):
-                break
-            await asyncio.sleep(0.02)
-        self.assertTrue(self.server._is_cli_task_running("task-42"))
-        self.assertEqual(
-            self.server._snapshot_cli_running_task_ids(), {"task-42"},
-        )
-        await self._send(writer, {"type": "cliTaskStart", "taskId": 7})
-        await self._send(writer, {"type": "cliTaskEnd", "taskId": ""})
-        await self._send(
-            writer, {"type": "cliTaskEnd", "taskId": "task-42"},
-        )
-        for _ in range(100):
-            if not self.server._is_cli_task_running("task-42"):
-                break
-            await asyncio.sleep(0.02)
-        self.assertFalse(self.server._is_cli_task_running("task-42"))
-        await self._send(
-            writer,
-            {"type": "ready", "tabId": "cli-tab", "restoredTabs": []},
-        )
-        focus = await self._drain_until(reader, "focusInput")
-        self.assertEqual(focus.get("tabId"), "cli-tab")
 
     async def test_run_update_without_install_script_errors(self) -> None:
         """runUpdate with no install.sh broadcasts the extension-parity error."""

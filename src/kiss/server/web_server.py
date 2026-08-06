@@ -1809,7 +1809,6 @@ class WebPrinter(JsonPrinter):
         self._ws_clients: set[ServerConnection] = set()
         self._uds_writers: set[asyncio.StreamWriter] = set()
         self._local_uds_tab_counts: dict[str, int] = {}
-        self._cli_tab_counts: dict[str, int] = {}
         self._conn_endpoints: dict[str, Any] = {}
         self._ws_lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -1932,11 +1931,10 @@ class WebPrinter(JsonPrinter):
 
         Any ``tabId`` already present on *event* is stripped first:
         events can reach this fan-out still carrying a stale stamp
-        (e.g. ``_relay_cli_event`` forwarding the CLI bridge's
-        ``subagentDone`` with its ``tabId: ""`` marker), and splicing
-        a second ``"tabId"`` member would produce ambiguous JSON with
-        duplicate keys — routed correctly today only because parsers
-        happen to keep the last member.
+        (e.g. a ``subagentDone`` broadcast with its ``tabId: ""``
+        marker), and splicing a second ``"tabId"`` member would
+        produce ambiguous JSON with duplicate keys — routed correctly
+        today only because parsers happen to keep the last member.
         """
         targets = self._fanout_targets(event.get("taskId"))
         if not targets:
@@ -1983,29 +1981,6 @@ class WebPrinter(JsonPrinter):
             for tab_id in tab_ids:
                 self._decrement_count(self._local_uds_tab_counts, tab_id)
 
-    def register_cli_tab(self, tab_id: str) -> None:
-        """Mark *tab_id* as a CLI terminal player for talk arbitration.
-
-        Called when a sorcar CLI REPL announces itself with the
-        ``cliTabHello`` command.  :meth:`_fanout_talk` mutes talk
-        copies stamped for CLI tabs whenever a LOCAL webview tab is
-        also subscribed to the task, so the utterance is not played by
-        the terminal AND a webview on the same machine at once.  A WSS
-        browser tab is a different device and does not suppress the
-        local CLI.
-
-        Args:
-            tab_id: The CLI client's frontend tab id.
-        """
-        with self._ws_lock:
-            self._increment_count(self._cli_tab_counts, tab_id)
-
-    def unregister_cli_tabs(self, tab_ids: set[str]) -> None:
-        """Drop this connection's CLI-terminal tab registrations."""
-        with self._ws_lock:
-            for tab_id in tab_ids:
-                self._decrement_count(self._cli_tab_counts, tab_id)
-
     def _fanout_talk(self, event: dict[str, Any], targets: list[str]) -> None:
         """Fan out one ``talk`` event with per-device playback arbitration.
 
@@ -2018,52 +1993,28 @@ class WebPrinter(JsonPrinter):
         robotic Web Speech fallback is gone).  When the event carries
         a synthesized clip and a local webview tab is subscribed, the
         DAEMON therefore plays the clip natively on this machine's
-        speakers (:mod:`kiss.ui.cli.cli_talk`, ``afplay`` on
-        macOS) and stamps every same-machine copy (local UDS webviews
-        AND CLI tabs) ``muted``.
+        speakers (:mod:`kiss.server.talk_player`, ``afplay`` on
+        macOS) and stamps every local UDS webview copy ``muted``.
 
-        Otherwise the previous arbitration applies: webview subscriber
-        tabs receive the playable copy (each webview plays on its own
-        device; ``talkId`` dedupe and the talk queue keep intra-webview
-        duplicates silent); CLI REPL tabs (:meth:`register_cli_tab`)
-        play on THIS machine's speakers, which a local UDS webview
-        shares — so every CLI tab's copy is stamped ``muted`` when at
-        least one local webview tab is subscribed.  WSS web tabs are
-        treated as remote devices and do not suppress the local CLI;
-        when only CLI tabs (and/or remote web tabs) are subscribed,
-        exactly one CLI tab (the lexicographically first) plays.
-        Without this, a REPL user with the same task open in a local
-        chat webview heard every utterance twice, slightly offset —
-        distorted, overlapping speech.
+        Otherwise webview subscriber tabs receive the playable copy
+        (each webview plays on its own device; ``talkId`` dedupe and
+        the talk queue keep intra-webview duplicates silent).
 
         Args:
             event: The ``talk`` event (no ``tabId`` stamp yet).
             targets: Subscriber tab ids for the event's task.
         """
         with self._ws_lock:
-            cli_tabs = set(self._cli_tab_counts)
             local_uds_tabs = set(self._local_uds_tab_counts)
-        cli_targets = sorted(t for t in targets if t in cli_tabs)
-        web_targets = [t for t in targets if t not in cli_tabs]
-        local_web_targets = [t for t in web_targets if t in local_uds_tabs]
+        local_web_targets = [t for t in targets if t in local_uds_tabs]
         daemon_plays = bool(local_web_targets) and self._play_talk_clip_locally(
             event
         )
-        playing_cli_tab = (
-            cli_targets[0]
-            if cli_targets and not local_web_targets and not daemon_plays
-            else None
-        )
         base = json.dumps(event)[:-1]
         muted_base = json.dumps({**event, "muted": True})[:-1]
-        for tab_id in web_targets:
+        for tab_id in targets:
             local_copy_muted = daemon_plays and tab_id in local_uds_tabs
             prefix = muted_base if local_copy_muted else base
-            self._send_to_ws_clients(
-                f'{prefix}, "tabId": {json.dumps(tab_id)}}}'
-            )
-        for tab_id in cli_targets:
-            prefix = base if tab_id == playing_cli_tab else muted_base
             self._send_to_ws_clients(
                 f'{prefix}, "tabId": {json.dumps(tab_id)}}}'
             )
@@ -2072,12 +2023,12 @@ class WebPrinter(JsonPrinter):
     def _play_talk_clip_locally(event: dict[str, Any]) -> bool:
         """Play a talk event's synthesized clip on this machine's speakers.
 
-        Uses the sorcar CLI's :class:`~kiss.ui.cli.cli_talk.
-        TalkPlayer` singleton — a real audio-player child process
+        Uses the :class:`~kiss.server.talk_player.TalkPlayer`
+        singleton — a real audio-player child process
         (``afplay`` / ``mpg123`` / ``ffplay`` / ``mpv``, overridable
         via ``KISS_SORCAR_PLAY_CMD``) fed from a serialising queue
         with ``talkId`` dedupe, so playback never blocks the event
-        loop and never overlaps a CLI-origin playback of the same
+        loop and never overlaps another playback of the same
         utterance.
 
         Args:
@@ -2092,44 +2043,15 @@ class WebPrinter(JsonPrinter):
         if not event.get("audioB64"):
             return False
         try:
-            from kiss.ui.cli import cli_talk
+            from kiss.server import talk_player
 
-            if cli_talk.player_command() is None:
+            if talk_player.player_command() is None:
                 return False
-            cli_talk.shared_player().play(dict(event))
+            talk_player.shared_player().play(dict(event))
             return True
         except Exception:
             logger.exception("daemon-side talk clip playback failed")
             return False
-
-    def _fanout_talk_cli_origin(self, event: dict[str, Any]) -> None:
-        """Fan out a CLI-forwarded ``talk`` event already played locally.
-
-        The sorcar CLI's :class:`RecordingConsolePrinter` plays every
-        talk event on the terminal machine's speakers BEFORE
-        forwarding it here, and every UDS peer of this daemon (VS Code
-        webviews, CLI REPL clients) lives on that same machine — so
-        their copies are stamped ``muted`` and only WSS peers (remote
-        browsers, i.e. other devices) receive the playable copy.
-        Without this, launching a task with ``sorcar`` while the same
-        task was open in a local chat webview played every clip twice,
-        slightly offset — the distorted, overlapping speech this
-        arbitration exists to prevent.
-
-        Args:
-            event: The CLI-originated ``talk`` event.
-        """
-        targets = self._fanout_targets(event.get("taskId"))
-        if not targets:
-            return
-        if "tabId" in event:
-            event = {k: v for k, v in event.items() if k != "tabId"}
-        base = json.dumps(event)[:-1]
-        muted_base = json.dumps({**event, "muted": True})[:-1]
-        for tab_id in targets:
-            stamp = f', "tabId": {json.dumps(tab_id)}}}'
-            self._send_to_wss_clients(base + stamp)
-            self._send_to_uds_writers(muted_base + stamp)
 
     def _send_to_wss_clients(self, data: str) -> None:
         """Send a pre-serialised JSON payload to WSS clients only.
@@ -3443,152 +3365,8 @@ class RemoteAccessServer:
         # connection's disconnect sweep must not arm a close timer for
         # a tab that a replacement connection has claimed (F4-01).
         self._tab_conn_owners: dict[str, str] = {}
-        # task_id -> number of live connections that announced it.
-        self._cli_running_tasks: dict[str, int] = {}
-        self._cli_running_lock = threading.Lock()
         self._lifecycle_lock = asyncio.Lock()
         self._uds_inode: int | None = None
-        self._vscode_server.set_cli_running_lookup(self._is_cli_task_running)
-        self._vscode_server.set_cli_running_task_ids_lookup(
-            self._snapshot_cli_running_task_ids,
-        )
-
-    def _snapshot_cli_running_task_ids(self) -> set[str]:
-        """Return a thread-safe copy of the CLI-running task id set.
-
-        Returned set is a fresh copy so callers can iterate / mutate
-        without taking ``_cli_running_lock`` (or racing the UDS
-        handler that mutates the underlying set).
-        """
-        with self._cli_running_lock:
-            return set(self._cli_running_tasks)
-
-    def _is_cli_task_running(self, task_id: str) -> bool:
-        """Return ``True`` when *task_id* is being run by the CLI.
-
-        Used by :meth:`VSCodeServer._replay_session` to decide whether
-        to subscribe a freshly opened webview tab to a CLI-launched
-        task's live event stream and broadcast a ``status:running``
-        event so the tab title shows the blinking-green-circle
-        indicator.
-        """
-        with self._cli_running_lock:
-            return task_id in self._cli_running_tasks
-
-    def _handle_cli_task_start(self, task_id: str, conn_state: dict[str, Any]) -> None:
-        """Record *task_id* as a CLI-launched running task.
-
-        Also stamps the task id into the UDS connection's per-conn
-        ``cli_tasks`` set so :meth:`_uds_handler` can clean it up if
-        the CLI process disconnects without sending a matching
-        ``cliTaskEnd`` (Ctrl+C, crash, abrupt termination).
-
-        :attr:`_cli_running_tasks` is a per-task-id refcount of live
-        announcing connections (F4-12): during a reconnect overlap the
-        old and the replacement connection both own the task id, and
-        the old connection's end/disconnect must not clear the global
-        running state out from under the live owner.
-        """
-        cli_tasks = conn_state.setdefault("cli_tasks", set())
-        if task_id in cli_tasks:
-            return
-        cli_tasks.add(task_id)
-        with self._cli_running_lock:
-            self._cli_running_tasks[task_id] = (
-                self._cli_running_tasks.get(task_id, 0) + 1
-            )
-
-    def _handle_cli_task_end(self, task_id: str, conn_state: dict[str, Any]) -> None:
-        """Mark one connection's claim on *task_id* as ended.
-
-        Decrements the task's refcount in :attr:`_cli_running_tasks`
-        when this connection had announced it; only when the count
-        reaches zero (no other live connection still owns the task)
-        is the task dropped and a ``status:running=false`` event
-        broadcast to subscribed webview tabs (F4-12).  An end from a
-        connection that never announced the task (e.g. a reconnected
-        CLI finishing a task it announced on a previous connection)
-        authoritatively clears the task.
-        """
-        cli_tasks = conn_state.get("cli_tasks")
-        owned = isinstance(cli_tasks, set) and task_id in cli_tasks
-        if owned:
-            assert isinstance(cli_tasks, set)
-            cli_tasks.discard(task_id)
-        still_running = False
-        with self._cli_running_lock:
-            if owned:
-                count = self._cli_running_tasks.get(task_id, 0) - 1
-                if count > 0:
-                    self._cli_running_tasks[task_id] = count
-                    still_running = True
-                else:
-                    self._cli_running_tasks.pop(task_id, None)
-            else:
-                self._cli_running_tasks.pop(task_id, None)
-        if not still_running:
-            self._fanout_cli_status(task_id, running=False)
-
-    def _sweep_stale_cli_tasks(self, conn_state: dict[str, Any]) -> None:
-        """End every CLI task still registered on a dropped connection.
-
-        Shared by the ``finally`` blocks of :meth:`_ws_handler` and
-        :meth:`_uds_handler` — ``cliTaskStart`` is accepted from both
-        transports, so both must sweep task ids their peer announced
-        but never closed with a matching ``cliTaskEnd`` (crash,
-        Ctrl+C, dropped browser).  Without the sweep the ids stay in
-        :attr:`_cli_running_tasks` for the daemon's lifetime and every
-        subscribed webview keeps showing the blinking-green-circle
-        "running" indicator for a task no longer running anywhere.
-
-        Args:
-            conn_state: The dropped connection's per-conn state dict,
-                whose ``cli_tasks`` set holds the announced task ids.
-        """
-        stale_cli_tasks = conn_state.get("cli_tasks")
-        if isinstance(stale_cli_tasks, set):
-            for task_id in list(stale_cli_tasks):
-                if isinstance(task_id, str) and task_id:
-                    self._handle_cli_task_end(task_id, conn_state)
-
-    @staticmethod
-    def _validated_cli_task_id(cmd: dict[str, Any]) -> str:
-        """Extract and validate the ``taskId`` of a CLI task command.
-
-        Shared by the ``cliTaskStart`` / ``cliTaskEnd`` handlers of
-        the server API (:meth:`kiss.server.sorcar.ServerApi`), which
-        require a non-empty string task id.
-
-        Args:
-            cmd: The parsed ``cliTaskStart`` / ``cliTaskEnd`` command.
-
-        Returns:
-            The task id, or ``""`` (after a debug log) when the field
-            is missing, empty, or not a string.
-        """
-        raw_id = cmd.get("taskId")
-        if isinstance(raw_id, str) and raw_id:
-            return raw_id
-        logger.debug("%s with bad taskId %r", cmd.get("type"), raw_id)
-        return ""
-
-    def _fanout_cli_status(self, task_id: str, *, running: bool) -> None:
-        """Send ``status:running`` to every tab subscribed to *task_id*.
-
-        Delegates to :meth:`WebPrinter._fanout_stamped`, which looks up
-        the viewer tabs currently subscribed to the task id and writes
-        one copy of the ``status`` event per tab with that tab's
-        ``tabId`` spliced in.  The event carries ``taskId`` like every
-        other task-scoped status broadcast (task_runner, cli_client)
-        so clients can filter on it.  Used when a CLI task ends so the
-        blinking-green-circle indicator clears on every webview that
-        was watching it.
-        """
-        self._printer._fanout_stamped({
-            "type": "status",
-            "running": running,
-            "taskId": task_id,
-        })
 
     async def _process_request(
         self, _connection: ServerConnection, request: Request
@@ -4014,7 +3792,6 @@ class RemoteAccessServer:
             logger.debug("WS handler error", exc_info=True)
         finally:
             self._schedule_owned_tab_closes(tabs_seen, conn_state)
-            self._sweep_stale_cli_tasks(conn_state)
             self._vscode_server.drop_connection_state(conn_state["conn_id"])
             self._printer.unbind_conn(conn_state["conn_id"])
             self._printer.remove_client(websocket)
@@ -4084,10 +3861,6 @@ class RemoteAccessServer:
             local_tabs = conn_state.get("local_tabs")
             if isinstance(local_tabs, set):
                 self._printer.unregister_local_uds_tabs(local_tabs)
-            cli_tabs = conn_state.get("cli_tabs")
-            if isinstance(cli_tabs, set):
-                self._printer.unregister_cli_tabs(cli_tabs)
-            self._sweep_stale_cli_tasks(conn_state)
             self._vscode_server.drop_connection_state(conn_state["conn_id"])
             self._printer.unbind_conn(conn_state["conn_id"])
             self._printer.remove_uds_writer(writer)
@@ -4096,35 +3869,6 @@ class RemoteAccessServer:
             except Exception:
                 logger.debug("UDS writer close failed", exc_info=True)
 
-
-    def _relay_cli_event(self, ev: dict[str, Any]) -> None:
-        """Fan a CLI-originated event out to subscribed webview tabs.
-
-        The ``sorcar`` CLI's :class:`RecordingConsolePrinter` ships
-        every display event over the daemon's UDS endpoint wrapped in
-        a ``cliEvent`` envelope (see
-        :mod:`kiss.ui.cli.cli_daemon_bridge`).  The CLI process
-        has ALREADY recorded the event into its per-task recording
-        and persisted it to the chat DB via
-        :meth:`JsonPrinter.broadcast`, so this method must NOT call
-        ``_record_event`` or ``_persist_event`` again — doing so would
-        produce duplicate rows in the ``events`` table.  It only
-        mirrors the tail of :meth:`WebPrinter.broadcast`: look up the
-        viewer tabs currently subscribed to the event's task id and
-        splice each ``tabId`` into the pre-serialised JSON, then push
-        to every WSS / UDS client in lockstep.  Any chat webview
-        that opened the task's chat id therefore receives the event
-        live, without waiting for a page reload to replay it from
-        the database.
-
-        Args:
-            ev: The event dictionary the CLI emitted; expected to
-                carry at least ``type`` and ``taskId``.
-        """
-        if ev.get("type") == "talk":
-            self._printer._fanout_talk_cli_origin(ev)
-            return
-        self._printer._fanout_stamped(ev)
 
     async def _dispatch_client_command(
         self,
@@ -4920,7 +4664,7 @@ class RemoteAccessServer:
                 :meth:`kiss.server.sorcar.ServerApi.dispatch`).
             websocket: The client connection (for direct replies).
             is_uds: True when the ``ready`` arrived over the local UDS
-                (VS Code extension host / CLI) transport.  Only
+                (VS Code extension host) transport.  Only
                 remote-web (WSS) clients get the ``openRunningTasks``
                 push at the end — VS Code windows manage their own tab
                 restoration in the extension host.

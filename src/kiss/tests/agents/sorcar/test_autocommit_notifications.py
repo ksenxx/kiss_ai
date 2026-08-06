@@ -250,7 +250,7 @@ class TestAutoCommitChangesNotifyFn:
             assert _head_sha(repo) == head_before
 
     def test_notify_fn_none_does_not_break_flow(self) -> None:
-        """Legacy callers (e.g. the cli_repl path) pass no ``notify_fn``
+        """Callers may pass no ``notify_fn``
         — the commit must still happen."""
         with tempfile.TemporaryDirectory() as tmp_str:
             tmp = Path(tmp_str)

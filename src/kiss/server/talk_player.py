@@ -2,21 +2,19 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Terminal-side playback of agent ``talk`` events for the sorcar CLI.
+"""Daemon-side playback of agent ``talk`` events on local speakers.
 
 The ``talk`` tool (sorcar_agent.py) broadcasts a
 ``{"type": "talk", "text", "language", "emotion", "talkId",
 "audioB64", "audioMime"}`` event.  Chat-webview clients play the
 synthesized MP3 (``media/main.js`` ``playTalkAudio``) and stay silent
 when the clip is missing or undecodable (the old robotic Web Speech
-fallback is gone for good).  A pure CLI session has no webview, so
-:class:`TalkPlayer` gives the terminal machine the same behaviour.
-The kiss-web daemon reuses the same :func:`shared_player` to play
-clips natively for LOCAL VS Code webview tabs
-(``web_server.WebPrinter._play_talk_clip_locally``), because a
-webview's ``Audio.play()`` is rejected by Chromium's autoplay policy
-without a recent user gesture and the talk would otherwise be
-silent:
+fallback is gone for good).  The kiss-web daemon uses
+:func:`shared_player` to play clips natively for LOCAL VS Code
+webview tabs (``web_server.WebPrinter._play_talk_clip_locally``),
+because a webview's ``Audio.play()`` is rejected by Chromium's
+autoplay policy without a recent user gesture and the talk would
+otherwise be silent:
 
 * the base64 MP3 is decoded to a temp file and played with the
   machine's audio player (``afplay`` on macOS; ``mpg123`` / ``ffplay``
@@ -32,9 +30,8 @@ silent:
 Both external commands honour environment overrides —
 ``KISS_SORCAR_PLAY_CMD`` (receives the audio file path as its last
 argument) and ``KISS_SORCAR_SAY_CMD`` (receives the utterance text as
-its last argument), each parsed with :func:`shlex.split` — the same
-pattern as ``KISS_SORCAR_VOICE_CMD`` in :mod:`cli_voice`, so tests can
-substitute real scripted child processes.
+its last argument), each parsed with :func:`shlex.split`, so tests
+can substitute real scripted child processes.
 """
 
 from __future__ import annotations
@@ -142,9 +139,9 @@ def say_command() -> list[str] | None:
 def _run_playback(argv: list[str]) -> bool:
     """Run one playback child to completion; ``True`` on exit code 0.
 
-    Output is suppressed so a chatty player never corrupts the
-    anchored REPL's escape-coded terminal painting.  A hung child is
-    killed after ``_PLAYBACK_TIMEOUT`` seconds.
+    Output is suppressed so a chatty player never pollutes the
+    daemon's terminal or logs.  A hung child is killed after
+    ``_PLAYBACK_TIMEOUT`` seconds.
     """
     try:
         proc = subprocess.Popen(
@@ -186,9 +183,8 @@ class TalkPlayer:
         ``talkId`` values are dropped, matching the webview client.
         Copies stamped ``muted`` by the daemon are dropped too: the
         daemon mutes a talk copy when another player on THIS machine
-        (a local webview, or the CLI process that originated the
-        event) already owns the playback, so honouring the flag is
-        what keeps each utterance to one playback per device.
+        (a local webview) already owns the playback, so honouring the
+        flag is what keeps each utterance to one playback per device.
 
         Args:
             event: The broadcast ``talk`` event dictionary.
@@ -270,7 +266,7 @@ def shared_player() -> TalkPlayer:
     """Return the process-wide :class:`TalkPlayer` singleton.
 
     One player per process mirrors the webview's one-queue-per-device
-    semantics: talks from every printer/agent in this CLI process are
+    semantics: talks from every printer/agent in this process are
     deduped and serialised together, so parallel sub-agents can never
     speak over each other on the same speakers.
 

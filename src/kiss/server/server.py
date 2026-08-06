@@ -28,7 +28,6 @@ import os
 import queue
 import threading
 import time
-from collections.abc import Callable
 from typing import Any, cast
 
 from kiss.agents.sorcar.persistence import (
@@ -263,7 +262,6 @@ class VSCodeServer(
     """Backend server for VS Code extension."""
 
     _tab_opened_task_ids: dict[str, str] = {}
-    _cli_running_lookup: Callable[[str], bool] | None = None
     _orphan_sweep_thread: threading.Thread | None = None
 
     def __init__(self, printer: JsonPrinter | None = None) -> None:
@@ -305,8 +303,6 @@ class VSCodeServer(
         self._file_cache: dict[str, list[str]] = {}
         self._last_active_file: dict[str, str] = {}
         self._last_active_content: dict[str, str] = {}
-        self._cli_running_lookup: Callable[[str], bool] | None = None
-        self._cli_running_task_ids_lookup: Callable[[], set[str]] | None = None
 
     @staticmethod
     def _run_orphan_sweep(still_running: set[str], boot_ts: float) -> None:
@@ -353,41 +349,6 @@ class VSCodeServer(
             )
         finally:
             _close_thread_db()
-
-    def set_cli_running_lookup(
-        self,
-        lookup: Callable[[str], bool] | None,
-    ) -> None:
-        """Install the CLI-task running-lookup used by :meth:`_replay_session`.
-
-        Called by :class:`RemoteAccessServer` so the resume path can
-        detect tasks the local ``sorcar`` CLI is currently running
-        and subscribe the freshly opened webview tab to their live
-        event stream.  Passing ``None`` clears the hook.
-
-        Args:
-            lookup: Callable taking the task id and returning
-                ``True`` when the CLI is running it.
-        """
-        self._cli_running_lookup = lookup
-
-    def set_cli_running_task_ids_lookup(
-        self,
-        lookup: Callable[[], set[str]] | None,
-    ) -> None:
-        """Install the CLI-running-task-id snapshot used by ``_get_history``.
-
-        Called by :class:`RemoteAccessServer` so the history listing
-        can union the CLI-launched running task ids with the
-        in-process UI-launched ones, making the History panel render
-        the pulsing-green-dot indicator on CLI tasks as well.
-        Passing ``None`` clears the hook.
-
-        Args:
-            lookup: Zero-arg callable returning a fresh snapshot set
-                of CLI-launched running ``task_history`` row ids.
-        """
-        self._cli_running_task_ids_lookup = lookup
 
     def drop_connection_state(self, conn_id: str) -> None:
         """Discard per-connection autocomplete state for a closed connection.
@@ -582,13 +543,6 @@ class VSCodeServer(
             for state in agent_state.agent_states.values():
                 if state.task_thread is not None and state.task_thread.is_alive():
                     running.add(state.task_id)
-        if self._cli_running_task_ids_lookup is not None:
-            try:
-                running.update(self._cli_running_task_ids_lookup())
-            except Exception:  # pragma: no cover — defensive
-                logger.exception(
-                    "cli running-task lookup failed; continuing",
-                )
         return running
 
     def _overlay_live_metrics(
@@ -1051,14 +1005,6 @@ class VSCodeServer(
             task_id=rebound_task_id,
             is_subagent=subagent_info is not None,
         )
-        if (
-            not rebound_running
-            and rebound_task_id is not None
-            and self._cli_running_lookup is not None
-            and self._cli_running_lookup(rebound_task_id)
-        ):
-            self.printer.subscribe_tab(str(rebound_task_id), tab_id)
-            rebound_running = True
         if (
             not rebound_running
             and rebound_task_id is not None

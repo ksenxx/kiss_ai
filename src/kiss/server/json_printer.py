@@ -617,8 +617,8 @@ class JsonPrinter(Printer):
         from is subscribed like any viewer (see
         :meth:`register_task_ui`), so no owner/viewer distinction
         exists.  *tab_id* is simply one more uniform target, for
-        callers whose printer never saw a subscription (CLI runs,
-        plain recording printers in tests).
+        callers whose printer never saw a subscription (plain
+        recording printers in tests).
 
         Args:
             task_id: Explicit task id used when the calling thread
@@ -657,8 +657,8 @@ class JsonPrinter(Printer):
         When no watching tab is resolvable at all, ONE copy stamped
         with *tab_id* (possibly ``""``) is still broadcast: the stamp
         preserves the transient no-record semantics, and printers
-        that render events locally regardless of the stamp (e.g. the
-        CLI's console toasts) still show it.
+        that render events locally regardless of the stamp still
+        show it.
 
         Args:
             event: The event to broadcast; must not carry ``tabId``.
@@ -910,7 +910,7 @@ class JsonPrinter(Printer):
         Args:
             model: The model the agent just switched to.
             tab_id: The tab the agent's task was launched in (``""``
-                when the agent runs outside a tab, e.g. from the CLI).
+                when the agent runs outside a tab).
             task_id: Optional explicit task id used to look up the
                 viewer tabs when the calling thread has no
                 thread-local ``task_id`` bound (e.g. a call made off

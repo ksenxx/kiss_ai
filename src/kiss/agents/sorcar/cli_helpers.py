@@ -14,7 +14,6 @@ import argparse
 import datetime
 import math
 import os
-from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -41,11 +40,10 @@ def _parse_kv(
 ) -> tuple[tuple[str, str], ...]:
     """Parse repeated ``KEY<sep>VALUE`` CLI options into tuples.
 
-    Shared by the ``sorcar mcp`` subcommand (``--env`` / ``--header``)
-    and the main CLI's ``--header`` flag so both apply the same strict
-    policy: an entry without the separator (or with an empty key) is
-    rejected loudly with :class:`SystemExit` instead of being silently
-    dropped.
+    Shared by the entry points' repeated ``--env`` / ``--header``
+    flags so all apply the same strict policy: an entry without the
+    separator (or with an empty key) is rejected loudly with
+    :class:`SystemExit` instead of being silently dropped.
 
     Args:
         pairs: The raw option values (e.g. ``["FOO=bar"]``).
@@ -419,20 +417,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_run_kwargs(
-    args: argparse.Namespace,
-    printer_factory: Callable[[], Any] | None = None,
-) -> dict[str, Any]:
+def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     """Build ``agent.run()`` keyword arguments from parsed CLI args.
 
     Args:
         args: Parsed CLI arguments from :func:`_build_arg_parser`.
-        printer_factory: Zero-argument factory for the printer to
-            install when the CLI runs verbosely (callers outside the
-            sorcar layer pass
-            :class:`~kiss.ui.cli.cli_printer.RecordingConsolePrinter`;
-            sorcar itself must not import the UI layer, hence the
-            inverted dependency).  ``None`` installs no printer.
 
     Returns:
         Keyword arguments for ``agent.run()``.
@@ -463,8 +452,6 @@ def _build_run_kwargs(
         "verbose": args.verbose,
         "ask_user_question_callback": cli_ask_user_question,
     }
-    if args.verbose and printer_factory is not None:
-        run_kwargs["printer"] = printer_factory()
     return run_kwargs
 
 

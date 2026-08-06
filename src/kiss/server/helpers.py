@@ -25,9 +25,8 @@ def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
 
     *suggestion* is always a continuation **suffix** (a prefix-matched
     history task minus the query, or an identifier candidate minus the
-    typed partial) — both call sites (``_AutocompleteMixin._complete``
-    and ``CliCompleter._active_file_suffix``) strip the query before
-    calling.  It must therefore NOT be prefix-stripped again here: a
+    typed partial) — the call site (``_AutocompleteMixin._complete``)
+    strips the query before calling.  It must therefore NOT be prefix-stripped again here: a
     legitimate suffix can itself begin with the query text (active file
     holds ``quxqux_token``, user typed ``qux`` → suffix ``qux_token``),
     and re-stripping would corrupt the accepted completion (``qux`` +

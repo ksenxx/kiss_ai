@@ -648,9 +648,7 @@ def channel_main(
         agent = agent_cls(workspace=workspace)
     else:
         agent = agent_cls()
-    from kiss.ui.cli.cli_printer import RecordingConsolePrinter
-
-    run_kwargs = _build_run_kwargs(args, printer_factory=RecordingConsolePrinter)
+    run_kwargs = _build_run_kwargs(args)
 
     from kiss.agents.third_party_agents._kiss_web_launcher import (
         run_agent_via_kiss_web,

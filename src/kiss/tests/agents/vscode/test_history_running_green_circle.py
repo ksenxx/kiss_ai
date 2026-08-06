@@ -11,9 +11,7 @@ pipeline used by the History sidebar to surface the
 ``.sidebar-item-running`` green pulsing dot:
 
 * The **backend** half — :meth:`VSCodeServer._get_running_task_ids`
-  must report the row id of a task whose worker thread is alive (or
-  whose row id is registered as a live CLI-launched task via
-  :meth:`VSCodeServer.set_cli_running_task_ids_lookup`).
+  must report the row id of a task whose worker thread is alive.
   ``_get_history`` must then stamp ``is_running=True`` (and
   ``failed=False``) on every such row in the ``history`` broadcast,
   EVEN when the persisted ``result`` is the "Agent Failed Abruptly"
@@ -266,7 +264,6 @@ def _history_event_from_real_backend(
     *,
     result: str = "",
     fake_running_task_id: str | None = None,
-    fake_cli_running_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """Persist one task and return the real ``getHistory`` broadcast.
 
@@ -278,9 +275,6 @@ def _history_event_from_real_backend(
     running — proving the backend → ``is_running`` plumbing works
     against a real DB row instead of fabricating ``is_running`` in
     the browser-side test.
-
-    *fake_cli_running_ids* sets the CLI lookup so a CLI-launched task
-    (with no per-tab state) also surfaces as running.
 
     When *fake_running_task_id* equals ``-1``, the helper resolves the
     sentinel to the just-persisted task's auto-assigned id so callers
@@ -330,14 +324,6 @@ def _history_event_from_real_backend(
                 time.sleep(0.01)
             state.task_thread = worker
             agent_state.register(state)
-
-        if fake_cli_running_ids is not None:
-            cli_ids: set[str] = set(fake_cli_running_ids)
-
-            def lookup() -> set[str]:
-                return cli_ids
-
-            server.set_cli_running_task_ids_lookup(lookup)
 
         server._handle_command({"type": "getHistory"})
 
@@ -435,32 +421,6 @@ def test_backend_overrides_failed_sentinel_for_running_task() -> None:
         "alive-thread row must NOT broadcast failed=True; got: "
         f"{row}"
     )
-
-
-def test_backend_marks_cli_launched_task_as_running() -> None:
-    """A CLI-launched task id surfaced via the
-    ``set_cli_running_task_ids_lookup`` hook must broadcast as
-    ``is_running=True`` so its row gets the green pulsing dot too."""
-    tmp = tempfile.mkdtemp(prefix="kiss-history-running-test-")
-    orig_db_path = th._DB_PATH  # type: ignore[attr-defined]
-    th._close_db()
-    th._DB_PATH = Path(tmp) / "sorcar.db"  # type: ignore[attr-defined]
-    try:
-        server = VSCodeServer()
-        server.work_dir = tmp
-        task_id, _ = th._add_task("cli-launched task")
-
-        server.set_cli_running_task_ids_lookup(lambda: {task_id})
-        running = server._get_running_task_ids()
-        assert task_id in running, (
-            f"CLI-launched task id {task_id} must surface from "
-            f"_get_running_task_ids; got: {running}"
-        )
-    finally:
-        th._close_db()
-        th._DB_PATH = orig_db_path  # type: ignore[attr-defined]
-        shutil.rmtree(tmp, ignore_errors=True)
-
 
 
 def test_running_session_renders_green_circle(_browser) -> None:

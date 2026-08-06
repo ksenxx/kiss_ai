@@ -392,25 +392,6 @@ class TestServerApiCodeBindings(unittest.TestCase):
         finally:
             del sorcar.API["bogusCmd"]
 
-    def test_cli_commands_bypass_work_dir_stamping(self) -> None:
-        from kiss.server.sorcar import ApiContext
-
-        with tempfile.TemporaryDirectory() as tmp:
-            server = RemoteAccessServer(
-                uds_path=os.path.join(tmp, "s.sock"),
-                url_file=os.path.join(tmp, "remote-url.json"),
-            )
-            ctx = ApiContext(
-                endpoint=None,
-                tabs_seen=set(),
-                conn_state={"conn_id": "conn-1"},
-                is_uds=False,
-            )
-            cmd: dict[str, Any] = {"type": "cliTabHello", "tabId": "cli-1"}
-            asyncio.run(server._server_api.dispatch(cmd, ctx))
-            self.assertNotIn("workDir", cmd)
-            self.assertEqual(cmd["connId"], "conn-1")
-
     def test_translate_webview_command(self) -> None:
         from kiss.server.sorcar import translate_webview_command
 

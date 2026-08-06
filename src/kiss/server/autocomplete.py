@@ -90,8 +90,7 @@ def identifier_prefix_matches(content: str, partial: str) -> list[str]:
     Harvests single-word identifiers and dot-chained identifiers
     (e.g. ``self.method``, ``os.path.join``) from *content* and keeps
     those that case-sensitively start with *partial* and are longer
-    than it.  Shared by the VS Code daemon's ghost-text completion and
-    the sorcar CLI completer so both surfaces harvest identically.
+    than it.  Used by the VS Code daemon's ghost-text completion.
 
     Args:
         content: Text to harvest identifiers from.
@@ -113,9 +112,7 @@ def model_picker_sort_key(name: str) -> tuple[int, float]:
 
     Models are grouped by vendor (see
     :func:`~kiss.server.helpers.model_vendor`) with the most
-    expensive model first within each vendor.  Shared by the daemon's
-    ``getModels`` reply and the CLI's ``--model`` value completion so
-    both pickers order identically.
+    expensive model first within each vendor.  Used by the daemon's ``getModels`` reply.
 
     Args:
         name: A model name present in ``MODEL_INFO``.
@@ -134,7 +131,7 @@ def ranked_function_calling_models() -> list[str]:
     Candidates are the currently-runnable models (a provider credential
     is configured) that support function calling, sorted by
     :func:`model_picker_sort_key` — the single business rule behind
-    both the VS Code model picker and the CLI's model completion.
+    the VS Code model picker.
 
     Returns:
         Model names, best-vendor-first, most expensive first per vendor.

@@ -222,7 +222,7 @@ ______________________________________________________________________
 
 - `backend`: The daemon object providing the transports and command implementations (in production the `RemoteAccessServer`).
 
-- **dispatch** — Route one client command to its API method. The single entry point of the code API. Applies, in order: 1. Silently drops :data:`DROPPED_COMMANDS` (host-consumed messages) BEFORE validation so they never surface errors. 2. Validates *cmd* against the catalog (:func:`validate_command`) and answers an invalid command with a direct `error` event to the sender only. 3. Records the command's `tabId` for the transport's deferred-close bookkeeping (:meth:`_record_tab`). 4. Stamps the connection's `conn_id` as `connId` — overwriting any client-supplied value so it cannot be spoofed — which keys the backend's per-connection autocomplete state. 5. Maintains the per-window work_dir invariant: a `setWorkDir` updates the connection's `work_dir`; every other command lacking an explicit `workDir` is stamped with it, so two VS Code windows sharing the daemon can never observe each other's folder through the daemon-global fallback. The CLI-bridge commands (:data:`_CLI_HANDLERS`) are exempt: they describe tasks the CLI runs itself, never read `workDir`, and must not be mutated on their way to the relay. 6. Invokes the :class:`ServerApi` method named by the command's catalog entry.<br/>`async dispatch(cmd: dict[str, Any], ctx: ApiContext) -> None`
+- **dispatch** — Route one client command to its API method. The single entry point of the code API. Applies, in order: 1. Silently drops :data:`DROPPED_COMMANDS` (host-consumed messages) BEFORE validation so they never surface errors. 2. Validates *cmd* against the catalog (:func:`validate_command`) and answers an invalid command with a direct `error` event to the sender only. 3. Records the command's `tabId` for the transport's deferred-close bookkeeping (:meth:`_record_tab`). 4. Stamps the connection's `conn_id` as `connId` — overwriting any client-supplied value so it cannot be spoofed — which keys the backend's per-connection autocomplete state. 5. Maintains the per-window work_dir invariant: a `setWorkDir` updates the connection's `work_dir`; every other command lacking an explicit `workDir` is stamped with it, so two VS Code windows sharing the daemon can never observe each other's folder through the daemon-global fallback. 6. Invokes the :class:`ServerApi` method named by the command's catalog entry.<br/>`async dispatch(cmd: dict[str, Any], ctx: ApiContext) -> None`
 
   - `cmd`: The parsed JSON command dictionary (the transport guarantees a dict).
   - `ctx`: The transport context of this call.
@@ -296,26 +296,6 @@ ______________________________________________________________________
 
   - `cmd`: The `serverReset` command (unused).
   - `ctx`: The transport context of the current call; supplies the requesting `conn_id` so acknowledgement notifications reach only the requesting window.
-
-- **cli_event** — Relay one CLI display event to subscribed webview tabs. CLI → daemon live-stream bridge: the sorcar CLI forwards every display event here so any chat webview subscribed to the task's chat id sees the event immediately instead of having to reload to replay it from the events DB.<br/>`async cli_event(cmd: dict[str, Any], ctx: ApiContext) -> None`
-
-  - `cmd`: The `cliEvent` envelope carrying the event.
-  - `ctx`: The transport context of the current call (unused).
-
-- **cli_tab_hello** — Register a sorcar CLI REPL's tab id for talk arbitration. A CLI REPL announces its tab id so talk-playback arbitration can tell CLI terminal players apart from webview tabs. Only local UDS peers are terminal players; a WSS/browser peer cannot suppress playback on the daemon machine.<br/>`async cli_tab_hello(cmd: dict[str, Any], ctx: ApiContext) -> None`
-
-  - `cmd`: The `cliTabHello` command.
-  - `ctx`: The transport context of the current call.
-
-- **cli_task_start** — Record a CLI-launched task as running. The CLI announces a fresh running task so a webview tab that later resumes it from the history sidebar is subscribed to the live stream and shows the blinking-green-circle "running" indicator.<br/>`async cli_task_start(cmd: dict[str, Any], ctx: ApiContext) -> None`
-
-  - `cmd`: The `cliTaskStart` command.
-  - `ctx`: The transport context of the current call.
-
-- **cli_task_end** — Mark a CLI-launched task as finished. The CLI announces the task finished; the daemon stops the running indicator on every subscribed webview tab.<br/>`async cli_task_end(cmd: dict[str, Any], ctx: ApiContext) -> None`
-
-  - `cmd`: The `cliTaskEnd` command.
-  - `ctx`: The transport context of the current call.
 
 - **trajectory_jobs** — List all trajectory jobs (the `/api/jobs` endpoint). Mirrors the `/api/jobs` endpoint of the standalone trajectory visualizer (:mod:`kiss.viz_trajectory.server`, imported lazily so this client-importable module stays light).<br/>`trajectory_jobs() -> tuple[int, str, bytes]`
 

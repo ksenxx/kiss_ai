@@ -356,11 +356,6 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("voiceSensitivity", required=("value",), handler="drop"),
     ApiCommand("voiceAck", handler="drop"),
     ApiCommand("voiceDropped", required=("text",), handler="drop"),
-    ApiCommand("cliEvent", required=("event",), handler="cli_event"),
-    ApiCommand("cliTabHello", required=("tabId",), handler="cli_tab_hello"),
-    ApiCommand("cliTaskStart", required=("taskId",), handler="cli_task_start"),
-    ApiCommand("cliTaskEnd", required=("taskId",), handler="cli_task_end"),
-    ApiCommand("cliInfo"),
     ApiCommand("focusEditor", handler="drop"),
     ApiCommand("webviewFocusChanged", handler="drop"),
     ApiCommand("activeTabChanged", required=("tabId",), handler="drop"),
@@ -393,18 +388,6 @@ it (e.g. a ``notificationAction`` missing its ``id``) would surface a
 spurious error banner for a message the daemon was never meant to
 handle.
 """
-
-_CLI_HANDLERS: frozenset[str] = frozenset(
-    {"cli_event", "cli_tab_hello", "cli_task_start", "cli_task_end"}
-)
-"""Handlers of the CLI → daemon bridge commands.
-
-Commands routed to these handlers describe tasks the sorcar CLI runs
-itself; :meth:`ServerApi.dispatch` exempts them from the per-window
-``workDir`` stamping because they never read ``workDir`` and must not
-be mutated on their way to the relay.
-"""
-
 
 def validate_command(cmd: Any) -> str | None:
     """Validate one client command against the server API catalog.
@@ -511,7 +494,7 @@ class ServerBackend(Protocol):
     Structural type of the object backing :class:`ServerApi` — in
     production the ``RemoteAccessServer`` of
     :mod:`kiss.server.web_server`, which owns the transports, the
-    merge/CLI bookkeeping, and the backend agent server.  Only the
+    merge bookkeeping, and the backend agent server.  Only the
     members the API layer actually calls are declared; see the
     implementing methods in ``web_server.py`` for full behaviour
     documentation.
@@ -522,18 +505,6 @@ class ServerBackend(Protocol):
     async def _endpoint_send(self, endpoint: Any, data: str) -> None: ...
 
     async def _run_cmd(self, cmd: dict[str, Any]) -> None: ...
-
-    def _relay_cli_event(self, ev: dict[str, Any]) -> None: ...
-
-    def _validated_cli_task_id(self, cmd: dict[str, Any]) -> str: ...
-
-    def _handle_cli_task_start(
-        self, task_id: str, conn_state: dict[str, Any],
-    ) -> None: ...
-
-    def _handle_cli_task_end(
-        self, task_id: str, conn_state: dict[str, Any],
-    ) -> None: ...
 
     async def _handle_open_file(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -653,10 +624,7 @@ class ServerApi:
            other command lacking an explicit ``workDir`` is stamped
            with it, so two VS Code windows sharing the daemon can
            never observe each other's folder through the daemon-global
-           fallback.  The CLI-bridge commands (:data:`_CLI_HANDLERS`)
-           are exempt: they describe tasks the CLI runs itself, never
-           read ``workDir``, and must not be mutated on their way to
-           the relay.
+           fallback.
         6. Invokes the :class:`ServerApi` method named by the
            command's catalog entry.
 
@@ -685,11 +653,7 @@ class ServerApi:
             new_wd = cmd.get("workDir", "")
             if isinstance(new_wd, str) and new_wd:
                 ctx.conn_state["work_dir"] = new_wd
-        elif (
-            handler not in _CLI_HANDLERS
-            and ctx.conn_state["work_dir"]
-            and not cmd.get("workDir")
-        ):
+        elif ctx.conn_state["work_dir"] and not cmd.get("workDir"):
             cmd["workDir"] = ctx.conn_state["work_dir"]
         await getattr(self, handler)(cmd, ctx)
 
@@ -1071,77 +1035,6 @@ class ServerApi:
                 notifications reach only the requesting window.
         """
         await self._backend._handle_server_reset(ctx.conn_state["conn_id"])
-
-    async def cli_event(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
-        """Relay one CLI display event to subscribed webview tabs.
-
-        CLI → daemon live-stream bridge: the sorcar CLI forwards every
-        display event here so any chat webview subscribed to the
-        task's chat id sees the event immediately instead of having to
-        reload to replay it from the events DB.
-
-        Args:
-            cmd: The ``cliEvent`` envelope carrying the event.
-            ctx: The transport context of the current call (unused).
-        """
-        ev = cmd.get("event")
-        if isinstance(ev, dict):
-            self._backend._relay_cli_event(ev)
-
-    async def cli_tab_hello(
-        self, cmd: dict[str, Any], ctx: ApiContext,
-    ) -> None:
-        """Register a sorcar CLI REPL's tab id for talk arbitration.
-
-        A CLI REPL announces its tab id so talk-playback arbitration
-        can tell CLI terminal players apart from webview tabs.  Only
-        local UDS peers are terminal players; a WSS/browser peer
-        cannot suppress playback on the daemon machine.
-
-        Args:
-            cmd: The ``cliTabHello`` command.
-            ctx: The transport context of the current call.
-        """
-        raw_tab = cmd.get("tabId")
-        if ctx.is_uds and isinstance(raw_tab, str) and raw_tab:
-            cli_tabs = ctx.conn_state.setdefault("cli_tabs", set())
-            if raw_tab not in cli_tabs:
-                cli_tabs.add(raw_tab)
-                self._backend._printer.register_cli_tab(raw_tab)
-
-    async def cli_task_start(
-        self, cmd: dict[str, Any], ctx: ApiContext,
-    ) -> None:
-        """Record a CLI-launched task as running.
-
-        The CLI announces a fresh running task so a webview tab that
-        later resumes it from the history sidebar is subscribed to the
-        live stream and shows the blinking-green-circle "running"
-        indicator.
-
-        Args:
-            cmd: The ``cliTaskStart`` command.
-            ctx: The transport context of the current call.
-        """
-        task_id = self._backend._validated_cli_task_id(cmd)
-        if task_id:
-            self._backend._handle_cli_task_start(task_id, ctx.conn_state)
-
-    async def cli_task_end(
-        self, cmd: dict[str, Any], ctx: ApiContext,
-    ) -> None:
-        """Mark a CLI-launched task as finished.
-
-        The CLI announces the task finished; the daemon stops the
-        running indicator on every subscribed webview tab.
-
-        Args:
-            cmd: The ``cliTaskEnd`` command.
-            ctx: The transport context of the current call.
-        """
-        task_id = self._backend._validated_cli_task_id(cmd)
-        if task_id:
-            self._backend._handle_cli_task_end(task_id, ctx.conn_state)
 
     @staticmethod
     def trajectory_jobs() -> tuple[int, str, bytes]:

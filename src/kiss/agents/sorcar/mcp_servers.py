@@ -36,10 +36,8 @@ Implements MCP server management with Claude Code compatibility:
 * **OAuth** — remote (``http``/``sse``) servers authenticate through
   the MCP SDK's OAuth 2.1 provider (dynamic client registration +
   PKCE).  Tokens are persisted per server under ``~/.kiss/mcp_auth/``
-  by :class:`FileTokenStorage`; ``sorcar mcp auth <name>`` runs the
-  interactive browser flow (see :mod:`kiss.ui.cli.mcp_cli`),
-  while agent runs reuse the stored tokens and fail with a hint to
-  run the auth command when interactive login would be required.
+  by :class:`FileTokenStorage`; agent runs reuse the stored tokens
+  and fail with a hint when interactive login would be required.
 
 Connections are kept alive for the life of the process by a single
 :class:`MCPManager` running an asyncio loop on a daemon thread; each
@@ -510,7 +508,7 @@ class FileTokenStorage:
             self._write(data)
 
     def clear(self) -> bool:
-        """Delete the token file (``sorcar mcp logout``).
+        """Delete the stored token file for this server.
 
         Returns:
             ``True`` when a file was deleted, ``False`` when absent.
@@ -525,16 +523,18 @@ class FileTokenStorage:
 async def _noninteractive_redirect(url: str) -> None:
     """Refuse to start a browser OAuth flow during an agent run."""
     raise RuntimeError(
-        "MCP server requires interactive OAuth login; run "
-        "`sorcar mcp auth <name>` first."
+        "MCP server requires interactive OAuth login; provision its "
+        "tokens under ~/.kiss/mcp_auth/ (or use a server that "
+        "authenticates via --header) first."
     )
 
 
 async def _noninteractive_callback() -> tuple[str, str | None]:
     """Refuse to wait for an OAuth callback during an agent run."""
     raise RuntimeError(
-        "MCP server requires interactive OAuth login; run "
-        "`sorcar mcp auth <name>` first."
+        "MCP server requires interactive OAuth login; provision its "
+        "tokens under ~/.kiss/mcp_auth/ (or use a server that "
+        "authenticates via --header) first."
     )
 
 
@@ -1161,7 +1161,7 @@ def format_mcp_listing(work_dir: str, connect: bool = False) -> str:
     if not servers:
         return (
             "No MCP servers configured.\n"
-            "Add one with: sorcar mcp add <name> <command> [args...]\n"
+            "Add one to a config file.\n"
             f"Config files: {user_mcp_config_path()} (user), "
             f"{project_mcp_config_path(work_dir)} (project), "
             f"{claude_project_mcp_config_path(work_dir)} (Claude-compatible)."

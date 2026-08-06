@@ -17,8 +17,6 @@ UDS connections (no mocks):
   review's state while the per-tab action lock is held.
 - F4-10: concurrent self-signed TLS generation publishes a matched
   cert/key pair.
-- F4-12: overlapping connections announcing one CLI task keep the
-  running state alive until the LAST owner ends it.
 - F4-13: concurrent ``runUpdate`` requests launch a single installer.
 - F4-14: SIGHUP triggers the shutdown path instead of being ignored.
 """
@@ -297,38 +295,6 @@ class TestFindings4WebServer(IsolatedAsyncioTestCase):
         probe.load_cert_chain(
             str(tls_dir / "cert.pem"), str(tls_dir / "key.pem"),
         )
-
-    async def test_f412_reconnect_overlap_keeps_cli_task_running(
-        self,
-    ) -> None:
-        """The last live owner's claim keeps the task running."""
-        task_id = "f412-task"
-        reader_a, writer_a = await self._connect()
-        reader_b, writer_b = await self._connect()
-        await self._send(writer_a, {"type": "cliTaskStart",
-                                    "taskId": task_id})
-        await self._send(writer_b, {"type": "cliTaskStart",
-                                    "taskId": task_id})
-        await asyncio.sleep(0.2)
-        self.assertTrue(self.server._is_cli_task_running(task_id))
-
-        # Old connection ends its claim (or drops) — the replacement
-        # still owns the task.
-        await self._send(writer_a, {"type": "cliTaskEnd",
-                                    "taskId": task_id})
-        await asyncio.sleep(0.2)
-        self.assertTrue(
-            self.server._is_cli_task_running(task_id),
-            "ending the STALE connection's claim cleared the global "
-            "running state while the live replacement still owns it",
-        )
-
-        await self._send(writer_b, {"type": "cliTaskEnd",
-                                    "taskId": task_id})
-        await asyncio.sleep(0.2)
-        self.assertFalse(self.server._is_cli_task_running(task_id))
-        writer_a.close()
-        writer_b.close()
 
     async def test_f413_concurrent_run_update_single_flight(self) -> None:
         """Two concurrent runUpdate requests spawn ONE installer."""

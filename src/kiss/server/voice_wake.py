@@ -568,8 +568,7 @@ def speaker_prefixed_text(
 
     This is the canonical Python twin of ``insertSpeech`` in
     ``media/voice.js`` and MUST stay in exact behavioural parity with
-    it; the sorcar CLI voice mode shares it so spoken tasks look the
-    same everywhere.  The contract, mirroring the JavaScript:
+    it so spoken tasks look the same everywhere.  The contract, mirroring the JavaScript:
 
     - *text* is trimmed; blank or non-string text yields ``""`` (the
       caller never submits it, like the webview).

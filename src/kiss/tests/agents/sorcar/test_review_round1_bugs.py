@@ -307,25 +307,6 @@ def test_vs_bug3_commands_reject_non_string_taskid() -> None:
 
 
 
-def test_vs_bug4_cli_task_envelopes_reject_non_string_taskid() -> None:
-    """``cliTaskStart`` / ``cliTaskEnd`` must reject non-str payloads.
-
-    Functional repro: both branches validate the ``taskId`` through the
-    shared ``_validated_cli_task_id`` helper, which must return ``""``
-    for missing, empty, or non-string payloads so the daemon never
-    registers a bogus task in ``_cli_running_tasks``.
-    """
-    from kiss.server.web_server import RemoteAccessServer
-
-    validate = RemoteAccessServer._validated_cli_task_id
-    assert validate({"type": "cliTaskStart", "taskId": ["evil"]}) == ""
-    assert validate({"type": "cliTaskEnd", "taskId": 123}) == ""
-    assert validate({"type": "cliTaskStart", "taskId": ""}) == ""
-    assert validate({"type": "cliTaskStart"}) == ""
-    assert validate({"type": "cliTaskEnd", "taskId": "abc123"}) == "abc123"
-
-
-
 def test_sorcar_bug1_is_task_history_id_contract() -> None:
     """``is_task_history_id`` is the canonical id-shape predicate."""
     assert persistence.is_task_history_id(uuid.uuid4().hex)
@@ -336,21 +317,6 @@ def test_sorcar_bug1_is_task_history_id_contract() -> None:
         uuid.uuid4().hex.upper()
     )
     assert not persistence.is_task_history_id(str(uuid.uuid4()))
-
-
-def test_sorcar_bug1_cli_printer_normalizes_case() -> None:
-    """``CliPrinter._broadcast_event`` lowercases the task id key.
-
-    Reading the source guarantees the new ``.lower()`` is in place and
-    the heuristic char-by-char check has been removed.
-    """
-    from kiss.ui.cli import cli_printer
-
-    src = Path(str(cli_printer.__file__)).read_text()
-    assert "0123456789abcdef" not in src
-    assert "is_task_history_id" in src
-    assert ".lower()" in src
-
 
 
 def test_sorcar_bug3_run_tasks_parallel_guards_none_parent() -> None:

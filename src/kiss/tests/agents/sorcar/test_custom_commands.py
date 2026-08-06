@@ -23,7 +23,6 @@ from kiss.agents.sorcar.custom_commands import (
     expand_command,
     format_command_listing,
 )
-from kiss.ui.cli.cli_repl import CliCompleter
 
 
 @pytest.fixture
@@ -270,19 +269,3 @@ def test_format_command_listing_empty_hint(kiss_home: Path, tmp_path: Path) -> N
     listing = format_command_listing({})
     assert "No custom commands found" in listing
     assert ".kiss/commands" in listing
-
-
-def test_completer_includes_custom_commands(kiss_home: Path, tmp_path: Path) -> None:
-    """Typing /<prefix> Tab offers matching custom command names."""
-    _write(kiss_home / "commands" / "greet.md", "Say hello.")
-    completer = CliCompleter(str(tmp_path))
-    matches = completer._build_matches("/gre")
-    assert "/greet " in matches
-
-
-def test_completer_builtins_before_custom(kiss_home: Path, tmp_path: Path) -> None:
-    """Built-in commands rank before custom commands in completion."""
-    _write(kiss_home / "commands" / "helper.md", "Assist.")
-    completer = CliCompleter(str(tmp_path))
-    matches = completer._build_matches("/hel")
-    assert matches.index("/help ") < matches.index("/helper ")

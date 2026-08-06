@@ -14,8 +14,8 @@ gpt-5.6-sol review sequence:
   persisted with the ``tabId`` STRIPPED (replay re-stamps events with
   the subscribing viewer's own tab id).  The base
   ``JsonPrinter.broadcast`` (production-reachable: ``VSCodeServer()``
-  defaults to it and the CLI's ``RecordingConsolePrinter`` subclasses
-  it) recorded + persisted EVERY event after taskId injection: a
+  defaults to it) recorded + persisted EVERY event after taskId
+  injection: a
   viewer-targeted transient ``clear`` (a display type) leaked into the
   recording/DB, and durable prompt/result copies kept a stale frontend
   tab id.
@@ -24,8 +24,7 @@ gpt-5.6-sol review sequence:
   the talk fan-outs) serialise the whole event dict and splice one
   ``"tabId": <target>`` member per subscriber.  An event that already
   carries a ``tabId`` key (reachable: ``_broadcast_subagent_done``
-  emits ``{"tab_id": ..., "tabId": ""}``, which the CLI daemon bridge
-  forwards verbatim and ``_relay_cli_event`` hands to
+  emits ``{"tab_id": ..., "tabId": ""}``, which can reach
   ``_fanout_stamped``) produced JSON with TWO ``"tabId"`` members —
   ambiguous, non-interoperable, and only routed correctly because
   JSON parsers happen to keep the last member.
@@ -271,48 +270,6 @@ class TestFanoutSingleTabIdStamp(_PersistenceHarness):
         assert parsed["tabId"] == "viewer-1"
         assert parsed["tab_id"] == f"task-{task_id}__sub_0"
         assert parsed["type"] == "subagentDone"
-
-    def test_fanout_talk_cli_origin_strips_preexisting_tabid(self):
-        """The CLI-origin talk fan-out must also stamp exactly one
-        tabId per copy."""
-        task_id = self._register_task("fanout talk dup")
-        self.printer.subscribe_tab(task_id, "viewer-1")
-        captured_wss: list[str] = []
-        captured_uds: list[str] = []
-        self.printer._send_to_wss_clients = captured_wss.append  # type: ignore[method-assign]
-        self.printer._send_to_uds_writers = captured_uds.append  # type: ignore[method-assign]
-        event = {
-            "type": "talk",
-            "text": "hello",
-            "talkId": "talk-1",
-            "tabId": "",
-            "taskId": task_id,
-        }
-        self.printer._fanout_talk_cli_origin(event)
-        assert len(captured_wss) == 1 and len(captured_uds) == 1
-        for raw in (*captured_wss, *captured_uds):
-            assert raw.count('"tabId"') == 1, (
-                f"talk wire payload has duplicate tabId members: {raw}"
-            )
-            assert json.loads(raw)["tabId"] == "viewer-1"
-
-    def test_fanout_talk_cli_origin_without_tabid_unchanged(self):
-        """A CLI-origin talk event with NO pre-existing tabId is
-        stamped normally (one tabId per copy, payload intact)."""
-        task_id = self._register_task("fanout talk clean")
-        self.printer.subscribe_tab(task_id, "viewer-1")
-        captured: list[str] = []
-        self.printer._send_to_wss_clients = captured.append  # type: ignore[method-assign]
-        self.printer._send_to_uds_writers = captured.append  # type: ignore[method-assign]
-        self.printer._fanout_talk_cli_origin(
-            {"type": "talk", "text": "hi", "talkId": "t2", "taskId": task_id}
-        )
-        assert len(captured) == 2
-        for raw in captured:
-            assert raw.count('"tabId"') == 1
-            parsed = json.loads(raw)
-            assert parsed["tabId"] == "viewer-1"
-            assert parsed["text"] == "hi"
 
     def test_normal_fanout_unchanged(self):
         """Events without a pre-existing tabId are stamped normally."""

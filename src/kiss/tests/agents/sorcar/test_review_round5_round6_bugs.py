@@ -45,46 +45,6 @@ def test_save_task_extra_raises_on_is_favorite_payload(temp_db: Path) -> None:  
         )
 
 
-def test_cli_printer_forwards_only_listed_global_types(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """In-process diagnostics with empty taskId must NOT flood the
-    daemon UDS; only the explicit ``new_tab`` / ``tasks_updated``
-    global system events should be forwarded.
-    """
-    from kiss.ui.cli import cli_daemon_bridge, cli_printer
-
-    captured: list[dict[str, object]] = []
-    monkeypatch.setattr(
-        cli_daemon_bridge,
-        "send_event",
-        lambda env: captured.append(env),
-    )
-    monkeypatch.setattr(
-        cli_daemon_bridge, "send_cli_task_start", lambda _tid: None,
-    )
-    monkeypatch.setattr(
-        cli_daemon_bridge, "send_cli_task_end", lambda _tid: None,
-    )
-
-    printer = cli_printer.RecordingConsolePrinter()
-    printer.broadcast({
-        "type": "new_tab",
-        "task_id": "a" * 32,
-        "parent_tab_id": "",
-        "taskId": "",
-    })
-    printer.broadcast({"type": "tasks_updated", "taskId": ""})
-    printer.broadcast({"type": "debug_diagnostic", "taskId": ""})
-    printer.broadcast({"type": "random_internal_event"})
-
-    types_forwarded = [e.get("type") for e in captured]
-    assert "new_tab" in types_forwarded
-    assert "tasks_updated" in types_forwarded
-    assert "debug_diagnostic" not in types_forwarded
-    assert "random_internal_event" not in types_forwarded
-
-
 def test_bx_handles_falsy_string_literals_during_migration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
