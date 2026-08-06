@@ -1,6 +1,6 @@
 # Prompt Tricks
 
-> Reusable prompt snippets ("tricks") that boost KISS Sorcar result quality. In the VS Code extension these appear under the "Tricks" button; they are read from `~/.kiss/INJECTIONS.md`, seeded from the bundled `src/kiss/INJECTIONS.md`. Append one or more to your task prompt.
+> Reusable prompt snippets ("tricks") that boost KISS Sorcar result quality. In the VS Code extension these appear under the "Tricks" button; they are the concatenation of `~/.kiss/MY_INJECTION.md` (your personal tricks, auto-seeded on first read) and the bundled `src/kiss/INJECTIONS.md` (read directly from the package so every upgrade delivers the latest defaults). Append one or more to your task prompt.
 
 ## Research
 
