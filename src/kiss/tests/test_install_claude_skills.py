@@ -4,11 +4,12 @@
 # add your name here
 """Integration tests for Claude skills handling in the install/release paths.
 
-Claude skills are owned exclusively by ``release.sh`` (downloads and bundles
-them into the release VSIX) and ``copy-kiss.sh`` (performs the bundling, but
-only when ``KISS_BUNDLE_CLAUDE_SKILLS`` is set).  ``install.sh`` must never
-install, delete, or otherwise touch Claude skills — it does not set the
-opt-in variable and contains no skills references at all.
+Claude skills are owned exclusively by ``release.sh``: it downloads them and
+opts into bundling by passing ``KISS_BUNDLE_EXTRA_DIRS`` to ``copy-kiss.sh``.
+``copy-kiss.sh`` is a fully generic bundler with no Claude references at all,
+and ``install.sh`` must never install, delete, or otherwise touch Claude
+skills — it does not set the opt-in variable and contains no skills
+references.
 """
 
 import subprocess
@@ -21,92 +22,92 @@ RELEASE_SH = REPO_ROOT / "scripts" / "release.sh"
 INSTALL_SH = REPO_ROOT / "install.sh"
 COPY_KISS_SH = REPO_ROOT / "src" / "kiss" / "agents" / "vscode" / "copy-kiss.sh"
 
-SKILLS_BLOCK_BEGIN = "# BEGIN: kiss-claude-skills-bundle"
-SKILLS_BLOCK_END = "# END: kiss-claude-skills-bundle"
+EXTRA_BUNDLE_BLOCK_BEGIN = "# BEGIN: kiss-extra-bundle"
+EXTRA_BUNDLE_BLOCK_END = "# END: kiss-extra-bundle"
+
+SKILLS_DIR_REL = "src/kiss/agents/claude_skills"
 
 
-def extract_skills_block() -> str:
-    """Return the Claude-skills bundling block of copy-kiss.sh, verbatim."""
+def extract_extra_bundle_block() -> str:
+    """Return the generic extra-dirs bundling block of copy-kiss.sh, verbatim."""
     text = COPY_KISS_SH.read_text()
-    begin = text.index(SKILLS_BLOCK_BEGIN)
-    end = text.index(SKILLS_BLOCK_END)
+    begin = text.index(EXTRA_BUNDLE_BLOCK_BEGIN)
+    end = text.index(EXTRA_BUNDLE_BLOCK_END)
     return text[begin:end]
 
 
-def run_skills_block(bundle_var_set: bool, skills_src_exists: bool) -> bool:
-    """Execute the extracted skills block against temp dirs.
+def run_extra_bundle_block(bundle_var_set: bool, extra_src_exists: bool) -> bool:
+    """Execute the extracted bundling block against temp dirs.
 
-    Returns True when the block copied the skills into DEST.
+    Returns True when the block copied the extra dir into DEST.
     """
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         project_root = tmp_path / "checkout"
         dest = tmp_path / "kiss_project"
-        (dest / "src" / "kiss" / "agents").mkdir(parents=True)
-        if skills_src_exists:
-            skill = project_root / "src" / "kiss" / "agents" / "claude_skills" / "demo"
+        dest.mkdir(parents=True)
+        if extra_src_exists:
+            skill = project_root / SKILLS_DIR_REL / "demo"
             skill.mkdir(parents=True)
             (skill / "SKILL.md").write_text("# demo skill\n")
         script = (
             "set -e\n"
             f'PROJECT_ROOT="{project_root}"\n'
-            f'DEST="{dest}"\n' + extract_skills_block()
+            f'DEST="{dest}"\n' + extract_extra_bundle_block()
         )
         env = {"PATH": "/usr/bin:/bin"}
         if bundle_var_set:
-            env["KISS_BUNDLE_CLAUDE_SKILLS"] = "1"
+            env["KISS_BUNDLE_EXTRA_DIRS"] = SKILLS_DIR_REL
         subprocess.run(
             ["bash", "-c", script], env=env, check=True, capture_output=True
         )
-        return (
-            dest / "src" / "kiss" / "agents" / "claude_skills" / "demo" / "SKILL.md"
-        ).is_file()
+        return (dest / SKILLS_DIR_REL / "demo" / "SKILL.md").is_file()
 
 
-class TestCopyKissIncludesClaudeSkills(unittest.TestCase):
-    """Verify copy-kiss.sh copies claude_skills into the extension bundle."""
+class TestCopyKissHasNoClaudeReferences(unittest.TestCase):
+    """copy-kiss.sh must be fully generic, with no Claude mention at all."""
 
-    def test_copy_kiss_copies_claude_skills(self) -> None:
+    def test_copy_kiss_never_mentions_claude(self) -> None:
+        text = COPY_KISS_SH.read_text().lower()
+        for needle in ("claude", "skill"):
+            self.assertNotIn(
+                needle,
+                text,
+                f"copy-kiss.sh must not mention '{needle}' — bundling is generic"
+                " via KISS_BUNDLE_EXTRA_DIRS; Claude specifics live in release.sh",
+            )
+
+    def test_copy_kiss_has_generic_extra_bundle_block(self) -> None:
         text = COPY_KISS_SH.read_text()
-        self.assertIn(
-            "claude_skills",
-            text,
-            "copy-kiss.sh must copy claude_skills into kiss_project",
-        )
-
-    def test_copy_kiss_checks_dir_exists(self) -> None:
-        text = COPY_KISS_SH.read_text()
-        self.assertIn(
-            '-d "$CLAUDE_SKILLS_SRC"',
-            text,
-            "copy-kiss.sh must check if claude_skills directory exists before copying",
-        )
+        self.assertIn("KISS_BUNDLE_EXTRA_DIRS", text)
+        self.assertIn(EXTRA_BUNDLE_BLOCK_BEGIN, text)
+        self.assertIn(EXTRA_BUNDLE_BLOCK_END, text)
 
 
-class TestCopyKissClaudeSkillsOptIn(unittest.TestCase):
-    """The skills copy must be opt-in so install.sh never touches skills.
+class TestCopyKissExtraBundleOptIn(unittest.TestCase):
+    """The extra-dirs copy must be opt-in so install.sh bundles nothing extra.
 
     These tests execute the actual bundling block extracted verbatim from
     copy-kiss.sh, so they verify real behavior, not just script text.
     """
 
-    def test_skills_copied_when_bundle_var_set(self) -> None:
+    def test_extra_dir_copied_when_bundle_var_set(self) -> None:
         self.assertTrue(
-            run_skills_block(bundle_var_set=True, skills_src_exists=True),
-            "KISS_BUNDLE_CLAUDE_SKILLS=1 must bundle claude_skills into DEST",
+            run_extra_bundle_block(bundle_var_set=True, extra_src_exists=True),
+            "KISS_BUNDLE_EXTRA_DIRS must bundle the listed dirs into DEST",
         )
 
-    def test_skills_not_copied_without_bundle_var(self) -> None:
+    def test_extra_dir_not_copied_without_bundle_var(self) -> None:
         self.assertFalse(
-            run_skills_block(bundle_var_set=False, skills_src_exists=True),
-            "without KISS_BUNDLE_CLAUDE_SKILLS the skills must NOT be bundled"
+            run_extra_bundle_block(bundle_var_set=False, extra_src_exists=True),
+            "without KISS_BUNDLE_EXTRA_DIRS nothing extra must be bundled"
             " (this is the install.sh path)",
         )
 
-    def test_no_copy_when_skills_dir_missing(self) -> None:
+    def test_no_copy_when_extra_dir_missing(self) -> None:
         self.assertFalse(
-            run_skills_block(bundle_var_set=True, skills_src_exists=False),
-            "a missing claude_skills source dir must not fail or copy anything",
+            run_extra_bundle_block(bundle_var_set=True, extra_src_exists=False),
+            "a missing extra source dir must not fail or copy anything",
         )
 
     def test_release_sh_sets_bundle_var_for_copy_kiss_and_package(self) -> None:
@@ -116,8 +117,9 @@ class TestCopyKissClaudeSkillsOptIn(unittest.TestCase):
         bare `npm run package` would silently drop the skills from the VSIX.
         """
         text = RELEASE_SH.read_text()
-        self.assertIn("KISS_BUNDLE_CLAUDE_SKILLS=1 npm run copy-kiss", text)
-        self.assertIn("KISS_BUNDLE_CLAUDE_SKILLS=1 npm run package", text)
+        opt_in = f'KISS_BUNDLE_EXTRA_DIRS="{SKILLS_DIR_REL}"'
+        self.assertIn(f"{opt_in} npm run copy-kiss", text)
+        self.assertIn(f"{opt_in} npm run package", text)
 
 
 class TestInstallShNeverTouchesClaudeSkills(unittest.TestCase):
@@ -130,14 +132,14 @@ class TestInstallShNeverTouchesClaudeSkills(unittest.TestCase):
                 needle,
                 text,
                 f"install.sh must not mention '{needle}' — Claude skills are"
-                " owned by release.sh/copy-kiss.sh only",
+                " owned by release.sh only",
             )
 
-    def test_install_sh_does_not_opt_into_skills_bundling(self) -> None:
+    def test_install_sh_does_not_opt_into_extra_bundling(self) -> None:
         self.assertNotIn(
-            "KISS_BUNDLE_CLAUDE_SKILLS",
+            "KISS_BUNDLE_EXTRA_DIRS",
             INSTALL_SH.read_text(),
-            "install.sh must never set the skills bundling opt-in variable",
+            "install.sh must never set the extra-dirs bundling opt-in variable",
         )
 
 
@@ -163,7 +165,7 @@ class TestReleaseShClaudeSkillsStep(unittest.TestCase):
     def test_release_sh_targets_claude_skills_dir(self) -> None:
         text = RELEASE_SH.read_text()
         self.assertIn(
-            "src/kiss/agents/claude_skills",
+            SKILLS_DIR_REL,
             text,
             "release.sh must target the claude_skills directory",
         )
