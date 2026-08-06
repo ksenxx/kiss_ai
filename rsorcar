@@ -51,7 +51,12 @@
 #   7. Publish it worldwide: a remote password is required (kiss-web only opens
 #      a Cloudflare tunnel when one is set), ``cloudflared`` is installed when
 #      missing, and the resulting public https URL is verified from this
-#      machine and opened in your browser.
+#      machine and opened in your browser.  The stable https://ntfy.sh/<topic>
+#      URL the web app displays is made machine-unique first: a
+#      ~/.kiss/ntfy_topic equal to this machine's (copied by an old deploy) is
+#      dropped so the remote regenerates its own topic — otherwise both
+#      machines publish their tunnel URLs to one topic and the URL shown on
+#      the remote resolves to whichever machine posted last.
 #
 # Environment overrides:
 #   SORCAR_REMOTE_DIR   name of the remote folder (default: project name)
@@ -254,6 +259,13 @@ fi
 # ---------------------------------------------------------------------------
 PASSWORD="${SORCAR_PASSWORD:-}"
 
+# The ntfy topic is the stable half of the web app's URL: the UI shows
+# https://ntfy.sh/<topic>, where kiss-web posts its current tunnel URL, so
+# every machine must own a distinct topic.  This machine's topic is shipped
+# so the remote can drop a copy of it (step 7a'); kiss-web then regenerates
+# a topic from the remote machine's own identity.
+LOCAL_NTFY_TOPIC="$(cat "$HOME/.kiss/ntfy_topic" 2>/dev/null | tr -d '[:space:]' || true)"
+
 # Git facts of this checkout, so the remote repository becomes a usable clone
 # you can commit and push from: same remotes, same branch, same history.
 GITHUB_USER="${SORCAR_GITHUB_USER:-ksenxx}"
@@ -285,7 +297,7 @@ step "Installing KISS Sorcar on $TARGET (this takes a few minutes) ..."
 ssh "$TARGET" "REMOTE_DIR='$REMOTE_DIR' WEB_PORT='$WEB_PORT' PASSWORD='$PASSWORD' \
     GIT_BRANCH='$GIT_BRANCH' GIT_HEAD='$GIT_HEAD' GIT_NAME='$GIT_NAME' \
     GIT_EMAIL='$GIT_EMAIL' GITHUB_USER='$GITHUB_USER' \
-    GIT_REMOTES_B64='$GIT_REMOTES_B64' bash -s" <<'REMOTE'
+    GIT_REMOTES_B64='$GIT_REMOTES_B64' LOCAL_NTFY_TOPIC='$LOCAL_NTFY_TOPIC' bash -s" <<'REMOTE'
 set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
 [ -f "$HOME/.kiss/api_keys.env" ] && . "$HOME/.kiss/api_keys.env"
@@ -473,6 +485,21 @@ with open(path, "w", encoding="utf-8") as fh:
 os.chmod(path, 0o600)
 print("SORCAR_PASSWORD=" + password)
 PY
+
+# --- 7a'. A machine-unique ntfy topic, so the URL the web app shows is its
+#          own.  The web app presents https://ntfy.sh/<topic> (from
+#          ~/.kiss/ntfy_topic) as its stable URL and posts its tunnel URL
+#          there.  When an old deploy copied the laptop's topic file here,
+#          both machines published to one topic, and the URL shown on this
+#          host resolved to whichever machine posted last — usually the
+#          laptop.  Dropping the copied file makes kiss-web regenerate a
+#          topic from this machine's hostname+MAC; an already-unique topic
+#          is kept so the remote's published URL stays stable.
+if [ -n "${LOCAL_NTFY_TOPIC:-}" ] \
+   && [ "$(cat "$HOME/.kiss/ntfy_topic" 2>/dev/null | tr -d '[:space:]')" = "$LOCAL_NTFY_TOPIC" ]; then
+    rinfo "Dropping ~/.kiss/ntfy_topic copied from the local machine (a unique one is regenerated)..."
+    rm -f "$HOME/.kiss/ntfy_topic"
+fi
 
 # --- 7b. cloudflared: the tunnel that makes the web app world-reachable ----
 if ! command -v cloudflared >/dev/null 2>&1; then
