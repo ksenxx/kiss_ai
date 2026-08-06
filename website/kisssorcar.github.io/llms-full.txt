@@ -663,12 +663,6 @@ See also [Prompt Tricks](prompt-tricks.md) and [Tips](tips.md).
 
 > Reusable prompt snippets ("tricks") that boost KISS Sorcar result quality. In the VS Code extension these appear under the "Tricks" button; they are the concatenation of `~/.kiss/MY_INJECTION.md` (your personal tricks, auto-seeded on first read) and the bundled `src/kiss/INJECTIONS.md` (read directly from the package so every upgrade delivers the latest defaults). Append one or more to your task prompt.
 
-## Research
-
-```text
-Search internet extensively.
-```
-
 ## Multi-Model Quality
 
 ```text
@@ -696,13 +690,6 @@ Can you use the instructions in the file @ to perform the task?
 
 ```text
 Can you check the following message for a merge conflict and help me fix it?
-```
-
-## Debugging
-
-```text
-Why did the last task fail? Thoroughly and precisely analyze the logs and the events of the
-task. Reproduce the issue by writing an integration test. Then fix the issue.
 ```
 
 See also [Sample Tasks](sample-tasks.md) and [Tips](tips.md).
