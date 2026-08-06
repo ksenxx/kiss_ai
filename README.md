@@ -2,7 +2,7 @@
 
 ![KISS Framework](assets/KISS-Sorcar.png)
 
-[![Version](https://img.shields.io/badge/version-2026.8.2-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
+[![Version](https://img.shields.io/badge/version-2026.8.3-blue?style=flat-square)](https://pypi.org/project/kiss-agent-framework/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.13-blue?style=flat-square)](https://www.python.org/)
 [![Website](https://img.shields.io/badge/website-kisssorcar.github.io-1976d2?style=flat-square)](https://kisssorcar.github.io/)
@@ -61,7 +61,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~2850** | Unknown | Unknown |
-| **Models in bundled catalog** | 601 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 603 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -193,7 +193,7 @@ The interactive CLI includes:
 - Custom Markdown slash commands loaded from `~/.kiss/commands`, `<project>/.kiss/commands`, `~/.claude/commands`, and `<project>/.claude/commands`.
 - Agent Skills loaded from `~/.kiss/skills`, `<project>/.kiss/skills`, Claude skill directories, `.agents/skills`, and bundled Sorcar skills.
 - MCP server discovery from `~/.kiss/mcp.json`, `<project>/.kiss/mcp.json`, and `<project>/.mcp.json`.
-- VS Code "Tricks" button entries read from `~/.kiss/INJECTIONS.md` (one per `## Trick` section), seeded on install from the bundled `src/kiss/INJECTIONS.md`. Edit the file to customise the dropdown; remove it to regenerate from the bundled defaults.
+- VS Code "Tricks" button entries are the concatenation of two `## Trick`-sectioned Markdown files: (1) `~/.kiss/MY_INJECTION.md` — your personal tricks, auto-seeded on first read with a starter trick and never overwritten thereafter; (2) the bundled `src/kiss/INJECTIONS.md` — tricks shipped with the extension, read directly from the package so every upgrade delivers the latest defaults. To customise your dropdown edit `~/.kiss/MY_INJECTION.md`; to reset it remove the file.
 - VS Code welcome-screen sample-task chips are the concatenation of two `## Task`-sectioned Markdown files: (1) `~/.kiss/MY_TASK_TEMPLATES.md` — your personal tasks, auto-created on first launch with the seed `## Task\n\nHi!\n` and never overwritten thereafter; (2) the bundled `src/kiss/SAMPLE_TASKS.md` — sample tasks shipped with the extension, read directly from the package so every upgrade delivers the latest chips. To customise your chips edit `~/.kiss/MY_TASK_TEMPLATES.md`; to reset it remove the file.
 
 ### `sorcar mcp` subcommand
@@ -202,7 +202,7 @@ Manage Model-Context-Protocol servers used by Sorcar:
 
 | Subcommand | Purpose |
 |---|---|
-| `sorcar mcp add <name> <cmd…>` | Register a stdio (default) or `--transport http`/`sse` server in `--scope user` (`~/.kiss/mcp.json`) or `--scope project` (`<work_dir>/.kiss/mcp.json`); supports `--env KEY=VALUE` and `--header 'Key: Value'` (repeatable). |
+| `sorcar mcp add [options] <name> <cmd…>` | Register a stdio (default) or `--transport http`/`sse` server in `--scope user` (`~/.kiss/mcp.json`) or `--scope project` (`<work_dir>/.kiss/mcp.json`); supports `--env KEY=VALUE` and `--header 'Key: Value'` (repeatable). **All options must precede `<name>`** because the target command uses `argparse.REMAINDER`; options placed after `<name>` are consumed as target arguments. |
 | `sorcar mcp list [--ping]` | List configured servers; `--ping` also connects and reports live status and tool counts. |
 | `sorcar mcp get <name>` | Print one server's configuration as JSON. |
 | `sorcar mcp remove <name>` | Delete a server from every writable config file. |
@@ -222,24 +222,24 @@ These agents live in `src/kiss/agents/third_party_agents/`.
 
 ## 🤖 Models Supported
 
-KISS Sorcar ships a catalog of **601 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
+KISS Sorcar ships a catalog of **603 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
 
 | Provider category | Catalog entries |
 |---|---:|
 | OpenAI | 105 |
-| Anthropic | 15 |
+| Anthropic | 13 |
 | Gemini / Google | 27 |
-| Together AI | 85 |
+| Together AI | 86 |
 | Z.AI | 8 |
 | Moonshot AI | 10 |
-| OpenRouter | 339 |
+| OpenRouter | 342 |
 | Claude Code CLI (`cc/*`) | 3 |
 | Codex CLI (`codex/*`) | 9 |
 
 Current catalog capability totals:
 
-- **584** generation-capable models
-- **426** function-calling-capable models
+- **586** generation-capable models
+- **428** function-calling-capable models
 - **8** embedding models
 
 Full model list:
@@ -295,13 +295,28 @@ Full model list:
 - `gpt-5.4-nano-2026-03-17`
 - `gpt-5.5`
 - `gpt-5.5-2026-04-23`
+- `gpt-5.5-2026-04-23-high`
+- `gpt-5.5-2026-04-23-low`
+- `gpt-5.5-2026-04-23-medium`
 - `gpt-5.5-2026-04-23-xhigh`
+- `gpt-5.5-high`
+- `gpt-5.5-low`
+- `gpt-5.5-medium`
 - `gpt-5.5-xhigh`
 - `gpt-5.6-luna`
+- `gpt-5.6-luna-high`
+- `gpt-5.6-luna-low`
+- `gpt-5.6-luna-medium`
 - `gpt-5.6-luna-xhigh`
 - `gpt-5.6-sol`
+- `gpt-5.6-sol-high`
+- `gpt-5.6-sol-low`
+- `gpt-5.6-sol-medium`
 - `gpt-5.6-sol-xhigh`
 - `gpt-5.6-terra`
+- `gpt-5.6-terra-high`
+- `gpt-5.6-terra-low`
+- `gpt-5.6-terra-medium`
 - `gpt-5.6-terra-xhigh`
 - `gpt-audio`
 - `gpt-audio-1.5`
@@ -327,7 +342,13 @@ Full model list:
 - `o4-mini-deep-research`
 - `o4-mini-deep-research-2025-06-26`
 - `openai/gpt-oss-120b`
+- `openai/gpt-oss-120b-high`
+- `openai/gpt-oss-120b-low`
+- `openai/gpt-oss-120b-medium`
 - `openai/gpt-oss-20b`
+- `openai/gpt-oss-20b-high`
+- `openai/gpt-oss-20b-low`
+- `openai/gpt-oss-20b-medium`
 - `text-embedding-3-large`
 - `text-embedding-3-small`
 - `text-embedding-ada-002`
@@ -335,18 +356,17 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Anthropic (15)</strong></summary>
+<summary><strong>Anthropic (13)</strong></summary>
 
 - `claude-fable-5`
 - `claude-haiku-4-5`
 - `claude-haiku-4-5-20251001`
-- `claude-opus-4-1`
-- `claude-opus-4-1-20250805`
 - `claude-opus-4-5`
 - `claude-opus-4-5-20251101`
 - `claude-opus-4-6`
 - `claude-opus-4-7`
 - `claude-opus-4-8`
+- `claude-opus-5`
 - `claude-sonnet-4-5`
 - `claude-sonnet-4-5-20250929`
 - `claude-sonnet-4-6`
@@ -388,17 +408,38 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Together AI (85)</strong></summary>
+<summary><strong>Together AI (86)</strong></summary>
 
-- `arcee-ai/trinity-mini`
 - `BAAI/bge-base-en-v1.5`
+- `Qwen/QwQ-32B`
+- `Qwen/Qwen2-1.5B-Instruct`
+- `Qwen/Qwen2-VL-72B-Instruct`
+- `Qwen/Qwen2.5-14B-Instruct`
+- `Qwen/Qwen2.5-72B-Instruct`
+- `Qwen/Qwen2.5-72B-Instruct-Turbo`
+- `Qwen/Qwen2.5-7B-Instruct-Turbo`
+- `Qwen/Qwen2.5-Coder-32B-Instruct`
+- `Qwen/Qwen2.5-VL-72B-Instruct`
+- `Qwen/Qwen3-235B-A22B-Instruct-2507-tput`
+- `Qwen/Qwen3-235B-A22B-Thinking-2507`
+- `Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8`
+- `Qwen/Qwen3-Coder-Next-FP8`
+- `Qwen/Qwen3-Next-80B-A3B-Instruct`
+- `Qwen/Qwen3-Next-80B-A3B-Thinking`
+- `Qwen/Qwen3-VL-32B-Instruct`
+- `Qwen/Qwen3-VL-8B-Instruct`
+- `Qwen/Qwen3.5-397B-A17B`
+- `Qwen/Qwen3.5-9B`
+- `Qwen/Qwen3.6-Plus`
+- `Qwen/Qwen3.7-Max`
+- `Qwen/Qwen3.7-Plus`
+- `arcee-ai/trinity-mini`
 - `deepcogito/cogito-v1-preview-llama-70B`
 - `deepcogito/cogito-v1-preview-llama-70B-Turbo`
 - `deepcogito/cogito-v1-preview-llama-8B`
 - `deepcogito/cogito-v1-preview-qwen-14B`
 - `deepcogito/cogito-v1-preview-qwen-32B`
 - `deepcogito/cogito-v2-1-671b`
-- `deepseek-ai/deepseek-coder-33b-instruct`
 - `deepseek-ai/DeepSeek-R1`
 - `deepseek-ai/DeepSeek-R1-0528`
 - `deepseek-ai/DeepSeek-R1-0528-tput`
@@ -407,7 +448,9 @@ Full model list:
 - `deepseek-ai/DeepSeek-R1-Distill-Qwen-14B`
 - `deepseek-ai/DeepSeek-V3-0324`
 - `deepseek-ai/DeepSeek-V3.1`
+- `deepseek-ai/DeepSeek-V4-Flash-0731`
 - `deepseek-ai/DeepSeek-V4-Pro`
+- `deepseek-ai/deepseek-coder-33b-instruct`
 - `essentialai/rnj-1-instruct`
 - `intfloat/multilingual-e5-large-instruct`
 - `meta-llama/Llama-3-70b-chat-hf`
@@ -443,36 +486,16 @@ Full model list:
 - `moonshotai/Kimi-K3-low`
 - `moonshotai/Kimi-K3-max`
 - `nvidia/Llama-3.1-Nemotron-70B-Instruct-HF`
-- `nvidia/nemotron-3-ultra-550b-a55b`
 - `nvidia/NVIDIA-Nemotron-Nano-9B-v2`
-- `Qwen/Qwen2-1.5B-Instruct`
-- `Qwen/Qwen2-VL-72B-Instruct`
-- `Qwen/Qwen2.5-14B-Instruct`
-- `Qwen/Qwen2.5-72B-Instruct`
-- `Qwen/Qwen2.5-72B-Instruct-Turbo`
-- `Qwen/Qwen2.5-7B-Instruct-Turbo`
-- `Qwen/Qwen2.5-Coder-32B-Instruct`
-- `Qwen/Qwen2.5-VL-72B-Instruct`
-- `Qwen/Qwen3-235B-A22B-Instruct-2507-tput`
-- `Qwen/Qwen3-235B-A22B-Thinking-2507`
-- `Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8`
-- `Qwen/Qwen3-Coder-Next-FP8`
-- `Qwen/Qwen3-Next-80B-A3B-Instruct`
-- `Qwen/Qwen3-Next-80B-A3B-Thinking`
-- `Qwen/Qwen3-VL-32B-Instruct`
-- `Qwen/Qwen3-VL-8B-Instruct`
-- `Qwen/Qwen3.5-397B-A17B`
-- `Qwen/Qwen3.5-9B`
-- `Qwen/Qwen3.6-Plus`
-- `Qwen/Qwen3.7-Max`
-- `Qwen/Qwen3.7-Plus`
-- `Qwen/QwQ-32B`
+- `nvidia/nemotron-3-ultra-550b-a55b`
 - `zai-org/GLM-4.5-Air-FP8`
 - `zai-org/GLM-4.6`
 - `zai-org/GLM-4.7`
 - `zai-org/GLM-5`
 - `zai-org/GLM-5.1`
 - `zai-org/GLM-5.2`
+- `zai-org/GLM-5.2-high`
+- `zai-org/GLM-5.2-max`
 
 </details>
 
@@ -507,7 +530,7 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>OpenRouter (339)</strong></summary>
+<summary><strong>OpenRouter (342)</strong></summary>
 
 - `openrouter/ai21/jamba-large-1.7`
 - `openrouter/aion-labs/aion-2.0`
@@ -533,6 +556,8 @@ Full model list:
 - `openrouter/anthropic/claude-opus-4.7-fast`
 - `openrouter/anthropic/claude-opus-4.8`
 - `openrouter/anthropic/claude-opus-4.8-fast`
+- `openrouter/anthropic/claude-opus-5`
+- `openrouter/anthropic/claude-opus-5-fast`
 - `openrouter/anthropic/claude-sonnet-4`
 - `openrouter/anthropic/claude-sonnet-4.5`
 - `openrouter/anthropic/claude-sonnet-4.6`
@@ -561,6 +586,7 @@ Full model list:
 - `openrouter/deepseek/deepseek-v3.2`
 - `openrouter/deepseek/deepseek-v3.2-exp`
 - `openrouter/deepseek/deepseek-v4-flash`
+- `openrouter/deepseek/deepseek-v4-flash-0731`
 - `openrouter/deepseek/deepseek-v4-pro`
 - `openrouter/google/gemini-2.5-flash`
 - `openrouter/google/gemini-2.5-flash-image`
@@ -596,9 +622,8 @@ Full model list:
 - `openrouter/inception/mercury-2`
 - `openrouter/inclusionai/ling-2.6-1t`
 - `openrouter/inclusionai/ling-2.6-flash`
+- `openrouter/inclusionai/ling-3.0-flash`
 - `openrouter/inclusionai/ring-2.6-1t`
-- `openrouter/inflection/inflection-3-pi`
-- `openrouter/inflection/inflection-3-productivity`
 - `openrouter/kwaipilot/kat-coder-air-v2.5`
 - `openrouter/kwaipilot/kat-coder-pro-v2`
 - `openrouter/kwaipilot/kat-coder-pro-v2.5`
@@ -613,10 +638,10 @@ Full model list:
 - `openrouter/meta-llama/llama-4-scout`
 - `openrouter/meta-llama/llama-guard-4-12b`
 - `openrouter/meta/muse-spark-1.1`
+- `openrouter/meta/muse-spark-1.2`
 - `openrouter/microsoft/phi-4`
 - `openrouter/microsoft/wizardlm-2-8x22b`
 - `openrouter/mistralai/codestral-2508`
-- `openrouter/mistralai/devstral-2512`
 - `openrouter/mistralai/ministral-14b-2512`
 - `openrouter/mistralai/ministral-3b-2512`
 - `openrouter/mistralai/ministral-8b-2512`
@@ -671,17 +696,13 @@ Full model list:
 - `openrouter/openai/gpt-4o-2024-11-20`
 - `openrouter/openai/gpt-4o-mini`
 - `openrouter/openai/gpt-4o-mini-2024-07-18`
-- `openrouter/openai/gpt-4o-mini-search-preview`
-- `openrouter/openai/gpt-4o-search-preview`
 - `openrouter/openai/gpt-4o:extended`
 - `openrouter/openai/gpt-5`
-- `openrouter/openai/gpt-5-chat`
 - `openrouter/openai/gpt-5-image`
 - `openrouter/openai/gpt-5-image-mini`
 - `openrouter/openai/gpt-5-mini`
 - `openrouter/openai/gpt-5-nano`
 - `openrouter/openai/gpt-5.1`
-- `openrouter/openai/gpt-5.1-chat`
 - `openrouter/openai/gpt-5.2`
 - `openrouter/openai/gpt-5.2-chat`
 - `openrouter/openai/gpt-5.3-chat`
@@ -690,28 +711,47 @@ Full model list:
 - `openrouter/openai/gpt-5.4-mini`
 - `openrouter/openai/gpt-5.4-nano`
 - `openrouter/openai/gpt-5.5`
+- `openrouter/openai/gpt-5.5-high`
+- `openrouter/openai/gpt-5.5-low`
+- `openrouter/openai/gpt-5.5-medium`
 - `openrouter/openai/gpt-5.5-xhigh`
 - `openrouter/openai/gpt-5.6-luna`
+- `openrouter/openai/gpt-5.6-luna-high`
+- `openrouter/openai/gpt-5.6-luna-low`
+- `openrouter/openai/gpt-5.6-luna-medium`
 - `openrouter/openai/gpt-5.6-luna-xhigh`
 - `openrouter/openai/gpt-5.6-sol`
+- `openrouter/openai/gpt-5.6-sol-high`
+- `openrouter/openai/gpt-5.6-sol-low`
+- `openrouter/openai/gpt-5.6-sol-medium`
 - `openrouter/openai/gpt-5.6-sol-xhigh`
 - `openrouter/openai/gpt-5.6-terra`
+- `openrouter/openai/gpt-5.6-terra-high`
+- `openrouter/openai/gpt-5.6-terra-low`
+- `openrouter/openai/gpt-5.6-terra-medium`
 - `openrouter/openai/gpt-5.6-terra-xhigh`
 - `openrouter/openai/gpt-audio`
 - `openrouter/openai/gpt-audio-mini`
 - `openrouter/openai/gpt-chat-latest`
 - `openrouter/openai/gpt-oss-120b`
+- `openrouter/openai/gpt-oss-120b-high`
+- `openrouter/openai/gpt-oss-120b-low`
+- `openrouter/openai/gpt-oss-120b-medium`
 - `openrouter/openai/gpt-oss-20b`
+- `openrouter/openai/gpt-oss-20b-high`
+- `openrouter/openai/gpt-oss-20b-low`
+- `openrouter/openai/gpt-oss-20b-medium`
 - `openrouter/openai/gpt-oss-safeguard-20b`
+- `openrouter/openai/gpt-oss-safeguard-20b-high`
+- `openrouter/openai/gpt-oss-safeguard-20b-low`
+- `openrouter/openai/gpt-oss-safeguard-20b-medium`
 - `openrouter/openai/o1`
 - `openrouter/openai/o1-pro`
 - `openrouter/openai/o3`
-- `openrouter/openai/o3-deep-research`
 - `openrouter/openai/o3-mini`
 - `openrouter/openai/o3-mini-high`
 - `openrouter/openai/o3-pro`
 - `openrouter/openai/o4-mini`
-- `openrouter/openai/o4-mini-deep-research`
 - `openrouter/openai/o4-mini-high`
 - `openrouter/perceptron/perceptron-mk1`
 - `openrouter/perplexity/sonar`
@@ -719,7 +759,7 @@ Full model list:
 - `openrouter/perplexity/sonar-pro`
 - `openrouter/perplexity/sonar-pro-search`
 - `openrouter/perplexity/sonar-reasoning-pro`
-- `openrouter/poolside/laguna-m.1`
+- `openrouter/poolside/laguna-s-2.1`
 - `openrouter/poolside/laguna-xs-2.1`
 - `openrouter/qwen/qwen-2.5-72b-instruct`
 - `openrouter/qwen/qwen-2.5-7b-instruct`
@@ -766,8 +806,10 @@ Full model list:
 - `openrouter/qwen/qwen3.6-flash`
 - `openrouter/qwen/qwen3.6-max-preview`
 - `openrouter/qwen/qwen3.6-plus`
+- `openrouter/qwen/qwen3.7-flash`
 - `openrouter/qwen/qwen3.7-max`
 - `openrouter/qwen/qwen3.7-plus`
+- `openrouter/qwen/qwen3.8-max`
 - `openrouter/rekaai/reka-edge`
 - `openrouter/rekaai/reka-flash-3`
 - `openrouter/relace/relace-apply-3`
@@ -786,13 +828,20 @@ Full model list:
 - `openrouter/thedrummer/skyfall-36b-v2`
 - `openrouter/thedrummer/unslopnemo-12b`
 - `openrouter/thinkingmachines/inkling`
+- `openrouter/thinkingmachines/inkling-small`
 - `openrouter/undi95/remm-slerp-l2-13b`
 - `openrouter/upstage/solar-pro-3`
 - `openrouter/writer/palmyra-x5`
 - `openrouter/x-ai/grok-4.20`
 - `openrouter/x-ai/grok-4.20-multi-agent`
 - `openrouter/x-ai/grok-4.3`
+- `openrouter/x-ai/grok-4.3-high`
+- `openrouter/x-ai/grok-4.3-low`
+- `openrouter/x-ai/grok-4.3-medium`
 - `openrouter/x-ai/grok-4.5`
+- `openrouter/x-ai/grok-4.5-high`
+- `openrouter/x-ai/grok-4.5-low`
+- `openrouter/x-ai/grok-4.5-medium`
 - `openrouter/x-ai/grok-build-0.1`
 - `openrouter/xiaomi/mimo-v2.5`
 - `openrouter/xiaomi/mimo-v2.5-pro`
@@ -807,15 +856,21 @@ Full model list:
 - `openrouter/z-ai/glm-5-turbo`
 - `openrouter/z-ai/glm-5.1`
 - `openrouter/z-ai/glm-5.2`
+- `openrouter/z-ai/glm-5.2-high`
+- `openrouter/z-ai/glm-5.2-max`
 - `openrouter/z-ai/glm-5v-turbo`
 - `openrouter/~anthropic/claude-fable-latest`
 - `openrouter/~anthropic/claude-haiku-latest`
 - `openrouter/~anthropic/claude-opus-latest`
 - `openrouter/~anthropic/claude-sonnet-latest`
+- `openrouter/~deepseek/deepseek-v4-flash-latest`
 - `openrouter/~google/gemini-flash-latest`
 - `openrouter/~google/gemini-pro-latest`
 - `openrouter/~moonshotai/kimi-latest`
 - `openrouter/~openai/gpt-latest`
+- `openrouter/~openai/gpt-latest-high`
+- `openrouter/~openai/gpt-latest-low`
+- `openrouter/~openai/gpt-latest-medium`
 - `openrouter/~openai/gpt-latest-xhigh`
 - `openrouter/~openai/gpt-mini-latest`
 - `openrouter/~x-ai/grok-latest`
