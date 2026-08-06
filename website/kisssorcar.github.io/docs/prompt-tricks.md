@@ -1,82 +1,34 @@
 # Prompt Tricks
 
-> Reusable prompt snippets ("tricks") that boost KISS Sorcar result quality. In the VS Code extension these appear under the "Tricks" button; they are read from `~/.kiss/INJECTIONS.md`, seeded from the bundled `src/kiss/INJECTIONS.md`. Append one or more to your task prompt.
+> Reusable prompt snippets ("tricks") that boost KISS Sorcar result quality. In the VS Code extension these appear under the "Tricks" button; they are the concatenation of `~/.kiss/MY_INJECTION.md` (your personal tricks, auto-seeded on first read) and the bundled `src/kiss/INJECTIONS.md` (read directly from the package so every upgrade delivers the latest defaults). Append one or more to your task prompt.
 
-## Research
+## Multi-Model Quality
 
 ```text
-Search internet extensively.
+Use 'claude-fable-5' model for all tasks, including software development. Use 'gpt-5.6-sol'
+(not codex) for a thorough read-only review and debugging of the other model's work. Thoroughly
+check whether the other model has missed any code or wiring or introduced any bugs. Use at most
+20% of task budget in gpt-5.6-sol for reviewing and debugging, and ask the model to not invent
+new problems. Use the model names literally without hallucinating new model names.
 ```
 
 ## Bug Fixing
 
 ```text
-Reproduce the issue by writing end-to-end tests. Then fix the issue.
-```
-
-```text
-Reproduce any violation of the invariant by writing end-to-end tests. Then fix the issue.
-```
-
-```text
-Why did the last task failed? Thoroughly and precisely analyze the logs and the events of the
-task. Reproduce the issue by writing an integration test. Then fix the issue.
-```
-
-## Multi-Model Quality
-
-```text
-Use claude-fable-5 model for all tasks including software development. Use gpt-5.6-sol (not
-codex) for thorough review and debugging of the work done by the other model. You MUST
-thoroughly check if the other model has missed code or wirings or has introduced bugs. No need
-to check if the models exist.
-```
-
-```text
-Use openrouter/z-ai/glm-5.2 model for all tasks including coding, bug fixing, and test creation.
-ALWAYS use gpt-5.6-sol (not codex) to carefully and thoroughly review and debug the work done by
-openrouter/z-ai/glm-5.2 for bugs and missing code. Then use claude-fable-5 to do the same thing.
+Reproduce any violation of the invariant by writing end-to-end tests with 100% coverage. Then
+fix the issue.
 ```
 
 ## Instructions from a File
 
 ```text
-Can you use the instructions in the following file to perform the following task?
-```
-
-## Reports
-
-```text
-Create an html report with diagrams and illustrations in ./reports and open it in the user's
-default browser?
-```
-
-## Testing at Scale
-
-```text
-Can you run all tests and report the cause of failing tests? Do not modify any code. Running all
-tests, collecting information, and fixing them is time consuming. So split the set of tests by
-the number of test methods into number of cores - 2, and run all splits in parallel using
-`run_parallel` tool. Determine which test failures are due to a bug in the project or a bug in
-the test. Fix them accordingly.
+Can you use the instructions in the file @ to perform the task?
 ```
 
 ## Git
 
 ```text
-Can you check the following message on merge conflict and help me fix it?
-```
-
-## Review Integrity
-
-```text
-Make sure that there is no reward hacking and cheating when reviewing your implementation.
-```
-
-## Papers
-
-```text
-Build the paper, and take screenshots to check and fix formatting.
+Can you check the following message for a merge conflict and help me fix it?
 ```
 
 See also [Sample Tasks](sample-tasks.md) and [Tips](tips.md).

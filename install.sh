@@ -705,6 +705,40 @@ vscode_is_running() {
 }
 
 # ---------------------------------------------------------------------------
+# CLI launcher helpers
+# ---------------------------------------------------------------------------
+
+# Install a launcher for a repo-root script (e.g. ./rsorcar, ./sorcar-docker)
+# into $BIN_DIR so it can be run from anywhere, mirroring how the ``sorcar``
+# CLI itself is installed into ~/.local/bin (see ``installCliScript`` in
+# DependencyInstaller.ts).
+#
+# The launcher is a thin wrapper that ``exec``s the real script inside
+# $PROJECT_DIR — deliberately NOT a symlink and NOT a copy.  Both scripts
+# locate their own directory (``dirname "$0"`` / ``BASH_SOURCE``) and treat
+# it as the KISS Sorcar checkout: ``rsorcar`` deploys the folder in which the
+# script is actually present, and ``sorcar-docker`` builds the Docker image
+# from that folder.  A symlink or copy in ~/.local/bin would make them
+# resolve ~/.local/bin instead of the checkout and fail.
+install_repo_script_launcher() {
+    local name="$1"
+    local target="$PROJECT_DIR/$name"
+    if [ ! -f "$target" ]; then
+        echo "   WARNING: $target not found — skipping $name launcher."
+        return 0
+    fi
+    {
+        echo '#!/bin/bash'
+        echo "# Installed by install.sh — launcher for $target"
+        echo "# Wrapper (not a symlink/copy): the real script must see its own"
+        echo "# directory as the KISS Sorcar checkout."
+        echo "exec bash \"$target\" \"\$@\""
+    } > "$BIN_DIR/$name"
+    chmod +x "$BIN_DIR/$name"
+    echo "   Installed $BIN_DIR/$name -> $target"
+}
+
+# ---------------------------------------------------------------------------
 # Version helpers
 # ---------------------------------------------------------------------------
 
@@ -1084,6 +1118,15 @@ exec > >(tee -a "$LOG_FILE") 2>&1
         exit 1
     fi
     echo "   Built $VSIX"
+    echo ""
+
+    # The ``sorcar`` CLI itself is installed into ~/.local/bin by the VS Code
+    # extension (``installCliScript`` in DependencyInstaller.ts).  Install the
+    # companion repo-root scripts the same way so they too can be run from
+    # anywhere.
+    echo ">>> Installing rsorcar and sorcar-docker launchers..."
+    install_repo_script_launcher rsorcar
+    install_repo_script_launcher sorcar-docker
     echo ""
 
     # BEGIN: kiss-step-5-5-terminal-freeze  (tests extract this block verbatim)
