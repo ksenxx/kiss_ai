@@ -321,7 +321,7 @@ class RelentlessAgent(Base):
                 ):
                     self._current_executor = None
                     self._accumulate_usage(executor)
-                    error_result = finish(False, False, str(exc))
+                    error_result = finish(False, False, f"{type(exc).__name__}: {exc}")
                     if self.printer:
                         self.printer.print(
                             error_result,

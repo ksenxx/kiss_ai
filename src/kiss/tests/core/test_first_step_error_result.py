@@ -17,6 +17,7 @@ type="result", ...)`` before returning early on first-step errors.
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -124,6 +125,10 @@ class TestFirstStepErrorResult:
             assert result_parsed["success"] is False
             assert result_parsed.get("summary"), (
                 "Result event must contain a non-empty summary/error message"
+            )
+            assert re.match(r"^(<p>)?\w+(Error|Exception|Warning)?: ", result_parsed["summary"]), (
+                "First-step error summary must be prefixed with the exception "
+                f"type name (e.g. 'KISSError: ...'), got: {result_parsed['summary']!r}"
             )
         finally:
             server.shutdown()
