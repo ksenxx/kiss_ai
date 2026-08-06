@@ -59,10 +59,20 @@ git ls-files src/kiss/ | while IFS= read -r f; do
     cp "$f" "$DEST/$f"
 done
 
-CLAUDE_SKILLS_SRC="$PROJECT_ROOT/src/kiss/agents/claude_skills"
-if [ -d "$CLAUDE_SKILLS_SRC" ]; then
-    cp -R "$CLAUDE_SKILLS_SRC" "$DEST/src/kiss/agents/claude_skills"
-    echo "Copied Claude Code skills to $DEST/src/kiss/agents/claude_skills"
-fi
+# Extra directories (space-separated, relative to PROJECT_ROOT) listed in
+# KISS_BUNDLE_EXTRA_DIRS are bundled into the extension.  release.sh uses
+# this to ship additional content in release VSIXes; install.sh leaves the
+# variable unset, so a source install bundles nothing extra.  Note that
+# `npm run package` re-runs this script via `vscode:prepublish`, so the
+# variable must be set for the package step too, not just `copy-kiss`.
+# BEGIN: kiss-extra-bundle  (tests extract this block verbatim)
+for extra_dir in ${KISS_BUNDLE_EXTRA_DIRS:-}; do
+    if [ -d "$PROJECT_ROOT/$extra_dir" ]; then
+        mkdir -p "$DEST/$(dirname "$extra_dir")"
+        cp -R "$PROJECT_ROOT/$extra_dir" "$DEST/$extra_dir"
+        echo "Bundled $extra_dir into $DEST/$extra_dir"
+    fi
+done
+# END: kiss-extra-bundle
 
 echo "Copied KISS project files to $DEST"
