@@ -1,6 +1,6 @@
 # Models Supported by KISS Sorcar
 
-> KISS Sorcar ships a catalog of **538 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding).
+> KISS Sorcar ships a catalog of **603 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding).
 
 The machine-readable source of truth is [`src/kiss/core/models/MODEL_INFO.json`](https://raw.githubusercontent.com/ksenxx/kiss_ai/main/src/kiss/core/models/MODEL_INFO.json) in the source repository.
 
@@ -8,21 +8,21 @@ The machine-readable source of truth is [`src/kiss/core/models/MODEL_INFO.json`]
 
 | Provider category | Catalog entries |
 |---|---:|
-| OpenAI | 84 |
-| Anthropic | 14 |
+| OpenAI | 105 |
+| Anthropic | 13 |
 | Gemini / Google | 27 |
-| Together AI | 79 |
+| Together AI | 86 |
 | Z.AI | 8 |
-| Moonshot AI | 7 |
-| OpenRouter | 307 |
+| Moonshot AI | 10 |
+| OpenRouter | 342 |
 | Claude Code CLI (`cc/*`) | 3 |
 | Codex CLI (`codex/*`) | 9 |
 
 ## Capability Totals
 
-- **521** generation-capable models
-- **369** function-calling-capable models
-- **10** embedding models
+- **586** generation-capable models
+- **428** function-calling-capable models
+- **8** embedding models
 
 ## Configuring Model Access
 
@@ -47,7 +47,7 @@ sorcar -e "http://localhost:8000/v1" --header "Authorization:Bearer xxx" -t "...
 ## Model Namespaces
 
 - Plain names (e.g. `claude-sonnet-4-6`, `gpt-4.1`) map to the native provider APIs.
-- `openrouter/...` routes through OpenRouter (307 entries, including `openrouter/~vendor/model-latest` aliases that always track the newest model).
+- `openrouter/...` routes through OpenRouter (342 entries, including `openrouter/~vendor/model-latest` aliases that always track the newest model).
 - `cc/haiku`, `cc/sonnet`, `cc/opus` run on top of the Claude Code CLI.
 - `codex/...` (e.g. `codex/gpt-5.6-sol`) run on top of the Codex CLI.
 
@@ -67,4 +67,4 @@ A running agent can also switch its own model mid-task with the `set_model` tool
 
 When `-m/--model_name` is omitted, `sorcar` defaults to the best available model for the API keys you have configured.
 
-The full per-model list (all 538 entries) is in the [project README](https://github.com/ksenxx/kiss_ai#-models-supported).
+The full per-model list (all 603 entries) is in the [project README](https://github.com/ksenxx/kiss_ai#-models-supported).

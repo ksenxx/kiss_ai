@@ -78,7 +78,7 @@ sorcar --version
 - Custom Markdown slash commands loaded from `~/.kiss/commands`, `<project>/.kiss/commands`, `~/.claude/commands`, and `<project>/.claude/commands`.
 - Agent Skills loaded from `~/.kiss/skills`, `<project>/.kiss/skills`, Claude skill directories, `.agents/skills`, and bundled Sorcar skills.
 - MCP server discovery from `~/.kiss/mcp.json`, `<project>/.kiss/mcp.json`, and `<project>/.mcp.json`.
-- VS Code "Tricks" button entries read from `~/.kiss/INJECTIONS.md` (one per `## Trick` section), seeded on install from the bundled `src/kiss/INJECTIONS.md`.
+- VS Code "Tricks" button entries are the concatenation of `~/.kiss/MY_INJECTION.md` (personal tricks, auto-seeded on first read) and the bundled `src/kiss/INJECTIONS.md` (read directly from the package so every upgrade delivers the latest defaults).
 - VS Code welcome-screen sample-task chips are the concatenation of `~/.kiss/MY_TASK_TEMPLATES.md` (your personal tasks) and the bundled `src/kiss/SAMPLE_TASKS.md`.
 
 ## `sorcar mcp` Subcommand
@@ -87,7 +87,7 @@ Manage Model-Context-Protocol servers used by Sorcar:
 
 | Subcommand | Purpose |
 |---|---|
-| `sorcar mcp add <name> <cmd…>` | Register a stdio (default) or `--transport http`/`sse` server in `--scope user` (`~/.kiss/mcp.json`) or `--scope project` (`<work_dir>/.kiss/mcp.json`); supports `--env KEY=VALUE` and `--header 'Key: Value'` (repeatable) |
+| `sorcar mcp add [options] <name> <cmd…>` | Register a stdio (default) or `--transport http`/`sse` server in `--scope user` (`~/.kiss/mcp.json`) or `--scope project` (`<work_dir>/.kiss/mcp.json`); supports `--env KEY=VALUE` and `--header 'Key: Value'` (repeatable). **All options must precede `<name>`** because the target command uses `argparse.REMAINDER`; options placed after `<name>` are consumed as target arguments |
 | `sorcar mcp list [--ping]` | List configured servers; `--ping` also connects and reports live status and tool counts |
 | `sorcar mcp get <name>` | Print one server's configuration as JSON |
 | `sorcar mcp remove <name>` | Delete a server from every writable config file |
