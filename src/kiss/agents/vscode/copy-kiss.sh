@@ -59,10 +59,19 @@ git ls-files src/kiss/ | while IFS= read -r f; do
     cp "$f" "$DEST/$f"
 done
 
+# Claude Code skills are bundled ONLY when KISS_BUNDLE_CLAUDE_SKILLS is set.
+# release.sh exports it around its extension build so release VSIXes ship the
+# skills.  install.sh deliberately does NOT set it: a source install must
+# never install, delete, or otherwise touch Claude skills (the skills step
+# was likewise removed from install.sh itself — see commit 953857a9).  Note
+# that `npm run package` re-runs this script via `vscode:prepublish`, so the
+# variable must be exported for the package step too, not just `copy-kiss`.
+# BEGIN: kiss-claude-skills-bundle  (tests extract this block verbatim)
 CLAUDE_SKILLS_SRC="$PROJECT_ROOT/src/kiss/agents/claude_skills"
-if [ -d "$CLAUDE_SKILLS_SRC" ]; then
+if [ -n "${KISS_BUNDLE_CLAUDE_SKILLS:-}" ] && [ -d "$CLAUDE_SKILLS_SRC" ]; then
     cp -R "$CLAUDE_SKILLS_SRC" "$DEST/src/kiss/agents/claude_skills"
     echo "Copied Claude Code skills to $DEST/src/kiss/agents/claude_skills"
 fi
+# END: kiss-claude-skills-bundle
 
 echo "Copied KISS project files to $DEST"
