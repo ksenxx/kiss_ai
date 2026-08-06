@@ -1,5 +1,7 @@
 #include "query_q17.hpp"
 
+#include "audit.hpp"
+
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -127,6 +129,9 @@ std::vector<Q17ResultRow> run_q17(const Database& db, const Q17Args& args) {
     {
         PROFILE_SCOPE("q17_total");
         if (args.BRAND == "<<NULL>>" || args.CONTAINER == "<<NULL>>") {
+            // NULL placeholder: equality with NULL matches nothing, so the
+            // sum is empty (0) — identical to the baseline's early exit.
+            AUDIT_PATH("q17 null-arg");
             rows.push_back(Q17ResultRow{0});
 #ifdef TRACE
             TRACE_SET(query_output_rows, rows.size());
@@ -137,6 +142,9 @@ std::vector<Q17ResultRow> run_q17(const Database& db, const Q17Args& args) {
 
         const int32_t max_partkey = q17::max_value(part.partkey);
         if (max_partkey < 0) {
+            // Empty part table: data-shape condition, unreachable for any
+            // placeholder value on TPC-H data.
+            AUDIT_PATH("q17 empty-part");
             rows.push_back(Q17ResultRow{0});
 #ifdef TRACE
             TRACE_SET(query_output_rows, rows.size());
@@ -150,6 +158,9 @@ std::vector<Q17ResultRow> run_q17(const Database& db, const Q17Args& args) {
         const int32_t container_code =
             q17::find_dictionary_code(part.container.dictionary, args.CONTAINER);
         if (brand_code < 0 || container_code < 0) {
+            // BRAND or CONTAINER not present in the part dictionaries: no
+            // part can match, sum over empty set is 0 (matches baseline).
+            AUDIT_PATH("q17 unknown-code");
             rows.push_back(Q17ResultRow{0});
 #ifdef TRACE
             TRACE_SET(query_output_rows, rows.size());
@@ -161,6 +172,7 @@ std::vector<Q17ResultRow> run_q17(const Database& db, const Q17Args& args) {
         if (!db.pre.li_by_partkey_offsets.empty()) {
             // Fast path: lineitem rows are indexed by partkey (CSR); only the
             // few parts matching brand+container need their rows scanned.
+            AUDIT_PATH("q17 fast");
             const auto& pre = db.pre;
             const uint32_t* __restrict offsets = pre.li_by_partkey_offsets.data();
             const size_t num_partkeys = pre.li_by_partkey_offsets.size() - 1;
@@ -212,6 +224,10 @@ std::vector<Q17ResultRow> run_q17(const Database& db, const Q17Args& args) {
             return rows;
         }
 
+        // Fallback: the li_by_partkey CSR is built whenever any partkey >= 0
+        // exists (data-shape condition), so this full-scan branch is
+        // unreachable for any placeholder value on TPC-H data.
+        AUDIT_PATH("q17 fallback");
         const size_t match_words = (static_cast<size_t>(max_partkey) >> 6) + 1;
         std::vector<uint64_t> part_match_bits(match_words, 0);
         uint64_t part_match_count = 0;
@@ -235,6 +251,7 @@ std::vector<Q17ResultRow> run_q17(const Database& db, const Q17Args& args) {
         TRACE_ADD(join_build_rows_in, part_match_count);
 
         if (part_match_count == 0) {
+            AUDIT_PATH("q17 fallback no-matching-part");
             rows.push_back(Q17ResultRow{0});
 #ifdef TRACE
             TRACE_SET(query_output_rows, rows.size());

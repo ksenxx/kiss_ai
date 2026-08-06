@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "audit.hpp"
 #include "trace_utils.hpp"
 
 namespace {
@@ -207,6 +208,13 @@ std::vector<Q4ResultRow> run_q4(const Database& db, const Q4Args& args) {
         const int32_t hi = std::min(static_cast<int32_t>(end_offset) - 1,
                                     pre.q4_date_max);
         if (lo <= hi) {
+            AUDIT_PATH("q4 fast");
+        } else {
+            // Requested 3-month window lies entirely outside the orderdate
+            // domain: zero counts (empty result) are exact.
+            AUDIT_PATH("q4 window_empty");
+        }
+        if (lo <= hi) {
             const size_t lo_idx = static_cast<size_t>(lo - pre.q4_date_min);
             const size_t hi_idx = static_cast<size_t>(hi - pre.q4_date_min);
             for (uint32_t code = 0; code < counts_size; ++code) {
@@ -248,6 +256,10 @@ std::vector<Q4ResultRow> run_q4(const Database& db, const Q4Args& args) {
         PROFILE_SCOPE("q4_orders_scan");
         TRACE_SET(orders_rows_scanned, static_cast<uint64_t>(end_idx - start_idx));
         if (orderkey_sorted) {
+            // Fallback (baseline scan): reachable only if build_q4_artifacts
+            // did not run to completion (builder/data invariant, parameter
+            // independent).
+            AUDIT_PATH("q4 fallback_sorted");
             const auto* __restrict range_ptr = order_ranges + start_idx;
             const auto* __restrict range_end = order_ranges + end_idx;
             const uint16_t* __restrict priority_ptr = priority_codes + start_idx;
@@ -293,6 +305,9 @@ std::vector<Q4ResultRow> run_q4(const Database& db, const Q4Args& args) {
                 counts_data[code] += 1;
             }
         } else {
+            // Fallback for unsorted lineitem storage (loader invariant;
+            // never taken with this loader).
+            AUDIT_PATH("q4 fallback_unsorted");
             const int32_t* __restrict lineitem_orderkey = lineitem.orderkey.data();
             for (uint32_t o_idx = start_idx; o_idx < end_idx; ++o_idx) {
 #ifdef TRACE

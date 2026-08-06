@@ -1,5 +1,7 @@
 #include "query_q10.hpp"
 
+#include "audit.hpp"
+
 #include <parallel/algorithm>
 
 #include <algorithm>
@@ -397,6 +399,7 @@ std::vector<Q10ResultRow> run_q10(const Database& db, const Q10Args& args) {
         }
     }
     if (returnflag_code < 0) {
+        AUDIT_PATH("q10 no_returnflag_R");
 #ifdef TRACE
         q10_trace::emit();
 #endif
@@ -444,6 +447,7 @@ std::vector<Q10ResultRow> run_q10(const Database& db, const Q10Args& args) {
             db.pre.q10_order_r_revenue.size() == orders.row_count) {
             // Fast path: per-order revenue over 'R' lineitems is precomputed
             // (parameter independent); accumulate per customer in parallel.
+            AUDIT_PATH("q10 fast");
             const int64_t* __restrict r_rev = db.pre.q10_order_r_revenue.data();
             const int32_t* __restrict orders_custkey = orders.custkey.data();
             const size_t revenue_size = static_cast<size_t>(max_custkey) + 1;
@@ -464,6 +468,7 @@ std::vector<Q10ResultRow> run_q10(const Database& db, const Q10Args& args) {
                 }
             }
         } else {
+        AUDIT_PATH("q10 fallback");
         const bool lineitem_sorted = lineitem.orderkey_sorted;
         order_revenues.reserve(order_end - order_start);
         std::vector<uint32_t> order_rows;

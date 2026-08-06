@@ -1,5 +1,7 @@
 #include "query_q7.hpp"
 
+#include "audit.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -148,6 +150,7 @@ std::vector<Q7ResultRow> run_q7(const Database& db, const Q7Args& args) {
     const auto nation2_it = db.nation.name_to_key.find(args.NATION2);
     if (nation1_it == db.nation.name_to_key.end() ||
         nation2_it == db.nation.name_to_key.end()) {
+        AUDIT_PATH("q7 nation_missing");
         return {};
     }
     const int32_t nation1 = nation1_it->second;
@@ -170,6 +173,7 @@ std::vector<Q7ResultRow> run_q7(const Database& db, const Q7Args& args) {
         nation2 < db.pre.q7_nation_span && nation1 >= 0 && nation2 >= 0) {
         // Fast path: revenue cube over (supp_nation, cust_nation, year) for
         // the template-fixed 1995..1996 shipdate window.
+        AUDIT_PATH("q7 fast");
         const auto& pre = db.pre;
         const int32_t span = pre.q7_nation_span;
         std::vector<Q7ResultRow> results;
@@ -239,6 +243,7 @@ std::vector<Q7ResultRow> run_q7(const Database& db, const Q7Args& args) {
         orders.lineitem_ranges.size() == orders.row_count;
 
     if (use_order_ranges) {
+        AUDIT_PATH("q7 fallback_ranges");
         struct ScanRange {
             uint32_t start = 0;
             uint32_t end = 0;
@@ -342,6 +347,7 @@ std::vector<Q7ResultRow> run_q7(const Database& db, const Q7Args& args) {
             }
         }
     } else {
+        AUDIT_PATH("q7 fallback_scan");
         const int16_t* __restrict shipdate = lineitem.shipdate.data();
         const int32_t* __restrict suppkey = lineitem.suppkey.data();
         const int32_t* __restrict orderkey = lineitem.orderkey.data();

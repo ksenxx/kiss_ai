@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "audit.hpp"
 #include "trace_utils.hpp"
 
 namespace q3 {
@@ -306,10 +307,17 @@ std::vector<Q3ResultRow> run_q3(const Database& db, const Q3Args& args) {
                 orders_with_lineitems += 1;
             };
 
+            if (segment_code < 0) {
+                // SEGMENT is not in the customer.mktsegment dictionary: no
+                // customer can match, so every path below yields the exact
+                // empty result.
+                AUDIT_PATH("q3 unknown_segment");
+            }
             if (db.pre.q3_order_segment.size() == orders.row_count &&
                 segment_code >= 0) {
                 // Fast path: per-order segment codes are precomputed; scan
                 // qualifying orders in parallel.
+                AUDIT_PATH("q3 fast");
                 const uint16_t* __restrict order_segment =
                     db.pre.q3_order_segment.data();
                 const uint16_t segment_code_u16 =
@@ -371,6 +379,10 @@ std::vector<Q3ResultRow> run_q3(const Database& db, const Q3Args& args) {
                     results.insert(results.end(), local.begin(), local.end());
                 }
             } else if (lineitem.orderkey_sorted) {
+                // Fallback (baseline scan over sorted lineitem ranges):
+                // reachable only when segment_code < 0 (unknown SEGMENT) or
+                // when the builder never produced q3_order_segment.
+                AUDIT_PATH("q3 fallback_sorted");
                 for (uint32_t o_idx = 0; o_idx < order_limit; ++o_idx) {
                     orders_scanned += 1;
                     const int32_t custkey = orders_custkey[o_idx];
@@ -384,6 +396,10 @@ std::vector<Q3ResultRow> run_q3(const Database& db, const Q3Args& args) {
                     handle_sorted_order(o_idx);
                 }
             } else {
+                // Fallback for unsorted lineitem storage (loader invariant;
+                // never taken with this loader, which always sorts by
+                // orderkey).
+                AUDIT_PATH("q3 fallback_unsorted");
                 for (uint32_t o_idx = 0; o_idx < order_limit; ++o_idx) {
                     orders_scanned += 1;
                     const int32_t custkey = orders_custkey[o_idx];

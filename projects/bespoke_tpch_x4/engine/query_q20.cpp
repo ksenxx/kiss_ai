@@ -9,6 +9,7 @@
 #include <cmath>
 #include <vector>
 
+#include "audit.hpp"
 #include "trace_utils.hpp"
 
 namespace q20 {
@@ -344,6 +345,7 @@ std::vector<Q20ResultRow> run_q20(const Database& db, const Q20Args& args) {
         PROFILE_SCOPE("q20_total");
         if (args.COLOR == "<<NULL>>" || args.DATE == "<<NULL>>" ||
             args.NATION == "<<NULL>>") {
+            AUDIT_PATH("q20 null");
             TRACE_SET(query_output_rows, 0);
         } else {
             const auto& part = db.part;
@@ -354,6 +356,7 @@ std::vector<Q20ResultRow> run_q20(const Database& db, const Q20Args& args) {
 
             const auto nation_it = nation.name_to_key.find(args.NATION);
             if (nation_it == nation.name_to_key.end()) {
+                AUDIT_PATH("q20 unknown-nation");
                 TRACE_SET(query_output_rows, 0);
             } else {
                 const int32_t target_nation = nation_it->second;
@@ -378,11 +381,13 @@ std::vector<Q20ResultRow> run_q20(const Database& db, const Q20Args& args) {
 
                 const int32_t max_partkey = q20::max_value(part.partkey);
                 if (max_partkey < 0) {
+                    AUDIT_PATH("q20 empty-part");
                     TRACE_SET(query_output_rows, 0);
                 } else if (!db.pre.li_by_partkey_offsets.empty() &&
                            db.pre.ps_by_partkey_sorted) {
                     // Fast path: scan only the lineitem rows of parts whose
                     // name starts with COLOR, via the partkey CSR.
+                    AUDIT_PATH("q20 fast");
                     const auto& pre = db.pre;
                     const int32_t max_suppkey = q20::max_value(supplier.suppkey);
                     std::vector<uint8_t> qualified_suppkeys(
@@ -529,6 +534,7 @@ std::vector<Q20ResultRow> run_q20(const Database& db, const Q20Args& args) {
                                   return a.s_name < b.s_name;
                               });
                 } else {
+                    AUDIT_PATH("q20 fallback");
                     const size_t partkey_word_count =
                         static_cast<size_t>(max_partkey) / 64 + 1;
                     std::vector<uint64_t> partkey_color_bits(partkey_word_count, 0);

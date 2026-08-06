@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "args_parser.hpp"
+#include "audit.hpp"
 #include "cpu_affinity.hpp"
 #include "trace_utils.hpp"
 #include "query_q1.hpp"
@@ -157,6 +158,9 @@ void query(Database* db) {
 
     for (size_t idx = 0; idx < requests.size(); ++idx) {
         const auto& request = requests[idx];
+#ifdef BESPOKE_AUDIT
+        std::fprintf(stderr, "AUDIT BEGIN %zu q%s\n", idx + 1, request.id.c_str());
+#endif
         const auto start = std::chrono::steady_clock::now();
         if (request.id == "1") {
             Q1Args args = parse_q1(request);

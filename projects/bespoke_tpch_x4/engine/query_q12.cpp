@@ -1,5 +1,7 @@
 #include "query_q12.hpp"
 
+#include "audit.hpp"
+
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -189,6 +191,7 @@ std::vector<Q12ResultRow> run_q12(const Database& db, const Q12Args& args) {
         }
     }
     if (allowed_code1 < 0 && allowed_code2 < 0) {
+        AUDIT_PATH("q12 shipmodes_missing");
 #ifdef TRACE
         q12_trace::emit();
 #endif
@@ -215,11 +218,15 @@ std::vector<Q12ResultRow> run_q12(const Database& db, const Q12Args& args) {
         PROFILE_SCOPE("q12_lineitem_scan");
         const auto& pre = db.pre;
         if (pre.q12_date_max >= pre.q12_date_min && !pre.q12_counts.empty()) {
+            AUDIT_PATH("q12 fast");
             const size_t date_span =
                 static_cast<size_t>(pre.q12_date_max - pre.q12_date_min) + 1;
             // Rows counted have receiptdate in [start_offset_i, end_offset_i).
             const int32_t lo = std::max(start_offset_i, pre.q12_date_min);
             const int32_t hi = std::min(end_offset_i - 1, pre.q12_date_max);
+            if (lo > hi) {
+                AUDIT_PATH("q12 fast_window_empty");
+            }
             if (lo <= hi) {
                 const size_t lo_idx = static_cast<size_t>(lo - pre.q12_date_min);
                 const size_t hi_idx = static_cast<size_t>(hi - pre.q12_date_min);
@@ -243,6 +250,12 @@ std::vector<Q12ResultRow> run_q12(const Database& db, const Q12Args& args) {
                     lineitems_emitted += static_cast<uint64_t>(high + low);
                 }
             }
+        } else {
+            // No fallback scan exists for Q12: the builder always constructs
+            // q12_counts whenever lineitem/orders are non-empty, so this
+            // branch is only reachable on an empty database (zero rows
+            // everywhere), where empty counts are the correct answer.
+            AUDIT_PATH("q12 no_precompute");
         }
     }
     TRACE_SET(lineitem_rows_emitted, lineitems_emitted);

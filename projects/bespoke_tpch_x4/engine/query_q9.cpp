@@ -1,5 +1,7 @@
 #include "query_q9.hpp"
 
+#include "audit.hpp"
+
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -146,11 +148,13 @@ std::vector<Q9ResultRow> run_q9(const Database& db, const Q9Args& args) {
         // Fast path: lineitem profit contributions are precomputed per
         // partkey (CSR); only the p_name LIKE '%COLOR%' filter depends on the
         // query parameter.
+        AUDIT_PATH("q9 fast");
         const auto& pre = db.pre;
         const int32_t year_span = pre.q9_year_span;
         const int32_t min_year = pre.q9_min_year;
         const int32_t max_nationkey = pre.q9_max_nationkey;
         if (max_nationkey < 0) {
+            AUDIT_PATH("q9 fast_no_nations");
             return {};
         }
         const size_t group_span = static_cast<size_t>(max_nationkey + 1) *
@@ -236,6 +240,7 @@ std::vector<Q9ResultRow> run_q9(const Database& db, const Q9Args& args) {
         return results;
     }
 
+    AUDIT_PATH("q9 fallback");
     const int32_t max_partkey =
         std::max(q9::max_value(part.partkey), q9::max_value(partsupp.partkey));
     std::vector<uint8_t> part_ok_by_key(static_cast<size_t>(max_partkey) + 1, 0);
@@ -342,6 +347,7 @@ std::vector<Q9ResultRow> run_q9(const Database& db, const Q9Args& args) {
         }
     }
     if (min_year > max_year) {
+        AUDIT_PATH("q9 fallback_no_orders");
         return {};
     }
 
@@ -375,6 +381,7 @@ std::vector<Q9ResultRow> run_q9(const Database& db, const Q9Args& args) {
             lineitem.supp_nationkey.data();
 
         if (fixed_four) {
+            AUDIT_PATH("q9 fallback_fixed_four");
             for (uint32_t li_idx = 0; li_idx < lineitem_count; ++li_idx) {
                 TRACE_ADD(lineitem_rows_scanned, 1);
                 const int32_t partkey = *lineitem_partkey++;
@@ -447,6 +454,7 @@ std::vector<Q9ResultRow> run_q9(const Database& db, const Q9Args& args) {
                 TRACE_ADD(lineitem_rows_emitted, 1);
             }
         } else {
+            AUDIT_PATH("q9 fallback_general");
             for (uint32_t li_idx = 0; li_idx < lineitem_count; ++li_idx) {
                 TRACE_ADD(lineitem_rows_scanned, 1);
                 const int32_t partkey = *lineitem_partkey++;

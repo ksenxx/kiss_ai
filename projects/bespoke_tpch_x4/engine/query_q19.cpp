@@ -10,6 +10,7 @@
 #include <string_view>
 #include <vector>
 
+#include "audit.hpp"
 #include "trace_utils.hpp"
 
 namespace q19 {
@@ -142,6 +143,7 @@ std::vector<Q19ResultRow> run_q19(const Database& db, const Q19Args& args) {
             args.QUANTITY3 != "<<NULL>>" && args.BRAND3 != "<<NULL>>";
 
         if (!group1_enabled && !group2_enabled && !group3_enabled) {
+            AUDIT_PATH("q19 all-groups-null");
             TRACE_SET(agg_rows_emitted, 1);
             TRACE_SET(groups_created, 1);
             results = {Q19ResultRow{}};
@@ -153,6 +155,7 @@ std::vector<Q19ResultRow> run_q19(const Database& db, const Q19Args& args) {
                 // Fast path (early): compact precomputed rows carry brand code
                 // and template-fixed container/size bits; no table-wide scans
                 // are needed.
+                AUDIT_PATH("q19 fast");
                 const auto& pre = db.pre;
                 int32_t quantity1 = 0;
                 int32_t quantity2 = 0;
@@ -230,10 +233,12 @@ std::vector<Q19ResultRow> run_q19(const Database& db, const Q19Args& args) {
                 return results;
             }
 
+            AUDIT_PATH("q19 fallback");
             const int32_t max_partkey =
                 std::max(q19::max_value(part.partkey),
                          q19::max_value(lineitem.partkey));
             if (max_partkey < 0) {
+                AUDIT_PATH("q19 fallback empty-part");
                 TRACE_SET(agg_rows_emitted, 1);
                 TRACE_SET(groups_created, 1);
                 results = {Q19ResultRow{}};

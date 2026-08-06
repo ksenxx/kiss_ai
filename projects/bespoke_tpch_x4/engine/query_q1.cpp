@@ -9,6 +9,7 @@
 #include <iostream>
 #include <sstream>
 
+#include "audit.hpp"
 #include "trace_utils.hpp"
 
 namespace {
@@ -126,6 +127,7 @@ std::vector<Q1ResultRow> run_q1(const Database& db, const Q1Args& args) {
             const auto& pre = db.pre;
             if (cutoff_offset >= pre.q1_date_min && pre.q1_date_max >= pre.q1_date_min &&
                 pre.q1_group_count == group_capacity) {
+                AUDIT_PATH("q1 fast");
                 const size_t date_span =
                     static_cast<size_t>(pre.q1_date_max - pre.q1_date_min) + 1;
                 const size_t d = static_cast<size_t>(
@@ -140,6 +142,18 @@ std::vector<Q1ResultRow> run_q1(const Database& db, const Q1Args& args) {
                     agg.sum_disc = pre.q1_sum_discount[idx];
                     agg.count_order = pre.q1_count[idx];
                 }
+            } else if (cutoff_offset < pre.q1_date_min &&
+                       pre.q1_date_max >= pre.q1_date_min &&
+                       pre.q1_group_count == group_capacity) {
+                // Cutoff precedes the earliest shipdate: no lineitem row can
+                // satisfy l_shipdate <= cutoff, so the empty aggregates are
+                // exact.
+                AUDIT_PATH("q1 empty_precutoff");
+            } else {
+                // Builder invariants violated (q1 cube missing or dictionary
+                // drift); unreachable for any placeholder value once
+                // build_q1_artifacts has run on a non-empty lineitem table.
+                AUDIT_PATH("q1 no_precompute");
             }
         }
 

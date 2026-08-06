@@ -1,5 +1,7 @@
 #include "query_q11.hpp"
 
+#include "audit.hpp"
+
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -115,6 +117,7 @@ std::vector<Q11ResultRow> run_q11(const Database& db, const Q11Args& args) {
         PROFILE_SCOPE("q11_total");
     const auto nation_it = db.nation.name_to_key.find(args.NATION);
     if (nation_it == db.nation.name_to_key.end()) {
+        AUDIT_PATH("q11 nation_missing");
 #ifdef TRACE
         q11_trace::emit();
 #endif
@@ -129,6 +132,7 @@ std::vector<Q11ResultRow> run_q11(const Database& db, const Q11Args& args) {
     if (db.pre.q11_built && nation_key >= 0 &&
         static_cast<size_t>(nation_key) + 1 < db.pre.q11_nation_offsets.size()) {
         // Fast path: per-nation (partkey, value) aggregates are precomputed.
+        AUDIT_PATH("q11 fast");
         const auto& pre = db.pre;
         const uint32_t begin = pre.q11_nation_offsets[nation_key];
         const uint32_t end = pre.q11_nation_offsets[nation_key + 1];
@@ -151,6 +155,7 @@ std::vector<Q11ResultRow> run_q11(const Database& db, const Q11Args& args) {
         return results;
     }
 
+    AUDIT_PATH("q11 fallback");
     const int32_t max_suppkey = q11_max_value(supplier.suppkey);
     std::vector<uint8_t> supp_in_nation(static_cast<size_t>(max_suppkey) + 1, 0);
     uint64_t suppliers_emitted = 0;

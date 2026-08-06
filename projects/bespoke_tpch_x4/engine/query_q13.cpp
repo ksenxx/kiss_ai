@@ -1,5 +1,7 @@
 #include "query_q13.hpp"
 
+#include "audit.hpp"
+
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -193,6 +195,17 @@ std::vector<Q13ResultRow> run_q13(const Database& db, const Q13Args& args) {
             q13::build_alpha_mask(args.WORD1) | q13::build_alpha_mask(args.WORD2);
         const uint64_t required_bigram_mask =
             q13::build_bigram_mask(args.WORD1) | q13::build_bigram_mask(args.WORD2);
+        // Q13 has a single execution path: precomputed per-customer base
+        // order counts (orders_by_customer_offsets) minus pattern-matching
+        // orders found by a full comment scan. The alpha/bigram masks are
+        // pure over-approximating prefilters; when the words contain no
+        // letters/bigrams the prefilter is disabled and every comment is
+        // string-searched directly.
+        if (required_mask == 0 && required_bigram_mask == 0) {
+            AUDIT_PATH("q13 fast nomask");
+        } else {
+            AUDIT_PATH("q13 fast masked");
+        }
         {
             PROFILE_SCOPE("q13_orders_scan");
             const uint32_t order_count = static_cast<uint32_t>(orders.row_count);

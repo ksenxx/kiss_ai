@@ -10,6 +10,7 @@
 #include <string_view>
 #include <vector>
 
+#include "audit.hpp"
 #include "trace_utils.hpp"
 
 namespace q22 {
@@ -295,6 +296,7 @@ std::vector<Q22ResultRow> run_q22(const Database& db, const Q22Args& args) {
             if (!has_extra && db.pre.q22_built) {
                 // Fast path: per-code positive acctbal sums and sorted
                 // no-order acctbal lists are precomputed.
+                AUDIT_PATH("q22 fast");
                 const auto& pre = db.pre;
                 int64_t acctbal_sum = 0;
                 int64_t acctbal_count = 0;
@@ -339,6 +341,7 @@ std::vector<Q22ResultRow> run_q22(const Database& db, const Q22Args& args) {
                               });
                 }
             } else if (!has_extra) {
+                AUDIT_PATH("q22 numeric fallback");
                 struct CandidateNumeric {
                     int32_t custkey = 0;
                     int32_t acctbal = 0;
@@ -446,6 +449,7 @@ std::vector<Q22ResultRow> run_q22(const Database& db, const Q22Args& args) {
                     TRACE_SET(sort_rows_out, results.size());
                 }
             } else {
+                AUDIT_PATH("q22 extra fallback");
                 struct Candidate {
                     int32_t custkey = 0;
                     int32_t acctbal = 0;
@@ -576,6 +580,8 @@ std::vector<Q22ResultRow> run_q22(const Database& db, const Q22Args& args) {
                     TRACE_SET(sort_rows_out, results.size());
                 }
             }
+        } else {
+            AUDIT_PATH("q22 no-codes");
         }
 
         TRACE_SET(query_output_rows, results.size());

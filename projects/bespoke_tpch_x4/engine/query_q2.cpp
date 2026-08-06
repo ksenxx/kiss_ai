@@ -10,6 +10,7 @@
 #include <string_view>
 #include <unordered_map>
 
+#include "audit.hpp"
 #include "trace_utils.hpp"
 
 namespace {
@@ -154,6 +155,9 @@ std::vector<Q2ResultRow> run_q2(const Database& db, const Q2Args& args) {
         const std::string_view type_suffix = args.TYPE;
         const auto region_it = db.region.name_to_key.find(args.REGION);
         if (region_it == db.region.name_to_key.end()) {
+            // Region name not in the region table: the r_name = '[REGION]'
+            // predicate matches nothing, so the empty result is exact.
+            AUDIT_PATH("q2 unknown_region");
             return {};
         }
         const int32_t region_key = region_it->second;
@@ -291,6 +295,11 @@ std::vector<Q2ResultRow> run_q2(const Database& db, const Q2Args& args) {
                     : 0;
             std::vector<uint32_t> best_supp_overflow;
             best_supp_overflow.reserve(8);
+#ifdef BESPOKE_AUDIT
+            bool audit_used_stride = false;
+            bool audit_used_binsearch = false;
+            bool audit_used_tie_overflow = false;
+#endif
             for (const uint32_t prow : part_ok_list) {
                 const int32_t partkey = static_cast<int32_t>(prow + 1);
                 const int32_t* range_start = nullptr;
@@ -311,6 +320,9 @@ std::vector<Q2ResultRow> run_q2(const Database& db, const Q2Args& args) {
                     }
                 }
                 if (range_start == nullptr) {
+#ifdef BESPOKE_AUDIT
+                    audit_used_binsearch = true;
+#endif
                     search_ptr = std::lower_bound(search_ptr, partsupp_partkey_end, partkey);
                     if (search_ptr == partsupp_partkey_end || *search_ptr != partkey) {
                         continue;
@@ -322,6 +334,11 @@ std::vector<Q2ResultRow> run_q2(const Database& db, const Q2Args& args) {
                     }
                     search_ptr = range_end;
                 }
+#ifdef BESPOKE_AUDIT
+                else {
+                    audit_used_stride = true;
+                }
+#endif
                 const uint32_t start_idx =
                     static_cast<uint32_t>(range_start - partsupp_partkey);
                 const uint32_t end_idx =
@@ -351,6 +368,9 @@ std::vector<Q2ResultRow> run_q2(const Database& db, const Q2Args& args) {
                         if (best_count < kBestSupplierCapacity) {
                             best_supp[best_count++] = srow;
                         } else {
+#ifdef BESPOKE_AUDIT
+                            audit_used_tie_overflow = true;
+#endif
                             best_supp_overflow.push_back(srow);
                         }
                     }
@@ -391,6 +411,20 @@ std::vector<Q2ResultRow> run_q2(const Database& db, const Q2Args& args) {
                     result_matches += 1;
                 }
             }
+#ifdef BESPOKE_AUDIT
+            if (audit_used_stride) {
+                AUDIT_PATH("q2 stride_range");
+            }
+            if (audit_used_binsearch) {
+                AUDIT_PATH("q2 binsearch_range");
+            }
+            if (audit_used_tie_overflow) {
+                AUDIT_PATH("q2 tie_overflow");
+            }
+            if (part_ok_list.empty()) {
+                AUDIT_PATH("q2 no_matching_parts");
+            }
+#endif
             TRACE_SET(partsupp_min_rows_scanned, partsupp_rows_scanned);
         }
         TRACE_SET(join_min_probe_rows_in, partsupp_rows_scanned);

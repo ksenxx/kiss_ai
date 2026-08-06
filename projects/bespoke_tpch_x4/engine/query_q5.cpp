@@ -9,6 +9,7 @@
 #include <string_view>
 #include <vector>
 
+#include "audit.hpp"
 #include "trace_utils.hpp"
 
 namespace q5 {
@@ -203,6 +204,9 @@ std::vector<Q5ResultRow> run_q5(const Database& db, const Q5Args& args) {
         PROFILE_SCOPE("q5_total");
     const auto region_it = db.region.name_to_key.find(args.REGION);
     if (region_it == db.region.name_to_key.end()) {
+        // Region name not in the region table: r_name = '[REGION]' matches
+        // nothing, so the empty result is exact.
+        AUDIT_PATH("q5 unknown_region");
         return {};
     }
     const int32_t region_key = region_it->second;
@@ -254,6 +258,13 @@ std::vector<Q5ResultRow> run_q5(const Database& db, const Q5Args& args) {
                                     pre.q5_date_max);
         results.reserve(nation.rows.size());
         if (lo <= hi) {
+            AUDIT_PATH("q5 fast");
+        } else {
+            // Requested 1-year window lies entirely outside the orderdate
+            // domain: the empty result is exact.
+            AUDIT_PATH("q5 window_empty");
+        }
+        if (lo <= hi) {
             const size_t lo_idx = static_cast<size_t>(lo - pre.q5_date_min);
             const size_t hi_idx = static_cast<size_t>(hi - pre.q5_date_min);
             for (int32_t n = 0; n <= max_nationkey; ++n) {
@@ -283,6 +294,10 @@ std::vector<Q5ResultRow> run_q5(const Database& db, const Q5Args& args) {
         return results;
     }
 
+    // Fallback (baseline join/scan): reachable only if build_q5_artifacts
+    // was skipped (empty tables, nation span > 256, or missing
+    // orderkey_to_row) — builder/data invariants, parameter independent.
+    AUDIT_PATH("q5 fallback");
     const int16_t* __restrict cust_nationkey_data = nullptr;
     const int16_t* __restrict supp_nationkey_data = nullptr;
     std::vector<int16_t> cust_nationkey_fallback;

@@ -1,5 +1,7 @@
 #include "query_q8.hpp"
 
+#include "audit.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -126,10 +128,12 @@ std::vector<Q8ResultRow> run_q8(const Database& db, const Q8Args& args) {
 #endif
     const auto region_it = db.region.name_to_key.find(args.REGION);
     if (region_it == db.region.name_to_key.end()) {
+        AUDIT_PATH("q8 region_missing");
         return {};
     }
     const auto nation_it = db.nation.name_to_key.find(args.NATION);
     if (nation_it == db.nation.name_to_key.end()) {
+        AUDIT_PATH("q8 nation_missing");
         return {};
     }
     const int32_t region_key = region_it->second;
@@ -165,6 +169,7 @@ std::vector<Q8ResultRow> run_q8(const Database& db, const Q8Args& args) {
         max_nationkey < db.pre.q8_nation_span && year_span == 2) {
         // Fast path: volume cube over (p_type, cust_nation, supp_nation,
         // order year) for the template-fixed 1995..1996 orderdate window.
+        AUDIT_PATH("q8 fast");
         const auto& pre = db.pre;
         const size_t span = static_cast<size_t>(pre.q8_nation_span);
         std::array<int64_t, 2> total_by_year{};
@@ -258,6 +263,7 @@ std::vector<Q8ResultRow> run_q8(const Database& db, const Q8Args& args) {
         lineitem.orderkey_sorted && orders.lineitem_ranges.size() == orders.row_count;
 
     if (use_order_ranges) {
+        AUDIT_PATH("q8 fallback_ranges");
         const auto start_it =
             std::lower_bound(orders.orderdate.begin(), orders.orderdate.end(), start_offset);
         const auto end_it =
@@ -336,6 +342,7 @@ std::vector<Q8ResultRow> run_q8(const Database& db, const Q8Args& args) {
             trace_utils::get_time_ns() - orders_scan_start - lineitem_scan_ns;
 #endif
     } else {
+        AUDIT_PATH("q8 fallback_scan");
         const int32_t max_orderkey = q8::max_value(orders.orderkey);
         std::vector<uint8_t> order_ok_by_key(static_cast<size_t>(max_orderkey) + 1, 0);
         {

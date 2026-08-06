@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "audit.hpp"
 #include "trace_utils.hpp"
 
 namespace q6 {
@@ -200,6 +201,13 @@ std::vector<Q6ResultRow> run_q6(const Database& db, const Q6Args& args) {
         const int32_t hi = std::min(static_cast<int32_t>(end_offset) - 1,
                                     pre.q6_date_max);
         if (lo <= hi) {
+            AUDIT_PATH("q6 fast");
+        } else {
+            // Requested 1-year shipdate window lies entirely outside the
+            // data domain: zero revenue is exact.
+            AUDIT_PATH("q6 window_empty");
+        }
+        if (lo <= hi) {
             const size_t lo_idx = static_cast<size_t>(lo - pre.q6_date_min);
             const size_t hi_idx = static_cast<size_t>(hi - pre.q6_date_min);
             const int32_t disc_lo = std::max(discount_min, 0);
@@ -226,6 +234,10 @@ std::vector<Q6ResultRow> run_q6(const Database& db, const Q6Args& args) {
         const uint8_t* __restrict discount = lineitem.discount.data();
         const int16_t* __restrict quantity = lineitem.quantity.data();
         if (lineitem.shards.empty()) {
+            // Fallback flat scan: reachable only if build_q6_artifacts was
+            // skipped (non-integral quantity or oversized cube — data
+            // invariants) AND the loader built no shards.
+            AUDIT_PATH("q6 fallback_flat");
             lineitems_scanned = row_count;
             const int16_t* __restrict ship_ptr = shipdate;
             const uint8_t* __restrict disc_ptr = discount;
@@ -252,6 +264,9 @@ std::vector<Q6ResultRow> run_q6(const Database& db, const Q6Args& args) {
                 lineitems_emitted += 1;
             }
         } else {
+            // Fallback shard-pruned scan: same builder/data-invariant
+            // reachability as the flat scan, with loader shards present.
+            AUDIT_PATH("q6 fallback_shards");
             for (const auto& shard : lineitem.shards) {
                 const int32_t shard_index = shard.year * 12 + (shard.month - 1);
                 if (shard_index < start_month_index || shard_index > end_month_index) {

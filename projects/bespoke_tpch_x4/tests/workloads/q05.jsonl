@@ -1,0 +1,20 @@
+# Q5 adversarial audit. Data: orderdate in [1992-01-01, 1998-08-02]; window = [DATE, DATE+1yr).
+# Branches: "q5 unknown_region" (REGION not in region table -> exact empty), "q5 fast"
+# (prefix-sum cube window overlaps orderdate domain), "q5 window_empty" (window entirely
+# outside domain -> exact empty), "q5 fallback" (baseline join; only if build_q5_artifacts was
+# skipped - builder/data invariant, unreachable for any placeholder value).
+{"line": "5 \"AFRICA\" \"1997-01-01\"", "expect": ["q5 fast"], "forbid": ["q5 fallback", "q5 unknown_region", "q5 window_empty"], "note": "seed42 values"}
+{"line": "5 \"AFRICA\" \"1995-01-01\"", "expect": ["q5 fast"], "forbid": ["q5 fallback"], "note": "seed7 values"}
+{"line": "5 \"AFRICA\" \"1996-01-01\"", "expect": ["q5 fast"], "forbid": ["q5 fallback"], "note": "seed123 values"}
+{"line": "5 \"ASIA\" \"1993-06-15\"", "expect": ["q5 fast"], "forbid": [], "note": "mid-domain window, different region"}
+{"line": "5 \"MIDDLE EAST\" \"1994-01-01\"", "expect": ["q5 fast"], "forbid": ["q5 unknown_region"], "note": "region name containing a space"}
+{"line": "5 \"EUROPE\" \"1992-01-01\"", "expect": ["q5 fast"], "forbid": [], "note": "window starts exactly at min orderdate"}
+{"line": "5 \"AMERICA\" \"1998-08-02\"", "expect": ["q5 fast"], "forbid": ["q5 window_empty"], "note": "window starts exactly at max orderdate: single-day overlap"}
+{"line": "5 \"ASIA\" \"1998-01-01\"", "expect": ["q5 fast"], "forbid": [], "note": "window straddles max orderdate: hi clamped"}
+{"line": "5 \"ASIA\" \"1991-06-15\"", "expect": ["q5 fast"], "forbid": ["q5 window_empty"], "note": "window straddles min orderdate: lo clamped"}
+{"line": "5 \"AFRICA\" \"1996-02-29\"", "expect": ["q5 fast"], "forbid": [], "note": "leap-day start: +1yr clamps to 1997-02-28"}
+{"line": "5 \"AMERICA\" \"1998-08-03\"", "expect": ["q5 window_empty"], "forbid": ["q5 fast", "q5 fallback"], "note": "window starts one day after max orderdate: guard-false, exact empty"}
+{"line": "5 \"EUROPE\" \"1991-01-01\"", "expect": ["q5 window_empty"], "forbid": ["q5 fast"], "note": "window [1991-01-01,1992-01-01) ends at domain start (half-open): empty"}
+{"line": "5 \"ASIA\" \"2050-01-01\"", "expect": ["q5 window_empty"], "forbid": ["q5 fast"], "note": "window decades after data: empty"}
+{"line": "5 \"ATLANTIS\" \"1995-01-01\"", "expect": ["q5 unknown_region"], "forbid": ["q5 fast", "q5 window_empty", "q5 fallback"], "note": "nonexistent region: guard-false early return, exact empty"}
+{"line": "5 \"africa\" \"1995-01-01\"", "expect": ["q5 unknown_region"], "forbid": ["q5 fast"], "note": "region comparison is case sensitive: empty"}

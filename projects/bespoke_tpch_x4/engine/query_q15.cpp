@@ -1,5 +1,7 @@
 #include "query_q15.hpp"
 
+#include "audit.hpp"
+
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -260,6 +262,7 @@ std::vector<Q15ResultRow> run_q15(const Database& db, const Q15Args& args) {
             // Fast path: per (month, suppkey) revenue sums are precomputed;
             // partial edge months (possible for non-first-of-month dates)
             // fall back to a filtered shard scan.
+            AUDIT_PATH("q15 fast");
             const auto& pre = db.pre;
             const size_t supp_span = pre.q15_supp_span;
             int64_t* __restrict revenue_ptr = revenue_by_suppkey.data();
@@ -267,6 +270,10 @@ std::vector<Q15ResultRow> run_q15(const Database& db, const Q15Args& args) {
             for (int32_t m = start_month_index; m <= end_month_index; ++m) {
                 const int32_t rel = m - pre.q15_month_min;
                 if (rel < 0 || rel >= pre.q15_month_count) {
+                    // Month outside the precomputed (== present-in-data)
+                    // shipdate range: no lineitem row can fall in it, so
+                    // skipping contributes exactly 0 revenue.
+                    AUDIT_PATH("q15 fast month-out-of-range");
                     continue;
                 }
                 const int32_t year = m / 12;
@@ -283,6 +290,7 @@ std::vector<Q15ResultRow> run_q15(const Database& db, const Q15Args& args) {
                 const bool full_month =
                     month_first >= start_offset_i && next_first <= start_offset_i + date_span;
                 if (full_month) {
+                    AUDIT_PATH("q15 fast full-month");
                     const int64_t* __restrict stripe =
                         pre.q15_month_supp.data() +
                         static_cast<size_t>(rel) * supp_span;
@@ -296,6 +304,7 @@ std::vector<Q15ResultRow> run_q15(const Database& db, const Q15Args& args) {
                     lineitems_emitted += 1;
                 } else {
                     // Partial month: scan only the shards of this month.
+                    AUDIT_PATH("q15 fast partial-month");
                     const int16_t* __restrict shipdate = lineitem.shipdate.data();
                     const int32_t* __restrict suppkey = lineitem.suppkey.data();
                     const int32_t* __restrict discounted_price =
@@ -334,6 +343,7 @@ std::vector<Q15ResultRow> run_q15(const Database& db, const Q15Args& args) {
                     }
                     if (lineitem.shards.empty()) {
                         // No shards: filter the whole table on this month.
+                        AUDIT_PATH("q15 fast noshard-scan");
                         for (uint32_t li_idx = 0;
                              li_idx < static_cast<uint32_t>(lineitem.row_count);
                              ++li_idx) {
@@ -357,6 +367,12 @@ std::vector<Q15ResultRow> run_q15(const Database& db, const Q15Args& args) {
                 }
             }
         } else {
+            // Fallback: engaged only when the builder skipped the month cube
+            // (empty lineitem/supplier, month*suppkey cube > 2^25 slots) or
+            // when a lineitem suppkey exceeds every supplier suppkey. All of
+            // these depend on data shape only, never on the DATE parameter,
+            // so this is unreachable for valid placeholders on TPC-H data.
+            AUDIT_PATH("q15 fallback");
             PROFILE_SCOPE("q15_lineitem_scan");
             const int16_t* __restrict shipdate = lineitem.shipdate.data();
             const int32_t* __restrict suppkey = lineitem.suppkey.data();
@@ -554,6 +570,9 @@ std::vector<Q15ResultRow> run_q15(const Database& db, const Q15Args& args) {
         TRACE_SET(agg_rows_in, lineitems_emitted);
 
         if (lineitems_emitted == 0) {
+            // No lineitem falls inside the 3-month window: the revenue view
+            // is empty, max() over it is NULL, and the join yields no rows.
+            AUDIT_PATH("q15 empty-result");
 #ifdef TRACE
             q15_trace::emit();
 #endif
@@ -571,6 +590,7 @@ std::vector<Q15ResultRow> run_q15(const Database& db, const Q15Args& args) {
         }
 
         if (max_revenue == 0) {
+            AUDIT_PATH("q15 empty-result");
 #ifdef TRACE
             q15_trace::emit();
 #endif

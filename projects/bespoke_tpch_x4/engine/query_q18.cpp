@@ -11,6 +11,7 @@
 #include <string_view>
 #include <vector>
 
+#include "audit.hpp"
 #include "trace_utils.hpp"
 
 namespace q18 {
@@ -192,6 +193,7 @@ std::vector<Q18ResultRow> run_q18(const Database& db, const Q18Args& args) {
     {
         PROFILE_SCOPE("q18_total");
         if (args.QUANTITY == "<<NULL>>") {
+            AUDIT_PATH("q18 null");
 #ifdef TRACE
             TRACE_SET(query_output_rows, 0);
             q18_trace::emit();
@@ -206,6 +208,7 @@ std::vector<Q18ResultRow> run_q18(const Database& db, const Q18Args& args) {
             orders.row_count > 0) {
             // Fast path: per-order sum(l_quantity) is precomputed (parameter
             // independent); scan orders in parallel for qualifying rows.
+            AUDIT_PATH("q18 fast");
             const int32_t* __restrict sums = db.pre.q18_order_sum_qty.data();
             const size_t row_count = orders.row_count;
             std::vector<uint32_t> qualifying_rows;
@@ -231,6 +234,8 @@ std::vector<Q18ResultRow> run_q18(const Database& db, const Q18Args& args) {
                 !customer.custkey.empty() && customer.custkey.front() == 1 &&
                 customer.custkey.back() ==
                     static_cast<int32_t>(customer.row_count);
+            AUDIT_PATH(dense_cust ? "q18 fast dense-cust"
+                                  : "q18 fast mapped-cust");
             std::vector<int32_t> custkey_to_row;
             if (!dense_cust) {
                 const int32_t max_custkey = q18::max_value(customer.custkey);
@@ -304,6 +309,7 @@ std::vector<Q18ResultRow> run_q18(const Database& db, const Q18Args& args) {
             customer.custkey.back() == static_cast<int32_t>(customer.row_count);
 
         if (dense_orderkeys) {
+            AUDIT_PATH("q18 fallback dense");
             if (orders.row_count == 0 || customer.row_count == 0) {
 #ifdef TRACE
                 TRACE_SET(query_output_rows, 0);
@@ -425,6 +431,7 @@ std::vector<Q18ResultRow> run_q18(const Database& db, const Q18Args& args) {
             TRACE_ADD(join_probe_rows_in, orders_probe);
             TRACE_ADD(join_rows_emitted, orders_emitted);
         } else {
+            AUDIT_PATH("q18 fallback sparse");
             const int32_t max_orderkey =
                 std::max(q18::max_value(orders.orderkey),
                          q18::max_value(lineitem.orderkey));

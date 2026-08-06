@@ -8,6 +8,7 @@
 #include <string_view>
 #include <vector>
 
+#include "audit.hpp"
 #include "trace_utils.hpp"
 
 namespace q21 {
@@ -150,10 +151,12 @@ std::vector<Q21ResultRow> run_q21(const Database& db, const Q21Args& args) {
     {
         PROFILE_SCOPE("q21_total");
         if (args.NATION == "<<NULL>>") {
+            AUDIT_PATH("q21 null");
             TRACE_SET(query_output_rows, 0);
         } else {
             const auto nation_it = db.nation.name_to_key.find(args.NATION);
             if (nation_it == db.nation.name_to_key.end()) {
+                AUDIT_PATH("q21 unknown-nation");
                 TRACE_SET(query_output_rows, 0);
             } else {
                 const int32_t target_nation = nation_it->second;
@@ -178,10 +181,12 @@ std::vector<Q21ResultRow> run_q21(const Database& db, const Q21Args& args) {
                     }
                 }
                 if (!has_final_status) {
+                    AUDIT_PATH("q21 no-f-status");
                     TRACE_SET(query_output_rows, 0);
                 } else {
                     const int32_t max_suppkey = q21::max_value(supplier.suppkey);
                     if (max_suppkey < 0) {
+                        AUDIT_PATH("q21 empty-supplier");
                         TRACE_SET(query_output_rows, 0);
                     } else {
                         std::vector<int32_t> suppkey_to_row(
@@ -217,6 +222,7 @@ std::vector<Q21ResultRow> run_q21(const Database& db, const Q21Args& args) {
                         if (db.pre.q21_built) {
                             // Fast path: per-order late-supplier analysis is
                             // parameter independent and precomputed.
+                            AUDIT_PATH("q21 fast");
                             const auto& sk = db.pre.q21_wait_suppkey;
                             const auto& ct = db.pre.q21_wait_count;
                             const auto* __restrict target =
@@ -241,6 +247,9 @@ std::vector<Q21ResultRow> run_q21(const Database& db, const Q21Args& args) {
                             const auto* __restrict suppkeys = li_suppkey.data();
                             const auto* __restrict commit_receipts =
                                 li_commit_receipt.data();
+                            AUDIT_PATH(orderkey_sorted
+                                           ? "q21 fallback sorted"
+                                           : "q21 fallback unsorted");
                             if (orderkey_sorted) {
                                 for (uint32_t o_idx = 0; o_idx < orders.row_count;
                                      ++o_idx) {

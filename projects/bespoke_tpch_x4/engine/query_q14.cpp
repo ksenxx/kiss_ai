@@ -1,5 +1,7 @@
 #include "query_q14.hpp"
 
+#include "audit.hpp"
+
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -201,6 +203,13 @@ std::vector<Q14ResultRow> run_q14(const Database& db, const Q14Args& args) {
             const int32_t hi = std::min(static_cast<int32_t>(end_offset) - 1,
                                         pre.q14_date_max);
             if (lo <= hi) {
+                AUDIT_PATH("q14 fast in-range");
+            } else {
+                // Requested month window does not intersect the shipdate
+                // range present in the data: both sums stay 0.
+                AUDIT_PATH("q14 fast empty-range");
+            }
+            if (lo <= hi) {
                 const size_t lo_idx = static_cast<size_t>(lo - pre.q14_date_min);
                 const size_t hi_idx = static_cast<size_t>(hi - pre.q14_date_min);
                 total_sum = pre.q14_total[hi_idx] -
@@ -222,6 +231,12 @@ std::vector<Q14ResultRow> run_q14(const Database& db, const Q14Args& args) {
             return results;
         }
 
+        // Fallback: q14_built is false only when lineitem or part is empty
+        // (builder guard depends solely on data shape, never on parameters),
+        // so this branch is unreachable for any placeholder value on TPC-H
+        // data. Kept correct regardless: full shard scan identical to the
+        // baseline plan.
+        AUDIT_PATH("q14 fallback");
         const int32_t max_partkey = q14::max_value(part.partkey);
         if (max_partkey < 0) {
 #ifdef TRACE

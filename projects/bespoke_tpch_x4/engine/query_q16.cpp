@@ -1,5 +1,7 @@
 #include "query_q16.hpp"
 
+#include "audit.hpp"
+
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -211,6 +213,9 @@ std::vector<Q16ResultRow> run_q16(const Database& db, const Q16Args& args) {
         add_size(args.SIZE8);
 
         if (sizes.empty()) {
+            // Every SIZE placeholder was NULL or non-numeric: the IN list is
+            // empty, no part can qualify (identical to the baseline parser).
+            AUDIT_PATH("q16 empty-sizes");
 #ifdef TRACE
             TRACE_SET(query_output_rows, 0);
             q16_trace::emit();
@@ -229,6 +234,7 @@ std::vector<Q16ResultRow> run_q16(const Database& db, const Q16Args& args) {
             // Fast path: distinct-supplier counts per (brand, type, size)
             // group are precomputed (complaint suppliers already excluded);
             // only group-level filters depend on the parameters.
+            AUDIT_PATH("q16 fast");
             const auto& pre = db.pre;
             std::vector<uint8_t> type_prefix_banned(part.type.dictionary.size(),
                                                     0);
@@ -266,6 +272,11 @@ std::vector<Q16ResultRow> run_q16(const Database& db, const Q16Args& args) {
                                           pre.q16_group_count[i]});
             }
         } else {
+        // Fallback: q16_built is false only for empty part/partsupp, part
+        // sizes > 100000, or suppkeys >= 2^20 (packing limit). All are data
+        // shape conditions independent of the request parameters, so this
+        // branch is unreachable for any valid placeholder on TPC-H data.
+        AUDIT_PATH("q16 fallback");
         const int32_t max_partkey =
             part.row_count ? static_cast<int32_t>(part.row_count) : -1;
         if (max_partkey < 0) {
@@ -432,6 +443,7 @@ std::vector<Q16ResultRow> run_q16(const Database& db, const Q16Args& args) {
                     ? (partsupp_row_count / part_row_count)
                     : 0;
             if (rows_per_part > 0) {
+                AUDIT_PATH("q16 fallback dense-partsupp");
                 for (uint32_t part_idx = 0; part_idx < part_row_count; ++part_idx) {
                     const int32_t group_id =
                         static_cast<int32_t>(partkey_group[part_idx + 1]);
@@ -452,6 +464,7 @@ std::vector<Q16ResultRow> run_q16(const Database& db, const Q16Args& args) {
                     }
                 }
             } else {
+                AUDIT_PATH("q16 fallback generic-partsupp");
                 for (uint32_t row = 0; row < partsupp_row_count; ++row) {
                     const int32_t group_id =
                         static_cast<int32_t>(partkey_group[partkey_ptr[row]]);
