@@ -6,7 +6,7 @@ Please look at the commit messages at [https://github.com/ksenxx/kiss_ai/commits
 
 **Always write precise 1-6 sentence prompts.** Long prompts confuse models. **Do not plan ahead of time.** Let KISS Sorcar plan dynamically, which is always better than AI-written static plans. The waterfall model does not work that well in contemporary times.
 
-**No need to use generic skills for debugging, code review, etc.** Frontier models have been trained on those skills.
+**No need to use generic skills for debugging, code review, etc.**  Frontier models have been trained on those skills.
 
 # Tip
 
@@ -20,6 +20,8 @@ Use 'claude-fable-5' for all tasks, including software development. Use 'gpt-5.6
 ```
 
 # Tip
+
+## What is the status of an agent perfoeming a task?
 
 If you want to get the status of a task, you can open a new chat and ask KISS Sorcar what is the status of the task doing …
 
@@ -84,19 +86,19 @@ It has a powerful Claude Code-style interface. It supports skills, MCP, commands
 Just run:
 
 ```bash
-~/kiss_ai/sorcar-docker
+sorcar-docker
 ```
 
 It runs KISS Sorcar in a Docker container and exposes a VS Code interface in the host machine's browser.
 
 # Tip
 
-## If You Are Implementing a Software Feature
+## To Run KISS Sorcar on a server via ssh
 
-Definitely add the following sentence to your KISS Sorcar prompt:
+Just run:
 
-```
-Reproduce the issue by writing real end-to-end tests with 100% coverage. Then fix the issue.
+```bash
+rsorcar username@ip_address
 ```
 
 # Tip
@@ -158,3 +160,5 @@ Click the burger menu button in the bottom-left corner to see all agents in KISS
 ## Settings
 
 Click on the settings button at the top right corner. You can get the URL for the remote web/mobile app, set the remote web app access password, set the budget limit per task, set the working directory, and set various API keys and a custom model endpoint using the Settings interface.
+
+
