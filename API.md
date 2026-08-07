@@ -252,16 +252,6 @@ ______________________________________________________________________
   - `cmd`: The `submit` command.
   - `ctx`: The transport context of the current call (unused).
 
-- **close_tab** — Dispose the backend state of a closed frontend tab. A WEB (WSS) client closing its chat tab destroys the only UI that could ever finish an in-flight (server-tracked) merge review for that tab, so the review is ended first (close = accept the remaining hunks; no disk writes) and the tab is disposed instead of leaking in `is_merging` limbo. UDS (VS Code) clients are exempt: their TypeScript MergeManager owns the review in real editor tabs that survive the chat tab's closure and will still send `all-done` — their `closeTab` forwards to the backend unchanged.<br/>`async close_tab(cmd: dict[str, Any], ctx: ApiContext) -> None`
-
-  - `cmd`: The `closeTab` command.
-  - `ctx`: The transport context of the current call.
-
-- **merge_action** — Advance a merge review (accept / reject / navigate / finish). Non-`all-done` actions are processed by the daemon's server-side merge engine (the web twin of the VS Code TypeScript `MergeManager`). An `all-done` arriving FROM a client is the extension's MergeManager finishing its editor-managed review (its per-hunk actions never reach the backend): the server-side shadow merge state registered when the `merge_data` event was broadcast is dropped — leaving it would replay a ZOMBIE review on the next webview reload and leak one state (with full file payloads) per finished review — and the command still falls through to the backend (`_cmd_merge_action` → `_finish_merge`).<br/>`async merge_action(cmd: dict[str, Any], ctx: ApiContext) -> None`
-
-  - `cmd`: The `mergeAction` command.
-  - `ctx`: The transport context of the current call.
-
 - **open_file** — Serve a file's content to a remote-web client. A remote-web (WSS) client clicked a file link in a chat webview. The browser has no editor to open the file in, so the daemon reads the file and replies with its content for an in-page content tab. UDS clients (VS Code windows) never take this path: their webview's `openFile` is consumed by the extension host, which opens the file in a real editor tab — so a UDS-delivered `openFile` is dropped as a defensive no-op.<br/>`async open_file(cmd: dict[str, Any], ctx: ApiContext) -> None`
 
   - `cmd`: The `openFile` command.
