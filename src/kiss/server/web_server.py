@@ -80,7 +80,6 @@ from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
 from kiss.core.vscode_config import load_config, source_shell_env
 from kiss.server import sorcar as sorcar_api
-from kiss.server.diff_merge import _read_lines_preserved as _read_lines_preserved
 from kiss.server.json_printer import JsonPrinter, stamp_event_ts
 from kiss.server.server import VSCodeServer, broadcast_to_conn
 from kiss.server.tips import read_tips
@@ -90,16 +89,6 @@ from kiss.server.voice_wake import (
     SpeakerIdentifier,
     default_models_dir,
     transcribe_pcm,
-)
-from kiss.server.web_merge import (
-    _apply_exec_bit,  # noqa: F401  (re-exported for external tests)
-    _exec_flag,
-    _hunk_unresolved,
-    _record_hunk_rejected,
-    _reject_all_hunks_in_file,
-    _reject_hunk_in_file,
-    _restore_base_bytes,  # noqa: F401  (re-exported for external tests)
-    _WebMergeState,
 )
 from kiss.viz_trajectory.server import find_job_dir as find_job_dir
 from kiss.viz_trajectory.server import list_jobs as list_jobs
@@ -1810,9 +1799,6 @@ class WebPrinter(JsonPrinter):
         self._conn_endpoints: dict[str, Any] = {}
         self._ws_lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._merge_state_callback: (
-            Callable[[str, dict[str, Any]], None] | None
-        ) = None
         self.work_dir: str = ""
         self._pending_sends: dict[Any, set[ConcurrentFuture[None]]] = {}
         self._send_locks: dict[Any, asyncio.Lock] = {}
@@ -1823,7 +1809,7 @@ class WebPrinter(JsonPrinter):
         Two code paths:
 
         * Events that already carry an explicit ``tabId`` (status,
-          askUser, commitMessage, merge_data, etc.) are treated as
+          askUser, commitMessage, etc.) are treated as
           targeted "system" events: sent verbatim to all connected
           clients (which filter by ``tabId``), but **not** recorded
           or persisted — except ``prompt`` echoes that ALSO carry a
@@ -1871,12 +1857,6 @@ class WebPrinter(JsonPrinter):
         if conn_id:
             self._send_to_conn(conn_id, json.dumps(event))
             return
-
-        if event.get("type") == "merge_data":
-            event = _augment_merge_data(event)
-            evt_tab = event.get("tabId", "")
-            if evt_tab and self._merge_state_callback is not None:
-                self._merge_state_callback(evt_tab, event.get("data", {}))
 
         if "tabId" in event:
             if event.get("type") in ("prompt", "result") and event.get("taskId"):
@@ -2130,39 +2110,6 @@ class WebPrinter(JsonPrinter):
                 if endpoint in self._pending_sends:
                     self._send_locks[endpoint] = lock
             return lock
-
-    async def flush_pending_sends(self, endpoint: Any) -> None:
-        """Await every send already scheduled to *endpoint*.
-
-        :meth:`_schedule_send` registers each outbound payload's
-        ``run_coroutine_threadsafe`` future in ``_pending_sends`` the
-        instant it is scheduled — synchronously, in the calling thread,
-        BEFORE the ``_locked_send`` coroutine's first step runs.
-        Awaiting a snapshot of those futures therefore guarantees every
-        payload queued *before* this call has actually reached the wire.
-
-        :meth:`RemoteAccessServer._handle_ready` uses this to replay an
-        in-flight ``merge_data`` strictly AFTER the ``task_events`` that
-        ``resumeSession`` scheduled from its executor thread.  The
-        per-endpoint :meth:`send_lock` alone is insufficient: it only
-        orders senders that have already reached ``async with
-        send_lock``, so under scheduler pressure the directly-awaited
-        ``merge_data`` send can grab the lock before the
-        ``run_coroutine_threadsafe``-scheduled ``task_events`` send has
-        even started — inverting wire order and erasing the recovered
-        merge panel on refresh.  Draining the pending futures first
-        closes that window deterministically.
-
-        Args:
-            endpoint: The client connection whose queued sends to await.
-        """
-        with self._ws_lock:
-            pending = list(self._pending_sends.get(endpoint, ()))
-        for fut in pending:
-            try:
-                await asyncio.wrap_future(fut)
-            except Exception:
-                logger.debug("flush_pending_sends await failed", exc_info=True)
 
     async def _locked_send(self, endpoint: Any, data: str) -> None:
         """Send one payload to one endpoint under its FIFO send lock.
@@ -2662,8 +2609,8 @@ _WS_SHIM_JS = r"""
   // after an ``onclose`` (i.e. a server restart or network blip)
   // means the page state is stale relative to the freshly booted
   // backend and we must reload the page so the normal load
-  // pipeline replays history, restored tabs, in-flight merges,
-  // etc.  Without this the page only re-binds the socket and the
+  // pipeline replays history, restored tabs, etc.  Without
+  // this the page only re-binds the socket and the
   // user is left staring at the "KISS Sorcar Server is starting
   // ..." overlay (or stale UI) until they manually refresh.
   var _hadAuthThenClosed = false;
@@ -2876,8 +2823,8 @@ _WS_SHIM_JS = r"""
         // already authenticated at least once and the WS later
         // closed, the page JS state is stale relative to the
         // freshly booted backend.  Reload so the normal page-load
-        // pipeline (history replay, restored tabs, in-flight
-        // merge replay, ...) runs against the new server state.
+        // pipeline (history replay, restored tabs, ...) runs
+        // against the new server state.
         // The reload is gated by ``_hadAuthThenClosed`` so the
         // very first authentication on a fresh page load does NOT
         // reload (otherwise we would loop forever).
@@ -3174,45 +3121,6 @@ def _read_media_file(filepath: Path) -> bytes | None:
     return None
 
 
-def _augment_merge_data(event: dict[str, Any]) -> dict[str, Any]:
-    """Add ``base_text`` and ``current_text`` to each file in a ``merge_data`` event.
-
-    The browser needs file contents to render diffs.  In VS Code, the
-    ``MergeManager`` reads files through the editor API; in the web
-    server we read them from disk and include the text in the event.
-
-    Args:
-        event: A ``merge_data`` event dict.
-
-    Returns:
-        A copy of the event with file contents added.
-    """
-    event = {**event}
-    data = {**event.get("data", {})}
-    files = []
-    for f in data.get("files", []):
-        f = {**f}
-        if f.get("binary"):
-            f["base_text"] = ""
-            f["current_text"] = ""
-            files.append(f)
-            continue
-        try:
-            with open(f["base"], encoding="utf-8", newline="") as bfh:
-                f["base_text"] = bfh.read()
-        except (OSError, KeyError, UnicodeDecodeError):
-            f["base_text"] = ""
-        try:
-            with open(f["current"], encoding="utf-8", newline="") as cfh:
-                f["current_text"] = cfh.read()
-        except (OSError, KeyError, UnicodeDecodeError):
-            f["current_text"] = ""
-        files.append(f)
-    data["files"] = files
-    event["data"] = data
-    return event
-
-
 _translate_webview_command = sorcar_api.translate_webview_command
 
 
@@ -3333,11 +3241,7 @@ class RemoteAccessServer:
         self._shutdown_initiated = False
         self._shutdown_future: asyncio.Future[None] | None = None
         self._local_url = f"https://localhost:{self.port}"
-        self._merge_states: dict[str, _WebMergeState] = {}
-        self._merge_states_lock = threading.Lock()
-        self._merge_action_locks: dict[str, asyncio.Lock] = {}
         self._uds_handler_tasks: set[asyncio.Task[None]] = set()
-        self._printer._merge_state_callback = self._register_merge_state
         self._active_url: str | None = None
         self._last_ips: frozenset[str] = frozenset()
         self._pending_ip_change: frozenset[str] | None = None
@@ -3523,55 +3427,6 @@ class RemoteAccessServer:
         await self._loop.run_in_executor(
             None, self._vscode_server._handle_command, cmd,
         )
-
-    async def _finish_merge_and_close_tab(
-        self, tab_id: str, merge_state: _WebMergeState | None = None,
-    ) -> None:
-        """End an in-flight merge review (if any) and close *tab_id*.
-
-        Used by the explicit ``closeTab`` path of remote-web clients
-        (:meth:`kiss.server.sorcar.ServerApi.close_tab`).  When the
-        tab closes while a merge review is still in flight, the
-        popped :class:`_WebMergeState` is the ONLY thing that could
-        ever drive the review to ``all-done`` — the backend
-        ``_close_tab`` sees ``is_merging=True`` (a busy lifecycle
-        flag), merely flips ``frontend_closed=True`` and waits for
-        the merge to end, which would now never happen.  Dispatching
-        ``all-done`` here treats the close as "accept the remaining
-        hunks" (no disk writes — the workspace already holds the
-        agent's content): ``_finish_merge`` clears ``is_merging``,
-        cleans the per-tab merge artifacts, presents any pending
-        worktree, and the subsequent ``closeTab`` disposes the
-        backend tab instead of leaking it forever.
-
-        The merge state is popped UNDER the tab's merge-action lock
-        (F4-07): an in-flight reject holds that lock across
-        executor-backed file rewrites, and removing the state (and the
-        lock-map entry) without waiting would let the reject resume
-        against detached state while the merge artifacts are being
-        cleaned up.
-
-        Args:
-            tab_id: The frontend tab identifier being closed.
-            merge_state: A merge state the caller already popped
-                (``ServerApi.close_tab``), or ``None`` to pop it here
-                under the action lock.
-        """
-        if merge_state is None:
-            lock = await self._acquire_merge_action_lock(tab_id)
-            if lock is not None:
-                try:
-                    merge_state = self._pop_merge_state(tab_id)
-                finally:
-                    lock.release()
-        if merge_state is not None:
-            await self._run_cmd({
-                "type": "mergeAction",
-                "action": "all-done",
-                "tabId": tab_id,
-                "workDir": merge_state.work_dir,
-            })
-        await self._run_cmd({"type": "closeTab", "tabId": tab_id})
 
     async def _ws_handler(self, websocket: ServerConnection) -> None:
         """Handle a WebSocket client connection.
@@ -4384,8 +4239,8 @@ class RemoteAccessServer:
         backpressure BEFORE queuing the frame, so without the lock a
         suspended earlier sender (e.g. the ``task_events`` replay
         scheduled by ``resumeSession``) could hit the wire AFTER a
-        later direct send (e.g. the ``merge_data`` replay), erasing
-        the recovered merge UI on refresh.
+        later direct send, inverting the wire order the client
+        depends on.
 
         Args:
             endpoint: The connection to send to.
@@ -4511,11 +4366,6 @@ class RemoteAccessServer:
             )
         except Exception:
             pass
-        merge_tabs_to_replay: list[str] = []
-        seen_merge_tabs: set[str] = set()
-        if tab_id:
-            merge_tabs_to_replay.append(tab_id)
-            seen_merge_tabs.add(tab_id)
         for rt in self._sanitized_restored_tabs(cmd):
             rt_id = rt["tabId"]
             chat_id = rt["chatId"]
@@ -4524,13 +4374,6 @@ class RemoteAccessServer:
                     {"type": "resumeSession", "chatId": chat_id,
                      "tabId": rt_id},
                 )
-            if rt_id and rt_id not in seen_merge_tabs:
-                merge_tabs_to_replay.append(rt_id)
-                seen_merge_tabs.add(rt_id)
-        if merge_tabs_to_replay:
-            await self._printer.flush_pending_sends(websocket)
-        for merge_tab_id in merge_tabs_to_replay:
-            await self._replay_merge_review(merge_tab_id, websocket)
         if not is_uds:
             try:
                 running_rows = await asyncio.to_thread(
@@ -4554,72 +4397,6 @@ class RemoteAccessServer:
                     logger.debug(
                         "ready openRunningTasks send failed", exc_info=True,
                     )
-
-    async def _replay_merge_review(self, tab_id: str, websocket: Any) -> None:
-        """Re-send an in-flight merge review to a reconnecting client.
-
-        ``merge_data`` events are tab-stamped, so ``WebPrinter.broadcast``
-        forwards them to currently-connected clients only — they are
-        never recorded or persisted.  A browser that reloads mid-review
-        would therefore never see the merge UI again even though the
-        server still holds the unresolved :class:`_WebMergeState` (and
-        the backend tab stays ``is_merging``).  The VS Code extension's
-        ``MergeManager`` survives webview reloads in the extension
-        host; for the web client the server is the only source of
-        truth, so it replays ``merge_data`` + ``merge_started`` +
-        ``merge_nav`` (resolutions included) to the reconnecting
-        endpoint.  Sends are targeted at *websocket* only — sibling
-        windows already received the original broadcast.
-
-        Args:
-            tab_id: The tab the ``ready`` command named.
-            websocket: The reconnecting client connection.
-        """
-        if not tab_id:
-            return
-        lock = await self._acquire_merge_action_lock(tab_id)
-        if lock is None:
-            return
-        try:
-            with self._merge_states_lock:
-                state = self._merge_states.get(tab_id)
-            if state is None or not state.remaining:
-                return
-            assert self._loop is not None
-            event = await self._loop.run_in_executor(
-                None,
-                _augment_merge_data,
-                {
-                    "type": "merge_data",
-                    "tabId": tab_id,
-                    "data": state.data,
-                    "hunk_count": state.total_hunks,
-                },
-            )
-            cur = state.current()
-            nav = {
-                "type": "merge_nav",
-                "tabId": tab_id,
-                "remaining": state.remaining,
-                "total": state.total_hunks,
-                "cur": (
-                    {"fi": cur[0], "hi": cur[1]}
-                    if cur is not None
-                    else None
-                ),
-                "resolved": state.resolutions(),
-            }
-            try:
-                await self._endpoint_send(websocket, json.dumps(event))
-                await self._endpoint_send(
-                    websocket,
-                    json.dumps({"type": "merge_started", "tabId": tab_id}),
-                )
-                await self._endpoint_send(websocket, json.dumps(nav))
-            except Exception:
-                logger.debug("Merge review replay failed", exc_info=True)
-        finally:
-            lock.release()
 
     async def _handle_submit(self, cmd: dict[str, Any]) -> None:
         """Translate the webview ``submit`` command into a backend ``run``.
@@ -4676,286 +4453,6 @@ class RemoteAccessServer:
             "autoCommit": cmd.get("autoCommit", False),
         }
         await self._run_cmd(run_cmd)
-
-    def _register_merge_state(
-        self, tab_id: str, merge_data: dict[str, Any],
-    ) -> None:
-        """Register a merge state when a merge_data event is broadcast.
-
-        Called from ``WebPrinter.broadcast()`` so the web server can
-        track active merge sessions and handle ``mergeAction`` commands.
-
-        M6: takes :attr:`_merge_states_lock` because this runs on the
-        agent task-runner thread while ``_handle_web_merge_action``
-        and the ``_ws_handler`` cleanup mutate the same dict on the
-        asyncio thread.
-
-        Args:
-            tab_id: The tab that started the merge.
-            merge_data: The ``data`` field from the ``merge_data`` event.
-        """
-        with self._merge_states_lock:
-            self._merge_states[tab_id] = _WebMergeState(merge_data)
-
-    def _pop_merge_state(self, tab_id: str) -> _WebMergeState | None:
-        """Atomically drop *tab_id*'s merge state and per-tab action lock.
-
-        Every cleanup site (the client ``all-done`` and web
-        ``closeTab`` handlers of the server API
-        (``sorcar.ServerApi.merge_action`` / ``close_tab``),
-        and the completion branch of ``_apply_web_merge_action``) must
-        drop BOTH entries together, or one of them leaks for the
-        daemon's lifetime (tab ids are fresh UUIDs, never reused).
-        Returns the popped state, or ``None`` when none was registered.
-        """
-        with self._merge_states_lock:
-            self._merge_action_locks.pop(tab_id, None)
-            return self._merge_states.pop(tab_id, None)
-
-
-    def _merge_action_lock(self, tab_id: str) -> asyncio.Lock:
-        """Return the per-tab :class:`asyncio.Lock` serialising merge actions.
-
-        Lazily creates a lock for *tab_id* on first use.  Creation is
-        guarded by :attr:`_merge_states_lock` (a threading lock) so two
-        coroutines that request the lock for the same tab in the same
-        event-loop tick still share one lock instance.
-
-        Args:
-            tab_id: The frontend tab id whose merge review is acted on.
-
-        Returns:
-            The shared :class:`asyncio.Lock` for *tab_id*.
-        """
-        with self._merge_states_lock:
-            lock = self._merge_action_locks.get(tab_id)
-            if lock is None:
-                lock = asyncio.Lock()
-                self._merge_action_locks[tab_id] = lock
-            return lock
-
-    async def _acquire_merge_action_lock(
-        self, tab_id: str,
-    ) -> asyncio.Lock | None:
-        """Acquire the tab's CURRENT merge-action lock, retrying rotations.
-
-        Owns the acquire-with-rotation-retry invariant shared by
-        :meth:`_handle_web_merge_action` and
-        :meth:`_replay_merge_review`: after acquiring, the lock must be
-        re-verified as still being the tab's registered one.  A holder
-        completing the review pops both the state and the lock entry
-        (``_pop_merge_state``) while still holding its lock object; if
-        a NEW review for the same tab is registered in that window, a
-        waiter that acted under the stale object would mutate the new
-        :class:`_WebMergeState` concurrently with actions holding the
-        freshly-minted lock — so on rotation the stale lock is released
-        and the acquire retried with the current one.
-
-        The lock is only minted when a merge review actually exists for
-        *tab_id*.  Without the membership check, an
-        authenticated-but-buggy (or malicious) client spamming merge
-        commands with random tab ids would grow
-        ``_merge_action_locks`` without bound, one permanent
-        :class:`asyncio.Lock` per never-seen tab id.
-
-        Args:
-            tab_id: The frontend tab id whose merge review is acted on.
-
-        Returns:
-            The HELD current lock (the caller MUST release it), or
-            ``None`` when no merge review exists for *tab_id*.
-        """
-        while True:
-            with self._merge_states_lock:
-                if tab_id not in self._merge_states:
-                    return None
-            lock = self._merge_action_lock(tab_id)
-            await lock.acquire()
-            with self._merge_states_lock:
-                if self._merge_action_locks.get(tab_id) is lock:
-                    return lock
-            lock.release()
-
-    def _broadcast_reject_failure(
-        self, tab_id: str, file_data: dict[str, Any], exc: OSError,
-    ) -> None:
-        """Report a failed hunk-rejection write to every client.
-
-        Called from the reject branches of
-        :meth:`_apply_web_merge_action` when restoring a file's base
-        content fails on disk (canonical trigger: the agent deleted a
-        tracked file and created a directory at the same path, so the
-        restore write raises ``IsADirectoryError``).  The hunks of the
-        affected file remain unresolved, the review stays open, and
-        the user sees an ``error`` chat event instead of a silently
-        dropped (or connection-killing) rejection.
-
-        Args:
-            tab_id: The tab whose merge review the action targeted.
-            file_data: The merge-data file entry whose restore failed.
-            exc: The ``OSError`` raised by the restore write.
-        """
-        fname = file_data.get("name") or file_data.get("target") or "file"
-        logger.warning("Merge reject failed for %s: %s", fname, exc)
-        self._printer.broadcast({
-            "type": "error",
-            "text": f"Failed to reject changes in {fname}: {exc}",
-            "tabId": tab_id,
-        })
-
-    async def _handle_web_merge_action(self, cmd: dict[str, Any]) -> None:
-        """Handle merge toolbar actions (accept/reject/navigate) server-side.
-
-        In VS Code, the TypeScript ``MergeManager`` processes these
-        actions.  In the standalone web server, this method provides
-        equivalent functionality by tracking hunk state and modifying
-        files on disk.
-
-        Serialised per tab via :meth:`_acquire_merge_action_lock` so
-        two clients (the local UDS VS Code extension and a remote
-        WebSocket browser) acting on the *same* tab's merge review
-        cannot interleave at the ``run_in_executor`` await inside the
-        reject branches and drop a hunk resolution.
-
-        Args:
-            cmd: The ``mergeAction`` command from the browser, with
-                ``action`` and ``tabId`` fields.
-        """
-        tab_id = cmd.get("tabId", "")
-        lock = await self._acquire_merge_action_lock(tab_id)
-        if lock is None:
-            return
-        try:
-            await self._apply_web_merge_action({**cmd, "tabId": tab_id})
-        finally:
-            lock.release()
-
-    async def _apply_web_merge_action(self, cmd: dict[str, Any]) -> None:
-        """Apply a single merge action while holding the per-tab lock.
-
-        Performs the read-modify-write on the per-tab
-        :class:`_WebMergeState`.  Must be called by
-        :meth:`_handle_web_merge_action` with the tab's
-        :meth:`_merge_action_lock` held so the whole sequence (including
-        the ``run_in_executor`` file rewrites) is atomic per tab.
-
-        Args:
-            cmd: The ``mergeAction`` command, with ``action`` and
-                ``tabId`` fields.
-        """
-        action = cmd.get("action", "")
-        tab_id = cmd.get("tabId", "")
-        with self._merge_states_lock:
-            state = self._merge_states.get(tab_id)
-        if state is None:
-            with self._merge_states_lock:
-                if tab_id not in self._merge_states:
-                    self._merge_action_locks.pop(tab_id, None)
-            return
-
-        assert self._loop is not None
-        cur = state.current()
-        if action == "accept":
-            if cur is not None:
-                state.mark_resolved(*cur, "accepted")
-                state.advance()
-        elif action == "reject":
-            if cur is not None:
-                fi, hi = cur
-                fd = state.files[fi]
-                hunk = fd["hunks"][hi]
-                try:
-                    await self._loop.run_in_executor(
-                        None,
-                        partial(
-                            _reject_hunk_in_file,
-                            fd["current"],
-                            fd["base"],
-                            hunk,
-                            fd.get("target"),
-                            binary=bool(fd.get("binary")),
-                            link_target=fd.get("link_target"),
-                            make_executable=_exec_flag(fd),
-                            base_missing=bool(fd.get("created")),
-                        ),
-                    )
-                except OSError as exc:
-                    self._broadcast_reject_failure(tab_id, fd, exc)
-                else:
-                    _record_hunk_rejected(
-                        fd["hunks"], hi, partial(_hunk_unresolved, state, fi),
-                    )
-                    state.mark_resolved(fi, hi, "rejected")
-                    state.advance()
-        elif action == "prev":
-            state.go_prev()
-        elif action == "next":
-            state.advance()
-        elif action in ("accept-file", "reject-file"):
-            if cur is not None:
-                fi = cur[0]
-                fd = state.files[fi]
-                resolve_file = True
-                if action == "reject-file":
-                    try:
-                        await self._loop.run_in_executor(
-                            None, _reject_all_hunks_in_file, fd,
-                            state.unresolved_in_file(fi),
-                        )
-                    except OSError as exc:
-                        self._broadcast_reject_failure(tab_id, fd, exc)
-                        resolve_file = False
-                if resolve_file:
-                    file_status = (
-                        "rejected" if action == "reject-file" else "accepted"
-                    )
-                    for hi in state.unresolved_in_file(fi):
-                        state.mark_resolved(fi, hi, file_status)
-                    state.advance()
-        elif action == "accept-all":
-            for fi, hi in state.all_unresolved():
-                state.mark_resolved(fi, hi, "accepted")
-        elif action == "reject-all":
-            unresolved_by_file: dict[int, list[int]] = {}
-            for fi, hi in state.all_unresolved():
-                unresolved_by_file.setdefault(fi, []).append(hi)
-            for fi, his in unresolved_by_file.items():
-                fd = state.files[fi]
-                try:
-                    await self._loop.run_in_executor(
-                        None, _reject_all_hunks_in_file, fd, his,
-                    )
-                except OSError as exc:
-                    self._broadcast_reject_failure(tab_id, fd, exc)
-                    continue
-                for hi in his:
-                    state.mark_resolved(fi, hi, "rejected")
-
-        cur_after = state.current()
-        self._printer.broadcast({
-            "type": "merge_nav",
-            "tabId": tab_id,
-            "remaining": state.remaining,
-            "total": state.total_hunks,
-            "cur": (
-                {"fi": cur_after[0], "hi": cur_after[1]}
-                if cur_after is not None
-                else None
-            ),
-            "resolved": state.resolutions(),
-        })
-
-        if not state.remaining:
-            self._pop_merge_state(tab_id)
-            await self._run_cmd(
-                {
-                    "type": "mergeAction",
-                    "action": "all-done",
-                    "tabId": tab_id,
-                    "workDir": state.work_dir,
-                },
-            )
-
 
     def _spawn_cloudflared(self, args: list[str], retries: int = 3) -> None:
         """Spawn ``cloudflared`` with *args* and a free ``--metrics`` port.

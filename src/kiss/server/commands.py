@@ -269,9 +269,6 @@ class _CommandsMixin:
         def _replay_session(
             self, chat_id: str, tab_id: str = "", task_id: str | None = None,
         ) -> None: ...
-        def _finish_merge(
-            self, tab_id: str = "", *, work_dir: str = "",
-        ) -> None: ...
         def _new_chat(self, tab_id: str) -> None: ...
         def _close_tab(self, tab_id: str) -> None: ...
         def _ensure_complete_worker(self) -> None: ...
@@ -287,9 +284,6 @@ class _CommandsMixin:
             self, action: str, tab_id: str = "", *,
             internal: bool = False, already_claimed: bool = False,
         ) -> dict[str, Any]: ...
-        def _handle_autocommit_action(
-            self, action: str, tab_id: str = "", *, work_dir: str = "",
-        ) -> None: ...
         def _handle_delete_frequent_task(self, task: str) -> None: ...
         def _handle_set_favorite(
             self, task_id: str, is_favorite: bool,
@@ -321,15 +315,14 @@ class _CommandsMixin:
         with self._state_lock:
             prev = agent_state.find_by_tab(tab_id)
             if prev is not None and prev.is_merging:
-                # An open merge review owns the tab's state (and its
-                # worktree agent); replacing it would orphan the
-                # review.  Refuse the run instead.
+                # An in-flight merge/discard owns the tab's state (and
+                # its worktree agent); replacing it would orphan the
+                # operation.  Refuse the run instead.
                 self.printer.broadcast(
                     {
                         "type": "error",
-                        "text": "Cannot run a task while merge review"
-                        " is in progress. Accept or reject all"
-                        " changes first.",
+                        "text": "Cannot run a task while a merge is"
+                        " in progress. Wait for it to finish first.",
                         "tabId": tab_id,
                     }
                 )
@@ -750,18 +743,6 @@ class _CommandsMixin:
                 chat_id, cmd.get("tabId", ""), task_id=task_id,
             )
 
-    def _cmd_merge_action(self, cmd: dict[str, Any]) -> None:
-        """Handle merge accept/reject from the extension.
-
-        Only ``all-done`` triggers cleanup. Individual ``accept``/``reject``
-        actions are tracked on the TypeScript side; the Python server
-        only needs to know when the entire merge session is finished.
-        """
-        if cmd.get("action", "") == "all-done":
-            self._finish_merge(
-                cmd.get("tabId", ""), work_dir=cmd.get("workDir", ""),
-            )
-
     def _cmd_close_tab(self, cmd: dict[str, Any]) -> None:
         """Clean up backend state for a closed frontend tab."""
         tab_id = cmd.get("tabId", "")
@@ -895,14 +876,6 @@ class _CommandsMixin:
             result = {"success": False, "message": str(e)}
         self.printer.broadcast(
             {"type": "worktree_result", "tabId": wt_tab_id, **result},
-        )
-
-    def _cmd_autocommit_action(self, cmd: dict[str, Any]) -> None:
-        """Process the user's reply to an autocommit prompt."""
-        self._handle_autocommit_action(
-            cmd.get("action", ""),
-            cmd.get("tabId", ""),
-            work_dir=cmd.get("workDir", ""),
         )
 
     def _cmd_get_config(self, cmd: dict[str, Any]) -> None:
@@ -1070,7 +1043,6 @@ class _CommandsMixin:
         "userAnswer": _cmd_user_answer,
         "appendUserMessage": _cmd_append_user_message,
         "resumeSession": _cmd_resume_session,
-        "mergeAction": _cmd_merge_action,
         "closeTab": _cmd_close_tab,
         "newChat": _cmd_new_chat,
         "complete": _cmd_complete,
@@ -1078,7 +1050,6 @@ class _CommandsMixin:
         "getAdjacentTask": _cmd_get_adjacent_task,
         "generateCommitMessage": _cmd_generate_commit_message,
         "worktreeAction": _cmd_worktree_action,
-        "autocommitAction": _cmd_autocommit_action,
         "setWorkDir": _cmd_set_work_dir,
         "getConfig": _cmd_get_config,
         "saveConfig": _cmd_save_config,

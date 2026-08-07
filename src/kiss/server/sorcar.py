@@ -319,7 +319,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("stop"),
     ApiCommand("userAnswer", required=("answer",)),
     ApiCommand("newChat"),
-    ApiCommand("closeTab", required=("tabId",), handler="close_tab"),
+    ApiCommand("closeTab", required=("tabId",)),
     ApiCommand("resumeSession", handler="resume_session"),
     ApiCommand("ready", handler="ready"),
     ApiCommand("getHistory"),
@@ -342,9 +342,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("openFile", required=("path",), handler="open_file"),
     ApiCommand("checkPaths", required=("paths",), handler="check_paths"),
     ApiCommand("complete", required=("query",)),
-    ApiCommand("mergeAction", required=("action",), handler="merge_action"),
     ApiCommand("worktreeAction", required=("action",)),
-    ApiCommand("autocommitAction", required=("action",)),
     ApiCommand("generateCommitMessage"),
     ApiCommand("auth", required=("password",), handler="drop"),
     ApiCommand("runUpdate", handler="run_update"),
@@ -492,8 +490,8 @@ class ServerBackend(Protocol):
 
     Structural type of the object backing :class:`ServerApi` — in
     production the ``RemoteAccessServer`` of
-    :mod:`kiss.server.web_server`, which owns the transports, the
-    merge bookkeeping, and the backend agent server.  Only the
+    :mod:`kiss.server.web_server`, which owns the transports and the
+    backend agent server.  Only the
     members the API layer actually calls are declared; see the
     implementing methods in ``web_server.py`` for full behaviour
     documentation.
@@ -534,14 +532,6 @@ class ServerBackend(Protocol):
     async def _handle_run_update(self, conn_id: str = "") -> None: ...
 
     async def _handle_server_reset(self, conn_id: str = "") -> None: ...
-
-    async def _handle_web_merge_action(self, cmd: dict[str, Any]) -> None: ...
-
-    def _pop_merge_state(self, tab_id: str) -> Any: ...
-
-    async def _finish_merge_and_close_tab(
-        self, tab_id: str, merge_state: Any,
-    ) -> None: ...
 
     def _client_ip(self, websocket: Any) -> str: ...
 
@@ -864,61 +854,6 @@ class ServerApi:
             ctx: The transport context of the current call (unused).
         """
         await self._backend._handle_submit(cmd)
-
-    async def close_tab(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
-        """Dispose the backend state of a closed frontend tab.
-
-        A WEB (WSS) client closing its chat tab destroys the only UI
-        that could ever finish an in-flight (server-tracked) merge
-        review for that tab, so the review is ended first (close =
-        accept the remaining hunks; no disk writes) and the tab is
-        disposed instead of leaking in ``is_merging`` limbo.  UDS (VS
-        Code) clients are exempt: their TypeScript MergeManager owns
-        the review in real editor tabs that survive the chat tab's
-        closure and will still send ``all-done`` — their ``closeTab``
-        forwards to the backend unchanged.
-
-        Args:
-            cmd: The ``closeTab`` command.
-            ctx: The transport context of the current call.
-        """
-        tab_id = cmd.get("tabId", "")
-        if isinstance(tab_id, str) and tab_id and not ctx.is_uds:
-            merge_state = self._backend._pop_merge_state(tab_id)
-            await self._backend._finish_merge_and_close_tab(
-                tab_id, merge_state,
-            )
-            return
-        await self.forward(cmd, ctx)
-
-    async def merge_action(
-        self, cmd: dict[str, Any], ctx: ApiContext,
-    ) -> None:
-        """Advance a merge review (accept / reject / navigate / finish).
-
-        Non-``all-done`` actions are processed by the daemon's
-        server-side merge engine (the web twin of the VS Code
-        TypeScript ``MergeManager``).  An ``all-done`` arriving FROM a
-        client is the extension's MergeManager finishing its
-        editor-managed review (its per-hunk actions never reach the
-        backend): the server-side shadow merge state registered when
-        the ``merge_data`` event was broadcast is dropped — leaving it
-        would replay a ZOMBIE review on the next webview reload and
-        leak one state (with full file payloads) per finished review —
-        and the command still falls through to the backend
-        (``_cmd_merge_action`` → ``_finish_merge``).
-
-        Args:
-            cmd: The ``mergeAction`` command.
-            ctx: The transport context of the current call.
-        """
-        if cmd.get("action", "") != "all-done":
-            await self._backend._handle_web_merge_action(cmd)
-            return
-        tab_id = cmd.get("tabId", "")
-        if isinstance(tab_id, str) and tab_id:
-            self._backend._pop_merge_state(tab_id)
-        await self.forward(cmd, ctx)
 
     async def open_file(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Serve a file's content to a remote-web client.

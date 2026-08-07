@@ -4,7 +4,7 @@
 # add your name here
 """VS Code extension backend server for Sorcar agent.
 
-The per-command handlers, task-runner, merge / worktree flow and
+The per-command handlers, task-runner, worktree flow and
 autocomplete logic live in sibling mixin modules.  This file keeps the
 per-tab state accessors, the command dispatcher, and the history /
 chat / commit-message helpers.
@@ -60,11 +60,7 @@ from kiss.server.autocomplete import (
     ranked_function_calling_models,
 )
 from kiss.server.commands import _CommandsMixin
-from kiss.server.diff_merge import (
-    _cleanup_merge_data,
-    _git,
-    _merge_data_dir,
-)
+from kiss.server.diff_merge import _git
 from kiss.server.helpers import (
     generate_commit_message_from_diff,
     generate_followup_text,
@@ -759,7 +755,7 @@ class VSCodeServer(
         state (bash buffers, recordings), and drops the persist-agent
         reference.
 
-        When the tab is currently running a task or in a merge review,
+        When the tab is currently running a task or a merge/discard,
         the state is **not** removed immediately — the running agent
         must be allowed to finish: closing a chat tab does NOT stop a
         running agent task.  Instead the
@@ -812,7 +808,7 @@ class VSCodeServer(
         tab_id: str,
         state: AgentState | None,
     ) -> None:
-        """Release worktree, per-tab printer state and merge data dir.
+        """Release worktree and per-tab printer state.
 
         Shared cleanup tail used by both the immediate (:meth:`_close_tab`)
         and the deferred (:meth:`_dispose_if_closed`) disposal paths.
@@ -848,7 +844,6 @@ class VSCodeServer(
             self._tab_chat_views.pop(tab_id, None)
             self._tab_opened_task_ids.pop(tab_id, None)
             self._tab_models.pop(tab_id, None)
-        _cleanup_merge_data(str(_merge_data_dir(tab_id)))
 
     def _new_chat(self, tab_id: str) -> None:
         """Start a new chat session for the given tab.
@@ -905,9 +900,8 @@ class VSCodeServer(
         ``use_parallel`` / ``auto_commit_mode`` / ``selected_model``:
         those mirror the toolbar toggles, which are global UI state the
         user owns.  Clearing them made a history click silently switch
-        auto-commit off, which in turn made the pending-worktree
-        handling below present a diff/merge review the user had opted
-        out of.
+        auto-commit off, which in turn changed how the pending-worktree
+        handling below finalizes the branch.
 
         Args:
             chat_id: The string chat session identifier to replay.

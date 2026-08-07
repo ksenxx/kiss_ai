@@ -5,8 +5,8 @@
 """Task-runner mixin for the VS Code server.
 
 Implements the background-thread task lifecycle: ``_run_task`` (status
-broadcasts) and ``_run_task_inner`` (pre/post snapshots, agent
-invocation, merge-view preparation, persistence).  Also hosts the
+broadcasts) and ``_run_task_inner`` (agent invocation, post-task
+autocommit / worktree finalization, persistence).  Also hosts the
 cooperative-stop machinery and the ``ask_user_question`` callback.
 
 Split out of ``server.py`` for organisation.
@@ -24,14 +24,11 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from contextlib import nullcontext, suppress
+from contextlib import suppress
 from functools import partial
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from kiss.agents.sorcar.git_worktree import (
-    GitWorktreeOps,
-    repo_lock,
     strip_worktree_suffix,
 )
 from kiss.agents.sorcar.persistence import (
@@ -49,12 +46,6 @@ from kiss.core.models.model_info import get_available_models
 from kiss.core.printer import parse_result_yaml
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
-from kiss.server.diff_merge import (
-    _capture_untracked,
-    _parse_diff_hunks,
-    _save_untracked_base,
-    _snapshot_files,
-)
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.tools_file import load_tools_file
 
@@ -336,24 +327,9 @@ class _TaskRunnerMixin:
         def _tab_model(self, tab_id: str) -> str: ...
         def _any_non_wt_running(self) -> bool: ...
         def _dispose_if_closed(self, tab_id: str) -> None: ...
-        def _prepare_and_start_merge(
-            self,
-            work_dir: str,
-            pre_hunks: dict[str, list[tuple[int, int, int, int]]] | None = None,
-            pre_untracked: set[str] | None = None,
-            pre_file_hashes: dict[str, str] | None = None,
-            base_ref: str = "HEAD",
-            tab_id: str = "",
-        ) -> bool: ...
         def _main_dirty_files(self, work_dir: str = "") -> list[str]: ...
-        def _broadcast_autocommit_prompt(
+        def _autocommit_changes(
             self,
-            tab_id: str,
-            work_dir: str = "",
-        ) -> None: ...
-        def _handle_autocommit_action(
-            self,
-            action: str,
             tab_id: str = "",
             *,
             work_dir: str = "",
@@ -370,9 +346,8 @@ class _TaskRunnerMixin:
             self,
             tab_id: str,
             *,
-            try_merge_review: bool,
             discard_if_empty: bool = True,
-        ) -> bool: ...
+        ) -> None: ...
         def _get_worktree_changed_files(self, tab_id: str = "") -> list[str]: ...
         def _extract_result_summary(self) -> str: ...
         def _generate_followup_async(
@@ -547,44 +522,6 @@ class _TaskRunnerMixin:
             self.printer.broadcast(payload)
             self._restore_user_model_pick(viewer_tab_id)
 
-    @staticmethod
-    def _capture_pre_snapshot(
-        work_dir: str,
-        repo: Path | None,
-        tab_id: str,
-    ) -> tuple[
-        str | None,
-        dict[str, list[tuple[int, int, int, int]]],
-        set[str],
-        dict[str, str] | None,
-    ]:
-        """Capture pre-task git snapshot for non-worktree merge view.
-
-        When *repo* is not None, acquires ``repo_lock`` for atomicity.
-
-        Args:
-            work_dir: Repository root directory.
-            repo: Repo root Path (None when not in a git repo).
-            tab_id: Frontend tab identifier for per-tab isolation.
-
-        Returns:
-            ``(head_sha, hunks, untracked, file_hashes)`` tuple.
-        """
-        with repo_lock(repo) if repo else nullcontext():
-            head = GitWorktreeOps.head_sha(repo) if repo else None
-            hunks = _parse_diff_hunks(work_dir)
-            untracked = _capture_untracked(work_dir)
-            hashes = _snapshot_files(
-                work_dir,
-                set(hunks.keys()) | untracked,
-            )
-            _save_untracked_base(
-                work_dir,
-                untracked | set(hunks.keys()),
-                tab_id=tab_id,
-            )
-            return head, hunks, untracked, hashes
-
     def _broadcast_early_prompts(
         self,
         prompt: str,
@@ -593,8 +530,8 @@ class _TaskRunnerMixin:
     ) -> None:
         """Broadcast optimistic ``system_prompt``/``prompt`` panels at submit.
 
-        Emitted before the slow pre-run steps (git pre-snapshot,
-        worktree creation, chat-context loading, model/tool setup) so
+        Emitted before the slow pre-run steps (worktree creation,
+        chat-context loading, model/tool setup) so
         the chat webview shows the submitted prompt and the system
         prompt right away.  The events are broadcast-only (``taskId:
         ""`` — never recorded or persisted) and flagged ``early`` so
@@ -774,13 +711,8 @@ class _TaskRunnerMixin:
 
         self._broadcast_early_prompts(prompt, active_file, tab_id)
 
-        pre_hunks: dict[str, list[tuple[int, int, int, int]]] = {}
-        pre_untracked: set[str] = set()
-        pre_file_hashes: dict[str, str] | None = None
-        pre_head_sha: str | None = None
         if not use_worktree:
-            repo = GitWorktreeOps.discover_repo(Path(work_dir))
-            with repo_lock(repo) if repo else nullcontext(), self._state_lock:
+            with self._state_lock:
                 if any(
                     t.is_merging and t.use_worktree
                     for t in agent_state.agent_states.values()
@@ -796,14 +728,6 @@ class _TaskRunnerMixin:
                     )
                     return
                 state.is_running_non_wt = True
-            try:
-                pre_head_sha, pre_hunks, pre_untracked, pre_file_hashes = (
-                    self._capture_pre_snapshot(work_dir, repo, tab_id)
-                )
-            except BaseException:
-                with self._state_lock:
-                    state.is_running_non_wt = False
-                raise
 
         if use_worktree and getattr(agent, "_wt_pending", False):
             with self._state_lock:
@@ -1034,29 +958,13 @@ class _TaskRunnerMixin:
                 )
                 effective_auto_commit = state.auto_commit_mode and not task_failed
                 if not use_worktree:
+                    # With the interactive diff review gone, task
+                    # changes on the main tree are always committed
+                    # directly; a clean tree is a cheap no-op.
                     try:
-                        if effective_auto_commit:
-                            self._handle_autocommit_action(
-                                "commit",
-                                tab_id,
-                                work_dir=work_dir,
-                            )
-                        else:
-                            merge_started = self._prepare_and_start_merge(
-                                work_dir,
-                                pre_hunks,
-                                pre_untracked,
-                                pre_file_hashes,
-                                base_ref=pre_head_sha or "HEAD",
-                                tab_id=tab_id,
-                            )
-                            if not merge_started:
-                                self._broadcast_autocommit_prompt(
-                                    tab_id,
-                                    work_dir,
-                                )
-                    except BaseException:  # pragma: no cover — merge view error handler
-                        logger.debug("Merge view error", exc_info=True)
+                        self._autocommit_changes(tab_id, work_dir=work_dir)
+                    except BaseException:  # pragma: no cover — autocommit error handler
+                        logger.debug("Post-task autocommit error", exc_info=True)
                     finally:
                         with self._state_lock:
                             state.is_running_non_wt = False
@@ -1126,11 +1034,10 @@ class _TaskRunnerMixin:
                         else:
                             self._present_pending_worktree(
                                 tab_id,
-                                try_merge_review=True,
                                 discard_if_empty=False,
                             )
                     except BaseException:
-                        logger.debug("Worktree merge review error", exc_info=True)
+                        logger.debug("Worktree presentation error", exc_info=True)
                 with self._state_lock:
                     state.is_task_active = False
                 self.printer.broadcast(
