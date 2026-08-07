@@ -133,9 +133,6 @@ class _RecordingPrinter:
     def broadcast(self, event: dict[str, Any]) -> None:
         self.events.append(event)
 
-    def broadcast_tab_ui(self, event: dict[str, Any]) -> None:
-        self.events.append(event)
-
     def print(self, *args: Any, **kwargs: Any) -> None:
         pass
 

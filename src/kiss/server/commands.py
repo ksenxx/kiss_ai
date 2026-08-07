@@ -750,36 +750,6 @@ class _CommandsMixin:
                 chat_id, cmd.get("tabId", ""), task_id=task_id,
             )
 
-    def _resolve_ui_owner(
-        self, cmd: dict[str, Any], open_event: str,
-    ) -> tuple[str, str]:
-        """Return the tab and folder owning the UI *cmd* acts on.
-
-        A merge review, an auto-commit prompt or a worktree strip is
-        shown on every tab viewing the task, but only ONE tab owns it:
-        the on-disk merge artifacts, the hunk cursor and the repository
-        all hang off that tab.  A command produced by any other client
-        carries that client's own ``tabId`` (and its own ``workDir``,
-        which for a shared daemon may name a different folder
-        entirely), so both are resolved back to the owner before the
-        action is applied.
-
-        Args:
-            cmd: The inbound command, with ``tabId`` and ``workDir``.
-            open_event: The event type that put the acted-on UI on
-                screen, so a tab mirroring two chats at once resolves
-                to the owner actually showing this UI.
-
-        Returns:
-            The owner tab id and the folder to act in.
-        """
-        tab_id = cmd.get("tabId", "")
-        work_dir = cmd.get("workDir", "")
-        owner_tab_id = self.printer.ui_mirror_owner(tab_id, open_event)
-        if owner_tab_id != tab_id:
-            work_dir = self.printer.ui_mirror_work_dir(owner_tab_id) or work_dir
-        return owner_tab_id, work_dir
-
     def _cmd_merge_action(self, cmd: dict[str, Any]) -> None:
         """Handle merge accept/reject from the extension.
 
@@ -788,10 +758,9 @@ class _CommandsMixin:
         only needs to know when the entire merge session is finished.
         """
         if cmd.get("action", "") == "all-done":
-            owner_tab_id, work_dir = self._resolve_ui_owner(
-                cmd, "merge_data",
+            self._finish_merge(
+                cmd.get("tabId", ""), work_dir=cmd.get("workDir", ""),
             )
-            self._finish_merge(owner_tab_id, work_dir=work_dir)
 
     def _cmd_close_tab(self, cmd: dict[str, Any]) -> None:
         """Clean up backend state for a closed frontend tab."""
@@ -918,23 +887,22 @@ class _CommandsMixin:
     def _cmd_worktree_action(self, cmd: dict[str, Any]) -> None:
         """Execute a worktree merge/discard action."""
         action = cmd.get("action", "")
-        wt_tab_id, _ = self._resolve_ui_owner(cmd, "worktree_done")
+        wt_tab_id = cmd.get("tabId", "")
         try:
             result = self._handle_worktree_action(action, wt_tab_id)
         except Exception as e:
             logger.debug("Worktree action error", exc_info=True)
             result = {"success": False, "message": str(e)}
-        self.printer.broadcast_tab_ui(
+        self.printer.broadcast(
             {"type": "worktree_result", "tabId": wt_tab_id, **result},
         )
 
     def _cmd_autocommit_action(self, cmd: dict[str, Any]) -> None:
         """Process the user's reply to an autocommit prompt."""
-        owner_tab_id, work_dir = self._resolve_ui_owner(
-            cmd, "autocommit_prompt",
-        )
         self._handle_autocommit_action(
-            cmd.get("action", ""), owner_tab_id, work_dir=work_dir,
+            cmd.get("action", ""),
+            cmd.get("tabId", ""),
+            work_dir=cmd.get("workDir", ""),
         )
 
     def _cmd_get_config(self, cmd: dict[str, Any]) -> None:

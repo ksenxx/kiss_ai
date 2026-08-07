@@ -97,10 +97,6 @@ class _ServerTestBase(IsolatedAsyncioTestCase):
             await asyncio.to_thread(sweep.join, 30)
         with self.server._merge_states_lock:
             self.server._merge_states.clear()
-        with self.server._pending_tab_closes_lock:
-            for h in list(self.server._pending_tab_closes.values()):
-                h.cancel()
-            self.server._pending_tab_closes.clear()
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None

@@ -56,7 +56,6 @@ from unittest import IsolatedAsyncioTestCase
 
 import pytest
 from websockets.asyncio.client import connect
-from websockets.exceptions import ConnectionClosed
 
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server import web_server as ws_mod
@@ -403,7 +402,7 @@ class TestM5SpawnRetriesOnImmediateExit(IsolatedAsyncioTestCase):
 
 
 class TestM6MergeStateCleanup(IsolatedAsyncioTestCase):
-    """Disconnecting the WebSocket drops merge state for that tab."""
+    """Merge-state bookkeeping is guarded against concurrent access."""
 
     async def asyncSetUp(self) -> None:
         self._snap = _ConfigSnapshot().__enter__()
@@ -417,55 +416,6 @@ class TestM6MergeStateCleanup(IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         await self.server.stop_async()
         self._snap.__exit__()
-
-    async def test_merge_state_dropped_on_disconnect(self) -> None:
-        """A tab's merge state is removed after the deferred ``closeTab``.
-
-        The web server defers ``closeTab`` for every tab id seen on a
-        dropped WS connection by :data:`_TAB_CLOSE_GRACE` seconds so a
-        reload / transient reconnect can re-claim the tab id and
-        preserve backend state.  Merge state for the disconnected tab
-        is popped inside :meth:`_fire_pending_tab_close` when the
-        grace timer elapses without a reconnect.  This test shrinks
-        the grace window to a few hundred milliseconds and verifies
-        the eventual cleanup.
-        """
-        import kiss.server.web_server as ws_mod
-
-        orig_grace = ws_mod._TAB_CLOSE_GRACE
-        ws_mod._TAB_CLOSE_GRACE = 0.1
-        try:
-            tab_id = "tab-m6-disc"
-            async with connect(
-                f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
-            ) as ws:
-                await ws.send(json.dumps({"type": "auth", "password": ""}))
-                await asyncio.wait_for(ws.recv(), timeout=5)
-                await ws.send(json.dumps({
-                    "type": "getWelcomeSuggestions", "tabId": tab_id,
-                }))
-                for _ in range(3):
-                    try:
-                        await asyncio.wait_for(ws.recv(), timeout=1)
-                    except (TimeoutError, ConnectionClosed):
-                        break
-                self.server._register_merge_state(tab_id, {"files": [
-                    {"name": "x.txt", "base": "/tmp/x.b",
-                     "current": "/tmp/x.c",
-                     "hunks": [{"bs": 0, "bc": 0, "cs": 0, "cc": 1}]},
-                ]})
-                self.assertIn(tab_id, self.server._merge_states)
-            for _ in range(40):
-                await asyncio.sleep(0.05)
-                if tab_id not in self.server._merge_states:
-                    break
-            self.assertNotIn(
-                tab_id, self.server._merge_states,
-                "merge state for the disconnected tab must be cleaned up "
-                "after the deferred-close grace period",
-            )
-        finally:
-            ws_mod._TAB_CLOSE_GRACE = orig_grace
 
     async def test_merge_states_lock_exists(self) -> None:
         """A threading.Lock guards _merge_states (M6 race fix)."""

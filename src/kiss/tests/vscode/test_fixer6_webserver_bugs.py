@@ -16,9 +16,9 @@ Covers, over REAL objects (no mocks, patches, or fakes):
   failure is recorded.
 * F7: a ``ready`` command carrying non-str ``tabId`` values (top
   level or inside ``restoredTabs``) must not abort ready handling —
-  an unhashable id used to raise ``TypeError`` inside
-  ``_cancel_pending_tab_close`` and skip the remaining restored-tab
-  resumes and merge replays.
+  an unhashable id used to raise ``TypeError`` while processing the
+  restored-tab list and skip the remaining restored-tab resumes and
+  merge replays.
 * F11: ``VSCodeServer._teardown_tab_resources`` must survive a
   duck-typed printer without ``cleanup_tab`` (same getattr-guarded
   contract as every sibling cleanup path).
@@ -213,11 +213,29 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
     async def test_ready_malformed_restored_entry_does_not_abort_loop(
         self,
     ) -> None:
-        """Entries after a malformed restoredTabs entry are still processed."""
+        """Entries after a malformed restoredTabs entry are still processed.
+
+        An in-flight merge review registered for the LATER (valid)
+        restored tab must still be replayed to the reconnecting
+        client — a malformed entry before it must not abort the
+        restored-tab loop.
+        """
+        base = Path(self.tmpdir) / "rt-base.txt"
+        cur = Path(self.tmpdir) / "rt-cur.txt"
+        base.write_text("old line\n")
+        cur.write_text("new line\n")
+        self.server._register_merge_state("rt-later", {
+            "work_dir": self.tmpdir,
+            "files": [
+                {
+                    "name": "rt-cur.txt",
+                    "base": str(base),
+                    "current": str(cur),
+                    "hunks": [{"bs": 0, "bc": 1, "cs": 0, "cc": 1}],
+                },
+            ],
+        })
         reader, writer = await self._connect_uds()
-        self.server._schedule_tab_close("rt-later")
-        with self.server._pending_tab_closes_lock:
-            self.assertIn("rt-later", self.server._pending_tab_closes)
         await self._send(
             writer,
             {
@@ -229,17 +247,12 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
                 ],
             },
         )
-        await self._drain_until(reader, "focusInput")
-        for _ in range(200):
-            with self.server._pending_tab_closes_lock:
-                if "rt-later" not in self.server._pending_tab_closes:
-                    break
-            await asyncio.sleep(0.01)
-        with self.server._pending_tab_closes_lock:
-            self.assertNotIn(
-                "rt-later", self.server._pending_tab_closes,
-                "restored tab after malformed entry was not re-claimed",
-            )
+        replay = await self._drain_until(reader, "merge_started")
+        self.assertEqual(
+            replay.get("tabId"), "rt-later",
+            "the merge review of the restored tab after the malformed "
+            "entry was not replayed — the restored-tab loop aborted",
+        )
 
 
 class TestAuthFailureBookkeeping(unittest.TestCase):

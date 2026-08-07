@@ -136,86 +136,6 @@ class _BashState:
         self.flush_lock = threading.Lock()
 
 
-# Interactive-UI events that put something on screen until it is
-# answered, mapped to the events that take it back off again.  A
-# mirror lives exactly as long as one of these is on screen.
-_UI_CLOSE_EVENTS: dict[str, tuple[str, ...]] = {
-    "merge_ended": ("merge_data", "merge_started", "merge_nav"),
-    "autocommit_done": ("autocommit_prompt",),
-    "worktree_result": ("worktree_done",),
-}
-_UI_OPEN_EVENTS: frozenset[str] = frozenset(
-    event_type for closed in _UI_CLOSE_EVENTS.values() for event_type in closed
-)
-
-
-class _UiMirror:
-    """One tab's interactive UI, mirrored onto other clients' tabs.
-
-    A chat can be open in several frontend tabs at once (the VS Code
-    window that launched the task, a browser on a phone, a second
-    laptop).  Blocking UIs — the merge/diff review, the auto-commit
-    prompt, the worktree merge/discard strip — are owned by exactly
-    one tab: the on-disk merge artifacts, the server-side hunk cursor
-    and the git working tree all hang off that tab's id.  This record
-    names the other tabs that must render the same UI, so opening and
-    closing it stays in lock step across every client.
-
-    Attributes:
-        viewer_tab_ids: Tabs of other clients showing the same task.
-        work_dir: The owner's working directory, used when an action
-            arrives from a viewer whose own folder may differ.
-        task_key: The task the UI belongs to, so a tab that joins
-            the task later can be shown the same UI.
-        open_events: The latest still-unanswered event of each open
-            type, replayed verbatim to such a late joiner.
-    """
-
-    __slots__ = ("viewer_tab_ids", "work_dir", "task_key", "open_events")
-
-    def __init__(self, work_dir: str, task_key: str) -> None:
-        self.viewer_tab_ids: list[str] = []
-        self.work_dir = work_dir
-        self.task_key = task_key
-        self.open_events: dict[str, dict[str, Any]] = {}
-
-
-def _orphaned_ui_close_events(
-    owner_tab_id: str,
-    mirror: _UiMirror,
-) -> list[dict[str, Any]]:
-    """Return the events that take *mirror*'s UI off the viewers' screens.
-
-    Used when the owner tab disappears with a UI still open.  One
-    closing event per still-open UI, per viewer, carrying the reason so
-    the user sees why the buttons went away rather than watching them
-    vanish.
-
-    Args:
-        owner_tab_id: The tab that owned the UI and has now gone.
-        mirror: Its mirror record, already detached from the printer.
-
-    Returns:
-        Ready-to-broadcast closing events.
-    """
-    closers = {
-        close_type
-        for close_type, opened in _UI_CLOSE_EVENTS.items()
-        if any(open_type in mirror.open_events for open_type in opened)
-    }
-    return [
-        {
-            "type": close_type,
-            "tabId": viewer_tab_id,
-            "mirrorOf": owner_tab_id,
-            "success": False,
-            "message": "The window that opened this closed it.",
-        }
-        for viewer_tab_id in mirror.viewer_tab_ids
-        for close_type in sorted(closers)
-    ]
-
-
 class _PrinterThreadLocal(threading.local):
     """Per-thread printer state whose ``stop_event`` is process-visible.
 
@@ -303,10 +223,6 @@ class JsonPrinter(Printer):
         # switched itself to (see broadcast_agent_model_pick).
         self._model_override_tabs: set[str] = set()
         self._task_model_override: dict[str, str] = {}
-        # Interactive UIs (merge review, auto-commit prompt, worktree
-        # strip) owned by one tab but mirrored onto the tabs of every
-        # other client viewing the same task.  Keyed by owner tab id.
-        self._ui_mirrors: dict[str, _UiMirror] = {}
 
     @staticmethod
     def _coerce_task_id(value: Any) -> str:
@@ -359,11 +275,8 @@ class JsonPrinter(Printer):
             catch_up = self._task_model_override.get(key, "")
             if catch_up:
                 self._model_override_tabs.add(tab_id)
-            pending_ui = self._join_ui_mirrors(key, tab_id)
         if catch_up:
             self.broadcast_model_pick(catch_up, "agent", tab_id)
-        for event in pending_ui:
-            self.broadcast(event)
 
     def register_task_ui(
         self,
@@ -546,39 +459,6 @@ class JsonPrinter(Printer):
                 branches.add(wt.branch)
         return branches
 
-    def _join_ui_mirrors(
-        self,
-        task_key: str,
-        tab_id: str,
-    ) -> list[dict[str, Any]]:
-        """Show *tab_id* the interactive UIs already open on *task_key*.
-
-        A client that opens a chat while another client is mid-review
-        (or sitting on an unanswered auto-commit prompt) has to be
-        caught up, or the question stays invisible in that window until
-        somebody else answers it.  Must be called with :attr:`_lock`
-        held; the returned events are broadcast by the caller once the
-        lock is released.
-
-        Args:
-            task_key: The coerced task id *tab_id* just subscribed to.
-            tab_id: The joining tab.
-
-        Returns:
-            Copies of the open UI events, stamped for *tab_id*.
-        """
-        pending: list[dict[str, Any]] = []
-        for owner_tab_id, mirror in self._ui_mirrors.items():
-            if mirror.task_key != task_key or owner_tab_id == tab_id:
-                continue
-            if tab_id not in mirror.viewer_tab_ids:
-                mirror.viewer_tab_ids.append(tab_id)
-            pending.extend(
-                {**event, "tabId": tab_id, "mirrorOf": owner_tab_id}
-                for event in mirror.open_events.values()
-            )
-        return pending
-
     def _fanout_targets(self, task_id: Any) -> list[str]:
         """Return a snapshot of subscriber tab ids for *task_id*.
 
@@ -671,190 +551,6 @@ class JsonPrinter(Printer):
         """
         for target in self._transient_targets(task_id, tab_id) or [tab_id]:
             self.broadcast({**event, "tabId": target})
-
-    def open_ui_mirror(
-        self,
-        owner_tab_id: str,
-        viewer_tab_ids: list[str],
-        work_dir: str = "",
-        task_key: str = "",
-    ) -> None:
-        """Mirror *owner_tab_id*'s interactive UI onto other clients' tabs.
-
-        Called whenever a blocking UI opens (merge review, auto-commit
-        prompt, worktree strip).  The viewer set is a snapshot rather
-        than a live query of :attr:`_subscribers`, because a review the
-        user leaves open for a while outlives the task's subscriber
-        set (``cleanup_task`` expires it a few minutes after the task
-        ends) — yet the closing event must still reach the very tabs
-        that were shown the UI.  Re-opening refreshes the snapshot
-        while keeping whatever is already on screen.
-
-        Args:
-            owner_tab_id: The tab that owns the UI and its on-disk
-                state.
-            viewer_tab_ids: Tabs of other clients viewing the same
-                task.  Duplicates and the owner itself are ignored.
-            work_dir: The owner's working directory.
-            task_key: The task the UI belongs to, used to catch up a
-                tab that joins the task while the UI is open.
-        """
-        if not owner_tab_id:
-            return
-        with self._lock:
-            mirror = self._ui_mirrors.get(owner_tab_id)
-            if mirror is None:
-                mirror = _UiMirror(work_dir, task_key)
-                self._ui_mirrors[owner_tab_id] = mirror
-            else:
-                mirror.work_dir = work_dir
-                mirror.task_key = task_key
-            # Tabs already shown an earlier phase are KEPT: the
-            # subscriber set expires a few minutes after the task ends,
-            # so re-reading it late would silently drop the very tabs
-            # still displaying the review this phase follows.  Closed
-            # tabs are removed by cleanup_tab, so nothing accumulates.
-            for tab_id in viewer_tab_ids:
-                if tab_id and tab_id != owner_tab_id and tab_id not in mirror.viewer_tab_ids:
-                    mirror.viewer_tab_ids.append(tab_id)
-
-    def close_ui_mirror(self, owner_tab_id: str) -> None:
-        """Drop *owner_tab_id*'s mirror without notifying anyone.
-
-        For the case where opening the UI failed and the owner has
-        already rolled its own state back, so there is nothing on any
-        screen to take down.
-
-        Args:
-            owner_tab_id: The tab whose UI never opened.
-        """
-        with self._lock:
-            self._ui_mirrors.pop(owner_tab_id, None)
-
-    def ui_mirror_owner(self, tab_id: str, open_event: str = "") -> str:
-        """Return the tab owning the interactive UI shown on *tab_id*.
-
-        An action (accept a hunk, commit, discard a worktree) carries
-        the tab id of the client that produced it.  When that client is
-        only mirroring someone else's UI, the action has to be applied
-        to the owner — the tab that holds the merge cursor, the
-        on-disk merge artifacts and the repository.
-
-        Args:
-            tab_id: The tab id carried by the inbound command.
-            open_event: The event type that put the acted-on UI on
-                screen (e.g. ``"merge_data"``).  A tab watching two
-                chats can mirror two owners at once, so the action is
-                matched to the owner actually showing that UI.
-
-        Returns:
-            The owner tab id, or *tab_id* itself when it owns its UI
-            (or no mirror is registered for it).
-        """
-        if not tab_id:
-            return tab_id
-        with self._lock:
-            if tab_id in self._ui_mirrors:
-                return tab_id
-            for owner_tab_id, mirror in self._ui_mirrors.items():
-                if tab_id not in mirror.viewer_tab_ids:
-                    continue
-                if open_event and open_event not in mirror.open_events:
-                    continue
-                return owner_tab_id
-        return tab_id
-
-    def ui_mirror_work_dir(self, owner_tab_id: str) -> str:
-        """Return the working directory recorded for *owner_tab_id*'s UI.
-
-        Args:
-            owner_tab_id: The tab that owns the UI.
-
-        Returns:
-            The owner's working directory, or ``""`` when unknown.
-        """
-        with self._lock:
-            mirror = self._ui_mirrors.get(owner_tab_id)
-        return mirror.work_dir if mirror is not None else ""
-
-    def ui_mirror_tabs(self, owner_tab_id: str) -> list[str]:
-        """Return every tab that renders *owner_tab_id*'s UI, owner first.
-
-        Args:
-            owner_tab_id: The tab that owns the UI.
-
-        Returns:
-            ``[owner, *viewers]``.  Just ``[owner]`` when nothing
-            mirrors it.
-        """
-        with self._lock:
-            mirror = self._ui_mirrors.get(owner_tab_id)
-            viewers = list(mirror.viewer_tab_ids) if mirror is not None else []
-        return [owner_tab_id, *viewers]
-
-    def broadcast_tab_ui(self, event: dict[str, Any]) -> None:
-        """Broadcast a tab-scoped UI *event* to every mirroring tab.
-
-        Tab-stamped events are routed verbatim to all clients, which
-        each keep only the copy naming a tab they know.  Tab ids are
-        per-client, so one stamped copy is emitted per mirroring tab;
-        copies for viewers also carry ``mirrorOf`` naming the owner, so
-        the transports can tell an original from its mirror.
-
-        Args:
-            event: A UI event carrying an owner ``tabId``.
-        """
-        owner_tab_id = event.get("tabId", "")
-        if not owner_tab_id:
-            self.broadcast(event)
-            return
-        targets = self._track_ui_event(owner_tab_id, event)
-        for target in targets:
-            copy = {**event, "tabId": target}
-            if target != owner_tab_id:
-                copy["mirrorOf"] = owner_tab_id
-            self.broadcast(copy)
-
-    def _track_ui_event(
-        self,
-        owner_tab_id: str,
-        event: dict[str, Any],
-    ) -> list[str]:
-        """Record what *owner_tab_id* has on screen and return the targets.
-
-        An opening event replaces the previous one of its kind; a
-        closing event retires the events it answers.  Once nothing is
-        on screen the mirror is dropped, so a tab that merely watched
-        an old review can never be mistaken for a viewer of a new one.
-
-        The state change and the target snapshot happen under one hold
-        of the lock: a tab that joins mid-way must either be caught up
-        by :meth:`_join_ui_mirrors` or be in this event's target list —
-        splitting the two would let it fall between them and be shown
-        an opening it is never told to close (or a close for an opening
-        it never saw).
-
-        Args:
-            owner_tab_id: The tab that owns the UI.
-            event: The UI event being broadcast.
-
-        Returns:
-            The tabs to send this event to, owner first.
-        """
-        event_type = event.get("type", "")
-        with self._lock:
-            mirror = self._ui_mirrors.get(owner_tab_id)
-            if mirror is None:
-                return [owner_tab_id]
-            targets = [owner_tab_id, *mirror.viewer_tab_ids]
-            if event_type in _UI_OPEN_EVENTS:
-                mirror.open_events[event_type] = event
-            answered = _UI_CLOSE_EVENTS.get(event_type, ())
-            for answered_type in answered:
-                mirror.open_events.pop(answered_type, None)
-            if answered and not mirror.open_events:
-                del self._ui_mirrors[owner_tab_id]
-        return targets
 
     def broadcast_model_pick(
         self,
@@ -1021,7 +717,7 @@ class JsonPrinter(Printer):
         self._steps_offsets[self._task_key()] = value
 
     def cleanup_tab(self, tab_id: str) -> None:
-        """Remove *tab_id* from every subscriber, override and mirror set.
+        """Remove *tab_id* from every subscriber and override set.
 
         Should be called when a frontend tab is closed.  The
         underlying per-task state (recording, bash buffer, offsets)
@@ -1031,10 +727,8 @@ class JsonPrinter(Printer):
         :meth:`cleanup_task` to drop the per-task state when the task
         itself ends.
 
-        A UI the tab OWNS is deliberately left alone — this also runs
-        when a tab merely re-subscribes (session replay, new chat), and
-        a review open in other windows must survive that.  Disposal of
-        the tab itself goes through :meth:`close_owner_ui`.
+        This also runs when a tab merely re-subscribes (session
+        replay, new chat), so it must stay safe to call on a live tab.
 
         Args:
             tab_id: The frontend tab identifier to drop.
@@ -1043,9 +737,6 @@ class JsonPrinter(Printer):
             return
         with self._lock:
             self._model_override_tabs.discard(tab_id)
-            for mirror in self._ui_mirrors.values():
-                if tab_id in mirror.viewer_tab_ids:
-                    mirror.viewer_tab_ids.remove(tab_id)
             self._sweep_expired_subscribers()
             for task_key in list(self._subscribers.keys()):
                 viewers = self._subscribers[task_key]
@@ -1053,43 +744,6 @@ class JsonPrinter(Printer):
                 if not viewers:
                     self._subscribers.pop(task_key, None)
                     self._subscriber_expiry.pop(task_key, None)
-
-    def close_owner_ui(self, owner_tab_id: str) -> None:
-        """Take *owner_tab_id*'s interactive UI off the other clients.
-
-        Called when the owner tab is disposed for good.  The tab that
-        held the merge cursor, the on-disk artifacts and the repository
-        is gone, so a button left on the other screens could only act
-        on nothing — or, once the mirror is forgotten, on the wrong
-        repository.
-
-        Args:
-            owner_tab_id: The tab being disposed.
-        """
-        with self._lock:
-            orphaned = self._ui_mirrors.pop(owner_tab_id, None)
-        if orphaned is None:
-            return
-        for event in _orphaned_ui_close_events(owner_tab_id, orphaned):
-            self.broadcast(event)
-
-    def has_ui_mirror_for_task(self, task_id: Any) -> bool:
-        """Return whether a UI of *task_id* is still waiting to be answered.
-
-        Args:
-            task_id: The task identifier to look for.
-
-        Returns:
-            True when some tab owns an open UI belonging to that task.
-        """
-        key = self._coerce_task_id(task_id)
-        if not key:
-            return False
-        with self._lock:
-            return any(
-                mirror.task_key == key and mirror.open_events
-                for mirror in self._ui_mirrors.values()
-            )
 
     def cleanup_task(
         self,

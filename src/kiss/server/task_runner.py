@@ -1116,7 +1116,7 @@ class _TaskRunnerMixin:
                                 tab_id,
                                 internal=True,
                             )
-                            self.printer.broadcast_tab_ui(
+                            self.printer.broadcast(
                                 {
                                     "type": "worktree_result",
                                     "tabId": tab_id,

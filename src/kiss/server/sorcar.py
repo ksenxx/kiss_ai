@@ -471,9 +471,8 @@ class ApiContext:
             ``websockets`` ``ServerConnection`` (remote browser) or an
             :class:`asyncio.StreamWriter` (local VS Code extension).
             Used for direct replies.
-        tabs_seen: Per-connection set of frontend tab ids, mutated in
-            place; the transport's disconnect cleanup arms a deferred
-            ``closeTab`` for every id recorded here.
+        tabs_seen: Per-connection set of frontend tab ids, mutated
+            in place (drives the local-UDS talk-muting bookkeeping).
         conn_state: Per-connection mutable state holding at least the
             connection's ``work_dir`` (announced via ``setWorkDir``)
             and unique ``conn_id``.
@@ -613,8 +612,8 @@ class ServerApi:
         2. Validates *cmd* against the catalog
            (:func:`validate_command`) and answers an invalid command
            with a direct ``error`` event to the sender only.
-        3. Records the command's ``tabId`` for the transport's
-           deferred-close bookkeeping (:meth:`_record_tab`).
+        3. Records the command's ``tabId`` in the connection's
+           bookkeeping (:meth:`_record_tab`).
         4. Stamps the connection's ``conn_id`` as ``connId`` —
            overwriting any client-supplied value so it cannot be
            spoofed — which keys the backend's per-connection
@@ -660,8 +659,7 @@ class ServerApi:
     def _record_tab(self, tab_id: str, ctx: ApiContext) -> None:
         """Record *tab_id* as touched by this connection.
 
-        Adds the id to ``ctx.tabs_seen`` (arming the transport's
-        deferred ``closeTab`` on disconnect) and, for local UDS peers,
+        Adds the id to ``ctx.tabs_seen`` and, for local UDS peers,
         registers it with the printer's local-tab set exactly once per
         connection (talk-playback arbitration).
 
@@ -837,12 +835,7 @@ class ServerApi:
         included) and writes the cleaned list back so the backend's
         own sanitize pass finds nothing left to reject or truncate,
         then records every restored tab id in the connection's
-        bookkeeping: the deferred-close contract is "schedule a
-        closeTab for every tab id this connection touched", and
-        ``_handle_ready`` re-claims (cancels the pending close of, and
-        resumes) every ``restoredTabs`` entry — without recording them
-        a later disconnect would never re-arm their deferred close,
-        leaking the restored backend state forever.  Finally fans the
+        bookkeeping (local-UDS talk muting).  Finally fans the
         command out through the backend's ready handler (models /
         input history / config / session replay).
 
@@ -910,8 +903,7 @@ class ServerApi:
         editor-managed review (its per-hunk actions never reach the
         backend): the server-side shadow merge state registered when
         the ``merge_data`` event was broadcast is dropped — leaving it
-        would replay a ZOMBIE review on the next webview reload, fire
-        a spurious second all-done from the deferred-close path, and
+        would replay a ZOMBIE review on the next webview reload and
         leak one state (with full file payloads) per finished review —
         and the command still falls through to the backend
         (``_cmd_merge_action`` → ``_finish_merge``).
@@ -925,11 +917,7 @@ class ServerApi:
             return
         tab_id = cmd.get("tabId", "")
         if isinstance(tab_id, str) and tab_id:
-            # The finishing client may be one of the other windows
-            # mirroring the review; the shadow state is the owner's.
-            self._backend._pop_merge_state(
-                self._backend._printer.ui_mirror_owner(tab_id, "merge_data"),
-            )
+            self._backend._pop_merge_state(tab_id)
         await self.forward(cmd, ctx)
 
     async def open_file(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
@@ -1186,8 +1174,9 @@ def run(
         ConnectionError: When no daemon is listening on the socket, or
             the daemon drops the connection before the task finishes.
         TimeoutError: When the task does not finish within *timeout*
-            seconds.  The client then disconnects, which asks the
-            daemon to close the task's tab.
+            seconds.  The client then sends the daemon an explicit
+            ``closeTab`` for the task's tab and disconnects; the task
+            keeps running and its state is disposed when it ends.
     """
     if not prompt or not prompt.strip():
         raise ValueError("prompt must be a non-empty string")
@@ -1275,6 +1264,22 @@ def run(
                 elif started:
                     return _to_task_result(result_event, chat_id, task_id)
     finally:
+        # The synthetic tab is this client's alone, and a disconnect no
+        # longer tears tabs down (tabs are global state shared by every
+        # client), so explicitly ask the daemon to close it on every
+        # exit path.  For a still-running task (timeout) this merely
+        # flips ``frontend_closed`` and the state is disposed when the
+        # task ends; for a finished task it is disposed immediately.
+        # Best-effort: the daemon may be gone or the connect may have
+        # failed.
+        try:
+            sock.settimeout(5.0)
+            sock.sendall(
+                json.dumps({"type": "closeTab", "tabId": tab_id})
+                .encode("utf-8") + b"\n",
+            )
+        except OSError:
+            pass
         # ``sock.makefile()`` holds an independent reference to the
         # socket descriptor, so closing only the socket object leaves
         # the buffered reader (and its multi-MiB buffer) alive whenever

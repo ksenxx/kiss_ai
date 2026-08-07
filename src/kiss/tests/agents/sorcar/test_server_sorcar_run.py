@@ -906,6 +906,64 @@ class SorcarRunApiTest(unittest.TestCase):
         assert seen["model_config"] != "junk"
         assert seen["web_tools"] is True, "config default web tools apply"
 
+    def test_api_tab_state_disposed_after_run(self) -> None:
+        """``run()`` explicitly closes its synthetic tab; no state leaks.
+
+        A client disconnect no longer tears tabs down (tabs are global
+        state shared by every client), so the API client itself sends
+        the daemon a ``closeTab`` for its ``api-…`` tab on exit.
+        Without it the ``server_owned`` ``AgentState`` and per-tab chat
+        view of every ``run()`` call would accumulate in the daemon
+        forever, one leaked entry per fresh ``api-{uuid}`` tab.
+        """
+        import time as _time
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            self_agent.total_tokens_used = 1
+            self_agent.budget_used = 0.0
+            self_agent.total_steps = 1
+            raw = "success: true\nis_continue: false\nsummary: ok\n"
+            printer = kwargs.get("printer") or getattr(
+                self_agent, "printer", None,
+            )
+            if printer is not None:
+                printer.print(raw, type="result", step_count=1)
+            return raw
+
+        self._parent_class.run = stub_run
+        result = sorcar.run(
+            "say hi",
+            work_dir=self.repo,
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert result.success is True
+
+        from kiss.server import agent_state
+
+        # The closeTab is dispatched asynchronously after run() returns.
+        api_states: list[Any] = []
+        api_views: list[str] = []
+        deadline = _time.monotonic() + 10.0
+        while _time.monotonic() < deadline:
+            api_states = [
+                state for state in agent_state.snapshot()
+                if state.tab_id.startswith("api-")
+            ]
+            with self.server._vscode_server._state_lock:
+                api_views = [
+                    tab for tab in self.server._vscode_server._tab_chat_views
+                    if tab.startswith("api-")
+                ]
+            if not api_states and not api_views:
+                break
+            _time.sleep(0.05)
+        assert api_states == [], (
+            "api tab AgentState leaked after run(): the client must "
+            "send an explicit closeTab on exit"
+        )
+        assert api_views == [], "api tab chat view leaked after run()"
+
     def test_no_daemon_raises_connection_error(self) -> None:
         """A missing daemon socket raises a helpful ConnectionError."""
         missing = str(Path(self.tmpdir) / "nowhere.sock")

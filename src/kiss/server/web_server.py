@@ -348,8 +348,6 @@ _OPEN_TIMEOUT_SECONDS = 300.0
 
 _MAX_VOICE_AUDIO_B64 = 4 * 1024 * 1024
 
-_TAB_CLOSE_GRACE = 10.0
-
 _KISS_HOME: Path | None = None
 _TLS_DIR: Path | None = None
 
@@ -1877,15 +1875,7 @@ class WebPrinter(JsonPrinter):
         if event.get("type") == "merge_data":
             event = _augment_merge_data(event)
             evt_tab = event.get("tabId", "")
-            # Copies mirrored onto other clients' tabs (see
-            # JsonPrinter.broadcast_tab_ui) describe the SAME review:
-            # registering a hunk cursor per copy would give each client
-            # its own cursor and fire one "all-done" per client.
-            if (
-                evt_tab
-                and not event.get("mirrorOf")
-                and self._merge_state_callback is not None
-            ):
+            if evt_tab and self._merge_state_callback is not None:
                 self._merge_state_callback(evt_tab, event.get("data", {}))
 
         if "tabId" in event:
@@ -3346,9 +3336,6 @@ class RemoteAccessServer:
         self._merge_states: dict[str, _WebMergeState] = {}
         self._merge_states_lock = threading.Lock()
         self._merge_action_locks: dict[str, asyncio.Lock] = {}
-        self._pending_tab_closes: dict[str, asyncio.TimerHandle] = {}
-        self._pending_tab_closes_lock = threading.Lock()
-        self._pending_close_tasks: set[asyncio.Task[None]] = set()
         self._uds_handler_tasks: set[asyncio.Task[None]] = set()
         self._printer._merge_state_callback = self._register_merge_state
         self._active_url: str | None = None
@@ -3360,11 +3347,6 @@ class RemoteAccessServer:
         self._update_log_path: Path = _kiss_home_dir() / "update.log"
         self._update_proc: subprocess.Popen[bytes] | None = None
         self._update_starting = False
-        # tab_id -> conn_id of the most recent live connection that
-        # used the tab.  Guarded by _pending_tab_closes_lock.  A stale
-        # connection's disconnect sweep must not arm a close timer for
-        # a tab that a replacement connection has claimed (F4-01).
-        self._tab_conn_owners: dict[str, str] = {}
         self._lifecycle_lock = asyncio.Lock()
         self._uds_inode: int | None = None
 
@@ -3542,171 +3524,14 @@ class RemoteAccessServer:
             None, self._vscode_server._handle_command, cmd,
         )
 
-    def _claim_tab(self, tab_id: str, conn_id: str) -> None:
-        """Record *conn_id* as the current live owner of *tab_id*.
-
-        Called on every dispatched command that names a tab, and on
-        the ``ready`` claim path.  Ownership decides whether a
-        dropping connection may arm the deferred ``closeTab`` timer
-        for the tab (F4-01): a stale connection that lost the tab to
-        a live replacement must not tear the tab's backend state
-        down.
-        """
-        if not tab_id or not conn_id:
-            return
-        with self._pending_tab_closes_lock:
-            prev_owner = self._tab_conn_owners.get(tab_id)
-            self._tab_conn_owners[tab_id] = conn_id
-            if prev_owner == conn_id:
-                return
-            # Ownership moved to a new live connection: atomically
-            # cancel any close timer armed by the previous owner's
-            # disconnect (same lock as the arm path, so a stale
-            # disconnect cannot re-arm in between).
-            handle = self._pending_tab_closes.pop(tab_id, None)
-        if handle is not None:
-            try:
-                handle.cancel()
-            except Exception:
-                logger.debug(
-                    "Cancel of pending close on tab reclaim failed",
-                    exc_info=True,
-                )
-
-    def _schedule_owned_tab_closes(
-        self, tabs_seen: set[str], conn_state: dict[str, Any],
-    ) -> None:
-        """Arm deferred closes for the dropped connection's own tabs.
-
-        Shared by the ``finally`` blocks of :meth:`_ws_handler` and
-        :meth:`_uds_handler`.  Skips any tab a live replacement
-        connection has since claimed (F4-01) — the replacement's own
-        disconnect will arm the timer when it really drops.
-        """
-        if self._shutdown_initiated:
-            return
-        conn_id = str(conn_state.get("conn_id", ""))
-        for tab in tabs_seen:
-            self._schedule_tab_close(tab, owner_conn_id=conn_id)
-
-    def _schedule_tab_close(
-        self, tab_id: str, owner_conn_id: str | None = None,
-    ) -> None:
-        """Schedule a deferred ``closeTab`` for *tab_id* after a grace period.
-
-        Called from :meth:`_ws_handler`'s ``finally`` block whenever a
-        WebSocket connection drops, for every tab id that was seen on
-        that connection.  Because browsers cannot reliably emit a
-        ``closeTab`` before the WSS shuts down (``beforeunload`` /
-        ``pagehide`` WebSocket writes are commonly buffered then
-        dropped), the grace timer is the canonical way to detect that
-        the frontend tab is truly gone — a reload / transient
-        reconnect that re-claims the same tab id within
-        :data:`_TAB_CLOSE_GRACE` seconds calls
-        :meth:`_cancel_pending_tab_close` to abort the disposal.
-
-        If a previous timer was already armed for *tab_id*, it is
-        cancelled and replaced (extending the grace window each time
-        the same tab id appears on a new dropped connection).
-
-        Args:
-            tab_id: The frontend tab identifier whose backend state
-                should be torn down once the grace period elapses,
-                unless cancelled by a reconnect.
-        """
-        if not tab_id:
-            return
-        loop = self._loop
-        if loop is None or not loop.is_running():
-            return
-        with self._pending_tab_closes_lock:
-            if owner_conn_id is not None and (
-                self._tab_conn_owners.get(tab_id, owner_conn_id)
-                != owner_conn_id
-            ):
-                # Ownership check and timer arming under ONE lock
-                # acquisition (F4-01): a replacement connection that
-                # claimed the tab must not have its tab torn down by
-                # this stale disconnect.
-                return
-            existing = self._pending_tab_closes.pop(tab_id, None)
-            if existing is not None:
-                try:
-                    existing.cancel()
-                except Exception:
-                    logger.debug(
-                        "Cancel of stale pending close failed",
-                        exc_info=True,
-                    )
-            handle = loop.call_later(
-                _TAB_CLOSE_GRACE,
-                self._fire_pending_tab_close,
-                tab_id,
-            )
-            self._pending_tab_closes[tab_id] = handle
-
-    def _cancel_pending_tab_close(self, tab_id: str) -> None:
-        """Cancel a pending deferred ``closeTab`` for *tab_id*.
-
-        Called from :meth:`_handle_ready` when a fresh WebSocket
-        connection re-claims a tab id (either as the current
-        ``tabId`` or as an entry in ``restoredTabs``).  Idempotent and
-        safe for unknown tab ids — if no timer was armed for *tab_id*
-        the call is a no-op.
-
-        Args:
-            tab_id: The frontend tab identifier being re-claimed.
-        """
-        if not tab_id:
-            return
-        with self._pending_tab_closes_lock:
-            handle = self._pending_tab_closes.pop(tab_id, None)
-        if handle is not None:
-            try:
-                handle.cancel()
-            except Exception:
-                logger.debug(
-                    "Cancel of pending tab close failed", exc_info=True,
-                )
-
-    def _fire_pending_tab_close(self, tab_id: str) -> None:
-        """Execute the deferred ``closeTab`` for *tab_id*.
-
-        Runs on the asyncio event loop after :data:`_TAB_CLOSE_GRACE`
-        seconds elapse without a reconnect cancelling the timer.
-        Pops the merge state (if any) for *tab_id* and dispatches the
-        ``closeTab`` command through :meth:`_run_cmd`, which routes
-        through :class:`VSCodeServer._close_tab`.  When the tab is
-        idle, ``_close_tab`` disposes the tab's agent state immediately;
-        when a task or merge review is still in flight, it flips
-        ``frontend_closed=True`` and lets the existing deferred-
-        disposal hook (:meth:`VSCodeServer._dispose_if_closed`) tear
-        down the state once the lifecycle ends — never interrupting
-        the running agent.
-
-        Args:
-            tab_id: The frontend tab identifier whose grace window
-                has elapsed.
-        """
-        with self._pending_tab_closes_lock:
-            self._pending_tab_closes.pop(tab_id, None)
-            self._tab_conn_owners.pop(tab_id, None)
-        if self._loop is None or not self._loop.is_running():
-            return
-        task = asyncio.ensure_future(
-            self._finish_merge_and_close_tab(tab_id),
-            loop=self._loop,
-        )
-        self._pending_close_tasks.add(task)
-        task.add_done_callback(self._pending_close_tasks.discard)
-
     async def _finish_merge_and_close_tab(
         self, tab_id: str, merge_state: _WebMergeState | None = None,
     ) -> None:
         """End an in-flight merge review (if any) and close *tab_id*.
 
-        Companion of :meth:`_fire_pending_tab_close`.  When the close
-        grace elapsed while a merge review was still in flight, the
+        Used by the explicit ``closeTab`` path of remote-web clients
+        (:meth:`kiss.server.sorcar.ServerApi.close_tab`).  When the
+        tab closes while a merge review is still in flight, the
         popped :class:`_WebMergeState` is the ONLY thing that could
         ever drive the review to ``all-done`` — the backend
         ``_close_tab`` sees ``is_merging=True`` (a busy lifecycle
@@ -3791,7 +3616,6 @@ class RemoteAccessServer:
         except Exception:
             logger.debug("WS handler error", exc_info=True)
         finally:
-            self._schedule_owned_tab_closes(tabs_seen, conn_state)
             self._vscode_server.drop_connection_state(conn_state["conn_id"])
             self._printer.unbind_conn(conn_state["conn_id"])
             self._printer.remove_client(websocket)
@@ -3857,7 +3681,6 @@ class RemoteAccessServer:
         except Exception:
             logger.debug("UDS handler error", exc_info=True)
         finally:
-            self._schedule_owned_tab_closes(tabs_seen, conn_state)
             local_tabs = conn_state.get("local_tabs")
             if isinstance(local_tabs, set):
                 self._printer.unregister_local_uds_tabs(local_tabs)
@@ -3897,9 +3720,9 @@ class RemoteAccessServer:
                 :class:`ServerConnection` (WSS) or an
                 :class:`asyncio.StreamWriter` (UDS).  Used for direct
                 replies.
-            tabs_seen: Per-connection set of tab ids, mutated in place
-                (used by the callers' ``finally`` blocks to arm
-                deferred ``closeTab`` timers).
+            tabs_seen: Per-connection set of tab ids, mutated in
+                place (drives the per-connection local-UDS tab
+                bookkeeping for talk muting).
             conn_state: Per-connection mutable state holding the
                 connection's own ``work_dir`` and unique ``conn_id``.
                 Each VS Code window owns exactly one connection, and
@@ -3907,9 +3730,6 @@ class RemoteAccessServer:
                 guarantees the per-window work_dir and autocomplete
                 isolation invariants.
         """
-        cmd_tab_id = cmd.get("tabId")
-        if isinstance(cmd_tab_id, str) and cmd_tab_id:
-            self._claim_tab(cmd_tab_id, str(conn_state.get("conn_id", "")))
         ctx = sorcar_api.ApiContext(
             endpoint=endpoint,
             tabs_seen=tabs_seen,
@@ -4594,8 +4414,6 @@ class RemoteAccessServer:
           would propagate out of the command dispatch and tear
           down the whole authenticated connection over one bad field;
         * blanks non-str ``tabId`` / ``chatId`` values — a non-str
-          ``tabId`` (e.g. a list) would raise ``TypeError`` in
-          ``_cancel_pending_tab_close``'s dict lookup, and a non-str
           ``chatId`` would flow into backend handlers that assume
           strings.
 
@@ -4673,7 +4491,6 @@ class RemoteAccessServer:
         if not isinstance(tab_id, str):
             tab_id = ""
         conn_id = cmd.get("connId", "")
-        self._cancel_pending_tab_close(tab_id)
         work_dir = cmd.get("workDir", "")
         for init_cmd in ("getModels", "getInputHistory", "getConfig"):
             init: dict[str, Any] = {"type": init_cmd, "connId": conn_id}
@@ -4701,10 +4518,6 @@ class RemoteAccessServer:
             seen_merge_tabs.add(tab_id)
         for rt in self._sanitized_restored_tabs(cmd):
             rt_id = rt["tabId"]
-            if rt_id:
-                self._cancel_pending_tab_close(rt_id)
-                if isinstance(conn_id, str):
-                    self._claim_tab(rt_id, conn_id)
             chat_id = rt["chatId"]
             if chat_id:
                 await self._run_cmd(
@@ -4758,25 +4571,18 @@ class RemoteAccessServer:
         endpoint.  Sends are targeted at *websocket* only — sibling
         windows already received the original broadcast.
 
-        A tab that only MIRRORS someone else's review (this client
-        joined a chat another client is reviewing) has no state of its
-        own, so the owner's review is replayed to it — stamped with
-        this tab's id, exactly as ``broadcast_tab_ui`` stamps the live
-        events.
-
         Args:
-            tab_id: The tab the connection (re-)claimed.
+            tab_id: The tab the ``ready`` command named.
             websocket: The reconnecting client connection.
         """
         if not tab_id:
             return
-        owner_tab_id = self._printer.ui_mirror_owner(tab_id, "merge_data")
-        lock = await self._acquire_merge_action_lock(owner_tab_id)
+        lock = await self._acquire_merge_action_lock(tab_id)
         if lock is None:
             return
         try:
             with self._merge_states_lock:
-                state = self._merge_states.get(owner_tab_id)
+                state = self._merge_states.get(tab_id)
             if state is None or not state.remaining:
                 return
             assert self._loop is not None
@@ -4803,9 +4609,6 @@ class RemoteAccessServer:
                 ),
                 "resolved": state.resolutions(),
             }
-            if owner_tab_id != tab_id:
-                event["mirrorOf"] = owner_tab_id
-                nav["mirrorOf"] = owner_tab_id
             try:
                 await self._endpoint_send(websocket, json.dumps(event))
                 await self._endpoint_send(
@@ -4897,8 +4700,8 @@ class RemoteAccessServer:
     def _pop_merge_state(self, tab_id: str) -> _WebMergeState | None:
         """Atomically drop *tab_id*'s merge state and per-tab action lock.
 
-        Every cleanup site (deferred tab close, the client ``all-done``
-        and web ``closeTab`` handlers of the server API
+        Every cleanup site (the client ``all-done`` and web
+        ``closeTab`` handlers of the server API
         (``sorcar.ServerApi.merge_action`` / ``close_tab``),
         and the completion branch of ``_apply_web_merge_action``) must
         drop BOTH entries together, or one of them leaks for the
@@ -4994,7 +4797,7 @@ class RemoteAccessServer:
         """
         fname = file_data.get("name") or file_data.get("target") or "file"
         logger.warning("Merge reject failed for %s: %s", fname, exc)
-        self._printer.broadcast_tab_ui({
+        self._printer.broadcast({
             "type": "error",
             "text": f"Failed to reject changes in {fname}: {exc}",
             "tabId": tab_id,
@@ -5018,9 +4821,7 @@ class RemoteAccessServer:
             cmd: The ``mergeAction`` command from the browser, with
                 ``action`` and ``tabId`` fields.
         """
-        tab_id = self._printer.ui_mirror_owner(
-            cmd.get("tabId", ""), "merge_data",
-        )
+        tab_id = cmd.get("tabId", "")
         lock = await self._acquire_merge_action_lock(tab_id)
         if lock is None:
             return
@@ -5131,7 +4932,7 @@ class RemoteAccessServer:
                     state.mark_resolved(fi, hi, "rejected")
 
         cur_after = state.current()
-        self._printer.broadcast_tab_ui({
+        self._printer.broadcast({
             "type": "merge_nav",
             "tabId": tab_id,
             "remaining": state.remaining,
@@ -6507,18 +6308,6 @@ class RemoteAccessServer:
             self._watchdog_task = None
             await _cancel_task(self._version_check_task)
             self._version_check_task = None
-            with self._pending_tab_closes_lock:
-                handles = list(self._pending_tab_closes.values())
-                self._pending_tab_closes.clear()
-                self._tab_conn_owners.clear()
-            for handle in handles:
-                try:
-                    handle.cancel()
-                except Exception:
-                    logger.debug(
-                        "Cancel of pending tab close on shutdown failed",
-                        exc_info=True,
-                    )
             if self._ws_server is not None:
                 self._ws_server.close()
                 try:
@@ -6548,15 +6337,12 @@ class RemoteAccessServer:
                         "UDS client close on shutdown failed",
                         exc_info=True,
                     )
-            # DRAIN in-flight UDS handlers and deferred tab-close
-            # tasks: closing writers merely unblocks readline(); the
-            # handler coroutines (and their cleanup `finally`
-            # blocks) plus any fired deferred-close tasks may still
-            # be running.  Join them so no coroutine touches server
-            # state after stop_async returns; cancel stragglers.
-            await self._drain_tasks(
-                self._uds_handler_tasks | self._pending_close_tasks,
-            )
+            # DRAIN in-flight UDS handlers: closing writers merely
+            # unblocks readline(); the handler coroutines (and their
+            # cleanup `finally` blocks) may still be running.  Join
+            # them so no coroutine touches server state after
+            # stop_async returns; cancel stragglers.
+            await self._drain_tasks(set(self._uds_handler_tasks))
             await asyncio.to_thread(self._stop_active_agent_tasks)
             self._stop_tunnel()
             _remove_url_file(self._url_file)

@@ -6,11 +6,11 @@
 
 BUG-WS8-1 — every cleanup site that pops a finished review's
 ``_merge_states`` entry also pops its ``_merge_action_locks`` entry
-(``_fire_pending_tab_close``, the client ``all-done`` branch and the
-web ``closeTab`` branch of ``_dispatch_client_command``) — EXCEPT the
-most common one: the completion branch at the end of
-``_apply_web_merge_action`` (``remaining == 0`` after the user resolves
-the last hunk).  A review finished through the merge toolbar therefore
+(the client ``all-done`` and web ``closeTab`` handlers of the server
+API, ``sorcar.ServerApi.merge_action`` / ``close_tab``, both via
+``_pop_merge_state``) — EXCEPT the most common one: the completion
+branch at the end of ``_apply_web_merge_action`` (``remaining == 0``
+after the user resolves the last hunk).  A review finished through the merge toolbar therefore
 leaks one ``asyncio.Lock`` per tab id in ``_merge_action_locks`` for
 the daemon's entire lifetime (tab ids are fresh UUIDs, so entries are
 never reused).

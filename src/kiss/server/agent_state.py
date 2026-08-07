@@ -43,11 +43,12 @@ class AgentState:
     Re-keyed to the persisted task id via :func:`rekey` as soon as the
     row exists.
 
-    A state normally lives exactly as long as its run.  The only
-    exception is a server-owned worktree run whose pending worktree /
-    merge review outlives the task: the state stays registered until
-    the user merges or discards, because the merge flow needs the
-    agent that owns the worktree.
+    A tab's state lives until its tab is explicitly closed (tabs are
+    global state shared by every client, so a mere disconnect never
+    disposes one) — in particular a server-owned worktree run whose
+    pending worktree / merge review outlives the task stays registered
+    until the user merges or discards, because the merge flow needs
+    the agent that owns the worktree.
     """
 
     __slots__ = (

@@ -172,16 +172,6 @@ class _RecordingPrinter:
     def broadcast(self, event: dict[str, Any]) -> None:
         self.events.append(event)
 
-    def broadcast_tab_ui(self, event: dict[str, Any]) -> None:
-        """Record a tab-scoped UI event.
-
-        The production ``JsonPrinter.broadcast_tab_ui`` fans the event
-        out to mirroring tabs; with no mirrors registered it reduces to
-        a single ``broadcast``, which is what merge/discard progress
-        events go through here.
-        """
-        self.broadcast(event)
-
 
 def _server(repo: Path) -> VSCodeServer:
     """Construct a VSCodeServer pointed at *repo* with a recording printer."""

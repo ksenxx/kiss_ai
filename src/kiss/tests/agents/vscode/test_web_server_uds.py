@@ -50,9 +50,6 @@ class TestUdsListener(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect_persistence(self.tmpdir)
-        import kiss.server.web_server as ws
-        self._orig_grace = ws._TAB_CLOSE_GRACE
-        ws._TAB_CLOSE_GRACE = 0.05
 
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
@@ -71,8 +68,6 @@ class TestUdsListener(IsolatedAsyncioTestCase):
         await self.server.start_async()
 
     async def asyncTearDown(self) -> None:
-        import kiss.server.web_server as ws
-        ws._TAB_CLOSE_GRACE = self._orig_grace
         await self.server.stop_async()
         if th._db_conn is not None:
             th._db_conn.close()
@@ -135,35 +130,6 @@ class TestUdsListener(IsolatedAsyncioTestCase):
                 await writer.wait_closed()
             except Exception:
                 pass
-
-    async def test_disconnect_arms_deferred_close(self) -> None:
-        """Dropping the UDS arms a deferred ``closeTab`` for every tab seen."""
-        reader, writer = await asyncio.open_unix_connection(
-            str(self.uds_path),
-            limit=16 * 1024 * 1024,
-        )
-        writer.write(
-            json.dumps(
-                {"type": "ready", "tabId": "tab-uds-2",
-                 "restoredTabs": []},
-            ).encode("utf-8") + b"\n",
-        )
-        await writer.drain()
-        await self._drain_events(reader, "focusInput", timeout=2.0)
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except Exception:
-            pass
-        for _ in range(50):
-            with self.server._pending_tab_closes_lock:
-                if "tab-uds-2" in self.server._pending_tab_closes:
-                    break
-            await asyncio.sleep(0.01)
-        with self.server._pending_tab_closes_lock:
-            self.assertIn(
-                "tab-uds-2", self.server._pending_tab_closes,
-            )
 
     async def test_broadcast_fans_out_to_uds_client(self) -> None:
         """Backend broadcasts reach UDS clients via the WebPrinter fan-out."""
