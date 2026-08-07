@@ -1,0 +1,4 @@
+engine/db
+engine_baseline/db
+bench/ref/sf10/
+*.o

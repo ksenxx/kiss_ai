@@ -1,0 +1,65 @@
+# Adversarial fast-path audit manifest for Q18-Q22 (Group D).
+# Each raw request line runs through the audited optimized engine AND the
+# pristine baseline; results are diffed and AUDIT path markers asserted.
+
+# ---------------------------------------------------------------- Q18
+{"line": "18 \"314\"", "expect": ["q18 fast", "q18 fast dense-cust"], "forbid": ["q18 fallback*"], "note": "seed42 benchmark value"}
+{"line": "18 \"313\"", "expect": ["q18 fast"], "forbid": ["q18 fallback*"], "note": "seed7 benchmark value"}
+{"line": "18 \"315\"", "expect": ["q18 fast"], "forbid": ["q18 fallback*"], "note": "seed123 benchmark value"}
+{"line": "18 \"300\"", "expect": ["q18 fast"], "forbid": ["q18 fallback*"], "note": "spec-range low boundary of official [312..315] neighborhood"}
+{"line": "18 \"0\"", "expect": ["q18 fast"], "forbid": ["q18 fallback*"], "note": "QUANTITY 0: every order with lineitems qualifies (huge result)"}
+{"line": "18 \"1\"", "expect": ["q18 fast"], "forbid": ["q18 fallback*"], "note": "QUANTITY 1: near-total qualification"}
+{"line": "18 \"10000\"", "expect": ["q18 fast"], "forbid": ["q18 fallback*"], "note": "QUANTITY 10000: threshold above any per-order sum -> empty result"}
+{"line": "18 \"-5\"", "expect": ["q18 fast"], "forbid": ["q18 fallback*"], "note": "negative QUANTITY: exercises sum>=0 sentinel so orders w/o lineitems stay excluded"}
+{"line": "18 \"314.5\"", "expect": ["q18 fast"], "forbid": ["q18 fallback*"], "note": "fractional QUANTITY: stod parse, scaled-cents comparison"}
+{"line": "18 \"<<NULL>>\"", "expect": ["q18 null"], "forbid": ["q18 fast*", "q18 fallback*"], "note": "NULL placeholder -> empty result, no scan"}
+
+# ---------------------------------------------------------------- Q19
+{"line": "19 \"1\" \"17\" \"28\" \"Brand#14\" \"Brand#15\" \"Brand#35\"", "expect": ["q19 fast"], "forbid": ["q19 fallback*"], "note": "seed42 benchmark values"}
+{"line": "19 \"6\" \"11\" \"28\" \"Brand#15\" \"Brand#15\" \"Brand#24\"", "expect": ["q19 fast"], "forbid": ["q19 fallback*"], "note": "seed7 benchmark values (duplicate brand across groups 1&2)"}
+{"line": "19 \"4\" \"19\" \"30\" \"Brand#55\" \"Brand#31\" \"Brand#45\"", "expect": ["q19 fast"], "forbid": ["q19 fallback*"], "note": "seed123 benchmark values"}
+{"line": "19 \"-10\" \"0\" \"-1\" \"Brand#14\" \"Brand#15\" \"Brand#35\"", "expect": ["q19 fast"], "forbid": ["q19 fallback*"], "note": "negative and zero quantities: lower bounds below all l_quantity"}
+{"line": "19 \"0\" \"0\" \"0\" \"Brand#11\" \"Brand#22\" \"Brand#33\"", "expect": ["q19 fast"], "forbid": ["q19 fallback*"], "note": "all-zero quantities, valid brands"}
+{"line": "19 \"1000000\" \"2000000\" \"3000000\" \"Brand#14\" \"Brand#15\" \"Brand#35\"", "expect": ["q19 fast"], "forbid": ["q19 fallback*"], "note": "huge quantities (scaled still fits int32): zero revenue"}
+{"line": "19 \"28\" \"17\" \"1\" \"Brand#35\" \"Brand#15\" \"Brand#14\"", "expect": ["q19 fast"], "forbid": ["q19 fallback*"], "note": "inverted q1>q2>q3 vs seed42"}
+{"line": "19 \"5\" \"5\" \"5\" \"Brand#14\" \"Brand#14\" \"Brand#14\"", "expect": ["q19 fast"], "forbid": ["q19 fallback*"], "note": "identical brand+quantity in all three OR groups (dup-brand mask logic)"}
+{"line": "19 \"1\" \"17\" \"28\" \"Brand#99\" \"Brand#00\" \"NoSuchBrand\"", "expect": ["q19 fast"], "forbid": ["q19 fallback*"], "note": "unknown brands: no dictionary code matches, zero revenue"}
+{"line": "19 \"<<NULL>>\" \"17\" \"28\" \"Brand#14\" \"Brand#15\" \"Brand#35\"", "expect": ["q19 fast"], "forbid": ["q19 all-groups-null", "q19 fallback*"], "note": "group1 NULL-disabled, groups 2&3 active"}
+{"line": "19 \"<<NULL>>\" \"<<NULL>>\" \"<<NULL>>\" \"<<NULL>>\" \"<<NULL>>\" \"<<NULL>>\"", "expect": ["q19 all-groups-null"], "forbid": ["q19 fast", "q19 fallback*"], "note": "all groups NULL -> single NULL-sum row"}
+{"line": "19 \"1.5\" \"17.25\" \"28.75\" \"Brand#14\" \"Brand#15\" \"Brand#35\"", "expect": ["q19 fast"], "forbid": ["q19 fallback*"], "note": "fractional quantities via stod"}
+
+# ---------------------------------------------------------------- Q20
+{"line": "20 \"linen\" \"1997-01-01\" \"FRANCE\"", "expect": ["q20 fast"], "forbid": ["q20 fallback"], "note": "seed42 benchmark values"}
+{"line": "20 \"turquoise\" \"1997-01-01\" \"JORDAN\"", "expect": ["q20 fast"], "forbid": ["q20 fallback"], "note": "seed7 benchmark values"}
+{"line": "20 \"navajo\" \"1997-01-01\" \"SAUDI ARABIA\"", "expect": ["q20 fast"], "forbid": ["q20 fallback"], "note": "seed123 benchmark values (two-word nation)"}
+{"line": "20 \"zzzznotacolor\" \"1997-01-01\" \"FRANCE\"", "expect": ["q20 fast"], "forbid": ["q20 fallback"], "note": "color prefix matching no parts -> empty result"}
+{"line": "20 \"\" \"1997-01-01\" \"FRANCE\"", "expect": ["q20 fast"], "forbid": ["q20 fallback"], "note": "empty color prefix: LIKE '%' matches every part"}
+{"line": "20 \"l\" \"1997-01-01\" \"FRANCE\"", "expect": ["q20 fast"], "forbid": ["q20 fallback"], "note": "single-char prefix matches many parts"}
+{"line": "20 \"linen\" \"1992-01-01\" \"FRANCE\"", "expect": ["q20 fast"], "forbid": ["q20 fallback"], "note": "window at very start of shipdate domain"}
+{"line": "20 \"linen\" \"1998-09-01\" \"FRANCE\"", "expect": ["q20 fast"], "forbid": ["q20 fallback"], "note": "window past end of shipdate domain -> empty"}
+{"line": "20 \"linen\" \"1996-02-29\" \"FRANCE\"", "expect": ["q20 fast"], "forbid": ["q20 fallback"], "note": "leap-day start; +1 year clamps to 1997-02-28"}
+{"line": "20 \"linen\" \"1997-01-01\" \"ATLANTIS\"", "expect": ["q20 unknown-nation"], "forbid": ["q20 fast", "q20 fallback"], "note": "unknown nation -> empty, no scan"}
+{"line": "20 \"<<NULL>>\" \"1997-01-01\" \"FRANCE\"", "expect": ["q20 null"], "forbid": ["q20 fast", "q20 fallback"], "note": "NULL color -> empty"}
+
+# ---------------------------------------------------------------- Q21
+{"line": "21 \"RUSSIA\"", "expect": ["q21 fast"], "forbid": ["q21 fallback*"], "note": "seed42 benchmark value"}
+{"line": "21 \"UNITED STATES\"", "expect": ["q21 fast"], "forbid": ["q21 fallback*"], "note": "seed7 benchmark value (two-word nation)"}
+{"line": "21 \"VIETNAM\"", "expect": ["q21 fast"], "forbid": ["q21 fallback*"], "note": "seed123 benchmark value"}
+{"line": "21 \"ALGERIA\"", "expect": ["q21 fast"], "forbid": ["q21 fallback*"], "note": "non-benchmarked valid nation"}
+{"line": "21 \"UNITED KINGDOM\"", "expect": ["q21 fast"], "forbid": ["q21 fallback*"], "note": "another two-word nation"}
+{"line": "21 \"WAKANDA\"", "expect": ["q21 unknown-nation"], "forbid": ["q21 fast", "q21 fallback*"], "note": "unknown nation -> empty, no scan"}
+{"line": "21 \"<<NULL>>\"", "expect": ["q21 null"], "forbid": ["q21 fast", "q21 fallback*"], "note": "NULL nation -> empty"}
+
+# ---------------------------------------------------------------- Q22
+{"line": "22 \"13\" \"17\" \"31\" \"23\" \"18\" \"29\" \"30\"", "expect": ["q22 fast"], "forbid": ["q22 numeric fallback", "q22 extra fallback"], "note": "seed42 benchmark values"}
+{"line": "22 \"23\" \"29\" \"30\" \"18\" \"31\" \"17\" \"13\"", "expect": ["q22 fast"], "forbid": ["q22 numeric fallback", "q22 extra fallback"], "note": "seed7 benchmark values (same set, different order)"}
+{"line": "22 \"30\" \"29\" \"17\" \"18\" \"31\" \"13\" \"23\"", "expect": ["q22 fast"], "forbid": ["q22 numeric fallback", "q22 extra fallback"], "note": "seed123 benchmark values (exact args.txt order)"}
+{"line": "22 \"13\" \"13\" \"13\" \"17\" \"17\" \"31\" \"31\"", "expect": ["q22 fast"], "forbid": ["q22 numeric fallback", "q22 extra fallback"], "note": "duplicate codes must not double-count (IN-list set semantics)"}
+{"line": "22 \"99\" \"98\" \"97\" \"96\" \"95\" \"94\" \"93\"", "expect": ["q22 fast"], "forbid": ["q22 numeric fallback", "q22 extra fallback"], "note": "codes matching no customer phones -> empty result"}
+{"line": "22 \"00\" \"01\" \"02\" \"03\" \"04\" \"05\" \"06\"", "expect": ["q22 fast"], "forbid": ["q22 numeric fallback", "q22 extra fallback"], "note": "low codes below TPC-H country-code range -> empty"}
+{"line": "22 \"1\" \"3\" \"5\" \"7\" \"9\" \"11\" \"13\"", "expect": ["q22 fast"], "forbid": ["q22 numeric fallback", "q22 extra fallback"], "note": "1-char codes can never equal a 2-char substring; only 11 and 13 active"}
+{"line": "22 \"133\" \"17\" \"31\" \"23\" \"18\" \"29\" \"30\"", "expect": ["q22 fast"], "forbid": ["q22 numeric fallback", "q22 extra fallback"], "note": "3-char code: baseline contract truncates to first 2 chars ('13'); optimized matches baseline exactly"}
+{"line": "22 \"AB\" \"13\" \"17\" \"31\" \"23\" \"18\" \"29\"", "expect": ["q22 extra fallback"], "forbid": ["q22 fast", "q22 numeric fallback"], "note": "non-numeric code forces the extra-codes fallback scan (guard-false for the fast path)"}
+{"line": "22 \"ZZ\" \"YY\" \"XX\" \"WW\" \"VV\" \"UU\" \"TT\"", "expect": ["q22 extra fallback"], "forbid": ["q22 fast", "q22 numeric fallback"], "note": "all non-numeric codes: fallback yields empty result"}
+{"line": "22 \"13\" \"<<NULL>>\" \"<<NULL>>\" \"<<NULL>>\" \"<<NULL>>\" \"<<NULL>>\" \"<<NULL>>\"", "expect": ["q22 fast"], "forbid": ["q22 no-codes"], "note": "single active code, rest NULL"}
+{"line": "22 \"<<NULL>>\" \"<<NULL>>\" \"<<NULL>>\" \"<<NULL>>\" \"<<NULL>>\" \"<<NULL>>\" \"<<NULL>>\"", "expect": ["q22 no-codes"], "forbid": ["q22 fast", "q22 numeric fallback", "q22 extra fallback"], "note": "all NULL -> empty result, no scan"}
