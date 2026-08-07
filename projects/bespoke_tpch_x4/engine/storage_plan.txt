@@ -1,0 +1,44 @@
+LINEITEM
+- Primary shape: wide columnar segments per column with SIMD-friendly 1024-row vectors; dictionary-coded small enums (l_returnflag, l_linestatus, l_shipinstruct, l_shipmode) with a global string dictionary and per-segment bitpacked indices (2–4 bits).
+- Temporal shard: two-tier partitioning by l_shipdate (year -> month) with per-month min/max metadata for dates and discounts to enable predicate pruning for Q1/Q6/Q12/Q14/Q15/Q20. Store the date columns as 16-bit day offsets from 1992-01-01 in each shard.
+- Join accelerator: keep a compact, monotonic l_orderkey array (delta + varint) aligned with l_linenumber so that lineitems of an order are contiguous. Also build a sparse “order directory” (orderkey -> [start,end] range) for Q18/Q21.
+- Hybrid SoA/AoS cluster: pack (l_extendedprice, l_discount, l_tax, l_quantity) into a micro-AoS struct of 4 decimals to reduce cache misses for revenue aggregates (Q1/Q3/Q5/Q6/Q7/Q8/Q9/Q10/Q14/Q15/Q17/Q19). Store each field as scaled int32 (e.g., *100) with SIMD-friendly block compression.
+- Novel idea: “discount tax lattice” — compute on-the-fly polynomial approximation using SIMD; store small 4-bit residual buckets per row to reconstruct exact decimal when needed (lossless via residual lookup table).
+- Rare text: l_comment as a separate string arena with a per-row 32-bit offset, compressed with front-coding within each shard.
+- No redundancy: all derived metadata (min/max, dictionaries, directory) stores only references and offsets.
+
+ORDERS
+- Columnar with sort order by o_orderdate, then o_orderkey. Store o_orderdate as 16-bit day offsets; keep o_orderkey delta-encoded per block.
+- Join-friendly: maintain a compact hash index (o_orderkey -> rowid) plus a run-length encoded o_custkey map per customer to accelerate Q3/Q5/Q10/Q13/Q18.
+- o_orderstatus and o_orderpriority dictionary-coded; o_shippriority tinyint.
+- “Temporal fanout map”: per-month bitmap of orderkeys for fast semi-joins in Q4/Q12; stored as Roaring bitmaps keyed by month.
+- o_comment in separate arena with dictionary of frequent substrings (e.g., Q13 filter) and per-row 16-bit token stream.
+
+CUSTOMER
+- Columnar, clustered by c_nationkey then c_custkey to speed nation joins (Q5/Q7/Q8/Q10/Q22).
+- c_mktsegment dictionary-coded; c_phone stored as 2-byte country code + 9-byte suffix to enable substring filters without full string scan.
+- c_acctbal as scaled int32; c_name/c_address/c_comment stored in separate string pools with shared prefix compression.
+- “Anti-join bloom”: maintain a compact bloom or xor filter over o_custkey values (from orders) for Q22; stored as metadata only.
+
+SUPPLIER
+- Columnar, clustered by s_nationkey then s_suppkey for nation join locality (Q2/Q5/Q7/Q9/Q11/Q15/Q20/Q21).
+- s_acctbal scaled int32; s_phone split into country code + suffix; s_comment stored in string arena with trigram index metadata to accelerate “Customer%Complaints%” pattern (Q16) without duplicating text.
+
+PART
+- Columnar, clustered by p_brand -> p_type -> p_partkey for Q16/Q17/Q19; p_partkey delta-encoded.
+- p_size and p_retailprice as scaled int32; p_container and p_mfgr dictionary-coded.
+- p_name in string arena with a per-segment suffix array or minimal perfect hash of 3-gram tokens to speed LIKE '%[COLOR]%' (Q9/Q20) while remaining lossless.
+
+PARTSUPP
+- Composite key storage: primary order by (ps_partkey, ps_suppkey) with a two-level index (partkey -> offset range, then suppkey delta list). Great for Q2/Q9/Q11/Q16/Q20.
+- ps_availqty and ps_supplycost packed as int32 with zigzag/delta in blocks. ps_comment in separate string arena.
+
+NATION
+- Tiny table: store as an array-of-structs for cache-resident joins, with dictionary-coded n_name and n_comment pooled strings; n_nationkey as dense int32. Also build a perfect hash (n_nationkey -> rowid) for constant-time joins.
+
+REGION
+- Tiny table: AoS with dictionary-coded r_name; r_regionkey dense. Precompute a map r_name -> r_regionkey for Q2/Q5/Q8.
+
+CROSS-TABLE CRAZY IDEAS (non-redundant metadata only)
+- “Join tapestry”: maintain a compact graph of foreign-key ranges (orders -> lineitem, customer -> orders, part/supplier -> partsupp) as offset arrays to allow vectorized nested-loop scans without copying data.
+- “Adaptive shard temperature”: maintain LRU heat scores per date shard to keep hot shards in huge pages; cold shards remain compressed with lightweight decompression on scan.

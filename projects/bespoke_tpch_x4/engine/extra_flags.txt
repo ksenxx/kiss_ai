@@ -1,0 +1,2 @@
+-fopenmp
+-march=native

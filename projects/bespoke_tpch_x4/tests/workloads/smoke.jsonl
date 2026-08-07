@@ -1,0 +1,5 @@
+# Smoke test for the audit harness: Q1 with normal, boundary-low, and huge DELTA.
+{"line": "1 \"90\"", "expect": ["q1 fast"], "note": "spec-range delta", "forbid": []}
+{"line": "1 \"0\"", "expect": ["q1 fast"], "note": "delta 0: cutoff at 1998-12-01, includes all rows", "forbid": []}
+{"line": "1 \"2600\"", "expect": [], "note": "cutoff 1991-10-19 before min shipdate: empty result expected", "forbid": []}
+{"line": "1 \"-100\"", "expect": ["q1 fast"], "note": "negative delta: cutoff after all shipdates", "forbid": []}

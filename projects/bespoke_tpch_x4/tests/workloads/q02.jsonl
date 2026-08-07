@@ -1,0 +1,20 @@
+# Q2 adversarial audit. Data: part sizes 1..50, exactly 4 partsupp rows per part (sorted by
+# partkey, dense keys 1..N), 5 regions. Branches: "q2 unknown_region" (REGION not in region
+# table -> exact empty), "q2 stride_range" (dense partsupp range lookup), "q2 binsearch_range"
+# (per-part lower_bound fallback; unreachable on TPC-H-shaped data since the 4-per-part stride
+# is always valid), "q2 tie_overflow" (>16 tied min-cost suppliers; unreachable: each part has
+# only 4 suppliers), "q2 no_matching_parts" (size/type filter matches no part).
+{"line": "2 \"8\" \"TIN\" \"ASIA\"", "expect": ["q2 stride_range"], "forbid": ["q2 binsearch_range", "q2 unknown_region", "q2 tie_overflow"], "note": "seed42 values"}
+{"line": "2 \"10\" \"STEEL\" \"AFRICA\"", "expect": ["q2 stride_range"], "forbid": ["q2 binsearch_range"], "note": "seed7 values"}
+{"line": "2 \"18\" \"TIN\" \"EUROPE\"", "expect": ["q2 stride_range"], "forbid": ["q2 binsearch_range"], "note": "seed123 values"}
+{"line": "2 \"15\" \"BRASS\" \"MIDDLE EAST\"", "expect": ["q2 stride_range"], "forbid": ["q2 unknown_region"], "note": "region name containing a space"}
+{"line": "2 \"1\" \"NICKEL\" \"AMERICA\"", "expect": ["q2 stride_range"], "forbid": [], "note": "smallest valid size"}
+{"line": "2 \"50\" \"COPPER\" \"ASIA\"", "expect": ["q2 stride_range"], "forbid": [], "note": "largest valid size"}
+{"line": "2 \"25\" \"N\" \"ASIA\"", "expect": ["q2 stride_range"], "forbid": [], "note": "1-char suffix matching every ...TIN type"}
+{"line": "2 \"36\" \"STANDARD POLISHED TIN\" \"EUROPE\"", "expect": [], "forbid": ["q2 unknown_region"], "note": "full type name as suffix (exact match)"}
+{"line": "2 \"8\" \"TIN\" \"ATLANTIS\"", "expect": ["q2 unknown_region"], "forbid": ["q2 stride_range", "q2 binsearch_range"], "note": "nonexistent region: guard-false early return, exact empty"}
+{"line": "2 \"8\" \"TIN\" \"asia\"", "expect": ["q2 unknown_region"], "forbid": ["q2 stride_range"], "note": "region comparison is case sensitive: empty"}
+{"line": "2 \"8\" \"XYZZY\" \"ASIA\"", "expect": ["q2 no_matching_parts"], "forbid": ["q2 stride_range", "q2 binsearch_range"], "note": "out-of-dictionary type suffix: no parts, empty"}
+{"line": "2 \"0\" \"TIN\" \"ASIA\"", "expect": ["q2 no_matching_parts"], "forbid": ["q2 stride_range"], "note": "size 0 below data domain: no parts, empty"}
+{"line": "2 \"-5\" \"TIN\" \"ASIA\"", "expect": ["q2 no_matching_parts"], "forbid": ["q2 stride_range"], "note": "negative size: no parts, empty"}
+{"line": "2 \"1000000\" \"TIN\" \"ASIA\"", "expect": ["q2 no_matching_parts"], "forbid": ["q2 stride_range"], "note": "huge size: no parts, empty"}

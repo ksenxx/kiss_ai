@@ -1,0 +1,26 @@
+# Q6 adversarial audit. Data: shipdate in [1992-01-02, 1998-12-01], discount 0.00-0.10,
+# quantity integers 1-50; window = [DATE, DATE+1yr), discount between D-0.01 and D+0.01,
+# quantity < Q. Branches: "q6 fast" (prefix-sum cube window overlaps shipdate domain),
+# "q6 window_empty" (window entirely outside domain -> zero revenue is exact),
+# "q6 fallback_flat"/"q6 fallback_shards" (baseline scans; only if build_q6_artifacts was
+# skipped due to non-integral quantities or oversized cube - data invariants, unreachable
+# for any placeholder value).
+{"line": "6 \"1993-01-01\" \"0.08\" \"24\"", "expect": ["q6 fast"], "forbid": ["q6 fallback_flat", "q6 fallback_shards", "q6 window_empty"], "note": "seed42 values"}
+{"line": "6 \"1997-01-01\" \"0.02\" \"24\"", "expect": ["q6 fast"], "forbid": ["q6 fallback_shards"], "note": "seed7 values"}
+{"line": "6 \"1997-01-01\" \"0.07\" \"25\"", "expect": ["q6 fast"], "forbid": ["q6 fallback_shards"], "note": "seed123 values"}
+{"line": "6 \"1993-01-01\" \"0.00\" \"24\"", "expect": ["q6 fast"], "forbid": [], "note": "discount 0: range [-0.01,0.01], negative low end clamped to 0"}
+{"line": "6 \"1993-01-01\" \"0.10\" \"24\"", "expect": ["q6 fast"], "forbid": [], "note": "discount at data max: range [0.09,0.11] clamped to 0.10"}
+{"line": "6 \"1993-01-01\" \"0.99\" \"24\"", "expect": ["q6 fast"], "forbid": [], "note": "discount far above data max: zero revenue"}
+{"line": "6 \"1993-01-01\" \"0.08\" \"0\"", "expect": ["q6 fast"], "forbid": [], "note": "quantity 0: no lineitem has quantity < 0, zero revenue"}
+{"line": "6 \"1993-01-01\" \"0.08\" \"-5\"", "expect": ["q6 fast"], "forbid": [], "note": "negative quantity limit: zero revenue"}
+{"line": "6 \"1993-01-01\" \"0.08\" \"1000000\"", "expect": ["q6 fast"], "forbid": [], "note": "huge quantity limit: every quantity qualifies"}
+{"line": "6 \"1993-01-01\" \"0.08\" \"24.5\"", "expect": ["q6 fast"], "forbid": [], "note": "fractional quantity limit: bucket boundary semantics (qty<=24 pass)"}
+{"line": "6 \"1993-01-01\" \"0.08\" \"1\"", "expect": ["q6 fast"], "forbid": [], "note": "quantity 1 = data min: no row qualifies (strict <)"}
+{"line": "6 \"1992-01-02\" \"0.05\" \"30\"", "expect": ["q6 fast"], "forbid": [], "note": "window starts exactly at min shipdate"}
+{"line": "6 \"1998-12-01\" \"0.05\" \"30\"", "expect": ["q6 fast"], "forbid": ["q6 window_empty"], "note": "window starts exactly at max shipdate: single-day overlap"}
+{"line": "6 \"1998-06-15\" \"0.05\" \"30\"", "expect": ["q6 fast"], "forbid": [], "note": "window straddles max shipdate: hi clamped"}
+{"line": "6 \"1991-06-15\" \"0.05\" \"30\"", "expect": ["q6 fast"], "forbid": ["q6 window_empty"], "note": "window straddles min shipdate: lo clamped"}
+{"line": "6 \"1996-02-29\" \"0.05\" \"30\"", "expect": ["q6 fast"], "forbid": [], "note": "leap-day start: +1yr clamps to 1997-02-28"}
+{"line": "6 \"1998-12-02\" \"0.05\" \"30\"", "expect": ["q6 window_empty"], "forbid": ["q6 fast", "q6 fallback_flat", "q6 fallback_shards"], "note": "window starts one day after max shipdate: guard-false, zero revenue"}
+{"line": "6 \"1991-01-01\" \"0.05\" \"30\"", "expect": ["q6 window_empty"], "forbid": ["q6 fast"], "note": "window [1991-01-01,1992-01-01) ends before min shipdate: zero revenue"}
+{"line": "6 \"2050-01-01\" \"0.05\" \"30\"", "expect": ["q6 window_empty"], "forbid": ["q6 fast"], "note": "window decades after data: zero revenue"}
