@@ -550,7 +550,7 @@ class TestMergeGuard(unittest.TestCase):
         _register_wt_state("5", use_worktree=False, is_merging=True)
         self.server._run_task_inner({"prompt": "test", "model": "", "tabId": "5"})
         errors = [e for e in self.events if e["type"] == "error"]
-        assert any("merge review" in e["text"] for e in errors)
+        assert any("merge is in progress" in e["text"] for e in errors)
 
     @pytest.mark.slow
     def test_merging_does_not_block_other_tabs(self) -> None:
@@ -559,7 +559,9 @@ class TestMergeGuard(unittest.TestCase):
         self.events.clear()
         self.server._run_task_inner({"prompt": "test", "model": "", "tabId": "99"})
         errors = [e for e in self.events if e["type"] == "error"]
-        assert not any("merge review" in e.get("text", "") for e in errors)
+        assert not any(
+            "merge is in progress" in e.get("text", "") for e in errors
+        )
 
 
 class TestWorktreeActionExceptionHandling(unittest.TestCase):

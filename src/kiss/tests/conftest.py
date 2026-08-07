@@ -270,16 +270,17 @@ def _isolated_default_workdir(
     task end — so any test that drives ``_run_task`` on a server whose
     ``work_dir`` was never overridden would commit the developer's
     in-progress work.  Defaulting the variable to a per-test temporary
-    directory makes that path harmless.  Tests that set
-    ``KISS_WORKDIR`` themselves (env already set) are left alone, and
-    tests that assign ``server.work_dir`` in ``setUp`` run after this
-    fixture and still win.
+    directory makes that path harmless.
 
-    The override is unconditional: developer machines commonly run the
-    daemon with ``KISS_WORKDIR`` pointing at the repository itself, so
-    honoring an ambient value would disable the guard exactly where it
-    matters.  The directory lives OUTSIDE the test's own ``tmp_path``
-    so tests that scan their ``tmp_path`` do not see an extra entry.
+    The override is unconditional — it also replaces an ambient
+    ``KISS_WORKDIR`` — because developer machines commonly run the
+    daemon with the variable pointing at the repository itself, and
+    honoring that value would disable the guard exactly where it
+    matters.  Tests that need a specific work dir must set the
+    variable (or assign ``server.work_dir``) inside their own
+    setup/body, which runs after this fixture and therefore wins.
+    The directory lives OUTSIDE the test's own ``tmp_path`` so tests
+    that scan their ``tmp_path`` do not see an extra entry.
 
     Yields:
         None.

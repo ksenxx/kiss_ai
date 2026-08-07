@@ -26,6 +26,7 @@ import logging
 import math
 import os
 import queue
+import shutil
 import threading
 import time
 from typing import Any, cast
@@ -48,6 +49,7 @@ from kiss.agents.sorcar.persistence import (
     _search_history,
     _set_task_favorite,
 )
+from kiss.core import config as config_module
 from kiss.core.models.model_info import (
     MODEL_INFO,
     get_default_model,
@@ -249,6 +251,27 @@ def _subagent_is_done(sub_task_id: Any) -> bool:
         return state is None or not (state.is_task_active or state.thread_alive())
 
 
+def _cleanup_legacy_merge_artifacts() -> None:
+    """Delete review snapshots left behind by the removed diff review.
+
+    Prior releases snapshotted dirty and untracked files (up to 2 MB
+    each) under ``{artifact_root}/merge_dir/<tab>/`` while preparing
+    the interactive diff/merge review, and deleted them when each
+    review ended.  With the review workflow removed, nothing writes —
+    or would ever delete — that tree, so an upgrade (or a restart
+    mid-review) would strand potentially sensitive file copies
+    forever.  Removing the whole directory once at server construction
+    retires the legacy data.
+    """
+    legacy = config_module._artifact_root() / "merge_dir"
+    try:
+        shutil.rmtree(legacy)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.debug("Legacy merge_dir cleanup failed", exc_info=True)
+
+
 class VSCodeServer(
     _CommandsMixin,
     _TaskRunnerMixin,
@@ -262,6 +285,7 @@ class VSCodeServer(
 
     def __init__(self, printer: JsonPrinter | None = None) -> None:
         self.printer: JsonPrinter = printer or JsonPrinter()
+        _cleanup_legacy_merge_artifacts()
         boot_ts = time.time()
         still_running: set[str] = set()
         with agent_state.STATE_LOCK:

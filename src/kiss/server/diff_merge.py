@@ -184,5 +184,3 @@ def _capture_untracked(work_dir: str) -> set[str]:
         for line in result.stdout.split("\n")
         if line
     }
-
-

@@ -46,9 +46,9 @@ class AgentState:
     A tab's state lives until its tab is explicitly closed (tabs are
     global state shared by every client, so a mere disconnect never
     disposes one) — in particular a server-owned worktree run whose
-    pending worktree / merge review outlives the task stays registered
-    until the user merges or discards, because the merge flow needs
-    the agent that owns the worktree.
+    pending worktree (or an in-flight merge/discard) outlives the task
+    stays registered until the user merges or discards, because the
+    merge flow needs the agent that owns the worktree.
     """
 
     __slots__ = (
@@ -130,7 +130,7 @@ class AgentState:
         return thread is not None and (thread.ident is None or thread.is_alive())
 
     def busy(self) -> bool:
-        """True when the state is owned by a live task or merge review.
+        """True when the state is owned by a live task or merge/discard.
 
         Callers must hold :data:`STATE_LOCK` while acting on the
         result.

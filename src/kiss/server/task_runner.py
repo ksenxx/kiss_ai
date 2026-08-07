@@ -695,8 +695,8 @@ class _TaskRunnerMixin:
                 self.printer.broadcast(
                     {
                         "type": "error",
-                        "text": "Cannot run a task while merge review is in progress."
-                        " Accept or reject all changes first.",
+                        "text": "Cannot run a task while a merge is"
+                        " in progress. Wait for it to finish first.",
                         "tabId": tab_id,
                     }
                 )
