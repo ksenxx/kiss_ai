@@ -960,9 +960,13 @@ class _TaskRunnerMixin:
                 if not use_worktree:
                     # With the interactive diff review gone, task
                     # changes on the main tree are always committed
-                    # directly; a clean tree is a cheap no-op.
+                    # directly.  The dirty-files probe keeps clean
+                    # trees (and non-git folders) event-free.
                     try:
-                        self._autocommit_changes(tab_id, work_dir=work_dir)
+                        if self._main_dirty_files(work_dir):
+                            self._autocommit_changes(
+                                tab_id, work_dir=work_dir,
+                            )
                     except BaseException:  # pragma: no cover — autocommit error handler
                         logger.debug("Post-task autocommit error", exc_info=True)
                     finally:
