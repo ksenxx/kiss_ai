@@ -256,6 +256,39 @@ requires_moonshot_api_key = pytest.mark.skipif(
     not has_moonshot_api_key(),
     reason="MOONSHOT_API_KEY environment variable not set",
 )
+@pytest.fixture(autouse=True)
+def _isolated_default_workdir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[None]:
+    """Point ``VSCodeServer``'s default ``work_dir`` away from this repo.
+
+    ``VSCodeServer.__init__`` falls back to ``os.getcwd()`` when
+    ``KISS_WORKDIR`` is unset, which is the *developer repository* when
+    pytest runs from the repo root.  Since the diff/merge review was
+    removed, ``_run_task_inner`` auto-commits a dirty working tree at
+    task end — so any test that drives ``_run_task`` on a server whose
+    ``work_dir`` was never overridden would commit the developer's
+    in-progress work.  Defaulting the variable to a per-test temporary
+    directory makes that path harmless.  Tests that set
+    ``KISS_WORKDIR`` themselves (env already set) are left alone, and
+    tests that assign ``server.work_dir`` in ``setUp`` run after this
+    fixture and still win.
+
+    The override is unconditional: developer machines commonly run the
+    daemon with ``KISS_WORKDIR`` pointing at the repository itself, so
+    honoring an ambient value would disable the guard exactly where it
+    matters.  The directory lives OUTSIDE the test's own ``tmp_path``
+    so tests that scan their ``tmp_path`` do not see an extra entry.
+
+    Yields:
+        None.
+    """
+    default_dir = tmp_path_factory.mktemp("kiss-default-workdir")
+    monkeypatch.setenv("KISS_WORKDIR", str(default_dir))
+    yield
+
+
 @pytest.fixture
 def temp_dir(tmp_path):
     original_dir = os.getcwd()
