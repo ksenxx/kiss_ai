@@ -6,16 +6,16 @@
 
 All frontend clients are mirror copies of each other: every client
 shows the same tabs and their contents.  A blocking UI the daemon
-opens for a chat (the merge/diff review, the auto-commit prompt, the
+opens for a chat (the post-task auto-commit progress strip, the
 worktree merge/discard strip) therefore needs exactly ONE broadcast
 copy, stamped with the single owning ``tabId`` — every client renders
 that same tab.  There is no per-viewer fan-out and no ``mirrorOf``
 stamping of viewer copies.
 
 These tests drive the real backend: a real git repository, the real
-``_prepare_and_start_merge`` / ``_finish_merge`` / autocommit /
-worktree code paths, and commands entering through ``_handle_command``
-exactly as the transports deliver them.  Output is observed through
+``_autocommit_changes`` / ``_present_pending_worktree`` / worktree
+code paths, and commands entering through ``_handle_command`` exactly
+as the transports deliver them.  Output is observed through
 ``MemoryPrinter`` — a real :class:`JsonPrinter` subclass that records
 every broadcast event (explicit-``tabId`` events are captured exactly
 once, verbatim).
@@ -35,7 +35,6 @@ from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-from kiss.server.task_runner import _TaskRunnerMixin
 from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
 
 TASK_ID = "task-77"
@@ -124,80 +123,40 @@ class TestSingleOwnerUiBroadcast(unittest.TestCase):
             "exist under the mirror-clients model",
         )
 
-    def _start_merge(self) -> None:
-        """Modify a tracked file and open the merge review on the owner tab."""
-        repo = GitWorktreeOps.discover_repo(Path(self.tmpdir))
-        pre_head_sha, pre_hunks, pre_untracked, pre_hashes = (
-            _TaskRunnerMixin._capture_pre_snapshot(self.tmpdir, repo, OWNER_TAB)
-        )
+    def test_autocommit_done_broadcasts_one_owner_copy(self) -> None:
+        """Post-task autocommit commits and emits one ``autocommit_done``."""
         Path(self.tmpdir, "README.md").write_text(
             "# Hello\n\nUpdated content by the agent\n",
         )
-        started = self.server._prepare_and_start_merge(
-            self.tmpdir,
-            pre_hunks,
-            pre_untracked,
-            pre_hashes,
-            base_ref=pre_head_sha or "HEAD",
-            tab_id=OWNER_TAB,
-        )
-        self.assertTrue(started, "merge review failed to open")
+        self.server._autocommit_changes(OWNER_TAB, work_dir=self.tmpdir)
 
-    def test_merge_review_start_broadcasts_one_owner_copy(self) -> None:
-        """``merge_data`` / ``merge_started`` are emitted exactly once."""
-        self._start_merge()
-        merge_data = self._assert_single_owner_copy("merge_data")
-        self._assert_single_owner_copy("merge_started")
-        self._assert_no_mirror_of()
-        self.assertIn("data", merge_data, "the single copy carries the data")
-
-    def test_merge_ended_broadcasts_one_owner_copy(self) -> None:
-        """Finishing the review emits one owner-stamped ``merge_ended``."""
-        self._start_merge()
-        self.assertTrue(self.owner.is_merging)
-        _git(self.tmpdir, "checkout", "--", "README.md")
-        self.server._handle_command({
-            "type": "mergeAction",
-            "action": "all-done",
-            "tabId": OWNER_TAB,
-            "workDir": self.tmpdir,
-        })
-        self.assertFalse(self.owner.is_merging)
-        self._assert_single_owner_copy("merge_ended")
-        self._assert_no_mirror_of()
-
-    def test_autocommit_prompt_broadcasts_one_owner_copy(self) -> None:
-        """The post-merge auto-commit prompt is emitted exactly once."""
-        self._start_merge()
-        self.server._handle_command({
-            "type": "mergeAction",
-            "action": "all-done",
-            "tabId": OWNER_TAB,
-            "workDir": self.tmpdir,
-        })
-        self._assert_single_owner_copy("autocommit_prompt")
-        self._assert_no_mirror_of()
-
-    def test_autocommit_done_broadcasts_one_owner_copy(self) -> None:
-        """Answering the prompt commits and emits one ``autocommit_done``."""
-        self._start_merge()
-        self.server._handle_command({
-            "type": "mergeAction",
-            "action": "all-done",
-            "tabId": OWNER_TAB,
-            "workDir": self.tmpdir,
-        })
-        self.server._handle_command({
-            "type": "autocommitAction",
-            "action": "commit",
-            "tabId": OWNER_TAB,
-            "workDir": self.tmpdir,
-        })
         done = self._assert_single_owner_copy("autocommit_done")
         self._assert_no_mirror_of()
         self.assertTrue(done["committed"], done["message"])
+        self.assertEqual(done.get("commitMessage"), "chore: auto-commit test")
         status = _git(self.tmpdir, "status", "--porcelain")
         self.assertEqual(status.stdout.strip(), "")
+
+    def test_autocommit_progress_stamped_with_owner_tab(self) -> None:
+        """Every ``autocommit_progress`` step carries the owning tabId."""
+        Path(self.tmpdir, "README.md").write_text(
+            "# Hello\n\nUpdated content by the agent\n",
+        )
+        self.server._autocommit_changes(OWNER_TAB, work_dir=self.tmpdir)
+
+        progress = self._events_of("autocommit_progress")
+        self.assertTrue(progress, "autocommit must report progress steps")
+        seen_messages = {ev["message"] for ev in progress}
+        self.assertEqual(
+            len(progress), len(seen_messages),
+            f"each progress step must be broadcast exactly once: {progress}",
+        )
+        for ev in progress:
+            self.assertEqual(
+                ev.get("tabId"), OWNER_TAB,
+                "autocommit_progress must be stamped with the owning tabId",
+            )
+        self._assert_no_mirror_of()
 
     def _make_pending_worktree(self) -> GitWorktree:
         """Create a real worktree with an agent commit, owned by the tab."""
@@ -224,8 +183,7 @@ class TestSingleOwnerUiBroadcast(unittest.TestCase):
     def test_worktree_strip_broadcasts_one_owner_copy(self) -> None:
         """``worktree_done`` and ``worktree_result`` are emitted once."""
         self._make_pending_worktree()
-        self.owner.is_merging = True
-        self.server._finish_merge(OWNER_TAB)
+        self.server._present_pending_worktree(OWNER_TAB, discard_if_empty=False)
 
         done = self._assert_single_owner_copy("worktree_done")
         self.assertEqual(done.get("changedFiles"), ["agent.txt"])

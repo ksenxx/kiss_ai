@@ -352,46 +352,6 @@ class TestConcurrentTabs(_RegistryCleanupTestCase):
         time.sleep(0.5)
 
 
-class TestMergeTabIsolation(_RegistryCleanupTestCase):
-    """Merge ownership is per-tab — other tabs are unaffected."""
-
-    def setUp(self) -> None:
-        self.server, self.events = _make_server()
-
-    def test_finish_merge_broadcasts_with_tabid(self) -> None:
-        """_finish_merge includes the tab's tabId in merge_ended."""
-        state = _register_state("task-42", "42")
-        state.is_merging = True
-        self.server._finish_merge("42")
-        ended = [e for e in self.events if e["type"] == "merge_ended"]
-        assert len(ended) == 1
-        assert ended[0]["tabId"] == "42"
-        assert state.is_merging is False
-
-    def test_finish_merge_no_tab_is_noop(self) -> None:
-        """_finish_merge with no tab_id is a no-op (B8 fix).
-
-        It must not tear down every tab's merge state or emit an
-        untagged ``merge_ended``.
-        """
-        state = _register_state("task-10", "10")
-        state.is_merging = True
-        self.server._finish_merge()
-        ended = [e for e in self.events if e["type"] == "merge_ended"]
-        assert ended == []
-        assert state.is_merging is True
-
-    def test_merging_tabs_are_independent(self) -> None:
-        """Multiple tabs can be in merge state simultaneously."""
-        s1 = _register_state("task-1", "1")
-        s2 = _register_state("task-2", "2")
-        s1.is_merging = True
-        s2.is_merging = True
-        self.server._finish_merge("1")
-        assert s1.is_merging is False
-        assert s2.is_merging is True
-
-
 class TestRunTaskStatusBroadcast(_RegistryCleanupTestCase):
     """_run_task always brackets execution with status events."""
 

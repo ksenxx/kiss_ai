@@ -9,10 +9,6 @@ B1 fix: ``_await_user_response`` now acquires ``_state_lock`` before
     reading the task-keyed ``agent_state`` registry, consistent with
     the locking discipline.
 
-B2 fix: ``_handle_autocommit_action`` now acquires ``_state_lock``
-    before reading the ``agent_state`` registry when persisting the
-    autocommit event.
-
 I1 fix: ``_cmd_user_answer`` now uses ``cmd.get("tabId", "")`` (empty
     string default), consistent with every other command handler.
 """

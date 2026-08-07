@@ -259,7 +259,7 @@ class TestBug9Fix:
 
         (wt_dir / "agent_output.txt").write_text("work\n")
 
-        server._present_pending_worktree("0", try_merge_review=False)
+        server._present_pending_worktree("0")
 
         r = subprocess.run(
             ["git", "-C", str(self.repo), "rev-list", "--count",

@@ -15,12 +15,11 @@ N3: ``_scan_files`` depth check ``len(rel_root.parts) - 1 > 3`` was
     written assuming ``PurePath('.').parts == ('.',)`` but it is ``()``,
     causing an off-by-one that allows one extra nesting level (depth 4
     sub-directories instead of the intended 3).
-N5: ``_capture_pre_snapshot`` passes ``tab_id`` through to
-    ``_save_untracked_base`` and ``_prepare_and_start_merge`` passes it
-    to ``_merge_data_dir`` without guarding against empty string.
-    The B7 fix only guards ``_finish_merge``; the *write* paths can
-    still place data in the parent ``merge_dir/`` when ``tab_id`` is
-    ``""``.
+
+(N5 covered empty-tab_id collisions in the merge-data write paths of
+the interactive diff/merge review workflow; that workflow and its
+``_merge_data_dir``/``_save_untracked_base`` helpers were removed from
+the server, so those tests are gone.)
 """
 
 from __future__ import annotations
@@ -31,11 +30,7 @@ import tempfile
 import unittest
 from pathlib import Path, PurePath
 
-from kiss.server.diff_merge import (
-    _merge_data_dir,
-    _scan_files,
-    _untracked_base_dir,
-)
+from kiss.server.diff_merge import _scan_files
 
 
 class TestScanFilesDepthOffByOne(unittest.TestCase):
@@ -116,53 +111,6 @@ class TestScanFilesDepthOffByOne(unittest.TestCase):
         )
 
 
-
-
-class TestWritePathsEmptyTabId(unittest.TestCase):
-    """N5: ``_capture_pre_snapshot`` and ``_prepare_and_start_merge``
-    pass ``tab_id`` to ``_save_untracked_base`` and ``_merge_data_dir``
-    without guarding against empty string.  The B7 fix only guards
-    ``_finish_merge``; the write paths can still place data in the
-    parent ``merge_dir/`` when ``tab_id`` is ``""``.
-    """
-
-    def test_merge_data_dir_empty_returns_parent(self) -> None:
-        """Behavioral: ``_merge_data_dir("")`` returns the parent dir."""
-        parent = _merge_data_dir("")
-        child = _merge_data_dir("some-tab")
-        assert child.parent == parent, (
-            f"N5: _merge_data_dir('') returns parent dir; "
-            f"parent={parent}, child.parent={child.parent}"
-        )
-
-    def test_untracked_base_dir_empty_returns_parent_subdir(self) -> None:
-        """Behavioral: ``_untracked_base_dir("")`` creates a path under
-        the parent merge_dir rather than a per-tab subdirectory."""
-        empty = _untracked_base_dir("")
-        with_tab = _untracked_base_dir("tab-1")
-        assert empty.parent == _merge_data_dir(""), (
-            "N5: empty tab_id puts untracked-base in shared parent dir"
-        )
-        assert with_tab.parent == _merge_data_dir("tab-1"), (
-            "with tab_id, untracked-base is isolated in tab subdir"
-        )
-
-
-
-    def test_cross_tab_data_collision_with_empty_tab_id(self) -> None:
-        """Behavioral: two calls with empty tab_id write to the same
-        directory, demonstrating the collision risk."""
-        dir_a = _merge_data_dir("")
-        dir_b = _merge_data_dir("")
-        assert dir_a == dir_b, (
-            "N5: two empty-tab_id calls write to the same directory"
-        )
-
-        dir_c = _merge_data_dir("tab-A")
-        dir_d = _merge_data_dir("tab-B")
-        assert dir_c != dir_d, (
-            "With tab_ids, merge data dirs are isolated"
-        )
 
 
 if __name__ == "__main__":

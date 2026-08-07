@@ -16,12 +16,8 @@ The tests pin this contract end-to-end against a real running
 mocks):
 
 * a connection that touches a tab and then drops leaves the tab's
-  ``AgentState`` — and an in-flight merge review's ``_WebMergeState``
-  — fully intact, and dispatches no ``closeTab``;
-* an explicit ``closeTab`` command still tears the tab down;
-* a remote-web ``closeTab`` mid-merge-review still drives the review
-  to ``all-done`` via ``_finish_merge_and_close_tab`` instead of
-  leaking the backend tab in ``is_merging`` limbo.
+  ``AgentState`` fully intact, and dispatches no ``closeTab``;
+* an explicit ``closeTab`` command still tears the tab down.
 """
 
 from __future__ import annotations
@@ -34,7 +30,6 @@ import ssl
 import tempfile
 import time
 import unittest
-from functools import partial
 from pathlib import Path
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
@@ -80,37 +75,6 @@ def _no_verify_ssl() -> ssl.SSLContext:
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     return ctx
-
-
-def _build_pending_merge(work_dir: Path) -> Path:
-    """Create real files plus a pending-merge.json with a 2-hunk file.
-
-    Returns:
-        Path to the written ``pending-merge.json`` manifest.
-    """
-    current = work_dir / "f.txt"
-    base = work_dir / "f_base.txt"
-    lines = "".join(f"line{i}\n" for i in range(20))
-    current.write_text(lines.replace("line2\n", "edit2\n"))
-    base.write_text(lines)
-    manifest = {
-        "branch": "HEAD",
-        "files": [
-            {
-                "name": "f.txt",
-                "base": str(base),
-                "current": str(current),
-                "target": str(current),
-                "hunks": [
-                    {"bs": 2, "bc": 1, "cs": 2, "cc": 1},
-                    {"bs": 10, "bc": 1, "cs": 10, "cc": 1},
-                ],
-            }
-        ],
-    }
-    merge_json = work_dir / "pending-merge.json"
-    merge_json.write_text(json.dumps(manifest))
-    return merge_json
 
 
 class TestTabPersistence(IsolatedAsyncioTestCase):
@@ -202,36 +166,6 @@ class TestTabPersistence(IsolatedAsyncioTestCase):
             if cmd.get("type") == "closeTab"
         ]
 
-    async def _start_review(self, tab_id: str) -> Path:
-        """Open a real merge review on *tab_id* through the backend path."""
-        work = Path(self.tmpdir) / f"work-{tab_id}"
-        work.mkdir(exist_ok=True)
-        merge_json = _build_pending_merge(work)
-        vs = self.server._vscode_server
-        agent_state.register(
-            agent_state.AgentState(
-                f"task-{tab_id}", tab_id=tab_id, server_owned=True,
-            ),
-        )
-        loop = asyncio.get_running_loop()
-        started = await loop.run_in_executor(
-            None,
-            partial(
-                vs._start_merge_session,
-                str(merge_json),
-                tab_id=tab_id,
-                work_dir=str(work),
-            ),
-        )
-        self.assertTrue(started, "merge session failed to start")
-        state = agent_state.find_by_tab(tab_id)
-        self.assertIsNotNone(state)
-        assert state is not None
-        self.assertTrue(state.is_merging)
-        with self.server._merge_states_lock:
-            self.assertIn(tab_id, self.server._merge_states)
-        return work
-
     async def test_disconnect_does_not_tear_down_idle_tab(self) -> None:
         """A dropped connection leaves the touched tab's state intact."""
         tab_id = "tab-persist-idle"
@@ -264,45 +198,6 @@ class TestTabPersistence(IsolatedAsyncioTestCase):
             "no closeTab may be dispatched on behalf of a disconnect",
         )
 
-    async def test_disconnect_preserves_in_flight_merge_review(self) -> None:
-        """Merge state survives the disconnect and replays on reconnect."""
-        tab_id = "tab-persist-merge"
-        await self._start_review(tab_id)
-
-        ws = await self._connect_ok()
-        await ws.send(json.dumps({
-            "type": "ready", "tabId": tab_id, "restoredTabs": [],
-        }))
-        self.assertIsNotNone(
-            await self._wait_for_event(ws, "merge_started"),
-            "in-flight review was not replayed to the first client",
-        )
-        await ws.close()
-
-        await asyncio.sleep(1.0)
-        state = agent_state.find_by_tab(tab_id)
-        self.assertIsNotNone(state, "backend tab must survive the drop")
-        assert state is not None
-        self.assertTrue(state.is_merging, "the review must stay open")
-        with self.server._merge_states_lock:
-            self.assertIn(
-                tab_id, self.server._merge_states,
-                "the merge state must survive the disconnect",
-            )
-        self.assertEqual(self._close_tabs_dispatched(), [])
-
-        # A later reconnect finds the tab exactly where it was left:
-        # the still-open review is replayed to the new connection.
-        ws2 = await self._connect_ok()
-        await ws2.send(json.dumps({
-            "type": "ready", "tabId": tab_id, "restoredTabs": [],
-        }))
-        self.assertIsNotNone(
-            await self._wait_for_event(ws2, "merge_started"),
-            "the surviving review must be replayed to a reconnecting "
-            "client",
-        )
-
     async def test_explicit_close_tab_tears_down_idle_tab(self) -> None:
         """An explicit ``closeTab`` command still disposes the tab."""
         tab_id = "tab-explicit-close-idle"
@@ -330,53 +225,6 @@ class TestTabPersistence(IsolatedAsyncioTestCase):
             "an explicit closeTab must still dispose the idle tab's "
             "backend state",
         )
-
-    async def test_explicit_close_tab_mid_review_finishes_merge(self) -> None:
-        """A remote-web ``closeTab`` mid-review drives it to all-done.
-
-        Closing the chat tab destroys the only UI that could ever
-        finish the (server-tracked) review, so
-        ``ServerApi.close_tab`` pops the ``_WebMergeState`` and runs
-        ``_finish_merge_and_close_tab``: the review is ended (close =
-        accept the remaining hunks; no disk writes) and the tab is
-        disposed instead of leaking in ``is_merging`` limbo.
-        """
-        tab_id = "tab-explicit-close-merge"
-        await self._start_review(tab_id)
-
-        ws = await self._connect_ok()
-        await ws.send(json.dumps({
-            "type": "ready", "tabId": tab_id, "restoredTabs": [],
-        }))
-        self.assertIsNotNone(await self._wait_for_event(ws, "merge_started"))
-
-        await ws.send(json.dumps({"type": "closeTab", "tabId": tab_id}))
-
-        deadline = time.monotonic() + 8.0
-        while time.monotonic() < deadline:
-            with self.server._merge_states_lock:
-                state_gone = tab_id not in self.server._merge_states
-            if state_gone and agent_state.find_by_tab(tab_id) is None:
-                break
-            await asyncio.sleep(0.1)
-        leaked = agent_state.find_by_tab(tab_id)
-        self.assertIsNone(
-            leaked,
-            "closeTab mid-merge-review left the backend tab stuck "
-            f"(is_merging={getattr(leaked, 'is_merging', None)}, "
-            f"frontend_closed={getattr(leaked, 'frontend_closed', None)})",
-        )
-        with self.server._merge_states_lock:
-            self.assertNotIn(
-                tab_id, self.server._merge_states,
-                "web merge state leaked after explicit closeTab",
-            )
-        self.assertIn(
-            tab_id, self._close_tabs_dispatched(),
-            "_finish_merge_and_close_tab must dispatch the closeTab "
-            "to the backend after finishing the review",
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

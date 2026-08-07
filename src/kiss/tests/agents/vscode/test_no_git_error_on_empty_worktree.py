@@ -178,8 +178,6 @@ class TestNoGitRepoErrorOnEmptyWorktree(unittest.TestCase):
         )
         assert state.agent._wt_pending, "Worktree should still be pending"
 
-        self.server._finish_merge(tab_id)
-
         result = self.server._handle_worktree_action("discard", tab_id)
         assert result["success"], f"Discard should succeed: {result}"
 

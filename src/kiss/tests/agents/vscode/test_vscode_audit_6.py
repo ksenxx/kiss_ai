@@ -10,9 +10,9 @@ B1 fix: ``save_config`` now preserves non-DEFAULTS keys (like ``email``)
     ``save_config`` truncated the file to only DEFAULTS keys.
 
 B2 fix: ``is_task_active`` is now cleared in ``_run_task``'s finally
-    block, not only in ``_run_task_inner``'s.  Previously, if
-    ``_capture_pre_snapshot`` raised before the inner try/finally,
-    ``is_task_active`` stayed True permanently.
+    block, not only in ``_run_task_inner``'s.  Previously, a failure
+    in the pre-task setup (before the inner try/finally) left
+    ``is_task_active`` True permanently.
 
 B3 fix: ``get_fast_model()`` now returns ``gemini-2.0-flash`` for
     Gemini (a genuinely cheap/fast model) instead of ``gemini-2.5-pro``
@@ -137,9 +137,9 @@ class TestSaveConfigPreservesExtraKeys(TestCase):
 
 class TestIsTaskActiveClearedOnSnapshotFailure(TestCase):
     """B2 FIX: ``_run_task`` now clears ``is_task_active`` in its own
-    finally block, so a failure in ``_capture_pre_snapshot`` (which
-    occurs before the inner try/finally) no longer leaves the tab
-    permanently marked as active.
+    finally block, so a failure in the pre-task setup (before the
+    inner try/finally) no longer leaves the tab permanently marked as
+    active.
     """
 
     def test_is_task_active_false_after_snapshot_error(self) -> None:
@@ -162,10 +162,13 @@ class TestIsTaskActiveClearedOnSnapshotFailure(TestCase):
             except (FileNotFoundError, OSError):
                 pass
 
-            state = agent_state.get(cmd.get("_state_key", ""))
+            # The printer bridge re-keys the state to the allocated
+            # task id mid-run, so look it up by tab instead of the
+            # (stale) ``_state_key`` stamp.
+            state = agent_state.find_by_tab(tab_id)
             assert state is not None, "run never registered an agent state"
             assert state.is_task_active is False, (
-                "B2 FIX: is_task_active should be False after snapshot failure"
+                "B2 FIX: is_task_active should be False after setup failure"
             )
         finally:
             agent_state.agent_states.clear()
@@ -239,10 +242,12 @@ class TestIsRunningNonWtClearedOnSnapshotFailure(TestCase):
             except (FileNotFoundError, OSError):
                 pass
 
-            state = agent_state.get(cmd.get("_state_key", ""))
+            # Looked up by tab: the state is re-keyed to the allocated
+            # task id mid-run (see B2 test above).
+            state = agent_state.find_by_tab(tab_id)
             assert state is not None, "run never registered an agent state"
             assert state.is_running_non_wt is False, (
-                "is_running_non_wt should be False after snapshot failure"
+                "is_running_non_wt should be False after setup failure"
             )
         finally:
             agent_state.agent_states.clear()

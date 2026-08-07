@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for the twelve MEDIUM-severity robustness fixes
+"""Integration tests for the MEDIUM-severity robustness fixes
 in :mod:`kiss.server.web_server`.
 
 Each test exercises real network sockets, real subprocesses (where
@@ -21,20 +21,13 @@ Coverage:
   expired or expiring within 30 days.
 * M5 — ``_spawn_cloudflared`` retries with a fresh metrics port when
   the subprocess exits immediately (TOCTOU bind collision).
-* M6 — merge state for a tab is dropped when the owning WebSocket
-  disconnects, and ``_merge_states`` accesses are guarded by a lock
-  against the agent thread.
 * M7 — ``restoredTabs`` and ``attachments`` lists are clamped, and
   oversize prompts are truncated.
 * M8 — ``WebPrinter.broadcast`` tracks ``run_coroutine_threadsafe``
   futures per client, and ``remove_client`` cancels pending sends.
-* M9 — ``_WebMergeState`` exposes :meth:`is_resolved` and the body of
-  ``web_server`` no longer pokes at ``state._resolved`` directly.
 * M10 — ``_send_welcome_info`` is async and does its disk / pgrep /
   HTTP I/O via :meth:`asyncio.AbstractEventLoop.run_in_executor`,
   so it cannot block the event loop.
-* M11 — ``_WebMergeState.current()`` returns ``None`` once every hunk
-  has been resolved (post-``accept-all`` / ``reject-all``).
 * M12 — ``_authenticate_ws`` always closes the WebSocket on failure,
   including the exception path.
 """
@@ -65,7 +58,6 @@ from kiss.server.web_server import (
     _create_ssl_context,
     _generate_self_signed_cert,
     _self_signed_cert_needs_renewal,
-    _WebMergeState,
 )
 
 
@@ -401,32 +393,6 @@ class TestM5SpawnRetriesOnImmediateExit(IsolatedAsyncioTestCase):
 
 
 
-class TestM6MergeStateCleanup(IsolatedAsyncioTestCase):
-    """Merge-state bookkeeping is guarded against concurrent access."""
-
-    async def asyncSetUp(self) -> None:
-        self._snap = _ConfigSnapshot().__enter__()
-        save_config({"remote_password": ""})
-        self.port = _find_free_port()
-        self.server = RemoteAccessServer(
-            host="127.0.0.1", port=self.port, work_dir=tempfile.mkdtemp(),
-        )
-        await self.server.start_async()
-
-    async def asyncTearDown(self) -> None:
-        await self.server.stop_async()
-        self._snap.__exit__()
-
-    async def test_merge_states_lock_exists(self) -> None:
-        """A threading.Lock guards _merge_states (M6 race fix)."""
-        import threading
-
-        self.assertIsInstance(
-            self.server._merge_states_lock, type(threading.Lock()),
-        )
-
-
-
 class TestM7CapsRestoredTabs(IsolatedAsyncioTestCase):
     """Oversize ``restoredTabs`` is truncated to the configured cap."""
 
@@ -611,26 +577,6 @@ class TestM8FuturesTrackedAndCancelled(IsolatedAsyncioTestCase):
 
 
 
-class TestM9IsResolvedMethod(unittest.TestCase):
-    """``_WebMergeState`` exposes a public ``is_resolved`` method."""
-
-    def test_is_resolved_method_exists(self) -> None:
-        self.assertTrue(callable(getattr(_WebMergeState, "is_resolved", None)))
-
-    def test_is_resolved_returns_correct_values(self) -> None:
-        state = _WebMergeState({"files": [
-            {"name": "a", "hunks": [{}, {}]},
-            {"name": "b", "hunks": [{}]},
-        ]})
-        self.assertFalse(state.is_resolved(0, 0))
-        self.assertFalse(state.is_resolved(1, 0))
-        state.mark_resolved(0, 1)
-        self.assertTrue(state.is_resolved(0, 1))
-        self.assertFalse(state.is_resolved(0, 0))
-
-
-
-
 class TestM10WelcomeInfoIsAsync(unittest.TestCase):
     """``_send_welcome_info`` must be a coroutine and use run_in_executor."""
 
@@ -695,41 +641,6 @@ class TestM10WelcomeInfoDoesNotBlockEventLoop(IsolatedAsyncioTestCase):
             tick_count, 5,
             f"event loop was blocked during slow IO (only {tick_count} ticks)",
         )
-
-
-
-class TestM11CurrentReturnsNoneWhenAllResolved(unittest.TestCase):
-    """After accept-all / reject-all, ``current()`` is unambiguously ``None``."""
-
-    def test_current_none_after_all_resolved(self) -> None:
-        state = _WebMergeState({"files": [
-            {"name": "a", "hunks": [{}, {}]},
-            {"name": "b", "hunks": [{}]},
-        ]})
-        self.assertEqual(state.current(), (0, 0))
-        for fi, hi in state.all_unresolved():
-            state.mark_resolved(fi, hi)
-        self.assertEqual(state.remaining, 0)
-        self.assertIsNone(
-            state.current(),
-            "current() must return None once every hunk is resolved",
-        )
-
-    def test_current_none_for_empty_state(self) -> None:
-        state = _WebMergeState({"files": []})
-        self.assertIsNone(state.current())
-
-    def test_current_returns_unresolved_hunk(self) -> None:
-        """Sanity: while hunks remain, current() returns one of them."""
-        state = _WebMergeState({"files": [
-            {"name": "a", "hunks": [{}, {}]},
-        ]})
-        cur = state.current()
-        self.assertIsNotNone(cur)
-        assert cur is not None
-        self.assertFalse(state.is_resolved(*cur))
-
-
 
 
 

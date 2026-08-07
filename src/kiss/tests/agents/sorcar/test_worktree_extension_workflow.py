@@ -727,14 +727,13 @@ class TestServerWorktreeWorkflow:
         wt_events = [e for e in events if e["type"] == "worktree_done"]
         assert wt_events == []
 
-    def test_worktree_merge_review_shown_on_failure_with_changes(self) -> None:
-        """Merge/diff review UI is shown when agent fails after making changes.
+    def test_worktree_done_shown_on_failure_with_changes(self) -> None:
+        """Merge/Discard buttons are shown when agent fails after making changes.
 
-        Regression: previously the merge/diff + worktree action UI was
-        only shown on success, leaving the user with no way to merge or
-        discard after a failure.  Now the merge review (merge_data +
-        merge_started) is emitted in the finally block so the user can
-        still review and accept/reject changes.
+        Regression: previously the worktree action UI was only shown on
+        success, leaving the user with no way to merge or discard after
+        a failure.  Now ``worktree_done`` is broadcast in the finally
+        block so the user can still merge or discard the changes.
         """
         _unpatch_super_run(self.original_run)
         parent_class = cast(Any, SorcarAgent.__mro__[1])
@@ -762,23 +761,17 @@ class TestServerWorktreeWorkflow:
             "model": "",
         })
 
-        merge_events = [e for e in events if e["type"] == "merge_data"]
-        assert len(merge_events) == 1
-        merge_started = [e for e in events if e["type"] == "merge_started"]
-        assert len(merge_started) == 1
-        assert _agent(server)._wt_pending
-
-        server._finish_merge("0")
         wt_done = [e for e in events if e["type"] == "worktree_done"]
         assert len(wt_done) == 1
         assert len(wt_done[0].get("changedFiles", [])) > 0
+        assert _agent(server)._wt_pending
 
         agent = _agent(server)
         if agent._wt_pending:
             agent.discard()
 
-    def test_worktree_merge_review_shown_on_stop_with_changes(self) -> None:
-        """Merge/diff review UI is shown when user stops after agent made changes.
+    def test_worktree_done_shown_on_stop_with_changes(self) -> None:
+        """Merge/Discard buttons are shown when user stops after agent made changes.
 
         Same as the failure test but with KeyboardInterrupt (user stop).
         """
@@ -808,8 +801,9 @@ class TestServerWorktreeWorkflow:
             "model": "",
         })
 
-        merge_events = [e for e in events if e["type"] == "merge_data"]
-        assert len(merge_events) == 1
+        wt_done = [e for e in events if e["type"] == "worktree_done"]
+        assert len(wt_done) == 1
+        assert len(wt_done[0].get("changedFiles", [])) > 0
         stopped = [e for e in events if e["type"] == "task_stopped"]
         assert len(stopped) == 1
 

@@ -2,47 +2,25 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""With auto-commit ON, resuming a chat must never pop the diff/merge UI.
+"""With auto-commit ON, resuming a chat must never prompt the user.
 
-The user-observed defect
-------------------------
-
-    "why did the diff/merge UI show up on the last task when the
-    auto-commit mode is on?"
-
-The task itself had ``useWorktree=True`` and ``autoCommit=True`` and it
-SUCCEEDED — its persisted event stream ends with ``result``
-(``success: true``) followed by ``task_done`` and carries no merge
-event at all.  The merge view therefore did not come from the task; it
-came from the *session-resume* path that runs when the user clicks a
-row in the task-history panel.
-
-Mechanism
----------
-
-1. :meth:`_TaskRunnerMixin._run_task_inner` auto-merges on success, but
-   :meth:`WorktreeSorcarAgent.merge` clears its pending worktree ONLY on
-   ``MergeResult.SUCCESS``.  A merge that cannot complete (conflict,
-   ``git stash`` failure, rejected pre-commit hook, ...) returns an
-   error string and leaves ``_wt_pending`` raised.  Nothing retries.
-
-2. :meth:`_ServerCommandsMixin._replay_session` then calls
-   :meth:`_MergeFlowMixin._emit_pending_worktree` unconditionally, which
-   walks into ``_present_pending_worktree(try_merge_review=True)`` and
-   broadcasts ``merge_data`` + ``merge_started`` — the diff/merge UI —
-   even though the user has auto-commit switched on.  Worse,
-   ``_replay_session`` had already reset ``tab.auto_commit_mode`` to
-   ``False`` a few lines earlier, so the tab could not even report the
-   user's real preference.
+The user-observed defect (from the era of the interactive diff/merge
+review, since removed) was that clicking a task-history row popped a
+review even though the auto-commit toggle was on.  The session-resume
+path (:meth:`_ServerCommandsMixin._replay_session` →
+:meth:`_MergeFlowMixin._emit_pending_worktree`) still decides between
+silently finalizing a pending worktree and presenting it, so the
+policy remains load-bearing after the review's removal — presentation
+now means the ``worktree_done`` Merge / Discard buttons.
 
 Expected behaviour
 ------------------
 
 Auto-commit means "do not ask me".  On resume the pending worktree of an
 auto-commit tab must be finalized silently (merged, or discarded when it
-holds nothing) rather than presented as a hunk-by-hunk review.  With
-auto-commit OFF the review must still appear — that is the whole point
-of the setting — so both directions are asserted here.
+holds nothing) rather than presented.  With auto-commit OFF the
+``worktree_done`` Merge / Discard prompt must still appear — that is
+the whole point of the setting — so both directions are asserted here.
 
 One deliberate exception is asserted too: work from a task that failed
 or was stopped (``_pending_review``) is still shown, because
@@ -227,23 +205,6 @@ class _Base(unittest.TestCase):
             "tabId": tab_id,
         })
 
-    def _finish_open_review(self, tab_id: str) -> None:
-        """Close a hunk review the task itself opened.
-
-        A task run with auto-commit OFF ends inside the diff/merge view,
-        leaving ``tab.is_merging`` raised.  Resuming a chat in that
-        state is deliberately a no-op (regenerating the view would
-        discard the user's accepted/rejected hunks), so the tests that
-        exercise a *later* history click must first dismiss the review
-        the way the frontend does — with an ``all-done`` mergeAction.
-        """
-        self.server._handle_command({
-            "type": "mergeAction",
-            "action": "all-done",
-            "tabId": tab_id,
-            "workDir": self.repo,
-        })
-
     def _assert_resume_reaches_the_decision(self, tab_id: str) -> None:
         """Fail loudly unless the next resume exercises the fixed code.
 
@@ -299,7 +260,6 @@ class TestAutoCommitSuppressesMergeUIOnResume(_Base):
         tab_id = "tab-ac-on"
         self._patch_run()
         self._run_task(tab_id, auto_commit=False)
-        self._finish_open_review(tab_id)
 
         row = self._latest_row()
         chat_id, task_id = str(row["chat_id"]), str(row["id"])
@@ -361,7 +321,6 @@ class TestAutoCommitSuppressesMergeUIOnResume(_Base):
         tab_id = "tab-ac-off"
         self._patch_run()
         self._run_task(tab_id, auto_commit=False)
-        self._finish_open_review(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent
@@ -393,7 +352,6 @@ class TestAutoCommitFinalizesPendingWorktreeOnResume(_Base):
         tab_id = "tab-finalize"
         self._patch_run()
         self._run_task(tab_id, auto_commit=False)
-        self._finish_open_review(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent
@@ -433,7 +391,6 @@ class TestSilentFinalizeRefusesUnsafeState(_Base):
         tab_id = "tab-failed"
         self._patch_run()
         self._run_task(tab_id, auto_commit=False)
-        self._finish_open_review(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent
@@ -477,7 +434,6 @@ class TestSilentFinalizeRefusesUnsafeState(_Base):
         tab_id = "tab-live"
         self._patch_run()
         self._run_task(tab_id, auto_commit=False)
-        self._finish_open_review(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent
@@ -530,7 +486,6 @@ class TestSilentFinalizeRefusesUnsafeState(_Base):
         tab_id = "tab-live-empty"
         self._patch_run()
         self._run_task(tab_id, auto_commit=False)
-        self._finish_open_review(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent
@@ -594,7 +549,6 @@ class TestSilentFinalizeRefusesUnsafeState(_Base):
         tab_id = "tab-submitting"
         self._patch_run()
         self._run_task(tab_id, auto_commit=False)
-        self._finish_open_review(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent
@@ -657,7 +611,6 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         tab_id = "tab-next-task"
         self._patch_run()
         self._run_task(tab_id, auto_commit=False)
-        self._finish_open_review(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent
@@ -692,7 +645,6 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         tab_id = "tab-new-chat"
         self._patch_run()
         self._run_task(tab_id, auto_commit=False)
-        self._finish_open_review(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent
@@ -729,7 +681,6 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         tab_id = "tab-stranded"
         self._patch_run()
         self._run_task(tab_id, auto_commit=False)
-        self._finish_open_review(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent
@@ -779,7 +730,6 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         """
         self._patch_run()
         self._run_task(tab_id, auto_commit=False)
-        self._finish_open_review(tab_id)
         agent = self._tab(tab_id).agent
         assert agent is not None and agent._wt_pending
         agent._pending_review = True
@@ -880,7 +830,6 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         tab_id = "tab-stale-warning"
         self._patch_run()
         self._run_task(tab_id, auto_commit=False)
-        self._finish_open_review(tab_id)
         agent = self._tab(tab_id).agent
         assert agent is not None and agent._wt_pending
         agent._pending_review = True
@@ -934,7 +883,6 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         tab_id = "tab-nothing-pending"
         self._patch_run()
         self._run_task(tab_id, auto_commit=False)
-        self._finish_open_review(tab_id)
         agent = self._tab(tab_id).agent
         assert agent is not None
 
@@ -975,7 +923,6 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         tab_id = "tab-next-task-ok"
         self._patch_run()
         self._run_task(tab_id, auto_commit=False)
-        self._finish_open_review(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent
@@ -1030,91 +977,101 @@ class TestConcurrentResumesClaimTheWorktreeOnce(_Base):
         if failures:
             raise failures[0]
 
-    def test_two_manual_resumes_open_only_one_review(self) -> None:
-        """Auto-commit OFF: the merge view must be broadcast once.
+    def test_two_manual_resumes_keep_the_branch_and_release_the_tab(
+        self,
+    ) -> None:
+        """Auto-commit OFF: concurrent resumes present, never finalize.
 
-        ``_present_pending_worktree`` starts a review without checking
-        who owns the worktree, so when the decision to present is taken
-        outside the claim both callers run
-        ``_prepare_and_start_merge`` and the frontend receives
-        ``merge_data``/``merge_started`` twice for a single branch.  The
-        second view replaces the first one's registered merge state,
-        throwing away hunk resolutions the user may already have made
-        (F4-20).
+        The presentation claim (``is_merging``, taken atomically inside
+        :meth:`_finalize_pending_worktree`) exists so two simultaneous
+        resumes cannot race each other into the presentation's
+        empty-branch auto-discard (F4-20).  Whatever interleaving the
+        scheduler picks, the outcome must be: the ``worktree_done``
+        prompt reaches the user, the branch survives untouched for the
+        explicit Merge / Discard decision, and no resume leaves a stale
+        ownership claim behind.
         """
         tab_id = "tab-race-review"
         self._patch_run()
         self._run_task(tab_id, auto_commit=False)
-        self._finish_open_review(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending
         assert not tab.is_merging, "the fixture must start with a free worktree"
+        branches_before = _kiss_wt_branches(self.repo)
+        assert branches_before, "a task branch should exist"
 
         row = self._latest_row()
         self.events.clear()
         self._resume_twice(tab_id, str(row["chat_id"]), str(row["id"]))
 
         types = self._types()
-        for ui_event in MERGE_UI_EVENTS:
-            assert types.count(ui_event) <= 1, (
-                f"two concurrent resumes broadcast {ui_event!r} "
-                f"{types.count(ui_event)} times for one worktree; the "
-                f"second review discards the first one's hunk "
-                f"resolutions: {types}"
-            )
-        assert any(t in types for t in (*MERGE_UI_EVENTS, WORKTREE_PROMPT_EVENT)), (
+        assert WORKTREE_PROMPT_EVENT in types, (
             f"auto-commit is OFF, so one of the resumes must still "
             f"present the pending worktree; got: {types}"
         )
+        assert "worktree_result" not in types, (
+            f"a resume finalized a worktree the user never decided on: "
+            f"{types}"
+        )
+        assert _kiss_wt_branches(self.repo) == branches_before, (
+            "concurrent resumes destroyed the pending branch: "
+            f"{branches_before} -> {_kiss_wt_branches(self.repo)}"
+        )
+        assert agent._wt_pending, (
+            "a resume cleared the worktree registration without the "
+            "user's Merge / Discard decision"
+        )
+        assert not tab.is_merging, (
+            "a resume left a stale ownership claim on the tab; every "
+            "later task, merge and discard on it is now refused"
+        )
 
-    def test_a_review_that_cannot_start_leaves_the_tab_free(self) -> None:
+    def test_a_presentation_that_fails_leaves_the_tab_free(self) -> None:
         """The claim must not outlive the attempt that took it.
 
         Deciding to present the worktree claims ``is_merging`` so a
-        second resume cannot open a duplicate review.  That claim is
-        speculative: when the review cannot start — no hunks to show,
-        the worktree directory gone, ``_prepare_and_start_merge``
-        raising — the code falls back to a ``worktree_done`` event and
-        no owner exists any more.  Leaving the flag raised would wedge
-        the tab: every later task, merge and discard on it is refused,
-        and nothing would ever clear it because only
-        :meth:`_finish_merge` does, and no merge was ever started.
+        second resume cannot race the presentation.  That claim is
+        speculative: when the presentation itself blows up — here the
+        changed-files probe raising — no owner exists any more.
+        Leaving the flag raised would wedge the tab: every later task,
+        merge and discard on it is refused, and nothing would ever
+        clear it.
         """
         tab_id = "tab-review-fallback"
         self._patch_run()
         self._run_task(tab_id, auto_commit=False)
-        self._finish_open_review(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent
         assert agent is not None and agent._wt_pending
         assert not tab.is_merging
 
-        # A review that cannot start: the fallback path the claim must
-        # survive.  `_present_pending_worktree` catches the error and
-        # broadcasts `worktree_done` instead.
-        real_prepare = self.server._prepare_and_start_merge
+        # A presentation that cannot run: the probe it starts with
+        # raises.  `_emit_pending_worktree` must still release the
+        # claim it took, via its `finally`.
+        real_probe = self.server._get_worktree_changed_files
 
-        def failing_prepare(*args: Any, **kwargs: Any) -> bool:
-            raise RuntimeError("merge review unavailable")
+        def failing_probe(*args: Any, **kwargs: Any) -> list[str]:
+            raise RuntimeError("worktree probe unavailable")
 
-        self.server._prepare_and_start_merge = failing_prepare  # type: ignore[assignment,method-assign]
+        self.server._get_worktree_changed_files = failing_probe  # type: ignore[assignment,method-assign]
         try:
             row = self._latest_row()
             self.events.clear()
-            self._resume(tab_id, str(row["chat_id"]), str(row["id"]))
+            with self.assertRaises(RuntimeError):
+                self._resume(tab_id, str(row["chat_id"]), str(row["id"]))
         finally:
-            self.server._prepare_and_start_merge = real_prepare  # type: ignore[method-assign]
+            self.server._get_worktree_changed_files = real_probe  # type: ignore[method-assign]
 
-        assert WORKTREE_PROMPT_EVENT in self._types(), (
-            f"the fallback event must still reach the user: {self._types()}"
-        )
         assert not tab.is_merging, (
-            "the speculative claim outlived the review attempt that "
-            "took it; the tab is now permanently busy and no later "
+            "the speculative claim outlived the presentation attempt "
+            "that took it; the tab is now permanently busy and no later "
             "task, merge or discard on it can ever run"
+        )
+        assert agent._wt_pending, (
+            "the failed presentation must leave the worktree pending"
         )
 
     def test_two_autocommit_resumes_finalize_the_branch_once(self) -> None:
@@ -1142,7 +1099,6 @@ class TestConcurrentResumesClaimTheWorktreeOnce(_Base):
         tab_id = "tab-race-finalize"
         self._patch_run()
         self._run_task(tab_id, auto_commit=False)
-        self._finish_open_review(tab_id)
 
         tab = self._tab(tab_id)
         agent = tab.agent

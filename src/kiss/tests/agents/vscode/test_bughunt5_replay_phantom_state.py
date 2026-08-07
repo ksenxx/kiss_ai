@@ -77,9 +77,7 @@ class TestReplayPhantomState(unittest.TestCase):
         )
 
     def test_present_pending_worktree_unknown_tab_is_noop(self) -> None:
-        self.server._present_pending_worktree(
-            "never-seen-tab", try_merge_review=True,
-        )
+        self.server._present_pending_worktree("never-seen-tab")
         assert agent_state.find_by_tab("never-seen-tab") is None, (
             "BUG: _present_pending_worktree minted a registry entry for "
             "an unknown tab id"

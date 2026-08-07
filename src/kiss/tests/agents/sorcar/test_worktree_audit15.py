@@ -6,8 +6,8 @@
 
 BUG-66: ``_emit_pending_worktree`` broadcasts ``worktree_done`` for
     pending worktrees with **no changed files** instead of
-    auto-discarding them.  Both ``_run_task_inner``'s finally block
-    and ``_finish_merge`` auto-discard empty-change worktrees, but
+    auto-discarding them.  ``_run_task_inner``'s finally block
+    auto-discards empty-change worktrees, but
     ``_emit_pending_worktree`` (called on session resume via
     ``_replay_session``) does not.  This means after a server
     restart, a stale zero-change worktree persists and the user is
@@ -19,15 +19,8 @@ BUG-66: ``_emit_pending_worktree`` broadcasts ``worktree_done`` for
     now runs unconditionally — see
     ``test_worktree_leak_when_main_tree_busy.py``.
 
-BUG-67: ``_start_merge_session`` sets ``tab.is_merging = True``
-    **before** calling ``self.printer.broadcast()``.  If the broadcast
-    raises (e.g. ``BrokenPipeError`` when stdout pipe is closed), the
-    exception propagates and ``is_merging`` is never cleared.  The tab
-    becomes permanently locked:
-    - ``_run_task_inner`` refuses new tasks ("merge review in progress")
-    - ``_new_chat`` refuses new chats (BUG-65 guard)
-    - ``_finish_merge`` is never called because the frontend never
-      received the merge data.
+BUG-67 (obsolete): covered ``_start_merge_session``, which was removed
+    together with the interactive diff/merge review workflow.
 
 RED-9: ``_restore_pending_merge`` is dead code — defined in
     ``VSCodeServer`` but never called by any production module.  Only
@@ -127,8 +120,8 @@ class _RecordingPrinter(JsonPrinter):
 
 class TestBug66EmitPendingNoAutoDiscard:
     """``_emit_pending_worktree`` must auto-discard pending worktrees
-    with no changed files, consistent with ``_run_task_inner`` and
-    ``_finish_merge``.
+    with no changed files, consistent with ``_run_task_inner``'s
+    post-task cleanup.
     """
 
     def test_emit_pending_worktree_auto_discards_empty(
@@ -178,8 +171,8 @@ class TestBug66EmitPendingNoAutoDiscard:
         self, tmp_path: Path,
     ) -> None:
         """Regression: a pending worktree WITH changes must NOT be
-        auto-discarded.  Either a merge review starts (merge_started)
-        or worktree_done is broadcast — but never auto-discard.
+        auto-discarded.  ``worktree_done`` is broadcast so the user
+        gets the Merge / Discard buttons — but never auto-discard.
 
         Auto-commit is switched off because that is the mode in which
         the user is asked what to do with the branch.  With auto-commit
@@ -216,9 +209,9 @@ class TestBug66EmitPendingNoAutoDiscard:
             "Regression: pending worktree WITH changes was auto-discarded."
         )
         types = {e.get("type") for e in printer.events}
-        assert types & {"merge_started", "worktree_done"}, (
-            "Regression: neither merge_started nor worktree_done broadcast "
-            f"for changed worktree.  Events: {printer.events}"
+        assert "worktree_done" in types, (
+            "Regression: worktree_done not broadcast for changed "
+            f"worktree.  Events: {printer.events}"
         )
 
         GitWorktreeOps.remove(repo, wt_dir)
@@ -344,102 +337,6 @@ class TestBug66EmitPendingNoAutoDiscard:
         )
 
         other_state.is_running_non_wt = False
-
-
-class TestBug67IsMergingStuckOnBroadcastFailure:
-    """``_start_merge_session`` must clear ``is_merging`` if
-    ``broadcast()`` raises, so the tab is not permanently locked."""
-
-    def _write_merge_json(self, data_dir: Path) -> str:
-        """Write a valid pending-merge.json and return its path."""
-        import json
-
-        data_dir.mkdir(parents=True, exist_ok=True)
-        merge_json = data_dir / "pending-merge.json"
-        merge_json.write_text(
-            json.dumps(
-                {
-                    "branch": "HEAD",
-                    "files": [
-                        {
-                            "name": "a.txt",
-                            "base": "/tmp/base",
-                            "current": "/tmp/current",
-                            "hunks": [{"bs": 0, "bc": 1, "cs": 0, "cc": 2}],
-                        }
-                    ],
-                }
-            )
-        )
-        return str(merge_json)
-
-    def test_is_merging_cleared_on_broadcast_failure(
-        self, tmp_path: Path,
-    ) -> None:
-        """If broadcast() raises after is_merging=True, the flag must
-        be cleared so the tab is not permanently locked."""
-        server = VSCodeServer()
-        tab_id = "tab-bug67"
-        state = _register_state("task-bug67", tab_id)
-
-        printer = _RecordingPrinter(raise_on="merge_data")
-        server.printer = cast(Any, printer)
-
-        merge_json = self._write_merge_json(tmp_path / "merge")
-        try:
-            server._start_merge_session(merge_json, tab_id=tab_id)
-        except BrokenPipeError:
-            pass
-
-        assert not state.is_merging, (
-            "BUG-67: is_merging is stuck True after broadcast failure.  "
-            "The tab is permanently locked — user can't run tasks or "
-            "start new chats."
-        )
-
-    def test_is_merging_set_on_successful_broadcast(
-        self, tmp_path: Path,
-    ) -> None:
-        """Regression: is_merging must be True after a successful
-        _start_merge_session call."""
-        server = VSCodeServer()
-        tab_id = "tab-bug67-success"
-        state = _register_state("task-bug67-success", tab_id)
-
-        printer = _RecordingPrinter()
-        server.printer = cast(Any, printer)
-
-        merge_json = self._write_merge_json(tmp_path / "merge2")
-        result = server._start_merge_session(merge_json, tab_id=tab_id)
-
-        assert result is True
-        assert state.is_merging, (
-            "Regression: is_merging should be True after successful "
-            "merge session start."
-        )
-
-    def test_merge_started_broadcast_failure(
-        self, tmp_path: Path,
-    ) -> None:
-        """If the second broadcast (merge_started) fails, is_merging
-        must still be cleared."""
-        server = VSCodeServer()
-        tab_id = "tab-bug67-second"
-        state = _register_state("task-bug67-second", tab_id)
-
-        printer = _RecordingPrinter(raise_on="merge_started")
-        server.printer = cast(Any, printer)
-
-        merge_json = self._write_merge_json(tmp_path / "merge3")
-        try:
-            server._start_merge_session(merge_json, tab_id=tab_id)
-        except BrokenPipeError:
-            pass
-
-        assert not state.is_merging, (
-            "BUG-67: is_merging stuck True when merge_started "
-            "broadcast fails."
-        )
 
 
 class TestRed9RestorePendingMergeDeadCode:

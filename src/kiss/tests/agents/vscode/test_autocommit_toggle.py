@@ -8,9 +8,8 @@ Validates:
 - ``AgentState`` carries an ``auto_commit_mode`` field defaulting to
   ``True`` (the run command overwrites it per task from the frontend
   toggle).
-- When ``auto_commit_mode`` is ON the task lifecycle skips the
-  interactive merge/diff workflow and auto-commits agent changes
-  directly (non-worktree branch).
+- ``_autocommit_changes`` commits agent changes on the main tree
+  directly (non-worktree branch), with no interactive review.
 """
 
 from __future__ import annotations
@@ -95,8 +94,8 @@ class _AutocommitTaskHarness(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
-class TestAutocommitModeSkipsMergeReview(_AutocommitTaskHarness):
-    """With auto-commit ON the merge review is skipped."""
+class TestAutocommitCommitsDirectly(_AutocommitTaskHarness):
+    """Post-task autocommit commits directly, with no review events."""
 
     def test_autocommit_commits_directly(self) -> None:
         tab_id = "test-tab-ac-on"
@@ -105,7 +104,7 @@ class TestAutocommitModeSkipsMergeReview(_AutocommitTaskHarness):
             "# Hello\n\nAgent-edited content\n",
         )
 
-        self.server._handle_autocommit_action("commit", tab_id)
+        self.server._autocommit_changes(tab_id)
 
         types = [e["type"] for e in self.events]
         assert "merge_started" not in types

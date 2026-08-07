@@ -17,8 +17,7 @@ Covers, over REAL objects (no mocks, patches, or fakes):
 * F7: a ``ready`` command carrying non-str ``tabId`` values (top
   level or inside ``restoredTabs``) must not abort ready handling —
   an unhashable id used to raise ``TypeError`` while processing the
-  restored-tab list and skip the remaining restored-tab resumes and
-  merge replays.
+  restored-tab list and skip the remaining restored-tab resumes.
 * F11: ``VSCodeServer._teardown_tab_resources`` must survive a
   duck-typed printer without ``cleanup_tab`` (same getattr-guarded
   contract as every sibling cleanup path).
@@ -215,26 +214,18 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         """Entries after a malformed restoredTabs entry are still processed.
 
-        An in-flight merge review registered for the LATER (valid)
-        restored tab must still be replayed to the reconnecting
-        client — a malformed entry before it must not abort the
-        restored-tab loop.
+        The session resume of the LATER (valid) restored tab must
+        still be dispatched to the backend — a malformed entry before
+        it must not abort the restored-tab loop.
         """
-        base = Path(self.tmpdir) / "rt-base.txt"
-        cur = Path(self.tmpdir) / "rt-cur.txt"
-        base.write_text("old line\n")
-        cur.write_text("new line\n")
-        self.server._register_merge_state("rt-later", {
-            "work_dir": self.tmpdir,
-            "files": [
-                {
-                    "name": "rt-cur.txt",
-                    "base": str(base),
-                    "current": str(cur),
-                    "hunks": [{"bs": 0, "bc": 1, "cs": 0, "cc": 1}],
-                },
-            ],
-        })
+        dispatched: list[dict[str, Any]] = []
+        orig_run_cmd = self.server._run_cmd
+
+        async def recording_run_cmd(cmd: dict[str, Any]) -> None:
+            dispatched.append(dict(cmd))
+            await orig_run_cmd(cmd)
+
+        self.server._run_cmd = recording_run_cmd  # type: ignore[method-assign]
         reader, writer = await self._connect_uds()
         await self._send(
             writer,
@@ -243,16 +234,26 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
                 "tabId": "t-main",
                 "restoredTabs": [
                     {"tabId": ["evil"], "chatId": {"also": "bad"}},
-                    {"tabId": "rt-later", "chatId": ""},
+                    {"tabId": "rt-later", "chatId": "chat-rt-later"},
                 ],
             },
         )
-        replay = await self._drain_until(reader, "merge_started")
+        await self._drain_until(reader, "focusInput")
+        resumes: list[dict[str, Any]] = []
+        for _ in range(100):
+            resumes = [
+                c for c in dispatched if c.get("type") == "resumeSession"
+            ]
+            if resumes:
+                break
+            await asyncio.sleep(0.05)
         self.assertEqual(
-            replay.get("tabId"), "rt-later",
-            "the merge review of the restored tab after the malformed "
-            "entry was not replayed — the restored-tab loop aborted",
+            len(resumes), 1,
+            "the resume of the restored tab after the malformed entry "
+            "was not dispatched — the restored-tab loop aborted",
         )
+        self.assertEqual(resumes[0].get("tabId"), "rt-later")
+        self.assertEqual(resumes[0].get("chatId"), "chat-rt-later")
 
 
 class TestAuthFailureBookkeeping(unittest.TestCase):

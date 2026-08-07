@@ -7,10 +7,8 @@
 Targets only the five bug sites fixed in this change:
   1. ``_handle_command`` unknown-command error — carries ``tabId`` from cmd.
   2. ``run()`` generic-exception error — carries ``tabId`` from parsed cmd.
-  3. ``_start_merge_session`` — ``merge_data`` and ``merge_started`` carry tab.
-  4. ``worktree_done`` event (inlined in ``_present_pending_worktree``) — carries tab.
-  5. ``_handle_worktree_action`` — ``worktree_progress`` carries tab.
-  6. ``_get_adjacent_task`` — ``adjacent_task_events`` carries tab.
+  3. ``_handle_worktree_action`` — ``worktree_progress`` carries tab.
+  4. ``_get_adjacent_task`` — ``adjacent_task_events`` carries tab.
 
 No mocks: uses a real ``VSCodeServer`` with its ``printer.broadcast``
 replaced by a capture-list helper.
@@ -18,11 +16,8 @@ replaced by a capture-list helper.
 
 from __future__ import annotations
 
-import json
-import tempfile
 import threading
 import unittest
-from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
@@ -59,44 +54,6 @@ class TestUnknownCommandErrorRouted(unittest.TestCase):
         err = [e for e in events if e.get("type") == "error"]
         assert len(err) == 1
         assert "tabId" not in err[0]
-
-
-class TestStartMergeSessionRouted(unittest.TestCase):
-    def _write_merge_json(self, path: Path) -> None:
-        payload = {
-            "files": [{"path": "a.py", "hunks": [{"lines": ["+x"]}]}],
-        }
-        path.write_text(json.dumps(payload))
-
-    def test_merge_data_and_merge_started_carry_tab_id(self) -> None:
-        server, events = _make_server()
-        with tempfile.TemporaryDirectory() as td:
-            merge_path = Path(td) / "pending-merge.json"
-            self._write_merge_json(merge_path)
-            started = server._start_merge_session(str(merge_path), tab_id="t-9")
-            assert started is True
-
-        md = [e for e in events if e.get("type") == "merge_data"]
-        ms = [e for e in events if e.get("type") == "merge_started"]
-        assert len(md) == 1 and md[0].get("tabId") == "t-9"
-        assert len(ms) == 1 and ms[0].get("tabId") == "t-9"
-
-    def test_no_tab_id_omits_field(self) -> None:
-        server, events = _make_server()
-        if hasattr(server.printer._thread_local, "tab_id"):
-            delattr(server.printer._thread_local, "tab_id")
-        with tempfile.TemporaryDirectory() as td:
-            merge_path = Path(td) / "pending-merge.json"
-            self._write_merge_json(merge_path)
-            started = server._start_merge_session(str(merge_path), tab_id="")
-            assert started is True
-
-        md = [e for e in events if e.get("type") == "merge_data"]
-        ms = [e for e in events if e.get("type") == "merge_started"]
-        assert len(md) == 1 and "tabId" not in md[0]
-        assert len(ms) == 1 and "tabId" not in ms[0]
-
-
 
 
 class TestWorktreeProgressRouted(unittest.TestCase):

@@ -9,13 +9,13 @@ real on-disk git repos and worktrees — no mocks):
 
 - F4-19: ``_handle_worktree_action(..., internal=True)`` must still
   refuse while a non-worktree task is running on the main tree.
-- F4-20: a session replay (``_emit_pending_worktree``) during an
-  active merge review must not regenerate the review.
+- F4-20: a session replay (``_emit_pending_worktree``) while a merge
+  or discard owns the tab must not re-present the worktree.
 - F4-21: when the recorded original branch no longer resolves, a
   worktree holding COMMITTED work must not be reported as "no
   changes" (which callers auto-discard).
 - F4-22: committed agent changes in a clean worktree must reach the
-  hunk review (fork-point base, not ``HEAD``).
+  ``worktree_done`` prompt (fork-point base, not ``HEAD``).
 """
 
 from __future__ import annotations
@@ -121,7 +121,7 @@ class TestF419InternalStillGuardsMainTree:
 
 
 class TestF420ReplayDoesNotResetActiveReview:
-    """Session replay must not regenerate an in-flight merge review."""
+    """Session replay must no-op while a merge/discard owns the tab."""
 
     def test_emit_pending_worktree_noops_while_merging(
         self, tmp_path: Path,
@@ -181,10 +181,10 @@ class TestF421GitFailureNotMistakenForClean:
             agent_state.agent_states.clear()
 
 
-class TestF422CommittedChangesReachHunkReview:
-    """The review base must be the fork point, not worktree HEAD."""
+class TestF422CommittedChangesReachWorktreePrompt:
+    """The changed-files base must be the fork point, not worktree HEAD."""
 
-    def test_present_pending_worktree_reviews_committed_changes(
+    def test_present_pending_worktree_lists_committed_changes(
         self, tmp_path: Path,
     ) -> None:
         repo = _make_repo(tmp_path / "repo")
@@ -198,22 +198,22 @@ class TestF422CommittedChangesReachHunkReview:
         _commit_in_worktree(wt_dir, "committed.txt", "agent work\n")
         try:
             printer.emitted.clear()
-            server._present_pending_worktree("wt-422", try_merge_review=True)
+            server._present_pending_worktree("wt-422")
 
-            merge_events = [
-                e for e in printer.emitted if e.get("type") == "merge_data"
+            done_events = [
+                e for e in printer.emitted
+                if e.get("type") == "worktree_done"
             ]
-            assert merge_events, (
-                "no hunk review was started for committed worktree "
-                "changes; the flow fell back to the coarse "
-                f"merge/discard buttons (events: "
+            assert done_events, (
+                "no worktree_done prompt was broadcast for committed "
+                "worktree changes; an empty changed-files answer would "
+                "let callers auto-discard the branch (events: "
                 f"{[e.get('type') for e in printer.emitted]})"
             )
-            reviewed = {
-                f.get("name")
-                for f in merge_events[0]["data"].get("files", [])
-            }
-            assert "committed.txt" in reviewed
+            assert "committed.txt" in done_events[0]["changedFiles"]
+            assert wt_agent._wt_pending, (
+                "presenting must not finalize or discard the branch"
+            )
         finally:
             with server._state_lock:
                 tab.is_merging = False

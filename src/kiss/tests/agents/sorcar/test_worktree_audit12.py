@@ -19,13 +19,9 @@ BUG-60: ``_do_merge`` passes ``wt.original_branch`` (type ``str | None``)
     type-unsafe.  If a future caller omits the guard, git would attempt
     to checkout a branch called "None".
 
-BUG-61: Non-worktree merge view preparation races with concurrent
-    operations.  In ``_run_task_inner``'s finally block,
-    ``is_running_non_wt`` is cleared BEFORE ``_prepare_and_start_merge``
-    runs.  Between clearing the flag and capturing the post-task diff, a
-    concurrent worktree merge can modify the working tree, causing the
-    merge view to show the other tab's merge changes as the current
-    agent's changes.
+BUG-61 (obsolete): the non-worktree merge-view preparation it covered
+    was removed together with the interactive diff/merge review
+    workflow; post-task changes are now committed directly.
 
 BUG-62 (removed in audit14/RED-8): the previously-tested
     ``manual_merge_branch`` helper was dead code — no production

@@ -11,12 +11,6 @@ B1: ``_cmd_run`` queues a duplicate ``run`` while a task is already
     starting and echoes the accepted follow-up without spawning a thread.
 B2: ``_close_tab`` refuses to remove the state of a tab whose task
     thread is installed or alive (``AgentState.busy()``).
-B3: ``_hunk_to_dict`` now treats ``bs`` and ``cs`` symmetrically:
-    both skip the ``-1`` adjustment when their respective count is 0.
-
-Redundancies
-------------
-R1: ``_finish_merge`` uses a single registry lookup instead of two.
 """
 
 from __future__ import annotations
@@ -26,7 +20,6 @@ import unittest
 
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
-from kiss.server.diff_merge import _diff_files, _hunk_to_dict
 from kiss.server.server import VSCodeServer
 
 
@@ -144,83 +137,6 @@ class TestCloseTabRaceWithTaskStartup(unittest.TestCase):
 
         blocker.set()
         thread.join(timeout=2)
-
-
-class TestHunkToDictAsymmetry(unittest.TestCase):
-    """B3 fix: ``_hunk_to_dict`` now treats ``bs`` and ``cs``
-    symmetrically — both skip the ``-1`` adjustment when their
-    respective count is 0.
-    """
-
-    def test_bs_is_zero_for_insertion_at_start(self) -> None:
-        """Pure insertion at line 0: bs should be 0, not -1."""
-        result = _hunk_to_dict(0, 0, 1, 5)
-        assert result["bs"] == 0, (
-            "B3 fix: bs should be 0 for zero-count insertion at start"
-        )
-
-    def test_symmetry_between_bs_and_cs_for_zero_counts(self) -> None:
-        """Both zero-count sides now use the same convention."""
-        deletion = _hunk_to_dict(5, 3, 3, 0)
-        insertion = _hunk_to_dict(3, 0, 5, 3)
-
-        assert deletion["cs"] == 3, "cs is NOT decremented when cc == 0"
-        assert insertion["bs"] == 3, (
-            "B3 fix: bs is NOT decremented when bc == 0"
-        )
-
-    def test_diff_files_pure_insertion_at_start_produces_zero_bs(self) -> None:
-        """_diff_files → _hunk_to_dict pipeline: bs should be 0."""
-        import os
-        import shutil
-        import tempfile
-
-        td = tempfile.mkdtemp()
-        base = os.path.join(td, "base.txt")
-        cur = os.path.join(td, "cur.txt")
-        with open(base, "w") as f:
-            f.write("")
-        with open(cur, "w") as f:
-            f.write("a\nb\nc\n")
-
-        raw_hunks = _diff_files(base, cur)
-        assert len(raw_hunks) == 1
-        hunk = _hunk_to_dict(*raw_hunks[0])
-        assert hunk["bs"] == 0, (
-            "B3 fix: bs should be 0 for insertion at start through _diff_files"
-        )
-
-        shutil.rmtree(td)
-
-
-class TestFinishMergeRedundantLookup(unittest.TestCase):
-    """R1 fix: ``_finish_merge`` now performs a single registry lookup."""
-
-    def tearDown(self) -> None:
-        agent_state.agent_states.clear()
-
-    def test_autocommit_prompt_not_lost_after_state_removal(self) -> None:
-        """Behavioral: the autocommit check uses the state ref from the
-        first lookup, so removing the state mid-flow doesn't lose it."""
-        server, events = _make_server()
-        state = _register_tab_state(
-            "audit-r1", "t1", agent=WorktreeSorcarAgent("Sorcar VS Code"),
-        )
-        state.is_merging = True
-        state.use_worktree = False
-
-        removed = threading.Event()
-
-        def intercept_present(tid: str, **kw: object) -> None:
-            with server._state_lock:
-                agent_state.agent_states.pop(state.task_id, None)
-            removed.set()
-
-        server._present_pending_worktree = intercept_present  # type: ignore[assignment,method-assign]
-
-        server._finish_merge("t1")
-
-        assert removed.is_set(), "Intercept ran"
 
 
 class TestCmdRunFollowupNoErrorBroadcast(unittest.TestCase):

@@ -7,14 +7,10 @@
 Covers the exact code paths refactored by the web_server.py
 simplification pass:
 
-* ``_WebMergeState`` navigation / resolution logic (``current()`` guard
-  merge).
 * ``WebPrinter`` endpoint add/remove + broadcast fan-out over a real
   Unix-domain socket connection (shared add/remove helper refactor).
 * ``_handle_run_update`` connId-stamped ``error`` / ``notice`` events
   (shared stamped-broadcast helper).
-* Merge-action completion popping both ``_merge_states`` and
-  ``_merge_action_locks`` (shared pop helper).
 * ``stop_async`` cancelling the watchdog and version-check tasks
   (shared cancel helper).
 * Tunnel bookkeeping reset via ``_stop_tunnel`` / ``_detach_tunnel``
@@ -47,82 +43,7 @@ from kiss.server.web_server import (
     _compare_versions,
     _get_local_ips,
     _version_tuple,
-    _WebMergeState,
 )
-
-
-def _merge_data_two_files(tmpdir: Path) -> dict[str, Any]:
-    """Build a real two-file, three-hunk merge_data payload on disk."""
-    base_a = tmpdir / "a.base"
-    cur_a = tmpdir / "a.txt"
-    base_a.write_text("one\ntwo\nthree\nfour\n")
-    cur_a.write_text("ONE\ntwo\nTHREE\nfour\n")
-    base_b = tmpdir / "b.base"
-    cur_b = tmpdir / "b.txt"
-    base_b.write_text("alpha\n")
-    cur_b.write_text("beta\n")
-    return {
-        "work_dir": str(tmpdir),
-        "files": [
-            {
-                "name": "a.txt",
-                "base": str(base_a),
-                "current": str(cur_a),
-                "hunks": [
-                    {"bs": 0, "bc": 1, "cs": 0, "cc": 1},
-                    {"bs": 2, "bc": 1, "cs": 2, "cc": 1},
-                ],
-            },
-            {
-                "name": "b.txt",
-                "base": str(base_b),
-                "current": str(cur_b),
-                "hunks": [{"bs": 0, "bc": 1, "cs": 0, "cc": 1}],
-            },
-        ],
-    }
-
-
-class TestWebMergeState(unittest.TestCase):
-    """Pin _WebMergeState navigation / resolution semantics."""
-
-    def test_empty_merge_data_current_is_none(self) -> None:
-        state = _WebMergeState({"files": []})
-        self.assertEqual(state.total_hunks, 0)
-        self.assertEqual(state.remaining, 0)
-        self.assertIsNone(state.current())
-        state.advance()
-        state.go_prev()
-        self.assertIsNone(state.current())
-        self.assertEqual(state.resolutions(), [])
-        self.assertEqual(state.all_unresolved(), [])
-
-    def test_navigation_and_resolution_flow(self) -> None:
-        tmpdir = Path(tempfile.mkdtemp(prefix="kiss-simp-ms-"))
-        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
-        state = _WebMergeState(_merge_data_two_files(tmpdir))
-        self.assertEqual(state.total_hunks, 3)
-        self.assertEqual(state.remaining, 3)
-        self.assertEqual(state.current(), (0, 0))
-        state.mark_resolved(0, 0, "accepted")
-        state.advance()
-        self.assertEqual(state.current(), (0, 1))
-        self.assertEqual(state.remaining, 2)
-        state.go_prev()
-        self.assertEqual(state.current(), (1, 0))
-        self.assertEqual(state.unresolved_in_file(0), [1])
-        self.assertEqual(state.all_unresolved(), [(0, 1), (1, 0)])
-        self.assertTrue(state.is_resolved(0, 0))
-        self.assertFalse(state.is_resolved(0, 1))
-        state.mark_resolved(0, 1, "rejected")
-        state.mark_resolved(1, 0, "accepted")
-        self.assertEqual(state.remaining, 0)
-        self.assertIsNone(state.current())
-        resolved = {(r["fi"], r["hi"]): r["status"] for r in state.resolutions()}
-        self.assertEqual(
-            resolved,
-            {(0, 0): "accepted", (0, 1): "rejected", (1, 0): "accepted"},
-        )
 
 
 class TestPureHelpers(unittest.TestCase):
@@ -147,59 +68,6 @@ class TestPureHelpers(unittest.TestCase):
         self.assertEqual(_compare_versions("2026.6", "2026.6.0"), 0)
         self.assertEqual(_compare_versions("2026.6", "2026.6.1"), -1)
         self.assertEqual(_compare_versions("junk", "2026.6"), 0)
-
-
-class TestMergeActionCompletion(unittest.TestCase):
-    """Completing a review must pop state AND the per-tab action lock."""
-
-    def setUp(self) -> None:
-        agent_state.agent_states.clear()
-        self.tmpdir = Path(tempfile.mkdtemp(prefix="kiss-simp-mac-"))
-        self.server = RemoteAccessServer(
-            url_file=self.tmpdir / "remote-url.json",
-            uds_path=self.tmpdir / "sorcar.sock",
-        )
-
-    def tearDown(self) -> None:
-        agent_state.agent_states.clear()
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_accept_and_reject_flow_completes_and_cleans_up(self) -> None:
-        tab_id = "simp-merge-tab"
-        self.server._register_merge_state(
-            tab_id, _merge_data_two_files(self.tmpdir),
-        )
-
-        async def drive() -> None:
-            self.server._loop = asyncio.get_running_loop()
-            self.server._printer._loop = self.server._loop
-            for action in ("accept", "reject", "accept"):
-                await self.server._handle_web_merge_action({
-                    "type": "mergeAction",
-                    "action": action,
-                    "tabId": tab_id,
-                })
-
-        asyncio.run(drive())
-        self.assertNotIn(tab_id, self.server._merge_states)
-        self.assertNotIn(tab_id, self.server._merge_action_locks)
-        self.assertEqual(
-            (self.tmpdir / "a.txt").read_text(),
-            "ONE\ntwo\nthree\nfour\n",
-        )
-        self.assertEqual((self.tmpdir / "b.txt").read_text(), "beta\n")
-
-    def test_unknown_tab_action_is_noop(self) -> None:
-        async def drive() -> None:
-            self.server._loop = asyncio.get_running_loop()
-            self.server._printer._loop = self.server._loop
-            await self.server._handle_web_merge_action({
-                "type": "mergeAction", "action": "next",
-                "tabId": "simp-ghost",
-            })
-
-        asyncio.run(drive())
-        self.assertNotIn("simp-ghost", self.server._merge_action_locks)
 
 
 class TestTunnelStateReset(unittest.TestCase):

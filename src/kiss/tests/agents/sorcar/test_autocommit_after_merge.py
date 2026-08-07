@@ -2,15 +2,15 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for the non-worktree auto-commit prompt feature.
+"""Integration tests for the non-worktree post-task auto-commit.
 
-After the user resolves all merge-diff hunks in the non-worktree mode,
-the server must inspect the main working tree.  When uncommitted or
-untracked changes remain, it broadcasts an ``autocommit_prompt`` event
-so the webview can render "Auto commit" / "Do nothing" buttons.  When
-the user clicks "Auto commit", the server stages everything, generates
-a commit message and commits to the current branch.  When the user
-clicks "Do nothing", the server leaves the working tree untouched.
+With the interactive diff/merge review workflow removed, a non-worktree
+task that leaves the main working tree dirty is always committed
+directly: :meth:`_MergeFlowMixin._autocommit_changes` stages
+everything, generates a commit message and commits to the current
+branch, reporting progress through ``autocommit_progress`` /
+``autocommit_done`` events.  The old ``autocommit_prompt`` event and
+the ``autocommitAction`` / ``mergeAction`` commands no longer exist.
 
 These tests drive :class:`VSCodeServer` with real ``git`` state — no
 mocks, no test doubles.  The LLM call for commit-message generation is
@@ -71,17 +71,6 @@ class _ServerHarness(unittest.TestCase):
         agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _register_tab(
-        self, tab_id: str, *, use_worktree: bool = False,
-    ) -> agent_state.AgentState:
-        """Register a server-owned tab state like a UI-launched run."""
-        state = agent_state.AgentState(
-            f"task-{tab_id}", tab_id=tab_id, server_owned=True,
-        )
-        state.use_worktree = use_worktree
-        agent_state.register(state)
-        return state
-
     def _types(self) -> list[str]:
         return [e["type"] for e in self.events]
 
@@ -92,115 +81,8 @@ class _ServerHarness(unittest.TestCase):
         raise AssertionError(f"No event of type {type_!r}: {self._types()}")
 
 
-class TestFinishMergeEmitsAutocommitPrompt(_ServerHarness):
-    """``_finish_merge`` broadcasts ``autocommit_prompt`` for non-worktree
-    tabs when the main working tree has dirty state after hunk review."""
-
-    def test_prompt_with_unstaged_modification(self) -> None:
-        """Modifying a tracked file fires autocommit_prompt with the file."""
-        self._register_tab("t1")
-        Path(self.tmpdir, "seed.txt").write_text("modified\n")
-        self.server._finish_merge("t1")
-
-        evt = self._event("autocommit_prompt")
-        assert evt["tabId"] == "t1"
-        assert "seed.txt" in evt["changedFiles"]
-
-    def test_prompt_with_untracked_file(self) -> None:
-        """Untracked files trigger the prompt too."""
-        self._register_tab("t2")
-        Path(self.tmpdir, "new.txt").write_text("hi\n")
-        self.server._finish_merge("t2")
-
-        evt = self._event("autocommit_prompt")
-        assert evt["tabId"] == "t2"
-        assert "new.txt" in evt["changedFiles"]
-
-    def test_no_prompt_when_clean(self) -> None:
-        """No autocommit_prompt when working tree is clean."""
-        self._register_tab("t3")
-        self.server._finish_merge("t3")
-
-        assert "autocommit_prompt" not in self._types()
-
-    def test_no_prompt_for_worktree_tab(self) -> None:
-        """Worktree tabs keep their own merge/discard flow; the
-        non-worktree prompt must not fire for them."""
-        self._register_tab("t4", use_worktree=True)
-        Path(self.tmpdir, "seed.txt").write_text("x\n")
-        self.server._finish_merge("t4")
-
-        assert "autocommit_prompt" not in self._types()
-
-    def test_no_prompt_when_tab_id_none(self) -> None:
-        """When tab_id is None (global clear), no per-tab prompt is sent."""
-        Path(self.tmpdir, "x.txt").write_text("x\n")
-        self.server._finish_merge(None)  # type: ignore[arg-type]
-
-        assert "autocommit_prompt" not in self._types()
-
-    def test_no_prompt_when_not_a_git_repo(self) -> None:
-        """A non-git work_dir must not crash or broadcast the prompt."""
-        non_git = tempfile.mkdtemp()
-        try:
-            self.server.work_dir = non_git
-            self._register_tab("t5")
-            Path(non_git, "loose.txt").write_text("x\n")
-            self.server._finish_merge("t5")
-            assert "autocommit_prompt" not in self._types()
-        finally:
-            shutil.rmtree(non_git, ignore_errors=True)
-
-    def test_merge_ended_still_broadcast(self) -> None:
-        """merge_ended is still sent — AFTER the prompt (W3-B1).
-
-        The frontend re-enables the input on ``merge_ended``, so it
-        must be the LAST post-merge broadcast: emitting it before the
-        autocommit dirty-file scan opened a window in which a prompt
-        submitted right after the merge view closed was rejected by
-        the ``is_merging`` task-start guard and silently lost.
-        """
-        self._register_tab("t6")
-        Path(self.tmpdir, "foo.txt").write_text("foo\n")
-        self.server._finish_merge("t6")
-
-        types = self._types()
-        assert "merge_ended" in types
-        assert "autocommit_prompt" in types
-        assert types.index("merge_ended") > types.index("autocommit_prompt")
-
-
-class TestAutocommitActionSkip(_ServerHarness):
-    """Clicking "Do nothing" leaves the working tree untouched and
-    broadcasts ``autocommit_done``."""
-
-    def test_skip_leaves_working_tree_dirty(self) -> None:
-        Path(self.tmpdir, "seed.txt").write_text("modified\n")
-        Path(self.tmpdir, "new.txt").write_text("new\n")
-
-        self.server._handle_autocommit_action("skip", "t1")
-
-        status = _run_git(self.tmpdir, "status", "--porcelain").stdout
-        assert "seed.txt" in status
-        assert "new.txt" in status
-
-        evt = self._event("autocommit_done")
-        assert evt["success"] is True
-        assert evt["tabId"] == "t1"
-        assert evt["committed"] is False
-
-    def test_skip_does_not_create_commit(self) -> None:
-        Path(self.tmpdir, "seed.txt").write_text("modified\n")
-        before = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
-
-        self.server._handle_autocommit_action("skip", "t1")
-
-        after = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
-        assert before == after
-
-
-class TestAutocommitActionCommit(_ServerHarness):
-    """Clicking "Auto commit" stages everything (including untracked),
+class TestAutocommitChanges(_ServerHarness):
+    """``_autocommit_changes`` stages everything (including untracked),
     generates a commit message, and commits to the current branch."""
 
     def setUp(self) -> None:
@@ -222,7 +104,7 @@ class TestAutocommitActionCommit(_ServerHarness):
         Path(self.tmpdir, "new.txt").write_text("brand new\n")
 
         before = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
-        self.server._handle_autocommit_action("commit", "t1")
+        self.server._autocommit_changes("t1")
         after = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
 
         assert before != after
@@ -243,11 +125,23 @@ class TestAutocommitActionCommit(_ServerHarness):
         assert evt["committed"] is True
         assert evt["tabId"] == "t1"
 
+    def test_progress_events_precede_done(self) -> None:
+        """The webview shows a staged progress toast before the result."""
+        Path(self.tmpdir, "seed.txt").write_text("progress\n")
+
+        self.server._autocommit_changes("t1")
+
+        types = self._types()
+        assert "autocommit_progress" in types
+        assert types.index("autocommit_progress") < types.index(
+            "autocommit_done",
+        )
+
     def test_commit_with_only_untracked(self) -> None:
         """Commit handles the case with only untracked files."""
         Path(self.tmpdir, "only_new.txt").write_text("hi\n")
 
-        self.server._handle_autocommit_action("commit", "t1")
+        self.server._autocommit_changes("t1")
 
         status = _run_git(self.tmpdir, "status", "--porcelain").stdout.strip()
         assert status == ""
@@ -264,7 +158,7 @@ class TestAutocommitActionCommit(_ServerHarness):
         ``committed: False`` instead of failing."""
         before = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
 
-        self.server._handle_autocommit_action("commit", "t1")
+        self.server._autocommit_changes("t1")
 
         after = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
         assert before == after
@@ -277,54 +171,50 @@ class TestAutocommitActionCommit(_ServerHarness):
         non_git = tempfile.mkdtemp()
         try:
             self.server.work_dir = non_git
-            self.server._handle_autocommit_action("commit", "t1")
+            self.server._autocommit_changes("t1")
             evt = self._event("autocommit_done")
             assert evt["success"] is False
             assert evt["committed"] is False
         finally:
             shutil.rmtree(non_git, ignore_errors=True)
 
+    def test_explicit_work_dir_preferred_over_server_work_dir(self) -> None:
+        """The ``work_dir`` keyword wins over the daemon-wide folder."""
+        non_git = tempfile.mkdtemp()
+        try:
+            self.server.work_dir = non_git
+            Path(self.tmpdir, "seed.txt").write_text("via keyword\n")
+            self.server._autocommit_changes("t1", work_dir=self.tmpdir)
+            evt = self._event("autocommit_done")
+            assert evt["success"] is True
+            assert evt["committed"] is True
+            status = _run_git(
+                self.tmpdir, "status", "--porcelain",
+            ).stdout.strip()
+            assert status == ""
+        finally:
+            shutil.rmtree(non_git, ignore_errors=True)
 
-class TestAutocommitUnknownAction(_ServerHarness):
-    """Unknown actions are reported as failure — no silent success."""
 
-    def test_unknown_action(self) -> None:
-        self.server._handle_autocommit_action("bogus", "t1")
-        evt = self._event("autocommit_done")
-        assert evt["success"] is False
-        assert evt["committed"] is False
+class TestRemovedCommandsAreUnknown(_ServerHarness):
+    """The retired review commands are plain unknown commands now."""
 
-
-class TestAutocommitCommandRouting(_ServerHarness):
-    """The ``autocommitAction`` command type is routed through
-    ``_handle_command``."""
-
-    def test_routed_skip(self) -> None:
-        Path(self.tmpdir, "seed.txt").write_text("x\n")
-        self.server._handle_command(
-            {"type": "autocommitAction", "action": "skip", "tabId": "t1"},
-        )
-        evt = self._event("autocommit_done")
-        assert evt["committed"] is False
-        assert evt["success"] is True
-
-    def test_routed_commit(self) -> None:
-        Path(self.tmpdir, "seed.txt").write_text("x\n")
-
-        def fake_compose(
-            diff_text: str,
-            user_prompt: str | None = None,
-            task_result: str | None = None,
-        ) -> str:
-            return "chore: test"
-
-        _merge_flow_module.generate_commit_message_from_diff = fake_compose  # type: ignore[assignment]
+    def test_autocommit_action_is_unknown(self) -> None:
+        before = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
         self.server._handle_command(
             {"type": "autocommitAction", "action": "commit", "tabId": "t1"},
         )
-        evt = self._event("autocommit_done")
-        assert evt["success"] is True
-        assert evt["committed"] is True
+        after = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
+        assert before == after, "a removed command must not commit anything"
+        evt = self._event("error")
+        assert "Unknown command" in evt["text"]
+
+    def test_merge_action_is_unknown(self) -> None:
+        self.server._handle_command(
+            {"type": "mergeAction", "action": "all-done", "tabId": "t1"},
+        )
+        evt = self._event("error")
+        assert "Unknown command" in evt["text"]
 
     def test_unknown_cmd_still_rejected(self) -> None:
         """Safety check: other unknown command types still broadcast
@@ -332,58 +222,6 @@ class TestAutocommitCommandRouting(_ServerHarness):
         self.server._handle_command({"type": "nosuchcmd"})
         evt = self._event("error")
         assert "Unknown command" in evt["text"]
-
-
-class TestAutocommitPromptRoundtrip(_ServerHarness):
-    """End-to-end: finish merge review → prompt event → user clicks
-    "Auto commit" → repo committed; or → user clicks "Do nothing" →
-    repo untouched."""
-
-    def test_full_auto_commit_flow(self) -> None:
-        self._register_tab("t1")
-        Path(self.tmpdir, "seed.txt").write_text("delta\n")
-        Path(self.tmpdir, "extra.txt").write_text("extra\n")
-
-        self.server._finish_merge("t1")
-        prompt = self._event("autocommit_prompt")
-        assert set(prompt["changedFiles"]) >= {"seed.txt", "extra.txt"}
-
-        def fake_compose(
-            _diff: str,
-            user_prompt: str | None = None,
-            task_result: str | None = None,
-        ) -> str:
-            return "chore: auto"
-
-        _merge_flow_module.generate_commit_message_from_diff = fake_compose  # type: ignore[assignment]
-        self.server._handle_command(
-            {"type": "autocommitAction", "action": "commit", "tabId": "t1"},
-        )
-        done = self._event("autocommit_done")
-        assert done["success"] is True
-        assert done["committed"] is True
-
-        assert _run_git(
-            self.tmpdir, "status", "--porcelain",
-        ).stdout.strip() == ""
-
-    def test_full_do_nothing_flow(self) -> None:
-        self._register_tab("t1")
-        Path(self.tmpdir, "seed.txt").write_text("untouched dirty\n")
-
-        self.server._finish_merge("t1")
-        self._event("autocommit_prompt")
-        before = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
-
-        self.server._handle_command(
-            {"type": "autocommitAction", "action": "skip", "tabId": "t1"},
-        )
-
-        after = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
-        assert before == after
-        assert "seed.txt" in _run_git(
-            self.tmpdir, "status", "--porcelain",
-        ).stdout
 
 
 if __name__ == "__main__":  # pragma: no cover

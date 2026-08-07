@@ -311,8 +311,8 @@ class _StopDuringSetupPrinter(_CapturePrinter):
 
     Raises on the first ``status running:true`` broadcast — i.e. inside
     ``_run_task``'s ``try`` before ``_run_task_inner`` runs, the same
-    place a Stop-injected ``KeyboardInterrupt`` lands during
-    ``_capture_pre_snapshot`` of a large repo.
+    place a Stop-injected ``KeyboardInterrupt`` lands during pre-task
+    setup on a large repo.
     """
 
     def __init__(self) -> None:

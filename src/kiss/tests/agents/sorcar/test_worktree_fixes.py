@@ -6,30 +6,24 @@
 
 Each test verifies the fix is in place — assertions fail if the
 bug is reintroduced.
+
+(Fix 1 — per-tab merge data dirs — and Fix 2 — pinned pre-task HEAD
+SHA — covered the interactive merge-review machinery, removed together
+with the diff/merge review workflow; only the main-tree busy guard and
+the symmetric merge guard remain testable.)
 """
 
 from __future__ import annotations
 
-import inspect
-import json
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.git_worktree import (
-    GitWorktreeOps,
-    repo_lock,
-)
+from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
-from kiss.server.diff_merge import (
-    _merge_data_dir,
-    _parse_diff_hunks,
-    _prepare_merge_view,
-    _save_untracked_base,
-)
 from kiss.server.server import VSCodeServer
 
 
@@ -73,155 +67,6 @@ def _make_repo(path: Path) -> Path:
         capture_output=True, check=True,
     )
     return path
-
-
-class TestFix1PerTabMergeDirs:
-    """Verify _merge_data_dir returns per-tab paths."""
-
-    def test_merge_data_dir_with_tab_id_returns_unique_path(self) -> None:
-        d1 = _merge_data_dir("tab-A")
-        d2 = _merge_data_dir("tab-B")
-        d0 = _merge_data_dir()
-        assert d1 != d2, "Different tabs must get different dirs"
-        assert d1 != d0, "Tab dir differs from default"
-        assert "tab-A" in str(d1)
-        assert "tab-B" in str(d2)
-
-    def test_merge_data_dir_without_tab_id_returns_base(self) -> None:
-        d = _merge_data_dir("")
-        assert "merge_dir" in str(d)
-
-    def test_save_untracked_base_uses_tab_specific_dir(self) -> None:
-        """_save_untracked_base with tab_id stores files under per-tab path."""
-        tmpdir = tempfile.mkdtemp()
-        saved = _redirect_db(tmpdir)
-        try:
-            repo = _make_repo(Path(tmpdir) / "repo")
-            (repo / "untracked.txt").write_text("hello\n")
-
-            _save_untracked_base(str(repo), {"untracked.txt"}, tab_id="tabX")
-
-            tab_ub_dir = _merge_data_dir("tabX") / "untracked-base"
-            assert (tab_ub_dir / "untracked.txt").exists(), (
-                "Untracked base should be saved under per-tab dir"
-            )
-        finally:
-            _restore_db(saved)
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_concurrent_merge_views_dont_destroy_each_other(self) -> None:
-        """Two tabs preparing merge views simultaneously keep isolated data."""
-        tmpdir = tempfile.mkdtemp()
-        saved = _redirect_db(tmpdir)
-        try:
-            repo = _make_repo(Path(tmpdir) / "repo")
-
-            (repo / "file_a.py").write_text("content a\n")
-            subprocess.run(
-                ["git", "-C", str(repo), "add", "."],
-                capture_output=True, check=True,
-            )
-            subprocess.run(
-                ["git", "-C", str(repo), "commit", "-m", "add file_a"],
-                capture_output=True, check=True,
-            )
-
-            (repo / "file_a.py").write_text("modified by tab A\n")
-            dir_a = str(_merge_data_dir("tab-A"))
-            result_a = _prepare_merge_view(str(repo), dir_a, {}, set(), None)
-            assert result_a.get("status") == "opened"
-
-            pending_a = Path(dir_a) / "pending-merge.json"
-            data_a = json.loads(pending_a.read_text())
-            assert any(f["name"] == "file_a.py" for f in data_a["files"])
-
-            subprocess.run(
-                ["git", "-C", str(repo), "checkout", "--", "file_a.py"],
-                capture_output=True, check=True,
-            )
-            (repo / "new_file_b.txt").write_text("created by tab B\n")
-            dir_b = str(_merge_data_dir("tab-B"))
-            result_b = _prepare_merge_view(str(repo), dir_b, {}, set(), None)
-            assert result_b.get("status") == "opened"
-
-            data_a_after = json.loads(pending_a.read_text())
-            assert any(f["name"] == "file_a.py" for f in data_a_after["files"]), (
-                "Tab A data must survive Tab B's merge view preparation"
-            )
-
-            pending_b = Path(dir_b) / "pending-merge.json"
-            data_b = json.loads(pending_b.read_text())
-            assert any(f["name"] == "new_file_b.txt" for f in data_b["files"])
-        finally:
-            _restore_db(saved)
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    def test_prepare_and_start_merge_accepts_tab_id(self) -> None:
-        """_prepare_and_start_merge now accepts tab_id parameter."""
-        sig = inspect.signature(VSCodeServer._prepare_and_start_merge)
-        assert "tab_id" in sig.parameters, (
-            "Fix 1: _prepare_and_start_merge must accept tab_id"
-        )
-
-    def test_save_untracked_base_accepts_tab_id(self) -> None:
-        """_save_untracked_base now accepts tab_id parameter."""
-        sig = inspect.signature(_save_untracked_base)
-        assert "tab_id" in sig.parameters, (
-            "Fix 1: _save_untracked_base must accept tab_id"
-        )
-
-
-class TestFix2PinHeadSHA:
-    """Verify pre-task snapshot is atomic and HEAD SHA is pinned."""
-
-
-
-    def test_pinned_head_sha_survives_concurrent_checkout(self) -> None:
-        """Functional: pinned SHA is stable even if HEAD changes."""
-        tmpdir = tempfile.mkdtemp()
-        try:
-            repo = _make_repo(Path(tmpdir) / "repo")
-
-            subprocess.run(
-                ["git", "-C", str(repo), "checkout", "-b", "feature"],
-                capture_output=True, check=True,
-            )
-            (repo / "feature.txt").write_text("feature\n")
-            subprocess.run(
-                ["git", "-C", str(repo), "add", "."],
-                capture_output=True, check=True,
-            )
-            subprocess.run(
-                ["git", "-C", str(repo), "commit", "-m", "feature"],
-                capture_output=True, check=True,
-            )
-            subprocess.run(
-                ["git", "-C", str(repo), "checkout", "main"],
-                capture_output=True, check=True,
-            )
-
-            with repo_lock(repo):
-                pinned_sha = GitWorktreeOps.head_sha(repo)
-                _parse_diff_hunks(str(repo))
-
-            subprocess.run(
-                ["git", "-C", str(repo), "checkout", "feature"],
-                capture_output=True, check=True,
-            )
-
-            current_sha = GitWorktreeOps.head_sha(repo)
-            assert pinned_sha != current_sha, "sanity: HEAD moved"
-            assert pinned_sha is not None, "pinned SHA must be valid"
-
-            post_hunks = _parse_diff_hunks(str(repo), base_ref=pinned_sha)
-            assert isinstance(post_hunks, dict)
-
-            subprocess.run(
-                ["git", "-C", str(repo), "checkout", "main"],
-                capture_output=True, check=True,
-            )
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 class TestFix3MainTreeBusyGuard:

@@ -13,7 +13,7 @@ whole end-of-run cleanup.  The tab's state then kept its dead
 ``task_thread`` forever, so every subsequent ``run`` on the tab was
 queued as steering for the finished task and dropped.
 
-Bug 2 — ``_cmd_run`` destroyed an open merge review: a thread-less
+Bug 2 — ``_cmd_run`` destroyed an in-flight merge: a thread-less
 state with ``is_merging=True`` was unregistered and replaced by a fresh
 state, orphaning the review.  The run must be refused instead.
 
@@ -128,10 +128,10 @@ class TestFinallyCleanupSurvivesRekey(_Harness):
         release.set()
 
 
-class TestRunRefusedDuringMergeReview(_Harness):
-    """A run on a tab with an open merge review must be refused."""
+class TestRunRefusedDuringMerge(_Harness):
+    """A run on a tab with a merge in progress must be refused."""
 
-    def test_run_does_not_destroy_merge_review_state(self) -> None:
+    def test_run_does_not_destroy_merging_state(self) -> None:
         tab_id = "tab-merge"
         review = agent_state.AgentState(
             "task-review",
@@ -159,17 +159,17 @@ class TestRunRefusedDuringMergeReview(_Harness):
         errors = [
             e
             for e in self._events_of("error")
-            if "merge review" in str(e.get("text", ""))
+            if "while a merge is in progress" in str(e.get("text", ""))
         ]
         assert errors, (
-            "BUG: run during merge review must broadcast the "
-            "merge-review error"
+            "BUG: run during a merge must broadcast the "
+            "merge-in-progress error"
         )
         assert not ran.wait(timeout=0.5), (
-            "BUG: run during merge review must not start a task"
+            "BUG: run during a merge must not start a task"
         )
         assert agent_state.get("task-review") is review, (
-            "BUG: _cmd_run unregistered the merge review's state"
+            "BUG: _cmd_run unregistered the merging tab's state"
         )
         assert review.is_merging
 

@@ -12,8 +12,6 @@ asked to fix:
   missing frontend tab_id cannot reach every tab.
 - B5: ``commitMessage`` events generated in the background thread must
   carry a ``tabId`` so the result only reaches the requesting tab.
-- B8: ``_finish_merge(None)`` must not clear every tab's merge flag
-  and must not emit an untagged ``merge_ended`` event.
 - C1: ``_cmd_get_adjacent_task`` must not fall back to the globally
   latest chat when the tab has no chat association.
 - C2, C3: ``_replay_session`` with an empty ``tab_id`` must not
@@ -151,27 +149,6 @@ class TestB5CommitMessageCarriesTabId(unittest.TestCase):
         cm = [e for e in printer.emitted if e.get("type") == "commitMessage"]
         assert len(cm) == 1
         assert cm[0].get("tabId") == "TAB-1"
-
-
-class TestB8FinishMergeRequiresTabId(unittest.TestCase):
-    """B8: _finish_merge(None) must not tear down every tab's state."""
-
-    def tearDown(self) -> None:
-        agent_state.agent_states.clear()
-
-    def test_finish_merge_none_does_not_clear_other_tabs(self) -> None:
-        server, events = _make_server()
-        state_a = agent_state.AgentState("task-A", tab_id="A", server_owned=True)
-        state_a.is_merging = True
-        agent_state.register(state_a)
-        state_b = agent_state.AgentState("task-B", tab_id="B", server_owned=True)
-        state_b.is_merging = True
-        agent_state.register(state_b)
-        server._finish_merge(None)  # type: ignore[arg-type]
-        assert state_a.is_merging is True
-        assert state_b.is_merging is True
-        ended = [e for e in events if e.get("type") == "merge_ended"]
-        assert all("tabId" in e for e in ended)
 
 
 class TestC1AdjacentTaskNoGlobalFallback(unittest.TestCase):

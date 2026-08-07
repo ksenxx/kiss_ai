@@ -4,15 +4,6 @@
 # add your name here
 """End-to-end regression tests for Wave3-Fixer-3 findings (real repos, no mocks).
 
-B1  ``_MergeFlowMixin._finish_merge`` broadcast ``merge_ended`` FIRST
-    while keeping ``tab.is_merging`` raised through the pending-worktree
-    presentation and the autocommit dirty-file scan.  The frontend
-    re-enables the input on ``merge_ended``, so a ``run`` submitted in
-    that seconds-wide window was rejected ("Cannot run a task while
-    merge review is in progress") and the prompt text was LOST.  The
-    client-visible contract is now: by the time ``merge_ended`` is
-    broadcast, the ``is_merging`` guard has already been cleared.
-
 B2  ``_run_task_inner`` initialised the per-subtask metric baselines to
     0 before the big ``try``.  ``tab.agent`` is REUSED across runs on
     the same tab, so its counters are cumulative — a failure before the
@@ -53,7 +44,6 @@ from kiss.core.models.model_info import get_available_models
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
-from kiss.server.merge_flow import _MergeFlowMixin
 from kiss.server.server import VSCodeServer
 
 
@@ -111,174 +101,6 @@ def _pop_states(*task_ids: str) -> None:
     with agent_state.STATE_LOCK:
         for task_id in task_ids:
             agent_state.agent_states.pop(task_id, None)
-
-
-
-class _MergeEndedFlagPrinter(_RecordingPrinter):
-    """Recorder that snapshots ``tab.is_merging`` at broadcast time.
-
-    The B1 contract: when the client receives ``merge_ended`` (and
-    re-enables its input), the ``is_merging`` guard consulted by
-    ``_run_task_inner`` must ALREADY be cleared — otherwise a prompt
-    submitted right after the merge view closes is rejected and lost.
-    """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.tab: AgentState | None = None
-        self.merging_at_merge_ended: bool | None = None
-        self.merging_at_prompt: bool | None = None
-
-    def broadcast(self, event: dict[str, Any]) -> None:
-        """Record the event plus the tab's live ``is_merging`` flag."""
-        if self.tab is not None:
-            if event.get("type") == "merge_ended":
-                self.merging_at_merge_ended = self.tab.is_merging
-            elif event.get("type") == "autocommit_prompt":
-                self.merging_at_prompt = self.tab.is_merging
-        super().broadcast(event)
-
-
-class _MergeHost(_MergeFlowMixin):
-    """Concrete merge-flow host with the server state the mixin expects.
-
-    Implements the same ``_any_non_wt_running`` / ``_dispose_if_closed``
-    contracts as ``VSCodeServer`` against the real
-    :mod:`kiss.server.agent_state` registry (mirrors the wave-2 harness).
-    """
-
-    def __init__(self, work_dir: str, printer: JsonPrinter | None = None) -> None:
-        self.work_dir = work_dir
-        self._state_lock = agent_state.STATE_LOCK
-        self.printer = printer or _RecordingPrinter()
-
-    def _any_non_wt_running(self) -> bool:
-        """True if any task runs on the main tree (real server semantics)."""
-        return any(
-            s.is_running_non_wt
-            for s in agent_state.agent_states.values()
-        )
-
-    def _dispose_if_closed(self, tab_id: str) -> None:
-        """Mirror the server: pop only closed, fully-idle task states."""
-        with self._state_lock:
-            state = agent_state.find_by_tab(tab_id)
-            if state is not None and state.frontend_closed and not (
-                state.is_task_active or state.is_merging
-            ):
-                agent_state.unregister(state.task_id, state)
-
-
-class _RaisingPendingAgent(WorktreeSorcarAgent):
-    """Real agent subclass whose pending-worktree probe fails.
-
-    Simulates a mid-cleanup crash inside ``_finish_merge``'s body
-    (``_present_pending_worktree`` reads ``agent._wt_pending``) so the
-    exception path of the fix is exercised end-to-end.
-    """
-
-    @property
-    def _wt_pending(self) -> bool:
-        """Raise to simulate a crash during the pending-worktree probe."""
-        raise RuntimeError("simulated pending-worktree probe failure")
-
-    @_wt_pending.setter
-    def _wt_pending(self, value: bool) -> None:
-        """Ignore writes (base ``__init__`` initialises the flag)."""
-
-
-class TestMergeEndedBroadcastAfterGuardCleared:
-    def test_merge_ended_broadcast_with_guard_already_cleared(
-        self, tmp_path: Path,
-    ) -> None:
-        """When the client learns the merge ended, the guard is down."""
-        repo = tmp_path / "repo"
-        _make_repo(repo)
-        (repo / "dirty.txt").write_text("uncommitted\n")
-        tab_id = "w3f3-b1-tab"
-        printer = _MergeEndedFlagPrinter()
-        host = _MergeHost(str(repo), printer)
-        try:
-            tab = _register_tab_state("w3f3-b1-task", tab_id)
-            tab.use_worktree = False
-            tab.is_merging = True
-            printer.tab = tab
-
-            host._finish_merge(tab_id, work_dir=str(repo))
-
-            types = printer.event_types()
-            assert types.count("merge_ended") == 1
-            assert "autocommit_prompt" in types
-            assert printer.merging_at_prompt is True
-            assert printer.merging_at_merge_ended is False, (
-                "merge_ended was broadcast while is_merging was still "
-                "raised — a run submitted on merge-view close is "
-                "rejected and the prompt text is lost"
-            )
-            assert types.index("merge_ended") > types.index(
-                "autocommit_prompt",
-            )
-            assert tab.is_merging is False
-        finally:
-            _pop_states("w3f3-b1-task")
-
-    def test_clean_tree_still_ends_merge(self, tmp_path: Path) -> None:
-        """No dirty files: merge_ended still fires, guard already down."""
-        repo = tmp_path / "repo"
-        _make_repo(repo)
-        tab_id = "w3f3-b1b-tab"
-        printer = _MergeEndedFlagPrinter()
-        host = _MergeHost(str(repo), printer)
-        try:
-            tab = _register_tab_state("w3f3-b1b-task", tab_id)
-            tab.is_merging = True
-            printer.tab = tab
-
-            host._finish_merge(tab_id, work_dir=str(repo))
-
-            types = printer.event_types()
-            assert types.count("merge_ended") == 1
-            assert "autocommit_prompt" not in types
-            assert printer.merging_at_merge_ended is False
-            assert tab.is_merging is False
-        finally:
-            _pop_states("w3f3-b1b-task")
-
-    def test_merge_ended_still_fires_when_cleanup_raises(
-        self, tmp_path: Path,
-    ) -> None:
-        """A crash in the post-merge cleanup must not eat merge_ended.
-
-        Otherwise the frontend's merge view (and its disabled input)
-        would be stuck open forever.
-        """
-        repo = tmp_path / "repo"
-        _make_repo(repo)
-        tab_id = "w3f3-b1c-tab"
-        printer = _MergeEndedFlagPrinter()
-        host = _MergeHost(str(repo), printer)
-        try:
-            tab = _register_tab_state("w3f3-b1c-task", tab_id)
-            tab.use_worktree = True
-            tab.agent = _RaisingPendingAgent("w3f3-b1c")
-            tab.is_merging = True
-            printer.tab = tab
-
-            with pytest.raises(RuntimeError):
-                host._finish_merge(tab_id, work_dir=str(repo))
-
-            types = printer.event_types()
-            assert types.count("merge_ended") == 1
-            assert printer.merging_at_merge_ended is False
-            assert tab.is_merging is False
-        finally:
-            _pop_states("w3f3-b1c-task")
-
-    def test_missing_tab_id_is_noop(self, tmp_path: Path) -> None:
-        host = _MergeHost(str(tmp_path))
-        host._finish_merge("", work_dir=str(tmp_path))
-        assert isinstance(host.printer, _RecordingPrinter)
-        assert host.printer.events == []
 
 
 

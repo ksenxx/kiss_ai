@@ -185,14 +185,17 @@ class TestNonGitCommandsDoNotCrash(_NonGitHarness):
         errs = self._events_of("error")
         assert any("Unknown command" in e.get("text", "") for e in errs)
 
-    def test_merge_action_no_op(self) -> None:
+    def test_merge_action_is_unknown_command(self) -> None:
+        """The interactive merge review was removed: ``mergeAction`` is
+        an unknown command and must not touch the tab's merge flag."""
         state = _register_tab_state("t-merge")
         state.is_merging = True
         self.server._handle_command(
             {"type": "mergeAction", "action": "all-done", "tabId": "t-merge"},
         )
-        assert "autocommit_prompt" not in self._types()
-        assert "merge_ended" in self._types()
+        errs = self._events_of("error")
+        assert any("Unknown command" in e.get("text", "") for e in errs)
+        assert state.is_merging is True
 
 
 class TestNonGitWorktreeActions(_NonGitHarness):
@@ -227,38 +230,19 @@ class TestNonGitWorktreeActions(_NonGitHarness):
 
 
 class TestNonGitAutocommit(_NonGitHarness):
-    """Autocommit prompt + action paths must not crash in non-git."""
+    """The post-task autocommit path must not crash in non-git."""
 
-    def test_finish_merge_no_autocommit_prompt(self) -> None:
-        state = _register_tab_state(
-            "t1", agent=WorktreeSorcarAgent("Sorcar VS Code"),
-        )
-        state.use_worktree = False
-        state.is_merging = True
-        Path(self.tmpdir, "loose.txt").write_text("x\n")
-        self.server._finish_merge("t1")
-        assert "autocommit_prompt" not in self._types()
-        assert "merge_ended" in self._types()
-
-    def test_autocommit_commit_reports_failure(self) -> None:
+    def test_autocommit_reports_not_a_git_repository(self) -> None:
+        """``_autocommit_changes`` in a non-git dir reports a graceful
+        failure through ``autocommit_done`` instead of crashing."""
         _register_tab_state("t2").use_worktree = False
-        self.server._handle_command(
-            {"type": "autocommitAction", "action": "commit", "tabId": "t2"},
-        )
+        Path(self.tmpdir, "loose.txt").write_text("x\n")
+        self.server._autocommit_changes("t2", work_dir=self.tmpdir)
         evt = self._events_of("autocommit_done")
         assert evt
         assert evt[-1]["success"] is False
         assert evt[-1]["committed"] is False
-
-    def test_autocommit_skip(self) -> None:
-        _register_tab_state("t3").use_worktree = False
-        self.server._handle_command(
-            {"type": "autocommitAction", "action": "skip", "tabId": "t3"},
-        )
-        evt = self._events_of("autocommit_done")
-        assert evt
-        assert evt[-1]["success"] is True
-        assert evt[-1]["committed"] is False
+        assert evt[-1]["message"] == "Not a git repository."
 
 
 class TestNonGitGenerateCommitMessage(_NonGitHarness):

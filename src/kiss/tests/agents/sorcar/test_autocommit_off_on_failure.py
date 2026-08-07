@@ -2,15 +2,8 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""When a task fails or is stopped, treat ``autoCommit=True`` as if it
-were off.
-
-The user-observed expectation:
-
-    "when auto-commit mode is on, worktree mode is on, files in the
-    worktree have been modified and the task fails, behave as if
-    auto commit is off, i.e. explicitly show the user the diff/merge
-    workflow followed by the worktree merge workflow."
+"""When a worktree task fails or is stopped, treat ``autoCommit=True``
+as if it were off.
 
 The implementation in :meth:`_TaskRunnerMixin._run_task_inner`'s
 finally block computes::
@@ -18,12 +11,17 @@ finally block computes::
     task_failed = task_end_event.type in ("task_error", "task_stopped")
     effective_auto_commit = tab.auto_commit_mode and not task_failed
 
-and both decision sites (non-worktree autocommit/merge gate and the
-worktree merge-review gate) consult ``effective_auto_commit`` instead
-of the raw ``tab.auto_commit_mode``.  Therefore on failure / user-stop
-the user gets the explicit diff/merge workflow (non-worktree) or the
-worktree merge-review (worktree), and on success the original
-auto-commit / auto-merge fast path is preserved as a regression guard.
+and the worktree finalization gate consults ``effective_auto_commit``
+instead of the raw ``tab.auto_commit_mode``.  Therefore on failure /
+user-stop the user gets the explicit ``worktree_done`` Merge / Discard
+prompt with the branch preserved, and on success the auto-merge fast
+path is preserved as a regression guard.
+
+Non-worktree tasks behave differently since the removal of the
+interactive diff/merge review: a dirty main working tree is ALWAYS
+auto-committed at task end — auto-commit toggle and task outcome
+notwithstanding — so a failed task's changes are still committed
+rather than silently stranded.
 
 Each test drives the real :meth:`VSCodeServer._run_task_inner` against
 a fresh git repo, replacing the stateful agent's parent ``run`` with
@@ -40,6 +38,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as _persistence
+import kiss.server.merge_flow as _merge_flow_module
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.server.server import VSCodeServer
 
@@ -102,11 +101,25 @@ class _Base(unittest.TestCase):
 
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
+        # Deterministic commit-message generation: the post-task
+        # autocommit path calls this module-level extension point.
+        self._orig_gen = _merge_flow_module.generate_commit_message_from_diff
+
+        def fake_compose(
+            diff_text: str,
+            user_prompt: str | None = None,
+            task_result: str | None = None,
+        ) -> str:
+            return "test: deterministic autocommit"
+
+        _merge_flow_module.generate_commit_message_from_diff = fake_compose  # type: ignore[assignment]
+
         self._parent_class = cast(Any, SorcarAgent.__mro__[1])
         self._original_run = self._parent_class.run
 
     def tearDown(self) -> None:
         self._parent_class.run = self._original_run
+        _merge_flow_module.generate_commit_message_from_diff = self._orig_gen
 
         from kiss.server import agent_state
         for state in agent_state.snapshot():
@@ -185,6 +198,10 @@ class TestWorktreeFailureWithAutocommit(_Base):
         assert "worktree_result" not in types, (
             f"Auto-merge must NOT run on task_error; got events: {types}"
         )
+        assert "worktree_done" in types, (
+            f"The Merge / Discard prompt must be shown for the failed "
+            f"task's branch; got events: {types}"
+        )
         branches = _list_kiss_wt_branches(self.repo)
         assert len(branches) == 1, (
             f"Worktree branch must survive failed task for manual review; "
@@ -212,6 +229,10 @@ class TestWorktreeFailureWithAutocommit(_Base):
         assert "worktree_result" not in types, (
             f"Auto-merge must NOT run on task_stopped; got events: {types}"
         )
+        assert "worktree_done" in types, (
+            f"The Merge / Discard prompt must be shown for the stopped "
+            f"task's branch; got events: {types}"
+        )
         branches = _list_kiss_wt_branches(self.repo)
         assert len(branches) == 1, (
             f"Worktree branch must survive stopped task; "
@@ -220,16 +241,16 @@ class TestWorktreeFailureWithAutocommit(_Base):
 
 
 class TestNonWorktreeFailureWithAutocommit(_Base):
-    """Non-worktree + autoCommit=True + task failure must NOT silently
-    commit; user must get the interactive diff/merge or autocommit
-    prompt instead."""
+    """Non-worktree tasks always auto-commit a dirty tree at task end —
+    even when the task failed — now that the interactive diff/merge
+    review is gone.  A failed task's changes must not be stranded."""
 
-    def test_runtime_error_no_silent_commit(self) -> None:
+    def test_runtime_error_still_commits_dirty_tree(self) -> None:
         """Stub creates a file in the working tree, then raises.
 
-        Expect: HEAD unchanged (no silent auto-commit), and the
-        interactive diff/merge workflow is presented (either a
-        ``merge_data`` event or an ``autocommit_prompt`` event).
+        Expect: the change is committed anyway (``autocommit_done``
+        with ``committed=True``, HEAD advances, clean tree) — the
+        always-commit policy is independent of the task outcome.
         """
         pre_head = _head_sha(self.repo)
         self._original_run = _patch_run(
@@ -245,16 +266,65 @@ class TestNonWorktreeFailureWithAutocommit(_Base):
         })
 
         post_head = _head_sha(self.repo)
-        assert pre_head == post_head, (
-            f"HEAD must not advance when task fails with autoCommit=True; "
+        assert pre_head != post_head, (
+            f"the failed task's changes must still be committed; "
             f"pre={pre_head} post={post_head}, events={self._types()}"
         )
         assert (Path(self.repo) / "agent_out.txt").exists()
+        status = _run_git(self.repo, "status", "--porcelain").stdout.strip()
+        assert status == "", f"tree must be clean after autocommit: {status}"
 
         types = self._types()
-        assert "merge_data" in types or "autocommit_prompt" in types, (
-            f"User must be shown interactive diff/merge or autocommit "
-            f"prompt on failure; got: {types}"
+        assert "autocommit_done" in types, (
+            f"autocommit_done must be broadcast; got: {types}"
+        )
+        done = next(
+            e for e in self.events if e["type"] == "autocommit_done"
+        )
+        assert done["success"] is True
+        assert done["committed"] is True
+
+    def test_autocommit_off_commits_dirty_tree_too(self) -> None:
+        """The autoCommit toggle no longer gates the non-worktree
+        commit: OFF behaves exactly like ON."""
+        pre_head = _head_sha(self.repo)
+        self._original_run = _patch_run("agent_out.txt", raises=None)
+        self.server._run_task_inner({
+            "prompt": "task with the toggle off",
+            "workDir": self.repo,
+            "tabId": "0",
+            "useWorktree": False,
+            "autoCommit": False,
+            "model": "",
+        })
+
+        assert pre_head != _head_sha(self.repo), (
+            f"autoCommit=False must not skip the post-task commit; "
+            f"events={self._types()}"
+        )
+        status = _run_git(self.repo, "status", "--porcelain").stdout.strip()
+        assert status == "", f"tree must be clean after autocommit: {status}"
+
+    def test_clean_tree_emits_no_autocommit_events(self) -> None:
+        """A task that changes nothing produces no autocommit events."""
+        pre_head = _head_sha(self.repo)
+        self._original_run = _patch_run(None, raises=None)
+        self.server._run_task_inner({
+            "prompt": "task that changes nothing",
+            "workDir": self.repo,
+            "tabId": "0",
+            "useWorktree": False,
+            "autoCommit": True,
+            "model": "",
+        })
+
+        assert pre_head == _head_sha(self.repo)
+        types = self._types()
+        assert "autocommit_done" not in types, (
+            f"a clean tree must stay event-free; got: {types}"
+        )
+        assert "autocommit_progress" not in types, (
+            f"a clean tree must stay event-free; got: {types}"
         )
 
 

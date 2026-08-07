@@ -18,9 +18,9 @@ Repro:
     ``extra.work_dir`` (the worktree path) during the task and is
     NOT reset after worktree cleanup.
 3.  The user presses the settings-panel "Git Commit" button.  The
-    frontend posts ``autocommitAction`` with that now-stale
+    frontend triggers an autocommit with that now-stale
     ``workDir`` (the deleted ``.kiss-worktrees/kiss_wt-…`` path).
-4.  ``_handle_autocommit_action`` runs ``git -C <stale>`` which
+4.  ``_autocommit_changes`` runs ``git -C <stale>`` which
     fails (the directory no longer exists) and the user sees a
     misleading "Not a git repository." error even though their
     main working tree IS a git repo with uncommitted changes
@@ -101,8 +101,8 @@ class TestGitCommitAfterWorktreeCleanup(unittest.TestCase):
         report "Not a git repository."."""
         before_head = _run_git(self.repo, "rev-parse", "HEAD").stdout.strip()
 
-        self.server._handle_autocommit_action(
-            "commit", tab_id="t-stale", work_dir=self.stale_wt_dir,
+        self.server._autocommit_changes(
+            "t-stale", work_dir=self.stale_wt_dir,
         )
 
         done = self._last_done_event()

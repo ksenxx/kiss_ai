@@ -9,11 +9,8 @@ double-quote, backslash, or control character — in ``diff --git``
 headers, ``--name-only`` output, ``ls-files --others`` output, and
 ``status --porcelain`` output.  Reproduces real bugs:
 
-* ``diff_merge._parse_diff_hunks``: the quoted header line matched
-  neither regex, so ``current_file`` stayed at the PREVIOUS file and
-  the quoted file's hunks were misattributed to it (or dropped).
 * ``diff_merge._capture_untracked``: returned the quoted string, which
-  does not exist on disk, making the file invisible to the merge view.
+  does not exist on disk, making the file invisible to callers.
 * ``merge_flow._main_dirty_files``: ``.strip('"')`` removed the quotes
   but never unescaped ``\\"`` / ``\\\\``.
 * ``merge_flow._get_worktree_changed_files`` and
@@ -35,7 +32,7 @@ from pathlib import Path
 
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server import agent_state
-from kiss.server.diff_merge import _capture_untracked, _parse_diff_hunks
+from kiss.server.diff_merge import _capture_untracked
 from kiss.server.server import VSCodeServer
 
 QUOTED_NAME = 'qu"ote.txt'
@@ -72,19 +69,6 @@ class TestQuotedPathParsing(unittest.TestCase):
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_parse_diff_hunks_quoted_name_not_misattributed(self) -> None:
-        """Hunks of a quoted-name file must not leak into the previous file."""
-        Path(self.repo, "a.txt").write_text("one\nTWO\nthree\n")
-        Path(self.repo, QUOTED_NAME).write_text("alpha\nBRAVO\ncharlie\n")
-        hunks = _parse_diff_hunks(self.repo)
-        self.assertIn(QUOTED_NAME, hunks, f"quoted file missing: {hunks}")
-        self.assertEqual(
-            len(hunks["a.txt"]), 1,
-            "quoted file's hunks were misattributed to the previous "
-            f"file in the diff: {hunks}",
-        )
-        self.assertEqual(hunks[QUOTED_NAME], [(2, 1, 2, 1)])
 
     def test_capture_untracked_unquotes(self) -> None:
         """Untracked files with quotes in the name must be reported as-is."""

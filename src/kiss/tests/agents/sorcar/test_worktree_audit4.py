@@ -12,7 +12,8 @@ BUG-13: _release_worktree sets _merge_conflict_warning and returns None
 BUG-14: _new_chat surfaces _stash_pop_warning and _merge_conflict_warning
 BUG-15: concurrent _release_worktree uses per-repo locking
 BUG-16: _finalize_worktree preserves worktree when auto-commit fails
-BUG-17: _run_task_inner skips _save_untracked_base in worktree mode
+BUG-17 (obsolete): covered _save_untracked_base, removed together with
+         the interactive diff/merge review workflow
 BUG-18: _release_worktree returns None on merge conflict (not
          original_branch)
 """

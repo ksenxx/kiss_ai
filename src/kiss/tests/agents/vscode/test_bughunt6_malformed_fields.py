@@ -15,7 +15,7 @@ values:
 
 * ``run``/``userAnswer``/``appendUserMessage``/``selectModel``/
   ``complete``/``closeTab``/``newChat``/``stop``/``getAdjacentTask``/
-  ``mergeAction``/``getFiles`` with a list ``tabId``/``workDir``:
+  ``getFiles`` with a list ``tabId``/``workDir``:
   ``TypeError: unhashable type`` out of a registry/dict lookup.
 * ``selectModel`` with a list ``model``: corrupted
   ``tab.selected_model`` / ``self._default_model`` to a list FIRST,
@@ -127,7 +127,7 @@ class TestMalformedFields(unittest.TestCase):
             {"type": "newChat", "tabId": [1]},
             {"type": "stop", "tabId": [1]},
             {"type": "getAdjacentTask", "tabId": [1]},
-            {"type": "mergeAction", "action": "all-done", "tabId": [1]},
+            {"type": "worktreeAction", "action": "discard", "tabId": [1]},
             {"type": "resumeSession", "chatId": "c", "tabId": [1]},
         ]
         for p in payloads:

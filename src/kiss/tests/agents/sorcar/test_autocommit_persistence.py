@@ -4,17 +4,17 @@
 # add your name here
 """Test that autocommit events are persisted to the task history database.
 
-BUG: After a non-worktree task completes and the user auto-commits via
-the autocommit prompt, the ``autocommit_done`` event was not persisted
-to the task history.  When the user later replays the session ("the
-report"), the commit never shows up.
+BUG: After a non-worktree task completes and its changes are
+auto-committed, the ``autocommit_done`` event was not persisted to the
+task history.  When the user later replays the session ("the report"),
+the commit never shows up.
 
-Root cause: ``_handle_autocommit_action`` broadcasts the
-``autocommit_done`` event but did not call ``_append_chat_event`` to
-persist it.  By the time autocommit happens, the task's recording has
-already been stopped, so the automatic persistence path in
-``broadcast()`` is also inactive.  The fix resolves the task id from
-the tab's registered agent state and persists the event explicitly.
+Root cause: ``_autocommit_changes`` broadcasts the ``autocommit_done``
+event but did not call ``_append_chat_event`` to persist it.  By the
+time autocommit happens, the task's recording has already been
+stopped, so the automatic persistence path in ``broadcast()`` is also
+inactive.  The fix resolves the task id from the tab's registered
+agent state and persists the event explicitly.
 """
 
 from __future__ import annotations
@@ -126,7 +126,7 @@ class TestAutocommitPersistence(unittest.TestCase):
 
         Path(self.tmpdir, "seed.txt").write_text("modified content\n")
 
-        self.server._handle_autocommit_action("commit", "t1")
+        self.server._autocommit_changes("t1")
 
         status = _run_git(self.tmpdir, "status", "--porcelain").stdout.strip()
         assert status == "", f"Working tree should be clean after commit: {status}"
@@ -145,13 +145,12 @@ class TestAutocommitPersistence(unittest.TestCase):
         assert ac_events[0]["committed"] is True
         assert ac_events[0]["success"] is True
 
-    def test_autocommit_skip_not_persisted(self) -> None:
-        """Skipping autocommit (no commit made) should NOT persist
-        an autocommit_done event since no commit was created."""
+    def test_autocommit_without_changes_not_persisted(self) -> None:
+        """A clean tree (no commit made) should NOT persist an
+        autocommit_done event since no commit was created."""
         task_id, chat_id = self._create_task_for_tab("t2")
 
-        Path(self.tmpdir, "seed.txt").write_text("dirty\n")
-        self.server._handle_autocommit_action("skip", "t2")
+        self.server._autocommit_changes("t2")
 
         done_events = [e for e in self.events if e.get("type") == "autocommit_done"]
         assert len(done_events) == 1
@@ -167,7 +166,7 @@ class TestAutocommitPersistence(unittest.TestCase):
         task_id, chat_id = self._create_task_for_tab("t3")
 
         Path(self.tmpdir, "seed.txt").write_text("changed for replay test\n")
-        self.server._handle_autocommit_action("commit", "t3")
+        self.server._autocommit_changes("t3")
 
         result = _load_latest_chat_events_by_chat_id(chat_id)
         assert result is not None, "Should find events for chat_id"
@@ -191,7 +190,7 @@ class TestAutocommitPersistence(unittest.TestCase):
         agent_state.register(state)
 
         Path(self.tmpdir, "seed.txt").write_text("no task id\n")
-        self.server._handle_autocommit_action("commit", "t4")
+        self.server._autocommit_changes("t4")
 
         done_events = [e for e in self.events if e.get("type") == "autocommit_done"]
         assert len(done_events) == 1
