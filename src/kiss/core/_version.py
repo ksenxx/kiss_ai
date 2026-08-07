@@ -2,4 +2,4 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-__version__ = "2026.8.5"
+__version__ = "2026.8.6"
