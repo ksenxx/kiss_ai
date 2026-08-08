@@ -266,12 +266,16 @@ class TestFix3MainTreeBusyGuard:
 
         non_wt_tab = server._get_tab("non_wt_tab")
         non_wt_tab.is_running_non_wt = True
+        # Mirror _run_task_inner: a running non-wt task records the
+        # resolved main-repo root of its work_dir on its tab.
+        non_wt_tab.non_wt_repo_root = repo.resolve()
 
         result = server._handle_worktree_action("merge", "wt_tab")
         assert result["success"] is False
         assert "running" in result["message"].lower()
 
         non_wt_tab.is_running_non_wt = False
+        non_wt_tab.non_wt_repo_root = None
         wt_agent.discard()
 
     def test_check_merge_conflict_suppressed_when_non_wt_running(self) -> None:
@@ -316,12 +320,16 @@ class TestFix3MainTreeBusyGuard:
         )
 
         non_wt_tab.is_running_non_wt = True
+        # Mirror _run_task_inner: record the repo root so the
+        # repo-aware guard attributes the task to this repository.
+        non_wt_tab.non_wt_repo_root = repo.resolve()
         conflict_after = server._check_merge_conflict("wt_tab")
         assert conflict_after is False, (
             "Fix 3: dirty files from non-wt agent must not cause false conflict"
         )
 
         non_wt_tab.is_running_non_wt = False
+        non_wt_tab.non_wt_repo_root = None
         GitWorktreeOps.remove(repo, wt.wt_dir)
         GitWorktreeOps.prune(repo)
         GitWorktreeOps.delete_branch(repo, wt.branch)
