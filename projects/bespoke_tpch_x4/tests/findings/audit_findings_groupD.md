@@ -7,21 +7,24 @@ paper's validation tolerance. Test manifest: `tests/workloads/q18_22.jsonl`
 expected/forbidden path markers verified).
 
 Build/run used:
+
 ```
 flock /tmp/audit_build.lock ./tests/build_audit.sh tests/bin_D
 uv run --no-project --with duckdb --with pandas python3 tests/difftest.py \
     tests/workloads/q18_22.jsonl --bin-dir "$(pwd)/tests/bin_D" -v
 ```
+
 (Note: `--bin-dir` must be absolute; difftest launches the engines with
 `cwd=<tempdir>`, so a relative bin dir raises FileNotFoundError. Harness file is
 read-only for this audit, so the absolute path is simply passed on the command
 line.)
 
----
+______________________________________________________________________
 
 ## Q18 — large-volume customers
 
 ### Guards / branches (markers)
+
 | Marker | Condition |
 |---|---|
 | `q18 null` | `args.QUANTITY == "<<NULL>>"` → empty result, no scan |
@@ -31,6 +34,7 @@ line.)
 | `q18 fallback sparse` | fast guard false, orderkeys sparse — baseline-style max-keyed arrays |
 
 ### Adversarial cases
+
 Seed values 314/313/315; boundary 300; `0`, `1` (near-total qualification,
 ~1.5M-row result diffed OK against baseline); `10000` (empty result); `-5`
 (negative threshold — exercises the `sum >= 0` sentinel: builder initializes
@@ -40,6 +44,7 @@ produces groups for orders that appear in lineitem); `314.5` (fractional, stod +
 cents scaling); `<<NULL>>`.
 
 ### Unreachable-guard justification
+
 `build_q18_artifacts` unconditionally does
 `pre.q18_order_sum_qty.assign(orders.row_count, -1)` before any early return, so
 the size always equals `orders.row_count`. The guard can only be false when
@@ -51,14 +56,16 @@ baseline algorithm, so even if an exotic data shape engaged it, it computes the
 reference answer.
 
 ### Bugs found
+
 None. (Correct handling of negative thresholds via the −1 sentinel + `sum >= 0`
 check was specifically verified.)
 
----
+______________________________________________________________________
 
 ## Q19 — discounted revenue (three OR'd brand/container/quantity groups)
 
 ### Guards / branches (markers)
+
 | Marker | Condition |
 |---|---|
 | `q19 all-groups-null` | every group has QUANTITYi or BRANDi = `<<NULL>>` → single default row |
@@ -67,6 +74,7 @@ check was specifically verified.)
 | `q19 fallback empty-part` | fallback with `max_partkey < 0` (both part and lineitem empty) |
 
 ### Adversarial cases
+
 All three benchmark seeds (seed7 includes a duplicate brand across groups 1&2);
 negative/zero quantities (`-10/0/-1`); all-zero; huge (`1000000/2000000/3000000`
 — scaled ×100 still fits int32, revenue 0); inverted `q1>q2>q3`; identical
@@ -79,6 +87,7 @@ baseline); one group NULL with two active; all groups NULL; fractional
 quantities.
 
 ### Unreachable-guard justification
+
 `build_q19_artifacts` sets `q19_built = true` unless (a) the `AIR`/`AIR REG`
 shipmode or `DELIVER IN PERSON` shipinstruct dictionary entries are missing, or
 (b) `part.brand.dictionary.size() >= 0xFFFF`. Both are data-shape invariants of
@@ -94,13 +103,15 @@ never the placeholder brands/quantities, so it is sound for arbitrary
 parameters.
 
 ### Bugs found
+
 None.
 
----
+______________________________________________________________________
 
 ## Q20 — potential part promotion
 
 ### Guards / branches (markers)
+
 | Marker | Condition |
 |---|---|
 | `q20 null` | COLOR, DATE, or NATION = `<<NULL>>` → empty |
@@ -110,6 +121,7 @@ None.
 | `q20 fallback` | CSR missing or partsupp not sorted by partkey — baseline bitset + hash-map scan |
 
 ### Adversarial cases
+
 Three benchmark seeds (incl. two-word nation `SAUDI ARABIA`); color prefix
 matching no parts (`zzzznotacolor` → empty); **empty color prefix** (`""` —
 `LIKE '%'` matches all 200k parts; heaviest possible COLOR, diffed OK); 1-char
@@ -119,6 +131,7 @@ end date clamps to 1997-02-28 via `days_in_month`, identical to the baseline's
 `parse_date_offset_add_years`); unknown nation `ATLANTIS`; NULL color.
 
 ### Unreachable-guard justification
+
 The CSR builder computes `max_partkey` over part ∪ lineitem ∪ partsupp and
 always builds `li_by_partkey_offsets` when any partkey ≥ 0 exists;
 `ps_by_partkey_sorted` is set iff the loaded partsupp table is sorted by
@@ -131,16 +144,18 @@ part-table partkey is ≤ that max, so the fast path's bounds `continue` guards
 can only skip negative partkeys (which the baseline also cannot match).
 
 ### Bugs found
+
 None. (The per-part 8-entry supplier accumulator + spill vector was checked for
 overflow behavior: spill handles >8 distinct suppliers per part correctly, and
 the `qualify` lambda's first-match `break` on partsupp is safe because
 (ps_partkey, ps_suppkey) is a primary key.)
 
----
+______________________________________________________________________
 
 ## Q21 — suppliers who kept orders waiting
 
 ### Guards / branches (markers)
+
 | Marker | Condition |
 |---|---|
 | `q21 null` | NATION = `<<NULL>>` → empty |
@@ -151,6 +166,7 @@ the `qualify` lambda's first-match `break` on partsupp is safe because
 | `q21 fallback sorted` / `q21 fallback unsorted` | baseline orders×lineitem scan (lineitem sorted by orderkey or not) |
 
 ### Adversarial cases
+
 RUSSIA / UNITED STATES / VIETNAM (benchmark seeds), ALGERIA, UNITED KINGDOM
 (incl. two-word nations), unknown nation WAKANDA, NULL.
 
@@ -160,6 +176,7 @@ is fully parameter-independent; the per-order exists/not-exists logic in
 `build_q21_artifacts` is line-for-line the baseline's.
 
 ### Unreachable-guard justification
+
 `build_q21_artifacts` leaves `q21_built == false` only when orders/lineitem is
 empty, `orders.lineitem_ranges` is missing, or there is no `F` status code —
 all ingest-time data invariants. In the first and third situations the query
@@ -168,13 +185,15 @@ reaching the fast-path branch anyway. Hence `q21 fallback *` is unreachable for
 any valid placeholder on this data; `forbid`-asserted on every Q21 case.
 
 ### Bugs found
+
 None.
 
----
+______________________________________________________________________
 
 ## Q22 — global sales opportunity
 
 ### Guards / branches (markers)
+
 | Marker | Condition |
 |---|---|
 | `q22 no-codes` | all seven I placeholders NULL or shorter than 2 chars → empty |
@@ -183,6 +202,7 @@ None.
 | `q22 extra fallback` | at least one non-numeric code — full phone-prefix comparison scan |
 
 ### Adversarial cases
+
 Benchmark seed sets (both orders); duplicate codes (`13 13 13 17 17 31 31` —
 dedup in `add_code` + `seen[]` ensures no double counting, matching SQL IN-set
 semantics); codes matching no customers (`99..93` and `00..06` → empty);
@@ -201,6 +221,7 @@ integer-cent acctbals and positive sum/count, `acctbal > sum/count (rational)`
 baseline uses the identical floor comparison).
 
 ### Baseline-contract note (not a bug)
+
 `add_code` truncates codes longer than 2 characters to their first two chars
 (`"133"` behaves like `"13"`). Strict SQL semantics
 (`substring(c_phone from 1 for 2) IN ('133')`) would match nothing. However the
@@ -210,6 +231,7 @@ reproduces the paper artifact's behavior exactly; the differential test with
 correctness reference is the baseline artifact.
 
 ### Unreachable-guard justification
+
 `build_q22_artifacts` sets `q22_built = true` unless customer is empty,
 `customer.phone_prefix_code` was not materialized, or
 `orders.orders_by_customer_offsets` is missing — ingest-time invariants
@@ -218,22 +240,22 @@ valid request on this data; `forbid`-asserted on every numeric-code Q22 case.
 The `q22 extra fallback` guard-false path IS reachable (non-numeric codes) and
 is positively exercised by two cases.
 
----
+______________________________________________________________________
 
 ## Summary
 
-* 51 adversarial cases, 51 pass: optimized results match the baseline within the
+- 51 adversarial cases, 51 pass: optimized results match the baseline within the
   paper tolerance on every case, including ~1.5M-row Q18 outputs.
-* Every fast-path guard is instrumented with `AUDIT_PATH` (audit builds only;
+- Every fast-path guard is instrumented with `AUDIT_PATH` (audit builds only;
   no-op macro in benchmark builds, placed outside hot loops / OpenMP regions).
-* Every reachable fallback trigger was engaged and verified (`q18 null`,
+- Every reachable fallback trigger was engaged and verified (`q18 null`,
   `q19 all-groups-null`, partial-NULL Q19, `q20 null`, `q20 unknown-nation`,
   `q21 null`, `q21 unknown-nation`, `q22 no-codes`, `q22 extra fallback`).
-* Guard-false conditions that depend only on builder/data invariants
+- Guard-false conditions that depend only on builder/data invariants
   (q18/q19/q20/q21 fallbacks, q22 numeric fallback) are documented above as
   unreachable for any valid placeholder, instrumented anyway, and
   `forbid`-asserted so a regression that accidentally disables a precompute
   would be caught as a marker failure.
-* **No correctness bugs found in the Q18–Q22 fast paths; no engine logic was
+- **No correctness bugs found in the Q18–Q22 fast paths; no engine logic was
   changed** — the only engine edits are the `#include "audit.hpp"` lines and
   AUDIT_PATH markers in the five Group D files.
