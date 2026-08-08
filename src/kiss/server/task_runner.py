@@ -337,8 +337,10 @@ def _wt_merge_on_repo(tab: _RunningAgentState, repo: Path | None) -> bool:
 
     Returns:
         True when *tab* holds a worktree merge whose repository is
-        *repo* (or whose repository cannot be determined — the
-        conservative pre-repo-aware behavior).
+        *repo*, whose worktree directory itself is *repo* (the
+        starting task would run inside the directory the merge is
+        about to remove), or whose repository cannot be determined —
+        the conservative pre-repo-aware behavior.
     """
     if not (tab.is_merging and tab.use_worktree):
         return False
@@ -351,7 +353,18 @@ def _wt_merge_on_repo(tab: _RunningAgentState, repo: Path | None) -> bool:
         # already been disposed); keep the conservative refusal.
         return True
     try:
-        return bool(Path(merge_root).resolve() == repo.resolve())
+        repo_resolved = repo.resolve()
+        if Path(merge_root).resolve() == repo_resolved:
+            return True
+        # A task starting INSIDE the very worktree being merged (its
+        # work_dir's toplevel is the linked worktree directory) must
+        # also be refused: the merge auto-commits and removes that
+        # directory out from under the task.
+        merge_wt_dir = getattr(agent, "_wt_dir", None)
+        return bool(
+            merge_wt_dir is not None
+            and Path(merge_wt_dir).resolve() == repo_resolved
+        )
     except OSError:  # pragma: no cover — unresolvable path
         return True
 

@@ -28,6 +28,14 @@ only blocks actions on that same repository.  The reverse admission
 gate (a worktree merge in progress refusing a new non-worktree task)
 became repository-aware the same way (``_wt_merge_on_repo``).
 
+One occupancy case must KEEP blocking (gpt-5.6-sol review finding):
+a non-worktree task whose toplevel is the very worktree directory a
+merge or discard would remove.  Distinct worktrees stay non-blocking,
+but deleting a running task's working directory out from under it
+loses work, so ``_check_worktree_busy`` compares against the pending
+``wt_dir`` too, and ``_wt_merge_on_repo`` refuses to admit a task
+into a worktree that is mid-merge.
+
 Every test drives the real ``VSCodeServer`` post-task flow against a
 real temp git repo; only the LLM agent body and the LLM commit-message
 generator are replaced with deterministic functions.
@@ -38,7 +46,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import kiss.agents.sorcar.commit_message as _commit_message_module
-from kiss.agents.sorcar.git_worktree import GitWorktree
+from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.tests.agents.sorcar.test_worktree_no_autocommit_branch import (
@@ -195,6 +203,90 @@ class TestMergeNotBlockedByUnrelatedTasks(_RepoAwareGuardBase):
         assert (Path(self.repo) / "agent_out.txt").exists()
 
 
+class TestMergeBlockedByTaskInsideOwnWorktree(_RepoAwareGuardBase):
+    """A task running INSIDE the pending worktree still blocks its merge.
+
+    Merging (and discarding) removes the worktree directory; doing so
+    while another tab's non-worktree task runs inside that directory
+    would delete the running task's working tree (gpt-5.6-sol review
+    finding).  Only the SAME worktree blocks — a different linked
+    worktree of the same repo does not (covered above).
+    """
+
+    def test_user_merge_refused_while_task_runs_inside_this_worktree(
+        self,
+    ) -> None:
+        # Strand a pending worktree first (same-main-tree guard
+        # legitimately refuses the post-task auto-merge).
+        self._mark_non_wt_task(Path(self.repo))
+        self._run_worktree_task_with_changes()
+        agent = self.server._get_tab(_WT_TAB).agent
+        assert agent is not None and agent._wt_pending, (
+            "precondition: the worktree must still be pending"
+        )
+        wt_dir = agent._wt_dir
+        assert wt_dir is not None and wt_dir.exists()
+
+        # The main-tree task ends; a task INSIDE this worktree starts
+        # (a linked worktree's `git rev-parse --show-toplevel` is the
+        # worktree directory itself).
+        self._mark_non_wt_task(wt_dir)
+        result = self.server._handle_worktree_action("merge", _WT_TAB)
+
+        assert not result["success"], (
+            "merging must be refused while a task runs inside the "
+            f"worktree the merge would remove: {result}"
+        )
+        assert "worktree" in result["message"], result
+        assert wt_dir.exists(), (
+            "the occupied worktree directory must not be removed"
+        )
+
+    def test_user_discard_refused_while_task_runs_inside_this_worktree(
+        self,
+    ) -> None:
+        self._mark_non_wt_task(Path(self.repo))
+        self._run_worktree_task_with_changes()
+        agent = self.server._get_tab(_WT_TAB).agent
+        assert agent is not None and agent._wt_pending
+        wt_dir = agent._wt_dir
+        assert wt_dir is not None and wt_dir.exists()
+
+        self._mark_non_wt_task(wt_dir)
+        result = self.server._handle_worktree_action("discard", _WT_TAB)
+
+        assert not result["success"], (
+            "discarding must be refused while a task runs inside the "
+            f"worktree the discard would remove: {result}"
+        )
+        assert wt_dir.exists(), (
+            "the occupied worktree directory must not be removed"
+        )
+
+    def test_internal_auto_merge_refused_while_worktree_occupied(
+        self,
+    ) -> None:
+        """The post-task auto-merge (``internal=True``) must honor the
+        same occupancy guard."""
+        self._mark_non_wt_task(Path(self.repo))
+        self._run_worktree_task_with_changes()
+        agent = self.server._get_tab(_WT_TAB).agent
+        assert agent is not None and agent._wt_pending
+        wt_dir = agent._wt_dir
+        assert wt_dir is not None and wt_dir.exists()
+
+        self._mark_non_wt_task(wt_dir)
+        result = self.server._handle_worktree_action(
+            "merge", _WT_TAB, internal=True,
+        )
+
+        assert not result["success"], (
+            "the internal auto-merge must be refused while a task "
+            f"runs inside the worktree: {result}"
+        )
+        assert wt_dir.exists()
+
+
 class TestMergeStillBlockedOnSameMainTree(_RepoAwareGuardBase):
     """NON-REGRESSION — a task really writing this main tree blocks."""
 
@@ -263,6 +355,45 @@ class TestNonWorktreeTaskAdmission(_RepoAwareGuardBase):
             "the direct task must actually have run"
         )
 
+    def test_task_inside_merging_worktree_refused(self) -> None:
+        """A task whose ``work_dir`` is INSIDE the worktree being
+        merged must be refused: the merge removes that directory
+        (gpt-5.6-sol review finding).  The worktree's own toplevel is
+        the worktree directory, not the main repo, so the repo-root
+        comparison alone would wrongly admit it."""
+        repo = Path(self.repo)
+        branch = "kiss/wt-merge-holder-real"
+        wt_dir = repo / ".kiss-worktrees" / branch.replace("/", "_")
+        assert GitWorktreeOps.create(repo, branch, wt_dir), (
+            "precondition: a real linked worktree must exist"
+        )
+
+        tab = self.server._get_tab(_OTHER_TAB)
+        agent = WorktreeSorcarAgent("merge-holder")
+        agent._wt = GitWorktree(
+            repo_root=repo,
+            branch=branch,
+            original_branch="main",
+            wt_dir=wt_dir,
+            baseline_commit=None,
+        )
+        with self.server._state_lock:
+            tab.agent = agent
+            tab.use_worktree = True
+            tab.is_merging = True
+
+        self._start_non_wt_task(str(wt_dir))
+
+        errors = [e for e in self.events if e["type"] == "error"]
+        assert any(
+            "worktree merge is in progress" in e.get("text", "")
+            for e in errors
+        ), (
+            "BUG: a task was admitted into the very worktree a merge "
+            f"is about to remove: {errors}"
+        )
+        assert not (wt_dir / "direct_out.txt").exists()
+
     def test_task_on_same_repo_still_refused_by_worktree_merge(self) -> None:
         """NON-REGRESSION: a direct task on the repo being merged is
         still refused."""
@@ -300,7 +431,7 @@ class TestNonWtRepoRootRecording(_RepoAwareGuardBase):
             return "success: true\nsummary: stub\n"
 
         parent = type(self)._patched_parent()
-        parent.run = probing_run
+        setattr(parent, "run", probing_run)  # noqa: B010 — mypy: "type" has no attr "run"
 
         self.server._run_task_inner({
             "prompt": "direct task",
@@ -326,10 +457,8 @@ class TestNonWtRepoRootRecording(_RepoAwareGuardBase):
     @classmethod
     def _patched_parent(cls) -> type:
         """The direct parent class whose ``run`` the harness stubs."""
-        from typing import Any, cast
-
         from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-        return cast(Any, SorcarAgent.__mro__[1])
+        return SorcarAgent.__mro__[1]
 
 
 if __name__ == "__main__":  # pragma: no cover
