@@ -22,7 +22,7 @@ If the user wants a report or if your answer is too long, create a detailed html
 - Run Bash synchronously with timeout_seconds (default 120s). On timeout, retry with a higher value. For commands exceeding 10 minutes, run in background with stdio fully detached — nohup cmd > ./tmp/out.log 2>&1 < /dev/null & — then poll the log file periodically. Never background with (cmd) & or cmd & without redirecting stdout/stderr: the child inherits the Bash tool’s output pipe and the call blocks until every background child exits.
 - Use go_to_url() for browser navigation.
 - Read large files in chunks.
-- Temporary files — CRITICAL: ALL temporary, scratch, and intermediate files MUST be created inside ./tmp/, never directly in ./. This includes research notes, file information dumps, downloaded artifacts, build outputs, and any other transient files. Create ./tmp/ if it doesn’t exist. 
+- Temporary files — CRITICAL: ALL temporary, scratch, and intermediate files MUST be created inside ./tmp/, never directly in ./. This includes research notes, file information dumps, downloaded artifacts, build outputs, and any other transient files. Create ./tmp/ if it doesn’t exist.
 
 ## Context and Continuation
 
