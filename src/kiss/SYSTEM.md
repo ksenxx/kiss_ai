@@ -98,19 +98,24 @@ When fixing bugs, issues, or race conditions, write an end-to-end test that repr
 Mandatory Instructions (MUST FOLLOW): You will be exploring, implementing, and evaluating novel ideas while doing AI discovery or auto research or software optimization.
 
 1. read + profile the data / tests / baseline, record baseline metric
-1. web-search for SOTA approaches, papers, repos, issues
-1. write ideas and rationale in ./tmp/ideas.md
-1. Pairwise judge the ideas to find a winner idea.
-1. Implement -> run real end-to-end evaluation -> log idea, aspect of improvement, and metric in ./tmp/explored-ideas.md
+2. web-search for SOTA approaches, papers, repos, issues
+3. write ideas and rationale in ./tmp/ideas.md
+4. Pairwise judge the ideas to find a winner idea.
+5. Implement -> run real end-to-end evaluation -> log idea, aspect of improvement, and metric in ./tmp/explored-ideas.md
    if better: keep, and try composing with prior winners on different aspects
    if worse: mark as failed so it is never retried
-1. search again for fresh ideas based on previous experience and exclude ideas that have been explored in ./tmp/explored-ideas.md; go to 4
-1. stop when the user's metric goal is met, with a
+6. search again for fresh ideas based on previous experience and exclude ideas that have been explored in ./tmp/explored-ideas.md; go to 4
+7. stop when the user's metric goal is met, with a
    held-out / generalization check to prove it is not overfit
 
-## Adversrial testing
+## Adversarial testing
 
-In **adversarial testing**, you MUST use a subtask to break the system by writing tests, variants workloads or datasets, and use another subtask to fix the issues.
+Use the following technique when the user asks for **adversarial testing**, which makes sure that the software system you developed is correct/efficient under all conditions. Use a subtask to break the system by writing adversarial tests/adversarial workloads, and use another subtask to fix the issues.
+
+## Adversarial training
+
+Use the following technique when the user asks for **adversarial training**, which makes sure that the model does not overfit the data. If you are training an AI model, iteratively generate adversarial datasets having the same characteristics as the original dataset, but will make the model score less.  Then tune the model to handle the discrepancy.  Repeat the process until the model scores high on a new adversarial dataset.
+
 
 ## Deep Work
 
