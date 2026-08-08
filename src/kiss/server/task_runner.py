@@ -320,6 +320,55 @@ def _release_worktree_without_merging(
     agent._set_warnings(merge=f"{reason} {stranded}" if stranded else reason)
 
 
+def _wt_merge_on_repo(tab: _RunningAgentState, repo: Path | None) -> bool:
+    """True when *tab* is merging a worktree into *repo*'s main tree.
+
+    Used by the non-worktree task admission gate: starting a task
+    directly on a main working tree that a concurrent worktree merge
+    is stashing/checking-out/merging would interleave writes, so the
+    start is refused — but only when the two really share a main tree.
+    A merge in a *different* repository never touches *repo*.
+
+    Args:
+        tab: The per-tab state of a potentially merging tab.
+        repo: The main repository root the starting task will write,
+            or ``None`` when the task's ``work_dir`` is not in a git
+            repo (then no worktree merge can conflict with it).
+
+    Returns:
+        True when *tab* holds a worktree merge whose repository is
+        *repo*, whose worktree directory itself is *repo* (the
+        starting task would run inside the directory the merge is
+        about to remove), or whose repository cannot be determined —
+        the conservative pre-repo-aware behavior.
+    """
+    if not (tab.is_merging and tab.use_worktree):
+        return False
+    if repo is None:
+        return False
+    agent = tab.agent
+    merge_root = getattr(agent, "_repo_root", None) if agent is not None else None
+    if merge_root is None:
+        # The merging tab's repository is unknown (e.g. its agent has
+        # already been disposed); keep the conservative refusal.
+        return True
+    try:
+        repo_resolved = repo.resolve()
+        if Path(merge_root).resolve() == repo_resolved:
+            return True
+        # A task starting INSIDE the very worktree being merged (its
+        # work_dir's toplevel is the linked worktree directory) must
+        # also be refused: the merge auto-commits and removes that
+        # directory out from under the task.
+        merge_wt_dir = getattr(agent, "_wt_dir", None)
+        return bool(
+            merge_wt_dir is not None
+            and Path(merge_wt_dir).resolve() == repo_resolved
+        )
+    except OSError:  # pragma: no cover — unresolvable path
+        return True
+
+
 _STOP_SENTINEL: object = object()
 
 
@@ -336,7 +385,9 @@ class _TaskRunnerMixin:
         _pending_user_answer_tasks: dict[int, str]
 
         def _get_tab(self, tab_id: str) -> _RunningAgentState: ...
-        def _any_non_wt_running(self) -> bool: ...
+        def _any_non_wt_running(
+            self, repo_root: Path | None = None,
+        ) -> bool: ...
         def _dispose_if_closed(self, tab_id: str) -> None: ...
         def _prepare_and_start_merge(
             self,
@@ -443,6 +494,7 @@ class _TaskRunnerMixin:
                     tab.unattributed_prompt_echoes.clear()
                     tab.is_task_active = False
                     tab.is_running_non_wt = False
+                    tab.non_wt_repo_root = None
                     tab.interrupted_by_shutdown = False
                     if tab.agent is not None:
                         tab.last_task_id = (
@@ -709,7 +761,7 @@ class _TaskRunnerMixin:
             repo = GitWorktreeOps.discover_repo(Path(work_dir))
             with repo_lock(repo) if repo else nullcontext(), self._state_lock:
                 if any(
-                    t.is_merging and t.use_worktree
+                    _wt_merge_on_repo(t, repo)
                     for t in _RunningAgentState.running_agent_states.values()
                 ):
                     tab.is_task_active = False
@@ -723,6 +775,7 @@ class _TaskRunnerMixin:
                     )
                     return
                 tab.is_running_non_wt = True
+                tab.non_wt_repo_root = repo.resolve() if repo else None
             try:
                 pre_head_sha, pre_hunks, pre_untracked, pre_file_hashes = (
                     self._capture_pre_snapshot(work_dir, repo, tab_id)
@@ -730,11 +783,14 @@ class _TaskRunnerMixin:
             except BaseException:
                 with self._state_lock:
                     tab.is_running_non_wt = False
+                    tab.non_wt_repo_root = None
                 raise
 
         if use_worktree and getattr(tab.agent, "_wt_pending", False):
             with self._state_lock:
-                main_tree_busy = self._any_non_wt_running()
+                main_tree_busy = self._any_non_wt_running(
+                    getattr(tab.agent, "_repo_root", None),
+                )
             if main_tree_busy:
                 _release_worktree_without_merging(
                     tab.agent, bool(self._get_worktree_changed_files(tab_id)),
@@ -987,6 +1043,7 @@ class _TaskRunnerMixin:
                     finally:
                         with self._state_lock:
                             tab.is_running_non_wt = False
+                            tab.non_wt_repo_root = None
                 assert task_end_event is not None
                 _append_chat_event(
                     task_end_event,
@@ -1126,6 +1183,7 @@ class _TaskRunnerMixin:
                     tab.is_task_active = False
                     if not use_worktree:
                         tab.is_running_non_wt = False
+                        tab.non_wt_repo_root = None
                 if tab.task_history_id is not None:
                     try:
                         self.printer.cleanup_task(tab.task_history_id)
