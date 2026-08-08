@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -165,6 +166,7 @@ class _RunningAgentState:
         "unattributed_prompt_echoes",
         "is_merging",
         "is_running_non_wt",
+        "non_wt_repo_root",
         "is_task_active",
         "interrupted_by_shutdown",
         "frontend_closed",
@@ -202,6 +204,7 @@ class _RunningAgentState:
         self.unattributed_prompt_echoes: list[str] = []
         self.is_merging: bool = False
         self.is_running_non_wt: bool = False
+        self.non_wt_repo_root: Path | None = None
         self.is_task_active: bool = is_task_active
         self.interrupted_by_shutdown: bool = False
         self.frontend_closed: bool = False

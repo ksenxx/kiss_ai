@@ -111,8 +111,12 @@ class _Host(_MergeFlowMixin):
                 _RunningAgentState.running_agent_states[tab_id] = tab
             return tab
 
-    def _any_non_wt_running(self) -> bool:
-        """True if any tab runs a non-worktree task (real server semantics)."""
+    def _any_non_wt_running(self, repo_root: Path | None = None) -> bool:
+        """True if any tab runs a non-worktree task (conservative semantics).
+
+        The harness ignores *repo_root*: every simulated non-worktree
+        task in these tests runs on the same main tree as the merge.
+        """
         return any(
             t.is_running_non_wt
             for t in _RunningAgentState.running_agent_states.values()
