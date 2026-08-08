@@ -200,7 +200,9 @@ class _MergeFlowMixin:
         _state_lock: threading.RLock
 
         def _get_tab(self, tab_id: str) -> _RunningAgentState: ...
-        def _any_non_wt_running(self) -> bool: ...
+        def _any_non_wt_running(
+            self, repo_root: Path | None = None,
+        ) -> bool: ...
         def _dispose_if_closed(self, tab_id: str) -> None: ...
 
     def _ensure_wt_agent(
@@ -1008,7 +1010,7 @@ class _MergeFlowMixin:
             return True
 
         with self._state_lock:
-            if self._any_non_wt_running():
+            if self._any_non_wt_running(wt.repo_root):
                 return False
         dirty: set[str] = set()
         for extra_flags in ((), ("--cached",)):
@@ -1126,11 +1128,16 @@ class _MergeFlowMixin:
             if result.returncode == 0 else []
         )
 
-    def _check_worktree_busy(self, tab: _RunningAgentState, verb: str) -> dict[str, Any] | None:
+    def _check_worktree_busy(
+        self,
+        tab: _RunningAgentState,
+        verb: str,
+        repo_root: Path | None = None,
+    ) -> dict[str, Any] | None:
         """Return an error dict if a worktree action should be refused, else None.
 
         Checks both the tab's own task and any non-worktree task running
-        on the main tree (BUG-35, BUG-72 fixes).
+        on the main tree of *repo_root* (BUG-35, BUG-72 fixes).
 
         Must be called with ``_state_lock`` already held (RACE-1 fix)
         so the caller can atomically set ``tab.is_merging = True``
@@ -1142,6 +1149,12 @@ class _MergeFlowMixin:
         Args:
             tab: The per-tab state to check.
             verb: Human-readable action name (e.g. ``"merging"``).
+            repo_root: The main repository root the action would
+                stash/checkout/merge.  Non-worktree tasks running in a
+                different repository (or in no repository at all) do
+                not occupy this main tree and therefore do not block
+                the action.  ``None`` falls back to the conservative
+                "any non-worktree task blocks" behavior.
 
         Returns:
             Error dict with ``success: False`` when busy, otherwise ``None``.
@@ -1162,7 +1175,7 @@ class _MergeFlowMixin:
                     f"on this tab. Wait for it to finish before {verb}."
                 ),
             }
-        if self._any_non_wt_running():
+        if self._any_non_wt_running(repo_root):
             return {
                 "success": False,
                 "message": (
@@ -1232,10 +1245,10 @@ class _MergeFlowMixin:
             }
         with self._state_lock:
             if not internal:
-                busy = self._check_worktree_busy(tab, verb)
+                busy = self._check_worktree_busy(tab, verb, repo_root)
                 if busy:
                     return busy
-            elif action == "merge" and self._any_non_wt_running():
+            elif action == "merge" and self._any_non_wt_running(repo_root):
                 # internal=True only bypasses this tab's OWN
                 # is_task_active/is_merging flags (the post-task
                 # auto-finalize runs on the task thread that owns
