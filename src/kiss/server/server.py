@@ -29,6 +29,7 @@ import queue
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, cast
 
 from kiss.agents.sorcar.persistence import (
@@ -490,15 +491,47 @@ class VSCodeServer(
                 tab.agent = agent
             return tab
 
-    def _any_non_wt_running(self) -> bool:
-        """True if any tab is running a non-worktree task on the main tree.
+    def _any_non_wt_running(self, repo_root: Path | None = None) -> bool:
+        """True if a non-worktree task is running on *repo_root*'s main tree.
 
         Must be called with ``_state_lock`` held.
 
+        A non-worktree task only occupies the main working tree of the
+        repository its ``work_dir`` resolves into (recorded on the tab
+        as ``non_wt_repo_root`` when the task starts).  A task running
+        in a *different* repository, in a non-git directory, or inside
+        a linked ``.kiss-worktrees`` worktree (whose ``git rev-parse
+        --show-toplevel`` is the worktree itself, not the main tree)
+        never touches *repo_root*'s main working tree, so it must not
+        block worktree merges there.
+
+        Args:
+            repo_root: The main repository root the caller is about to
+                stash/checkout/merge.  ``None`` means "any main tree"
+                and preserves the conservative pre-repo-aware behavior
+                (used when the caller cannot name its repository).
+
         Returns:
-            True if at least one tab has ``is_running_non_wt`` set.
+            True if at least one tab is running a non-worktree task
+            whose main working tree is *repo_root* (or, when
+            *repo_root* is ``None``, any non-worktree task at all).
         """
-        return any(t.is_running_non_wt for t in _RunningAgentState.running_agent_states.values())
+        for t in _RunningAgentState.running_agent_states.values():
+            if not t.is_running_non_wt:
+                continue
+            if repo_root is None:
+                return True
+            t_root = t.non_wt_repo_root
+            if t_root is None:
+                # The non-worktree task is not inside any git repo, so
+                # it cannot be modifying repo_root's main working tree.
+                continue
+            try:
+                if t_root.resolve() == repo_root.resolve():
+                    return True
+            except OSError:  # pragma: no cover — unresolvable path
+                return True
+        return False
 
     def _handle_command(self, cmd: dict[str, Any]) -> None:
         """Dispatch a command from VS Code to the appropriate handler."""
