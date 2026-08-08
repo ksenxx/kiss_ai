@@ -15,11 +15,12 @@ changed.** The only engine edits are `#include "audit.hpp"` and `AUDIT_PATH`
 markers (no-ops outside `-DBESPOKE_AUDIT`), all placed outside hot loops and
 outside OpenMP parallel regions.
 
----
+______________________________________________________________________
 
 ## Q13 — comment-pattern anti-join
 
 Guards / branches (markers):
+
 - `q13 fast masked` — single execution path. Per-customer base order counts
   come from the parameter-independent `orders_by_customer_offsets`; a parallel
   scan finds orders whose comment matches `%WORD1%WORD2%` and subtracts them.
@@ -49,6 +50,7 @@ rare-letter words (prefilter rejects almost everything).
 ## Q14 — promo revenue share, 1-month window
 
 Guards / branches (markers):
+
 - guard `db.pre.q14_built` → fast path: per-shipdate promo/total prefix sums.
   - `q14 fast in-range` — clamped `[lo,hi]` intersects the data's shipdate
     span; two prefix-sum lookups answer the query.
@@ -73,6 +75,7 @@ max shipdate (1998-12-02 → empty-range).
 ## Q15 — top-revenue supplier, 3-month window
 
 Guards / branches (markers):
+
 - guard `db.pre.q15_built && q15_supp_span >= initial_capacity` → fast path
   (`q15 fast`) over the (month × suppkey) revenue cube. Per month in the
   window:
@@ -92,8 +95,7 @@ Guards / branches (markers):
   placeholder**: `q15_built` is false only for empty lineitem/supplier or a
   cube larger than 2^25 slots (SF1 ≈ 84×10k, SF10 ≈ 84×100k, both far under);
   `q15_supp_span >= initial_capacity` always holds when built because
-  `supp_span = max(suppkey over supplier ∪ lineitem) + 1 ≥
-  max(supplier.suppkey) + 1`. Pure data-shape conditions.
+  `supp_span = max(suppkey over supplier ∪ lineitem) + 1 ≥ max(supplier.suppkey) + 1`. Pure data-shape conditions.
 - `q15 empty-result` — both empty-return branches (no rows in window; max
   revenue 0). Baseline has the identical returns, so empty windows agree.
 
@@ -105,12 +107,14 @@ parameter forces a tie on SF1, none was observed).
 Adversarial cases: 3 seed requests (all month-start → cube-only, partial-month
 forbidden); mid-month and month-end starts (`1996-01-31`+3m clamps to
 04-30) → partial+full mix; windows entirely before/after the data (out-of-range
-+ empty-result); windows straddling the low/high data boundary; exact boundary
-months 1992-01 and 1998-12.
+
+- empty-result); windows straddling the low/high data boundary; exact boundary
+  months 1992-01 and 1998-12.
 
 ## Q16 — supplier counts per (brand, type, size)
 
 Guards / branches (markers):
+
 - `q16 empty-sizes` — every SIZE placeholder was `<<NULL>>`/non-numeric
   (`add_size` accepts only pure digit strings — identical lambda in the
   baseline): empty IN list → empty result in both engines. Reached with all
@@ -143,6 +147,7 @@ boundary sizes 1 and 50; off-seed brand/type mix.
 ## Q17 — small-quantity revenue for brand+container
 
 Guards / branches (markers):
+
 - `q17 null-arg` — literal `<<NULL>>` BRAND or CONTAINER: early 0-row (sum
   0 → `0.00`), identical early exit in the baseline.
 - `q17 empty-part` — empty part table; **unreachable** data-shape condition
@@ -162,7 +167,7 @@ brand / swapped arguments (all → unknown-code, empty-sum agreement); both
 `<<NULL>>` sentinels; three non-seed valid brand×container combos (JUMBO PKG,
 WRAP DRUM, LG CAN) exercising the CSR path off the benchmark values.
 
----
+______________________________________________________________________
 
 ## Unreachable-guard summary (why each fallback cannot engage via parameters)
 
@@ -188,6 +193,5 @@ a hypothetical engagement would stay correct.
 
 ## Final test status
 
-`uv run --no-project --with duckdb --with pandas python3 tests/difftest.py
-tests/workloads/q13_17.jsonl --bin-dir <abs>/tests/bin_C -v` →
+`uv run --no-project --with duckdb --with pandas python3 tests/difftest.py tests/workloads/q13_17.jsonl --bin-dir <abs>/tests/bin_C -v` →
 **66/66 cases passed** (CSV diff + marker assertions).

@@ -7,15 +7,17 @@
 There are two concrete false-negative weaknesses in `tests/difftest.py` and one explicit seed-coverage omission:
 
 1. two empty CSVs bypass column-count comparison;
-2. one Q13 path assertion is ambiguous because marker checks use substring matching; and
-3. the exact Q22 seed123 request is absent.
+1. one Q13 path assertion is ambiguous because marker checks use substring matching; and
+1. the exact Q22 seed123 request is absent.
 
 ## CONFIRMED DEFECTS
 
 ### 1. Both-empty results bypass schema/column-count validation
 
 - **Location:** `projects/bespoke_tpch_x4/tests/difftest.py:117-122`
+
 - **Evidence:** when both frames have zero rows, line 119 selects `err = None` and never calls `compare_frames`. The imported comparator would detect differing column counts at `bench/run_bench.py:48-52`, but that check is skipped.
+
 - **Demonstrated minimal repro:** I created a baseline CSV containing only header `a,b` and an optimized CSV containing only header `wrong`, then invoked `check_case` under the harness dependencies. The observed output was:
 
   ```text
@@ -40,9 +42,11 @@ There are two concrete false-negative weaknesses in `tests/difftest.py` and one 
 ### 2. Q13's intended `nomask` assertion can pass on the wrong branch
 
 - **Locations:**
+
   - substring matching: `projects/bespoke_tpch_x4/tests/difftest.py:126-131`
   - ambiguous manifest expectation: `projects/bespoke_tpch_x4/tests/workloads/q13_17.jsonl:16`
   - actual mutually exclusive markers: `projects/bespoke_tpch_x4/engine/query_q13.cpp:204-208`
+
 - **Evidence:** the punctuation case is documented as testing the `nomask` branch, but it expects only `"q13 fast"`. There is no exact code marker with that name; the code emits either `"q13 fast nomask"` or `"q13 fast masked"`. Because the harness uses `marker in m`, both satisfy the expectation:
 
   ```text
@@ -51,7 +55,9 @@ There are two concrete false-negative weaknesses in `tests/difftest.py` and one 
   ```
 
 - **Minimal repro:** `any("q13 fast" in m for m in ["q13 fast masked"])` evaluates to `True`, despite `masked` being the branch the case is intended to reject.
+
 - **Impact:** a regression that sends `13 "%" "_"` through `q13 fast masked` would still pass its path assertion. The freshly rebuilt binary did in fact emit `q13 fast nomask`, so this is an assertion defect rather than evidence of a current engine bug.
+
 - **Related concrete inconsistency:** `tests/README.md` says marker names may not be prefixes of one another, but the code/manifests contain several parent/child relationships. Most are harmless because the exact parent is also emitted or a broad substring is deliberately used to forbid a whole fallback family. The Q13 case above is the demonstrated false-positive instance.
 
 ## COVERAGE GAPS
@@ -65,7 +71,9 @@ There are two concrete false-negative weaknesses in `tests/difftest.py` and one 
   ```
 
 - **Manifest:** `tests/workloads/q18_22.jsonl:54-64` labels seed42 and seed7 cases but contains no exact seed123 line.
+
 - Automated comparison of each seed42/7/123 workload line against the per-query manifests found this as the only missing exact request. Q17's seed42 and seed123 requests are identical and are correctly represented by one explicitly dual-labeled case.
+
 - **Risk qualification:** all three Q22 seeds use the same seven codes in different orders, and the existing seed42/seed7 plus duplicate-code tests already exercise set/order semantics. The omission is therefore low semantic risk, but it does not satisfy the explicit requirement that every query cover all three benchmark-seed request lines.
 
 ### Fast-path/fallback instrumentation coverage

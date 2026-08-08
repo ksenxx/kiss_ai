@@ -17,11 +17,12 @@ fast path; no engine logic was changed (instrumentation only). The normal
 bench build still validates cleanly (`./bench/bench.sh engine 1 42 1` →
 `validation_errors == {}`).**
 
----
+______________________________________________________________________
 
 ## Q7 — revenue between two nations, fixed 1995–1996 shipdate window
 
 Branches / markers:
+
 - `q7 nation_missing` — NATION1 or NATION2 not in `nation.name_to_key` → `{}`.
   Identical early-return exists in the baseline (`engine_baseline/query_q7.cpp:147-151`),
   and it matches SQL semantics (inner join on a non-existent name is empty).
@@ -48,10 +49,10 @@ are `forbid`-asserted on every fast case.
 ## Q8 — market share, fixed 1995–1996 orderdate window
 
 Branches / markers:
+
 - `q8 region_missing`, `q8 nation_missing` — dictionary misses → `{}`; same
   early-returns exist in the baseline (`engine_baseline/query_q8.cpp:127-133`).
-- `q8 fast` — guard: `pre.q8_built && 0 <= target_nation < q8_nation_span &&
-  max_nationkey < q8_nation_span && year_span == 2`. Cube
+- `q8 fast` — guard: `pre.q8_built && 0 <= target_nation < q8_nation_span && max_nationkey < q8_nation_span && year_span == 2`. Cube
   `q8_cube[p_type][cust_nation][supp_nation][year-1995]` of volume for orders in
   the fixed window.
 - `q8 fallback_ranges` / `q8 fallback_scan` — baseline-style scans.
@@ -63,17 +64,16 @@ lineitem joins to some part type); unknown REGION; unknown NATION; AFRICA
 region not covered by the seeds.
 
 Guard-false reachability: `year_span` is computed from the hard-coded template
-dates 1995-01-01/1996-12-31, so it is always 2. `max_nationkey <
-q8_nation_span` holds by construction of `max_nation_span`. `q8_built` is false
-only for empty tables or `nation_span/type_span` outside (0,256]/(0,4096] —
+dates 1995-01-01/1996-12-31, so it is always 2. `max_nationkey < q8_nation_span` holds by construction of `max_nation_span`. `q8_built` is false
+only for empty tables or `nation_span/type_span` outside (0,256\]/(0,4096\] —
 data invariants. Fallback markers exist and are `forbid`-asserted.
 
 ## Q9 — profit by nation/year, `p_name LIKE '%COLOR%'`
 
 Branches / markers:
+
 - `q9 fast` — guard: `!pre.q9_part_offsets.empty() && pre.q9_year_span > 0`.
-  Parameter-independent CSR: per partkey, entries `(group = supp_nation ×
-  year_span + year_offset, profit = discounted_price − supplycost·qty/100)`.
+  Parameter-independent CSR: per partkey, entries `(group = supp_nation × year_span + year_offset, profit = discounted_price − supplycost·qty/100)`.
   Only the COLOR substring filter over `p_name` runs at query time (OpenMP with
   thread-local accumulators merged under a critical section — exact int64
   arithmetic, ordering-independent).
@@ -97,11 +97,11 @@ cannot influence it. Fallback markers exist and are `forbid`-asserted.
 ## Q10 — returned-item revenue, 3-month orderdate window
 
 Branches / markers:
+
 - `q10 no_returnflag_R` — `'R'` absent from the returnflag dictionary → `{}`.
   Unreachable via parameters (data invariant; TPC-H lineitem always contains
   'R' rows); marker kept and forbidden in tests.
-- `q10 fast` — guard: `pre.q10_built && q10_order_r_revenue.size() ==
-  orders.row_count`. Builder always sets this when orders are non-empty, so the
+- `q10 fast` — guard: `pre.q10_built && q10_order_r_revenue.size() == orders.row_count`. Builder always sets this when orders are non-empty, so the
   guard is a pure data invariant; DATE only selects the orderdate range via
   binary search over the orderdate-sorted orders table.
 - `q10 fallback` — per-order scan path (sorted/unsorted lineitem variants).
@@ -122,6 +122,7 @@ and the size equality are established unconditionally by
 ## Q11 — partsupp value concentration, NATION + FRACTION
 
 Branches / markers:
+
 - `q11 nation_missing` — unknown NATION → `{}` (same as baseline
   `engine_baseline/query_q11.cpp:116-121`).
 - `q11 fast` — guard: `pre.q11_built && nation_key+1 < q11_nation_offsets.size()`.
@@ -148,10 +149,10 @@ so both paths share the same data assumption.)
 ## Q12 — shipmode line counts, 1-year receiptdate window
 
 Branches / markers:
+
 - `q12 shipmodes_missing` — *both* shipmodes absent from the dictionary → `{}`
   (matches SQL: `l_shipmode IN (...)` can never match).
-- `q12 fast` — guard: `pre.q12_date_max >= pre.q12_date_min &&
-  !pre.q12_counts.empty()`. Prefix-sum cube over
+- `q12 fast` — guard: `pre.q12_date_max >= pre.q12_date_min && !pre.q12_counts.empty()`. Prefix-sum cube over
   `(shipmode, high/low priority, receiptdate)`; the request window
   `[DATE, DATE+1yr)` is answered by two prefix differences after clamping to
   the data's receiptdate range.

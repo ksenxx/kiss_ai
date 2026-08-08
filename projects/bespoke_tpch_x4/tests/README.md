@@ -13,10 +13,10 @@ actually engages when it should.
    (`bench/build.sh`) never define it, so the shipped binary is unaffected
    (verified: `git diff` is purely additive and SF1 bench totals/validation
    are unchanged).
-2. `build_audit.sh [<out_dir>]` builds `db_audit` (optimized engine +
+1. `build_audit.sh [<out_dir>]` builds `db_audit` (optimized engine +
    `-DBESPOKE_AUDIT`) and `db_baseline` (pristine `engine_baseline/`, the
    paper artifact used as the correctness oracle).
-3. `difftest.py <manifest.jsonl>` feeds the identical request batch to both
+1. `difftest.py <manifest.jsonl>` feeds the identical request batch to both
    binaries, diffs each `result<i>.csv` pair with the paper's validation
    policy (`compare_frames` from `bench/run_bench.py`: all-column-sorted,
    atol=rtol=1e-2), and asserts each request's `expect`/`forbid` path markers.
@@ -27,7 +27,7 @@ actually engages when it should.
 {"line": "3 \"BUILDING\" \"1995-03-08\"", "expect": ["q3 fast"], "forbid": [], "note": "seed42"}
 ```
 
-- `line`   — raw request exactly as in `bench/workloads/seed*/args.txt`
+- `line` — raw request exactly as in `bench/workloads/seed*/args.txt`
 - `expect` — markers that must appear among the request's AUDIT markers
 - `forbid` — markers that must NOT appear
 - Lines starting with `#` are comments. Matching is EXACT by default; a

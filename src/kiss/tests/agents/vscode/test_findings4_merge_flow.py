@@ -92,6 +92,9 @@ class TestF419InternalStillGuardsMainTree:
 
         non_wt_tab = server._get_tab("direct-419")
         non_wt_tab.is_running_non_wt = True
+        # Mirror _run_task_inner: a running non-wt task records the
+        # resolved main-repo root of its work_dir on its tab.
+        non_wt_tab.non_wt_repo_root = repo.resolve()
         try:
             result = server._handle_worktree_action(
                 "merge", "wt-419", internal=True,
@@ -107,6 +110,7 @@ class TestF419InternalStillGuardsMainTree:
             )
         finally:
             non_wt_tab.is_running_non_wt = False
+            non_wt_tab.non_wt_repo_root = None
             wt_agent.discard()
 
 

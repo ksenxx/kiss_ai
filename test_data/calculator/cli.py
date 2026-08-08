@@ -21,7 +21,7 @@ def main(argv: list[str] | None = None) -> int:
     expression = " ".join(args)
     try:
         result = evaluate(expression)
-    except (ValueError, ZeroDivisionError) as e:
+    except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
     print(int(result) if result == int(result) else result)
