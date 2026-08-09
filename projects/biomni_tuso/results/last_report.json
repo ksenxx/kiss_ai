@@ -1,0 +1,44 @@
+{
+  "method": "methods.tuso_evolved",
+  "threshold": 99.0,
+  "primary": [
+    {
+      "benchmark": "perturb_replogle",
+      "validation": 99.69350339860009,
+      "test": 99.70916450120802
+    },
+    {
+      "benchmark": "perturb_adamson",
+      "validation": 99.68618089321663,
+      "test": 99.7069516355114
+    },
+    {
+      "benchmark": "perturb_norman",
+      "validation": 99.70235537057148,
+      "test": 99.71152257492558
+    },
+    {
+      "benchmark": "enhancer_gene_linking",
+      "validation": 99.45012120407225,
+      "test": 99.65771167610178
+    }
+  ],
+  "generalization": [
+    {
+      "benchmark": "perturb_replogle",
+      "test": 99.70261211871691
+    },
+    {
+      "benchmark": "perturb_adamson",
+      "test": 99.69928547405355
+    },
+    {
+      "benchmark": "perturb_norman",
+      "test": 99.71742152666403
+    },
+    {
+      "benchmark": "enhancer_gene_linking",
+      "test": 99.70831112645223
+    }
+  ]
+}
