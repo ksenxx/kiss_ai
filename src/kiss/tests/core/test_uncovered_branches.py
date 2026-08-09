@@ -323,32 +323,6 @@ class TestRelentlessAgentDockerBash:
             agent._docker_bash("echo hi", "test")
 
 
-class TestConfigBuilder:
-    def test_add_config_twice_preserves_first(self) -> None:
-        """Calling add_config twice preserves previous config fields."""
-        from pydantic import BaseModel as PydanticBaseModel
-
-        from kiss.core import config as config_module
-        from kiss.core.config_builder import add_config
-
-        original = config_module.DEFAULT_CONFIG
-
-        class Cfg1(PydanticBaseModel):
-            a: int = 1
-
-        class Cfg2(PydanticBaseModel):
-            b: int = 2
-
-        try:
-            add_config("cfg1", Cfg1)
-            add_config("cfg2", Cfg2)
-            cfg = config_module.DEFAULT_CONFIG
-            assert cfg.cfg1.a == 1  # type: ignore[attr-defined]
-            assert cfg.cfg2.b == 2  # type: ignore[attr-defined]
-        finally:
-            config_module.DEFAULT_CONFIG = original
-
-
 class TestPrintToConsole:
     def test_format_result_summary_no_success(self) -> None:
         """Dict with summary but no success key should skip the success label."""

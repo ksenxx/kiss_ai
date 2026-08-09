@@ -9,7 +9,7 @@ This module is the single source of truth for the wire API of the
 
 **The server API** — :data:`API`, :func:`validate_command`, and
 :class:`ServerApi` define every command a user interface (a VS Code
-window, the remote webapp, or a CLI/Python client) may send to the
+window, the remote webapp, or a Python client) may send to the
 daemon.  Both transports speak the same JSON commands, dispatched on
 the ``"type"`` field — framed as newline-delimited lines on the
 Unix-domain socket (UDS) and as one object per WebSocket frame on
@@ -64,7 +64,7 @@ tools::
 The function speaks the daemon's newline-delimited JSON protocol over
 its Unix-domain socket (``$KISS_SORCAR_SOCK``, defaulting to
 ``$KISS_HOME/sorcar.sock``) — the same transport the VS Code extension
-and the CLI client use — so no HTTP server, password, or extra
+uses — so no HTTP server, password, or extra
 dependency is involved.  POSIX file permissions (mode 0o600) on the
 socket restrict access to the owning user.
 """
@@ -475,8 +475,8 @@ class ApiContext:
             connection's ``work_dir`` (announced via ``setWorkDir``)
             and unique ``conn_id``.
         is_uds: ``True`` when the command arrived over the local
-            Unix-domain socket (a VS Code window or the sorcar CLI),
-            ``False`` for a remote WSS browser client.
+            Unix-domain socket (a VS Code window or a local Python
+            client), ``False`` for a remote WSS browser client.
     """
 
     endpoint: Any
@@ -547,7 +547,7 @@ class ServerApi:
     entry in :data:`API` names (via ``ApiCommand.handler``) the method
     of this class that services it, so the clients — the VS Code
     extension (``src/SorcarApi.ts`` over UDS), the chat webview /
-    remote webapp (``media/api.js`` over WSS), and the CLI / Python
+    remote webapp (``media/api.js`` over WSS), and the Python
     clients — call these methods remotely by sending the catalog's
     JSON commands.  The transport layer
     (``RemoteAccessServer._dispatch_client_command``) parses the JSON
@@ -673,8 +673,9 @@ class ServerApi:
         frames must complete this handshake (the ``_WS_SHIM_JS`` shim
         served with the webapp sends ``{"type": "auth", "password":
         ...}`` as soon as the socket opens).  Local UDS clients (the
-        VS Code extension, the CLI) skip it — POSIX file permissions
-        on the socket already gate access to the owning user.
+        VS Code extension, Python clients) skip it — POSIX file
+        permissions on the socket already gate access to the owning
+        user.
 
         Protocol serviced here, in order:
 

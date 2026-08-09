@@ -40,13 +40,14 @@ def _restore_default_config():
     ``vscode_config._refresh_config`` which rebinds
     ``kiss.core.config.DEFAULT_CONFIG`` from the (test-redirected)
     config file; without restoration the rebound object leaks into
-    later test modules (e.g. ``test_build_config_cli``) and breaks
+    later test modules and breaks
     their default-value assertions.
     """
     saved = config_module.DEFAULT_CONFIG
-    snapshot = saved.model_copy(deep=True).__dict__
+    snapshot = dict(saved.model_copy(deep=True).__dict__)
     yield
-    saved.__dict__.update(snapshot)
+    for _k, _v in snapshot.items():
+        setattr(saved, _k, _v)
     config_module.DEFAULT_CONFIG = saved
 
 

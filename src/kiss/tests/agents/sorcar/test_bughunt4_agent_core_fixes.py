@@ -158,23 +158,16 @@ def _fresh_openai_model(api_key: str, config: dict[str, object] | None = None) -
 class TestF01FinishGuard(_TempDbTestBase):
     """finish must be rejected while a queued user follow-up is undrained."""
 
-    def test_finish_blocked_until_drain(self) -> None:
+    def test_finish_allowed_without_pending_bridge(self) -> None:
         agent: Any = SorcarAgent("f01")
-        agent.pending_user_messages.append("also update the docs")
 
-        blocked = agent._block_finish_when_user_message_pending("finish", {})
-        assert blocked is not None
-        assert "new message" in blocked
-
-        # Non-finish tools are never blocked.
-        assert (
-            agent._block_finish_when_user_message_pending("Bash", {}) is None
-        )
-
-        # Once the queue is drained, finish is allowed again.
-        agent.pending_user_messages.clear()
+        # Without a printer bridge there is no queued steering, so
+        # finish is allowed and non-finish tools are never blocked.
         assert (
             agent._block_finish_when_user_message_pending("finish", {}) is None
+        )
+        assert (
+            agent._block_finish_when_user_message_pending("Bash", {}) is None
         )
 
     def test_finish_blocked_via_printer_bridge(self) -> None:
@@ -203,12 +196,19 @@ class TestF01FinishGuard(_TempDbTestBase):
     def test_guard_wired_through_chat_agent_property(self) -> None:
         """ChatSorcarAgent's guard property must delegate to the F-01 guard."""
         agent: Any = ChatSorcarAgent("f01-wire")
-        agent.pending_user_messages.append("stop, do X instead")
-
-        # Same assignment SorcarAgent.perform_task performs.
-        agent.tool_call_guard = agent._block_finish_when_user_message_pending
-        blocked = agent.tool_call_guard("finish", {})
-        assert blocked is not None and "new message" in blocked
+        printer = JsonPrinter()
+        printer._thread_local.task_id = "task-f01-wire"
+        agent.printer = printer
+        state = agent_state.AgentState("task-f01-wire")
+        state.pending_user_messages.append("stop, do X instead")
+        agent_state.register(state)
+        try:
+            # Same assignment SorcarAgent.perform_task performs.
+            agent.tool_call_guard = agent._block_finish_when_user_message_pending
+            blocked = agent.tool_call_guard("finish", {})
+            assert blocked is not None and "new message" in blocked
+        finally:
+            agent_state.unregister("task-f01-wire", state)
 
 
 class _BrokenBroadcastJsonPrinter(JsonPrinter):

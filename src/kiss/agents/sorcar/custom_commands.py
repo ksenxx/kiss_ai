@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Custom slash commands for the ``sorcar`` CLI, defined as Markdown files.
+"""Custom slash commands for Sorcar, defined as Markdown files.
 
 Reusable prompts become slash commands, following the conventions shared
 by Claude Code, OpenCode, and Gemini CLI:

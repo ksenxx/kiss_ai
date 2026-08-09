@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""MCP (Model Context Protocol) server support for the ``sorcar`` CLI.
+"""MCP (Model Context Protocol) server support for Sorcar.
 
 Implements MCP server management with Claude Code compatibility:
 
@@ -347,8 +347,8 @@ def _file_lock(lock_path: Path) -> Any:
     """Hold an exclusive advisory inter-process lock on *lock_path*.
 
     Serializes read-modify-write cycles on shared JSON files (MCP
-    configs, OAuth token stores) across CLI processes, daemons, and
-    event loops.  The lock file itself is created mode ``0600``.
+    configs, OAuth token stores) across daemons, channel-agent
+    processes, and event loops.  The lock file itself is created mode ``0600``.
 
     Cross-platform: ``fcntl.flock`` on POSIX, ``msvcrt.locking`` on
     Windows (where ``fcntl`` does not exist — an unconditional import
@@ -675,7 +675,7 @@ class MCPManager:
     Runs a private asyncio event loop on a daemon thread; every server
     gets one long-lived task that owns its transport + session.  The
     synchronous facade (:meth:`get_tools`, :meth:`call_tool`) is what
-    agent tool wrappers and the CLI use.
+    the agent tool wrappers use.
     """
 
     _instance: MCPManager | None = None

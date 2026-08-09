@@ -11,19 +11,16 @@ Covers:
   task, broadcasts a ``prompt`` echo, and rejects empty /
   whitespace-only / non-string prompts.
 * :meth:`SorcarAgent._drain_pending_user_messages` — drains the
-  agent-local queue plus the printer bridge
-  (``JsonPrinter.drain_pending_user_messages``) and calls
+  printer bridge (``JsonPrinter.drain_pending_user_messages``) and calls
   ``model.add_message_to_conversation("user", ...)`` for each queued
   entry, wrapping it as ``User says: <msg>. Take the message into
-  account and finish your task.`` (then leaves the queues empty so
+  account and finish your task.`` (then leaves the queue empty so
   the same message is never injected twice).
 * Hook lifecycle: ``SorcarAgent.perform_task`` always installs the
   drain as ``pre_step_hook`` (and the finish guard as
-  ``tool_call_guard``); both are self-guarding no-ops when neither
+  ``tool_call_guard``); both are self-guarding no-ops when the
   follow-up channel (the printer's duck-typed
-  ``drain_pending_user_messages`` bridge or the agent-local
-  ``pending_user_messages`` queue used by CLI steering) has anything
-  queued.
+  ``drain_pending_user_messages`` bridge) has nothing queued.
 * ``KISSAgent.pre_step_hook`` runs BEFORE each model call.
 * End-to-end: ``_run_task`` clears any leftover queued messages.
 
@@ -85,15 +82,31 @@ class _RecordingModel:
         self.calls.append((role, content))
 
 
-def _make_drain_agent(
-    pending: list[str] | None = None, printer: Any = None,
-) -> SorcarAgent:
+def _make_drain_agent(printer: Any = None) -> SorcarAgent:
     """Bare ``SorcarAgent`` carrying only what the drain hook reads."""
     agent = SorcarAgent.__new__(SorcarAgent)
-    agent.pending_user_messages = pending if pending is not None else []
     if printer is not None:
         agent.printer = printer
     return agent
+
+
+def _bridge_printer(
+    task_id: str, messages: list[str],
+) -> tuple[Any, AgentState]:
+    """A real ``JsonPrinter`` bound to *task_id* with queued *messages*.
+
+    Registers an :class:`AgentState` for *task_id* holding *messages*
+    so the printer bridge (the only steering channel) can drain them.
+    The per-test registry cleanup unregisters the state.
+    """
+    from kiss.server.json_printer import JsonPrinter
+
+    printer = JsonPrinter()
+    printer._thread_local.task_id = task_id
+    st = AgentState(task_id)
+    st.pending_user_messages.extend(messages)
+    agent_state.register(st)
+    return printer, st
 
 
 class TestAppendUserMessageHandler:
@@ -188,7 +201,8 @@ class TestDrainPendingUserMessages:
         _clear_registry()
 
     def test_drain_injects_each_message_and_clears_queue(self) -> None:
-        agent = _make_drain_agent(["msg1", "msg2", "msg3"])
+        printer, st = _bridge_printer("task-d1", ["msg1", "msg2", "msg3"])
+        agent = _make_drain_agent(printer=printer)
 
         model = _RecordingModel()
         agent._drain_pending_user_messages(model)
@@ -210,10 +224,10 @@ class TestDrainPendingUserMessages:
                 "Take the message into account and finish your task.",
             ),
         ]
-        assert agent.pending_user_messages == []
+        assert st.pending_user_messages == []
 
-    def test_drain_noop_when_queue_empty(self) -> None:
-        agent = _make_drain_agent([])
+    def test_drain_noop_without_printer_bridge(self) -> None:
+        agent = _make_drain_agent()
         model = _RecordingModel()
         agent._drain_pending_user_messages(model)
         assert model.calls == []
@@ -223,7 +237,7 @@ class TestDrainPendingUserMessages:
         server, _events = _make_server()
         server.printer._thread_local.task_id = "ghost-task"
         try:
-            agent = _make_drain_agent([], printer=server.printer)
+            agent = _make_drain_agent(printer=server.printer)
             model = _RecordingModel()
             agent._drain_pending_user_messages(model)
             assert model.calls == []
@@ -247,7 +261,7 @@ class TestDrainPendingUserMessages:
 
         server.printer._thread_local.task_id = "task-rt"
         try:
-            agent = _make_drain_agent([], printer=server.printer)
+            agent = _make_drain_agent(printer=server.printer)
             model = _RecordingModel()
             agent._drain_pending_user_messages(model)
 
@@ -367,7 +381,8 @@ class TestPreStepHookIntegration:
         model = _PreStepHookRecordingModel()
         agent = self._make_kiss_agent(model)
 
-        sa = _make_drain_agent(["queued 1", "queued 2"])
+        printer, _st = _bridge_printer("task-hook", ["queued 1", "queued 2"])
+        sa = _make_drain_agent(printer=printer)
         agent.pre_step_hook = sa._drain_pending_user_messages
         result = agent._execute_step()
 
@@ -386,7 +401,7 @@ class TestPreStepHookIntegration:
             "User says: queued 2. "
             "Take the message into account and finish your task.",
         ) in roles_and_contents
-        assert sa.pending_user_messages == []
+        assert _st.pending_user_messages == []
 
     def test_pre_step_hook_none_does_not_break_step(self) -> None:
         model = _PreStepHookRecordingModel()
@@ -506,7 +521,7 @@ class TestSteeringMessageWrappedForModel:
 
         server.printer._thread_local.task_id = "task-wrap"
         try:
-            agent = _make_drain_agent([], printer=server.printer)
+            agent = _make_drain_agent(printer=server.printer)
             model = _RecordingModel()
             agent._drain_pending_user_messages(model)
         finally:
@@ -522,7 +537,10 @@ class TestSteeringMessageWrappedForModel:
         assert st.pending_user_messages == []
 
     def test_every_drained_message_is_wrapped(self) -> None:
-        agent = _make_drain_agent(["first steer", "second steer"])
+        printer, _st = _bridge_printer(
+            "task-wrap2", ["first steer", "second steer"],
+        )
+        agent = _make_drain_agent(printer=printer)
 
         model = _RecordingModel()
         agent._drain_pending_user_messages(model)
@@ -550,21 +568,23 @@ class TestFinishBlockedWhilePending:
     def teardown_method(self) -> None:
         _clear_registry()
 
-    def test_finish_blocked_when_agent_local_message_pending(self) -> None:
-        agent = _make_drain_agent(["steer me"])
+    def test_finish_blocked_when_message_pending(self) -> None:
+        printer, _st = _bridge_printer("task-fb", ["steer me"])
+        agent = _make_drain_agent(printer=printer)
         verdict = agent._block_finish_when_user_message_pending("finish", {})
         assert verdict is not None
         assert "finish rejected" in verdict
 
     def test_finish_allowed_when_nothing_pending(self) -> None:
-        agent = _make_drain_agent([])
+        agent = _make_drain_agent()
         assert (
             agent._block_finish_when_user_message_pending("finish", {})
             is None
         )
 
     def test_non_finish_tools_never_blocked(self) -> None:
-        agent = _make_drain_agent(["steer me"])
+        printer, _st = _bridge_printer("task-nf", ["steer me"])
+        agent = _make_drain_agent(printer=printer)
         assert (
             agent._block_finish_when_user_message_pending("Bash", {}) is None
         )
@@ -576,7 +596,7 @@ class TestFinishBlockedWhilePending:
 
         server.printer._thread_local.task_id = "task-guard"
         try:
-            agent = _make_drain_agent([], printer=server.printer)
+            agent = _make_drain_agent(printer=server.printer)
             verdict = agent._block_finish_when_user_message_pending(
                 "finish", {},
             )

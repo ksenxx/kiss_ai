@@ -402,7 +402,7 @@ def _is_failed_result(result: str) -> bool:
     * ``Task interrupted*`` — an interrupted run.  Covers both the
       bare ``Task interrupted`` marker persisted by
       ``ChatSorcarAgent.run``'s ``except BaseException`` handler (a
-      ``KeyboardInterrupt`` reaching a CLI / sub-agent / channel-agent
+      ``KeyboardInterrupt`` reaching a sub-agent / channel-agent
       run) and ``Task interrupted by server restart/shutdown`` (a
       graceful daemon/server shutdown cancellation).  Both are
       incomplete task outcomes rather than successes.
@@ -1865,62 +1865,6 @@ def _task_has_events(task_id: str) -> bool:
             (task_id,),
         ).fetchone()
         return row is not None
-
-
-def _list_recent_chats(limit: int = 10) -> list[dict[str, object]]:
-    """List recent chat sessions with their tasks and results.
-
-    Returns the most recent *limit* distinct chat sessions, ordered by
-    most-recent-first.  Each entry contains the ``chat_id`` and a list
-    of ``tasks`` (each with ``task``, ``result``, ``timestamp``,
-    ``task_id``, and ``parent_task_id``) in chronological order.
-
-    Sub-agent rows (``extra.subagent``, identified by a non-NULL
-    ``parent_task_id`` column) are excluded — they are an internal
-    implementation detail of the parent's ``run_parallel`` tool call,
-    exactly as in every other
-    chat/history reader (:func:`_load_history`,
-    :func:`_load_chat_context`, ...).  A chat whose only rows are
-    sub-agent rows is omitted entirely.
-
-    Args:
-        limit: Maximum number of chat sessions to return.
-
-    Returns:
-        List of dicts, each with ``chat_id`` (str) and ``tasks``
-        (list of dicts with ``task``, ``result``, ``timestamp``,
-        ``task_id``, and ``parent_task_id``).
-    """
-    with _rw_lock.read_lock():
-        db = _get_db()
-        chat_rows = db.execute(
-            "SELECT chat_id, MAX(timestamp) AS latest "
-            "FROM task_history WHERE chat_id != '' "
-            f"AND {_HISTORY_NOT_SUBAGENT} "
-            "GROUP BY chat_id ORDER BY latest DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        result: list[dict[str, object]] = []
-        for cr in chat_rows:
-            cid = cr["chat_id"]
-            tasks = db.execute(
-                "SELECT id, task, result, timestamp, parent_task_id "
-                "FROM task_history "
-                f"WHERE chat_id = ? AND {_HISTORY_NOT_SUBAGENT} "
-                "ORDER BY timestamp ASC, rowid ASC",
-                (cid,),
-            ).fetchall()
-            task_dicts = [
-                {"task": t["task"], "result": t["result"],
-                 "timestamp": t["timestamp"],
-                 "task_id": t["id"],
-                 "parent_task_id": t["parent_task_id"] or ""}
-                for t in tasks
-            ]
-            if not task_dicts:
-                continue
-            result.append({"chat_id": cid, "tasks": task_dicts})
-        return result
 
 
 def _fetch_events_for_task_id(

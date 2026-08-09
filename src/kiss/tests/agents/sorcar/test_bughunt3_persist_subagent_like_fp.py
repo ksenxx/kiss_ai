@@ -15,7 +15,7 @@ the history sidebar, history search, and prefix autocomplete.
 
 This is inconsistent with the canonical sub-agent detector — the
 dedicated ``parent_task_id`` column read by ``_load_chat_context``,
-``_list_recent_chats`` and ``_load_latest_chat_events_by_chat_id`` —
+the chat readers (e.g. ``_load_latest_chat_events_by_chat_id``) —
 which correctly classifies such a row as a normal parent task.  The same row is visible in the
 chat context but invisible in the history list.
 

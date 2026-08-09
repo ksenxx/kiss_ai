@@ -138,7 +138,7 @@ def build_task_extra_payload(
 def _client_task_id_of(cmd: dict[str, Any]) -> str:
     """Return the client-stamped ``taskId`` of a ``run`` command, or ``""``.
 
-    The CLI client stamps every ``run`` with a per-submission ``taskId``
+    A client may stamp a ``run`` with a per-submission ``taskId``
     (a UUID it minted just before sending) so its dispatcher can filter
     stale ``status`` events from a prior task.  r3-vscode-H1: non-string
     payloads (list, dict, bool, int) are rejected so they never flow

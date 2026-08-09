@@ -65,9 +65,10 @@ def _isolate_config(
 
     monkeypatch.setattr(config_module, "DEFAULT_CONFIG", config_module.DEFAULT_CONFIG)
     saved = config_module.DEFAULT_CONFIG
-    snapshot = saved.model_copy(deep=True).__dict__
+    snapshot = dict(saved.model_copy(deep=True).__dict__)
     yield
-    saved.__dict__.update(snapshot)
+    for _k, _v in snapshot.items():
+        setattr(saved, _k, _v)
 
 
 class TestLoadSaveConfig:

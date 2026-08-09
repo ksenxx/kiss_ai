@@ -5,26 +5,22 @@
 
 """End-to-end regression tests locking in behavior of core misc modules.
 
-Covers code paths in config_builder, utils, base, print_to_console,
+Covers code paths in utils, base, print_to_console,
 kiss_agent and relentless_agent that are touched by the simplification
 pass, using only real objects (no mocks/patches/fakes).
 """
 
 import io
-import sys
 import unittest
 from typing import Any, cast
 
 import yaml
-from pydantic import BaseModel
 
 from kiss.agents.obsolete.gepa.template_utils import escape_invalid_template_field_names
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent, _str_to_bool
 from kiss.agents.sorcar.relentless_agent import finish as relentless_finish
-from kiss.core import config as config_module
 from kiss.core.base import Base
-from kiss.core.config import Config, set_artifact_base_dir
-from kiss.core.config_builder import add_config, build_config
+from kiss.core.config import set_artifact_base_dir
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.print_to_console import ConsolePrinter
 from kiss.core.printer import parse_result_yaml
@@ -34,60 +30,6 @@ from kiss.core.utils import (
 from kiss.core.utils import (
     finish as utils_finish,
 )
-
-
-class ConfigBuilderRegression(unittest.TestCase):
-    def setUp(self) -> None:
-        self._argv = sys.argv
-        self._default_config = config_module.DEFAULT_CONFIG
-
-    def tearDown(self) -> None:
-        sys.argv = self._argv
-        config_module.DEFAULT_CONFIG = self._default_config
-
-    def test_build_config_no_args_keeps_defaults(self) -> None:
-        sys.argv = ["prog"]
-        config_module.DEFAULT_CONFIG = Config()
-        build_config()
-        self.assertEqual(config_module.DEFAULT_CONFIG.max_budget, 200.0)
-
-    def test_build_config_cli_override(self) -> None:
-        sys.argv = ["prog", "--max-budget", "333.5"]
-        config_module.DEFAULT_CONFIG = Config()
-        build_config()
-        self.assertEqual(config_module.DEFAULT_CONFIG.max_budget, 333.5)
-
-    def test_add_config_defaults_and_cli_override(self) -> None:
-        class MyCfg(BaseModel):
-            foo: str = "bar"
-            num_val: int = 5
-            flag: bool = False
-
-        config_module.DEFAULT_CONFIG = Config()
-        sys.argv = ["prog", "--my.num-val", "7", "--my.flag"]
-        add_config("my", MyCfg)
-        cfg: Any = config_module.DEFAULT_CONFIG
-        self.assertEqual(cfg.my.num_val, 7)
-        self.assertEqual(cfg.my.foo, "bar")
-        self.assertTrue(cfg.my.flag)
-
-    def test_add_config_accumulates_previous_configs(self) -> None:
-        class FirstCfg(BaseModel):
-            alpha: str = "a"
-
-        class SecondCfg(BaseModel):
-            beta: float = 1.5
-
-        config_module.DEFAULT_CONFIG = Config()
-        sys.argv = ["prog"]
-        add_config("first", FirstCfg)
-        cfg_first: Any = config_module.DEFAULT_CONFIG
-        cfg_first.first.alpha = "changed"
-        add_config("second", SecondCfg)
-        cfg: Any = config_module.DEFAULT_CONFIG
-        self.assertEqual(cfg.first.alpha, "changed")
-        self.assertEqual(cfg.second.beta, 1.5)
-        self.assertEqual(cfg.max_budget, 200.0)
 
 
 class UtilsRegression(unittest.TestCase):

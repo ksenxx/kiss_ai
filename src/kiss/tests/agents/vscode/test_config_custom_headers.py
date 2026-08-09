@@ -136,7 +136,7 @@ class TestCLIHeadersFlow(unittest.TestCase):
     def test_build_run_kwargs_with_headers(self) -> None:
         import argparse
 
-        from kiss.agents.sorcar.cli_helpers import _build_run_kwargs
+        from kiss.agents.third_party_agents._channel_cli import _build_run_kwargs
 
         args = argparse.Namespace(
             model_name="gpt-4o",
@@ -160,7 +160,7 @@ class TestCLIHeadersFlow(unittest.TestCase):
     def test_build_run_kwargs_without_headers(self) -> None:
         import argparse
 
-        from kiss.agents.sorcar.cli_helpers import _build_run_kwargs
+        from kiss.agents.third_party_agents._channel_cli import _build_run_kwargs
 
         args = argparse.Namespace(
             model_name="gpt-4o",

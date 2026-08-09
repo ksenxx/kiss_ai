@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from kiss.agents.sorcar.cli_helpers import (
+from kiss.agents.third_party_agents._channel_cli import (
     _build_arg_parser,
     _build_run_kwargs,
     _launch_work_dir,

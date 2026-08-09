@@ -15,7 +15,6 @@ import enum
 import functools
 import logging
 import shlex
-import sys
 import threading
 import time
 import uuid
@@ -1284,47 +1283,3 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         if delete_warning:
             return f"Partially discarded branch '{wt.branch}'.{checkout_warning}{delete_warning}"
         return f"Discarded branch '{wt.branch}'.{checkout_warning}"
-
-
-_INTERACTIVE_ONLY_FLAGS: frozenset[str] = frozenset({
-    "--worktree", "--no-worktree",
-    "--auto-commit", "--no-auto-commit",
-})
-
-
-def _reject_interactive_only_flags(argv: list[str]) -> None:
-    """Fail fast when a non-interactive run carries interactive-only flags.
-
-    The non-interactive (``-t`` / ``-f``) path now constructs a bare
-    :class:`SorcarAgent` and therefore cannot honour
-    ``--worktree`` / ``--no-worktree`` / ``--auto-commit`` /
-    ``--no-auto-commit``.  Silently accepting them would, in the
-    case of ``--worktree`` (the previous default), let edits land
-    in the user's working tree instead of the isolated worktree
-    branch the flag advertised — a destructive surprise.  This
-    helper inspects the user's literal ``argv`` and exits via
-    ``sys.exit(2)`` (the argparse convention) with a message
-    naming every offending flag.
-
-    Argparse prefix abbreviations (e.g. ``--auto`` for
-    ``--auto-commit``) cannot bypass this guard because
-    :func:`_build_arg_parser` disables ``allow_abbrev``; the user
-    must spell the full flag, and the full spelling is in this set.
-
-    Args:
-        argv: The process argument list (typically ``sys.argv``).
-    """
-    bad = list(dict.fromkeys(
-        token for token in argv[1:] if token in _INTERACTIVE_ONLY_FLAGS
-    ))
-    if not bad:
-        return
-    flag_list = ", ".join(bad)
-    msg = (
-        f"sorcar: error: {flag_list} cannot be combined with -t/--task "
-        "or -f/--file (non-interactive mode runs a bare SorcarAgent; "
-        "drop the flag, or run sorcar without -t/-f for the "
-        "interactive daemon-client mode which honours it)"
-    )
-    print(msg, file=sys.stderr)
-    sys.exit(2)

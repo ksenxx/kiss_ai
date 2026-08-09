@@ -19,15 +19,6 @@ from typing import Any
 
 import yaml
 
-from kiss.agents.sorcar.cli_helpers import (
-    _DEFAULT_TASK as _DEFAULT_TASK,
-)
-from kiss.agents.sorcar.cli_helpers import (
-    _resolve_task as _resolve_task,
-)
-from kiss.agents.sorcar.cli_helpers import (
-    cli_ask_user_question as cli_ask_user_question,
-)
 from kiss.agents.sorcar.persistence import _load_last_model
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.agents.sorcar.skills import make_skill_tool
@@ -382,8 +373,8 @@ class _LiveUsageMonitor:
     Between the moment ``run_parallel`` blocks the parent's turn and the
     moment :func:`_attribute_sub_usage` folds the finished sub-agents'
     spend back into the parent, nothing else emits ``usage_info`` on the
-    PARENT task — the cost/tokens header (chat webview top bar, sorcar
-    CLI interactive) would otherwise show a stale figure that excludes
+    PARENT task — the cost/tokens header (chat webview top bar)
+    would otherwise show a stale figure that excludes
     all live sub-agent spend until every sub-agent finished.  This
     monitor polls every tracked sub-agent and broadcasts a parent-task
     ``usage_info`` whenever the totals change, so the header always
@@ -638,11 +629,6 @@ class SorcarAgent(RelentlessAgent):
         self.docker_manager: Any = None
         self._use_web_tools: bool = True
         self._is_parallel: bool = False
-        # Follow-up prompts queued directly on the agent by embedding
-        # UIs that own the agent instance (e.g. the CLI steering box).
-        # Server-launched runs queue through the printer bridge
-        # instead; the pre-step drain consumes both sources.
-        self.pending_user_messages: list[str] = []
 
     def _subagent_budget_share(self, num_tasks: int) -> float | None:
         """Return the ``max_budget`` each parallel sub-agent may spend.
@@ -1113,12 +1099,9 @@ class SorcarAgent(RelentlessAgent):
         """
         all_tools = self._get_tools() + tools
         # Always install the steering hooks: they are self-guarding
-        # no-ops when no follow-up channel exists (empty agent-local
-        # ``pending_user_messages`` queue and a printer without the
-        # duck-typed ``drain_pending_user_messages`` bridge), and both
-        # channels — the server UI's printer bridge and the CLI
-        # steering session's agent-local queue — must be drained when
-        # present.
+        # no-ops when no follow-up channel exists (a printer without
+        # the duck-typed ``drain_pending_user_messages`` bridge), and
+        # the server UI's printer bridge must be drained when present.
         self.pre_step_hook = self._drain_pending_user_messages
         self.tool_call_guard = self._block_finish_when_user_message_pending
         return super().perform_task(all_tools, attachments=attachments)
@@ -1269,19 +1252,12 @@ class SorcarAgent(RelentlessAgent):
             model: The live model whose conversation receives the
                 queued user messages.
         """
-        queued: list[str] = []
-        while True:
-            try:
-                queued.append(self.pending_user_messages.pop(0))
-            except IndexError:
-                break
         drain = getattr(
             getattr(self, "printer", None),
             "drain_pending_user_messages",
             None,
         )
-        if drain is not None:
-            queued.extend(drain())
+        queued: list[str] = drain() if drain is not None else []
         for msg in queued:
             model.add_message_to_conversation(
                 "user",
@@ -1314,14 +1290,13 @@ class SorcarAgent(RelentlessAgent):
         del args
         if name != "finish":
             return None
-        if not self.pending_user_messages:
-            has_pending = getattr(
-                getattr(self, "printer", None),
-                "has_pending_user_messages",
-                None,
-            )
-            if has_pending is None or not has_pending():
-                return None
+        has_pending = getattr(
+            getattr(self, "printer", None),
+            "has_pending_user_messages",
+            None,
+        )
+        if has_pending is None or not has_pending():
+            return None
         return (
             "Error: finish rejected — the user sent a new message while "
             "you were working. It will be appended to the conversation "

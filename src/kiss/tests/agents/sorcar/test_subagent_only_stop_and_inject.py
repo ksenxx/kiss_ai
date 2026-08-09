@@ -228,12 +228,20 @@ class TestSubagentPromptInjectionWiring:
             self.printer = printer
             captured["tab_id"] = getattr(self, "_tab_id", "")
             captured["agent"] = self
+            # Bind a task id on the worker thread (as the real run
+            # does) and register the sub-agent's task-keyed state so
+            # the server bridge (the only steering channel) can queue
+            # into it.
+            printer._thread_local.task_id = "sub-task-0"
+            state = agent_state.AgentState("sub-task-0")
+            agent_state.register(state)
+            captured["state"] = state
             started.set()
             assert queued.wait(10)
             model = _RecordingModel()
             SorcarAgent._drain_pending_user_messages(self, model)
             captured["model_calls"] = list(model.calls)
-            captured["leftover"] = list(self.pending_user_messages)
+            captured["leftover"] = list(state.pending_user_messages)
             return "success: true\nsummary: drained\n"
 
         monkeypatch.setattr(ChatSorcarAgent, "run", _stub_run)
@@ -254,8 +262,8 @@ class TestSubagentPromptInjectionWiring:
         runner.start()
 
         assert started.wait(10), "the sub-agent worker never started"
-        sub_agent = captured["agent"]
-        sub_agent.pending_user_messages.append("focus on tests")
+        sub_state = captured["state"]
+        sub_state.pending_user_messages.append("focus on tests")
         queued.set()
         runner.join(timeout=15)
         assert not runner.is_alive()
