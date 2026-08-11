@@ -40,16 +40,19 @@
 #      ~/.kiss/api_keys.env (sourced by bash) and ~/.kiss/api_keys.systemd.env
 #      (read by the kiss-web service).  Sourcing a zsh rc from bash is
 #      unreliable, hence the distilled copies.
-#   4b. Sync the task database (~/.kiss/sorcar.db) on every run, so the
-#      remote web app's History panel lists every task this machine ever ran,
-#      with the tasks that ran in this checkout re-pointed at the remote one
-#      (the panel hides tasks from other workspaces by default).
-#      scripts/ship-task-db.sh does the work: when the remote already has a
-#      database it delta-syncs only the missing rows into it in place via
-#      src/kiss/scripts/sync_db.py (the web app keeps running and remote-only
-#      tasks survive); only a first deploy — or a sync the schemas refuse —
-#      falls back to a full copy, which stops the remote web app for the swap
-#      and starts it again before returning.
+#   4b. Sync the task database (~/.kiss/sorcar.db) both ways on every run, so
+#      the History panel on *either* machine lists every task either machine
+#      ever ran, with the tasks that ran in one checkout re-pointed at the
+#      other (the panel hides tasks from other workspaces by default).
+#      scripts/sync-task-db.sh does the work: it first brings back what ran on
+#      the remote, then sends what ran here, each pass merging only the missing
+#      rows into the receiving database in place via
+#      src/kiss/scripts/sync_db.py — no row is ever deleted, both web apps keep
+#      running, and a task that ran on only one of the two machines ends up on
+#      both.  Only a remote without a usable database (first deploy) — or a
+#      merge the schemas refuse — falls back to a full copy, which stops the
+#      remote web app for the swap, keeps the database it replaces as
+#      sorcar.db.replaced, and starts the web app again before returning.
 #   5. Run install.sh in the synced folder (git, Node.js, VS Code extension
 #      build).  A ``code`` CLI is required by install.sh, so code-server is
 #      installed (standalone, no sudo) when the host has no editor CLI.
@@ -118,6 +121,10 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -f "$SCRIPT_DIR/install.sh" ]] || die "No install.sh next to $0 — is this a KISS Sorcar checkout?"
 [[ -f "$SCRIPT_DIR/scripts/sync-repo.sh" ]] || die "No scripts/sync-repo.sh next to $0 — step 3 needs it."
+for helper in scripts/sync-task-db.sh src/kiss/scripts/sync_db.py \
+              src/kiss/scripts/relocate_work_dir.py; do
+    [[ -f "$SCRIPT_DIR/$helper" ]] || die "No $helper next to $0 — step 4b needs it."
+done
 
 # When run from a git worktree (".kiss-worktrees/kiss_wt-1785-29b4"), the
 # interesting repository is the main one it belongs to: its name is the remote
@@ -267,15 +274,22 @@ RCWIRE
 info "API keys installed (~/.kiss/api_keys.env, sourced from ~/.bashrc)."
 
 # ---------------------------------------------------------------------------
-# 4b. Sync the task database, so the remote History panel lists every task
-#     this machine ever ran.  scripts/ship-task-db.sh delta-syncs only the
-#     missing rows into an existing remote database in place (via
-#     src/kiss/scripts/sync_db.py, web app left running, remote-only tasks
-#     kept) and falls back to a full copy only when the remote has no usable
-#     database yet or the sync is refused.
+# 4b. Sync the task database both ways, so the History panel on either machine
+#     lists every task either machine ever ran.  scripts/sync-task-db.sh first
+#     merges the remote's tasks into this machine's database and then this
+#     machine's into the remote's, each pass moving only the missing rows (via
+#     src/kiss/scripts/sync_db.py, both web apps left running, no row ever
+#     deleted).  Bringing the remote's tasks back first is also what makes the
+#     full-copy fallback safe: by the time it can run, the tasks that ran only
+#     on the remote are already here.
 # ---------------------------------------------------------------------------
-step "Syncing the task database to $TARGET ..."
-bash "$SCRIPT_DIR/scripts/ship-task-db.sh" "$TARGET" "$MAIN_REPO" "$REMOTE_DIR"
+#     A history that could not be synced is worth a warning, not a failed
+#     deploy: the script leaves both databases as it found them, so the next
+#     run picks up where this one stopped, and the web app about to be
+#     installed works either way.
+step "Syncing the task database with $TARGET (both ways) ..."
+bash "$SCRIPT_DIR/scripts/sync-task-db.sh" "$TARGET" "$MAIN_REPO" "$REMOTE_DIR" \
+    || warn "The task databases are not in sync (see above); continuing the deploy."
 
 # ---------------------------------------------------------------------------
 # 5-7. Remote bootstrap: install.sh, uv sync, kiss-web service, public URL.

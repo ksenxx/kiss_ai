@@ -101,6 +101,8 @@ rsorcar username@ip_address
 
 It keeps this checkout and the server's in total sync through `origin`: every branch of both is mirrored, and uncommitted work is committed first so it can travel. Files git does not track (`.venv`, `tmp/`, build output) stay behind, and a branch whose two sides conflict is reported instead of being merged behind your back.
 
+The task history travels both ways too: after a deploy, the History panel here and on the server both list every task and every event either machine ever ran. Only the rows that are missing move, no row is ever deleted, and both web apps keep running while it happens.
+
 # Tip
 
 ## If You Get a git Merge Conflict
