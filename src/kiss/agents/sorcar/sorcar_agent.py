@@ -419,7 +419,8 @@ class _LiveUsageMonitor:
     def stop(self) -> None:
         """Stop and join the polling thread.
 
-        Joining guarantees no further emission can race with the
+        The monitor emits one final snapshot before its thread exits.
+        Joining then guarantees no later emission can race with the
         subsequent :func:`_attribute_sub_usage` offset bump (which would
         double-count the sub-agents' spend in the displayed total).
         """
@@ -432,11 +433,18 @@ class _LiveUsageMonitor:
         thread_local = getattr(self._printer, "_thread_local", None)
         if thread_local is not None:
             thread_local.task_id = self._parent_task_id
-        while not self._done.wait(self._interval):
+        while True:
+            stopping = self._done.wait(self._interval)
             try:
+                # A final poll on shutdown captures sub-agents that finished
+                # between regular ticks.  It runs on this thread so the event
+                # retains the parent task id, and _last_emitted suppresses a
+                # duplicate when the preceding regular poll saw the same data.
                 self._emit()
             except Exception:
                 logger.debug("Live usage emission failed", exc_info=True)
+            if stopping:
+                return
 
     def _emit(self) -> None:
         """Broadcast a parent-task ``usage_info`` when the totals changed."""

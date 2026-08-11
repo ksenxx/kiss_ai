@@ -235,6 +235,28 @@ class TestLiveUsageMonitor:
         for e in printer.usage_events("stop-task"):
             assert e["cost"] == "$0.2500"
 
+    def test_stop_emits_latest_usage_before_returning(self) -> None:
+        """A fast sub-agent that finishes between polling ticks must still
+        update the parent header before the monitor stops."""
+        printer = _RecordingPrinter()
+        parent = _parent_with_task(printer, "fast-stop-task")
+        monitor = _LiveUsageMonitor(parent, printer, interval=60.0)
+        sub: Any = KISSAgent("fast-sub")
+        monitor.track(sub)
+        monitor.start()
+
+        sub.budget_used = 0.25
+        sub.total_tokens_used = 1000
+        sub.total_steps = 4
+        monitor.stop()
+
+        assert any(
+            e.get("cost") == "$0.2500"
+            and e.get("total_tokens") == 1000
+            and e.get("total_steps") == 4
+            for e in printer.usage_events("fast-stop-task")
+        ), "stop() lost the final spend before the next polling tick"
+
     def test_monitor_survives_a_misbehaving_agent(self) -> None:
         """An exception while polling one agent must neither kill the
         monitor nor blind the header to the OTHER sub-agents' spend."""

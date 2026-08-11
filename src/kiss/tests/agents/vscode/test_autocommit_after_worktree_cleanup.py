@@ -2,34 +2,18 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Regression test: settings-panel "Git Commit" works after worktree cleanup.
+"""Regression test: auto-commit resolves a cleaned-up worktree path.
 
-Bug reported by the user:
+After a worktree task finishes, cleanup removes its directory under
+``<repo>/.kiss-worktrees/kiss_wt-*``.  A delayed automatic commit may
+still carry that now-stale worktree path.  Passing it directly to
+``git -C`` would report "Not a git repository" even though the parent
+repository has changes waiting to be committed.
 
-    "in the last task when I pressed 'git commit' it says
-    'Not a git repository.'"
-
-Repro:
-
-1.  A worktree task runs and finishes (merge or discard).  The
-    worktree directory under ``<repo>/.kiss-worktrees/kiss_wt-*`` is
-    removed by ``git worktree remove`` as part of cleanup.
-2.  The frontend tab's ``workDir`` was captured from the agent's
-    ``extra.work_dir`` (the worktree path) during the task and is
-    NOT reset after worktree cleanup.
-3.  The user presses the settings-panel "Git Commit" button.  The
-    frontend triggers an autocommit with that now-stale
-    ``workDir`` (the deleted ``.kiss-worktrees/kiss_wt-…`` path).
-4.  ``_autocommit_changes`` runs ``git -C <stale>`` which
-    fails (the directory no longer exists) and the user sees a
-    misleading "Not a git repository." error even though their
-    main working tree IS a git repo with uncommitted changes
-    waiting to be committed.
-
-Fix: when ``work_dir`` points under a ``.kiss-worktrees/kiss_wt-*``
-segment that no longer exists (or contains no ``.git`` link), strip
-that segment and act on the equivalent path inside the parent repo
-(``_stale_worktree_fallback`` in ``useful_tools.py``).
+When ``work_dir`` points under a removed ``.kiss-worktrees/kiss_wt-*``
+segment (or one without a valid ``.git`` link), the server must strip
+that segment and act on the corresponding parent-repository path via
+``_stale_worktree_fallback`` in ``useful_tools.py``.
 """
 
 from __future__ import annotations
@@ -60,8 +44,8 @@ def _init_repo(repo: str) -> None:
     _run_git(repo, "commit", "-q", "-m", "seed")
 
 
-class TestGitCommitAfterWorktreeCleanup(unittest.TestCase):
-    """Settings-panel "Git Commit" must work with a stale worktree path."""
+class TestAutoCommitAfterWorktreeCleanup(unittest.TestCase):
+    """Automatic commit must recover from a stale worktree path."""
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-stale-wt-")
@@ -95,9 +79,9 @@ class TestGitCommitAfterWorktreeCleanup(unittest.TestCase):
             f"No autocommit_done event captured. Events: {self.events}",
         )
 
-    def test_commit_via_stale_worktree_path_commits_in_parent_repo(self) -> None:
-        """Settings-panel ``commit`` action with a stale ``.kiss-worktrees/kiss_wt-…``
-        ``workDir`` must commit the dirty files in the parent repo, not
+    def test_autocommit_via_stale_worktree_path_uses_parent_repo(self) -> None:
+        """A stale path below ``.kiss-worktrees/kiss_wt-…``
+        must commit the dirty files in the parent repo, not
         report "Not a git repository."."""
         before_head = _run_git(self.repo, "rev-parse", "HEAD").stdout.strip()
 

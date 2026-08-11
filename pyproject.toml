@@ -57,6 +57,10 @@ dependencies = [
     "google-api-python-client>=2.100.0",
     "google-auth-oauthlib>=1.2.0",
     "requests>=2.28.0",
+    # The repository has a top-level ``brotli`` gitlink.  Without the real
+    # codec installed, Python exposes that directory as a namespace package;
+    # urllib3 mistakes it for Brotli support and crashes while importing.
+    "brotli>=1.2.0",
     "harbor>=0.3.0",
     "websockets>=15.0",
     "cryptography>=44.0.0",

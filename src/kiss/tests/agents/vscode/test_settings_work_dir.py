@@ -121,6 +121,9 @@ let configFormPopulated = false;
 // Module-scope declaration (main.js line 165) that the extracted
 // populateConfigForm/getCurrentWorkDir bodies assign to and read.
 let configWorkDir = '';
+// Module-scope toggle references used by the extracted config functions.
+const autocommitToggleBtn = document.getElementById('cfg-auto-commit');
+const worktreeToggleBtn = document.getElementById('cfg-use-worktree');
 {populate}
 {collect}
 {save}
