@@ -249,6 +249,33 @@ class SyncRepoTest(unittest.TestCase):
         self.assertIn("feature-x", self.branches(self.remote))
         self.assert_in_sync("main", "feature-x")
 
+    def test_a_rejected_branch_is_not_retried_in_the_same_deploy(self) -> None:
+        """A permanent rejection must not make pass three repeat a slow push.
+
+        The third pass exists to collect work the server pushed.  Retrying a
+        local ref that origin already rejected in pass one cannot collect
+        anything; on a large historical branch it only adds another long,
+        silent upload to every deployment.
+        """
+        rejected = self.tmp / "rejected-pushes"
+        hook = self.origin / "hooks" / "pre-receive"
+        hook.write_text(
+            "#!/bin/bash\n"
+            f"echo attempted >> {rejected}\n"
+            "while read -r old new ref; do\n"
+            "  [ \"$ref\" != refs/heads/unpushable ] || exit 1\n"
+            "done\n"
+        )
+        hook.chmod(0o755)
+        self.git(self.local, "branch", "unpushable")
+
+        done = self.sync_ok()
+
+        self.assertIn("could not be pushed", (done.stdout + done.stderr).lower())
+        self.assertEqual(rejected.read_text().splitlines(), ["attempted"])
+        self.assertNotIn("unpushable", self.branches(self.remote))
+        self.assert_in_sync("main")
+
     def test_a_branch_only_origin_has_is_created_on_both(self) -> None:
         """Somebody else's branch lands in both checkouts."""
         # Pushing a ref without creating it locally is what another machine
