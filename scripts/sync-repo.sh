@@ -294,7 +294,7 @@ queue_push_ref() {
 
 remember_failed_pushes() {
     local spec
-    for spec in "${PUSH_REFS[@]}"; do
+    for spec in "$@"; do
         FAILED_PUSH_REFS="${FAILED_PUSH_REFS}${FAILED_PUSH_REFS:+$'\n'}$spec"
     done
 }
@@ -486,11 +486,33 @@ sync_repo() {
         [[ -n "$branch" ]] && sync_branch "$branch"
     done <<< "$BRANCHES"
 
-    if ((${#PUSH_REFS[@]} > 0)); then
-        step "Pushing ${#PUSH_REFS[@]} branch(es) from $repo to origin ..."
-        if ! git push --quiet origin ${PUSH_REFS[@]+"${PUSH_REFS[@]}"}; then
+    # The checked-out branch is the deployment.  Push it independently so an
+    # archival branch rejected by origin cannot reject the requested deploy in
+    # the same receive transaction; auxiliary refs remain a best-effort mirror.
+    PRIMARY_PUSH_REFS=()
+    AUXILIARY_PUSH_REFS=()
+    current="$(current_branch)"
+    for spec in ${PUSH_REFS[@]+"${PUSH_REFS[@]}"}; do
+        if [[ "$spec" == "refs/heads/$current:refs/heads/$current" ]]; then
+            PRIMARY_PUSH_REFS[${#PRIMARY_PUSH_REFS[@]}]="$spec"
+        else
+            AUXILIARY_PUSH_REFS[${#AUXILIARY_PUSH_REFS[@]}]="$spec"
+        fi
+    done
+    if ((${#PRIMARY_PUSH_REFS[@]} > 0)); then
+        step "Pushing checked-out branch $current from $repo to origin ..."
+        if ! git push --quiet origin \
+                ${PRIMARY_PUSH_REFS[@]+"${PRIMARY_PUSH_REFS[@]}"}; then
+            warn "The checked-out branch could not be pushed to origin."
+            remember_failed_pushes "${PRIMARY_PUSH_REFS[@]}"
+        fi
+    fi
+    if ((${#AUXILIARY_PUSH_REFS[@]} > 0)); then
+        step "Pushing ${#AUXILIARY_PUSH_REFS[@]} other branch(es) from $repo to origin ..."
+        if ! git push --quiet origin \
+                ${AUXILIARY_PUSH_REFS[@]+"${AUXILIARY_PUSH_REFS[@]}"}; then
             warn "Some branches could not be pushed to origin."
-            remember_failed_pushes
+            remember_failed_pushes "${AUXILIARY_PUSH_REFS[@]}"
         fi
     fi
 
