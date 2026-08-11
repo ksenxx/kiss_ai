@@ -46,10 +46,24 @@
 #   * The one destructive operation is pass 2's fallback: replacing the
 #     remote's database wholesale.  It only ever runs when nothing can be lost
 #     by it — the remote has no database, or none that any reader could get a
-#     row out of, or pass 1 has already brought its rows here.  A probe that
-#     did not run authorises nothing.  Whatever file it replaces is kept as
-#     ~/.kiss/sorcar.db.replaced-<time> (with its -wal alongside, so the copy
-#     is complete and openable), and an older backup is never written over.
+#     row out of, or pass 1 has already brought its rows here *and the remote
+#     still holds exactly what it held then* -- the same tasks, the same
+#     progress on them, the same events -- compared once before the decision and
+#     again once the web app there is stopped and nothing can write any more.
+#     Anything that happened there in between, down to a single event, is
+#     something this machine has never seen, and stops the replacement.
+#     A probe that did not run authorises nothing.  Whatever file
+#     it replaces is kept as ~/.kiss/sorcar.db.replaced-<time>, complete: the
+#     pages that were still only in its -wal are folded into it first, and if
+#     they cannot be, that -wal is kept alongside instead.  An older backup is
+#     never written over, and the three tables no sync moves — that machine's
+#     own usage counters — are carried from that file into the database which
+#     replaced it.
+#   * The fallback stops the remote web app, and stopping it kills the task it
+#     is running, so it refuses to run while one is: SORCAR_FORCE_RESTART=1
+#     says go ahead anyway, and SORCAR_LIVE_TASK_WINDOW sets how recent a
+#     task's newest event has to be for the task to count as running (300
+#     seconds by default; 0 turns the check off).
 #   * A pass that could not finish leaves both databases as they were, says so,
 #     and makes the script exit non-zero.
 #
@@ -103,6 +117,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 SYNC_DB="$PROJECT_ROOT/src/kiss/scripts/sync_db.py"
 RELOCATE="$PROJECT_ROOT/src/kiss/scripts/relocate_work_dir.py"
+CARRY_OVER="$PROJECT_ROOT/src/kiss/scripts/carry_over_tables.py"
+RUNNING_TASKS="$PROJECT_ROOT/src/kiss/scripts/running_tasks.py"
+FINGERPRINT="$PROJECT_ROOT/src/kiss/scripts/db_fingerprint.py"
+# How recent a task's newest event has to be for the task to count as running,
+# which is what stops the fallback from stopping the web app under one.
+LIVE_TASK_WINDOW="${SORCAR_LIVE_TASK_WINDOW:-300}"
 
 KISS_DIR="${KISS_HOME:-$HOME/.kiss}"
 DB="$KISS_DIR/sorcar.db"
@@ -122,6 +142,12 @@ REMOTE_WEB_APP_STOPPED=0
 # remote's database is only safe once that has happened, so a pass 1 that
 # could not finish has to be able to stop pass 2 from doing it.
 PULL_COMPLETE=0
+# What the remote held when pass 1 read it (see
+# src/kiss/scripts/db_fingerprint.py).  A wholesale replacement is only as safe
+# as that is current: anything that happened there since -- a task started, a
+# task carried further, an event written -- is something this machine has never
+# seen and the replacement would throw away.
+REMOTE_FINGERPRINT_AT_PULL=""
 # Set by anything that did not do what it set out to do.  Such a run has not
 # synced the two machines, and must not report that it has.
 INCOMPLETE=0
@@ -200,6 +226,22 @@ con.execute("VACUUM INTO ?", (sys.argv[2],))
 con.close()' "$DB" "$SNAPSHOT"
 }
 
+# What the remote's database holds, in one line, for comparing two moments in
+# time (see src/kiss/scripts/db_fingerprint.py).  Empty means the question was
+# not answered -- which no caller may read as "nothing has changed".
+remote_fingerprint() {
+    local path="$1" answer
+    [[ -f "$FINGERPRINT" ]] || return 0
+    answer="$(ssh "$TARGET" "python3 - \"$path\"" < "$FINGERPRINT" 2>/dev/null \
+        | head -1 || true)"
+    # Six counts and the digest of the task rows.  Anything else -- a python
+    # traceback, a login banner, a shell's "command not found" -- is not an
+    # answer, and must not be compared with one.
+    [[ "$answer" =~ ^[0-9]+([[:space:]]+[0-9.eE+-]+){5}[[:space:]]+[0-9a-f]+$ ]] \
+        || return 0
+    printf '%s' "$answer"
+}
+
 count_tasks() {
     python3 -c 'import sqlite3, sys
 con = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
@@ -248,6 +290,10 @@ pull_from_remote() {
         return 0
     fi
     info "$TARGET holds $remote_tasks task(s)."
+    # What the snapshot holds, which is what this pass is about to bring here.
+    # Taken from the snapshot rather than from the live database, so that it
+    # describes exactly the rows that travel.
+    REMOTE_FINGERPRINT_AT_PULL="$(remote_fingerprint "$REMOTE_SNAPSHOT")"
 
     if [[ -n "$LOCAL_DIR" && -n "$REMOTE_DIR" ]]; then
         if [[ ! -f "$RELOCATE" ]]; then
@@ -343,7 +389,9 @@ push_to_remote() {
             info "Task database synced on $TARGET."
             return 0
         fi
-        incomplete "The merge into $TARGET failed."
+        # Not "incomplete" yet: the fallback below can still put the two
+        # machines in sync, and it says so itself when it cannot.
+        warn "The merge into $TARGET failed — falling back to replacing its database."
     else
         info "No usable task database on $TARGET yet ($REMOTE_DB_STATE)."
     fi
@@ -370,6 +418,34 @@ push_to_remote() {
 # A probe that did not run (``unknown``) says nothing about the remote, so it
 # never authorises a replacement.
 # ---------------------------------------------------------------------------
+# Has the remote's database stood still since pass 1 read it?  Asked twice: once
+# before the replacement is decided on, and again once the web app is stopped
+# and nothing there can write any more -- the second answer is the one that
+# makes the replacement safe rather than merely likely to be safe.
+remote_unchanged_since_pull() {
+    local now
+    if [[ -z "$REMOTE_FINGERPRINT_AT_PULL" ]]; then
+        incomplete "It is not recorded what $TARGET held when its tasks were" \
+                   "brought here, so its database was left as it is."
+        return 1
+    fi
+    now="$(remote_fingerprint '$HOME/.kiss/sorcar.db')"
+    if [[ -z "$now" ]]; then
+        incomplete "Cannot re-read what $TARGET holds, so it is not certain that" \
+                   "the tasks brought back are still all of it: its database was" \
+                   "left as it is."
+        return 1
+    fi
+    if [[ "$now" != "$REMOTE_FINGERPRINT_AT_PULL" ]]; then
+        incomplete "$TARGET has moved on since its tasks were brought here" \
+                   "($REMOTE_FINGERPRINT_AT_PULL then, $now now — tasks, steps," \
+                   "tokens, events, last event, what the tasks say), so replacing" \
+                   "its database would" \
+                   "throw that away: it was left as it is. Sync again to pick it up."
+        return 1
+    fi
+}
+
 may_replace_remote_db() {
     case "$REMOTE_DB_STATE" in
         missing) return 0 ;;
@@ -380,6 +456,11 @@ may_replace_remote_db() {
             ;;
     esac
     if (( PULL_COMPLETE )); then
+        # ... as long as that is still true.  Pass 1 read the remote minutes
+        # ago; anything that happened there since -- a task started, a task
+        # carried further, an event written -- is something this machine has
+        # never seen, and the replacement would throw it away.
+        remote_unchanged_since_pull || return 1
         warn "Replacing the database on $TARGET wholesale; its own tasks are" \
              "already here, and it is kept as ~/.kiss/sorcar.db.replaced-<time>."
         return 0
@@ -400,7 +481,33 @@ may_replace_remote_db() {
 # driven by a test harness, the developer's own).
 # ---------------------------------------------------------------------------
 upload_whole_db() {
-    local tasks="$1"
+    local tasks="$1" running backup
+    # Stopping the web app kills the task it is running: the agent stops
+    # mid-step and the steps it had left are gone.  A task counts as running
+    # when its newest event is younger than the window (see
+    # src/kiss/scripts/running_tasks.py); the rows an old database holds with
+    # no end time and no recent event are not running tasks.
+    # Only a database a reader can get a row out of can say anything about a
+    # running task; the other states got here because nobody can.
+    if [[ "${SORCAR_FORCE_RESTART:-}" != "1" && "$LIVE_TASK_WINDOW" != "0" \
+          && "$REMOTE_DB_STATE" == "ok" ]]; then
+        if [[ ! -f "$RUNNING_TASKS" ]]; then
+            incomplete "$RUNNING_TASKS is missing, so it cannot be checked whether" \
+                       "stopping the web app on $TARGET would kill a running task:" \
+                       "its database was left as it is."
+            return 0
+        fi
+        running="$(ssh "$TARGET" "python3 - \"\$HOME/.kiss/sorcar.db\" \
+            $(shquote "$LIVE_TASK_WINDOW")" < "$RUNNING_TASKS" 2>/dev/null \
+            | head -1 | tr -d '[:space:]' || true)"
+        if [[ "$running" != "0" ]]; then
+            incomplete "'${running:-no answer}' task(s) are running on $TARGET;" \
+                       "replacing its database means stopping the web app, which" \
+                       "would kill them. Nothing was changed on either machine —" \
+                       "sync again when they are done, or set SORCAR_FORCE_RESTART=1."
+            return 0
+        fi
+    fi
     step "Stopping the remote web app so nothing holds its database open ..."
     REMOTE_WEB_APP_STOPPED=1
     ssh "$TARGET" 'mkdir -p "$HOME/.kiss" && chmod 700 "$HOME/.kiss"
@@ -411,14 +518,22 @@ upload_whole_db() {
                    rm -f "$HOME"/.kiss/sorcar.db.incoming' \
         || die "Could not prepare $TARGET for the upload."
 
+    # Nothing there can write any more, so this answer cannot go stale between
+    # here and the swap.  It is the one that makes the replacement safe rather
+    # than merely likely to be safe: whatever a last-second task wrote there
+    # after pass 1 read the database is caught here, while the file it wrote it
+    # to is still in place.
+    if [[ "$REMOTE_DB_STATE" == "ok" ]] && ! remote_unchanged_since_pull; then
+        return 0
+    fi
+
     # gzip shrinks the database ~4x, so the upload takes a quarter as long.
     step "Uploading $tasks tasks to $TARGET ..."
     gzip -1 -c "$SNAPSHOT" \
         | ssh "$TARGET" 'gzip -dc > "$HOME/.kiss/sorcar.db.incoming"' \
         || die "Uploading the task database to $TARGET failed."
 
-    ssh "$TARGET" "EXPECTED='$tasks' bash -s" <<'SWAP' \
-        || die "The upload did not verify on $TARGET — its previous database was kept."
+    if ! ssh "$TARGET" "EXPECTED='$tasks' bash -s" > "$TMP_DIR/swap.out" <<'SWAP'
 set -e
 cd "$HOME/.kiss"
 got=$(python3 -c 'import sqlite3
@@ -427,23 +542,109 @@ if con.execute("PRAGMA quick_check").fetchone()[0] != "ok":
     raise SystemExit("the uploaded database is corrupt")
 print(con.execute("SELECT count(*) FROM task_history").fetchone()[0])')
 [ "$got" = "$EXPECTED" ] || { echo "ERROR: $got of $EXPECTED tasks arrived" >&2; exit 1; }
-# The database being replaced is kept, not deleted -- together with its -wal,
-# which holds committed pages the main file does not have yet, and which
-# SQLite finds again under the backup's name (it derives the -wal name from
-# the file it opens).  The -shm and the socket describe a process that is
-# gone.  The backup's name carries the time, so an earlier one -- possibly
-# the only remaining copy of what it held -- is never written over.
+# The database being replaced is kept, not deleted.  The backup's name carries
+# the time, so an earlier one -- possibly the only remaining copy of what it
+# held -- is never written over.
+#
+# The backup is a second *link* to the same file rather than a rename of it, so
+# the database stays where it is until the new one replaces it in one atomic
+# step.  Renaming it away first leaves a window -- and, if what follows fails, a
+# deployment with no database at all where a moment ago there was a full one.  A
+# link costs no space; a filesystem that refuses one (some network mounts) gets
+# a copy instead, and a backup that cannot be made at all stops the swap.
+#
+# The -wal comes first, before anything is kept: it holds pages the main file
+# does not have yet, so a copy of the main file taken while they are still out
+# there is a copy of an older database than the one being replaced.  Nothing
+# holds the database open any more, so those pages can be folded in where they
+# belong -- and whether they were is *read back* from the pragma rather than
+# assumed: a checkpoint runs without error and still leaves frames behind when
+# another reader holds an older view of the file (its first result is non-zero,
+# "busy"), and deleting a -wal that was never folded in is losing exactly the
+# rows that were only in it.
+#
+# A -wal that could not be folded in is kept beside the backup instead, where
+# SQLite finds it again (it derives the -wal name from the file it opens), and
+# it is *copied* there rather than moved, so that the database left behind is
+# still complete if the last step below cannot be taken.  Either way the old
+# -wal is gone before the new database takes its place: a -wal left beside a
+# database it does not belong to is how a database gets corrupted.
 if [ -f sorcar.db ]; then
     backup="sorcar.db.replaced-$(date -u +%Y%m%dT%H%M%SZ)"
     while [ -e "$backup" ]; do backup="$backup+"; done
-    mv -f sorcar.db "$backup"
-    [ -f sorcar.db-wal ] && mv -f sorcar.db-wal "$backup-wal"
-    echo "kept the previous database as ~/.kiss/$backup"
+    folded=1
+    if [ -f sorcar.db-wal ]; then
+        python3 -c 'import sqlite3, sys
+con = sqlite3.connect("sorcar.db", timeout=30)
+try:
+    busy, frames, _ = con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+finally:
+    con.close()
+# TRUNCATE leaves an empty log behind when it folded everything in, so
+# anything else -- a busy reader, frames still in the log -- means it did not.
+sys.exit(0 if busy == 0 and frames <= 0 else 1)' 2>/dev/null || folded=0
+    fi
+    ln sorcar.db "$backup" 2>/dev/null || cp -p sorcar.db "$backup" \
+        || { echo "ERROR: cannot keep a copy of the database being replaced" >&2; exit 1; }
+    if [ "$folded" = 0 ]; then
+        cp -p sorcar.db-wal "$backup-wal" \
+            || { echo "ERROR: cannot keep the -wal of the database being replaced" >&2; exit 1; }
+    fi
+    echo "SORCAR_DB_BACKUP=$backup"
 fi
+# The -shm is an index into the -wal, and the socket describes a process that is
+# gone; neither says anything about the database arriving.
 rm -f sorcar.db-wal sorcar.db-shm sorcar.sock
-mv -f sorcar.db.incoming sorcar.db
+# The one step that takes the old database away.  If it cannot be taken, the old
+# database is still here under its own name -- and gets its -wal back, so that
+# what is here is the database that was here, whole.
+if ! mv -f sorcar.db.incoming sorcar.db; then
+    # No backup means there was no database here to put back.
+    if [ -n "${backup:-}" ] && [ -f "$backup-wal" ]; then
+        cp -p "$backup-wal" sorcar.db-wal || true
+    fi
+    echo "ERROR: cannot put the new database in place; the previous one is still here" >&2
+    exit 1
+fi
 SWAP
+    then
+        die "The upload did not verify on $TARGET — its previous database was kept."
+    fi
+    backup="$(sed -n 's/^SORCAR_DB_BACKUP=//p' "$TMP_DIR/swap.out" | tail -1)"
     info "Task database replaced on $TARGET ($tasks tasks)."
+    if [[ -n "$backup" ]]; then
+        info "The database it replaced is kept as ~/.kiss/$backup."
+        carry_over_counters "$backup"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# What the replacement does not bring with it
+#
+# A sync moves the two tables that hold a machine's history.  A sorcar.db has
+# three more that no sync moves -- how often each model was chosen, each file
+# opened, each task text run -- and a wholesale replacement would take those
+# down with the file, in the one step that is supposed to lose nothing.  They
+# are put back from the copy the replacement kept: rows only it had are
+# inserted and every counter is raised to the larger of the two values, so
+# running this twice changes nothing the second time.
+#
+# A failure here is worth saying out loud but not worth failing the sync over:
+# the history -- what the two passes exist for -- is already in place.
+# ---------------------------------------------------------------------------
+carry_over_counters() {
+    local backup="$1"
+    # The name comes back from the remote, and goes into a remote command line.
+    [[ "$backup" =~ ^sorcar\.db\.replaced-[0-9A-Za-z]+\+*$ ]] \
+        || { warn "'$backup' is not a name this script gave a backup — leaving it alone."
+             return 0; }
+    [[ -f "$CARRY_OVER" ]] || { warn "$CARRY_OVER is missing — the usage counters" \
+        "of the replaced database were left in ~/.kiss/$backup."; return 0; }
+    if ! ssh "$TARGET" "python3 - \"\$HOME/.kiss/$backup\" \"\$HOME/.kiss/sorcar.db\"" \
+            < "$CARRY_OVER"; then
+        warn "Could not carry the usage counters of the replaced database over;" \
+             "they are in ~/.kiss/$backup on $TARGET."
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -467,6 +668,7 @@ con = sqlite3.connect("file:" + snapshot + "?mode=ro", uri=True)
 print(con.execute("SELECT count(*) FROM task_history").fetchone()[0])
 con.close()
 PY
+
 
 case "$REMOTE_DB_STATE" in
     ok) pull_from_remote ;;

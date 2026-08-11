@@ -10,12 +10,17 @@
 # Usage:  ./sorcar-cloud user@ip-address
 #
 # Flow:
-#   1. Check SSH connectivity to user@ip-address.
+#   1. Check SSH connectivity to user@ip-address, and that no task is running
+#      there: this deploy restarts the remote web app, which would kill one
+#      mid-step (SORCAR_FORCE_RESTART=1 says go ahead anyway).
 #   2. Copy ~/.ssh/ so the remote can fetch and push git as you, and hop to
 #      other hosts as you.  It comes before the sync because the deployment
 #      pulls its own history from GitHub over that key.  ``authorized_keys``
 #      is never overwritten — that file is what lets you SSH *into* the
-#      remote.
+#      remote — and a file of the remote's own that this copy would replace
+#      (its own key, its own ssh config) is moved into
+#      ~/.kiss/ssh-replaced-<time>/ rather than destroyed: a private key
+#      cannot be reconstructed.
 #   3. Put this checkout and ~/<project>/ on the remote machine in total sync
 #      through ``origin``, by way of scripts/sync-repo.sh: every branch here
 #      is pushed to origin, the remote checkout is created (or updated) from
@@ -36,10 +41,14 @@
 #      deployed: the agent treats such a branch as one of its own worktrees
 #      and reclaiming it would delete the deployment.
 #   4. Copy the ~/*rc file that holds the API keys (the one with the most
-#      ``FOO_API_KEY=`` style lines), and distill those lines into
+#      ``FOO_API_KEY=`` style lines) into ~/.kiss/ — not into the remote's
+#      home directory, which has shell files of its own that a copy of this
+#      machine's would destroy — and distill those lines into
 #      ~/.kiss/api_keys.env (sourced by bash) and ~/.kiss/api_keys.systemd.env
 #      (read by the kiss-web service).  Sourcing a zsh rc from bash is
-#      unreliable, hence the distilled copies.
+#      unreliable, hence the distilled copies.  scripts/install-api-keys.sh
+#      then adds one delimited block to ~/.bashrc, keeping a copy of that file
+#      as it was and replacing it by an atomic rename.
 #   4b. Sync the task database (~/.kiss/sorcar.db) both ways on every run, so
 #      the History panel on *either* machine lists every task either machine
 #      ever ran, with the tasks that ran in one checkout re-pointed at the
@@ -52,7 +61,8 @@
 #      both.  Only a remote without a usable database (first deploy) — or a
 #      merge the schemas refuse — falls back to a full copy, which stops the
 #      remote web app for the swap, keeps the database it replaces as
-#      sorcar.db.replaced, and starts the web app again before returning.
+#      sorcar.db.replaced (with the usage counters of that database carried
+#      into the new one), and starts the web app again before returning.
 #   5. Run install.sh in the synced folder (git, Node.js, VS Code extension
 #      build).  A ``code`` CLI is required by install.sh, so code-server is
 #      installed (standalone, no sudo) when the host has no editor CLI.
@@ -68,6 +78,23 @@
 #      dropped so the remote regenerates its own topic — otherwise both
 #      machines publish their tunnel URLs to one topic and the URL shown on
 #      the remote resolves to whichever machine posted last.
+#   8. Copy this machine's GitHub.com credentials, so the agent running on the
+#      remote is the same person on GitHub as you are here: it can open pull
+#      requests, read private repositories and push over https, not only over
+#      the ssh key of step 2.  scripts/collect-github-auth.sh reads the token
+#      of every account ``gh`` is logged in to here (on macOS the token is in
+#      the keychain, so copying ~/.config/gh/hosts.yml would copy account
+#      names and no token at all), falling back to git's own credential
+#      helpers and then to $GH_TOKEN, and checks each one against the GitHub
+#      API — a revoked token is not worth shipping, and the API answers with
+#      the login to store it under.  scripts/install-github-auth.sh then logs
+#      those accounts in on the remote with ``gh auth login --with-token``,
+#      the active one last so it stays active there too, and points git at gh
+#      for github.com URLs.  The tokens travel on standard input, never as
+#      arguments — the arguments of a process are readable by everyone on the
+#      machine.  The accounts the remote was already logged in to are kept in
+#      ~/.kiss/ first.  A machine with no GitHub credentials is a warning, not
+#      a failed deploy.
 #
 # Environment overrides:
 #   SORCAR_REMOTE_DIR   name of the remote folder (default: project name)
@@ -79,6 +106,8 @@
 #   SORCAR_GIT_NAME     git author name on the remote (default: the account)
 #   SORCAR_GIT_EMAIL    git author email (default: <account>@users.noreply.github.com)
 #   SORCAR_NO_BROWSER   set to 1 to skip opening the browser
+#   SORCAR_SKIP_GITHUB_AUTH  set to 1 to leave this machine's GitHub.com
+#                       credentials here (step 8 is skipped)
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -121,9 +150,14 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -f "$SCRIPT_DIR/install.sh" ]] || die "No install.sh next to $0 — is this a KISS Sorcar checkout?"
 [[ -f "$SCRIPT_DIR/scripts/sync-repo.sh" ]] || die "No scripts/sync-repo.sh next to $0 — step 3 needs it."
-for helper in scripts/sync-task-db.sh src/kiss/scripts/sync_db.py \
-              src/kiss/scripts/relocate_work_dir.py; do
-    [[ -f "$SCRIPT_DIR/$helper" ]] || die "No $helper next to $0 — step 4b needs it."
+for helper in scripts/install-api-keys.sh scripts/sync-task-db.sh \
+              scripts/collect-github-auth.sh scripts/install-github-auth.sh \
+              src/kiss/scripts/sync_db.py src/kiss/scripts/relocate_work_dir.py \
+              src/kiss/scripts/carry_over_tables.py \
+              src/kiss/scripts/db_fingerprint.py \
+              src/kiss/scripts/running_tasks.py \
+              src/kiss/scripts/remote_config.py; do
+    [[ -f "$SCRIPT_DIR/$helper" ]] || die "No $helper next to $0 — the deploy needs it."
 done
 
 # When run from a git worktree (".kiss-worktrees/kiss_wt-1785-29b4"), the
@@ -154,6 +188,44 @@ REMOTE_DIR="$REMOTE_HOME/$PROJECT"
 info "SSH OK — deploying $MAIN_REPO -> $TARGET:$REMOTE_DIR"
 
 # ---------------------------------------------------------------------------
+# 1b. Do not deploy on top of a task that is still running there
+#
+# A deploy rebuilds the Python environment under the running web app and then
+# restarts it (step 7c), which kills whatever it is doing: the agent stops
+# mid-step and the steps it had left are gone.  So this is checked before
+# anything on the remote is touched — and by asking the remote's own history,
+# because a running task writes events continuously.  The thousands of rows
+# an old database holds with no end time and no recent event are not running
+# tasks; see src/kiss/scripts/running_tasks.py.
+# ---------------------------------------------------------------------------
+LIVE_TASK_WINDOW="${SORCAR_LIVE_TASK_WINDOW:-300}"
+[[ "$LIVE_TASK_WINDOW" =~ ^[0-9]+$ ]] \
+    || die "SORCAR_LIVE_TASK_WINDOW must be a number of seconds, got '$LIVE_TASK_WINDOW'."
+if [[ "${SORCAR_FORCE_RESTART:-}" != "1" && "$LIVE_TASK_WINDOW" != "0" ]]; then
+    step "Checking whether a task is running on $TARGET ..."
+    RUNNING="$(ssh "$TARGET" "python3 - \"\$HOME/.kiss/sorcar.db\" \
+        $(shquote "$LIVE_TASK_WINDOW")" \
+        < "$SCRIPT_DIR/src/kiss/scripts/running_tasks.py" 2>/dev/null || echo unknown)"
+    RUNNING_COUNT="$(printf '%s' "$RUNNING" | head -1 | tr -d '[:space:]')"
+    case "$RUNNING_COUNT" in
+        0) info "No task is running on $TARGET." ;;
+        ""|*[!0-9]*)
+            # Not an answer.  Reading "I could not look" as "nothing is
+            # running" is how a deploy kills the task it was told to look for.
+            die "Could not tell whether a task is running on $TARGET (answer:" \
+                "'${RUNNING_COUNT:-none}'). Fix the connection, or the database" \
+                "there, or set SORCAR_FORCE_RESTART=1 to deploy anyway."
+            ;;
+        *)
+            printf '%s\n' "$RUNNING" | tail -n +2 | sed 's/^/         task /'
+            die "$RUNNING_COUNT task(s) are still running on $TARGET, and this deploy" \
+                "would restart the web app and kill them. Wait for them to finish," \
+                "or set SORCAR_FORCE_RESTART=1 to deploy anyway."
+            ;;
+    esac
+fi
+
+# ---------------------------------------------------------------------------
 # 2. Copy ~/.ssh/ — identity only, never authorized_keys
 #
 # Before the sync, not after it: the deployment fetches and pushes its own
@@ -161,17 +233,29 @@ info "SSH OK — deploying $MAIN_REPO -> $TARGET:$REMOTE_DIR"
 # ---------------------------------------------------------------------------
 if [[ -d "$HOME/.ssh" ]]; then
     step "Copying ~/.ssh/ to $TARGET (keeping the remote's authorized_keys) ..."
-    ssh "$TARGET" 'mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"'
-    rsync -aHz -e ssh \
+    # A private key cannot be reconstructed, and the remote may well have one
+    # of its own under a name this machine also uses (id_ed25519, config,
+    # known_hosts).  --backup moves every file this copy would overwrite into
+    # a directory of its own instead of destroying it; the directory is
+    # outside ~/.ssh so ssh never reads what is in it, and rsync only creates
+    # it if there was something to put there.
+    SSH_BACKUP="$REMOTE_HOME/.kiss/ssh-replaced-$(date -u +%Y%m%dT%H%M%SZ)"
+    ssh "$TARGET" 'mkdir -p "$HOME/.ssh" "$HOME/.kiss" && chmod 700 "$HOME/.ssh" "$HOME/.kiss"'
+    rsync -aHz -e ssh --backup --backup-dir="$SSH_BACKUP" \
         --exclude='authorized_keys' --exclude='authorized_keys2' \
         --exclude='environment' --exclude='*.sock' --exclude='.DS_Store' \
         "$HOME/.ssh/" "$TARGET:.ssh/"
     # ssh refuses to use a key whose permissions are group/world readable.
-    ssh "$TARGET" 'bash -s' <<'FIXSSH'
+    ssh "$TARGET" "SSH_BACKUP=$(shquote "$SSH_BACKUP") bash -s" <<'FIXSSH'
 set -e
 chmod 700 "$HOME/.ssh"
 find "$HOME/.ssh" -type f -exec chmod 600 {} +
 find "$HOME/.ssh" -type f \( -name '*.pub' -o -name 'known_hosts*' \) -exec chmod 644 {} +
+if [ -d "$SSH_BACKUP" ]; then
+    chmod -R go-rwx "$SSH_BACKUP"
+    echo "[$(hostname -s)] kept the ssh files this copy replaced in ${SSH_BACKUP/#$HOME/~}:"
+    find "$SSH_BACKUP" -type f | sed "s|^$SSH_BACKUP/|         |"
+fi
 FIXSSH
     info "SSH identity copied to $REMOTE_HOME/.ssh."
 else
@@ -249,28 +333,25 @@ KEY_COUNT="$(wc -l < "$TMP_DIR/api_keys.env" | tr -d ' ')"
 
 step "Copying $(basename "$RC_FILE") and $KEY_COUNT exported variables to $TARGET ..."
 ssh "$TARGET" 'mkdir -p "$HOME/.kiss" && chmod 700 "$HOME/.kiss"'
-scp -q "$RC_FILE" "$TARGET:$(basename "$RC_FILE")"
+# The rc file goes into ~/.kiss, not into the remote's home: a home directory
+# already holds a .bashrc or .zshrc of its own, and dropping this machine's
+# copy on top of it destroys the shell configuration of the host (in the
+# .bashrc case, the very file the next step edits).  It holds every API key,
+# so it is also kept unreadable by anyone else — the copy in the home
+# directory was world-readable.
+scp -q "$RC_FILE" "$TARGET:.kiss/$(basename "$RC_FILE")"
 scp -q "$TMP_DIR/api_keys.env" "$TMP_DIR/api_keys.systemd.env" "$TARGET:.kiss/"
-ssh "$TARGET" 'bash -s' <<'RCWIRE'
-set -e
-chmod 600 "$HOME/.kiss/api_keys.env" "$HOME/.kiss/api_keys.systemd.env"
+# Steps 7a and 7c run these two on the remote.  They are shipped rather than
+# run out of the synced checkout, so that deploying a branch older than they
+# are still gets the version that keeps the rest of ~/.kiss/config.json, and
+# the one that looks for a running task before the web app is restarted.
+scp -q "$SCRIPT_DIR/src/kiss/scripts/remote_config.py" \
+       "$SCRIPT_DIR/src/kiss/scripts/running_tasks.py" "$TARGET:.kiss/"
+ssh "$TARGET" "chmod 600 \"\$HOME/.kiss/$(basename "$RC_FILE")\""
 # Make interactive and non-interactive bash sessions (which is what the agent
-# and its tools run under) see the keys.  The block is delimited so that
-# re-running this script replaces it instead of appending a second copy.
-BEGIN='# >>> sorcar-cloud API keys >>>'
-END='# <<< sorcar-cloud API keys <<<'
-touch "$HOME/.bashrc"
-awk -v b="$BEGIN" -v e="$END" '
-    $0 == b {skip = 1} skip == 0 {print} $0 == e {skip = 0}
-' "$HOME/.bashrc" > "$HOME/.bashrc.sorcar-tmp"
-{
-    cat "$HOME/.bashrc.sorcar-tmp"
-    echo "$BEGIN"
-    echo '[ -f "$HOME/.kiss/api_keys.env" ] && . "$HOME/.kiss/api_keys.env"'
-    echo "$END"
-} > "$HOME/.bashrc"
-rm -f "$HOME/.bashrc.sorcar-tmp"
-RCWIRE
+# and its tools run under) see the keys; see scripts/install-api-keys.sh for
+# how ~/.bashrc is edited without damaging what is in it.
+ssh "$TARGET" 'bash -s' < "$SCRIPT_DIR/scripts/install-api-keys.sh"
 info "API keys installed (~/.kiss/api_keys.env, sourced from ~/.bashrc)."
 
 # ---------------------------------------------------------------------------
@@ -310,6 +391,8 @@ LOCAL_NTFY_TOPIC="$(cat "$HOME/.kiss/ntfy_topic" 2>/dev/null | tr -d '[:space:]'
 step "Installing KISS Sorcar on $TARGET (this takes a few minutes) ..."
 ssh "$TARGET" "REMOTE_DIR=$(shquote "$REMOTE_DIR") WEB_PORT=$(shquote "$WEB_PORT") \
     PASSWORD=$(shquote "$PASSWORD") LOCAL_NTFY_TOPIC=$(shquote "$LOCAL_NTFY_TOPIC") \
+    LIVE_TASK_WINDOW=$(shquote "$LIVE_TASK_WINDOW") \
+    FORCE_RESTART=$(shquote "${SORCAR_FORCE_RESTART:-}") \
     bash -s" <<'REMOTE'
 set -euo pipefail
 export PATH="$HOME/.local/bin:$PATH"
@@ -414,26 +497,8 @@ uv sync
 # --- 7a. Password + work_dir in ~/.kiss/config.json ------------------------
 # kiss-web only opens a Cloudflare tunnel when a password is configured, so a
 # password is what makes the web app both reachable worldwide and protected.
-PASSWORD="$PASSWORD" WEB_PORT="$WEB_PORT" REMOTE_DIR="$REMOTE_DIR" \
-python3 - <<'PY'
-import json, os, secrets, string
-path = os.path.expanduser("~/.kiss/config.json")
-try:
-    with open(path, encoding="utf-8") as fh:
-        cfg = json.load(fh)
-except (OSError, ValueError):
-    cfg = {}
-password = os.environ["PASSWORD"] or cfg.get("remote_password") or "".join(
-    secrets.choice(string.ascii_lowercase + string.digits) for _ in range(12)
-)
-cfg["remote_password"] = password
-cfg["work_dir"] = os.environ["REMOTE_DIR"]
-os.makedirs(os.path.dirname(path), exist_ok=True)
-with open(path, "w", encoding="utf-8") as fh:
-    json.dump(cfg, fh, indent=2)
-os.chmod(path, 0o600)
-print("SORCAR_PASSWORD=" + password)
-PY
+python3 "$HOME/.kiss/remote_config.py" \
+    "$HOME/.kiss/config.json" "$REMOTE_DIR" "$PASSWORD"
 
 # --- 7a'. A machine-unique ntfy topic, so the URL the web app shows is its
 #          own.  The web app presents https://ntfy.sh/<topic> (from
@@ -500,8 +565,41 @@ systemctl --user enable kiss-web.service >/dev/null 2>&1 || true
 # Retire the previous tunnel before restarting: kiss-web adopts a cloudflared
 # it finds in ~/.kiss/cloudflared.pid and republishes its URL, and that URL
 # stops resolving (HTTP 530) once the old tunnel dies with its owner.
+#
+# Only this deployment's tunnel is retired: the process kiss-web recorded (if
+# it is still a cloudflared — a recorded pid outlives the process it named, and
+# the number is eventually given to something else), and then any cloudflared
+# publishing this very port.  This host may well be running a tunnel for
+# something else, and killing every "cloudflared tunnel" it owns — which is
+# what a bare pattern does — takes that down too.
+#
+# A task may have started in the minutes this deploy has been running; the
+# restart below would end it mid-step.
+if [ "${FORCE_RESTART:-}" != "1" ] && [ "${LIVE_TASK_WINDOW:-300}" != "0" ]; then
+    # The braces keep a failing probe from ending the pipeline (and, under
+    # ``set -e``, this script) before its answer has been read.
+    LIVE=$( { python3 "$HOME/.kiss/running_tasks.py" "$HOME/.kiss/sorcar.db" \
+                  "${LIVE_TASK_WINDOW:-300}" || true; } | head -1 | tr -d '[:space:]')
+    if [ "$LIVE" != "0" ]; then
+        echo "ERROR: '$LIVE' task(s) are running on this host now (none were when" \
+             "the deploy started); restarting the web app would kill them. Deploy" \
+             "again when they are done, or with SORCAR_FORCE_RESTART=1." >&2
+        exit 1
+    fi
+fi
 systemctl --user stop kiss-web.service >/dev/null 2>&1 || true
-pkill -f 'cloudflared.*tunnel' >/dev/null 2>&1 || true
+OLD_TUNNEL="$(python3 -c 'import json, sys
+try:
+    pid = int(json.load(open(sys.argv[1]))["pid"])
+except Exception:
+    pass
+else:
+    print(pid if pid > 1 else "")' "$HOME/.kiss/cloudflared.pid" 2>/dev/null || true)"
+if [ -n "$OLD_TUNNEL" ] \
+   && [ "$(ps -o comm= -p "$OLD_TUNNEL" 2>/dev/null | xargs -r basename)" = cloudflared ]; then
+    kill "$OLD_TUNNEL" >/dev/null 2>&1 || true
+fi
+pkill -f "cloudflared.*--url .*:$WEB_PORT" >/dev/null 2>&1 || true
 rm -f "$HOME/.kiss/cloudflared.pid" "$HOME/.kiss/remote-url.json"
 systemctl --user restart kiss-web.service
 
@@ -541,7 +639,42 @@ echo "SORCAR_PUBLIC_URL=$url"
 REMOTE
 
 # ---------------------------------------------------------------------------
-# 8. Read back the public URL / password, verify from this machine, open it.
+# 8. Copy this machine's GitHub.com credentials
+#
+# The ssh key of step 2 makes the remote you for git over ssh.  This makes it
+# you for everything else GitHub offers: ``gh pr create``, a private
+# repository, a push over https.  The token never becomes an argument of a
+# command on either machine (arguments are readable by every account on the
+# host, standard input is not) and it never becomes a file here: it is held in
+# a shell variable and piped straight into the installer.
+#
+# Not having any is worth a warning and no more.  A deployment that cannot
+# open pull requests still runs tasks.
+# ---------------------------------------------------------------------------
+if [[ "${SORCAR_SKIP_GITHUB_AUTH:-}" == "1" ]]; then
+    info "Leaving the GitHub.com credentials here (SORCAR_SKIP_GITHUB_AUTH=1)."
+else
+    step "Copying this machine's GitHub.com credentials to $TARGET ..."
+    if GH_PAYLOAD="$(bash "$SCRIPT_DIR/scripts/collect-github-auth.sh")" \
+       && [[ -n "$GH_PAYLOAD" ]]; then
+        # One guard around all three: a deploy is not abandoned because the
+        # copy of a helper script failed, any more than because the install
+        # of the credentials did.
+        {
+            ssh "$TARGET" 'mkdir -p "$HOME/.kiss" && chmod 700 "$HOME/.kiss"' \
+            && scp -q "$SCRIPT_DIR/scripts/install-github-auth.sh" "$TARGET:.kiss/" \
+            && printf '%s\n' "$GH_PAYLOAD" \
+               | ssh "$TARGET" 'bash "$HOME/.kiss/install-github-auth.sh"'
+        } || warn "The GitHub.com credentials were not installed (see above); continuing."
+        unset GH_PAYLOAD
+    else
+        warn "No GitHub.com credentials on this machine, so the remote agent gets none:" \
+             "it will not be able to use gh or push over https. Run 'gh auth login' here."
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 9. Read back the public URL / password, verify from this machine, open it.
 #    The remote's stdout above is echoed for the user; the two SORCAR_* lines
 #    are re-read here over a fresh, quiet ssh call.
 # ---------------------------------------------------------------------------

@@ -53,6 +53,9 @@
 #   * a branch deleted on one side is recreated from the other rather than
 #     deleted on both.  Deleting a branch everywhere is a decision, not a
 #     side effect of a deploy;
+#   * a commit that only a detached HEAD holds gets a branch of its own
+#     ("sorcar-rescued-<time>") before that HEAD is left for the branch being
+#     deployed, because nothing would point at it afterwards;
 #   * ``.gitignore``d files (``.venv``, ``tmp/``, build output) are not part
 #     of the repository and therefore do not travel;
 #   * two kinds of branch are reported and left alone instead of being
@@ -81,6 +84,7 @@ warn() { printf '\033[1;33m[WARN]\033[0m  %s\n' "$*"; }
 die()  { printf '\033[0;31m[ERR]\033[0m  %s\n' "$*" >&2; exit 1; }
 
 STAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+STAMP_TAG="$(date -u +%Y%m%dT%H%M%SZ)"   # the same instant, usable in a ref name
 HOST="$(hostname -s 2>/dev/null || hostname)"
 
 # A value that survives being pasted into a remote shell command: everything
@@ -197,6 +201,28 @@ refuse_detached_work() {
     return 0
 }
 
+# Give a name to commits that only a detached HEAD holds, before that HEAD is
+# left behind for the branch being deployed.  Nothing points at such a commit
+# afterwards: it stops being reachable, and git eventually collects it -- so
+# somebody's work would be gone with no branch, no push and no warning to say
+# where it went.  A branch is created instead, which the sync then mirrors to
+# origin like any other.  Commits that a branch already contains need nothing.
+rescue_detached_head() {
+    [[ -z "$(current_branch)" ]] || return 0
+    local head rescue
+    head="$(git rev-parse -q --verify HEAD)" || return 0
+    [[ -z "$(git for-each-ref --contains "$head" --count=1 \
+             refs/heads refs/remotes 2>/dev/null)" ]] || return 0
+    rescue="sorcar-rescued-$STAMP_TAG"
+    while git rev-parse -q --verify "refs/heads/$rescue" >/dev/null; do
+        rescue="$rescue+"
+    done
+    git branch "$rescue" "$head" \
+        || die "$PWD has a detached HEAD with commits of its own that cannot be" \
+               "put on a branch — check it out somewhere before deploying."
+    warn "$PWD had commits only its detached HEAD held; they are on branch $rescue now."
+}
+
 # Put the requested branch in the working tree, keeping the work that is
 # there.  A repository without a commit is adopted; one that sits on another
 # branch commits that branch's work before leaving it.  A checkout that
@@ -211,6 +237,7 @@ attach_branch() {
     fi
     [[ "$(current_branch)" == "$want" ]] && return 0
     refuse_detached_work
+    rescue_detached_head
     [[ -n "$(current_branch)" ]] && commit_working_tree
     if git rev-parse -q --verify "refs/heads/$want" >/dev/null; then
         git checkout -q "$want" || die "Cannot check out $want in $PWD."
@@ -407,8 +434,17 @@ sync_repo() {
     # Local-only tags are left alone: a tag marks a release, not a working
     # state, so a deploy must not publish one.
     step "Fetching origin into $repo ..."
-    git fetch --prune --tags --quiet origin '+refs/heads/*:refs/remotes/origin/*' \
-        || die "Cannot fetch from origin in $repo — nothing can be synced through it."
+    if ! git fetch --prune --tags --quiet origin '+refs/heads/*:refs/remotes/origin/*'; then
+        # A local tag that names a different commit than origin's makes the
+        # whole fetch fail, and moving it is exactly what must not happen: a
+        # tag marks a release.  The branches are what a deploy needs, so they
+        # are fetched on their own and the tag is left for its owner to sort
+        # out.
+        git fetch --prune --quiet --no-tags origin '+refs/heads/*:refs/remotes/origin/*' \
+            || die "Cannot fetch from origin in $repo — nothing can be synced through it."
+        warn "Some of origin's tags were not fetched into $repo (a local tag of the" \
+             "same name names another commit); the branches were."
+    fi
 
     if [[ -n "$want" ]]; then
         attach_branch "$want"

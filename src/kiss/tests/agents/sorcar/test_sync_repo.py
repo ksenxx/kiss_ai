@@ -403,6 +403,69 @@ class SyncRepoTest(unittest.TestCase):
         self.assertEqual((self.remote / "agent_work.txt").read_text(),
                          "written on the server\n")
 
+    def test_commits_only_a_detached_head_holds_are_rescued(self) -> None:
+        """Leaving that HEAD behind would make them unreachable.
+
+        A committed detached HEAD is clean, so nothing stops the deploy --
+        and the deploy then checks out the branch it was asked for.  With
+        no branch pointing at those commits, nothing does: they stop being
+        reachable and git eventually collects them.  Somebody's work would
+        be gone with no branch, no push and no warning saying where.  A
+        branch is created for them instead, and travels like any other.
+        """
+        self.sync_ok()
+        self.git(self.remote, "checkout", "-q", "--detach", "HEAD")
+        self.write(self.remote, "agent_work.txt", "written on the server\n")
+        self.git(self.remote, "add", "-A")
+        self.git(self.remote, "-c", "user.name=Agent",
+                 "-c", "user.email=agent@example.com",
+                 "commit", "-q", "-m", "work an agent committed detached")
+        orphan = self.tip(self.remote, "HEAD")
+
+        done = self.sync_ok()
+
+        self.assertIn("detached HEAD held", done.stdout + done.stderr)
+        rescued = [b for b in self.branches(self.remote)
+                   if b.startswith("sorcar-rescued-")]
+        self.assertEqual(len(rescued), 1)
+        # On the server, on origin and back on the laptop.
+        self.assertEqual(self.tip(self.remote, rescued[0]), orphan)
+        self.assertEqual(self.tip(self.origin, rescued[0]), orphan)
+        self.assertEqual(self.tip(self.local, rescued[0]), orphan)
+        # And the deployment is on the branch it was asked for.
+        self.assertEqual(self.git(self.remote, "rev-parse", "--abbrev-ref", "HEAD"),
+                         "main")
+
+    def test_a_detached_head_a_branch_already_has_is_left_alone(self) -> None:
+        """Nothing is at risk there, so no branch is invented for it."""
+        self.sync_ok()
+        self.git(self.remote, "checkout", "-q", "--detach", "main")
+
+        self.sync_ok()
+
+        self.assertEqual([b for b in self.branches(self.remote)
+                          if b.startswith("sorcar-rescued-")], [])
+
+    def test_a_local_tag_naming_another_commit_does_not_stop_the_deploy(self) -> None:
+        """The branches are what a deploy needs; the tag is its owner's business."""
+        self.git(self.local, "tag", "v1")
+        self.git(self.local, "push", "-q", "origin", "v1")
+        # The same name on another commit here, which is what makes fetching
+        # origin's tags fail.
+        self.write(self.local, "later.txt", "later\n")
+        self.commit(self.local, "a second commit")
+        self.git(self.local, "tag", "-f", "v1")
+        moved = self.tip(self.local, "v1")
+
+        done = self.sync_ok()
+
+        # The tagged fetch really did fail, and the deploy carried on anyway.
+        self.assertIn("tags were not fetched", done.stdout + done.stderr)
+        self.assertEqual(self.tip(self.local, "main"), self.tip(self.remote, "main"))
+        # The local tag was not moved, and origin's was not moved either.
+        self.assertEqual(self.tip(self.local, "v1"), moved)
+        self.assertNotEqual(self.tip(self.origin, "v1"), moved)
+
     def test_a_quote_in_the_author_name_survives_the_ssh_line(self) -> None:
         """The remote command line is built, not interpolated by hope."""
         self.sync_ok()

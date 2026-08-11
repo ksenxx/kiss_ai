@@ -103,6 +103,10 @@ It keeps this checkout and the server's in total sync through `origin`: every br
 
 The task history travels both ways too: after a deploy, the History panel here and on the server both list every task and every event either machine ever ran. Only the rows that are missing move, no row is ever deleted, and both web apps keep running while it happens.
 
+Your GitHub.com login travels as well: every account `gh` is logged in to here is logged in on the server too, the same one active, so the agent there can open pull requests, read your private repositories and push over https as you. A token the GitHub API no longer accepts is left behind rather than shipped, the accounts the server was already logged in to are kept in `~/.kiss/`, and `SORCAR_SKIP_GITHUB_AUTH=1 rsorcar username@ip_address` leaves your credentials on this machine.
+
+A deploy restarts the server's web app, which would kill a task running there mid-step, so it stops before it touches anything if it finds one. Wait for the task, or run `SORCAR_FORCE_RESTART=1 rsorcar username@ip_address` to go ahead anyway. Nothing else on the server is overwritten either: a file of its own that the copy of your `~/.ssh` would replace is kept in `~/.kiss/ssh-replaced-<time>/`, its `~/.bashrc` is copied before one block is added to it, and the settings in its `~/.kiss/config.json` other than the password and the work directory are left as they are.
+
 # Tip
 
 ## If You Get a git Merge Conflict
