@@ -44,6 +44,12 @@ _DISPLAY_EVENT_TYPES = frozenset({
     "warning",
 })
 
+# Tools whose ``tool_call`` event names a file the agent CHANGED (as
+# opposed to merely read).  Used to track, per task, which files the
+# task modified so the end-of-task auto-commit can also commit repos
+# other than the tab's work_dir one.
+_FILE_MUTATING_TOOLS = frozenset({"Write", "Edit"})
+
 
 def stamp_event_ts(event: dict[str, Any]) -> None:
     """Stamp *event* with its wall-clock emission time, in place.
@@ -283,6 +289,15 @@ class JsonPrinter(Printer):
         # strip) owned by one tab but mirrored onto the tabs of every
         # other client viewing the same task.  Keyed by owner tab id.
         self._ui_mirrors: dict[str, _UiMirror] = {}
+        # Absolute paths of files each task changed through the
+        # file-mutating tools (Write / Edit), keyed by task id.
+        # Consumed by the task-runner's end-of-task auto-commit so
+        # changes landing OUTSIDE the tab's work_dir repository are
+        # committed too (see _autocommit_changed_repos).  Tracked
+        # in memory because event persistence is asynchronous — the
+        # DB may not yet hold the last tool_call rows when the task's
+        # finally block runs.
+        self._changed_paths: dict[str, set[str]] = {}
 
     @staticmethod
     def _coerce_task_id(value: Any) -> str:
@@ -856,6 +871,7 @@ class JsonPrinter(Printer):
                 pass
         with self._lock:
             self._recordings.pop(key, None)
+            self._changed_paths.pop(key, None)
             self._task_model_override.pop(key, None)
             self._tokens_offsets.pop(key, None)
             self._budget_offsets.pop(key, None)
@@ -1039,6 +1055,47 @@ class JsonPrinter(Printer):
         if rec is not None:
             rec.append(event)
 
+    def _track_changed_path(self, event: dict[str, Any]) -> None:
+        """Record the file path of a mutating ``tool_call`` under its task.
+
+        Only ``Write`` / ``Edit`` calls are tracked — the tools whose
+        ``path`` names a file the agent changed (``Read`` events carry
+        a path too but change nothing; ``Bash`` changes cannot be
+        attributed to paths).  Must be called with ``self._lock`` held.
+
+        Args:
+            event: A broadcast event, already task-id-injected.
+        """
+        if event.get("type") != "tool_call":
+            return
+        if event.get("name") not in _FILE_MUTATING_TOOLS:
+            return
+        path = event.get("path")
+        key = self._coerce_task_id(event.get("taskId"))
+        if not path or not key:
+            return
+        self._changed_paths.setdefault(key, set()).add(str(path))
+
+    def pop_changed_paths(self, task_id: Any) -> set[str]:
+        """Return and clear the file paths *task_id*'s tools changed.
+
+        Called once by the task-runner's end-of-task auto-commit.
+        Popping (rather than reading) keeps the map from accumulating
+        entries for tasks whose runner never consumed them.
+
+        Args:
+            task_id: The task identifier whose changed paths to take.
+
+        Returns:
+            The set of absolute path strings recorded for the task
+            (empty when nothing was tracked).
+        """
+        key = self._coerce_task_id(task_id)
+        if not key:
+            return set()
+        with self._lock:
+            return self._changed_paths.pop(key, set())
+
     def broadcast(self, event: dict[str, Any]) -> None:
         """Inject the thread-local taskId, record, and persist the event.
 
@@ -1070,6 +1127,7 @@ class JsonPrinter(Printer):
         event = self._inject_task_id(event)
         with self._lock:
             self._record_event(event)
+            self._track_changed_path(event)
         self._persist_event(event)
 
     def _cost_with_offset(self, cost: Any) -> Any:
