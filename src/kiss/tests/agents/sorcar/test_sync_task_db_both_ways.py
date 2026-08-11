@@ -25,6 +25,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -186,6 +187,40 @@ class SyncTaskDbBothWaysTest(unittest.TestCase):
         self.assertEqual(sorted(_tasks(self.remote_db)), ["L1", "L2", "R1", "R2"])
         # Merged in place, so no database was replaced wholesale.
         self.assertEqual(_backups(self.remote_kiss), [])
+
+    def test_a_live_local_task_is_not_mistaken_for_remote_work(self) -> None:
+        """The deploy task itself must not make the final restart refuse.
+
+        ``rsorcar`` can be launched by a Sorcar task.  Its database sync runs
+        while that task is still writing events.  Shipping the unfinished row
+        to the server makes the final remote safety probe report a new live
+        *remote* task, even though the task is running on this machine, and
+        every such deployment aborts just before restarting the service.
+        Finished work should travel now; live work can travel on the next run.
+        """
+        _make_db(self.local_db, ["DONE"], work_dir=_LAPTOP, events=1)
+        con = sqlite3.connect(self.local_db)
+        con.execute("UPDATE task_history SET end_ts = ? WHERE id = 'DONE'", (time.time(),))
+        con.execute(
+            "INSERT INTO task_history(id, timestamp, task, work_dir, has_events)"
+            " VALUES ('LIVE', ?, 'the deploy itself', ?, 1)",
+            (time.time(), _LAPTOP),
+        )
+        con.execute(
+            "INSERT INTO events(task_id, seq, event_json, timestamp)"
+            " VALUES ('LIVE', 0, '{}', ?)",
+            (time.time(),),
+        )
+        con.commit()
+        con.close()
+        _make_db(self.remote_db, ["REMOTE"], work_dir=_SERVER)
+
+        result = self._sync(_LAPTOP, _SERVER)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(sorted(_tasks(self.remote_db)), ["DONE", "REMOTE"])
+        self.assertEqual(sorted(_tasks(self.local_db)), ["DONE", "LIVE", "REMOTE"])
+        self.assertIn("live local task", result.stdout)
 
     def test_the_remotes_tasks_arrive_pointing_at_this_checkout(self) -> None:
         """Otherwise the panel's Workspace chip hides the whole import.

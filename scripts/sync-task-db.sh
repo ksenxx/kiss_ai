@@ -151,6 +151,10 @@ REMOTE_FINGERPRINT_AT_PULL=""
 # Set by anything that did not do what it set out to do.  Such a run has not
 # synced the two machines, and must not report that it has.
 INCOMPLETE=0
+# IDs that were live on this machine before any remote rows were merged here.
+# After the pull, row contents alone cannot say which machine a live task came
+# from, and a genuinely remote task must survive a forced replacement.
+LOCAL_LIVE_TASK_IDS=""
 
 # Report a step that failed without giving up on the rest of the sync: the
 # other direction, or the other machine, may still have work that can travel.
@@ -224,6 +228,53 @@ snapshot_local_db() {
 con = sqlite3.connect(sys.argv[1], timeout=60)
 con.execute("VACUUM INTO ?", (sys.argv[2],))
 con.close()' "$DB" "$SNAPSHOT"
+}
+
+# A deployment can itself be a task in this machine's database.  Sending that
+# unfinished row to the server makes the final restart guard mistake it for a
+# task that began *there* during the deploy, so the deploy refuses to restart
+# itself.  Capture local identity before the pull: afterwards a genuinely
+# remote live row has been merged here too and must not be filtered back out.
+capture_live_local_tasks() {
+    local answer count
+    [[ -f "$DB" && -f "$RUNNING_TASKS" ]] || return 0
+    answer="$(python3 "$RUNNING_TASKS" "$DB" "$LIVE_TASK_WINDOW" 2>/dev/null || true)"
+    count="$(printf '%s\n' "$answer" | head -1 | tr -d '[:space:]')"
+    [[ "$count" =~ ^[0-9]+$ ]] || {
+        warn "Could not identify live local tasks before syncing; continuing."
+        return 0
+    }
+    ((count > 0)) || return 0
+    LOCAL_LIVE_TASK_IDS="$(printf '%s\n' "$answer" | tail -n +2 | sed 's/ [^ ]*$//')"
+}
+
+# Leave the captured local rows out of the outgoing snapshot.  Completed tasks,
+# stale interrupted tasks, and live tasks pulled from the remote still travel;
+# deferred local work travels on the next sync after it finishes.  The live
+# database itself is never changed.
+omit_live_tasks_from_snapshot() {
+    local removed
+    [[ -n "$LOCAL_LIVE_TASK_IDS" ]] || return 0
+    removed="$(printf '%s\n' "$LOCAL_LIVE_TASK_IDS" \
+        | python3 -c 'import sqlite3, sys
+snapshot = sys.argv[1]
+task_ids = [line.rstrip("\n") for line in sys.stdin if line.rstrip("\n")]
+con = sqlite3.connect(snapshot, timeout=60)
+try:
+    con.execute("CREATE TEMP TABLE live_local_tasks(id TEXT PRIMARY KEY)")
+    con.executemany("INSERT INTO live_local_tasks(id) VALUES (?)",
+                    ((task_id,) for task_id in task_ids))
+    con.execute("DELETE FROM events WHERE task_id IN"
+                " (SELECT id FROM live_local_tasks)")
+    removed = con.execute("DELETE FROM task_history WHERE id IN"
+                          " (SELECT id FROM live_local_tasks)").rowcount
+    con.commit()
+    print(removed)
+finally:
+    con.close()' "$SNAPSHOT")"
+    if ((removed > 0)); then
+        info "Deferred $removed live local task(s); they will sync after they finish."
+    fi
 }
 
 # What the remote's database holds, in one line, for comparing two moments in
@@ -375,6 +426,7 @@ push_to_remote() {
     step "Snapshotting $DB ..."
     snapshot_local_db \
         || die "Could not snapshot $DB (no space in $TMP_DIR, or a stuck writer?)."
+    omit_live_tasks_from_snapshot
     tasks="$(count_tasks "$SNAPSHOT" 2>/dev/null || true)"
     [[ "$tasks" =~ ^[0-9]+$ ]] || die "The snapshot of $DB is not a readable database."
     info "Snapshot taken: $tasks tasks, $(du -h "$SNAPSHOT" | cut -f1)."
@@ -669,6 +721,9 @@ print(con.execute("SELECT count(*) FROM task_history").fetchone()[0])
 con.close()
 PY
 
+# Preserve which live rows belonged to this machine before pull_from_remote
+# makes the two histories indistinguishable.
+capture_live_local_tasks
 
 case "$REMOTE_DB_STATE" in
     ok) pull_from_remote ;;
