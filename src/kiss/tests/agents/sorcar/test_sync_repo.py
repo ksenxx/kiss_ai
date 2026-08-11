@@ -249,6 +249,33 @@ class SyncRepoTest(unittest.TestCase):
         self.assertIn("feature-x", self.branches(self.remote))
         self.assert_in_sync("main", "feature-x")
 
+    def test_a_rejected_side_branch_does_not_block_the_deployed_branch(self) -> None:
+        """An archival branch must not make a valid deployment impossible.
+
+        Git servers can reject one historical ref (for example, because it
+        contains an oversized blob).  Sending that ref and the checked-out
+        deployment branch in one push lets the rejection reject both.  The
+        branch being deployed must travel independently; auxiliary failures
+        remain warnings.
+        """
+        hook = self.origin / "hooks" / "pre-receive"
+        hook.write_text(
+            "#!/bin/bash\n"
+            "while read -r old new ref; do\n"
+            "  [ \"$ref\" != refs/heads/unpushable ] || exit 1\n"
+            "done\n"
+        )
+        hook.chmod(0o755)
+        self.git(self.local, "branch", "unpushable")
+        self.write(self.local, "deploy-me.txt", "new main content\n")
+
+        done = self.sync_ok()
+
+        self.assertIn("could not be pushed", (done.stdout + done.stderr).lower())
+        self.assertEqual((self.remote / "deploy-me.txt").read_text(), "new main content\n")
+        self.assertNotIn("unpushable", self.branches(self.remote))
+        self.assert_in_sync("main")
+
     def test_a_rejected_branch_is_not_retried_in_the_same_deploy(self) -> None:
         """A permanent rejection must not make pass three repeat a slow push.
 
