@@ -5,7 +5,7 @@
 """Integration tests for 100% branch coverage of sorcar/ and vscode/ modules.
 
 Targets remaining uncovered branches in:
-  cli_helpers.py: lines 23, 53->39, 106-119, 137-142, 153-155, 172-180, 200-203
+  _channel_cli.py (channel-agent CLI helpers)
   persistence.py: lines 263, 426
   sorcar_agent.py: lines 251-252
   chat_sorcar_agent.py: lines 130->134, 132-133
@@ -30,13 +30,12 @@ from pathlib import Path
 import pytest
 
 from kiss.agents.sorcar import persistence as th
-from kiss.agents.sorcar.cli_helpers import (
-    _build_arg_parser,
-    _build_run_kwargs,
-    _print_recent_chats,
-)
 from kiss.agents.sorcar.git_worktree import GitWorktree
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent, _generate_commit_message
+from kiss.agents.third_party_agents._channel_cli import (
+    _build_arg_parser,
+    _build_run_kwargs,
+)
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
@@ -63,26 +62,7 @@ def _restore_db(saved: _SavedState) -> None:
 
 
 class TestCliHelpers:
-    """Cover uncovered branches in cli_helpers.py."""
-
-    def test_print_recent_chats_with_data(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        """_print_recent_chats with populated chats prints session data."""
-        saved = _redirect_db(str(tmp_path))
-        try:
-            _, chat_id = th._add_task("task one")
-            th._save_task_result(result="result one", task="task one")
-            long_text = "X" * 300
-            th._add_task(long_text, chat_id=chat_id)
-            th._save_task_result(result="R" * 300, task=long_text)
-            th._add_task("task no result", chat_id=chat_id)
-            th._save_task_result(result="", task="task no result")
-            _print_recent_chats()
-            out = capsys.readouterr().out
-            assert "Chat ID:" in out
-        finally:
-            _restore_db(saved)
+    """Cover uncovered branches in _channel_cli.py."""
 
     def test_build_run_kwargs(self) -> None:
         """_build_run_kwargs builds kwargs from parsed args."""

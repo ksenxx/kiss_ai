@@ -510,8 +510,8 @@ class ChatSorcarAgent(SorcarAgent):
         Runs that happen inside a chat webview stream every agent event
         through a recording printer (the VS Code server's ``JsonPrinter``
         / ``WebPrinter``), which persists them to the ``events`` table.
-        Runs that happen OUTSIDE a chat webview — the CLI, the
-        third-party channel agents, or a remote webapp invocation with a
+        Runs that happen OUTSIDE a chat webview — the third-party
+        channel agents, or a remote webapp invocation with a
         non-recording printer — leave the ``events`` table empty, so the
         chat webview would load a blank session even though the task and
         its result are in ``task_history``.

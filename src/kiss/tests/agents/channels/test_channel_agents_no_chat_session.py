@@ -13,8 +13,9 @@ Verifies the contract enforced by the
 2. ``channel_main()``'s parser rejects every chat-session CLI flag
    (``-n/--new``, ``-c/--chat-id``, ``-l/--list-chat-id``) — they no
    longer exist anywhere in the project's CLI surface.
-3. The ``_apply_chat_args`` helper has been removed from
-   ``kiss.agents.sorcar.cli_helpers``.
+3. The ``_apply_chat_args`` helper has been removed from the
+   channel-agent CLI helpers
+   (``kiss.agents.third_party_agents._channel_cli``).
 """
 
 from __future__ import annotations
@@ -143,13 +144,13 @@ def test_channel_main_rejects_chat_session_flag(
 
 
 def test_apply_chat_args_helper_removed() -> None:
-    """``_apply_chat_args`` no longer exists in ``cli_helpers``.
+    """``_apply_chat_args`` no longer exists in the CLI helpers.
 
     Its only consumer was the channel-agent CLI, which is now a
     plain :class:`SorcarAgent` and has no use for chat-session
     routing.  The helper itself is removed so the chat-session
     surface really is gone from the project.
     """
-    from kiss.agents.sorcar import cli_helpers
+    from kiss.agents.third_party_agents import _channel_cli
 
-    assert not hasattr(cli_helpers, "_apply_chat_args")
+    assert not hasattr(_channel_cli, "_apply_chat_args")

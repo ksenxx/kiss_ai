@@ -277,36 +277,5 @@ class TestFileUsage:
             th._MAX_FILE_USAGE_ENTRIES = orig
 
 
-class TestListRecentChats:
-    def setup_method(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
-
-    def teardown_method(self):
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
-        _restore(self.saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-
-class TestPrintRecentChats:
-    def setup_method(self):
-        self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect(self.tmpdir)
-
-    def teardown_method(self):
-        if th._db_conn is not None:
-            th._db_conn.close()
-            th._db_conn = None
-        _restore(self.saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_print_empty(self, capsys):
-        from kiss.agents.sorcar.cli_helpers import _print_recent_chats
-        _print_recent_chats()
-        assert "No chat sessions found." in capsys.readouterr().out
-
-
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

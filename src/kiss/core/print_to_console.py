@@ -99,17 +99,6 @@ class ConsolePrinter(Printer):
             self._file.flush()
             self._mid_line = False
 
-    def flush_newline(self) -> None:
-        """Public wrapper around :meth:`_flush_newline`.
-
-        External callers (e.g. the sorcar CLI client driving streamed
-        ``text_delta`` events from the daemon) need to terminate any
-        partially-written line before the next Rich panel renders.
-        Exposed as a stable name so they don't reach into ``_mid_line``
-        directly.
-        """
-        self._flush_newline()
-
     def _stream_delta(self, text: str, **kwargs: Any) -> None:
         self._console.print(text, end="", highlight=False, markup=False, **kwargs)
         if text:
@@ -312,9 +301,9 @@ class ConsolePrinter(Printer):
         """Return True iff a ``Read`` tool_result should be syntax-highlighted.
 
         The output of the ``Read`` tool is the textual content of the
-        file the model asked to read.  The sorcar CLI interactive
-        terminal MUST render that content with syntax highlighting
-        derived from the file extension (matching the language picker
+        file the model asked to read.  The console renders that
+        content with syntax highlighting derived from the file
+        extension (matching the language picker
         used by ``_format_tool_call`` for the inverse direction —
         ``Write`` / ``Edit`` inputs).  Non-content results (errors,
         the ``(file is empty)`` sentinel, the binary-attachment

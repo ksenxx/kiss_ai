@@ -10,13 +10,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, cast
 
-from kiss.agents.sorcar.cli_helpers import _build_arg_parser
-from kiss.agents.sorcar.sorcar_agent import (
-    SorcarAgent,
-    _resolve_task,
-    cli_ask_user_question,
-)
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.web_use_tool import WebUseTool
+from kiss.agents.third_party_agents._channel_cli import (
+    _build_arg_parser,
+    _resolve_task,
+)
 from kiss.core.models.model import Attachment
 from kiss.server.json_printer import JsonPrinter
 
@@ -136,24 +135,11 @@ class TestResolveTask:
 
 class TestDefaultTaskNoCredentials:
     def test_no_password_in_default_task(self) -> None:
-        from kiss.agents.sorcar.sorcar_agent import _DEFAULT_TASK
+        from kiss.agents.third_party_agents._channel_cli import _DEFAULT_TASK
 
         assert "password" not in _DEFAULT_TASK.lower()
         assert "kissagent" not in _DEFAULT_TASK.lower()
         assert "@gmail" not in _DEFAULT_TASK.lower()
-
-
-class TestCliAskUserQuestion:
-    def test_returns_user_input(self, monkeypatch: object) -> None:
-        import builtins
-
-        monkeypatch.setattr(builtins, "input", lambda prompt="": "my answer")  # type: ignore[attr-defined]
-        captured: list[str] = []
-        monkeypatch.setattr(builtins, "print", lambda *a, **kw: captured.append(str(a)))  # type: ignore[attr-defined]
-
-        result = cli_ask_user_question("What is your name?")
-        assert result == "my answer"
-        assert any("What is your name?" in s for s in captured)
 
 
 class TestSorcarAgentCallbackWiring:
@@ -210,13 +196,11 @@ class TestBuildArgParser:
             "--model_name", "gpt-4",
             "--max_budget", "1.5",
             "--work_dir", "/tmp/test",
-            "--verbose", "false",
             "--task", "hello world",
         ])
         assert args.model_name == "gpt-4"
         assert args.max_budget == 1.5
         assert args.work_dir == "/tmp/test"
-        assert args.verbose is False
         assert args.task == "hello world"
 
 class TestSorcarBashStreaming:

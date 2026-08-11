@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """Bug-hunt 9 (findings-2 audit): persistence, git_worktree, skills,
-custom_commands, cli_helpers regressions.
+custom_commands, and channel-CLI helper regressions.
 
 Covers, end-to-end with real files/processes/DBs (no mocks/patches):
 
@@ -38,11 +38,11 @@ import pytest
 
 import kiss.agents.sorcar.custom_commands as cc
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.cli_helpers import _parse_budget_value
 from kiss.agents.sorcar.custom_commands import CustomCommand, expand_command
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.agents.sorcar.persistence import _add_task, _prefix_match_tasks
 from kiss.agents.sorcar.skills import parse_frontmatter
+from kiss.agents.third_party_agents._channel_cli import _parse_budget_value
 
 
 def _run_git(*args: str, cwd: Path) -> None:

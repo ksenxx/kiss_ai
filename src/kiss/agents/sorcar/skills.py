@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Agent Skills support for the ``sorcar`` CLI and agent.
+"""Agent Skills support for the Sorcar agent.
 
 Implements the `Agent Skills <https://agentskills.io>`_ open standard
 with Claude Code compatibility: a *skill* is a directory containing a

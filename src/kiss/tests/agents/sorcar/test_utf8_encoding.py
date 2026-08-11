@@ -84,7 +84,7 @@ print("OK")
         task_file.write_bytes(NON_ASCII.encode("utf-8"))
         script = f"""
 import argparse, json
-from kiss.agents.sorcar.cli_helpers import _resolve_task
+from kiss.agents.third_party_agents._channel_cli import _resolve_task
 
 args = argparse.Namespace(file={str(task_file)!r}, task=None)
 loaded = _resolve_task(args)

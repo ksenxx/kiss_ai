@@ -24,7 +24,7 @@ real child Python interpreter whose:
 and then asserting that the argument parser resolves ``--work_dir``
 to the user's shell directory rather than the chdir'd project
 directory.  Without the launch-dir capture in
-:func:`kiss.agents.sorcar.cli_helpers._launch_work_dir`, the parser
+:func:`kiss.agents.third_party_agents._channel_cli._launch_work_dir`, the parser
 would return the bundled-project path instead and break every task
 run by the wrapper.
 """
@@ -39,7 +39,7 @@ from pathlib import Path
 
 _PROBE_SOURCE = textwrap.dedent(
     """
-    from kiss.agents.sorcar.cli_helpers import (
+    from kiss.agents.third_party_agents._channel_cli import (
         _build_arg_parser,
         _build_run_kwargs,
     )
@@ -170,7 +170,7 @@ def test_explicit_w_flag_still_overrides_launch_dir(tmp_path: Path) -> None:
     env["KISS_WORKDIR"] = str(user_shell_dir)
     source = textwrap.dedent(
         f"""
-        from kiss.agents.sorcar.cli_helpers import (
+        from kiss.agents.third_party_agents._channel_cli import (
             _build_arg_parser,
             _build_run_kwargs,
         )

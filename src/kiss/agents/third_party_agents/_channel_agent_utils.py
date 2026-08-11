@@ -574,7 +574,7 @@ def channel_main(
     """
     import inspect
 
-    from kiss.agents.sorcar.cli_helpers import (
+    from kiss.agents.third_party_agents._channel_cli import (
         _build_arg_parser,
         _build_run_kwargs,
         _print_run_stats,

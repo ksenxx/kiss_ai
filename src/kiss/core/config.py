@@ -3,14 +3,13 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""Configuration Pydantic models for KISS agent settings with CLI support."""
+"""Configuration Pydantic models for KISS agent settings."""
 
 import os
 import random
 import threading
 import time
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -147,12 +146,13 @@ class Config(BaseModel):
         default=200.0,
         description=(
             "Maximum budget in USD for a single agent run. Only consumed as the "
-            "default for the Sorcar CLI's --max-budget option (and settable from "
-            "the VS Code settings); KISSAgent and RelentlessAgent do NOT consult "
-            "this field — they use their own defaults (10.0 and 200.0 USD "
-            "respectively) unless max_budget is passed to run() explicitly."
+            "default for channel-agent command-line runs (and kept in sync from "
+            "the VS Code settings; daemon-launched tasks read max_budget from "
+            "the VS Code config directly); KISSAgent and RelentlessAgent do NOT "
+            "consult this field — they use their own defaults (10.0 and 200.0 "
+            "USD respectively) unless max_budget is passed to run() explicitly."
         ),
     )
 
 
-DEFAULT_CONFIG: Any = Config()
+DEFAULT_CONFIG = Config()
