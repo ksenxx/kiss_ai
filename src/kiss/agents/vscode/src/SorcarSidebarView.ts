@@ -112,7 +112,6 @@ function isTextLikeExtension(filePath: string): boolean {
 import {AgentClient} from './AgentClient';
 import {SorcarApi} from './SorcarApi';
 import {getGitApi} from './gitApi';
-import {MergeManager} from './MergeManager';
 import {getDefaultModel} from './DependencyInstaller';
 import {buildChatHtml, readSampleTasks} from './SorcarTab';
 import {VoiceWakeService} from './voiceWake';
@@ -132,19 +131,6 @@ import {
   showInformationNotification,
   withWebviewNotificationProgress,
 } from './WebviewNotifications';
-
-export const MERGE_ACTIONS = {
-  accept: 'acceptChange',
-  reject: 'rejectChange',
-  prev: 'prevChange',
-  next: 'nextChange',
-  'accept-all': 'acceptAll',
-  'reject-all': 'rejectAll',
-  'accept-file': 'acceptFile',
-  'reject-file': 'rejectFile',
-} as const;
-
-export type MergeCommand = (typeof MERGE_ACTIONS)[keyof typeof MERGE_ACTIONS];
 
 const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   appendUserMessage: ['prompt', 'tabId'],
@@ -180,7 +166,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _voiceSensitivity: number | undefined;
   private _voiceWakeSuspendedByHide: boolean = false;
 
-  private _mergeManagers: Map<string, MergeManager> = new Map();
   private _onCommitMessage = new vscode.EventEmitter<{
     message: string;
     error?: string;
@@ -189,27 +174,15 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   public readonly onCommitMessage = this._onCommitMessage.event;
   private _commitPendingTabs: Set<string> = new Set();
   private _worktreeDirs: Map<string, string> = new Map();
-  // Repository directory carried by each tab's merge_data payload; echoed
-  // back on the all-done mergeAction so the daemon's post-merge dirty-file
-  // scan runs against the tab's own repository.
-  private _mergeWorkDirs: Map<string, string> = new Map();
   private _worktreeActionResolves: Map<string, () => void> = new Map();
   private _worktreeProgresses: Map<
     string,
     vscode.Progress<{message?: string}>
   > = new Map();
-  private _autocommitActionResolves: Map<string, () => void> = new Map();
-  private _autocommitProgresses: Map<
-    string,
-    vscode.Progress<{message?: string}>
-  > = new Map();
-  public _autocommitProgressTimeoutMs: number | undefined = undefined;
   private _disposed: boolean = false;
   private _lastSentUrl: string = '';
   private _lastSeenRemotePassword: string | undefined;
   private _configFileWatchTimer?: ReturnType<typeof setInterval>;
-  private _preMergeOpenFiles: Map<string, Set<string>> = new Map();
-  private _restoreChain: Promise<void> = Promise.resolve();
   private _onFirstResolve: (() => void) | undefined;
   private _sizeReportResolver:
     ((s: {inner: number; screen: number}) => void) | undefined;
@@ -269,9 +242,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     for (const resolve of this._worktreeActionResolves.values()) resolve();
     this._worktreeActionResolves.clear();
     this._worktreeProgresses.clear();
-    for (const resolve of this._autocommitActionResolves.values()) resolve();
-    this._autocommitActionResolves.clear();
-    this._autocommitProgresses.clear();
   }
 
   public onFirstResolve(cb: () => void): void {
@@ -288,28 +258,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       vscode.workspace
         .getConfiguration('kissSorcar')
         .get<string>('defaultModel') || getDefaultModel();
-  }
-
-  private _getOrCreateMergeManager(tabId: string): MergeManager {
-    const existing = this._mergeManagers.get(tabId);
-    if (existing) return existing;
-    const mgr = new MergeManager();
-    this._mergeManagers.set(tabId, mgr);
-    mgr.on('allDone', () => {
-      this._mergeManagers.delete(tabId);
-      const openedByMerge = new Set(mgr.openedFiles);
-      mgr.dispose();
-      this.sendMergeAllDone(tabId);
-      this._restoreChain = this._restoreChain
-        .then(() => this._restorePreMergeEditors(tabId, openedByMerge))
-        .catch(err => {
-          console.error(
-            '[SorcarSidebarView] restorePreMergeEditors failed:',
-            err,
-          );
-        });
-    });
-    return mgr;
   }
 
   private _getApi(): SorcarApi {
@@ -373,42 +321,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           this._ownTabs.add(subMsg.tab_id);
         }
       }
-      if (msg.type === 'merge_data') {
-        const mergeTabId = msg.tabId;
-        if (mergeTabId !== undefined && this._ownTabs.has(mergeTabId)) {
-          const mergeWorkDir = (msg.data as {work_dir?: string}).work_dir;
-          if (mergeWorkDir) {
-            this._mergeWorkDirs.set(mergeTabId, mergeWorkDir);
-          }
-          const mgr = this._getOrCreateMergeManager(mergeTabId);
-          this._restoreChain = this._restoreChain
-            .then(async () => {
-              if (!this._preMergeOpenFiles.has(mergeTabId)) {
-                this._preMergeOpenFiles.set(
-                  mergeTabId,
-                  this._getOpenEditorFiles(),
-                );
-              }
-              // A merge from a chat tab the user is not looking at must
-              // not pull an editor in front of them: prepare the review
-              // state and let them see it when they visit that tab.
-              // Preparing the merge awaits several host operations, and
-              // the user can switch tabs while they run, so pass a live
-              // predicate rather than a snapshot of the answer.
-              await mgr.openMerge(
-                msg.data,
-                () => mergeTabId === this._activeTabId,
-              );
-            })
-            .catch(err => {
-              console.error(
-                '[SorcarSidebarView] openMerge failed for tab',
-                mergeTabId,
-                err,
-              );
-            });
-        }
-      }
       if (msg.type === 'worktree_created' || msg.type === 'worktree_done') {
         const dir = msg.worktreeDir;
         const wtTabId = msg.tabId;
@@ -458,26 +370,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           }
         }
       }
-      if (msg.type === 'autocommit_progress') {
-        const apTabId = msg.tabId;
-        const progress =
-          apTabId !== undefined
-            ? this._autocommitProgresses.get(apTabId)
-            : this._autocommitProgresses.values().next().value;
-        if (progress) {
-          progress.report({message: msg.message});
-        }
-      }
       if (msg.type === 'autocommit_done' && this._isOwnTab(msg.tabId)) {
-        const adTabId = msg.tabId;
-        if (adTabId !== undefined) {
-          const resolve = this._autocommitActionResolves.get(adTabId);
-          if (resolve) {
-            resolve();
-            this._autocommitActionResolves.delete(adTabId);
-          }
-          this._autocommitProgresses.delete(adTabId);
-        }
         if (msg.success) {
           showInformationNotification(msg.message || 'Auto-commit completed.');
         } else {
@@ -489,9 +382,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       // webview flags the waiting tab instead, so the user decides when to
       // answer it.
 
-      if (msg.type !== 'merge_data') {
-        this._sendToWebview(msg);
-      }
+      this._sendToWebview(msg);
       if (msg.type === 'status') {
         const statusTabId = msg.tabId;
         if (msg.running) {
@@ -585,46 +476,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   get hasFocus(): boolean {
     return this._webviewHasFocus;
-  }
-
-  private _getOpenEditorFiles(): Set<string> {
-    const files = new Set<string>();
-    for (const group of vscode.window.tabGroups.all) {
-      for (const tab of group.tabs) {
-        if (tab.input instanceof vscode.TabInputText) {
-          files.add(tab.input.uri.fsPath);
-        }
-      }
-    }
-    return files;
-  }
-
-  private async _restorePreMergeEditors(
-    tabId: string,
-    openedByMerge?: Set<string>,
-  ): Promise<void> {
-    const snapshot = this._preMergeOpenFiles.get(tabId);
-    this._preMergeOpenFiles.delete(tabId);
-    if (!snapshot) return;
-    const tabsToClose: vscode.Tab[] = [];
-    for (const group of vscode.window.tabGroups.all) {
-      for (const tab of group.tabs) {
-        if (tab.input instanceof vscode.TabInputText) {
-          const fp = tab.input.uri.fsPath;
-          // Close only editors the merge review itself opened; anything
-          // the user opened during the review must stay open.
-          if (
-            !snapshot.has(fp) &&
-            (openedByMerge === undefined || openedByMerge.has(fp))
-          ) {
-            tabsToClose.push(tab);
-          }
-        }
-      }
-    }
-    if (tabsToClose.length > 0) {
-      await vscode.window.tabGroups.close(tabsToClose);
-    }
   }
 
   private _getWorkDir(): string {
@@ -990,24 +841,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
       }
 
-      case 'mergeAction': {
-        const mTabId = message.tabId || this._activeTabId;
-        const mgr = this._mergeManagers.get(mTabId);
-        if (!mgr) {
-          if (message.action === 'all-done') {
-            this.sendMergeAllDone(mTabId);
-          }
-          break;
-        }
-        const mAction = message.action;
-        const method = MERGE_ACTIONS[mAction as keyof typeof MERGE_ACTIONS];
-        if (method) void mgr[method]();
-        else if (mAction === 'all-done') {
-          this.sendMergeAllDone(mTabId);
-        }
-        break;
-      }
-
       case 'worktreeAction': {
         const wtAction = message.action;
         const wtTabId = message.tabId;
@@ -1024,22 +857,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           );
         }
         this._getApi().worktreeAction(wtAction, wtTabId);
-        break;
-      }
-
-      case 'autocommitAction': {
-        const acAction = message.action;
-        const acTabId = message.tabId;
-        if (acAction === 'commit') {
-          this._showActionProgress(
-            'Auto-committing…',
-            acTabId,
-            this._autocommitProgresses,
-            this._autocommitActionResolves,
-            this._autocommitProgressTimeoutMs,
-          );
-        }
-        this._getApi().autocommitAction(acAction, acTabId, message.workDir);
         break;
       }
 
@@ -1067,8 +884,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._webviewHasFocus = message.focused;
         break;
 
-      // Which chat tab the user is looking at. Host-side actions that
-      // take over the editor (opening a merge) are only allowed for it.
+      // Which chat tab the user is looking at.
       case 'activeTabChanged':
         this._activeTabId = message.tabId;
         break;
@@ -1165,28 +981,15 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   /** Release every host-side resource owned by a closed tab. */
   private _cleanupTabResources(tabId: string): void {
-    const mgr = this._mergeManagers.get(tabId);
-    if (mgr) {
-      this._mergeManagers.delete(tabId);
-      mgr.dispose();
-    }
     this._runningTabs.delete(tabId);
     this._commitPendingTabs.delete(tabId);
     this._worktreeDirs.delete(tabId);
-    this._mergeWorkDirs.delete(tabId);
-    this._preMergeOpenFiles.delete(tabId);
     const wtResolve = this._worktreeActionResolves.get(tabId);
     if (wtResolve) {
       this._worktreeActionResolves.delete(tabId);
       wtResolve();
     }
     this._worktreeProgresses.delete(tabId);
-    const acResolve = this._autocommitActionResolves.get(tabId);
-    if (acResolve) {
-      this._autocommitActionResolves.delete(tabId);
-      acResolve();
-    }
-    this._autocommitProgresses.delete(tabId);
   }
 
   public runUpdate(): void {
@@ -1217,22 +1020,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       `bash '${escScript}'`,
     ].join('; ');
     terminal.sendText(preflight);
-  }
-
-  public handleMergeCommand(cmd: MergeCommand): void {
-    const mgr = this._mergeManagers.get(this._activeTabId);
-    if (mgr) void mgr[cmd]();
-  }
-
-  public sendMergeAllDone(tabId?: string): void {
-    const mergeWorkDir =
-      tabId !== undefined ? this._mergeWorkDirs.get(tabId) : undefined;
-    if (tabId !== undefined) this._mergeWorkDirs.delete(tabId);
-    this._getApi().mergeAction(
-      'all-done',
-      tabId,
-      mergeWorkDir || this._getWorkDir(),
-    );
   }
 
   public async submitTask(prompt: string): Promise<void> {
@@ -1398,8 +1185,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       this._workspaceFoldersSub.dispose();
       this._workspaceFoldersSub = undefined;
     }
-    for (const mgr of this._mergeManagers.values()) mgr.dispose();
-    this._mergeManagers.clear();
     if (this._client) {
       this._client.dispose();
       this._client = null;

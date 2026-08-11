@@ -8,7 +8,6 @@
 // E2E tests for SorcarSidebarView routing/lifecycle findings:
 // VS-011: openFile/checkPaths must resolve against the tab's workDir.
 // VS-012: symlinks must not escape the workspace containment check.
-// VS-014: merge all-done must echo the merge_data work_dir.
 // VS-016: closeTab must release per-tab host resources.
 // VS-018: stopTask without a resolved webview must stop via the API.
 
@@ -149,8 +148,6 @@ function makeView() {
     run: c => sent.push({type: 'run', ...c}),
     stop: tabId => sent.push({type: 'stop', tabId}),
     complete: c => sent.push({type: 'complete', ...c}),
-    mergeAction: (action, tabId, workDir) =>
-      sent.push({type: 'mergeAction', action, tabId, workDir}),
     closeTab: tabId => sent.push({type: 'closeTab', tabId}),
     getModels: () => {},
     getInputHistory: () => {},
@@ -161,7 +158,6 @@ function makeView() {
     userAnswer: () => {},
     resumeSession: () => {},
     worktreeAction: () => {},
-    autocommitAction: () => {},
     generateCommitMessage: () => {},
     serverReset: () => {},
     appendUserMessage: () => {},
@@ -261,27 +257,6 @@ async function testSymlinkEscapeRefused() {
   console.log('ok - VS-012 symlink escape refused');
 }
 
-// VS-014: merge all-done echoes the merge_data work_dir.
-async function testMergeAllDoneUsesMergeWorkDir() {
-  const {view, sent} = makeView();
-  view._ownTabs.add('tabX');
-  view._mergeWorkDirs.set('tabX', tabRepo);
-  view.sendMergeAllDone('tabX');
-  const msg = sent.find(m => m.type === 'mergeAction');
-  assert.ok(msg, 'mergeAction sent');
-  assert.strictEqual(
-    msg.workDir,
-    tabRepo,
-    'VS-014: all-done must carry the merge work_dir, not workspace 0',
-  );
-  assert.ok(
-    !view._mergeWorkDirs.has('tabX'),
-    'merge workDir entry must be consumed',
-  );
-  view.dispose();
-  console.log('ok - VS-014 merge all-done echoes merge_data work_dir');
-}
-
 // VS-016: closeTab releases per-tab resources.
 async function testCloseTabCleansResources() {
   const {view, sent} = makeView();
@@ -289,26 +264,16 @@ async function testCloseTabCleansResources() {
   view._runningTabs.add('tabY');
   view._commitPendingTabs.add('tabY');
   view._worktreeDirs.set('tabY', tabRepo);
-  view._mergeWorkDirs.set('tabY', tabRepo);
-  view._preMergeOpenFiles.set('tabY', new Set());
   let resolved = false;
   view._worktreeActionResolves.set('tabY', () => (resolved = true));
   view._worktreeProgresses.set('tabY', {report() {}});
-  const mgr = view._getOrCreateMergeManager('tabY');
-  assert.ok(view._mergeManagers.has('tabY'));
   await view._handleMessage({type: 'closeTab', tabId: 'tabY'});
-  assert.ok(!view._mergeManagers.has('tabY'), 'VS-016: merge manager leaked');
   assert.ok(!view._runningTabs.has('tabY'), 'VS-016: runningTabs leaked');
   assert.ok(
     !view._commitPendingTabs.has('tabY'),
     'VS-016: commitPendingTabs leaked',
   );
   assert.ok(!view._worktreeDirs.has('tabY'), 'VS-016: worktreeDirs leaked');
-  assert.ok(!view._mergeWorkDirs.has('tabY'), 'VS-016: mergeWorkDirs leaked');
-  assert.ok(
-    !view._preMergeOpenFiles.has('tabY'),
-    'VS-016: preMergeOpenFiles leaked',
-  );
   assert.ok(resolved, 'VS-016: worktree progress resolver not resolved');
   assert.ok(
     !view._worktreeActionResolves.has('tabY') &&
@@ -319,7 +284,6 @@ async function testCloseTabCleansResources() {
     sent.some(m => m.type === 'closeTab' && m.tabId === 'tabY'),
     'closeTab still forwarded to the daemon',
   );
-  void mgr;
   view.dispose();
   console.log('ok - VS-016 closeTab releases per-tab resources');
 }
@@ -357,44 +321,11 @@ async function testCompleteUsesMessageTabId() {
   console.log('ok - VS-013 completion uses the message tabId');
 }
 
-// VS-015: post-merge restore closes only editors the merge itself opened.
-async function testRestoreClosesOnlyMergeOpenedEditors() {
-  const {view} = makeView();
-  const vscode = global.__kissVscodeStub;
-  const mkTab = fp => {
-    const input = new vscode.TabInputText();
-    input.uri = {fsPath: fp, scheme: 'file'};
-    return {input};
-  };
-  const userFile = path.join(wsRoot, 'user-opened.txt');
-  const mergeFile = path.join(wsRoot, 'merge-opened.txt');
-  const closed = [];
-  vscode.window.tabGroups = {
-    all: [{tabs: [mkTab(userFile), mkTab(mergeFile)]}],
-    close: tabs => {
-      for (const t of tabs) closed.push(t.input.uri.fsPath);
-      return Promise.resolve(true);
-    },
-  };
-  view._preMergeOpenFiles.set('tabR', new Set()); // nothing open pre-merge
-  await view._restorePreMergeEditors('tabR', new Set([mergeFile]));
-  assert.deepStrictEqual(
-    closed,
-    [mergeFile],
-    'VS-015: restore must close only editors the merge review opened',
-  );
-  vscode.window.tabGroups = {all: [], close: () => Promise.resolve(true)};
-  view.dispose();
-  console.log('ok - VS-015 restore keeps user-opened editors');
-}
-
 async function run() {
   await testOpenFileHonorsTabWorkDir();
   await testCompleteUsesMessageTabId();
-  await testRestoreClosesOnlyMergeOpenedEditors();
   await testCheckPathsHonorsTabWorkDir();
   await testSymlinkEscapeRefused();
-  await testMergeAllDoneUsesMergeWorkDir();
   await testCloseTabCleansResources();
   await testStopTaskWithoutWebview();
   await delay(10);

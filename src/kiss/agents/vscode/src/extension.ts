@@ -6,7 +6,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import {MERGE_ACTIONS, SorcarSidebarView} from './SorcarSidebarView';
+import {SorcarSidebarView} from './SorcarSidebarView';
 import {getGitApi} from './gitApi';
 import {isReloadReady} from './reloadGuard';
 
@@ -264,14 +264,6 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand(cmdId, triggerCommitMessageGeneration),
       );
     } catch {}
-  }
-
-  for (const cmd of Object.values(MERGE_ACTIONS)) {
-    context.subscriptions.push(
-      vscode.commands.registerCommand(`kissSorcar.${cmd}`, () => {
-        sidebarView!.handleMergeCommand(cmd);
-      }),
-    );
   }
 
   const extJsPath = path.join(context.extensionPath, 'out', 'extension.js');

@@ -66,7 +66,7 @@ function initialTabId(posted) {
   return ready ? ready.tabId : '';
 }
 
-function workDirOnAutocommitAfterSettingsChange(initialWd, newWd, bindKind) {
+function workDirOnMentionAfterSettingsChange(initialWd, newWd, bindKind) {
   const {win, posted} = makeWebview();
   const tabId = initialTabId(posted);
   assert.ok(tabId, 'main.js must announce the initial tab id');
@@ -99,24 +99,18 @@ function workDirOnAutocommitAfterSettingsChange(initialWd, newWd, bindKind) {
     apiKeys: {},
   });
 
-  send(win, {
-    type: 'autocommit_prompt',
-    tabId: tabId,
-    changedFiles: ['file.txt'],
-  });
+  const inp = win.document.getElementById('task-input');
+  inp.value = '@readm';
+  inp.dispatchEvent(new win.window.Event('input', {bubbles: true}));
 
-  const btn = win.document.querySelector('.wt-merge');
-  assert.ok(btn, 'autocommit bar must render an "Auto commit" button');
-  btn.click();
-
-  const msg = lastMsg(posted, 'autocommitAction');
-  assert.ok(msg, 'clicking Auto commit must post an autocommitAction');
+  const msg = lastMsg(posted, 'getFiles');
+  assert.ok(msg, 'typing an @-mention must post a getFiles command');
   win.close();
   return msg.workDir;
 }
 
 function testInvariantHoldsAfterSettingsChange_ClearBind() {
-  const wd = workDirOnAutocommitAfterSettingsChange(
+  const wd = workDirOnMentionAfterSettingsChange(
     '/path/initial',
     '/path/new',
     'clear',
@@ -134,7 +128,7 @@ function testInvariantHoldsAfterSettingsChange_ClearBind() {
 }
 
 function testInvariantHoldsAfterSettingsChange_TaskEventsBindNoExtraWorkdir() {
-  const wd = workDirOnAutocommitAfterSettingsChange(
+  const wd = workDirOnMentionAfterSettingsChange(
     '/path/initial',
     '/path/new',
     'task_events_no_extra_workdir',
@@ -180,14 +174,10 @@ function testTaskEventsExtraWorkDirStillWinsOverConfig() {
     apiKeys: {},
   });
 
-  send(win, {
-    type: 'autocommit_prompt',
-    tabId: tabId,
-    changedFiles: ['file.txt'],
-  });
-
-  win.document.querySelector('.wt-merge').click();
-  const msg = lastMsg(posted, 'autocommitAction');
+  const inp = win.document.getElementById('task-input');
+  inp.value = '@readm';
+  inp.dispatchEvent(new win.window.Event('input', {bubbles: true}));
+  const msg = lastMsg(posted, 'getFiles');
   assert.strictEqual(
     msg.workDir,
     '/path/task-recorded',

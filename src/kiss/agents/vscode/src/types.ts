@@ -3,8 +3,6 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-import {MergeData} from './MergeManager';
-
 export interface Attachment {
   name: string;
   mimeType: string;
@@ -64,18 +62,11 @@ export type FromWebviewMessage =
     }
   | {type: 'getWelcomeSuggestions'}
   | {type: 'complete'; query: string; tabId?: string}
-  | {type: 'mergeAction'; action: string; tabId?: string; workDir?: string}
   | {type: 'newChat'; tabId?: string}
   | {type: 'focusEditor'}
   | {type: 'closeTab'; tabId: string}
   | {type: 'getInputHistory'}
   | {type: 'worktreeAction'; action: 'merge' | 'discard'; tabId?: string}
-  | {
-      type: 'autocommitAction';
-      action: 'commit' | 'skip';
-      tabId?: string;
-      workDir?: string;
-    }
   | {type: 'resolveDroppedPaths'; uris: string[]; workDir?: string}
   | {type: 'webviewFocusChanged'; focused: boolean}
   | {type: 'activeTabChanged'; tabId: string}
@@ -226,10 +217,6 @@ type ToWebviewMessageBody =
   | {type: 'remote_url'; url: string; ntfyUrl?: string; tunnelActive?: boolean}
   | {type: 'task_events'; events: unknown[]; task?: string; chat_id?: number}
   | {type: 'ghost'; suggestion: string; query: string}
-  | {type: 'merge_data'; data: MergeData; hunk_count: number}
-  | {type: 'merge_nav'; remaining: number; total: number}
-  | {type: 'merge_started'}
-  | {type: 'merge_ended'}
   | {type: 'commitMessage'; message: string; error?: string}
   | {type: 'inputHistory'; tasks: string[]}
   | {
@@ -252,7 +239,6 @@ type ToWebviewMessageBody =
   | {type: 'worktree_progress'; message: string}
   | {type: 'worktree_result'; success: boolean; message: string}
   | {type: 'warning'; message: string; tabId?: string}
-  | {type: 'autocommit_prompt'; changedFiles: string[]; tabId?: string}
   | {type: 'autocommit_progress'; message: string; tabId?: string}
   | {
       type: 'autocommit_done';
@@ -323,13 +309,11 @@ export interface AgentCommand {
     | 'recordFileUsage'
     | 'resumeSession'
     | 'complete'
-    | 'mergeAction'
     | 'newChat'
     | 'closeTab'
     | 'generateCommitMessage'
     | 'getInputHistory'
     | 'worktreeAction'
-    | 'autocommitAction'
     | 'getAdjacentTask'
     | 'setWorkDir'
     | 'getConfig'
@@ -350,7 +334,7 @@ export interface AgentCommand {
   chatId?: number | string;
   taskId?: string | number | null;
   activeFileContent?: string;
-  action?: 'merge' | 'discard' | 'all-done' | 'commit' | 'skip';
+  action?: 'merge' | 'discard';
   useWorktree?: boolean;
   useParallel?: boolean;
   autoCommit?: boolean;

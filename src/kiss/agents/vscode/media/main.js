@@ -530,10 +530,7 @@
       attachments: [],
       attachErrors: [],
       inputValue: '',
-      isMerging: false,
       worktreeBarEl: null,
-      autocommitBarEl: null,
-      mergeToolbarEl: null,
       t0: null,
       endTs: 0,
       workDir: '',
@@ -720,7 +717,6 @@
     tab.attachments = attachments;
     tab.attachErrors = attachErrors;
     tab.inputValue = inp.value;
-    tab.isMerging = isMerging;
     tab.isRunning = isActiveTabRunning();
     tab.t0 = t0;
     tab.endTs = endTs;
@@ -737,20 +733,6 @@
       tab.worktreeBarEl = null;
     }
     worktreeBar = null;
-    if (autocommitBar && autocommitBar.parentNode) {
-      tab.autocommitBarEl = autocommitBar;
-      autocommitBar.parentNode.removeChild(autocommitBar);
-    } else {
-      tab.autocommitBarEl = null;
-    }
-    autocommitBar = null;
-    const mergeBar = document.getElementById('merge-toolbar');
-    if (mergeBar && mergeBar.parentNode) {
-      tab.mergeToolbarEl = mergeBar;
-      mergeBar.parentNode.removeChild(mergeBar);
-    } else {
-      tab.mergeToolbarEl = null;
-    }
     if (inputContainer) inputContainer.style.display = '';
     persistTabState();
   }
@@ -851,7 +833,6 @@
     syncClearBtn();
     inp.style.height = 'auto';
     inp.style.height = inp.scrollHeight + 'px';
-    isMerging = tab.isMerging || false;
     t0 = tab.t0 || null;
     endTs = tab.endTs || 0;
     state = tab.streamState || mkS();
@@ -869,28 +850,7 @@
       const area = document.getElementById('input-area');
       area.insertBefore(worktreeBar, area.firstChild);
     }
-    if (autocommitBar && autocommitBar.parentNode)
-      autocommitBar.parentNode.removeChild(autocommitBar);
-    autocommitBar = null;
-    if (tab.autocommitBarEl) {
-      autocommitBar = tab.autocommitBarEl;
-      tab.autocommitBarEl = null;
-      const acArea = document.getElementById('input-area');
-      acArea.insertBefore(autocommitBar, acArea.firstChild);
-    }
-    const existingMerge = document.getElementById('merge-toolbar');
-    if (existingMerge) existingMerge.remove();
-    if (tab.mergeToolbarEl) {
-      document.getElementById('input-area').appendChild(tab.mergeToolbarEl);
-      tab.mergeToolbarEl = null;
-    } else if (isMerging) {
-      showMergeToolbar(tab.id);
-    }
-    const hideInput =
-      worktreeBar ||
-      autocommitBar ||
-      document.getElementById('merge-toolbar') ||
-      (tab.isSubagentTab && !tab.isRunning);
+    const hideInput = worktreeBar || (tab.isSubagentTab && !tab.isRunning);
     if (hideInput) {
       if (inputContainer) inputContainer.style.display = 'none';
     } else {
@@ -1986,7 +1946,6 @@
   const tricksPanelClose = document.getElementById('tricks-panel-close');
   const tricksBtn = document.getElementById('tricks-btn');
   const tricksList = document.getElementById('tricks-list');
-  const autocommitBtn = document.getElementById('autocommit-btn');
   const waitSpinner = document.getElementById('wait-spinner');
   const ghostOverlay = document.getElementById('ghost-overlay');
   const inputContainer = document.getElementById('input-container');
@@ -2305,8 +2264,6 @@
   function syncClearBtn() {
     if (inputClearBtn) inputClearBtn.style.display = inp.value ? '' : 'none';
   }
-
-  let isMerging = false;
 
   let state = mkS();
   let lastToolName = '';
@@ -5685,76 +5642,6 @@
         break;
       }
 
-      case 'merge_data': {
-        const mdEl = renderMergeData(ev);
-        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
-          const bgMdTab = getTab(ev.tabId);
-          if (bgMdTab && bgMdTab.outputFragment) {
-            bgMdTab.outputFragment.appendChild(mdEl);
-          }
-          break;
-        }
-        O.appendChild(mdEl);
-        setCurrentMergeHunk(mdEl, 0, 0);
-        scrollHunkIntoView(mdEl, 0, 0);
-        collapseOlderPanels();
-        break;
-      }
-      case 'merge_started':
-        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
-          const bgMergeTab = getTab(ev.tabId);
-          if (bgMergeTab) bgMergeTab.isMerging = true;
-          break;
-        }
-        isMerging = true;
-        showMergeToolbar((ev && ev.tabId) || activeTabId);
-        updateInputDisabled();
-        break;
-      case 'merge_ended':
-        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
-          const mrt2 = getTab(ev.tabId);
-          if (mrt2) {
-            mrt2.isMerging = false;
-            mrt2.mergeToolbarEl = null;
-          }
-          break;
-        }
-        isMerging = false;
-        hideMergeToolbar();
-        updateInputDisabled();
-        break;
-      case 'merge_nav': {
-        const navTabId = ev.tabId || activeTabId;
-        const navHost =
-          navTabId === activeTabId
-            ? O
-            : (getTab(navTabId) || {}).outputFragment;
-        if (!navHost) break;
-        if (navTabId === activeTabId) {
-          const mergeTitle = document.querySelector('.merge-toolbar-title');
-          if (mergeTitle && ev.remaining !== undefined) {
-            mergeTitle.textContent =
-              'Review Changes (' +
-              ev.remaining +
-              '/' +
-              ev.total +
-              ' remaining)';
-          }
-        }
-        const mergePanels = navHost.querySelectorAll('.merge-info');
-        const mergePanel = mergePanels[mergePanels.length - 1];
-        if (!mergePanel) break;
-        applyMergeResolutions(mergePanel, ev.resolved || []);
-        if (ev.cur && ev.cur.fi !== undefined && ev.cur.hi !== undefined) {
-          setCurrentMergeHunk(mergePanel, ev.cur.fi, ev.cur.hi);
-          scrollHunkIntoView(mergePanel, ev.cur.fi, ev.cur.hi);
-        } else {
-          mergePanel.querySelectorAll('.merge-hunk.current').forEach(el => {
-            el.classList.remove('current');
-          });
-        }
-        break;
-      }
       case 'commitMessage':
         break;
       case 'droppedPaths':
@@ -5807,21 +5694,10 @@
         }
         handleWorktreeResult(ev);
         break;
-      case 'autocommit_prompt':
-        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
-          const bgAcTab = getTab(ev.tabId);
-          if (bgAcTab) {
-            bgAcTab.autocommitBarEl = createAutocommitBar(ev);
-          }
-          break;
-        }
-        showAutocommitActions(ev);
-        break;
       case 'autocommit_done':
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgAdTab = getTab(ev.tabId);
           if (bgAdTab) {
-            bgAdTab.autocommitBarEl = null;
             if (bgAdTab.outputFragment) {
               const cls = ev && ev.success ? 'wt-result-ok' : 'wt-result-err';
               const div = mkEl('div', 'ev ' + cls);
@@ -6121,15 +5997,10 @@
   }
 
   function updateInputDisabled() {
-    const blocked = isMerging;
-    inp.disabled = blocked;
+    inp.disabled = false;
     // A photo still being converted must not be raced by a send: block the
     // button until every attachment slot holds real bytes.
-    sendBtn.disabled = blocked || hasPendingAttachments();
-    if (blocked) {
-      clearGhost();
-      hideAC();
-    }
+    sendBtn.disabled = hasPendingAttachments();
   }
 
   /**
@@ -6700,233 +6571,9 @@
     appendActionResult(ev);
   }
 
-  let autocommitBar = null;
-
-  function clearAutocommitBar() {
-    detachActionBar(autocommitBar);
-    autocommitBar = null;
-  }
-
-  function createAutocommitBar(ev) {
-    const ownerTabId = (ev && ev.tabId) || activeTabId;
-    const n = (ev && ev.changedFiles && ev.changedFiles.length) || 0;
-    const labelText =
-      n === 1
-        ? '1 uncommitted change on main. Auto commit?'
-        : n + ' uncommitted changes on main. Auto commit?';
-    const msgFor = action => () => ({
-      type: 'autocommitAction',
-      action: action,
-      tabId: ownerTabId,
-      workDir: workDirForTab(ownerTabId),
-    });
-    return createActionBar(labelText, [
-      {cls: 'wt-merge', text: 'Auto commit', msg: msgFor('commit')},
-      {cls: 'wt-discard', text: 'Do nothing', msg: msgFor('skip')},
-    ]);
-  }
-
-  function showAutocommitActions(ev) {
-    clearAutocommitBar();
-    autocommitBar = createAutocommitBar(ev);
-    attachActionBar(autocommitBar);
-  }
-
   function handleAutocommitResult(ev) {
-    clearAutocommitBar();
     appendActionResult(ev);
     focusInputWithRetry();
-  }
-
-  function renderMergeData(ev) {
-    const mdEl = mkEl('div', 'ev merge-info');
-    const hdr = mkEl('div', 'merge-info-hdr');
-    hdr.textContent = '✱ Reviewing ' + (ev.hunk_count || 0) + ' change(s)';
-    mdEl.appendChild(hdr);
-
-    const body = mkEl('div', 'merge-info-body');
-    body.textContent =
-      'Red = old lines, Green = new lines. Use the merge toolbar to ' +
-      'navigate and accept or reject changes.';
-    mdEl.appendChild(body);
-
-    const mergeFiles = (ev.data && ev.data.files) || [];
-    for (let mfi = 0; mfi < mergeFiles.length; mfi++) {
-      const mf = mergeFiles[mfi];
-      if (mf.base_text === undefined || mf.current_text === undefined) continue;
-      const fileEl = mkEl('div', 'merge-file-diff');
-      fileEl.dataset.fi = String(mfi);
-      const fileName = mkEl('div', 'merge-file-name');
-      fileName.textContent = mf.name || 'unknown';
-      fileEl.appendChild(fileName);
-
-      const baseLines = (mf.base_text || '').split('\n');
-      const curLines = (mf.current_text || '').split('\n');
-      const hunks = mf.hunks || [];
-      let curIdx = 0;
-      for (let mhi = 0; mhi < hunks.length; mhi++) {
-        const h = hunks[mhi];
-        if (curIdx < h.cs) {
-          const ctxBefore = mkEl('pre', 'merge-ctx');
-          let ctxText = '';
-          while (curIdx < h.cs) {
-            ctxText += ' ' + (curLines[curIdx] || '') + '\n';
-            curIdx++;
-          }
-          ctxBefore.textContent = ctxText;
-          fileEl.appendChild(ctxBefore);
-        }
-        const hunkEl = mkEl('pre', 'merge-hunk');
-        hunkEl.dataset.fi = String(mfi);
-        hunkEl.dataset.hi = String(mhi);
-        const hunkHdr = mkEl('span', 'merge-hunk-label');
-        hunkHdr.textContent =
-          'Hunk ' + (mhi + 1) + ' / ' + hunks.length + ' @ line ' + (h.cs + 1);
-        hunkEl.appendChild(hunkHdr);
-        for (let bi = h.bs; bi < h.bs + h.bc; bi++) {
-          const oldLine = mkEl('span', 'diff-del');
-          oldLine.textContent = '-' + (baseLines[bi] || '') + '\n';
-          hunkEl.appendChild(oldLine);
-        }
-        for (let ci = h.cs; ci < h.cs + h.cc; ci++) {
-          const newLine = mkEl('span', 'diff-add');
-          newLine.textContent = '+' + (curLines[ci] || '') + '\n';
-          hunkEl.appendChild(newLine);
-        }
-        fileEl.appendChild(hunkEl);
-        curIdx = h.cs + h.cc;
-      }
-      if (curIdx < curLines.length) {
-        const ctxAfter = mkEl('pre', 'merge-ctx');
-        let ctxText = '';
-        while (curIdx < curLines.length) {
-          ctxText += ' ' + (curLines[curIdx] || '') + '\n';
-          curIdx++;
-        }
-        ctxAfter.textContent = ctxText;
-        fileEl.appendChild(ctxAfter);
-      }
-      mdEl.appendChild(fileEl);
-    }
-    addCollapse(mdEl, hdr);
-    return mdEl;
-  }
-
-  function setCurrentMergeHunk(mergePanel, fi, hi) {
-    mergePanel.querySelectorAll('.merge-hunk.current').forEach(el => {
-      el.classList.remove('current');
-    });
-    const hunk = mergePanel.querySelector(
-      '.merge-hunk[data-fi="' + fi + '"][data-hi="' + hi + '"]',
-    );
-    if (hunk) hunk.classList.add('current');
-  }
-
-  function scrollHunkIntoView(mergePanel, fi, hi) {
-    const hunk = mergePanel.querySelector(
-      '.merge-hunk[data-fi="' + fi + '"][data-hi="' + hi + '"]',
-    );
-    if (!hunk) return;
-    let container = hunk.parentElement;
-    while (container && container !== document.body) {
-      const style = window.getComputedStyle(container);
-      const oy = style.overflowY;
-      if (
-        (oy === 'auto' || oy === 'scroll') &&
-        container.scrollHeight > container.clientHeight
-      ) {
-        break;
-      }
-      container = container.parentElement;
-    }
-    if (!container || container === document.body) {
-      if (typeof hunk.scrollIntoView === 'function') {
-        hunk.scrollIntoView({block: 'center', behavior: 'smooth'});
-      }
-      return;
-    }
-    const containerRect = container.getBoundingClientRect();
-    const hunkRect = hunk.getBoundingClientRect();
-    const target =
-      container.scrollTop +
-      (hunkRect.top - containerRect.top) -
-      Math.max(0, (container.clientHeight - hunkRect.height) / 2);
-    const top = Math.max(
-      0,
-      Math.min(target, container.scrollHeight - container.clientHeight),
-    );
-    if (typeof container.scrollTo === 'function') {
-      container.scrollTo({top: top, behavior: 'smooth'});
-    } else {
-      container.scrollTop = top;
-    }
-  }
-
-  function applyMergeResolutions(mergePanel, resolutions) {
-    mergePanel
-      .querySelectorAll('.merge-hunk.accepted, .merge-hunk.rejected')
-      .forEach(el => {
-        el.classList.remove('accepted');
-        el.classList.remove('rejected');
-      });
-    for (let i = 0; i < resolutions.length; i++) {
-      const r = resolutions[i];
-      if (!r || r.fi === undefined || r.hi === undefined) continue;
-      const hunk = mergePanel.querySelector(
-        '.merge-hunk[data-fi="' + r.fi + '"][data-hi="' + r.hi + '"]',
-      );
-      if (hunk)
-        hunk.classList.add(r.status === 'rejected' ? 'rejected' : 'accepted');
-    }
-  }
-
-  function showMergeToolbar(ownerTabId) {
-    if (document.getElementById('merge-toolbar')) return;
-    const capturedTabId = ownerTabId || activeTabId;
-    inputContainer.style.display = 'none';
-    const bar = mkEl('div', 'merge-toolbar-card');
-    bar.id = 'merge-toolbar';
-    bar.innerHTML =
-      '<div class="merge-toolbar-header">' +
-      '<span class="merge-toolbar-title">Review Changes</span>' +
-      '<span class="merge-toolbar-hint">Red = old \u00b7 Green = new</span>' +
-      '</div>' +
-      '<div class="merge-toolbar-actions">' +
-      '<div class="merge-toolbar-row">' +
-      '<button class="merge-btn merge-nav" id="merge-prev-btn">Prev</button>' +
-      '<button class="merge-btn merge-nav" id="merge-next-btn">Next</button>' +
-      '<button class="merge-btn merge-accept" id="merge-accept-btn">Accept</button>' +
-      '<button class="merge-btn merge-reject" id="merge-reject-btn">Reject</button>' +
-      '</div>' +
-      '<div class="merge-toolbar-row">' +
-      '<button class="merge-btn merge-accept" id="merge-accept-file-btn">Accept File</button>' +
-      '<button class="merge-btn merge-reject" id="merge-reject-file-btn">Reject File</button>' +
-      '<button class="merge-btn merge-accept" id="merge-accept-all-btn">Accept Rest</button>' +
-      '<button class="merge-btn merge-reject" id="merge-reject-all-btn">Reject Rest</button>' +
-      '</div>' +
-      '</div>';
-    document.getElementById('input-area').appendChild(bar);
-    const mergeActions = {
-      'merge-accept-btn': 'accept',
-      'merge-reject-btn': 'reject',
-      'merge-prev-btn': 'prev',
-      'merge-next-btn': 'next',
-      'merge-accept-file-btn': 'accept-file',
-      'merge-reject-file-btn': 'reject-file',
-      'merge-accept-all-btn': 'accept-all',
-      'merge-reject-all-btn': 'reject-all',
-    };
-    Object.keys(mergeActions).forEach(id => {
-      document.getElementById(id).addEventListener('click', () => {
-        api.mergeAction({action: mergeActions[id], tabId: capturedTabId});
-      });
-    });
-  }
-
-  function hideMergeToolbar() {
-    const bar = document.getElementById('merge-toolbar');
-    if (bar) bar.remove();
-    inputContainer.style.display = '';
   }
 
   function init() {
@@ -7195,18 +6842,6 @@
           e.stopPropagation();
           closeServerResetConfirm();
         }
-      });
-    }
-
-    if (autocommitBtn) {
-      autocommitBtn.addEventListener('click', e => {
-        e.preventDefault();
-        e.stopPropagation();
-        api.autocommitAction({
-          action: 'commit',
-          tabId: activeTabId,
-          workDir: workDirForTab(activeTabId),
-        });
       });
     }
 
