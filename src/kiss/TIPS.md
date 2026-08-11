@@ -99,6 +99,8 @@ Just run:
 rsorcar username@ip_address
 ```
 
+It keeps this checkout and the server's in total sync through `origin`: every branch of both is mirrored, and uncommitted work is committed first so it can travel. Files git does not track (`.venv`, `tmp/`, build output) stay behind, and a branch whose two sides conflict is reported instead of being merged behind your back.
+
 # Tip
 
 ## If You Get a git Merge Conflict
