@@ -411,6 +411,15 @@ class _TaskRunnerMixin:
             *,
             work_dir: str = "",
         ) -> None: ...
+        def _autocommit_changed_repos(
+            self,
+            tab_id: str = "",
+            *,
+            work_dir: str = "",
+            task_id: str | None = None,
+            extra_paths: set[str] | None = None,
+            extra_task_ids: list[str] | None = None,
+        ) -> None: ...
         def _handle_worktree_action(
             self,
             action: str,
@@ -816,6 +825,13 @@ class _TaskRunnerMixin:
         sub_cost_base = float(getattr(tab.agent, "budget_used", 0.0) or 0.0)
         sub_steps_base = int(getattr(tab.agent, "total_steps", 0) or 0)
         agent_returned: str = ""
+        # Changed-path records (and history ids) of EARLIER sequential
+        # <task> runs of this submission, taken before their
+        # per-subtask cleanup frees them (see the pop above
+        # _persist_subtask_row).  The ids let the end-of-run cross-repo
+        # auto-commit collect those runs' sub-agent records too.
+        run_changed_paths: set[str] = set()
+        run_task_ids: list[str] = []
         try:
             tab.task_history_id = None
             subtasks = parse_task_tags(prompt)
@@ -953,6 +969,15 @@ class _TaskRunnerMixin:
                         self.printer.broadcast(failure_result)
                     break
                 if subtask_index < len(subtasks) - 1:
+                    # _persist_subtask_row's cleanup_task frees this
+                    # subtask's changed-path record; take it first so
+                    # the end-of-run cross-repo auto-commit still sees
+                    # the files EARLIER sequential <task> runs changed.
+                    if tab.task_history_id is not None:
+                        run_changed_paths |= self.printer.pop_changed_paths(
+                            tab.task_history_id,
+                        )
+                        run_task_ids.append(str(tab.task_history_id))
                     self._persist_subtask_row(
                         tab,
                         task_prompt=task_prompt,
@@ -1023,6 +1048,17 @@ class _TaskRunnerMixin:
                                 "commit",
                                 tab_id,
                                 work_dir=work_dir,
+                            )
+                            # The action above commits the work_dir
+                            # repository only; files the task changed
+                            # in OTHER repositories would be silently
+                            # left uncommitted without this pass.
+                            self._autocommit_changed_repos(
+                                tab_id,
+                                work_dir=work_dir,
+                                task_id=tab.task_history_id,
+                                extra_paths=run_changed_paths,
+                                extra_task_ids=run_task_ids,
                             )
                         else:
                             merge_started = self._prepare_and_start_merge(
