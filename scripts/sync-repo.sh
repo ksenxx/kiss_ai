@@ -281,6 +281,24 @@ merge_detached() {
 # ---------------------------------------------------------------------------
 # One branch
 #
+# A ref rejected in pass one is unchanged when pass three starts: that pass is
+# for collecting what the remote pushed, not for repeating the same upload.
+# Remember failures only for this driver process; the next deployment retries
+# in case permissions, history, or origin's policy have changed meanwhile.
+FAILED_PUSH_REFS=""
+queue_push_ref() {
+    local spec="$1"
+    printf '%s\n' "$FAILED_PUSH_REFS" | grep -qxF "$spec" && return 0
+    PUSH_REFS[${#PUSH_REFS[@]}]="$spec"
+}
+
+remember_failed_pushes() {
+    local spec
+    for spec in "${PUSH_REFS[@]}"; do
+        FAILED_PUSH_REFS="${FAILED_PUSH_REFS}${FAILED_PUSH_REFS:+$'\n'}$spec"
+    done
+}
+
 # Fills PUSH_REFS with the branches origin has to catch up on; the push
 # itself is one command per repository (seventeen branches over https is one
 # connection, not seventeen).  Whether a branch really ended up in sync is
@@ -292,7 +310,7 @@ sync_branch() {
     origin_sha="$(git rev-parse -q --verify "refs/remotes/origin/$branch^{commit}" || true)"
 
     if [[ -z "$origin_sha" ]]; then                       # only here: mirror it up
-        PUSH_REFS[${#PUSH_REFS[@]}]="refs/heads/$branch:refs/heads/$branch"
+        queue_push_ref "refs/heads/$branch:refs/heads/$branch"
         return 0
     fi
     if [[ -z "$local_sha" ]]; then                        # only on origin: mirror it down
@@ -308,7 +326,7 @@ sync_branch() {
     [[ "$local_sha" == "$origin_sha" ]] && return 0
 
     if git merge-base --is-ancestor "$origin_sha" "$local_sha"; then
-        PUSH_REFS[${#PUSH_REFS[@]}]="refs/heads/$branch:refs/heads/$branch"
+        queue_push_ref "refs/heads/$branch:refs/heads/$branch"
     elif git merge-base --is-ancestor "$local_sha" "$origin_sha"; then
         if [[ "$branch" == "$(current_branch)" ]]; then
             git merge --ff-only -q "$origin_sha" \
@@ -320,7 +338,7 @@ sync_branch() {
         fi
     elif merge_branch "$branch" "$local_sha" "$origin_sha"; then
         info "Merged origin/$branch into the diverged $branch."
-        PUSH_REFS[${#PUSH_REFS[@]}]="refs/heads/$branch:refs/heads/$branch"
+        queue_push_ref "refs/heads/$branch:refs/heads/$branch"
     else
         warn "$branch and origin/$branch have conflicting changes." \
              "Merge it by hand: git checkout $branch && git merge origin/$branch"
@@ -470,8 +488,10 @@ sync_repo() {
 
     if ((${#PUSH_REFS[@]} > 0)); then
         step "Pushing ${#PUSH_REFS[@]} branch(es) from $repo to origin ..."
-        git push --quiet origin ${PUSH_REFS[@]+"${PUSH_REFS[@]}"} \
-            || warn "Some branches could not be pushed to origin."
+        if ! git push --quiet origin ${PUSH_REFS[@]+"${PUSH_REFS[@]}"}; then
+            warn "Some branches could not be pushed to origin."
+            remember_failed_pushes
+        fi
     fi
 
     check_convergence
