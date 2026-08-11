@@ -15,7 +15,7 @@ that ran in the window's own workspace.  Two cases were wrong:
   (``/home/ubuntu/kiss`` instead of ``/Users/me/work/kiss``), so *every*
   imported task mismatched and the panel showed "No tasks match the
   filter" even though the whole database had arrived.  The paths are
-  rewritten while shipping (``scripts/ship-task-db.sh``); this test
+  rewritten while syncing (``scripts/sync-task-db.sh``); this test
   covers the frontend contract that rewrite relies on.
 
 The real ``media/main.js`` runs in headless Chromium against the real
@@ -187,7 +187,7 @@ def test_a_sibling_directory_is_not_the_workspace(browser) -> None:
 
 
 def test_a_relocated_history_is_visible_on_the_remote(browser) -> None:
-    """What ``scripts/ship-task-db.sh`` rewrites must show up remotely.
+    """What ``scripts/sync-task-db.sh`` rewrites must show up remotely.
 
     The deployment runs from ``/home/ubuntu/kiss``; tasks shipped from
     the laptop arrive already re-pointed there, worktrees included.
