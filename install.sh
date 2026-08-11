@@ -897,9 +897,10 @@ update_repo() {
     # pop them back via the EXIT trap once the install finishes.
     #
     # KISS_SKIP_UPDATE exists for callers that deliberately install a checkout
-    # they already control, byte for byte — ``sorcar-cloud`` ships the laptop's
-    # working directory (uncommitted edits included) to a remote host, and a
-    # pull would swap that code for whatever is on origin/main instead.
+    # they already control, commit for commit — ``sorcar-cloud`` has just put
+    # the remote checkout on the branch it deploys (the laptop's uncommitted
+    # edits committed and synced through origin first), and a pull would drag
+    # it to whatever is on origin/main instead.
     if [ -n "${KISS_SKIP_UPDATE:-}" ]; then
         echo "   KISS_SKIP_UPDATE set — installing this checkout as-is, no pull."
         return 0
