@@ -504,7 +504,10 @@ def test_neighbouring_column_values_are_not_confused(tmp_path: Path) -> None:
     dst.execute("UPDATE task_history SET model = 'a' || char(0) || 's', parent_task_id = 'b'")
     dst.close()
 
-    done = sync(str(source), str(target))
+    # ``--force``: the two rows record the same progress, so the digest is
+    # the only thing that can tell them apart, and only a mode that writes
+    # an equally-far-along row makes the difference observable.
+    done = sync(str(source), str(target), "--force")
 
     assert done.returncode == 0, done.stderr
     assert "1 updated" in done.stdout
@@ -655,6 +658,51 @@ def test_reversed_unique_index_on_the_target(tmp_path: Path) -> None:
 
     assert done.returncode == 0, done.stderr
     assert event_keys(target) == [("a", 1)]
+
+
+def test_a_schema_without_progress_columns_keeps_the_targets_row(
+    tmp_path: Path,
+) -> None:
+    """With nothing that grows, neither copy of a task may win.
+
+    ``steps``, ``tokens``, ``cost`` and ``end_ts`` are what tell two
+    copies of one task apart.  A table with none of them cannot say
+    which copy came later, so the target's row stays as it is unless
+    ``--force`` says otherwise.
+    """
+    source, target = tmp_path / "src.db", tmp_path / "dst.db"
+    ddl = (
+        "CREATE TABLE task_history (id TEXT PRIMARY KEY, task TEXT NOT NULL,"
+        " result TEXT DEFAULT '');"
+        " CREATE TABLE events (task_id TEXT NOT NULL, seq INTEGER NOT NULL,"
+        " event_json TEXT NOT NULL, timestamp REAL NOT NULL);"
+    )
+    for path, note in ((source, "from the source"), (target, "from the target")):
+        conn = sqlite3.connect(path, isolation_level=None)
+        conn.executescript(ddl)
+        conn.execute(
+            "INSERT INTO task_history (id, task, result) VALUES ('a', 't', ?)", (note,)
+        )
+        conn.execute(
+            "INSERT INTO task_history (id, task, result) VALUES (?, 't', '')",
+            (f"only {note}",),
+        )
+        conn.close()
+
+    done = sync(str(source), str(target))
+
+    assert done.returncode == 0, done.stderr
+    assert "1 task row(s) added, 0 updated" in done.stdout
+    assert rows(target, "SELECT result FROM task_history WHERE id = 'a'") == [
+        ("from the target",)
+    ]
+
+    forced = sync(str(source), str(target), "--force")
+
+    assert forced.returncode == 0, forced.stderr
+    assert rows(target, "SELECT result FROM task_history WHERE id = 'a'") == [
+        ("from the source",)
+    ]
 
 
 def test_without_rowid_event_table(tmp_path: Path) -> None:
