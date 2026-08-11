@@ -220,6 +220,10 @@ class TestC2C3ReplayRequiresTabId(unittest.TestCase):
         state = agent_state.AgentState(
             "task-real", tab_id="real-tab", server_owned=True,
         )
+        # Force the flag away from whatever the replayed session would
+        # set so a leaky replay (C3) is still detected now that the
+        # AgentState default is True.
+        state.use_worktree = False
         agent_state.register(state)
         server._replay_session("some-chat-id", tab_id="")
         for st in agent_state.agent_states.values():

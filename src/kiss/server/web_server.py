@@ -4448,9 +4448,9 @@ class RemoteAccessServer:
             "workDir": cmd.get("workDir") or self._vscode_server.work_dir,
             "tabId": tab_id,
             "attachments": attachments,
-            "useWorktree": cmd.get("useWorktree", False),
-            "useParallel": cmd.get("useParallel", False),
-            "autoCommit": cmd.get("autoCommit", False),
+            "useWorktree": cmd.get("useWorktree", True),
+            "useParallel": cmd.get("useParallel", True),
+            "autoCommit": cmd.get("autoCommit", True),
         }
         await self._run_cmd(run_cmd)
 

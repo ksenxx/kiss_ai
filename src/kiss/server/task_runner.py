@@ -701,9 +701,9 @@ class _TaskRunnerMixin:
                     }
                 )
                 return
-            state.use_worktree = bool(cmd.get("useWorktree", False))
-            state.use_parallel = bool(cmd.get("useParallel", False))
-            state.auto_commit_mode = bool(cmd.get("autoCommit", False))
+            state.use_worktree = bool(cmd.get("useWorktree", True))
+            state.use_parallel = bool(cmd.get("useParallel", True))
+            state.auto_commit_mode = bool(cmd.get("autoCommit", True))
             state.is_task_active = True
             stop_event = state.stop_event
             use_worktree = state.use_worktree

@@ -8912,6 +8912,17 @@
       }
     }
     el('cfg-max-budget').value = cfg.max_budget != null ? cfg.max_budget : 100;
+    // Initialize the run toggles from the persisted config instead of
+    // leaving whatever hardcoded `checked` state chat.html shipped with,
+    // so a fresh session (VS Code webview or remote web client) reflects
+    // the user's saved preference.  Missing keys default to true, the
+    // same defaults as vscode_config.DEFAULTS.
+    if (autocommitToggleBtn) {
+      autocommitToggleBtn.checked = cfg.auto_commit_mode !== false;
+    }
+    if (worktreeToggleBtn) {
+      worktreeToggleBtn.checked = cfg.is_worktree !== false;
+    }
     el('cfg-custom-endpoint').value = cfg.custom_endpoint || '';
     el('cfg-custom-api-key').value = cfg.custom_api_key || '';
     el('cfg-custom-headers').value = cfg.custom_headers || '';
@@ -8936,6 +8947,8 @@
     const el = id => document.getElementById(id);
     const cfg = {
       max_budget: parseFloat(el('cfg-max-budget').value) || 100,
+      auto_commit_mode: !!(autocommitToggleBtn && autocommitToggleBtn.checked),
+      is_worktree: !!(worktreeToggleBtn && worktreeToggleBtn.checked),
       custom_endpoint: el('cfg-custom-endpoint').value.trim(),
       custom_api_key: el('cfg-custom-api-key').value.trim(),
       custom_headers: el('cfg-custom-headers').value.trim(),

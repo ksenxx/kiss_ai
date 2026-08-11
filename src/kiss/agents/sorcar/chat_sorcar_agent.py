@@ -761,7 +761,7 @@ class ChatSorcarAgent(SorcarAgent):
         early_extra = self._build_extra_payload(
             model=kwargs.get("model_name", "") or "",
             work_dir=kwargs.get("work_dir", "") or "",
-            is_parallel=bool(kwargs.get("is_parallel", False)),
+            is_parallel=bool(kwargs.get("is_parallel", True)),
             is_worktree=is_worktree,
         )
 

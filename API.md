@@ -89,7 +89,7 @@ ______________________________________________________________________
   - `attachments`: Optional file attachments for the initial prompt.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
-- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, web_tools: bool = True, is_parallel: bool = False, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
+- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, web_tools: bool = True, is_parallel: bool = True, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
 
   - `model_name`: LLM model to use. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
@@ -103,7 +103,7 @@ ______________________________________________________________________
   - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
   - `docker_image`: Docker image name to run tools inside a container.
   - `web_tools`: Whether to include browser/web tools. Defaults to True. Set to False for terminal-only environments.
-  - `is_parallel`: Whether to include the run_parallel tool. Defaults to False. When True, the agent can spawn parallel sub-agents for independent tasks.
+  - `is_parallel`: Whether to include the run_parallel tool. Defaults to True. When True, the agent can spawn parallel sub-agents for independent tasks.
   - `verbose`: Whether to print output to console. Defaults to config verbose setting.
   - `current_editor_file`: Path to the currently active editor file, appended to prompt.
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
@@ -312,19 +312,19 @@ ______________________________________________________________________
 - `b`: Second password string.
 - **Returns:** `True` when the two strings are equal.
 
-**`run`** — Run *prompt* as a task on the local Sorcar daemon and block until done. Connects to the `sorcar web` daemon's Unix-domain socket, sends the same `run` command a chat webview would, streams the task's events, and returns once the daemon reports the task finished.<br/>`def run(prompt: str, *, work_dir: str = '', model: str = '', chat_id: str = '', tools: str | Path | None = None, use_worktree: bool = False, auto_commit: bool = False, max_budget: float | None = None, model_config: dict[str, Any] | None = None, web_tools: bool | None = None, is_parallel: bool = False, timeout: float = 3600.0, sock_path: str | Path | None = None) -> TaskResult`
+**`run`** — Run *prompt* as a task on the local Sorcar daemon and block until done. Connects to the `sorcar web` daemon's Unix-domain socket, sends the same `run` command a chat webview would, streams the task's events, and returns once the daemon reports the task finished.<br/>`def run(prompt: str, *, work_dir: str = '', model: str = '', chat_id: str = '', tools: str | Path | None = None, use_worktree: bool = True, auto_commit: bool = True, max_budget: float | None = None, model_config: dict[str, Any] | None = None, web_tools: bool | None = None, is_parallel: bool = True, timeout: float = 3600.0, sock_path: str | Path | None = None) -> TaskResult`
 
 - `prompt`: The task instruction to run.
 - `work_dir`: Working directory for the task; the daemon's current default is used when empty.
 - `model`: Model name; the daemon's selected default when empty.
 - `chat_id`: Optional existing chat session id to continue. Pass the `chat_id` of a previous :class:`TaskResult` to run this task in the same chat — the agent then sees the prior tasks and results of that chat as context. A new chat is started when empty.
 - `tools`: Optional path to a Python file supplying extra tools for the agent. The daemon imports the file and registers every top-level public function that is suitable as a tool (plain synchronous functions whose parameters are all keyword-bindable; `*args`/`**kwargs`/positional-only parameters and coroutine/generator functions are skipped). Each function's name, docstring (Google-style `Args:` section for parameter descriptions), and annotated parameters define the tool schema the agent sees, exactly like a native tool. The functions are never serialized by the client — they run **in the daemon process**. The path is resolved against this process's working directory.
-- `use_worktree`: Run the task in an isolated git worktree.
-- `auto_commit`: Auto-commit the task's changes on success.
+- `use_worktree`: Run the task in an isolated git worktree. Defaults to True.
+- `auto_commit`: Auto-commit the task's changes on success. Defaults to True.
 - `max_budget`: Per-task budget override in USD; `None` uses the daemon's configured default.
 - `model_config`: Per-task model configuration override (custom endpoint / headers); `None` uses the daemon's configured model endpoint. Must be JSON-serializable.
 - `web_tools`: Per-task browser-tool enablement override; `None` uses the daemon's configured default.
-- `is_parallel`: Whether the agent may spawn parallel sub-agents.
+- `is_parallel`: Whether the agent may spawn parallel sub-agents. Defaults to True.
 - `timeout`: Maximum seconds to wait for the task to finish.
 - `sock_path`: Daemon UDS path override (defaults to `$KISS_SORCAR_SOCK` or `$KISS_HOME/sorcar.sock`).
 - **Returns:** A :class:`TaskResult` with the result text, success flag, cost (USD), total tokens, step count, chat id, and task id of the task. `chat_id` is the daemon chat session id and `task_id` the persisted `task_history` row id — both usable later to look up or resume the run in the daemon's history.

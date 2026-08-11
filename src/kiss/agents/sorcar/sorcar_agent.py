@@ -628,7 +628,7 @@ class SorcarAgent(RelentlessAgent):
         self.web_use_tool: WebUseTool | None = None
         self.docker_manager: Any = None
         self._use_web_tools: bool = True
-        self._is_parallel: bool = False
+        self._is_parallel: bool = True
 
     def _subagent_budget_share(self, num_tasks: int) -> float | None:
         """Return the ``max_budget`` each parallel sub-agent may spend.
@@ -1145,7 +1145,7 @@ class SorcarAgent(RelentlessAgent):
         max_sub_sessions: int | None = None,
         docker_image: str | None = None,
         web_tools: bool = True,
-        is_parallel: bool = False,
+        is_parallel: bool = True,
         verbose: bool | None = None,
         current_editor_file: str | None = None,
         attachments: list[Attachment] | None = None,
@@ -1167,7 +1167,7 @@ class SorcarAgent(RelentlessAgent):
             docker_image: Docker image name to run tools inside a container.
             web_tools: Whether to include browser/web tools. Defaults to True.
                 Set to False for terminal-only environments.
-            is_parallel: Whether to include the run_parallel tool. Defaults to False.
+            is_parallel: Whether to include the run_parallel tool. Defaults to True.
                 When True, the agent can spawn parallel sub-agents for independent tasks.
             verbose: Whether to print output to console. Defaults to config verbose setting.
             current_editor_file: Path to the currently active editor file, appended to prompt.

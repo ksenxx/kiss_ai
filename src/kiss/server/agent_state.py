@@ -107,7 +107,7 @@ class AgentState:
         self.is_running_non_wt: bool = False
         self.interrupted_by_shutdown: bool = False
         self.frontend_closed: bool = False
-        self.use_worktree: bool = False
+        self.use_worktree: bool = True
         self.use_parallel: bool = True
         self.auto_commit_mode: bool = True
         self.last_user_prompt: str = ""

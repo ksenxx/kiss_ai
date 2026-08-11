@@ -201,10 +201,10 @@ def run_agent_via_kiss_web(
     work_dir: str = "",
     max_budget: float | None = None,
     tools: list[Callable[..., Any]] | None = None,
-    use_worktree: bool = False,
+    use_worktree: bool = True,
     model_config: dict[str, Any] | None = None,
     web_tools: bool | None = None,
-    is_parallel: bool = False,
+    is_parallel: bool = True,
     timeout: float | None = None,
     sock_path: str | None = None,
 ) -> str:

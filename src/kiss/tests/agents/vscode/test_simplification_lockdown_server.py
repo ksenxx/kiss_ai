@@ -251,7 +251,8 @@ class TestUnknownWorktreeAction(_DbTestBase):
         """Without ``use_worktree`` even an unknown action gets the
         mode-disabled message, pinning the guard ordering."""
         server, _ = _make_server()
-        _register_state("task-no-wt", tab_id="tab-no-wt")
+        st = _register_state("task-no-wt", tab_id="tab-no-wt")
+        st.use_worktree = False
 
         result = server._handle_worktree_action("frobnicate", "tab-no-wt")
 
@@ -399,7 +400,7 @@ class TestEmitPendingWorktreeNoop(_DbTestBase):
     def test_emit_pending_worktree_noop_without_use_worktree(self) -> None:
         server, events = _make_server()
         st = _register_state("t-no-wt", tab_id="tab-no-worktree")
-        assert st.use_worktree is False
+        st.use_worktree = False
         before = len(events)
 
         server._emit_pending_worktree("tab-no-worktree")

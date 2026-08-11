@@ -1044,12 +1044,12 @@ def run(
     model: str = "",
     chat_id: str = "",
     tools: str | Path | None = None,
-    use_worktree: bool = False,
-    auto_commit: bool = False,
+    use_worktree: bool = True,
+    auto_commit: bool = True,
     max_budget: float | None = None,
     model_config: dict[str, Any] | None = None,
     web_tools: bool | None = None,
-    is_parallel: bool = False,
+    is_parallel: bool = True,
     timeout: float = 3600.0,
     sock_path: str | Path | None = None,
 ) -> TaskResult:
@@ -1082,7 +1082,9 @@ def run(
             the client — they run **in the daemon process**.  The path
             is resolved against this process's working directory.
         use_worktree: Run the task in an isolated git worktree.
+            Defaults to True.
         auto_commit: Auto-commit the task's changes on success.
+            Defaults to True.
         max_budget: Per-task budget override in USD; ``None`` uses the
             daemon's configured default.
         model_config: Per-task model configuration override (custom
@@ -1091,6 +1093,7 @@ def run(
         web_tools: Per-task browser-tool enablement override; ``None``
             uses the daemon's configured default.
         is_parallel: Whether the agent may spawn parallel sub-agents.
+            Defaults to True.
         timeout: Maximum seconds to wait for the task to finish.
         sock_path: Daemon UDS path override (defaults to
             ``$KISS_SORCAR_SOCK`` or ``$KISS_HOME/sorcar.sock``).

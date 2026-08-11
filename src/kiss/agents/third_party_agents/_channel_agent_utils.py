@@ -663,7 +663,7 @@ def channel_main(
         max_budget=run_kwargs.get("max_budget"),
         model_config=run_kwargs.get("model_config"),
         web_tools=run_kwargs.get("web_tools"),
-        is_parallel=bool(run_kwargs.get("is_parallel", False)),
+        is_parallel=bool(run_kwargs.get("is_parallel", True)),
     )
     elapsed = _time.time() - start_time
 

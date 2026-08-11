@@ -267,7 +267,7 @@ def _run_sorcar(prompt: str, chat_id: str) -> tuple[str, str]:
     full_prompt = prompt + SLACK_FORMATTING_HINT
 
     cfg = load_config()
-    use_worktree = bool(cfg.get("is_worktree", False))
+    use_worktree = bool(cfg.get("is_worktree", True))
 
     try:
         result = run_agent_via_kiss_web(
