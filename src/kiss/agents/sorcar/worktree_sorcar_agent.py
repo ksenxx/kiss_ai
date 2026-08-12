@@ -1228,6 +1228,20 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
         if self._chat_id == "":
             self._chat_id = _allocate_chat_id()
 
+        printer = kwargs.get("printer")
+        if printer is not None:
+            # Bind the caller's printer BEFORE any worktree setup.  The
+            # orphan reclaim inside :meth:`_try_setup_worktree` builds
+            # its live-branch exclusion set through
+            # ``self.printer.live_worktree_branches`` — but on a fresh
+            # agent ``self.printer`` is only assigned deep inside
+            # ``super().run()`` (via ``_reset``), which runs AFTER the
+            # worktree setup.  Without this early bind, the first run
+            # of a new agent saw no live siblings and its reclaim pass
+            # squash-merged and deleted the worktree of every other
+            # RUNNING task in the same repo.
+            self.set_printer(printer)
+
         wt_work_dir: Path | None = None
         if kwargs.pop("use_worktree", True):
             work_dir_str = kwargs.get("work_dir")
@@ -1238,7 +1252,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             else:
                 wt_work_dir = self._try_setup_worktree(repo, work_dir_str)
 
-        printer = kwargs.get("printer")
         self._flush_warnings(printer)
         if wt_work_dir is None:
             try:

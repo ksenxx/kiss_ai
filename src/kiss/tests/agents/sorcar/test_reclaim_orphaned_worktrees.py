@@ -620,10 +620,20 @@ class TestReclaimWiredIntoWorktreeAgent:
 
         # Second agent starts a task with agent1 still holding its
         # worktree.  agent1's branch must be excluded from reclaim.
+        # The printer is passed exactly the way the production task
+        # runner passes it — as a ``run`` kwarg, never by pre-setting
+        # ``agent2.printer``.  Pre-setting the attribute used to mask
+        # a real bug: on a fresh agent ``self.printer`` is unset until
+        # ``super().run()``, so the reclaim inside worktree setup ran
+        # with an empty live-branch exclusion set and deleted a live
+        # sibling's worktree.
         agent2 = WorktreeSorcarAgent("test2")
-        agent2.printer = JsonPrinter()
         try:
-            agent2.run(prompt_template="task-b", work_dir=str(self.repo))
+            agent2.run(
+                prompt_template="task-b",
+                work_dir=str(self.repo),
+                printer=JsonPrinter(),
+            )
 
             # agent1's worktree must still exist.
             assert own_wt.wt_dir.exists()

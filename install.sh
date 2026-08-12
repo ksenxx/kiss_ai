@@ -932,7 +932,17 @@ update_repo() {
 # both the user's terminal AND the log file.  ``-a`` appends so a
 # previous install's log is preserved when this run is itself a retry
 # after an interrupted attempt.
-exec > >(tee -a "$LOG_FILE") 2>&1
+#
+# The ``trap '' INT TERM`` INSIDE the process substitution is load-
+# bearing too: VS Code's terminal teardown signals the whole foreground
+# process GROUP, so the same stray SIGINT that the outer trap absorbs
+# also reaches the tee child.  With default disposition tee died, and
+# the outer shell's very next write (the trap's own diagnostic!) hit a
+# dead pipe — SIGPIPE, script killed with rc=141 and an empty log,
+# defeating the trap fix above.  Ignored dispositions survive exec, so
+# tee inherits SIG_IGN and keeps draining until bash exits and closes
+# the pipe.
+exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
 
 {
     echo "=== KISS Sorcar Source Install ==="
