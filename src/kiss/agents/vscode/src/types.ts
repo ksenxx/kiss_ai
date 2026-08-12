@@ -51,8 +51,14 @@ export type FromWebviewMessage =
   | {
       type: 'ready';
       tabId?: string;
-      restoredTabs?: Array<{tabId: string; chatId: string}>;
+      restoredTabs?: Array<{
+        tabId: string;
+        chatId: string;
+        title?: string;
+        workDir?: string;
+      }>;
     }
+  | {type: 'openTab'; tabId: string; title?: string; workDir?: string}
   | {
       type: 'resumeSession';
       chatId?: string;
@@ -260,6 +266,17 @@ type ToWebviewMessageBody =
   | {type: 'measureSize'}
   | {type: 'daemonStatus'; connected: boolean}
   | {
+      // Canonical shared-tab snapshot broadcast by the daemon after
+      // every tab-registry mutation; clients reconcile against it.
+      type: 'tabs_state';
+      tabs: Array<{
+        tabId: string;
+        chatId: string;
+        title: string;
+        workDir: string;
+      }>;
+    }
+  | {
       type: 'openSubagentTab';
       tab_id?: string;
       parent_tab_id?: string;
@@ -310,7 +327,9 @@ export interface AgentCommand {
     | 'resumeSession'
     | 'complete'
     | 'newChat'
+    | 'openTab'
     | 'closeTab'
+    | 'ready'
     | 'generateCommitMessage'
     | 'getInputHistory'
     | 'worktreeAction'
@@ -344,4 +363,11 @@ export interface AgentCommand {
   config?: Record<string, unknown>;
   apiKeys?: Record<string, string>;
   isFavorite?: boolean;
+  title?: string;
+  restoredTabs?: Array<{
+    tabId: string;
+    chatId: string;
+    title?: string;
+    workDir?: string;
+  }>;
 }

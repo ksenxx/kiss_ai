@@ -319,6 +319,7 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("stop"),
     ApiCommand("userAnswer", required=("answer",)),
     ApiCommand("newChat"),
+    ApiCommand("openTab", required=("tabId",)),
     ApiCommand("closeTab", required=("tabId",)),
     ApiCommand("resumeSession", handler="resume_session"),
     ApiCommand("ready", handler="ready"),
@@ -522,7 +523,7 @@ class ServerBackend(Protocol):
     ) -> list[dict[str, str]]: ...
 
     async def _handle_ready(
-        self, cmd: dict[str, Any], websocket: Any, *, is_uds: bool = False,
+        self, cmd: dict[str, Any], websocket: Any,
     ) -> None: ...
 
     async def _handle_submit(self, cmd: dict[str, Any]) -> None: ...
@@ -839,9 +840,7 @@ class ServerApi:
             rt_id = rt["tabId"]
             if rt_id:
                 self._record_tab(rt_id, ctx)
-        await self._backend._handle_ready(
-            cmd, ctx.endpoint, is_uds=ctx.is_uds,
-        )
+        await self._backend._handle_ready(cmd, ctx.endpoint)
 
     async def submit(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
         """Start a task from a webview ``submit``.

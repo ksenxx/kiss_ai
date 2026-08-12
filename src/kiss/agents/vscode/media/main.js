@@ -1731,29 +1731,6 @@
     return subTab;
   }
 
-  // A regular chat tab that is created without being switched to. Used to
-  // restore tasks that are still running when a client (re)connects: they
-  // must be reachable, but must not take the user off the tab they are on.
-  function createBackgroundChatTab(title) {
-    const tab = makeTab(title);
-    tabs.push(tab);
-    renderTabBar();
-    persistTabState();
-    return tab;
-  }
-
-  function setTabTitle(tab, title) {
-    if (!tab) return;
-    const t = (title || '').trim();
-    tab.title = t
-      ? t.length > 30
-        ? t.substring(0, 30) + '\u2026'
-        : t
-      : 'new chat';
-    renderTabBar();
-    persistTabState();
-  }
-
   function createNewTab() {
     // Opening a chat is the user taking over: the launch is over, and no
     // backend event may move them off the tab they just asked for.
@@ -1773,6 +1750,7 @@
       stopTimer();
       removeSpinner();
     }
+    registerTab(tab);
     api.newChat({tabId: tab.id});
     api.getWelcomeSuggestions();
     focusInputWithRetry();
@@ -1791,32 +1769,12 @@
     persistTabState();
   }
 
+  // The tab SET is server-canonical (the daemon's shared tab registry,
+  // mirrored to every client via `tabs_state`), so the only webview
+  // state persisted locally is what stays client-local by design: the
+  // selected tab and the drawer preferences.
   function persistTabState() {
-    const persistable = tabs.filter(t => {
-      return !t.isSubagentTab && !t.isContentTab;
-    });
-    const serialized = persistable.map(t => {
-      return {
-        title: t.title,
-        chatId: t.id,
-        backendChatId: t.backendChatId || '',
-        parentTabId: t.parentTabId || '',
-        workDir: t.workDir || '',
-      };
-    });
-    let activeIdx = persistable.findIndex(t => {
-      return t.id === activeTabId;
-    });
-    if (activeIdx < 0) {
-      const active = getTab(activeTabId);
-      const parentId = active && active.parentTabId ? active.parentTabId : '';
-      activeIdx = persistable.findIndex(t => {
-        return t.id === parentId;
-      });
-    }
     vscode.setState({
-      tabs: serialized,
-      activeTabIndex: activeIdx,
       chatId: activeTabId,
       taskDrawerCollapsed: taskDrawerCollapsed,
       inputDrawerCollapsed: inputDrawerCollapsed,
@@ -1825,6 +1783,135 @@
       drawersVersion: DRAWERS_VERSION,
     });
   }
+
+  // tabmirror-coverage:start
+  // Tab ids announced to the daemon in an `openTab` whose `tabs_state`
+  // echo has not arrived yet. A snapshot broadcast inside that window
+  // predates the registration and must not remove the brand-new tab.
+  const pendingOpenTabs = new Set();
+
+  // Announce a locally created chat tab to the daemon's shared tab
+  // registry so every other client opens the same tab.
+  function registerTab(tab) {
+    pendingOpenTabs.add(tab.id);
+    api.openTab({
+      tabId: tab.id,
+      title: tab.title || 'new chat',
+      workDir: tab.workDir || '',
+    });
+  }
+
+  function clipTabTitle(title) {
+    const t = (title || '').trim();
+    if (!t) return 'new chat';
+    return t.length > 30 ? t.substring(0, 30) + '\u2026' : t;
+  }
+
+  // Reconcile the local tab bar against the canonical `tabs_state`
+  // snapshot: adopt tabs other clients opened, drop tabs they closed,
+  // and follow the registry's titles, order and chat bindings.
+  //
+  // Client-local state survives untouched: the active-tab selection,
+  // and each tab's own composer draft, model pick and task panel
+  // (mirroring covers the tab SET and transcript CONTENTS, not what
+  // the user is typing). Two kinds of tabs stay client-local by
+  // design and are never removed here: sub-agent tabs (derived state,
+  // rebuilt on every client from `openSubagentTab` broadcasts and
+  // replays; they re-anchor after their parent) and content tabs
+  // (the remote web app's stand-in for the VS Code editor — editors
+  // are per-user surfaces on every client, so file views are not
+  // mirrored).
+  function reconcileTabs(entries) {
+    const list = Array.isArray(entries) ? entries : [];
+    const byId = new Map(
+      tabs.map(t => {
+        return [t.id, t];
+      }),
+    );
+    const inSnapshot = new Set();
+    const next = [];
+    list.forEach(e => {
+      if (!e || !e.tabId || inSnapshot.has(e.tabId)) return;
+      inSnapshot.add(e.tabId);
+      pendingOpenTabs.delete(e.tabId);
+      let tab = byId.get(e.tabId);
+      if (!tab) {
+        tab = makeTab(clipTabTitle(e.title));
+        tab.id = e.tabId;
+        if (e.chatId) tab.hasRunTask = true;
+      } else if (!tab.isSubagentTab && e.title) {
+        tab.title = clipTabTitle(e.title);
+      }
+      if (e.chatId && String(tab.backendChatId || '') !== String(e.chatId)) {
+        tab.backendChatId = String(e.chatId);
+      }
+      if (e.workDir && !tab.workDir) tab.workDir = e.workDir;
+      next.push(tab);
+    });
+
+    // A removed registry tab takes its local sub-agent descendants
+    // with it, exactly like a local close would.
+    const removedIds = new Set();
+    tabs.forEach(t => {
+      if (
+        !inSnapshot.has(t.id) &&
+        !t.isSubagentTab &&
+        !t.isContentTab &&
+        !pendingOpenTabs.has(t.id)
+      ) {
+        removedIds.add(t.id);
+      }
+    });
+    let grew = removedIds.size > 0;
+    while (grew) {
+      grew = false;
+      tabs.forEach(t => {
+        if (
+          t.parentTabId &&
+          removedIds.has(t.parentTabId) &&
+          !removedIds.has(t.id)
+        ) {
+          removedIds.add(t.id);
+          grew = true;
+        }
+      });
+    }
+    tabs.forEach(t => {
+      if (inSnapshot.has(t.id) || removedIds.has(t.id)) return;
+      next.push(t);
+    });
+    removedIds.forEach(id => {
+      const doomed = byId.get(id);
+      if (doomed && doomed.isContentTab) disposeTabContentView(doomed);
+      forgetPendingFileLinks(id);
+      // report-coverage:start
+      discardReadyReports(id);
+      // report-coverage:end
+    });
+    tabs = next;
+    if (removedIds.size > 0) rpAfterTabsClosed(removedIds);
+    tabs.forEach(t => {
+      if (t.isSubagentTab && t.parentTabId) {
+        placeSubagentTabAfterParent(t, t.parentTabId);
+      }
+    });
+
+    if (tabs.length === 0) {
+      // Empty registry: keep one local, unregistered placeholder so
+      // the composer always exists. The daemon adopts it the moment
+      // it runs a task; until then it is a welcome screen only.
+      tabs.push(makeTab('new chat'));
+    }
+    if (!getTab(activeTabId)) {
+      const saved = savedActiveTabId ? getTab(savedActiveTabId) : null;
+      activateAdjacentTab(saved || tabs[0]);
+    }
+    savedActiveTabId = '';
+    reportSurvivingChatTab();
+    renderTabBar();
+    persistTabState();
+  }
+  // tabmirror-coverage:end
 
   // drawer-coverage:start
   function isMobileRemoteWebApp() {
@@ -1880,45 +1967,36 @@
     }
   }
 
+  // Tabs come from the server's shared registry (`tabs_state`), never
+  // from local storage. The boot placeholder below is replaced by the
+  // first snapshot; `savedActiveTabId` restores this client's own tab
+  // selection (selection stays client-local) once that snapshot lands.
+  // `legacyRestoredTabs` carries a pre-registry client's locally
+  // persisted tab set into `ready` exactly once, so the first daemon
+  // with an empty registry can adopt it (one-time migration).
+  let savedActiveTabId = '';
+  const legacyRestoredTabs = [];
   (function () {
     const saved = vscode.getState();
     if (saved && saved.tabs && saved.tabs.length > 0) {
-      tabs = [];
-      const restoredBackendChatIds = new Set();
+      const seenChatIds = new Set();
       saved.tabs.forEach(st => {
-        if (st.isSubagentTab) return;
-        const persistedBackendChatId = st.backendChatId
-          ? String(st.backendChatId)
-          : '';
-        if (
-          persistedBackendChatId &&
-          restoredBackendChatIds.has(persistedBackendChatId)
-        ) {
-          return;
-        }
-        const tab = makeTab(st.title);
-        if (st.chatId) tab.id = st.chatId;
-        if (persistedBackendChatId) {
-          tab.backendChatId = persistedBackendChatId;
-          restoredBackendChatIds.add(persistedBackendChatId);
-        }
-        if (st.parentTabId) tab.parentTabId = st.parentTabId;
-        if (st.workDir) tab.workDir = st.workDir;
-        tabs.push(tab);
+        if (!st || st.isSubagentTab) return;
+        const chatId = st.backendChatId ? String(st.backendChatId) : '';
+        if (!st.chatId || !chatId || seenChatIds.has(chatId)) return;
+        seenChatIds.add(chatId);
+        legacyRestoredTabs.push({
+          tabId: String(st.chatId),
+          chatId: chatId,
+          title: st.title || '',
+          workDir: st.workDir || '',
+        });
       });
     }
-    if (tabs.length > 0) {
-      const idx = (saved && saved.activeTabIndex) || 0;
-      if (idx >= 0 && idx < tabs.length) {
-        activeTabId = tabs[idx].id;
-      } else {
-        activeTabId = tabs[0].id;
-      }
-    } else {
-      const initial = makeTab('new chat');
-      tabs.push(initial);
-      activeTabId = initial.id;
-    }
+    if (saved && saved.chatId) savedActiveTabId = String(saved.chatId);
+    const initial = makeTab('new chat');
+    tabs.push(initial);
+    activeTabId = initial.id;
   })();
 
   const O = document.getElementById('output');
@@ -2136,10 +2214,10 @@
 
   // launchswitch-coverage:start
   // A chat window is often opened while agents are still working: the
-  // extension host replays a `status` for every tab it restored and the
-  // remote web app is handed an `openRunningTasks` snapshot. What the user
-  // wants to see then is the task that started last, not whichever tab
-  // happened to be active when the window was last closed.
+  // daemon replays every chat-bound tab of the shared registry after
+  // `ready`, including a `status` for each one that is still running.
+  // What the user wants to see then is the task that started last, not
+  // whichever tab happened to be active when the window was last closed.
   //
   // The window this permission lives in closes at the first real gesture --
   // a tap or a keystroke -- so a snapshot that arrives while the user is
@@ -5248,17 +5326,34 @@
   };
   // tableak-coverage:end
 
+  // Raised while the daemon is unreachable so the reconnect can
+  // re-announce `ready` (tab-registry sync + transcript replay).
+  let daemonWasDown = false;
+
   function handleEvent(ev) {
     const t = ev.type;
     switch (t) {
       case 'daemonStatus':
         setServerLoading(!ev.connected);
-        if (!ev.connected) forgetInFlightPathChecks();
+        if (!ev.connected) {
+          forgetInFlightPathChecks();
+          daemonWasDown = true;
+        }
         if (ev.connected) {
           // The backend is live, so this window's `ready` is on its way and
           // the running-task news it triggers is about to arrive: the launch
           // starts here (see beginLaunch).
           beginLaunch();
+          // A daemon that went away and came back is a fresh daemon as
+          // far as this client is concerned (it may have restarted):
+          // re-announce `ready` so it re-syncs the shared tab registry
+          // and replays the transcripts this window shows. The remote
+          // web app reloads the whole page on reconnect instead, so
+          // only the VS Code webview takes this path in practice.
+          if (daemonWasDown) {
+            daemonWasDown = false;
+            sendReady();
+          }
           // modelpick-coverage:start
           // While the daemon was away this window may have missed both a
           // task ending and its picker hand-back, so no agent override
@@ -5774,32 +5869,9 @@
         }
         break;
       }
-      case 'openRunningTasks': {
-        const runningTasks = Array.isArray(ev.tasks) ? ev.tasks : [];
-        runningTasks.forEach(rt => {
-          if (!rt || !rt.chatId) return;
-          const rtChatId = String(rt.chatId);
-          launchRunningStartTs.set(rtChatId, Number(rt.startTs) || 0);
-          if (getTabByBackendChatId(rtChatId)) return;
-          // Every running task gets a tab of its own, opened in the
-          // background. Which of them the user lands on is decided once, by
-          // switchToLatestRunningTab, after the whole snapshot is in.
-          const rtTab = createBackgroundChatTab('new chat');
-          rtTab.backendChatId = rtChatId;
-          setTabTitle(rtTab, String(rt.title || ''));
-          api.resumeSession({
-            id: rtChatId,
-            taskId: rt.taskId || '',
-            tabId: rtTab.id,
-          });
-        });
-        persistTabState();
-        if (runningTasks.length > 0) {
-          syncMobileInputDrawer();
-          switchToLatestRunningTab();
-        }
+      case 'tabs_state':
+        reconcileTabs(ev.tabs);
         break;
-      }
 
       case 'triggerStop':
         markStopping(activeTabId, true);
@@ -6806,22 +6878,41 @@
     focusInputWithRetry();
   }
 
-  function init() {
-    setupEventListeners();
-    renderTabBar();
-    const restoredTabs = tabs
+  // The `ready` announcement: hands the daemon this client's legacy
+  // locally-persisted tabs exactly once (adopted only into an empty
+  // registry) — or, on a re-`ready` after a daemon restart, the tabs
+  // currently on screen, so a daemon whose registry file was wiped
+  // re-adopts them. The daemon answers with the canonical `tabs_state`
+  // snapshot and replays every chat-bound tab.
+  function collectRestoredTabs() {
+    const current = tabs
       .filter(t => {
-        return t.backendChatId;
+        return !t.isSubagentTab && !t.isContentTab && t.backendChatId;
       })
       .map(t => {
-        return {tabId: t.id, chatId: t.backendChatId};
+        return {
+          tabId: t.id,
+          chatId: t.backendChatId,
+          title: t.title || '',
+          workDir: t.workDir || '',
+        };
       });
+    return current.length > 0 ? current : legacyRestoredTabs;
+  }
+
+  function sendReady() {
     // `ready` seeds the host's active chat tab exactly like an
     // `activeTabChanged` would, so the local mirror has to start out
     // agreeing with it — otherwise the first real change looks like a
     // no-op and is never sent.
-    api.ready({tabId: activeTabId, restoredTabs: restoredTabs});
+    api.ready({tabId: activeTabId, restoredTabs: collectRestoredTabs()});
     reportedChatTabId = activeTabId;
+  }
+
+  function init() {
+    setupEventListeners();
+    renderTabBar();
+    sendReady();
     api.getConfig();
   }
 

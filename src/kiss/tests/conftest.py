@@ -279,6 +279,29 @@ def _isolated_default_workdir(
     yield
 
 
+@pytest.fixture(autouse=True)
+def _isolated_tab_registry() -> Iterator[None]:
+    """Start every test with an empty shared tab registry.
+
+    ``VSCodeServer`` persists the canonical tab registry to
+    ``KISS_HOME/tabs.json``.  The session-wide ``KISS_HOME`` above is
+    shared by every test in the run, so tabs registered by one test
+    (a ``ready`` merge, an ``openTab``, a ``run``) would otherwise leak
+    into the next test's registry — changing its ``ready`` replay
+    fan-out and defeating merge-if-empty expectations.  Tests that
+    redirect ``persistence._KISS_DIR`` themselves are unaffected.
+
+    Yields:
+        None.
+    """
+    for kiss_dir in {Path(_test_kiss_home), Path(_th._KISS_DIR)}:
+        try:
+            (kiss_dir / "tabs.json").unlink(missing_ok=True)
+        except OSError:
+            pass
+    yield
+
+
 @pytest.fixture
 def temp_dir(tmp_path):
     original_dir = os.getcwd()

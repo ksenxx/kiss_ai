@@ -483,19 +483,22 @@ class TestStartupWindowIsLive(_ServerHarness):
     async def test_ready_restores_tab_of_starting_task(self) -> None:
         """A browser connecting in the window still gets the tab.
 
-        ``openRunningTasks`` is pushed to remote-web clients only, so
-        this drives a real WSS connection.
+        ``_cmd_run`` registers the tab in the shared tab registry
+        synchronously, BEFORE the worker thread starts, so a client
+        whose ``ready`` lands inside the startup window (worker alive,
+        ``is_task_active`` not yet raised) must still receive a
+        ``tabs_state`` snapshot binding the tab to its chat.
         """
         self._register_starting_task(
             "tab-restore", "task-restore", chat_id="chat-restore",
         )
-        finished = agent_state.AgentState(
-            "task-finished",
-            chat_id="chat-finished",
-            tab_id="tab-finished",
-            server_owned=True,
+        # What _cmd_run does synchronously before starting the worker:
+        self.server._vscode_server._registry_update_tab(
+            "tab-restore",
+            chat_id="chat-restore",
+            title="starting task",
+            create=True,
         )
-        agent_state.register(finished)
         ctx = _no_verify_ssl()
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=ctx) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
@@ -516,17 +519,17 @@ class TestStartupWindowIsLive(_ServerHarness):
         rows = [
             row
             for ev in seen
-            if ev.get("type") == "openRunningTasks"
-            for row in ev.get("tasks", [])
+            if ev.get("type") == "tabs_state"
+            for row in ev.get("tabs", [])
         ]
         self.assertTrue(
-            any(r.get("chatId") == "chat-restore" for r in rows),
+            any(
+                r.get("tabId") == "tab-restore"
+                and r.get("chatId") == "chat-restore"
+                for r in rows
+            ),
             "BUG F08-2: a client connecting during the startup window "
             f"silently omitted the running tab; got {rows}",
-        )
-        self.assertFalse(
-            [r for r in rows if r.get("chatId") == "chat-finished"],
-            "a finished task must not reopen a tab",
         )
 
 

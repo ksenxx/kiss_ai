@@ -29,8 +29,10 @@ import queue
 import shutil
 import threading
 import time
+from pathlib import Path
 from typing import Any, cast
 
+from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.persistence import (
     _append_chat_event,
     _current_db_path,
@@ -70,6 +72,7 @@ from kiss.server.helpers import (
 )
 from kiss.server.json_printer import JsonPrinter, _coalesce_events
 from kiss.server.merge_flow import _MergeFlowMixin
+from kiss.server.tab_registry import TabRegistry
 from kiss.server.task_runner import _TaskRunnerMixin, parse_task_tags
 
 __all__ = [
@@ -313,7 +316,17 @@ class VSCodeServer(
         )
         self._orphan_sweep_thread.start()
         self.work_dir = os.environ.get("KISS_WORKDIR", os.getcwd())
+        # The canonical shared tab registry (mirrored by every client).
+        # The path is resolved through the persistence module's
+        # redirectable KISS dir so tests point it at a scratch home.
+        self.tab_registry = TabRegistry(
+            Path(_persistence._KISS_DIR) / "tabs.json",
+        )
         self._tab_chat_views: dict[str, str] = {}
+        # Rebind surviving chat views from the persisted registry so a
+        # follow-up ``run`` after a daemon restart continues the tab's
+        # chat instead of silently starting a fresh one.
+        self._tab_chat_views.update(self.tab_registry.bindings())
         self._tab_opened_task_ids: dict[str, str] = {}
         self._tab_models: dict[str, str] = {}
         self._commit_msg_tabs: set[str] = set()
@@ -394,6 +407,74 @@ class VSCodeServer(
             self._last_active_file.pop(conn_id, None)
             self._last_active_content.pop(conn_id, None)
             self._complete_seq_latest.pop(conn_id, None)
+
+    def _broadcast_tabs_state(self) -> None:
+        """Broadcast the canonical tab snapshot to every client.
+
+        Emitted after every registry mutation.  Clients reconcile
+        their local tab bar against the full snapshot (idempotent and
+        self-healing), so deltas are never needed.  The explicit empty
+        ``tabId`` stamp routes the event through the printer's
+        verbatim all-clients path — never recorded or persisted, and
+        immune to the thread-local task-id injection when a mutation
+        happens inside a task thread.
+        """
+        self.printer.broadcast({
+            "type": "tabs_state",
+            "tabs": self.tab_registry.snapshot(),
+            "tabId": "",
+        })
+
+    def _registry_update_tab(
+        self,
+        tab_id: str,
+        *,
+        chat_id: str | None = None,
+        title: str | None = None,
+        work_dir: str | None = None,
+        create: bool = False,
+    ) -> None:
+        """Update the shared registry and broadcast when it changed.
+
+        Args:
+            tab_id: The shared tab identifier.
+            chat_id: New chat binding (``None`` keeps the current one).
+            title: New title (``None``/empty keeps the current one).
+            work_dir: New working directory (``None``/empty keeps it).
+            create: Register the tab first when it is unknown.
+        """
+        if self.tab_registry.update_tab(
+            tab_id, chat_id=chat_id, title=title,
+            work_dir=work_dir, create=create,
+        ):
+            self._broadcast_tabs_state()
+
+    def ready_tab_sync(
+        self, restored: list[dict[str, str]],
+    ) -> list[tuple[str, str]]:
+        """Synchronize a (re)connecting client with the tab registry.
+
+        Adopts the client's legacy ``restoredTabs`` when the registry
+        is still empty (one-time migration from pre-registry clients),
+        rebinds the in-memory chat views from the registry, and
+        broadcasts the canonical ``tabs_state`` snapshot.
+
+        Args:
+            restored: Sanitized ``restoredTabs`` entries from the
+                client's ``ready`` command.
+
+        Returns:
+            ``(tab_id, chat_id)`` pairs for every chat-bound registry
+            tab — the caller replays each so all clients converge on
+            the same transcripts.
+        """
+        self.tab_registry.merge_if_empty(restored)
+        bindings = self.tab_registry.bindings()
+        with self._state_lock:
+            for tab_id, chat_id in bindings.items():
+                self._tab_chat_views.setdefault(tab_id, chat_id)
+        self._broadcast_tabs_state()
+        return list(bindings.items())
 
     def _tab_model(self, tab_id: str) -> str:
         """Return the model selected for *tab_id* (default when unset).
@@ -799,6 +880,8 @@ class VSCodeServer(
         Args:
             tab_id: The frontend tab identifier to close.
         """
+        if self.tab_registry.close_tab(tab_id):
+            self._broadcast_tabs_state()
         with self._state_lock:
             state = agent_state.find_by_tab(tab_id)
             if state is not None and state.busy():
@@ -990,6 +1073,10 @@ class VSCodeServer(
                     state.frontend_closed = False
                 if chat_id and not is_sub_view:
                     self._tab_chat_views[tab_id] = chat_id
+            if chat_id and not is_sub_view:
+                self._registry_update_tab(
+                    tab_id, chat_id=chat_id, create=True,
+                )
             return
 
         extra_str = str(result.get("extra", "") or "")
@@ -1021,6 +1108,16 @@ class VSCodeServer(
                 self._tab_chat_views[tab_id] = chat_id
             else:
                 self._tab_chat_views.pop(tab_id, None)
+        if subagent_info is None and chat_id:
+            # A resumed chat binds + titles the tab for EVERY client:
+            # the shared registry is what makes a history click on one
+            # client rename the same tab everywhere.
+            self._registry_update_tab(
+                tab_id,
+                chat_id=chat_id,
+                title=str(result.get("task", "") or ""),
+                create=True,
+            )
 
         if subagent_info is not None:
             is_done = _subagent_is_done(result.get("task_id"))

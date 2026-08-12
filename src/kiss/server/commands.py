@@ -30,6 +30,7 @@ from kiss.server.agent_state import AgentState
 
 if TYPE_CHECKING:
     from kiss.server.json_printer import JsonPrinter
+    from kiss.server.tab_registry import TabRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -235,6 +236,9 @@ class _CommandsMixin:
         _tab_chat_views: dict[str, str]
         _tab_models: dict[str, str]
         _commit_msg_tabs: set[str]
+        tab_registry: TabRegistry
+
+        def _broadcast_tabs_state(self) -> None: ...
 
         def _run_task(self, cmd: dict[str, Any]) -> None: ...
         def _stop_task(self, tab_id: str = "") -> None: ...
@@ -271,6 +275,15 @@ class _CommandsMixin:
         ) -> None: ...
         def _new_chat(self, tab_id: str) -> None: ...
         def _close_tab(self, tab_id: str) -> None: ...
+        def _registry_update_tab(
+            self,
+            tab_id: str,
+            *,
+            chat_id: str | None = None,
+            title: str | None = None,
+            work_dir: str | None = None,
+            create: bool = False,
+        ) -> None: ...
         def _ensure_complete_worker(self) -> None: ...
         def _get_input_history(self, conn_id: str = "") -> None: ...
         def _get_adjacent_task(
@@ -390,6 +403,16 @@ class _CommandsMixin:
                 )
             return
         try:
+            # Register + title + bind the tab in the shared registry
+            # BEFORE the ``clear`` broadcast so every client has the
+            # tab by the time the run's first event reaches it.
+            self._registry_update_tab(
+                tab_id,
+                chat_id=chat_id,
+                title=str(cmd.get("prompt", "") or ""),
+                work_dir=str(cmd.get("workDir", "") or ""),
+                create=True,
+            )
             self.printer.broadcast({
                 "type": "clear",
                 "chat_id": chat_id,
@@ -751,6 +774,27 @@ class _CommandsMixin:
                 chat_id, cmd.get("tabId", ""), task_id=task_id,
             )
 
+    def _cmd_open_tab(self, cmd: dict[str, Any]) -> None:
+        """Register a client-opened tab in the shared tab registry.
+
+        Sent by a client the moment it creates a chat tab locally.
+        The registry mutation broadcasts a ``tabs_state`` snapshot, so
+        every other client opens the same tab.  Idempotent: a tab id
+        that is already registered changes nothing (and broadcasts
+        nothing).
+        """
+        tab_id = cmd.get("tabId", "")
+        if not isinstance(tab_id, str) or not tab_id:
+            return
+        title = cmd.get("title", "")
+        if not isinstance(title, str):
+            title = ""
+        work_dir = cmd.get("workDir", "")
+        if not isinstance(work_dir, str):
+            work_dir = ""
+        if self.tab_registry.open_tab(tab_id, title, work_dir):
+            self._broadcast_tabs_state()
+
     def _cmd_close_tab(self, cmd: dict[str, Any]) -> None:
         """Clean up backend state for a closed frontend tab."""
         tab_id = cmd.get("tabId", "")
@@ -1082,6 +1126,7 @@ class _CommandsMixin:
         "userAnswer": _cmd_user_answer,
         "appendUserMessage": _cmd_append_user_message,
         "resumeSession": _cmd_resume_session,
+        "openTab": _cmd_open_tab,
         "closeTab": _cmd_close_tab,
         "newChat": _cmd_new_chat,
         "complete": _cmd_complete,

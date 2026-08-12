@@ -13,6 +13,7 @@
     'stop',
     'userAnswer',
     'newChat',
+    'openTab',
     'closeTab',
     'resumeSession',
     'ready',

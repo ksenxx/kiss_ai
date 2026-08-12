@@ -1506,74 +1506,6 @@ def _snapshot_active_tabs() -> list[str]:
     return active_tabs
 
 
-def _snapshot_running_task_rows() -> list[dict[str, Any]]:
-    """Return one ``{chatId, taskId, title, startTs}`` dict per running chat.
-
-    Snapshots the agent-state registry (same discipline as
-    :func:`_snapshot_active_tabs`) and keeps only top-level running
-    tasks:
-
-    * the state must be :meth:`AgentState.busy` (a task is actually in
-      flight — including one whose worker has started but has not yet
-      raised ``is_task_active``, which would otherwise be silently
-      omitted from a client connecting in that window, F08-2);
-    * sub-agent states are skipped — their chats are reopened by the
-      parent tab's own ``resumeSession`` replay
-      (``_open_persisted_subagent_tabs``), so listing them here would
-      duplicate tabs on the client;
-    * states without a ``chat_id`` are skipped — there is nothing a
-      client-side ``resumeSession`` could resume yet;
-    * duplicate ``chat_id`` values are collapsed to one row (several
-      viewer tabs may share one live chat).
-
-    ``startTs`` is the ``task_history.start_ts`` of the in-flight task
-    (``0`` when the row is missing) and the result is sorted by it
-    ascending, so a client opening one tab per row in order lays the
-    restored tabs out oldest-first.  Those tabs open in the background:
-    a task that is still running never steals the user's focus.
-    ``title`` is the
-    task's user prompt for an immediate tab label; the follow-up
-    ``resumeSession`` replay repaints the tab with the real events.
-    """
-    from kiss.agents.sorcar.persistence import _get_task_start_ts
-    from kiss.server import agent_state
-
-    try:
-        states = agent_state.snapshot()
-    except Exception:
-        try:
-            states = list(agent_state.agent_states.values())
-        except Exception:
-            logger.debug(
-                "unlocked registry snapshot failed", exc_info=True,
-            )
-            states = []
-    rows: list[dict[str, Any]] = []
-    seen_chats: set[str] = set()
-    for state in states:
-        try:
-            if not state.busy() or state.is_subagent:
-                continue
-            chat_id = state.chat_id
-            if not chat_id or chat_id in seen_chats:
-                continue
-            task_id = state.task_id
-            rows.append({
-                "chatId": chat_id,
-                "taskId": task_id,
-                "title": state.last_user_prompt or "",
-                "startTs": _get_task_start_ts(task_id),
-            })
-            seen_chats.add(chat_id)
-        except Exception:
-            logger.debug(
-                "skipping malformed state in running-task snapshot",
-                exc_info=True,
-            )
-    rows.sort(key=lambda r: r["startTs"])
-    return rows
-
-
 def _rss_mb() -> float:
     """Return this process's peak RSS in megabytes, or ``-1.0`` on failure.
 
@@ -4328,38 +4260,39 @@ class RemoteAccessServer:
                     "ignoring non-str restoredTabs chatId: %r", chat_id,
                 )
                 chat_id = ""
-            cleaned.append({"tabId": rt_id, "chatId": chat_id})
+            title = rt.get("title", "")
+            if not isinstance(title, str):
+                title = ""
+            work_dir = rt.get("workDir", "")
+            if not isinstance(work_dir, str):
+                work_dir = ""
+            cleaned.append({
+                "tabId": rt_id, "chatId": chat_id,
+                "title": title, "workDir": work_dir,
+            })
         return cleaned
 
     async def _handle_ready(
-        self, cmd: dict[str, Any], websocket: Any, *, is_uds: bool = False,
-    ) -> None:
-        """Translate the webview ``ready`` command into backend commands.
+        self, cmd: dict[str, Any], websocket: Any) -> None:
+        """Initialize a (re)connecting client from canonical state.
 
-        The VS Code TypeScript extension intercepts ``ready`` and fans
-        it out into ``getModels``, ``getInputHistory``, ``getConfig``,
-        plus session replay for restored tabs.  The web server must do
-        the same translation since there is no TypeScript middleman.
-
-        The three fanned-out init commands carry the ``ready``
-        sender's ``connId`` so their replies (``models``,
-        ``inputHistory``, ``configData``) reach ONLY the window that
-        just (re)connected.  Without the stamp the replies would be
-        broadcast to every connected client — opening or reloading
-        one browser window would repaint every sibling window's model
-        picker (resetting its selected model to the default), clobber
-        any open settings form, and reset its input-history cache.
+        Fans the ``ready`` out into ``getModels`` / ``getInputHistory``
+        / ``getConfig`` (each stamped with the sender's ``connId`` so
+        the replies reach ONLY the window that just (re)connected),
+        then synchronizes the client with the shared tab registry:
+        the client's legacy ``restoredTabs`` are adopted only into an
+        EMPTY registry (one-time migration), a canonical ``tabs_state``
+        snapshot is broadcast, and every chat-bound registry tab is
+        replayed so all connected clients converge on identical
+        transcripts.  Tab state is server-canonical — clients never
+        keep a tab set of their own — so the same path serves VS Code
+        webviews (UDS) and remote web apps (WSS) alike.
 
         Args:
-            cmd: The ``ready`` message from the browser (already
+            cmd: The ``ready`` message from the client (already
                 stamped with the connection's ``connId`` by
                 :meth:`kiss.server.sorcar.ServerApi.dispatch`).
             websocket: The client connection (for direct replies).
-            is_uds: True when the ``ready`` arrived over the local UDS
-                (VS Code extension host) transport.  Only
-                remote-web (WSS) clients get the ``openRunningTasks``
-                push at the end — VS Code windows manage their own tab
-                restoration in the extension host.
         """
         tab_id = cmd.get("tabId", "")
         if not isinstance(tab_id, str):
@@ -4385,37 +4318,19 @@ class RemoteAccessServer:
             )
         except Exception:
             pass
-        for rt in self._sanitized_restored_tabs(cmd):
-            rt_id = rt["tabId"]
-            chat_id = rt["chatId"]
-            if chat_id:
-                await self._run_cmd(
-                    {"type": "resumeSession", "chatId": chat_id,
-                     "tabId": rt_id},
-                )
-        if not is_uds:
-            try:
-                running_rows = await asyncio.to_thread(
-                    _snapshot_running_task_rows,
-                )
-            except Exception:
-                logger.debug(
-                    "running-task snapshot for ready failed", exc_info=True,
-                )
-                running_rows = []
-            if running_rows:
-                try:
-                    await self._endpoint_send(
-                        websocket,
-                        json.dumps({
-                            "type": "openRunningTasks",
-                            "tasks": running_rows,
-                        }),
-                    )
-                except Exception:
-                    logger.debug(
-                        "ready openRunningTasks send failed", exc_info=True,
-                    )
+        restored = self._sanitized_restored_tabs(cmd)
+        try:
+            bound = await asyncio.to_thread(
+                self._vscode_server.ready_tab_sync, restored,
+            )
+        except Exception:
+            logger.exception("ready tab-registry sync failed")
+            bound = []
+        for rt_id, rt_chat in bound:
+            await self._run_cmd(
+                {"type": "resumeSession", "chatId": rt_chat,
+                 "tabId": rt_id},
+            )
 
     async def _handle_submit(self, cmd: dict[str, Any]) -> None:
         """Translate the webview ``submit`` command into a backend ``run``.

@@ -137,6 +137,7 @@ const FORWARDED_COMMANDS: Record<string, readonly string[]> = {
   appendUserMessage: ['prompt', 'tabId'],
   getInputHistory: [],
   newChat: ['tabId'],
+  openTab: ['tabId', 'title', 'workDir'],
   getHistory: ['query', 'offset', 'generation'],
   getFrequentTasks: ['limit'],
   setFavorite: ['taskId', 'isFavorite'],
@@ -714,19 +715,20 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           type: 'daemonStatus',
           connected: this._daemonConnected,
         });
-        this._getApi().getModels();
         this._sendWelcomeSuggestions();
         this._sendRemoteUrl();
-        this._getApi().getInputHistory();
-        this._getApi().getConfig();
         this._watchConfigFile();
-        this._sendToWebview({type: 'focusInput'} as ToWebviewMessage);
-        const restoredTabs = message.restoredTabs;
-        if (restoredTabs && restoredTabs.length > 0) {
-          for (const rt of restoredTabs) {
-            this._getApi().resumeSession({chatId: rt.chatId, tabId: rt.tabId});
-          }
-        }
+        // The daemon owns the canonical tab registry, so `ready` is
+        // forwarded whole: the daemon fans out the connId-scoped init
+        // replies (models / input history / config), merges any legacy
+        // restoredTabs into an empty registry, answers with the
+        // canonical `tabs_state` snapshot, and replays every
+        // chat-bound tab's transcript.
+        this._getApi().forward({
+          type: 'ready',
+          tabId: message.tabId,
+          restoredTabs: message.restoredTabs,
+        } as AgentCommand);
         break;
       }
 
