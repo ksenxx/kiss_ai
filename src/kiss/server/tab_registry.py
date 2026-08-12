@@ -10,6 +10,13 @@ ordered tab list; clients never persist a tab set of their own — they
 reconcile against the full ``tabs_state`` snapshot the daemon
 broadcasts after every mutation.
 
+INVARIANT: a chat id is bound to AT MOST ONE tab.  Binding a chat to
+a tab atomically displaces (removes) any other tab bound to the same
+chat — the newest bind wins — and loading / merging skips duplicate
+chat bindings.  Because every client mirrors this registry verbatim,
+the invariant guarantees that no client ever shows two open tabs for
+the same chat.
+
 Only top-level chat tabs live here.  Sub-agent tabs are derived state
 (recreated on every client from ``openSubagentTab`` broadcasts and
 session replays) and content tabs are client-local stand-ins for the
@@ -54,9 +61,11 @@ def _clean_str(value: Any, max_len: int = 0) -> str:
 class TabRegistry:
     """Ordered, persistent registry of the shared chat tabs.
 
-    Every mutator returns ``True`` when it changed the registry (the
-    caller then broadcasts a fresh ``tabs_state`` snapshot) and
-    persists the new state before returning.
+    Every mutator reports whether it changed the registry (the caller
+    then broadcasts a fresh ``tabs_state`` snapshot) and persists the
+    new state before returning.  :meth:`update_tab` additionally
+    reports the tabs it displaced to enforce the one-tab-per-chat
+    invariant.
     """
 
     def __init__(self, path: Path) -> None:
@@ -89,16 +98,23 @@ class TabRegistry:
         if not isinstance(entries, list):
             return
         seen: set[str] = set()
+        seen_chats: set[str] = set()
         for entry in entries[:_MAX_TABS]:
             if not isinstance(entry, dict):
                 continue
             tab_id = _clean_str(entry.get("tabId"))
             if not tab_id or tab_id in seen:
                 continue
+            chat_id = _clean_str(entry.get("chatId"))
+            if chat_id:
+                # One tab per chat: drop later duplicates on load.
+                if chat_id in seen_chats:
+                    continue
+                seen_chats.add(chat_id)
             seen.add(tab_id)
             self._tabs.append({
                 "tabId": tab_id,
-                "chatId": _clean_str(entry.get("chatId")),
+                "chatId": chat_id,
                 "title": _clean_str(entry.get("title"), _MAX_TITLE_CHARS),
                 "workDir": _clean_str(entry.get("workDir")),
                 "taskId": _clean_str(entry.get("taskId")),
@@ -256,8 +272,13 @@ class TabRegistry:
         work_dir: str | None = None,
         task_id: str | None = None,
         create: bool = False,
-    ) -> bool:
+    ) -> tuple[bool, list[str]]:
         """Update (or create) a tab's binding, title, work dir or task.
+
+        Binding a non-empty *chat_id* atomically DISPLACES (removes)
+        any other tab bound to the same chat — the one-tab-per-chat
+        invariant — and reports the displaced tab ids so the caller
+        can release their server-side per-tab state.
 
         Args:
             tab_id: The shared tab identifier.
@@ -270,17 +291,20 @@ class TabRegistry:
             create: Register the tab first when it is unknown.
 
         Returns:
-            ``True`` when the registry changed.
+            ``(changed, displaced)``: whether the registry changed,
+            and the ids of the tabs removed because *chat_id* was
+            bound to them.
         """
         tab_id = _clean_str(tab_id)
         if not tab_id:
-            return False
+            return False, []
         with self._lock:
             entry = self._find_locked(tab_id)
             changed = False
+            displaced: list[str] = []
             if entry is None:
                 if not create or len(self._tabs) >= _MAX_TABS:
-                    return False
+                    return False, []
                 entry = {
                     "tabId": tab_id, "chatId": "",
                     "title": "new chat", "workDir": "",
@@ -290,6 +314,14 @@ class TabRegistry:
                 changed = True
             if chat_id is not None:
                 chat_id = _clean_str(chat_id)
+                if chat_id:
+                    for other in [
+                        t for t in self._tabs
+                        if t is not entry and t["chatId"] == chat_id
+                    ]:
+                        self._tabs.remove(other)
+                        displaced.append(other["tabId"])
+                        changed = True
                 if entry["chatId"] != chat_id:
                     entry["chatId"] = chat_id
                     changed = True
@@ -308,7 +340,7 @@ class TabRegistry:
                 changed = True
             if changed:
                 self._save_locked()
-            return changed
+            return changed, displaced
 
     def merge_if_empty(self, entries: list[dict[str, str]]) -> bool:
         """Adopt a legacy client's persisted tabs into an EMPTY registry.
@@ -331,14 +363,21 @@ class TabRegistry:
             if self._tabs:
                 return False
             seen: set[str] = set()
+            seen_chats: set[str] = set()
             for entry in entries[:_MAX_TABS]:
                 tab_id = _clean_str(entry.get("tabId"))
                 if not tab_id or tab_id in seen:
                     continue
+                chat_id = _clean_str(entry.get("chatId"))
+                if chat_id:
+                    # One tab per chat: drop duplicate legacy tabs.
+                    if chat_id in seen_chats:
+                        continue
+                    seen_chats.add(chat_id)
                 seen.add(tab_id)
                 self._tabs.append({
                     "tabId": tab_id,
-                    "chatId": _clean_str(entry.get("chatId")),
+                    "chatId": chat_id,
                     "title": (
                         _clean_str(entry.get("title"), _MAX_TITLE_CHARS)
                         or "new chat"

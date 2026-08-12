@@ -1837,10 +1837,23 @@
     );
     const inSnapshot = new Set();
     const next = [];
+    // One tab per chat: the daemon's registry enforces the invariant,
+    // and this backstop drops any duplicate chat binding a legacy or
+    // buggy snapshot might still carry (keep-first, deterministic on
+    // every client).
+    const seenChats = new Set();
     list.forEach(e => {
       if (!e || !e.tabId || inSnapshot.has(e.tabId)) return;
-      inSnapshot.add(e.tabId);
+      // The daemon listed the id, so its `openTab` is confirmed —
+      // clear the pending shield even when the entry is dropped as a
+      // duplicate below, or the local duplicate tab would survive
+      // reconciliation until the shield expires.
       pendingOpenTabs.delete(e.tabId);
+      if (e.chatId) {
+        if (seenChats.has(String(e.chatId))) return;
+        seenChats.add(String(e.chatId));
+      }
+      inSnapshot.add(e.tabId);
       let tab = byId.get(e.tabId);
       if (!tab) {
         tab = makeTab(clipTabTitle(e.title));

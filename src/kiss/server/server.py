@@ -437,6 +437,11 @@ class VSCodeServer(
     ) -> None:
         """Update the shared registry and broadcast when it changed.
 
+        Binding a chat displaces any other tab bound to the same chat
+        (the registry enforces the one-tab-per-chat invariant); the
+        displaced tabs' server-side state is released here exactly as
+        an explicit ``closeTab`` would.
+
         Args:
             tab_id: The shared tab identifier.
             chat_id: New chat binding (``None`` keeps the current one).
@@ -446,10 +451,13 @@ class VSCodeServer(
                 (``None`` keeps the current value, ``""`` clears it).
             create: Register the tab first when it is unknown.
         """
-        if self.tab_registry.update_tab(
+        changed, displaced = self.tab_registry.update_tab(
             tab_id, chat_id=chat_id, title=title,
             work_dir=work_dir, task_id=task_id, create=create,
-        ):
+        )
+        for old_tab_id in displaced:
+            self._drop_tab_state(old_tab_id)
+        if changed:
             self._broadcast_tabs_state()
 
     def ready_tab_sync(
@@ -865,7 +873,22 @@ class VSCodeServer(
         self._broadcast_to_conn(event, conn_id)
 
     def _close_tab(self, tab_id: str) -> None:
-        """Clean up all backend state for a closed tab.
+        """Close a tab: remove it from the registry and drop its state.
+
+        Args:
+            tab_id: The frontend tab identifier to close.
+        """
+        if self.tab_registry.close_tab(tab_id):
+            self._broadcast_tabs_state()
+        self._drop_tab_state(tab_id)
+
+    def _drop_tab_state(self, tab_id: str) -> None:
+        """Clean up all backend state for a tab no longer shown.
+
+        Shared by :meth:`_close_tab` and the chat-bind displacement
+        path in :meth:`_registry_update_tab` (the one-tab-per-chat
+        invariant removes the previously bound tab from the registry;
+        its backend state is released here).
 
         Removes the tab from
         the agent-state registry, cleans up per-tab printer
@@ -886,10 +909,8 @@ class VSCodeServer(
         directory are not orphaned.
 
         Args:
-            tab_id: The frontend tab identifier to close.
+            tab_id: The frontend tab identifier being dropped.
         """
-        if self.tab_registry.close_tab(tab_id):
-            self._broadcast_tabs_state()
         busy = False
         with self._state_lock:
             state = agent_state.find_by_tab(tab_id)
