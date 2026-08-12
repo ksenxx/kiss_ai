@@ -282,7 +282,11 @@ class _CommandsMixin:
             chat_id: str | None = None,
             title: str | None = None,
             work_dir: str | None = None,
+            task_id: str | None = None,
             create: bool = False,
+        ) -> None: ...
+        def _broadcast_to_conn(
+            self, event: dict[str, Any], conn_id: str,
         ) -> None: ...
         def _ensure_complete_worker(self) -> None: ...
         def _get_input_history(self, conn_id: str = "") -> None: ...
@@ -317,6 +321,19 @@ class _CommandsMixin:
         thread's first broadcast.
         """
         tab_id = cmd.get("tabId", "")
+        # Acknowledge + mirror the task-panel text to EVERY client
+        # here, in the common run path, so all run origins (VS Code,
+        # remote-web ``submit``, Python clients) behave identically.
+        # Broadcast unconditionally — also for a queued follow-up, a
+        # merge refusal or a tab-less run — because the echo doubles
+        # as the submit acknowledgment: it carries the byte-truncated
+        # prompt back to the submitting client even when no task can
+        # start (pinned by the prompt-truncation transport tests).
+        self.printer.broadcast({
+            "type": "setTaskText",
+            "text": str(cmd.get("prompt", "") or ""),
+            "tabId": tab_id,
+        })
         if not tab_id:
             logger.debug("Ignoring run command without tabId")
             return
@@ -405,12 +422,16 @@ class _CommandsMixin:
         try:
             # Register + title + bind the tab in the shared registry
             # BEFORE the ``clear`` broadcast so every client has the
-            # tab by the time the run's first event reaches it.
+            # tab by the time the run's first event reaches it.  A new
+            # run supersedes any historical task the tab was pinned to
+            # (``taskId`` cleared: the tab tracks the chat's latest
+            # task again — the one this run creates).
             self._registry_update_tab(
                 tab_id,
                 chat_id=chat_id,
                 title=str(cmd.get("prompt", "") or ""),
                 work_dir=str(cmd.get("workDir", "") or ""),
+                task_id="",
                 create=True,
             )
             self.printer.broadcast({
@@ -782,6 +803,11 @@ class _CommandsMixin:
         every other client opens the same tab.  Idempotent: a tab id
         that is already registered changes nothing (and broadcasts
         nothing).
+
+        A REJECTED open (registry at its hard cap) is answered with an
+        ``openTabRejected`` event to the originating client — without
+        it the client would keep a permanently local, snapshot-immune
+        tab no other client ever sees.
         """
         tab_id = cmd.get("tabId", "")
         if not isinstance(tab_id, str) or not tab_id:
@@ -794,6 +820,18 @@ class _CommandsMixin:
             work_dir = ""
         if self.tab_registry.open_tab(tab_id, title, work_dir):
             self._broadcast_tabs_state()
+        elif not self.tab_registry.has_tab(tab_id):
+            self._broadcast_to_conn(
+                {
+                    "type": "openTabRejected",
+                    "tabId": tab_id,
+                    "text": (
+                        "Tab limit reached — close some tabs before "
+                        "opening new ones."
+                    ),
+                },
+                cmd.get("connId", ""),
+            )
 
     def _cmd_close_tab(self, cmd: dict[str, Any]) -> None:
         """Clean up backend state for a closed frontend tab."""

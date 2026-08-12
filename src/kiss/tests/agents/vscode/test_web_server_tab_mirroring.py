@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import socket
 import ssl
@@ -45,6 +46,7 @@ from websockets.asyncio.client import ClientConnection, connect
 import kiss.agents.sorcar.persistence as th
 import kiss.core.vscode_config as vc
 from kiss.server import agent_state
+from kiss.server.tab_registry import TabRegistry
 from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
@@ -516,6 +518,273 @@ class TestTabMirroring(TabMirroringBase):
         self.assertEqual(
             len(ids), len(set(ids)), f"duplicate tab ids in registry: {ids}",
         )
+
+
+class TestTabMirroringReviewFixes(TabMirroringBase):
+    """Pins for the five defects found by the read-only review."""
+
+    async def test_ready_replay_preserves_selected_task(self) -> None:
+        """[1] A tab resumed to an OLD task must survive any ``ready``.
+
+        Chat C has an older task A and a newer task B.  A client
+        resumes tab T to task A; a later ``ready`` from ANY client
+        replays the registry's tabs and must keep showing task A —
+        not silently switch every client's tab T to the latest task B.
+        """
+        task_a, chat_id = self._seed_chat(
+            "Old task A", [{"type": "prompt", "text": "old prompt A"}],
+        )
+        task_b, chat_b = th._add_task("New task B", chat_id=chat_id)
+        th._append_chat_event(
+            {"type": "prompt", "text": "new prompt B"}, task_id=task_b,
+        )
+        th._save_task_result(task_b, "success: seeded")
+        self.assertEqual(chat_b, chat_id)
+
+        ws_a = await self._connect_ok()
+        await self._ready(ws_a)
+        await self._send(ws_a, {
+            "type": "openTab", "tabId": "tab-t", "title": "new chat",
+        })
+        await self._send(ws_a, {
+            "type": "resumeSession", "chatId": chat_id,
+            "taskId": task_a, "tabId": "tab-t",
+        })
+        replay_a = await self._wait_for_event(
+            ws_a, "task_events",
+            pred=lambda ev: ev.get("tabId") == "tab-t",
+        )
+        self.assertIsNotNone(replay_a)
+        assert replay_a is not None
+        texts_a = [e.get("text") for e in replay_a.get("events", [])]
+        self.assertIn("old prompt A", texts_a)
+
+        # ANY client's ready must not lose the selected task.
+        ws_c = await self._connect_ok()
+        await self._ready(ws_c)
+        replay_c = await self._wait_for_event(
+            ws_c, "task_events",
+            pred=lambda ev: ev.get("tabId") == "tab-t",
+        )
+        self.assertIsNotNone(
+            replay_c, "ready never replayed the bound tab",
+        )
+        assert replay_c is not None
+        texts_c = [e.get("text") for e in replay_c.get("events", [])]
+        self.assertIn(
+            "old prompt A", texts_c,
+            "ready replay switched the tab away from the task the "
+            "user selected",
+        )
+        self.assertNotIn(
+            "new prompt B", texts_c,
+            "ready replay silently switched the tab to the chat's "
+            "latest task",
+        )
+
+    async def test_subagent_close_broadcasts_to_all_clients(self) -> None:
+        """[2] Closing a sub-agent tab must mirror to every client.
+
+        Sub-agent tabs are not in the registry, so their close cannot
+        mirror via ``tabs_state``; the daemon must broadcast a
+        canonical ``closeSubagentTab`` event instead.
+        """
+        ws_a = await self._connect_ok()
+        ws_b = await self._connect_ok()
+        await self._ready(ws_a)
+        await self._ready(ws_b)
+
+        await self._send(ws_a, {
+            "type": "closeTab", "tabId": "tab-parent__sub_9",
+        })
+        closed_b = await self._wait_for_event(
+            ws_b, "closeSubagentTab",
+            pred=lambda ev: ev.get("tab_id") == "tab-parent__sub_9",
+        )
+        self.assertIsNotNone(
+            closed_b,
+            "one client closing a sub-agent tab never reached the "
+            "other clients — the tab sets diverge",
+        )
+
+    async def test_run_broadcasts_task_text_to_all_clients(self) -> None:
+        """[3] A run from ANY origin mirrors the task-panel text.
+
+        The common server-side run path must broadcast ``setTaskText``
+        so VS Code-originated runs behave exactly like remote-web
+        ``submit`` ones.
+        """
+        ws_a = await self._connect_ok()
+        ws_b = await self._connect_ok()
+        await self._ready(ws_a)
+        await self._ready(ws_b)
+
+        await self._send(ws_a, {
+            "type": "run",
+            "prompt": "Mirror this task text",
+            "model": "definitely-not-a-real-model",
+            "workDir": self.tmpdir,
+            "tabId": "tab-tt",
+            "useWorktree": False,
+            "useParallel": False,
+            "autoCommit": False,
+        })
+        stt_b = await self._wait_for_event(
+            ws_b, "setTaskText",
+            pred=lambda ev: ev.get("tabId") == "tab-tt",
+        )
+        self.assertIsNotNone(
+            stt_b,
+            "the run's task text never reached the other client",
+        )
+        assert stt_b is not None
+        self.assertEqual(stt_b.get("text"), "Mirror this task text")
+
+    @unittest.skipIf(
+        hasattr(os, "geteuid") and os.geteuid() == 0,
+        "root bypasses directory permissions",
+    )
+    async def test_persist_failure_is_flushed_at_shutdown(self) -> None:
+        """[4] Live mirroring survives an unwritable KISS dir, and the
+        registry is re-persisted at shutdown once the dir is writable.
+        """
+        kiss_dir = Path(self.tmpdir) / ".kiss"
+        tabs_file = kiss_dir / "tabs.json"
+
+        ws_a = await self._connect_ok()
+        await self._ready(ws_a)
+        await self._send(ws_a, {
+            "type": "openTab", "tabId": "tab-w1", "title": "persisted",
+        })
+        self.assertIsNotNone(
+            await self._wait_for_snapshot_with(ws_a, present={"tab-w1"}),
+        )
+        self.assertIn("tab-w1", tabs_file.read_text(encoding="utf-8"))
+
+        os.chmod(kiss_dir, 0o500)
+        try:
+            await self._send(ws_a, {
+                "type": "openTab", "tabId": "tab-w2", "title": "in memory",
+            })
+            snap = await self._wait_for_snapshot_with(
+                ws_a, present={"tab-w1", "tab-w2"},
+            )
+            self.assertIsNotNone(
+                snap,
+                "a persistence failure must not break live mirroring",
+            )
+            self.assertNotIn(
+                "tab-w2", tabs_file.read_text(encoding="utf-8"),
+            )
+        finally:
+            os.chmod(kiss_dir, 0o755)
+
+        await self._stop_server()
+        self.assertIn(
+            "tab-w2", tabs_file.read_text(encoding="utf-8"),
+            "the daemon shut down without re-persisting the tabs that "
+            "failed to persist while the dir was unwritable",
+        )
+
+    async def test_open_tab_rejected_notifies_originating_client(
+        self,
+    ) -> None:
+        """[5] A cap-rejected ``openTab`` must answer the client.
+
+        Otherwise the originating client keeps a permanently local,
+        snapshot-immune tab no other client ever sees.
+        """
+        await self._stop_server()
+        kiss_dir = Path(self.tmpdir) / ".kiss"
+        entries = [
+            {"tabId": f"seed-{i}", "chatId": "", "title": f"seed {i}",
+             "workDir": ""}
+            for i in range(512)
+        ]
+        (kiss_dir / "tabs.json").write_text(
+            json.dumps({"tabs": entries}), encoding="utf-8",
+        )
+        await self._start_server()
+
+        ws_a = await self._connect_ok()
+        await self._ready(ws_a)
+        self.assertIsNotNone(
+            await self._wait_for_snapshot_with(ws_a, present={"seed-0"}),
+        )
+        await self._send(ws_a, {
+            "type": "openTab", "tabId": "tab-overflow", "title": "one too many",
+        })
+        rejected = await self._wait_for_event(
+            ws_a, "openTabRejected",
+            pred=lambda ev: ev.get("tabId") == "tab-overflow",
+        )
+        self.assertIsNotNone(
+            rejected,
+            "the rejected openTab was silently dropped — the client "
+            "keeps a permanently local tab",
+        )
+
+
+@unittest.skipIf(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    "root bypasses directory permissions",
+)
+class TestTabRegistryPersistenceFailure(unittest.TestCase):
+    """[4] The registry must survive persistence failures loudly."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.mkdtemp(prefix="kiss-tab-reg-")
+        self.addCleanup(shutil.rmtree, self.tmpdir, ignore_errors=True)
+        self.reg_dir = Path(self.tmpdir) / "reg"
+        self.reg_dir.mkdir()
+        self.path = self.reg_dir / "tabs.json"
+
+    def tearDown(self) -> None:
+        os.chmod(self.reg_dir, 0o755)
+
+    def test_mutations_survive_and_recover_from_unwritable_dir(self) -> None:
+        """Failed persists log ONE error, keep serving the in-memory
+        state, and re-persist on the next mutation / flush."""
+        reg = TabRegistry(self.path)
+        self.assertTrue(reg.open_tab("t1", "one"))
+        self.assertIn("t1", self.path.read_text(encoding="utf-8"))
+
+        os.chmod(self.reg_dir, 0o500)
+        with self.assertLogs("kiss.server.tab_registry", level="ERROR") as cm:
+            self.assertTrue(reg.open_tab("t2", "two"))
+            self.assertTrue(reg.open_tab("t3", "three"))
+        errors = [r for r in cm.records if r.levelname == "ERROR"]
+        self.assertEqual(
+            len(errors), 1,
+            "consecutive persistence failures must log loudly ONCE, "
+            f"got {len(errors)} error records",
+        )
+        # Live state still serves every mutation.
+        ids = [e["tabId"] for e in reg.snapshot()]
+        self.assertEqual(ids, ["t1", "t2", "t3"])
+        self.assertNotIn("t2", self.path.read_text(encoding="utf-8"))
+
+        # Recovery via the next mutation once the dir is writable.
+        os.chmod(self.reg_dir, 0o755)
+        self.assertTrue(reg.open_tab("t4", "four"))
+        on_disk = self.path.read_text(encoding="utf-8")
+        for tab in ("t1", "t2", "t3", "t4"):
+            self.assertIn(tab, on_disk)
+
+    def test_flush_persists_dirty_state(self) -> None:
+        """``flush()`` re-persists state whose last mutation failed."""
+        reg = TabRegistry(self.path)
+        self.assertTrue(reg.open_tab("t1", "one"))
+        os.chmod(self.reg_dir, 0o500)
+        self.assertTrue(reg.open_tab("t2", "two"))
+        os.chmod(self.reg_dir, 0o755)
+        reg.flush()
+        on_disk = self.path.read_text(encoding="utf-8")
+        self.assertIn("t1", on_disk)
+        self.assertIn("t2", on_disk)
+        # A clean flush is a no-op.
+        reg.flush()
+        self.assertIn("t2", self.path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

@@ -432,6 +432,7 @@ class VSCodeServer(
         chat_id: str | None = None,
         title: str | None = None,
         work_dir: str | None = None,
+        task_id: str | None = None,
         create: bool = False,
     ) -> None:
         """Update the shared registry and broadcast when it changed.
@@ -441,17 +442,19 @@ class VSCodeServer(
             chat_id: New chat binding (``None`` keeps the current one).
             title: New title (``None``/empty keeps the current one).
             work_dir: New working directory (``None``/empty keeps it).
+            task_id: The specific historical task the tab shows
+                (``None`` keeps the current value, ``""`` clears it).
             create: Register the tab first when it is unknown.
         """
         if self.tab_registry.update_tab(
             tab_id, chat_id=chat_id, title=title,
-            work_dir=work_dir, create=create,
+            work_dir=work_dir, task_id=task_id, create=create,
         ):
             self._broadcast_tabs_state()
 
     def ready_tab_sync(
         self, restored: list[dict[str, str]],
-    ) -> list[tuple[str, str]]:
+    ) -> list[tuple[str, str, str]]:
         """Synchronize a (re)connecting client with the tab registry.
 
         Adopts the client's legacy ``restoredTabs`` when the registry
@@ -464,17 +467,22 @@ class VSCodeServer(
                 client's ``ready`` command.
 
         Returns:
-            ``(tab_id, chat_id)`` pairs for every chat-bound registry
-            tab — the caller replays each so all clients converge on
-            the same transcripts.
+            ``(tab_id, chat_id, task_id)`` triples for every
+            chat-bound registry tab — the caller replays each so all
+            clients converge on the same transcripts.  ``task_id`` is
+            the specific historical task the tab was resumed to
+            (``""`` when the tab tracks the chat's latest task);
+            replaying it verbatim keeps a tab pinned to an older task
+            from being silently switched to the chat's latest task by
+            any client's reconnect.
         """
         self.tab_registry.merge_if_empty(restored)
-        bindings = self.tab_registry.bindings()
+        bound = self.tab_registry.bound_tabs()
         with self._state_lock:
-            for tab_id, chat_id in bindings.items():
+            for tab_id, chat_id, _task_id in bound:
                 self._tab_chat_views.setdefault(tab_id, chat_id)
         self._broadcast_tabs_state()
-        return list(bindings.items())
+        return bound
 
     def _tab_model(self, tab_id: str) -> str:
         """Return the model selected for *tab_id* (default when unset).
@@ -882,14 +890,46 @@ class VSCodeServer(
         """
         if self.tab_registry.close_tab(tab_id):
             self._broadcast_tabs_state()
+        busy = False
         with self._state_lock:
             state = agent_state.find_by_tab(tab_id)
+            is_subagent_tab = (
+                state is not None and state.is_subagent
+            ) or "__sub_" in tab_id
             if state is not None and state.busy():
                 state.frontend_closed = True
-                return
-            if state is not None:
+                busy = True
+            elif state is not None:
                 agent_state.unregister(state.task_id, state)
+        # Sub-agent tabs are not in the registry, so their close
+        # cannot mirror via ``tabs_state``: broadcast a canonical
+        # close event instead.  Every client removes the tab, so a
+        # torn-down shared per-tab printer subscription cannot starve
+        # a client that still shows the tab.
+        if is_subagent_tab:
+            self._broadcast_subagent_close(tab_id)
+        if busy:
+            return
         self._teardown_tab_resources(tab_id, state)
+
+    def _broadcast_subagent_close(self, tab_id: str) -> None:
+        """Tell every client to close the sub-agent tab *tab_id*.
+
+        Sub-agent tabs are derived state shared under ONE tab id by
+        every client, but they never live in the tab registry — so a
+        close on one client must be mirrored with this dedicated
+        broadcast (clients apply it without echoing ``closeTab`` back).
+
+        Args:
+            tab_id: The shared sub-agent tab identifier.
+        """
+        self.printer.broadcast({
+            "type": "closeSubagentTab",
+            "tab_id": tab_id,
+            # The explicit tabId stamp routes the event through the
+            # printer's verbatim all-clients path (never recorded).
+            "tabId": "",
+        })
 
     def _dispose_if_closed(self, tab_id: str) -> None:
         """Dispose *tab_id*'s state if the frontend already closed it.
@@ -1075,7 +1115,10 @@ class VSCodeServer(
                     self._tab_chat_views[tab_id] = chat_id
             if chat_id and not is_sub_view:
                 self._registry_update_tab(
-                    tab_id, chat_id=chat_id, create=True,
+                    tab_id,
+                    chat_id=chat_id,
+                    task_id=str(task_id) if task_id else "",
+                    create=True,
                 )
             return
 
@@ -1111,11 +1154,15 @@ class VSCodeServer(
         if subagent_info is None and chat_id:
             # A resumed chat binds + titles the tab for EVERY client:
             # the shared registry is what makes a history click on one
-            # client rename the same tab everywhere.
+            # client rename the same tab everywhere.  The selected
+            # task is persisted too, so the ready replay path keeps a
+            # tab pinned to an older task instead of silently
+            # switching every client to the chat's latest task.
             self._registry_update_tab(
                 tab_id,
                 chat_id=chat_id,
                 title=str(result.get("task", "") or ""),
+                task_id=str(task_id) if task_id else "",
                 create=True,
             )
 

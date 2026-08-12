@@ -1116,7 +1116,10 @@
 
   // agentInitiated marks a close the agent performed by itself rather
   // than one the user asked for; see pickSuccessorTab.
-  function closeTab(tabId, agentInitiated) {
+  // fromServer marks a close applied FROM a daemon broadcast (e.g.
+  // `closeSubagentTab`): it must not be echoed back as a `closeTab`
+  // command, or two clients would bounce the close between each other.
+  function closeTab(tabId, agentInitiated, fromServer) {
     const origIdx = tabs.findIndex(t => {
       return t.id === tabId;
     });
@@ -1145,7 +1148,7 @@
       // report-coverage:start
       discardReadyReports(id);
       // report-coverage:end
-      api.closeTab({tabId: id});
+      if (!fromServer) api.closeTab({tabId: id});
     }
     rpAfterTabsClosed(toClose);
     if (activeWasClosed) {
@@ -1786,14 +1789,19 @@
 
   // tabmirror-coverage:start
   // Tab ids announced to the daemon in an `openTab` whose `tabs_state`
-  // echo has not arrived yet. A snapshot broadcast inside that window
-  // predates the registration and must not remove the brand-new tab.
-  const pendingOpenTabs = new Set();
+  // echo has not arrived yet, mapped to how many snapshots have since
+  // arrived WITHOUT the id. A snapshot broadcast inside that window
+  // predates the registration and must not remove the brand-new tab —
+  // but an id no snapshot ever confirms (e.g. the daemon rejected or
+  // dropped the open) must not stay snapshot-immune forever, so it
+  // expires after PENDING_OPEN_MAX_MISSES missed snapshots.
+  const pendingOpenTabs = new Map();
+  const PENDING_OPEN_MAX_MISSES = 3;
 
   // Announce a locally created chat tab to the daemon's shared tab
   // registry so every other client opens the same tab.
   function registerTab(tab) {
-    pendingOpenTabs.add(tab.id);
+    pendingOpenTabs.set(tab.id, 0);
     api.openTab({
       tabId: tab.id,
       title: tab.title || 'new chat',
@@ -1849,6 +1857,15 @@
       }
       if (e.workDir && !tab.workDir) tab.workDir = e.workDir;
       next.push(tab);
+    });
+
+    // Expire pending opens the daemon never confirmed: after a few
+    // snapshots without the id, the open is considered lost/rejected
+    // and the id stops shielding its local tab from reconciliation.
+    pendingOpenTabs.forEach((misses, id) => {
+      if (inSnapshot.has(id)) return;
+      if (misses + 1 >= PENDING_OPEN_MAX_MISSES) pendingOpenTabs.delete(id);
+      else pendingOpenTabs.set(id, misses + 1);
     });
 
     // A removed registry tab takes its local sub-agent descendants
@@ -6193,6 +6210,35 @@
           if (subTab.isRunning) applyChevronState(currentTaskName);
         }
         persistTabState();
+        break;
+      }
+      case 'closeSubagentTab': {
+        // Another client closed this sub-agent tab; mirror the close.
+        // Applied without echoing `closeTab` back to the daemon (the
+        // origin client already sent it) — see closeTab(fromServer).
+        if (getTab(ev.tab_id)) closeTab(ev.tab_id, true, true);
+        break;
+      }
+      case 'openTabRejected': {
+        // The daemon refused to register this tab (registry cap): it
+        // will never appear in a snapshot, so drop the local copy —
+        // unless it is the only tab, which stays as the same local,
+        // unregistered placeholder an empty registry gets. No
+        // re-registration happens either way, so a full registry
+        // cannot start an openTab/reject loop.
+        pendingOpenTabs.delete(ev.tabId);
+        const rejTab = getTab(ev.tabId);
+        if (rejTab && !rejTab.isSubagentTab && !rejTab.isContentTab) {
+          const chatTabs = tabs.filter(t => !t.isContentTab);
+          if (chatTabs.length > 1) closeTab(ev.tabId, true, true);
+        }
+        if (ev.text) {
+          showNotification({
+            id: 'open-tab-rejected',
+            severity: 'warning',
+            message: ev.text,
+          });
+        }
         break;
       }
       case 'subagentDone': {

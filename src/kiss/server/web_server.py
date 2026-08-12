@@ -4326,11 +4326,17 @@ class RemoteAccessServer:
         except Exception:
             logger.exception("ready tab-registry sync failed")
             bound = []
-        for rt_id, rt_chat in bound:
-            await self._run_cmd(
-                {"type": "resumeSession", "chatId": rt_chat,
-                 "tabId": rt_id},
-            )
+        for rt_id, rt_chat, rt_task in bound:
+            resume: dict[str, Any] = {
+                "type": "resumeSession", "chatId": rt_chat,
+                "tabId": rt_id,
+            }
+            # A tab pinned to a specific historical task replays THAT
+            # task; without the taskId the replay would silently
+            # switch every client's tab to the chat's latest task.
+            if rt_task:
+                resume["taskId"] = rt_task
+            await self._run_cmd(resume)
 
     async def _handle_submit(self, cmd: dict[str, Any]) -> None:
         """Translate the webview ``submit`` command into a backend ``run``.
@@ -4373,7 +4379,8 @@ class RemoteAccessServer:
                 len(attachments), _MAX_ATTACHMENTS,
             )
             attachments = attachments[:_MAX_ATTACHMENTS]
-        self._printer.broadcast({"type": "setTaskText", "text": prompt, "tabId": tab_id})
+        # NOTE: no setTaskText here — the common run path (_cmd_run)
+        # broadcasts it for every origin, VS Code and remote alike.
         self._printer.broadcast({"type": "status", "running": True, "tabId": tab_id})
         run_cmd: dict[str, Any] = {
             "type": "run",
@@ -5752,6 +5759,10 @@ class RemoteAccessServer:
             self._stop_active_agent_tasks()
             self._await_active_merges()
             self._disconnect_mcp_servers()
+            # Re-persist tab-registry mutations whose save failed
+            # (e.g. a briefly unwritable KISS dir); no-op when the
+            # last save succeeded.
+            self._vscode_server.tab_registry.flush()
             logger.info("Server stopped: pid=%d", pid)
             self._detach_tunnel()
 
@@ -5872,6 +5883,10 @@ class RemoteAccessServer:
             await asyncio.to_thread(self._await_active_merges)
             await asyncio.to_thread(self._stop_active_agent_tasks)
             await asyncio.to_thread(self._disconnect_mcp_servers)
+            # Re-persist tab-registry mutations whose save failed
+            # (e.g. a briefly unwritable KISS dir) so they survive
+            # the restart; a no-op when the last save succeeded.
+            await asyncio.to_thread(self._vscode_server.tab_registry.flush)
             self._stop_tunnel()
             _remove_url_file(self._url_file)
 

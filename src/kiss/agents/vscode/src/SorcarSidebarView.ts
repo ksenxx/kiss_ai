@@ -668,7 +668,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     autoCommit?: boolean,
   ): void {
     const effectiveWorkDir = workDir || this._getWorkDir();
-    this._sendToWebview({type: 'setTaskText', text: prompt, tabId});
+    // No local setTaskText echo: the daemon's common run path
+    // broadcasts it to EVERY client (this webview included), so the
+    // task-panel text mirrors identically for all run origins.
     this._sendToWebview({type: 'status', running: true, tabId});
     this._getApi().run({
       prompt,

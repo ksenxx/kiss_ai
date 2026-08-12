@@ -69,6 +69,7 @@ class TabRegistry:
         self._path = path
         self._lock = threading.Lock()
         self._tabs: list[dict[str, str]] = []
+        self._persist_failed = False
         self._load()
 
     def _load(self) -> None:
@@ -100,10 +101,18 @@ class TabRegistry:
                 "chatId": _clean_str(entry.get("chatId")),
                 "title": _clean_str(entry.get("title"), _MAX_TITLE_CHARS),
                 "workDir": _clean_str(entry.get("workDir")),
+                "taskId": _clean_str(entry.get("taskId")),
             })
 
     def _save_locked(self) -> None:
-        """Atomically persist the tab list (caller holds the lock)."""
+        """Atomically persist the tab list (caller holds the lock).
+
+        A failed write never breaks live mirroring: the in-memory
+        state stays authoritative, the failure is logged loudly ONCE
+        per failure streak, and because every save writes the FULL
+        state, the next successful mutation (or :meth:`flush`) heals
+        the file.
+        """
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._path.with_name(self._path.name + ".tmp")
@@ -113,10 +122,33 @@ class TabRegistry:
             )
             os.replace(tmp, self._path)
         except OSError:
+            if not self._persist_failed:
+                logger.error(
+                    "Could not persist tab registry %s; serving the "
+                    "in-memory tabs and retrying on the next mutation "
+                    "and at shutdown",
+                    self._path,
+                    exc_info=True,
+                )
+            self._persist_failed = True
+            return
+        if self._persist_failed:
             logger.warning(
-                "Could not persist tab registry %s", self._path,
-                exc_info=True,
+                "Tab registry %s persisted again after earlier failures",
+                self._path,
             )
+        self._persist_failed = False
+
+    def flush(self) -> None:
+        """Re-persist the registry if its last save failed.
+
+        Called at daemon shutdown so tabs mutated while the disk was
+        unwritable are not silently lost across a restart.  A no-op
+        when the last save succeeded.
+        """
+        with self._lock:
+            if self._persist_failed:
+                self._save_locked()
 
     def _find_locked(self, tab_id: str) -> dict[str, str] | None:
         """Return the entry for *tab_id* (caller holds the lock)."""
@@ -138,6 +170,30 @@ class TabRegistry:
                 for entry in self._tabs
                 if entry["chatId"]
             }
+
+    def bound_tabs(self) -> list[tuple[str, str, str]]:
+        """Return ``(tabId, chatId, taskId)`` for every chat-bound tab.
+
+        ``taskId`` is the specific historical task the tab was resumed
+        to (``""`` when the tab tracks the chat's latest task) — the
+        ready replay path passes it through so a reconnect never
+        silently switches a tab to a different task.
+        """
+        with self._lock:
+            return [
+                (
+                    entry["tabId"],
+                    entry["chatId"],
+                    entry.get("taskId", ""),
+                )
+                for entry in self._tabs
+                if entry["chatId"]
+            ]
+
+    def has_tab(self, tab_id: str) -> bool:
+        """Return whether *tab_id* is registered."""
+        with self._lock:
+            return self._find_locked(_clean_str(tab_id)) is not None
 
     def open_tab(
         self, tab_id: str, title: str = "", work_dir: str = "",
@@ -169,6 +225,7 @@ class TabRegistry:
                 "chatId": "",
                 "title": _clean_str(title, _MAX_TITLE_CHARS) or "new chat",
                 "workDir": _clean_str(work_dir),
+                "taskId": "",
             })
             self._save_locked()
             return True
@@ -197,15 +254,19 @@ class TabRegistry:
         chat_id: str | None = None,
         title: str | None = None,
         work_dir: str | None = None,
+        task_id: str | None = None,
         create: bool = False,
     ) -> bool:
-        """Update (or create) a tab's binding, title or work dir.
+        """Update (or create) a tab's binding, title, work dir or task.
 
         Args:
             tab_id: The shared tab identifier.
             chat_id: New chat binding (``None`` keeps the current one).
             title: New title (``None``/empty keeps the current one).
             work_dir: New working directory (``None``/empty keeps it).
+            task_id: The specific historical task the tab shows.
+                ``None`` keeps the current value; ``""`` clears it (the
+                tab tracks the chat's latest task again).
             create: Register the tab first when it is unknown.
 
         Returns:
@@ -223,6 +284,7 @@ class TabRegistry:
                 entry = {
                     "tabId": tab_id, "chatId": "",
                     "title": "new chat", "workDir": "",
+                    "taskId": "",
                 }
                 self._tabs.append(entry)
                 changed = True
@@ -230,6 +292,11 @@ class TabRegistry:
                 chat_id = _clean_str(chat_id)
                 if entry["chatId"] != chat_id:
                     entry["chatId"] = chat_id
+                    changed = True
+            if task_id is not None:
+                task_id = _clean_str(task_id)
+                if entry.get("taskId", "") != task_id:
+                    entry["taskId"] = task_id
                     changed = True
             new_title = _clean_str(title, _MAX_TITLE_CHARS)
             if new_title and entry["title"] != new_title:
@@ -277,6 +344,7 @@ class TabRegistry:
                         or "new chat"
                     ),
                     "workDir": _clean_str(entry.get("workDir")),
+                    "taskId": "",
                 })
             if not self._tabs:
                 return False
