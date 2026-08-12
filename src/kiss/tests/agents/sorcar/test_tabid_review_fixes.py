@@ -57,10 +57,21 @@ class _WireCapturingWebPrinter(WebPrinter):
 
 
 class _AgentStub:
-    """Minimal stand-in carrying the ``_last_task_id`` persistence key."""
+    """Minimal stand-in exposing the ``last_task_id`` persistence key.
+
+    Mirrors ``ChatSorcarAgent``'s public surface: the printer resolves
+    the task an event belongs to through the ``last_task_id``
+    property, which the real agent reads under the lock its publishing
+    assignment takes.
+    """
 
     def __init__(self, task_id: str) -> None:
         self._last_task_id = task_id
+
+    @property
+    def last_task_id(self) -> str:
+        """Return the ``task_history`` row id this stand-in published."""
+        return self._last_task_id or ""
 
 
 def _redirect(tmpdir: str):

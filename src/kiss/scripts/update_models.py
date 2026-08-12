@@ -7,9 +7,13 @@
 and update MODEL_INFO.json.
 
 The script writes the source-of-truth ``src/kiss/core/models/MODEL_INFO.json``
-in the repo. When the user-local copy at ``~/.kiss/MODEL_INFO.json`` exists,
-it is also refreshed so a running KISS install picks up the changes on its
-next ``model_info`` reload without waiting for a reinstall.
+in the repo, and nothing else: there is deliberately no user-local
+``~/.kiss/MODEL_INFO.json`` copy to keep in sync, and
+``src/kiss/tests/test_install_no_model_info_copy.py`` forbids re-introducing
+one. A running KISS install picks the catalog up from the package on its
+next start. The write is atomic (temp file + ``os.replace``) because
+``model_info`` loads the catalog at import time, so a truncating rewrite
+would break every process that starts while the script is running.
 
 Usage:
     uv run python scripts/update_models.py [OPTIONS]
@@ -31,6 +35,7 @@ import os
 import re
 import ssl
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -1502,11 +1507,30 @@ def _write_model_info_json(path: Path, data: dict[str, dict]) -> None:
 
     Context lengths of 1000000 or above are capped at 500000 before
     writing so the on-disk catalog never advertises a >=1M context window.
+
+    The publish is **atomic**: the ~200 KB catalog is written to a
+    sibling temp file and then ``os.replace``d over the target.  A plain
+    ``write_text`` truncates first, and ``model_info`` reads this file at
+    **import time** — so any kiss process starting during the write (a
+    ``run_parallel`` fan-out can start dozens per second) used to read a
+    truncated prefix and die with a ``JSONDecodeError`` out of the import
+    itself.
+
+    Args:
+        path: The catalog file to publish.
+        data: The catalog contents, mutated in place by the context cap.
     """
     _normalize_context_caps(data)
     sorted_data = dict(sorted(data.items()))
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(sorted_data, indent=2) + "\n", encoding="utf-8")
+    fd, staged = tempfile.mkstemp(prefix=f".{path.name}-", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(sorted_data, indent=2) + "\n")
+        os.replace(staged, path)
+    except BaseException:
+        Path(staged).unlink(missing_ok=True)
+        raise
 
 
 def apply_updates_to_file(
@@ -1518,10 +1542,9 @@ def apply_updates_to_file(
 ) -> None:
     """Apply MODEL_INFO updates/additions/removals to the JSON source of truth.
 
-    Mutates ``MODEL_INFO_PATH`` (the in-repo ``MODEL_INFO.json``) and, when
-    it already exists, also syncs the user-local copy at
-    ``~/.kiss/MODEL_INFO.json`` so that a running KISS install picks up the
-    changes on next ``model_info`` reload without waiting for a reinstall.
+    Mutates ``MODEL_INFO_PATH`` (the in-repo ``MODEL_INFO.json``) and
+    nothing else — no user-local copy is written (see the module
+    docstring).
 
     Args:
         updates: ``[{"name": str, "changes": {field: value, ...}}]``.

@@ -159,7 +159,7 @@ def test_recover_orphaned_tasks_uses_placeholders() -> None:
         "src/kiss/agents/sorcar/persistence.py"
     ).read_text()
     assert "'\" + str(t).replace(\"'\", \"''\") + \"'\"" not in src
-    assert "AND id NOT IN ({placeholders})" in src
+    assert "WHERE rowid IN ({placeholders}) AND result = ?" in src
 
 
 def test_shutdown_persist_in_flight_works_with_uuid_str(

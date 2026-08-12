@@ -6,7 +6,8 @@
 
 Historically this module also prepared the interactive diff/merge
 review view; that workflow was removed, leaving the file scanner used
-by autocomplete and the shared ``git`` subprocess helpers.
+by autocomplete and a positional-``cwd`` adapter over the single
+hardened git runner in :mod:`kiss.agents.sorcar.git_worktree`.
 """
 
 from __future__ import annotations
@@ -16,7 +17,8 @@ import os
 import subprocess
 from pathlib import Path
 
-from kiss.agents.sorcar.git_worktree import _REPO_SCOPED_GIT_ENV, _unquote_git_path
+from kiss.agents.sorcar.git_worktree import _git as _git_run
+from kiss.agents.sorcar.git_worktree import _unquote_git_path
 
 logger = logging.getLogger(__name__)
 
@@ -97,76 +99,31 @@ def _scan_files(work_dir: str) -> list[str]:
     return paths
 
 
-_GIT_TIMEOUT_SECONDS: float = 30.0
-
-
-def _scrubbed_git_env() -> dict[str, str]:
-    """Return a copy of the environment without repo-scoped GIT_* vars.
-
-    Strips ``GIT_DIR`` / ``GIT_WORK_TREE`` / ``GIT_INDEX_FILE`` etc.
-    (see :data:`kiss.agents.sorcar.git_worktree._REPO_SCOPED_GIT_ENV`)
-    so an inherited variable — e.g. from a git hook that launched this
-    process — cannot redirect the command away from the ``cwd`` passed
-    to :func:`_git`.  This is the same scrub
-    ``git_worktree._git`` applies.
-
-    Returns:
-        Environment mapping safe to pass to a git subprocess.
-    """
-    return {k: v for k, v in os.environ.items() if k not in _REPO_SCOPED_GIT_ENV}
-
-
 def _git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
-    """Run a git command with captured text output.
+    """Run a git command in *cwd* with captured text output.
 
-    Always passes a 30-second timeout so a hung git process (e.g. waiting
-    on a credential-helper prompt or a network remote) cannot block the
-    agent thread forever (M1).  On timeout returns a non-zero
-    ``CompletedProcess`` so callers don't crash.
-
-    Repo-scoped ``GIT_*`` environment variables are scrubbed (see
-    :func:`_scrubbed_git_env`) and output is decoded with
-    ``errors="surrogateescape"`` because git paths are byte strings
-    that may be invalid UTF-8 — a strict decode would raise
-    ``UnicodeDecodeError`` out of every git call touching such a
-    filename.  Both behaviors match ``git_worktree._git``.
+    A thin positional-``cwd`` adapter over
+    :func:`kiss.agents.sorcar.git_worktree._git`, which is the single
+    hardened git runner: one timeout budget, repo-scoped ``GIT_*``
+    variables scrubbed, ``errors="surrogateescape"`` decoding, and a
+    timeout path that kills the whole process **group** and then waits
+    only briefly.  This module used to carry its own copy, which had
+    drifted to a 10× shorter timeout and to a kill that could still
+    hang forever: ``subprocess.run`` kills the git process alone and
+    then waits without a bound for its output pipes to close, so a
+    surviving grandchild (credential helper, ``core.askPass``, a
+    smudge/clean filter, ``ssh``) that inherited them blocked the
+    caller indefinitely — wedging ``repo_lock`` for every tab.
 
     Args:
         cwd: Working directory for the git command.
         *args: Git sub-command and arguments.
 
     Returns:
-        CompletedProcess with stdout/stderr as strings.
+        CompletedProcess with stdout/stderr as strings; ``returncode``
+        124 when the command timed out.
     """
-    try:
-        return subprocess.run(
-            ["git", "-c", "core.quotepath=false", *args],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="surrogateescape",
-            cwd=cwd,
-            env=_scrubbed_git_env(),
-            timeout=_GIT_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired as exc:
-        logger.warning("git %s timed out after %ss", args, _GIT_TIMEOUT_SECONDS)
-        stdout = (
-            exc.stdout.decode("utf-8", "surrogateescape")
-            if isinstance(exc.stdout, bytes)
-            else (exc.stdout or "")
-        )
-        stderr = (
-            exc.stderr.decode("utf-8", "surrogateescape")
-            if isinstance(exc.stderr, bytes)
-            else (exc.stderr or "")
-        )
-        return subprocess.CompletedProcess(
-            args=["git", *args],
-            returncode=124,
-            stdout=stdout or "",
-            stderr=stderr or f"git {args[0] if args else ''} timed out",
-        )
+    return _git_run(*args, cwd=cwd)
 
 
 def _capture_untracked(work_dir: str) -> set[str]:

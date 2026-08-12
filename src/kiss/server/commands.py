@@ -56,8 +56,10 @@ def _kiss_home_is_default() -> bool:
 def _owner_task_id(state: AgentState) -> str:
     """Return the persisted task id of *state*'s live agent, or ``""``.
 
-    Reads ``state.agent._last_task_id`` — the ``task_history`` row id
-    the agent allocated for its current run.  MUST be called while
+    Reads ``state.agent.last_task_id`` — the ``task_history`` row id
+    the agent allocated for its current run, through the property that
+    takes the same lock the publishing assignment takes.  MUST be
+    called while
     holding :data:`agent_state.STATE_LOCK` (the server's
     ``_state_lock``): task teardown replaces/clears ``state.agent``
     under that lock, so capturing the id inside the same critical
@@ -75,7 +77,7 @@ def _owner_task_id(state: AgentState) -> str:
 
     * In a multi-``<task>`` run, a prompt queued BETWEEN two subtasks
       is stamped with the subtask currently on screen (the one whose
-      id ``_last_task_id`` still names) even though the NEXT subtask's
+      id ``last_task_id`` still names) even though the NEXT subtask's
       pre-step drain consumes it — the echo lands in the trajectory
       the user was looking at when they typed.
     * If the whole task tears down between queueing and the echo
@@ -91,10 +93,7 @@ def _owner_task_id(state: AgentState) -> str:
         The owning task id, or ``""`` when it cannot be determined.
     """
     agent = state.agent
-    task_id = (
-        getattr(agent, "_last_task_id", None) if agent is not None else None
-    )
-    return task_id if isinstance(task_id, str) else ""
+    return str(getattr(agent, "last_task_id", "") or "")
 
 
 def _task_accepts_input(state: AgentState | None) -> bool:
@@ -235,6 +234,7 @@ class _CommandsMixin:
         _file_cache: dict[str, list[str]]
         _tab_chat_views: dict[str, str]
         _tab_models: dict[str, str]
+        _commit_msg_tabs: set[str]
 
         def _run_task(self, cmd: dict[str, Any]) -> None: ...
         def _stop_task(self, tab_id: str = "") -> None: ...
@@ -317,7 +317,15 @@ class _CommandsMixin:
             if prev is not None and prev.is_merging:
                 # An in-flight merge/discard owns the tab's state (and
                 # its worktree agent); replacing it would orphan the
-                # operation.  Refuse the run instead.
+                # operation.  Refuse the run instead.  Both frontends
+                # raise the tab's running state optimistically the
+                # moment the user hits Enter and only a
+                # ``status running:false`` ever lowers it again, so the
+                # refusal MUST clear it first or the tab's composer
+                # stays disabled forever (F08-1).
+                self.printer.broadcast(
+                    {"type": "status", "running": False, "tabId": tab_id},
+                )
                 self.printer.broadcast(
                     {
                         "type": "error",
@@ -855,15 +863,46 @@ class _CommandsMixin:
         daemon-wide ``self.work_dir``, which may point at a different —
         possibly non-git — folder and produce a misleading "Not a git
         repository." error.
+
+        At most one generation runs per tab: the generator makes a
+        billed LLM call and stamps its answer on the tab, so an
+        impatient double click used to pay twice and let the slower
+        (not the latest) reply win (R09-8).  Extra clicks are dropped
+        while the tab's generation is in flight.
         """
         tab_id = cmd.get("tabId", "")
         work_dir = cmd.get("workDir", "")
+        with self._state_lock:
+            if tab_id in self._commit_msg_tabs:
+                logger.debug(
+                    "Commit message generation already in flight for "
+                    "tab %r; ignoring duplicate request", tab_id,
+                )
+                return
+            self._commit_msg_tabs.add(tab_id)
         threading.Thread(
-            target=self._generate_commit_message,
-            args=(tab_id,),
-            kwargs={"work_dir": work_dir},
+            target=self._run_commit_message_job,
+            args=(tab_id, work_dir),
             daemon=True,
         ).start()
+
+    def _run_commit_message_job(self, tab_id: str, work_dir: str) -> None:
+        """Generate the tab's commit message and re-arm the button.
+
+        Body of the daemon thread spawned by
+        :meth:`_cmd_generate_commit_message`; the ``finally`` releases
+        the tab's in-flight claim so a failed generation never wedges
+        the tab out of ever generating a message again.
+
+        Args:
+            tab_id: Frontend tab that requested the message.
+            work_dir: The tab's working directory.
+        """
+        try:
+            self._generate_commit_message(tab_id, work_dir=work_dir)
+        finally:
+            with self._state_lock:
+                self._commit_msg_tabs.discard(tab_id)
 
     def _cmd_worktree_action(self, cmd: dict[str, Any]) -> None:
         """Execute a worktree merge/discard action."""

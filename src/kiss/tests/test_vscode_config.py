@@ -93,11 +93,26 @@ class TestLoadSaveConfig:
         assert loaded["use_web_browser"] is False
         assert loaded["remote_password"] == "secret"
 
-    def test_save_excludes_unknown_keys(self) -> None:
-        save_config({"max_budget": 75, "secret_api_key": "should_not_save"})
+    def test_save_excludes_api_keys_but_keeps_extension_keys(self) -> None:
+        """API keys never reach the file; other keys passed in are written.
+
+        This used to assert that *every* key outside ``DEFAULTS`` was
+        dropped, which was the bug: ``tunnel_token``,
+        ``skill_permissions``, ``mcp_permissions`` and ``email`` are all
+        read at runtime, so accepting and discarding them lost the value
+        silently until the next daemon restart.  Only real API keys are
+        excluded — they belong in the shell RC.
+        """
+        save_config({
+            "max_budget": 75,
+            "ANTHROPIC_API_KEY": "should_not_save",
+            "tunnel_token": "tok-xyz",
+        })
         cfg_path = Path.home() / ".kiss" / "config.json"
         raw = json.loads(cfg_path.read_text())
-        assert "secret_api_key" not in raw
+        assert "ANTHROPIC_API_KEY" not in raw
+        assert "should_not_save" not in cfg_path.read_text()
+        assert raw["tunnel_token"] == "tok-xyz"
         assert raw["max_budget"] == 75
 
     def test_load_survives_corrupt_json(self) -> None:
@@ -226,13 +241,26 @@ class TestApiKeyShell:
     def test_save_key_refreshes_default_config(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Saving a key calls _refresh_config to rebuild DEFAULT_CONFIG."""
+        """Saving a key refreshes DEFAULT_CONFIG without losing other settings.
+
+        This used to assert that ``DEFAULT_CONFIG`` was replaced by a
+        brand-new instance, which was the bug: rebuilding re-reads only
+        the environment-backed fields, so it reset ``max_budget`` (which
+        is not environment-backed) and discarded whatever
+        ``apply_config_to_env`` had just applied.  The singleton is now
+        updated in place; what matters is that the new key is visible.
+        """
         from kiss.core import config as config_module
 
         monkeypatch.setenv("SHELL", "/bin/zsh")
-        old_cfg = config_module.DEFAULT_CONFIG
-        save_api_key_to_shell("ZAI_API_KEY", "z-key")
-        assert config_module.DEFAULT_CONFIG is not old_cfg
+        previous_budget = config_module.DEFAULT_CONFIG.max_budget
+        config_module.DEFAULT_CONFIG.max_budget = 5.0
+        try:
+            save_api_key_to_shell("ZAI_API_KEY", "z-key")
+            assert config_module.DEFAULT_CONFIG.ZAI_API_KEY == "z-key"
+            assert config_module.DEFAULT_CONFIG.max_budget == 5.0
+        finally:
+            config_module.DEFAULT_CONFIG.max_budget = previous_budget
 
     def test_multiple_keys_sequential(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Multiple keys saved sequentially all appear in RC file."""

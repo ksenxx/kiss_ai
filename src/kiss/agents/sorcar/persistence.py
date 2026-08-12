@@ -33,10 +33,63 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import IO, Any
 
 from kiss.core.config import kiss_home
 
 logger = logging.getLogger(__name__)
+
+try:
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover — Windows has no fcntl
+    _fcntl = None  # type: ignore[assignment]
+
+
+def _race_delay() -> None:
+    """Sleep briefly when ``KISS_RACE_DELAY`` is set (no-op by default).
+
+    Concurrency tests need to widen a read-modify-write window to make
+    a cross-process race deterministic.  The delay is opt-in via an
+    environment variable that production never sets, and is capped at
+    100 ms so a stray value can never stall a real run.
+    """
+    raw = os.environ.get("KISS_RACE_DELAY")
+    if not raw:
+        return
+    try:
+        time.sleep(min(float(raw), 0.1))
+    except ValueError:
+        pass
+
+
+@contextmanager
+def _immediate_txn(db: sqlite3.Connection) -> Iterator[None]:
+    """Run a read-modify-write sequence as ONE atomic transaction.
+
+    Connections are opened with ``isolation_level=None`` (autocommit),
+    so without an explicit transaction every statement of a
+    read-modify-write sequence commits on its own and another PROCESS
+    can interleave between them — ``_rw_lock`` is a ``threading``
+    primitive and provides no cross-process exclusion.  ``BEGIN
+    IMMEDIATE`` takes SQLite's write lock for the whole block, which
+    every process on the database respects.
+
+    Args:
+        db: The connection to run the transaction on.
+
+    Yields:
+        ``None`` — run the statements inside the ``with`` block.
+    """
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+    except BaseException:
+        try:
+            db.execute("ROLLBACK")
+        except sqlite3.Error:  # pragma: no cover — rollback of a dead conn
+            pass
+        raise
+    db.execute("COMMIT")
 
 
 class _RWLock:
@@ -145,9 +198,110 @@ _MAX_FILE_USAGE_ENTRIES = 10000
 
 _MAX_FREQUENT_TASKS = 100
 
+_OWNER_DIR_NAME = "task-owners"
+
+_owner_state: tuple[str, str, IO[Any]] | None = None
+_owner_state_lock = threading.Lock()
+
 
 def _ensure_kiss_dir() -> None:
     _KISS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _owner_dir() -> Path:
+    """Return the directory holding one liveness marker per process."""
+    return _KISS_DIR / _OWNER_DIR_NAME
+
+
+def _process_owner_token() -> str:
+    """Return this process's owner token, publishing its liveness marker.
+
+    The database is shared by every Sorcar process on the machine (the
+    ``kiss-web`` daemon, a ``kiss`` CLI run, a VS Code reload), so
+    "is the task that wrote this row still running?" cannot be answered
+    from Python memory.  Each process therefore creates
+    ``<KISS_HOME>/task-owners/<token>.lock`` and holds an exclusive
+    ``flock`` on it for its whole lifetime: the kernel releases that
+    lock when the process dies, however violently, so any other
+    process can test liveness by trying to take the lock.
+
+    The token is re-minted when ``_KISS_DIR`` is redirected (test
+    fixtures, a daemon pointed at another home) so the marker always
+    lives next to the database the rows are written to.
+
+    Returns:
+        The token to store in ``task_history.owner``, or ``""`` when
+        the marker could not be created (liveness then degrades to the
+        previous timestamp-only heuristic).
+    """
+    global _owner_state
+    current_dir = str(_owner_dir())
+    with _owner_state_lock:
+        if _owner_state is not None and _owner_state[0] == current_dir:
+            return _owner_state[1]
+        if _owner_state is not None:
+            try:
+                _owner_state[2].close()
+            except OSError:  # pragma: no cover — close of a dead handle
+                pass
+            _owner_state = None
+        token = f"{os.getpid()}-{uuid.uuid4().hex}"
+        try:
+            _ensure_kiss_dir()
+            Path(current_dir).mkdir(parents=True, exist_ok=True)
+            handle = open(
+                Path(current_dir) / f"{token}.lock", "w", encoding="utf-8",
+            )
+            if _fcntl is not None:  # pragma: no branch — POSIX only
+                _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+            handle.write(f"{os.getpid()}\n")
+            handle.flush()
+        except OSError:
+            logger.warning(
+                "could not publish task-owner liveness marker", exc_info=True,
+            )
+            return ""
+        _owner_state = (current_dir, token, handle)
+        return token
+
+
+def _owner_is_alive(token: str) -> bool:
+    """Return True when the process that recorded *token* is still running.
+
+    A missing marker file, or one whose ``flock`` can be taken, means
+    the owning process is gone.  Stale markers are unlinked as they are
+    discovered so ``task-owners/`` cannot grow without bound.
+
+    Args:
+        token: The value of a row's ``owner`` column.  ``""`` (legacy
+            rows written before owner tracking) reports not alive.
+
+    Returns:
+        True when the owning process still holds its marker.
+    """
+    if not token:
+        return False
+    if _owner_state is not None and _owner_state[1] == token:
+        return True
+    marker = _owner_dir() / f"{token}.lock"
+    if _fcntl is None:  # pragma: no cover — Windows has no flock
+        return marker.exists()
+    try:
+        with open(marker, "r+", encoding="utf-8") as handle:
+            try:
+                _fcntl.flock(
+                    handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB,
+                )
+            except OSError:
+                return True
+            _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+    except OSError:
+        return False
+    try:
+        marker.unlink()
+    except OSError:  # pragma: no cover — concurrent sweep won the unlink
+        pass
+    return False
 
 
 _HistoryEntry = dict[str, object]
@@ -442,13 +596,21 @@ def _init_tables(conn: sqlite3.Connection) -> None:
             tokens INTEGER DEFAULT 0,
             cost REAL DEFAULT 0.0,
             steps INTEGER DEFAULT 0,
-            is_parallel INTEGER DEFAULT 0,
-            is_worktree INTEGER DEFAULT 0,
-            auto_commit_mode INTEGER DEFAULT 0,
+            -- The framework (vscode_config.DEFAULTS, AgentState,
+            -- sorcar.run()) defaults all three toggles to ON, so a row
+            -- whose producer did not state a value must read as ON
+            -- too; DEFAULT 0 would label it "no worktree / no
+            -- parallel / no auto-commit" in the history sidebar.
+            is_parallel INTEGER DEFAULT 1,
+            is_worktree INTEGER DEFAULT 1,
+            auto_commit_mode INTEGER DEFAULT 1,
             start_ts INTEGER DEFAULT 0,
             end_ts INTEGER DEFAULT 0,
             is_favorite INTEGER DEFAULT 0,
-            parent_task_id TEXT DEFAULT ''
+            parent_task_id TEXT DEFAULT '',
+            -- Token of the process that created the row; see
+            -- _process_owner_token / _recover_orphaned_tasks.
+            owner TEXT DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -483,6 +645,32 @@ def _init_tables(conn: sqlite3.Connection) -> None:
     """)
     for ddl in _INDEX_DDL:
         conn.execute(ddl)
+    _add_missing_columns(conn)
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after a database was first created.
+
+    ``CREATE TABLE IF NOT EXISTS`` cannot extend an existing table, so
+    every column added to :func:`_init_tables` after the first release
+    needs a matching ``ALTER TABLE`` here.  A concurrent process may
+    have added the same column between the ``PRAGMA`` and the
+    ``ALTER``; the resulting "duplicate column name" error is benign.
+
+    Args:
+        conn: Connection whose ``task_history`` table to extend.
+    """
+    cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(task_history)").fetchall()
+    }
+    if "owner" in cols:
+        return
+    try:
+        conn.execute(
+            "ALTER TABLE task_history ADD COLUMN owner TEXT DEFAULT ''"
+        )
+    except sqlite3.OperationalError:  # pragma: no cover — lost the race
+        logger.debug("owner column already present", exc_info=True)
 
 
 def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
@@ -513,7 +701,17 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
             return ""
         return v if isinstance(v, str) else str(v)
 
-    def _bx(v: object) -> int:
+    def _bx(v: object, missing: int = 0) -> int:
+        """Coerce a legacy ``extra`` value to a 0/1 column value.
+
+        *missing* is returned for a key the old row never recorded —
+        the framework toggles predate their own persistence, so
+        mapping their absence to 0 would assert that a legacy run had
+        worktree/parallel/auto-commit explicitly DISABLED, the exact
+        opposite of the framework default at the time.
+        """
+        if v is None:
+            return missing
         if isinstance(v, str):
             return 0 if v.strip().lower() in {"", "0", "false", "no"} else 1
         return 1 if bool(v) else 0
@@ -551,13 +749,14 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
             "tokens INTEGER DEFAULT 0, "
             "cost REAL DEFAULT 0.0, "
             "steps INTEGER DEFAULT 0, "
-            "is_parallel INTEGER DEFAULT 0, "
-            "is_worktree INTEGER DEFAULT 0, "
-            "auto_commit_mode INTEGER DEFAULT 0, "
+            "is_parallel INTEGER DEFAULT 1, "
+            "is_worktree INTEGER DEFAULT 1, "
+            "auto_commit_mode INTEGER DEFAULT 1, "
             "start_ts INTEGER DEFAULT 0, "
             "end_ts INTEGER DEFAULT 0, "
             "is_favorite INTEGER DEFAULT 0, "
-            "parent_task_id TEXT DEFAULT ''"
+            "parent_task_id TEXT DEFAULT '', "
+            "owner TEXT DEFAULT ''"
             ")"
         )
         conn.execute(
@@ -617,9 +816,9 @@ def _migrate_old_schema_if_needed(conn: sqlite3.Connection) -> bool:
                     _sx(extra.get("version")), _safe_int(extra.get("tokens")),
                     _safe_float(extra.get("cost")),
                     _safe_int(extra.get("steps")),
-                    _bx(extra.get("is_parallel")),
-                    _bx(extra.get("is_worktree")),
-                    _bx(extra.get("auto_commit_mode")),
+                    _bx(extra.get("is_parallel"), missing=1),
+                    _bx(extra.get("is_worktree"), missing=1),
+                    _bx(extra.get("auto_commit_mode"), missing=1),
                     _safe_int(extra.get("startTs")),
                     _safe_int(extra.get("endTs")),
                     _bx(extra.get("is_favorite")), parent_task_id,
@@ -707,11 +906,16 @@ def _get_db() -> sqlite3.Connection:
     cached in ``threading.local()`` and invalidated when:
 
     * ``_db_generation`` is bumped (via ``_close_db()``),
-    * ``_DB_PATH`` changes (test redirects),
-    * ``_db_conn`` is set to ``None`` (legacy test pattern), or
+    * ``_DB_PATH`` changes (test redirects), or
     * the file at ``_DB_PATH`` is deleted or replaced on disk (its
       ``(st_dev, st_ino)`` identity no longer matches the one the
       cached connection was opened against).
+
+    The process-global ``_db_conn`` is deliberately NOT part of that
+    validity test: it names whichever connection was created last by
+    ANY thread, so a short-lived thread calling ``_close_thread_db()``
+    used to force every other thread to close a healthy connection and
+    re-run the WAL pragma and the migration check.
     """
     global _db_conn
     tl = _thread_local
@@ -727,13 +931,18 @@ def _get_db() -> sqlite3.Connection:
         tl_conn is not None
         and tl_gen == gen_snapshot
         and tl_path == current_path
-        and _db_conn is not None
         and current_id is not None
         and getattr(tl, "file_id", None) == current_id
     ):
         return tl_conn
 
     if tl_conn is not None:
+        # Forget the handle BEFORE closing it: when the reconnect
+        # below raises (the database file is unreadable right now) the
+        # cache must not keep pointing at a closed connection that a
+        # later call would hand out as valid.
+        tl.conn = None
+        tl.file_id = None
         try:
             tl_conn.close()
         except Exception:
@@ -858,8 +1067,8 @@ def _add_task(
             "INSERT INTO task_history (id, timestamp, task, chat_id, result, "
             "model, work_dir, version, tokens, cost, steps, is_parallel, "
             "is_worktree, auto_commit_mode, start_ts, end_ts, is_favorite, "
-            "parent_task_id) VALUES "
-            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "parent_task_id, owner) VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 task_id, time.time(), task, chat_id,
                 "Agent Failed Abruptly",
@@ -876,9 +1085,9 @@ def _add_task(
                 _safe_int(payload.get("endTs"), 0),
                 1 if payload.get("is_favorite") else 0,
                 parent_task_id,
+                _process_owner_token(),
             ),
         )
-        db.commit()
     _invalidate_chat_context_cache(chat_id)
     return task_id, chat_id
 
@@ -1055,8 +1264,7 @@ def _resolve_task_id(
 
 def _log_orphaned_task_forensics(
     db: sqlite3.Connection,
-    extra_clause: str,
-    extra_params: list[object] | None = None,
+    rowids: list[int],
 ) -> None:
     """Log diagnostic info for each row still carrying the orphan sentinel.
 
@@ -1070,21 +1278,16 @@ def _log_orphaned_task_forensics(
 
     Args:
         db: Active database connection.
-        extra_clause: SQL fragment further restricting the sentinel
-            rows (``""``, or any combination of
-            ``"AND id NOT IN (?,?,...)"`` and
-            ``"AND timestamp < ?"``).
-        extra_params: Bound-parameter values matching the placeholders
-            embedded in ``extra_clause``.  Must be supplied (and
-            ordered) when the clause is non-empty.
+        rowids: The ``rowid``s about to be rewritten.  Empty is a
+            no-op.
     """
-    params: list[object] = ["Agent Failed Abruptly"]
-    if extra_params:
-        params.extend(extra_params)
+    if not rowids:
+        return
+    placeholders = ",".join(["?"] * len(rowids))
     diag_rows = db.execute(
         "SELECT id, task, chat_id, model, start_ts, steps, cost "
-        "FROM task_history WHERE result = ? " + extra_clause,
-        params,
+        f"FROM task_history WHERE rowid IN ({placeholders})",
+        list(rowids),
     ).fetchall()
     for row in diag_rows:
         task_id_val = row["id"]
@@ -1147,12 +1350,22 @@ def _recover_orphaned_tasks(
     process), and rewrite ``result`` to a diagnostic message that
     truthfully describes what happened.
 
+    Liveness is decided from the DATABASE, not from process memory:
+    every row records the ``owner`` token of the process that created
+    it (see :func:`_process_owner_token`), and a row whose owner still
+    holds its liveness marker is skipped.  Without that check a second
+    Sorcar process — a ``kiss`` CLI run, a VS Code extension reload, a
+    restarted daemon — rewrote the rows of tasks that were still
+    RUNNING in the first process, painting a red failure dot on a live
+    task; and because the sentinel was gone, neither the shutdown
+    safety net nor a later sweep could ever record the real outcome.
+
     Args:
         active_task_ids: Row ids that are still being processed in
             the current process and must therefore NOT be rewritten.
             Pass an empty set at fresh-server startup — by then any
-            row carrying the sentinel must belong to a prior,
-            now-dead process.
+            row carrying the sentinel must belong to a prior process,
+            live or dead.
         created_before: Optional epoch-seconds cut-off.  When given,
             only sentinel rows whose ``timestamp`` column is strictly
             older are rewritten.  ``VSCodeServer`` passes its boot
@@ -1170,29 +1383,41 @@ def _recover_orphaned_tasks(
         The number of rows whose ``result`` column was rewritten.
     """
     db = _get_db()
-    active_ids = [str(t) for t in active_task_ids]
-    extra_clause = ""
-    extra_params: list[object] = []
-    if active_ids:
-        placeholders = ",".join(["?"] * len(active_ids))
-        extra_clause += f"AND id NOT IN ({placeholders}) "
-        extra_params.extend(active_ids)
-    if created_before is not None:
-        extra_clause += "AND timestamp < ? "
-        extra_params.append(float(created_before))
-    sql = (
-        "UPDATE task_history SET result = ? WHERE result = ? " + extra_clause
+    active_ids = {str(t) for t in active_task_ids}
+    # ``rowid`` rather than ``id``: ``id`` is a TEXT primary key, so
+    # SQLite accepts NULL there (a partial INSERT from an older
+    # release or an external tool), and such a row could then never be
+    # targeted by an id-based UPDATE.  Every non-WITHOUT-ROWID table
+    # has a unique, non-NULL rowid.
+    select_sql = (
+        "SELECT rowid AS rid, id, owner FROM task_history WHERE result = ? "
     )
-    params: list[object] = [
-        "Task terminated unexpectedly (process killed)",
-        "Agent Failed Abruptly",
-    ]
-    params.extend(extra_params)
-    with _rw_lock.write_lock():
-        _log_orphaned_task_forensics(db, extra_clause, extra_params)
-        cursor = db.execute(sql, params)
-        rowcount = cursor.rowcount or 0
-        db.commit()
+    params: list[object] = ["Agent Failed Abruptly"]
+    if created_before is not None:
+        select_sql += "AND timestamp < ? "
+        params.append(float(created_before))
+    with _rw_lock.write_lock(), _immediate_txn(db):
+        candidates = db.execute(select_sql, params).fetchall()
+        dead_rowids = [
+            int(row["rid"])
+            for row in candidates
+            if str(row["id"] or "") not in active_ids
+            and not _owner_is_alive(row["owner"] or "")
+        ]
+        _log_orphaned_task_forensics(db, dead_rowids)
+        rowcount = 0
+        if dead_rowids:
+            placeholders = ",".join(["?"] * len(dead_rowids))
+            cursor = db.execute(
+                "UPDATE task_history SET result = ? "
+                f"WHERE rowid IN ({placeholders}) AND result = ?",
+                [
+                    "Task terminated unexpectedly (process killed)",
+                    *dead_rowids,
+                    "Agent Failed Abruptly",
+                ],
+            )
+            rowcount = cursor.rowcount or 0
     if rowcount:
         logger.warning(
             "Recovered %d orphaned task(s) from prior process kill",
@@ -1251,7 +1476,7 @@ def _shutdown_persist_in_flight_results(task_ids: set[str]) -> int:
         f"WHERE id IN ({placeholders}) AND result = ?"
     )
     affected_chat_ids: list[str] = []
-    with _rw_lock.write_lock():
+    with _rw_lock.write_lock(), _immediate_txn(db):
         rows = db.execute(
             f"SELECT chat_id FROM task_history "
             f"WHERE id IN ({placeholders}) AND result = ?",
@@ -1264,7 +1489,6 @@ def _shutdown_persist_in_flight_results(task_ids: set[str]) -> int:
              *id_list, "Agent Failed Abruptly"],
         )
         rowcount = cursor.rowcount or 0
-        db.commit()
     if rowcount:
         logger.warning(
             "Pre-emptively persisted shutdown result for %d in-flight task(s)",
@@ -1273,6 +1497,9 @@ def _shutdown_persist_in_flight_results(task_ids: set[str]) -> int:
         for chat_id in set(affected_chat_ids):
             _invalidate_chat_context_cache(chat_id)
     return rowcount
+
+
+_UPDATABLE_COLUMNS = frozenset({"result"})
 
 
 def _update_task_column(
@@ -1288,8 +1515,9 @@ def _update_task_column(
     UPDATE under the process-wide write lock.
 
     Args:
-        column: Column name to update.  Must be a trusted literal
-            (``"result"`` or ``"extra"``) — never user input.
+        column: Column name to update.  The name is interpolated into
+            the SQL, so it must be one of :data:`_UPDATABLE_COLUMNS`;
+            anything else raises ``ValueError``.
         value: The new column value.
         task_id: Stable row id to update when available.
         task: Fallback task description string for legacy callers.
@@ -1297,10 +1525,18 @@ def _update_task_column(
     Returns:
         The updated row's ``chat_id`` (possibly ``""``), or ``None``
         when no row could be resolved.
+
+    Raises:
+        ValueError: When *column* is not an allowed column name.
     """
-    _flush_chat_events()
+    if column not in _UPDATABLE_COLUMNS:
+        raise ValueError(
+            f"_update_task_column refuses column {column!r}; "
+            f"allowed: {sorted(_UPDATABLE_COLUMNS)}"
+        )
+    _flush_chat_events(task_id if is_task_history_id(task_id) else None)
     db = _get_db()
-    with _rw_lock.write_lock():
+    with _rw_lock.write_lock(), _immediate_txn(db):
         resolved = _resolve_task_id(db, task_id, task)
         if resolved is None:
             return None
@@ -1311,7 +1547,6 @@ def _update_task_column(
         row = db.execute(
             "SELECT chat_id FROM task_history WHERE id = ?", (resolved,),
         ).fetchone()
-        db.commit()
         return (row["chat_id"] or "") if row is not None else ""
 
 
@@ -1347,14 +1582,13 @@ def _set_task_favorite(task_id: str, is_favorite: bool) -> bool:
     Returns:
         True when the row existed and was updated, False otherwise.
     """
-    _flush_chat_events()
+    _flush_chat_events(task_id)
     db = _get_db()
     with _rw_lock.write_lock():
         cursor = db.execute(
             "UPDATE task_history SET is_favorite = ? WHERE id = ?",
             (1 if is_favorite else 0, task_id),
         )
-        db.commit()
         return (cursor.rowcount or 0) > 0
 
 
@@ -1395,9 +1629,9 @@ def _save_task_extra(
         task_id: Stable row id to update when available.
         task: Fallback task description string for legacy callers.
     """
-    _flush_chat_events()
+    _flush_chat_events(task_id if is_task_history_id(task_id) else None)
     db = _get_db()
-    with _rw_lock.write_lock():
+    with _rw_lock.write_lock(), _immediate_txn(db):
         resolved = _resolve_task_id(db, task_id, task)
         if resolved is None:
             return
@@ -1455,13 +1689,15 @@ def _save_task_extra(
         db.execute(
             f"UPDATE task_history SET {', '.join(sets)} WHERE id = ?", vals
         )
-        db.commit()
 
 
 _event_queue: queue.Queue = queue.Queue()
 _event_writer_thread: threading.Thread | None = None
 _event_writer_lock = threading.Lock()
 _event_writer_stop = threading.Event()
+_journal_lock = threading.Lock()
+_pending_cond = threading.Condition()
+_pending_by_task: dict[str, int] = {}
 _next_seq_cache: dict[str, int] = {}
 _marked_has_events: set[str] = set()
 _caches_db_key: tuple[str, tuple[int, int] | None] | None = None
@@ -1552,8 +1788,7 @@ def _event_writer_loop(stop: threading.Event) -> None:
         try:
             _persist_batch_with_retry(batch)
         finally:
-            for _ in batch:
-                _event_queue.task_done()
+            _release_pending(batch)
         if shutdown_pending:
             return
 
@@ -1580,6 +1815,11 @@ def _persist_batch_with_retry(batch: list[tuple[str, str, float, str]]) -> None:
                 _journal_failed_events(batch, attempts)
 
 
+def _failed_events_path(db_path: str) -> str:
+    """Return the journal path holding unwritable events for *db_path*."""
+    return db_path + ".failed_events.jsonl"
+
+
 def _journal_failed_events(
     batch: list[tuple[str, str, float, str]], attempts: int,
 ) -> None:
@@ -1588,30 +1828,93 @@ def _journal_failed_events(
     A batch that failed every write attempt must not be silently
     acknowledged and lost — ``_flush_chat_events`` would then report
     completion for events that were never persisted.  The rows are
-    appended as JSON lines to ``<db>.failed_events.jsonl`` next to the
-    database so they can be inspected or replayed, and the loss is
-    logged at ``error`` level with the sidecar path.
+    appended as JSON lines to ``<db>.failed_events.jsonl`` and replayed
+    by :func:`_replay_failed_events` as soon as the database accepts
+    writes again, so the transcript is recoverable instead of merely
+    inspectable.
+
+    Each row is journalled next to the database it was PRODUCED
+    against (its own ``origin_db_path``), not next to whichever
+    database happens to be active now: after a database swap the two
+    differ, and a journal written next to the new database would be
+    replayed into it and dropped.
     """
-    sidecar = _current_db_path() + ".failed_events.jsonl"
-    try:
-        with open(sidecar, "a", encoding="utf-8") as stream:
-            for task_id, event_json, timestamp, origin in batch:
-                stream.write(json.dumps({
-                    "task_id": task_id,
-                    "event_json": event_json,
-                    "timestamp": timestamp,
-                    "origin_db_path": origin,
-                }) + "\n")
-        logger.error(
-            "%d chat events could not be written after %d attempts; "
-            "preserved in %s", len(batch), attempts, sidecar, exc_info=True,
-        )
-    except OSError:
-        logger.error(
-            "dropping %d chat events after %d failed write attempts "
-            "(sidecar %s also unwritable)",
-            len(batch), attempts, sidecar, exc_info=True,
-        )
+    by_origin: dict[str, list[tuple[str, str, float, str]]] = {}
+    for row in batch:
+        by_origin.setdefault(row[3], []).append(row)
+    with _journal_lock:
+        for origin, rows in by_origin.items():
+            sidecar = _failed_events_path(origin)
+            try:
+                with open(sidecar, "a", encoding="utf-8") as stream:
+                    for task_id, event_json, timestamp, origin_path in rows:
+                        stream.write(json.dumps({
+                            "task_id": task_id,
+                            "event_json": event_json,
+                            "timestamp": timestamp,
+                            "origin_db_path": origin_path,
+                        }) + "\n")
+                logger.error(
+                    "%d chat events could not be written after %d attempts; "
+                    "journalled in %s for replay",
+                    len(rows), attempts, sidecar, exc_info=True,
+                )
+            except OSError:
+                logger.error(
+                    "dropping %d chat events after %d failed write attempts "
+                    "(sidecar %s also unwritable)",
+                    len(rows), attempts, sidecar, exc_info=True,
+                )
+
+
+def _replay_failed_events() -> None:
+    """Re-insert events journalled while the database was unwritable.
+
+    Called from :func:`_flush_chat_events`, so the recovery happens on
+    the very next write-ordering barrier after the database becomes
+    writable again — before ``_task_has_events`` decides that a task
+    produced no transcript and a stub stream must be synthesized in
+    its place.
+
+    The journal is only removed once every row it holds has landed in
+    the database; a still-failing replay leaves the file untouched for
+    the next attempt.
+    """
+    path = _failed_events_path(_current_db_path())
+    if not os.path.exists(path):
+        return
+    with _journal_lock:
+        try:
+            with open(path, encoding="utf-8") as stream:
+                lines = stream.read().splitlines()
+        except OSError:  # pragma: no cover — unreadable journal
+            return
+        batch: list[tuple[str, str, float, str]] = []
+        for line in lines:
+            try:
+                record = json.loads(line)
+                batch.append((
+                    str(record["task_id"]),
+                    str(record["event_json"]),
+                    _safe_float(record["timestamp"], 0.0),
+                    str(record["origin_db_path"]),
+                ))
+            except (ValueError, TypeError, KeyError):
+                logger.warning("skipping malformed journal line", exc_info=True)
+        if batch:
+            try:
+                _write_event_batch(batch)
+            except Exception:
+                logger.warning(
+                    "replay of %d journalled events failed; keeping %s",
+                    len(batch), path, exc_info=True,
+                )
+                return
+            logger.info("replayed %d journalled chat events", len(batch))
+        try:
+            os.unlink(path)
+        except OSError:  # pragma: no cover — concurrent unlink
+            pass
 
 
 def _write_event_batch(batch: list[tuple[str, str, float, str]]) -> None:
@@ -1724,6 +2027,7 @@ def _queue_chat_event(
             unrelated task in the new database (see
             :func:`_current_db_path`).
     """
+    _reserve_pending(task_id)
     _event_queue.put((
         task_id,
         json.dumps(event),
@@ -1735,19 +2039,62 @@ def _queue_chat_event(
         _start_event_writer()
 
 
-def _flush_chat_events() -> None:
-    """Block until all queued events have been persisted.
+def _reserve_pending(task_id: str) -> None:
+    """Record one queued-but-unwritten event for *task_id*."""
+    with _pending_cond:
+        _pending_by_task[task_id] = _pending_by_task.get(task_id, 0) + 1
+
+
+def _release_pending(batch: list[tuple[str, str, float, str]]) -> None:
+    """Mark every event in *batch* as no longer pending and wake waiters."""
+    with _pending_cond:
+        for task_id, _ev, _ts, _origin in batch:
+            remaining = _pending_by_task.get(task_id, 0) - 1
+            if remaining > 0:
+                _pending_by_task[task_id] = remaining
+            else:
+                _pending_by_task.pop(task_id, None)
+        _pending_cond.notify_all()
+    for _ in batch:
+        _event_queue.task_done()
+
+
+def _pending_count(task_id: str | None) -> int:
+    """Return the number of unwritten events, optionally for one task."""
+    if task_id is None:
+        return int(_event_queue.unfinished_tasks)
+    return _pending_by_task.get(task_id, 0)
+
+
+def _flush_chat_events(task_id: str | None = None) -> None:
+    """Block until queued events have been persisted.
+
+    Waits on the writer's condition variable rather than polling, and
+    re-plays any events that were journalled while the database was
+    unwritable so the caller's "everything is persisted" assumption
+    actually holds.
 
     Safe to call when no events are queued (returns immediately).  MUST
     be called BEFORE acquiring ``_rw_lock.write_lock()`` from the same
     thread — the writer thread also takes that lock per batch, so
     calling this while holding the write lock would deadlock.
+
+    Args:
+        task_id: When given, only that task's events are waited for.
+            Write ordering only matters within one task, so a caller
+            updating task A must not be delayed by a high-volume run
+            in task B.  ``None`` waits for every queued event.
     """
-    while _event_queue.unfinished_tasks:
-        t = _event_writer_thread
-        if t is None or not t.is_alive():
-            _start_event_writer()
-        time.sleep(0.002)
+    while True:
+        with _pending_cond:
+            if _pending_count(task_id) == 0:
+                break
+            writer = _event_writer_thread
+            if writer is not None and writer.is_alive():
+                _pending_cond.wait(0.05)
+                continue
+        _start_event_writer()
+    _replay_failed_events()
 
 
 def _stop_event_writer() -> None:
@@ -1857,7 +2204,7 @@ def _task_has_events(task_id: str) -> bool:
     Returns:
         ``True`` if at least one row exists in ``events`` for *task_id*.
     """
-    _flush_chat_events()
+    _flush_chat_events(task_id)
     with _rw_lock.read_lock():
         db = _get_db()
         row = db.execute(
@@ -2315,7 +2662,6 @@ def _record_model_usage(model: str) -> None:
             "ON CONFLICT(model) DO UPDATE SET count = count + 1",
             (model,),
         )
-        db.commit()
     _save_last_model(model)
 
 
@@ -2337,7 +2683,7 @@ def _record_file_usage(path: str) -> None:
     """Increment the access count for a file path atomically."""
     db = _get_db()
     now = time.time()
-    with _rw_lock.write_lock():
+    with _rw_lock.write_lock(), _immediate_txn(db):
         db.execute(
             "INSERT INTO file_usage (path, count, last_used) VALUES (?, 1, ?) "
             "ON CONFLICT(path) DO UPDATE SET count = count + 1, last_used = ?",
@@ -2350,7 +2696,6 @@ def _record_file_usage(path: str) -> None:
                 "(SELECT path FROM file_usage ORDER BY last_used DESC LIMIT ?)",
                 (_MAX_FILE_USAGE_ENTRIES,),
             )
-        db.commit()
 
 
 def _record_frequent_task(task: str) -> None:
@@ -2363,7 +2708,11 @@ def _record_frequent_task(task: str) -> None:
     The table is capped at ``_MAX_FREQUENT_TASKS`` rows.  When inserting
     a brand-new task would exceed the cap, the row with the lowest
     ``count`` (and, on a count tie, the oldest ``timestamp``) is
-    evicted before the insert completes.
+    evicted before the insert completes.  The whole probe → count →
+    evict → upsert sequence runs in one ``BEGIN IMMEDIATE``
+    transaction: as separate autocommit statements, two PROCESSES
+    could both observe "cap not reached" and both insert, pushing the
+    table permanently over the cap.
 
     Args:
         task: The task description string.  Empty strings are ignored.
@@ -2372,12 +2721,13 @@ def _record_frequent_task(task: str) -> None:
         return
     db = _get_db()
     now = time.time()
-    with _rw_lock.write_lock():
+    with _rw_lock.write_lock(), _immediate_txn(db):
         existing = db.execute(
             "SELECT 1 FROM frequent_tasks WHERE task = ?", (task,),
         ).fetchone()
         if existing is None:
             row = db.execute("SELECT COUNT(*) FROM frequent_tasks").fetchone()
+            _race_delay()
             if row[0] >= _MAX_FREQUENT_TASKS:
                 db.execute(
                     "DELETE FROM frequent_tasks WHERE task = "
@@ -2391,7 +2741,6 @@ def _record_frequent_task(task: str) -> None:
             "count = count + 1, timestamp = ?",
             (task, now, now),
         )
-        db.commit()
 
 
 def _delete_frequent_task(task: str) -> bool:
@@ -2410,7 +2759,6 @@ def _delete_frequent_task(task: str) -> bool:
         cursor = db.execute(
             "DELETE FROM frequent_tasks WHERE task = ?", (task,)
         )
-        db.commit()
         return (cursor.rowcount or 0) > 0
 
 

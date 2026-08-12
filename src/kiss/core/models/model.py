@@ -6,25 +6,33 @@
 """Abstract base class for LLM provider model implementations.
 
 Also contains shared text-based tool calling helpers used by models that
-lack native function calling support (e.g. DeepSeek R1, Claude Code CLI).
+lack native function calling support (e.g. DeepSeek R1, Claude Code CLI),
+and — beside :class:`CLITextModel`, the base class of both CLI-backed
+transports — the subprocess supervision those two share:
+:class:`_CLIProcess` and :class:`_ToolCallFilteredStream`.
 """
 
 import base64
+import contextlib
 import dataclasses
 import inspect
 import json
 import logging
 import mimetypes
 import os
+import queue
 import re
+import subprocess
+import threading
 import time
 import types as types_module
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin
 
+from kiss.core import stop_signal
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.heif import (
     HEIF_MIME_TYPES,
@@ -579,11 +587,44 @@ class Model(ABC):
     def reset_conversation(self) -> None:
         """Reset conversation state for reuse across sub-sessions.
 
-        Clears the conversation history and usage info while keeping the
-        HTTP client and model configuration intact.
+        Clears the conversation history, the usage info and the thinking
+        bracket, while keeping the HTTP client and model configuration
+        intact.
+
+        The bracket has to go with them: ``KISSAgent._reset`` reuses the
+        same adapter instance across runs and binds a *new* printer to
+        it, so a block left open by a stream that was aborted
+        mid-thinking would make the next task's first thought skip its
+        opening ``thinking_callback(True)`` — rendering reasoning as
+        ordinary assistant text — or emit a spurious closing ``False``
+        into a printer that never opened one.
         """
         self.conversation = []
         self.usage_info_for_messages = ""
+        self._thinking_open = False
+
+    def rebind_callbacks(
+        self,
+        token_callback: TokenCallback | None,
+        thinking_callback: ThinkingCallback | None,
+    ) -> None:
+        """Point this model's streaming callbacks at a new printer.
+
+        The hook ``KISSAgent._reset`` calls when it reuses an existing
+        adapter instance for a new run.  Assigning the two attributes
+        from outside reaches only the attributes themselves, which
+        silently misses any sub-model or per-turn state a subclass owns:
+        a transport that delegates a turn to a cached sub-model must
+        override this and re-bind that delegate too, or the delegated
+        turn keeps streaming into the *previous* run's printer.
+
+        Args:
+            token_callback: The new printer's token callback, or ``None``.
+            thinking_callback: The new printer's thinking callback, or
+                ``None``.
+        """
+        self.token_callback = token_callback
+        self.thinking_callback = thinking_callback
 
     def _replace_last_assistant_with_tool_calls(
         self, content: str, function_calls: list[dict[str, Any]]
@@ -1037,6 +1078,359 @@ class CLITextModel(Model):
             KISSError: Always.
         """
         raise KISSError(f"{self._cli_model_name} does not support embeddings.")
+
+
+# Seconds a drained pipe or a signalled child is given to finish before
+# the supervisor gives up on it and moves on.
+_REAP_GRACE_SECONDS = 2.0
+# Longest wait for a child that already closed stdout to exit on its own.
+# Bounded by the run's own deadline, so a short timeout stays short.
+_EXIT_GRACE_SECONDS = 10.0
+# How often a blocked reader re-checks the thread's stop signal.
+_STOP_POLL_SECONDS = 0.1
+
+
+def _cli_stall_error(label: str, timeout: float) -> TimeoutError:
+    """Build the retryable stall error for a CLI that stopped producing output.
+
+    ``KISSAgent._run_agentic_loop`` re-raises every :class:`KISSError`
+    immediately and retries everything else, so a transient stall must
+    NOT be a ``KISSError``: that would abort the whole task where the
+    equivalent Anthropic condition (``AnthropicModel._stall_error``) is
+    simply retried.
+
+    Args:
+        label: Human-readable CLI name for the message.
+        timeout: The deadline, in seconds, that the run overran.
+
+    Returns:
+        The ``TimeoutError`` for the caller to raise.
+    """
+    return TimeoutError(
+        f"{label} timed out after {timeout}s without finishing its turn; "
+        f"the process was killed and the step will be retried."
+    )
+
+
+class _StreamReadTimeoutError(Exception):
+    """Internal sentinel: the CLI stdout stream stalled past the deadline."""
+
+
+class _CLIProcess:
+    """A CLI child process whose whole lifetime is bounded by a ``with`` block.
+
+    Shared by both CLI-backed adapters, because both need four
+    guarantees that :class:`subprocess.Popen` does not give for free:
+
+    * **stderr is drained continuously.**  A CLI that fills the 64 KiB
+      stderr pipe with progress or deprecation noise otherwise blocks in
+      ``write(2)`` and stops writing stdout too, which is indistinguishable
+      from a model stall and costs the entire timeout.
+    * **writing the prompt cannot kill the caller.**  Agentic prompts are
+      the whole flattened dialogue and routinely exceed the pipe buffer,
+      so a child that rejects its arguments and exits breaks the pipe
+      mid-write.  The useful diagnosis is the child's exit status and
+      stderr, not ``BrokenPipeError``.
+    * **stdout is read with a deadline and a stop signal.**  A parked
+      reader cannot be rescued cooperatively, so the reader polls and
+      raises instead of blocking forever (see :mod:`kiss.core.stop_signal`).
+    * **the child is always reaped and its pipes released.**  Leaving
+      that to ``Popen.__del__`` leaks a zombie and three descriptors per
+      timed-out call, which a long-running daemon eventually pays for
+      with ``OSError: [Errno 24] Too many open files``.
+
+    The reader threads deliberately do nothing but move bytes: parsing
+    (and therefore every token/thinking callback) happens on the calling
+    thread, so an abandoned reader can never emit a dead run's output
+    into the next run's printer.
+    """
+
+    def __init__(self, args: list[str], label: str, timeout: float) -> None:
+        """Start *args* and begin draining both of its output pipes.
+
+        Args:
+            args: The command line to run.
+            label: Human-readable CLI name used in error messages.
+            timeout: Seconds the whole turn may take, counted from now.
+
+        Raises:
+            KISSError: If the executable could not be started.
+        """
+        self._label = label
+        self._deadline = time.monotonic() + timeout
+        try:
+            self._proc = subprocess.Popen(
+                args,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+        except OSError as e:
+            raise KISSError(f"Failed to start {label}: {e}") from e
+        self._stdout_lines: queue.Queue[str | None] = queue.Queue()
+        self._stderr_chunks: list[str] = []
+        self._readers = (
+            self._start_reader(self._drain_stdout, "stdout"),
+            self._start_reader(self._drain_stderr, "stderr"),
+        )
+
+    def __enter__(self) -> "_CLIProcess":
+        """Return the running process supervisor."""
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        """End the child's lifetime, however the ``with`` block finished."""
+        self.close()
+
+    def _start_reader(self, target: Callable[[], None], suffix: str) -> threading.Thread:
+        """Start a daemon thread draining one of the child's pipes."""
+        thread = threading.Thread(
+            target=target, daemon=True, name=f"cli-{suffix}-drain"
+        )
+        thread.start()
+        return thread
+
+    def _drain_stdout(self) -> None:
+        """Move every stdout line into the queue, then post the EOF sentinel."""
+        try:
+            for line in self._proc.stdout:  # type: ignore[union-attr]
+                self._stdout_lines.put(line)
+        except (OSError, ValueError):  # pragma: no cover – pipe closed under us
+            logger.debug("%s stdout closed while being read", self._label)
+        finally:
+            self._stdout_lines.put(None)
+
+    def _drain_stderr(self) -> None:
+        """Keep the stderr pipe empty so the child never blocks writing to it."""
+        try:
+            for line in self._proc.stderr:  # type: ignore[union-attr]
+                self._stderr_chunks.append(line)
+        except (OSError, ValueError):  # pragma: no cover – pipe closed under us
+            logger.debug("%s stderr closed while being read", self._label)
+
+    def send_prompt(self, prompt: str) -> None:
+        """Write *prompt* to the child's stdin and close it.
+
+        A child that exits before reading breaks the pipe mid-write.
+        That is swallowed here: the caller reports the child's exit
+        status and stderr, which is the failure the user can act on.
+
+        Args:
+            prompt: The complete prompt text.
+        """
+        stdin = self._proc.stdin
+        assert stdin is not None
+        try:
+            stdin.write(prompt)
+            stdin.close()
+        except OSError:
+            logger.debug("%s exited before reading its prompt", self._label)
+
+    def lines(self) -> Iterator[str]:
+        """Yield the child's stdout lines until EOF.
+
+        Yields:
+            One line of stdout at a time.
+
+        Raises:
+            KeyboardInterrupt: The user pressed Stop.
+            _StreamReadTimeoutError: The turn outlived its deadline.
+        """
+        while True:
+            remaining = self._deadline - time.monotonic()
+            if remaining <= 0:
+                raise _StreamReadTimeoutError()
+            if stop_signal.stop_requested():
+                raise KeyboardInterrupt("Agent stop requested")
+            try:
+                line = self._stdout_lines.get(
+                    timeout=min(remaining, _STOP_POLL_SECONDS)
+                )
+            except queue.Empty:
+                continue
+            if line is None:
+                return
+            yield line
+
+    def _reap(self, grace: float) -> int | None:
+        """Wait up to *grace* seconds for the child to exit, never raising.
+
+        Args:
+            grace: Seconds to wait.
+
+        Returns:
+            The exit status, or ``None`` when the child is still running.
+        """
+        try:
+            return self._proc.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            return None
+
+    def wait_for_exit(self) -> int | None:
+        """Return the child's exit status, or ``None`` if it is still running.
+
+        Never raises: a CLI that lingers after closing stdout (flushing
+        telemetry, waiting on its own children) must not turn a complete
+        turn into an unclassified ``subprocess.TimeoutExpired``.  The
+        wait is bounded by whatever is left of the run's deadline, so a
+        short configured timeout stays short.
+
+        Returns:
+            The exit status, or ``None`` when the child outlived the wait.
+        """
+        remaining = max(self._deadline - time.monotonic(), 0.0)
+        return self._reap(min(remaining, _EXIT_GRACE_SECONDS))
+
+    def stderr_text(self) -> str:
+        """Return everything the child wrote to stderr.
+
+        Returns:
+            The accumulated stderr text, after giving its reader a
+            moment to finish.
+        """
+        self._readers[1].join(timeout=_REAP_GRACE_SECONDS)
+        return "".join(self._stderr_chunks)
+
+    def close(self) -> None:
+        """Terminate the child, reap it, and release its pipes."""
+        proc = self._proc
+        if proc.poll() is None:
+            proc.terminate()
+            if self._reap(_REAP_GRACE_SECONDS) is None:
+                proc.kill()
+                self._reap(_REAP_GRACE_SECONDS)
+        for reader in self._readers:
+            reader.join(timeout=_REAP_GRACE_SECONDS)
+        if any(reader.is_alive() for reader in self._readers):
+            # A grandchild inherited the pipe, so a reader is still
+            # parked inside read(2) holding the buffer's lock: closing
+            # the pipe here would block this thread forever.
+            logger.warning("%s left a reader attached to its output pipes", self._label)
+            return
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            if pipe is not None:
+                with contextlib.suppress(OSError):
+                    pipe.close()
+
+
+class _ToolCallFilteredStream:
+    """Stream a turn to the UI with its tool-call JSON held back.
+
+    Text-based tool calling makes the assistant's *visible* text carry
+    the ``{"tool_calls": [...]}`` block the framework parses out of it,
+    and rendering that blob in the chat panel is noise the user cannot
+    act on.  Both CLI adapters therefore install this filter around the
+    turn, which keeps streaming text as it arrives — the panel must
+    update incrementally, not in one dump when the turn ends — but
+    buffers each top-level JSON object until it closes, then drops it if
+    it is a tool-call block and emits it otherwise.
+
+    Thinking tokens are never filtered: they are already displayed apart
+    from the answer, and a tool call quoted inside reasoning is content.
+    """
+
+    def __init__(self, model: CLITextModel) -> None:
+        """Capture *model*'s callbacks so they can be wrapped and restored.
+
+        Args:
+            model: The adapter whose stream is being filtered.
+        """
+        self._model = model
+        self._token_callback = model.token_callback
+        self._thinking_callback = model.thinking_callback
+        self._in_thinking = False
+        self._pending = ""
+        self._depth = 0
+        self._in_string = False
+        self._escaped = False
+
+    def __enter__(self) -> "_ToolCallFilteredStream":
+        """Install the filtering callbacks for the duration of the turn."""
+        if self._token_callback is not None:
+            self._model.token_callback = self._on_token
+            self._model.thinking_callback = self._on_thinking
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        """Release any buffered text and restore the original callbacks."""
+        self._flush()
+        self._model.token_callback = self._token_callback
+        self._model.thinking_callback = self._thinking_callback
+
+    def _emit(self, text: str) -> None:
+        """Send *text* onward, if there is any and anyone is listening."""
+        if text and self._token_callback is not None:
+            self._token_callback(text)
+
+    def _on_thinking(self, is_start: bool) -> None:
+        """Track and forward the thinking bracket."""
+        self._in_thinking = is_start
+        if self._thinking_callback is not None:
+            self._thinking_callback(is_start)
+
+    def _on_token(self, token: str) -> None:
+        """Forward a thinking token as-is, or filter a text token."""
+        if self._in_thinking:
+            self._emit(token)
+        else:
+            self._feed(token)
+
+    def _feed(self, text: str) -> None:
+        """Emit the plain text of *text*, buffering any JSON object in it."""
+        start = 0
+        for index, char in enumerate(text):
+            if self._depth == 0:
+                if char == "{":
+                    self._emit(text[start:index])
+                    start = index
+                    self._depth = 1
+                continue
+            self._track_json_char(char)
+            if self._depth == 0:
+                self._pending += text[start : index + 1]
+                self._release_pending()
+                start = index + 1
+        if self._depth == 0:
+            self._emit(text[start:])
+        else:
+            self._pending += text[start:]
+
+    def _track_json_char(self, char: str) -> None:
+        """Advance the brace/string state machine by one character."""
+        if self._escaped:
+            self._escaped = False
+        elif char == "\\":
+            self._escaped = True
+        elif self._in_string:
+            self._in_string = char != '"'
+        elif char == '"':
+            self._in_string = True
+        elif char == "{":
+            self._depth += 1
+        elif char == "}":
+            self._depth -= 1
+
+    def _release_pending(self) -> None:
+        """Emit the completed JSON object unless it is a tool call."""
+        block, self._pending = self._pending, ""
+        if not _parse_text_based_tool_calls(block):
+            self._emit(block)
+
+    def _flush(self) -> None:
+        """Release a JSON object the turn ended in the middle of.
+
+        A truncated block is dropped when it looks like a tool call —
+        the early-stop path cuts the stream off exactly there — and
+        emitted otherwise, so no ordinary text is ever swallowed.
+        """
+        block, self._pending = self._pending, ""
+        self._depth = 0
+        self._in_string = False
+        self._escaped = False
+        if "tool_calls" not in block:
+            self._emit(block)
 
 
 def _build_text_based_tools_prompt(function_map: dict[str, Callable[..., Any]]) -> str:

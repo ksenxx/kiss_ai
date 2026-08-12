@@ -280,7 +280,6 @@ class VSCodeServer(
 ):
     """Backend server for VS Code extension."""
 
-    _tab_opened_task_ids: dict[str, str] = {}
     _orphan_sweep_thread: threading.Thread | None = None
 
     def __init__(self, printer: JsonPrinter | None = None) -> None:
@@ -288,20 +287,24 @@ class VSCodeServer(
         _cleanup_legacy_merge_artifacts()
         boot_ts = time.time()
         still_running: set[str] = set()
+        # ``agent_states`` is process-global, so this constructor must
+        # evict only the finished states a previous server left behind:
+        # clearing the whole registry detached the live tasks of a
+        # server that is still serving, orphaning their worktrees and
+        # stranding their history rows (F08-5).
         with agent_state.STATE_LOCK:
-            for state in agent_state.agent_states.values():
-                thread = state.task_thread
-                if state.is_task_active and thread is not None and thread.is_alive():
-                    still_running.add(state.task_id)
+            for task_id, state in list(agent_state.agent_states.items()):
+                if state.busy():
+                    still_running.add(task_id)
+                else:
+                    del agent_state.agent_states[task_id]
             if still_running:
                 logger.warning(
-                    "New VSCodeServer clearing a registry with %d live "
-                    "task(s); their rows are exempt from the orphan "
-                    "sweep: %s",
+                    "New VSCodeServer kept %d live task(s) registered; "
+                    "their rows are exempt from the orphan sweep: %s",
                     len(still_running),
                     ", ".join(sorted(still_running)),
                 )
-            agent_state.agent_states.clear()
         self._orphan_sweep_thread = threading.Thread(
             target=self._run_orphan_sweep,
             args=(still_running, boot_ts),
@@ -313,6 +316,7 @@ class VSCodeServer(
         self._tab_chat_views: dict[str, str] = {}
         self._tab_opened_task_ids: dict[str, str] = {}
         self._tab_models: dict[str, str] = {}
+        self._commit_msg_tabs: set[str] = set()
         persisted = _load_last_model()
         self._default_model = persisted or os.environ.get("KISS_MODEL", "") or get_default_model()
         self._state_lock = agent_state.STATE_LOCK

@@ -698,14 +698,20 @@ class _AutocompleteMixin:
             reqs[conn_id] = token
             cache = self._file_cache.get(wd)
         if cache is None:
+            # The placeholder must be emitted BEFORE the scan is
+            # started.  Both events belong to the same request and
+            # carry the same prefix, so the client cannot tell a stale
+            # one from a fresh one; starting the producer first lets a
+            # quick scan's populated reply be overwritten by the empty
+            # placeholder that follows it (R09-3).
+            self._emit_files(
+                [], conn_id, loading=True, prefix=prefix, tab_id=tab_id,
+            )
             self._refresh_file_cache(
                 then_emit_for_prefix=prefix,
                 work_dir=wd,
                 conn_id=conn_id,
                 tab_id=tab_id,
-            )
-            self._emit_files(
-                [], conn_id, loading=True, prefix=prefix, tab_id=tab_id,
             )
             return
         usage = _load_file_usage()

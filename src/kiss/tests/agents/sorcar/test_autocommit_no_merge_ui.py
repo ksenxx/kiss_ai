@@ -833,6 +833,13 @@ class TestNextTaskDoesNotPublishParkedWork(_Base):
         agent = self._tab(tab_id).agent
         assert agent is not None and agent._wt_pending
         agent._pending_review = True
+        # The user switched Auto-commit back ON before the next task —
+        # the agent re-reads the toggle on every run, and this case is
+        # about the branch that DOES carry the work, so the preserve
+        # step has to be allowed to commit it.  (With the toggle still
+        # off it keeps the worktree directory instead, a different
+        # outcome covered by the sibling cases.)
+        agent.auto_commit_enabled = True
 
         # A previous worktree's warning that a failing broadcast put
         # back into the slot — exactly what `_flush_warnings` does.

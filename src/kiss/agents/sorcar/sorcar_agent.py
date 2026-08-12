@@ -25,7 +25,7 @@ from kiss.agents.sorcar.skills import make_skill_tool
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
 from kiss.core.base import SYSTEM_PROMPT
-from kiss.core.kiss_error import BudgetExceededError
+from kiss.core.kiss_error import BudgetExceededError, KISSError
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import (
     MODEL_INFO,
@@ -263,6 +263,69 @@ _SUBAGENT_POLL_SECONDS = 1.0
 _SUBAGENT_STOP_GRACE_SECONDS = 15.0
 
 
+class _SubagentStopEvent(threading.Event):
+    """Per-sub-agent stop event chained to the parent task's stop event.
+
+    Each parallel sub-agent worker gets its own instance so the user
+    can stop ONLY that sub-agent's task (``VSCodeServer._stop_task``
+    resolves the sub-agent's registered ``stop_event`` and
+    calls :meth:`set`, which flips just this event).  At the same time
+    a stop of the PARENT task must keep killing the whole fan-out, so
+    :meth:`is_set` and :meth:`wait` also observe the parent event —
+    every consumer (``JsonPrinter._check_stop``'s per-print poll, the
+    ``UsefulTools`` bash process-group killer's poll loop, and the
+    0.1 s ``stop.wait`` loops) sees the union of the two signals.
+    Nested ``run_parallel`` fan-outs chain transitively: the inner
+    event's parent is the outer sub-agent's event.
+    """
+
+    def __init__(self, parent: threading.Event | None = None) -> None:
+        """Create an unset event linked to *parent* (may be ``None``)."""
+        super().__init__()
+        self._parent_event = parent
+
+    def is_set(self) -> bool:
+        """True when this event OR any ancestor parent event is set.
+
+        Walks the parent chain ITERATIVELY: deeply nested
+        ``run_parallel`` fan-outs chain one linked event per level, so
+        a recursive walk could hit the interpreter recursion limit.
+        """
+        ev: threading.Event | None = self
+        while isinstance(ev, _SubagentStopEvent):
+            if threading.Event.is_set(ev):
+                return True
+            ev = ev._parent_event
+        return ev is not None and ev.is_set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        """Wait until this event or an ancestor is set.
+
+        Polls the parent chain on a short interval (0.05 s) so a
+        parent-task stop wakes waiters promptly even though the parent
+        event has no reference back to this child event.
+
+        Args:
+            timeout: Maximum seconds to wait; ``None`` waits forever.
+
+        Returns:
+            True when the event (or an ancestor) is set, else False
+            after *timeout* elapsed.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if self.is_set():
+                return True
+            slice_s = 0.05
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return self.is_set()
+                slice_s = min(slice_s, remaining)
+            if super().wait(slice_s):
+                return True
+
+
 def _await_subagents(
     futures: list[Future[str]],
     stop_event: threading.Event | None,
@@ -346,6 +409,97 @@ def _collect_unfinished_usage(
         if future.done():
             continue
         sub_usage[idx] = live
+
+
+class _AbandonedSubagent:
+    """A sub-agent thread its parent gave up waiting for.
+
+    :func:`_await_subagents` abandons a child that ignores its stop
+    event for :data:`_SUBAGENT_STOP_GRACE_SECONDS`, but Python cannot
+    kill a thread: the child keeps running with ``work_dir`` set to the
+    parent's directory (a git worktree, for a server run) and keeps
+    spending budget.  Holding on to it lets the parent (a) refuse to
+    delete a directory a live thread is still writing to and (b) bank
+    the spend the child reports after it was abandoned.
+    """
+
+    def __init__(
+        self,
+        future: Future[str],
+        agent: Any,
+        counted: tuple[float, int, int],
+    ) -> None:
+        """Record *future*/*agent* and the usage already attributed."""
+        self.future = future
+        self.agent = agent
+        self.counted = counted
+
+    def unbanked_usage(self) -> tuple[float, int, int]:
+        """Return the spend not yet attributed to the parent.
+
+        Returns:
+            The ``(budget, tokens, steps)`` delta between the child's
+            live figures and what the parent has already counted.
+        """
+        live = _live_agent_usage(self.agent)
+        delta = (
+            live[0] - self.counted[0],
+            live[1] - self.counted[1],
+            live[2] - self.counted[2],
+        )
+        self.counted = live
+        return delta
+
+
+def _persisted_task_id(agent: Any) -> str:
+    """Return *agent*'s persisted ``task_history`` row id, or ``""``.
+
+    Only :class:`~kiss.agents.sorcar.chat_sorcar_agent.ChatSorcarAgent`
+    and its subclasses persist a row (and expose the ``last_task_id``
+    accessor that reads it under the agent's lock), and even they have
+    no id before their first ``run``, so every caller must tolerate
+    ``""``.
+
+    Args:
+        agent: Any agent object, or ``None``.
+
+    Returns:
+        The row id, or ``""`` when the agent has none.
+    """
+    task_id = getattr(agent, "last_task_id", "") if agent is not None else ""
+    return task_id if isinstance(task_id, str) else ""
+
+
+def _register_abandoned(
+    parent_agent: Any,
+    futures: list[Future[str]],
+    sub_agents: list[Any],
+    sub_usage: list[tuple[float, int, int]],
+) -> None:
+    """Hand every still-running child to *parent_agent* for follow-up.
+
+    Called only on the abandon path.  ``sub_usage`` has just been
+    refreshed from the live children, so it is exactly what the parent
+    has counted for each of them.
+
+    Args:
+        parent_agent: The fanning-out agent, or ``None`` for a bare
+            functional call (nothing can be reclaimed then).
+        futures: One future per child, in task order.
+        sub_agents: The children's agents, in the same order.
+        sub_usage: Per-child ``(cost, tokens, steps)`` already counted.
+    """
+    pending = getattr(parent_agent, "_abandoned_subagents", None)
+    lock = getattr(parent_agent, "_abandoned_lock", None)
+    if pending is None or lock is None:
+        return
+    with lock:
+        for idx, future in enumerate(futures):
+            if future.done() or sub_agents[idx] is None:
+                continue
+            pending.append(
+                _AbandonedSubagent(future, sub_agents[idx], sub_usage[idx])
+            )
 
 
 def _live_agent_usage(agent: Any) -> tuple[float, int, int]:
@@ -637,6 +791,56 @@ class SorcarAgent(RelentlessAgent):
         self.docker_manager: Any = None
         self._use_web_tools: bool = True
         self._is_parallel: bool = True
+        # Sub-agent threads this agent stopped waiting for; see
+        # :class:`_AbandonedSubagent` and :meth:`reclaim_abandoned_subagents`.
+        # Touched by the agent thread and by server threads (worktree
+        # cleanup), hence the lock.
+        self._abandoned_subagents: list[_AbandonedSubagent] = []
+        self._abandoned_lock: threading.Lock = threading.Lock()
+
+    def reclaim_abandoned_subagents(self, timeout: float = 0.0) -> bool:
+        """Bank abandoned sub-agents' spend and report whether any live on.
+
+        A child that ignored its stop event is abandoned, not killed
+        (see :func:`_await_subagents`), so two things outlive the
+        fan-out: the thread — which is still writing into this agent's
+        ``work_dir`` — and the budget it keeps spending after the
+        parent froze its totals.  This waits up to *timeout* for those
+        threads, folds whatever they have spent since they were last
+        counted into this agent's totals, and forgets the ones that
+        finished.
+
+        Callers use the return value to decide whether it is safe to
+        delete the shared working directory.
+
+        Args:
+            timeout: Seconds to wait for the abandoned threads.  ``0``
+                polls without waiting.
+
+        Returns:
+            True when no abandoned sub-agent is still running.
+        """
+        with self._abandoned_lock:
+            pending = list(self._abandoned_subagents)
+        if not pending:
+            return True
+        if timeout > 0:
+            wait([item.future for item in pending], timeout=timeout)
+        still_running: list[_AbandonedSubagent] = []
+        for item in pending:
+            budget, tokens, steps = item.unbanked_usage()
+            if budget or tokens or steps:
+                _attribute_sub_usage(self, budget, tokens, steps)
+            if not item.future.done():
+                still_running.append(item)
+        with self._abandoned_lock:
+            live = {id(item) for item in still_running}
+            self._abandoned_subagents = [
+                item
+                for item in self._abandoned_subagents
+                if item not in pending or id(item) in live
+            ]
+        return not still_running
 
     def _subagent_budget_share(self, num_tasks: int) -> float | None:
         """Return the ``max_budget`` each parallel sub-agent may spend.
@@ -675,6 +879,28 @@ class SorcarAgent(RelentlessAgent):
             )
         return remaining if num_tasks <= 0 else remaining / (num_tasks + 1)
 
+    def _subagent_parent_tab_id(self) -> str:
+        """Return the frontend tab id sub-agents should call their parent.
+
+        Normally this agent's own ``_tab_id``.  When this agent is
+        itself a sub-agent (nested ``run_parallel``), its ``_tab_id``
+        is the synthetic id its parent invented, which no webview may
+        have opened yet; the printer's viewer registry knows which tab
+        is really watching this task, so that one wins.
+
+        Returns:
+            The tab id, or ``""`` when running headless.
+        """
+        tab_id = str(getattr(self, "_tab_id", "") or "")
+        if getattr(self, "_subagent_info", None) is None or self.printer is None:
+            return tab_id
+        fanout = getattr(self.printer, "_fanout_targets", None)
+        own_task_id = _persisted_task_id(self)
+        if fanout is None or not own_task_id:
+            return tab_id
+        viewer_ids = fanout(own_task_id)
+        return sorted(viewer_ids)[0] if viewer_ids else tab_id
+
     def _run_tasks_parallel(
         self,
         tasks: list[str],
@@ -682,16 +908,17 @@ class SorcarAgent(RelentlessAgent):
     ) -> list[str]:
         """Execute multiple independent tasks concurrently using parallel agents.
 
-        Each task gets its own ``ChatSorcarAgent`` instance.  Subclasses can
-        override this method to change the agent type or pass extra context
-        (e.g. ``ChatSorcarAgent`` propagates ``chat_id``).
+        Each task gets its own ``ChatSorcarAgent`` instance, resuming
+        this agent's chat session and nested under this agent's
+        persisted task, via the single fan-out engine
+        :func:`run_tasks_parallel`.
 
-        This method is a pure parallel executor.  It has no knowledge of
-        backend task ids or any frontend concepts (tabs, ``new_tab``
-        broadcasts, etc.).  Any sub-agent-specific frontend behaviour is
-        owned by the sub-agent itself — see
-        :meth:`ChatSorcarAgent.run`, which self-broadcasts a ``new_tab``
-        message whenever it detects ``self._subagent_info`` is set.
+        This method owns no frontend concepts (tabs, ``new_tab``
+        broadcasts, ...): it only reads this agent's context and hands
+        it to the engine.  Sub-agent-specific frontend behaviour is
+        owned by the sub-agent itself — see :meth:`ChatSorcarAgent.run`,
+        which self-broadcasts a ``new_tab`` message whenever it detects
+        ``self._subagent_info`` is set.
 
         Args:
             tasks: List of self-contained task description strings.
@@ -700,6 +927,11 @@ class SorcarAgent(RelentlessAgent):
         Returns:
             List of YAML result strings in the same order as *tasks*.
         """
+        tasks = _coerce_tasks(tasks)
+        # Bank whatever an earlier fan-out's abandoned children spent
+        # after this agent stopped waiting for them, before the budget
+        # share below is computed from those totals.
+        self.reclaim_abandoned_subagents()
         totals: dict[str, float] = {}
         monitor = _LiveUsageMonitor(self, self.printer)
         monitor.start()
@@ -714,6 +946,9 @@ class SorcarAgent(RelentlessAgent):
                 usage_monitor=monitor,
                 max_budget=self._subagent_budget_share(len(tasks)),
                 model_config=getattr(self, "model_config", None),
+                parent_agent=self,
+                chat_id=str(getattr(self, "_chat_id", "") or ""),
+                parent_tab_id=self._subagent_parent_tab_id(),
             )
         finally:
             # stop() joins the monitor BEFORE the offsets bump below so a
@@ -729,6 +964,43 @@ class SorcarAgent(RelentlessAgent):
                 int(totals.get("total_steps", 0)),
             )
         return results
+
+    def _docker_bash(
+        self,
+        command: str,
+        description: str,
+        timeout_seconds: int = 30,
+        max_output_chars: int = 50000,
+    ) -> str:
+        """Run *command* in the task's container, honouring both limits.
+
+        Widens ``RelentlessAgent._docker_bash``, which forwards only
+        the command and its description.  ``DockerManager.Bash``
+        honours a timeout and truncates its output, but a two-argument
+        forwarder pins both to the manager's defaults, so the model
+        could neither raise the 30-second cap for a slow build nor ask
+        for more than the default slice of a large output — limits the
+        non-docker ``UsefulTools.Bash`` has always exposed.
+
+        Args:
+            command: The bash command to run.
+            description: A brief description of the command.
+            timeout_seconds: Timeout in seconds for the command.
+            max_output_chars: Maximum characters in output before truncation.
+
+        Returns:
+            The output of the command.
+
+        Raises:
+            KISSError: If no docker manager is attached to this agent.
+        """
+        if self.docker_manager is None:
+            raise KISSError("Docker manager not initialized")
+        return str(
+            self.docker_manager.Bash(
+                command, description, timeout_seconds, max_output_chars,
+            )
+        )
 
     def _get_tools(self) -> list:
         """Build tool list, using DockerTools when docker_manager is active.
@@ -826,9 +1098,26 @@ class SorcarAgent(RelentlessAgent):
 
             docker_tools = DockerTools(self._docker_bash)
 
-            def Bash(command: str, description: str) -> str:  # noqa: N802
-                """Run a command in the task's Docker container."""
-                return self._docker_bash(command, description)
+            def Bash(  # noqa: N802
+                command: str,
+                description: str,
+                timeout_seconds: int = 30,
+                max_output_chars: int = 50000,
+            ) -> str:
+                """Runs a bash command in the task's Docker container and returns its output.
+
+                Args:
+                    command: The bash command to run.
+                    description: A brief description of the command.
+                    timeout_seconds: Timeout in seconds for the command.
+                    max_output_chars: Maximum characters in output before truncation.
+
+                Returns:
+                    The output of the command.
+                """
+                return self._docker_bash(
+                    command, description, timeout_seconds, max_output_chars,
+                )
 
             tools: list = [
                 Bash, docker_tools.Read, docker_tools.Edit, docker_tools.Write,
@@ -1086,7 +1375,7 @@ class SorcarAgent(RelentlessAgent):
             show(
                 model_name,
                 getattr(self, "_tab_id", "") or "",
-                getattr(self, "_last_task_id", None),
+                _persisted_task_id(self) or None,
             )
         except Exception:
             logger.warning("model picker update failed", exc_info=True)
@@ -1366,6 +1655,9 @@ def run_tasks_parallel(
     max_budget: float | None = None,
     model_config: dict[str, Any] | None = None,
     usage_monitor: _LiveUsageMonitor | None = None,
+    parent_agent: Any = None,
+    chat_id: str = "",
+    parent_tab_id: str = "",
 ) -> list[str]:
     """Execute multiple SorcarAgent tasks concurrently using threads.
 
@@ -1374,12 +1666,17 @@ def run_tasks_parallel(
     This is ideal for I/O-bound workloads (LLM API calls, network
     requests) where the GIL is released during I/O waits.
 
-    This helper is a pure parallel executor: it has no knowledge of
-    backend task ids or any frontend concepts.  It simply marks each
-    spawned agent as a sub-agent (via ``_subagent_info``) and the
-    sub-agent itself owns any sub-agent-specific behaviour (such as
-    broadcasting ``new_tab`` to a browser-based frontend) inside its
-    own ``run()`` method.
+    This is the ONE fan-out engine in the codebase.  It used to have a
+    near-identical twin in ``ChatSorcarAgent._run_tasks_parallel``, and
+    four correctness fixes (per-sub-agent stop event, stopped-child
+    recovery, real ``parent_task_id``, chat/tab propagation) had landed
+    only in that twin, so every plain :class:`SorcarAgent` subclass —
+    which is what all the third-party channel agents are — silently ran
+    the unfixed copy.  Keep it single.
+
+    The engine still owns no frontend concepts: it marks each spawned
+    agent as a sub-agent (via ``_subagent_info``) and the sub-agent
+    itself broadcasts its own ``new_tab`` inside ``run()``.
 
     Args:
         tasks: List of task description strings.  Each string is passed as
@@ -1423,6 +1720,19 @@ def run_tasks_parallel(
             spawned sub-agent is registered with, so the parent task's
             cost/tokens header can stream live aggregate usage while
             the sub-agents run.  ``None`` disables live tracking.
+        parent_agent: The agent that is fanning out, when there is one.
+            Its persisted ``task_history`` row id is re-read as each
+            worker starts and stamped on the child, so the child is
+            stored as a nested sub-task rather than a bogus top-level
+            history row.  ``None`` (a bare functional call) falls back
+            to the printer's thread-local task id.
+        chat_id: Chat session the children resume, so a sub-agent
+            starts with the parent's conversation context instead of a
+            brand-new empty session.  ``""`` gives each child a fresh
+            chat.
+        parent_tab_id: Frontend tab id of the parent, forwarded in
+            ``_subagent_info`` so the child's ``new_tab`` broadcast
+            tells the owning webview which tab spawned it.
 
     Returns:
         List of YAML result strings in the **same order** as *tasks*.
@@ -1445,17 +1755,39 @@ def run_tasks_parallel(
     sub_agents: list[Any] = [None] * len(tasks)
 
     parent_tl = getattr(printer, "_thread_local", None) if printer else None
-    parent_key = getattr(parent_tl, "task_id", "") if parent_tl else ""
+    parent_key = str(getattr(parent_tl, "task_id", "") or "") if parent_tl else ""
     parent_stop_event = getattr(parent_tl, "stop_event", None) if parent_tl else None
+    persisted_parent_id = _persisted_task_id(parent_agent)
+    # Stable for the whole fan-out: the children's synthetic tab ids
+    # must not change between submission and the subagentDone
+    # broadcast, even though the parent's persisted id can appear late.
+    # It is a ROUTING key only — never persisted, because a synthetic
+    # id names no row in ``task_history``.
+    routing_key = persisted_parent_id or parent_key or uuid.uuid4().hex
 
     def _run_single(args: tuple[int, str]) -> str:
         idx, task = args
+        # A per-child event, chained to the parent's: stopping ONE
+        # sub-agent must not stop the parent or its siblings, while a
+        # parent stop still reaches every child (_SubagentStopEvent).
+        sub_stop_event = _SubagentStopEvent(parent_stop_event)
         tl = getattr(printer, "_thread_local", None) if printer else None
         if tl is not None:
-            tl.stop_event = parent_stop_event
+            tl.stop_event = sub_stop_event
         agent = ChatSorcarAgent(f"Parallel-{task[:40]}")
         sub_agents[idx] = agent
-        agent._subagent_info = {"parent_task_id": ""}
+        if chat_id:
+            agent.resume_chat_by_id(chat_id)
+        sub_tab_id = f"task-{routing_key}__sub_{idx}"
+        agent._tab_id = sub_tab_id
+        # Re-read rather than reuse ``routing_key``: the parent may
+        # persist its own row while this fan-out is being submitted, and
+        # a child stamped with "" is stored as a top-level history row.
+        agent._subagent_info = {
+            "parent_task_id": _persisted_task_id(parent_agent)
+            or persisted_parent_id,
+            "parent_tab_id": parent_tab_id,
+        }
         if usage_monitor is not None:
             usage_monitor.track(agent)
         try:
@@ -1469,6 +1801,18 @@ def run_tasks_parallel(
                 model_config=model_config,
             )
             return result
+        except KeyboardInterrupt:
+            # Only THIS child was stopped: report it as a stopped task
+            # so its already-finished siblings' results are still
+            # collected.  A stop of the whole parent task keeps
+            # propagating, because there is nothing left to preserve.
+            if parent_stop_event is not None and parent_stop_event.is_set():
+                raise
+            stopped: str = yaml.dump(
+                {"success": False, "summary": "Sub-agent task stopped by user."},
+                sort_keys=False,
+            )
+            return stopped
         except Exception as exc:
             return _yaml_failure(exc)
         finally:
@@ -1477,27 +1821,22 @@ def run_tasks_parallel(
             # agent totals, so the folded-only read would undercount it.
             sub_usage[idx] = _live_agent_usage(agent)
             if printer is not None:
-                # Notify every tab watching the sub-agent: the
-                # synthetic child tab derived from the parent's task id
-                # plus any viewer tabs subscribed to the sub-agent's
-                # own task stream (mirrors the fan-out in
-                # ChatSorcarAgent._run_tasks_parallel).
+                # Notify every tab watching the sub-agent: its own
+                # synthetic tab plus any viewer tabs subscribed to the
+                # sub-agent's task stream.
                 try:
                     viewer_ids: list[str] = []
                     fanout = getattr(printer, "_fanout_targets", None)
-                    sub_task_id = getattr(agent, "_last_task_id", None)
+                    sub_task_id = _persisted_task_id(agent) or None
                     if callable(fanout) and sub_task_id is not None:
                         found = fanout(sub_task_id)
                         if isinstance(found, list):
                             viewer_ids = [v for v in found if v]
-                    if parent_key:
-                        sub_tab_id = f"task-{parent_key}__sub_{idx}"
-                        if sub_tab_id not in viewer_ids:
-                            viewer_ids.append(sub_tab_id)
-                    if viewer_ids:
-                        _broadcast_subagent_done(
-                            printer, viewer_ids, model_name or "",
-                        )
+                    if sub_tab_id not in viewer_ids:
+                        viewer_ids.append(sub_tab_id)
+                    _broadcast_subagent_done(
+                        printer, viewer_ids, model_name or "",
+                    )
                 except Exception:
                     logger.debug(
                         "subagentDone broadcast failed", exc_info=True,
@@ -1529,6 +1868,11 @@ def run_tasks_parallel(
         # read the live figures of any child that never got to report its
         # own, so no completed sibling's spend is lost.
         _collect_unfinished_usage(futures, sub_agents, sub_usage)
+        if abandoned:
+            # The abandoned threads keep running inside ``work_dir`` and
+            # keep spending: hand them to the parent so it can refuse to
+            # delete that directory and can bank the rest of their spend.
+            _register_abandoned(parent_agent, futures, sub_agents, sub_usage)
         if totals_out is not None:
             totals_out["budget_used"] = sum(u[0] for u in sub_usage)
             totals_out["total_tokens_used"] = sum(u[1] for u in sub_usage)

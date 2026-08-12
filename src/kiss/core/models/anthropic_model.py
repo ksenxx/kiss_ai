@@ -28,6 +28,7 @@ from kiss.core.models.model import (
 from kiss.core.models.stream_abort import (
     DEFAULT_STREAM_STALL_TIMEOUT,
     StreamAbortWatchdog,
+    stall_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,15 +37,38 @@ _CONNECT_TIMEOUT = 10.0
 _MAX_RETRIES = 1
 
 
-def _anthropic_cache_creation_tokens(usage: Any) -> tuple[int, int]:
-    """Return Anthropic 5-minute and 1-hour cache-creation token counts."""
-    cache_creation = getattr(usage, "cache_creation", None)
+def cache_creation_tokens(usage: Any, get: Callable[[Any, str], Any]) -> tuple[int, int]:
+    """Return the 5-minute and 1-hour cache-creation token counts.
+
+    Anthropic reports cache writes either split by TTL under
+    ``cache_creation`` or as a single aggregate.  An aggregate is
+    attributed to the one-hour bucket, the more expensive of the two, so
+    an unknown TTL is never under-billed.  The Claude Code CLI re-emits
+    exactly this shape as JSON, so :mod:`kiss.core.models.claude_code_model`
+    shares this parser and differs only in *get* — otherwise a change to
+    Anthropic's cache tiers would have to be made twice.
+
+    Args:
+        usage: The provider's usage record — an SDK object for the API
+            transport, a decoded JSON dict for the CLI transport.
+        get: Reads a named field off *usage* or a nested record,
+            returning ``None`` when the field is absent.
+
+    Returns:
+        ``(cache_write_5m_tokens, cache_write_1h_tokens)``.
+    """
+    cache_creation = get(usage, "cache_creation")
     if cache_creation is not None:
-        five_minute = getattr(cache_creation, "ephemeral_5m_input_tokens", 0) or 0
-        one_hour = getattr(cache_creation, "ephemeral_1h_input_tokens", 0) or 0
-        return five_minute, one_hour
-    aggregate = getattr(usage, "cache_creation_input_tokens", 0) or 0
-    return 0, aggregate
+        return (
+            get(cache_creation, "ephemeral_5m_input_tokens") or 0,
+            get(cache_creation, "ephemeral_1h_input_tokens") or 0,
+        )
+    return 0, get(usage, "cache_creation_input_tokens") or 0
+
+
+def _attribute_field(record: Any, name: str) -> Any:
+    """Return attribute *name* of *record*, or ``None`` when it is absent."""
+    return getattr(record, name, None)
 
 
 _THINKING_FAMILIES = ("opus", "sonnet", "haiku", "fable")
@@ -896,9 +920,16 @@ class AnthropicModel(Model):
     def _stall_error(self, thinking_started: bool) -> TimeoutError:
         """Build the retryable stall error, closing any open thinking bracket.
 
-        A stall can strike mid-thinking; without the closing
-        ``thinking_callback(False)`` the printer/UI would render everything
-        after the retry as "thinking" forever.
+        The message itself comes from
+        :func:`~kiss.core.models.stream_abort.stall_error`, so this
+        transport's hand-run watchdog loop reports a stall in exactly the
+        words the wrapped transports do; only the offending model is
+        added, because a stall is usually diagnosed from a log line that
+        does not say which model was being asked.
+
+        The extra side effect is the closing ``thinking_callback(False)``:
+        a stall can strike mid-thinking, and without it the printer/UI
+        would render everything after the retry as "thinking" forever.
 
         Args:
             thinking_started: Whether ``thinking_callback(True)`` was
@@ -910,10 +941,8 @@ class AnthropicModel(Model):
         if thinking_started:
             self._invoke_thinking_callback(False)
         return TimeoutError(
-            f"Anthropic stream for model {self.model_name} stalled: no "
-            f"data received for {self._stream_stall_timeout:.0f}s "
-            f"(model_config 'stream_stall_timeout'). The request was "
-            f"aborted instead of hanging; it will be retried."
+            f"Anthropic model {self.model_name}: "
+            f"{stall_error(self._stream_stall_timeout)}"
         )
 
     def _raise_on_refusal(self, response: Any) -> None:
@@ -1065,7 +1094,9 @@ class AnthropicModel(Model):
             cache_write_5m_tokens, cache_write_1h_tokens).
         """
         if hasattr(response, "usage") and response.usage:
-            cache_write_5m, cache_write_1h = _anthropic_cache_creation_tokens(response.usage)
+            cache_write_5m, cache_write_1h = cache_creation_tokens(
+                response.usage, _attribute_field
+            )
             return (
                 getattr(response.usage, "input_tokens", 0) or 0,
                 getattr(response.usage, "output_tokens", 0) or 0,

@@ -23,7 +23,7 @@ import logging
 import socket
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,7 @@ class StreamAbortWatchdog:
     """
 
     _STOP_POLL_SECONDS = 0.1
+    _STOP_JOIN_SECONDS = 5.0
 
     def __init__(
         self,
@@ -89,8 +90,28 @@ class StreamAbortWatchdog:
             self._last_event = time.monotonic()
 
     def stop(self) -> None:
-        """Stop the watchdog thread (stream finished or failed)."""
-        self._done.set()
+        """Disarm the watchdog and wait for its thread to finish.
+
+        Once this returns, no further abort can happen.  That guarantee
+        matters because the caller reaches here only after the stream is
+        done, by which point the SDK may already have returned the
+        keep-alive connection to httpx's pool: a late
+        ``shutdown(SHUT_RDWR)`` would then poison a socket belonging to
+        somebody else's next request.  Disarming under the same lock
+        :meth:`_claim_abort` uses closes that window, and the join
+        closes the "already decided, about to shut down" one.  Both are
+        bounded: the abort runs outside the lock and the join has a
+        timeout, so a transport that wedges during teardown delays the
+        caller instead of stalling it forever.
+        """
+        with self._lock:
+            self._done.set()
+        try:
+            self._thread.join(timeout=self._STOP_JOIN_SECONDS)
+        except RuntimeError:
+            # Joining is impossible during interpreter finalization,
+            # which is when an abandoned stream's generator is collected.
+            logger.debug("Exception caught", exc_info=True)
 
     def _poll_interval(self) -> float:
         """Return how long to sleep between checks."""
@@ -104,18 +125,37 @@ class StreamAbortWatchdog:
     def _watch(self) -> None:
         poll = self._poll_interval()
         while not self._done.wait(poll):
+            if not self._claim_abort():
+                continue
+            self._abort()
+            return
+
+    def _claim_abort(self) -> bool:
+        """Decide whether to abort, atomically with respect to :meth:`stop`.
+
+        The decision is taken under the lock that :meth:`stop` also holds
+        while disarming, so the two cannot interleave: either this
+        watchdog claims the abort before the caller disarms it (and
+        ``stop`` then waits for the abort to finish), or the disarm wins
+        and no abort ever happens.  The abort itself runs outside the
+        lock, so tearing a stream down can never block :meth:`beat` or
+        the disarming caller for as long as the transport takes.
+
+        Returns:
+            ``True`` when this watchdog must now abort the stream.
+        """
+        with self._lock:
+            if self._done.is_set():
+                return False
             if self._stop_event is not None and self._stop_event.is_set():
                 self.stopped = True
-                self._abort()
-                return
-            if self._stall_timeout is None:
-                continue
-            with self._lock:
-                idle = time.monotonic() - self._last_event
-            if idle >= self._stall_timeout:
+                return True
+            if self._stall_timeout is not None and (
+                time.monotonic() - self._last_event >= self._stall_timeout
+            ):
                 self.stalled = True
-                self._abort()
-                return
+                return True
+            return False
 
     def _abort(self) -> None:
         """Unblock the iterating thread, then close the stream."""
@@ -170,12 +210,58 @@ def _stop_requested(
     return stop_event is not None and stop_event.is_set()
 
 
+def _stall_error(stall_timeout: float | None) -> TimeoutError:
+    """Build the retryable error for a stream the watchdog aborted as stalled.
+
+    Args:
+        stall_timeout: The tolerated silence, for the message.
+
+    Returns:
+        A ``TimeoutError`` the agentic loop retries, rather than the
+        silently truncated success an aborted socket would otherwise
+        look like (the iterator just ends at EOF).
+    """
+    seconds = stall_timeout if stall_timeout is not None else 0.0
+    return TimeoutError(
+        f"Model stream stalled: no data received for {seconds:.0f}s "
+        f"(model_config 'stream_stall_timeout'). The request was aborted "
+        f"instead of hanging; it will be retried."
+    )
+
+
+stall_error = _stall_error
+"""Public name for :func:`_stall_error`.
+
+An adapter that runs its own :class:`StreamAbortWatchdog` loop instead of
+:func:`stop_aware_events` (``AnthropicModel._create_message``) still has
+to raise the same error for the same condition, so the wording lives
+here once rather than being restated per transport.
+"""
+
+
+def _close_stream(stream: Any) -> None:
+    """Close *stream*, ignoring transports that do not support it.
+
+    Iterating an SDK stream to its end does not release the underlying
+    HTTP response, so without this the connection is never returned to
+    httpx's pool — every request would open a fresh socket, and a stream
+    abandoned by an exception would strand one indefinitely.
+
+    Args:
+        stream: The SDK stream object.
+    """
+    try:
+        stream.close()
+    except Exception:
+        logger.debug("Exception caught", exc_info=True)
+
+
 def stop_aware_events(
     stream: Any,
     stall_timeout: float | None = None,
     on_abort: Callable[[], None] | None = None,
     name: str = "model-stream-abort-watchdog",
-) -> Iterator[Any]:
+) -> Generator[Any]:
     """Yield *stream*'s events, aborting the request on a user stop.
 
     A drop-in wrapper for ``for event in stream``: the caller's loop body
@@ -196,10 +282,17 @@ def stop_aware_events(
         name: Watchdog thread name, for readable stack dumps.
 
     Yields:
-        Each event the stream produces.
+        Each event the stream produces.  The result is a generator, not a
+        bare iterator: a caller whose loop body can raise must
+        ``close()`` it so the watchdog is stopped and the stream released
+        deterministically instead of whenever the traceback is dropped.
 
     Raises:
         KeyboardInterrupt: When the task was stopped mid-stream.
+        TimeoutError: When the stream produced no event for
+            *stall_timeout* seconds and was aborted.  Retryable, unlike
+            the stop above, and raised in preference to returning the
+            partial text the abandoned loop body accumulated.
     """
     from kiss.core import stop_signal
 
@@ -220,12 +313,23 @@ def stop_aware_events(
             if on_abort is not None:
                 on_abort()
             raise KeyboardInterrupt("Agent stop requested") from None
+        if watchdog.stalled:
+            if on_abort is not None:
+                on_abort()
+            raise _stall_error(stall_timeout) from None
         raise
     finally:
         watchdog.stop()
+        _close_stream(stream)
     if _stop_requested(watchdog, stop_event):
         # An aborted socket usually just ends the iterator, so a stop has
         # to be reported after the loop as well.
         if on_abort is not None:
             on_abort()
         raise KeyboardInterrupt("Agent stop requested")
+    if watchdog.stalled:
+        # Same for a stall: without this the caller would keep whatever
+        # partial text it accumulated and report it as a completion.
+        if on_abort is not None:
+            on_abort()
+        raise _stall_error(stall_timeout)

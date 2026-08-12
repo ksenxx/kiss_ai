@@ -178,46 +178,35 @@ def has_zai_api_key() -> bool:
 def has_moonshot_api_key() -> bool:
     return bool(os.environ.get("MOONSHOT_API_KEY"))
 
+
 def get_required_api_key_for_model(model_name: str) -> str | None:
-    if model_name.startswith("openrouter/"):
-        return "OPENROUTER_API_KEY"
-    elif model_name == "text-embedding-004":
-        return "GEMINI_API_KEY"
-    elif model_name.startswith(
-        ("gpt", "text-embedding", "o1", "o3", "o4", "codex", "computer-use")
-    ) and not model_name.startswith("openai/gpt-oss"):
-        return "OPENAI_API_KEY"
-    elif model_name.startswith(
-        (
-            "meta-llama/",
-            "Qwen/",
-            "mistralai/",
-            "deepseek-ai/",
-            "deepcogito/",
-            "google/gemma",
-            "moonshotai/",
-            "nvidia/",
-            "zai-org/",
-            "openai/gpt-oss",
-            "arcee-ai/",
-            "refuel-ai/",
-            "marin-community/",
-            "essentialai/",
-            "BAAI/",
-            "togethercomputer/",
-            "intfloat/",
-            "Alibaba-NLP/",
-        )
-    ):
-        return "TOGETHER_API_KEY"
-    elif model_name.startswith("claude-"):
-        return "ANTHROPIC_API_KEY"
-    elif model_name.startswith("gemini-"):
-        return "GEMINI_API_KEY"
-    elif model_name.startswith("glm-"):
-        return "ZAI_API_KEY"
-    elif model_name.startswith("kimi-") or model_name.startswith("moonshot-"):
-        return "MOONSHOT_API_KEY"
+    """Return the environment variable a model needs, or ``None`` if none.
+
+    Derived from the two routing tables in
+    :mod:`kiss.core.models.model_info` — the same ones the ``model()``
+    factory dispatches on — so a vendor added there is honoured here
+    without a second, hand-maintained copy of its prefixes drifting out
+    of sync.  ``None`` means the model needs no API key: either it is
+    routed to a subscription CLI (``cc/``, ``codex/``), whose credential
+    is a local executable, or nothing routes it at all.
+
+    Args:
+        model_name: A ``MODEL_INFO`` key.
+
+    Returns:
+        The environment variable name, or ``None``.
+    """
+    from kiss.core.models.model_info import (
+        _NATIVE_PROVIDERS,
+        _match_openai_compatible_provider,
+    )
+
+    provider = _match_openai_compatible_provider(model_name)
+    if provider is not None:
+        return provider.api_key_name
+    for prefix, _label, api_key_name in _NATIVE_PROVIDERS:
+        if model_name.startswith(prefix):
+            return api_key_name
     return None
 
 

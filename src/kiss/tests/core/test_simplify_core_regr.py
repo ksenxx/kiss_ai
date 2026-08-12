@@ -19,8 +19,8 @@ import yaml
 from kiss.agents.obsolete.gepa.template_utils import escape_invalid_template_field_names
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent, _str_to_bool
 from kiss.agents.sorcar.relentless_agent import finish as relentless_finish
+from kiss.core import config as config_module
 from kiss.core.base import Base
-from kiss.core.config import set_artifact_base_dir
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.print_to_console import ConsolePrinter
 from kiss.core.printer import parse_result_yaml
@@ -92,7 +92,11 @@ class BaseSaveRegression(unittest.TestCase):
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
-            set_artifact_base_dir(tmp)
+            # The runtime artifact-base setter was removed (it had no
+            # production caller and could misroute a running agent's
+            # trajectory), so redirect the process-wide directory here.
+            original = config_module._artifact_dir
+            config_module._artifact_dir = tmp
             try:
                 agent = Base("regr agent/save")
                 agent._add_message("user", "hello")
@@ -105,7 +109,7 @@ class BaseSaveRegression(unittest.TestCase):
                 self.assertEqual(data["max_tokens"], None)
                 self.assertIn("trajectory_regr_agent_save_", path.name)
             finally:
-                set_artifact_base_dir(None)
+                config_module._artifact_dir = original
 
     def test_get_trajectory_json(self) -> None:
         agent = Base("regr json")
@@ -349,16 +353,21 @@ class KISSAgentToolRegression(unittest.TestCase):
         self.assertIn("FAILED", buf.getvalue())
 
     def test_check_limits(self) -> None:
+        """The budget bound is enforced here; the step bound is not.
+
+        The second half used to assert that ``step_count > max_steps``
+        also raised from here.  That branch was unreachable — the
+        agentic loop stops first — and it worded the same condition
+        differently, so it was removed and the step bound now lives
+        solely in ``_run_agentic_loop`` (covered end to end by
+        ``test_artifact_dir_and_step_limit.py``).
+        """
         from kiss.core.kiss_error import KISSError
 
         agent = self._agent()
         agent.max_budget = 1.0
         agent.max_steps = 5
         agent.budget_used = 2.0
-        agent.step_count = 1
-        with self.assertRaises(KISSError):
-            agent._check_limits()
-        agent.budget_used = 0.0
         agent.step_count = 6
         with self.assertRaises(KISSError):
             agent._check_limits()

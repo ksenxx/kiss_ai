@@ -527,6 +527,9 @@ class TestThinkingInToolMode:
             def read(self) -> str:
                 return "".join(self._lines[self._pos:])
 
+            def close(self) -> None:
+                pass
+
         subprocess.Popen = FakePopen  # type: ignore[assignment,misc]
         try:
             function_calls, content, _ = m.generate_and_process_with_tools(

@@ -87,7 +87,10 @@ def test_model_routing_by_prefix() -> None:
     """model() routes each name prefix to the documented provider class."""
     assert type(model("claude-test-model")).__name__ == "AnthropicModel"
     assert type(model("gemini-test-model")).__name__ == "GeminiModel"
-    assert type(model("text-embedding-004")).__name__ == "GeminiModel"
+    # ``text-embedding-004`` used to be diverted to Gemini by an exact-name
+    # special case for a model that is not in the catalog (audit 01, F5).
+    # Every ``text-embedding-*`` name now routes by its prefix, to OpenAI.
+    assert type(model("text-embedding-004")).__name__ == "OpenAICompatibleModel"
     for name in ("gpt-4o", "openrouter/foo/bar", "glm-4", "kimi-k2", "moonshot-v1",
                  "meta-llama/Llama-3", "Qwen/qwen-x", "o3-mini"):
         assert type(model(name)).__name__ == "OpenAICompatibleModel", name
@@ -133,7 +136,9 @@ def test_provider_registry_lookup() -> None:
     assert _provider_name(_match_openai_compatible_provider("openrouter/x")) == "openrouter"
     assert _provider_name(_match_openai_compatible_provider("gpt-4o")) == "openai"
     assert _provider_name(_match_openai_compatible_provider("openai/gpt-oss-120b")) == "together"
-    assert _match_openai_compatible_provider("text-embedding-004") is None
+    assert _provider_name(
+        _match_openai_compatible_provider("text-embedding-004")
+    ) == "openai"
     assert _match_openai_compatible_provider("codex/default") is None
     assert _match_openai_compatible_provider("claude-x") is None
     assert _provider_name(
@@ -149,7 +154,7 @@ def test_get_model_provider_labels() -> None:
     assert get_model_provider("openrouter/x/y") == "OpenRouter"
     assert get_model_provider("claude-x") == "Anthropic"
     assert get_model_provider("gemini-x") == "Gemini"
-    assert get_model_provider("text-embedding-004") == "Gemini"
+    assert get_model_provider("text-embedding-004") == "OpenAI"
     assert get_model_provider("glm-5") == "Z.AI"
     assert get_model_provider("kimi-k2") == "Moonshot"
     assert get_model_provider("gpt-4o") == "OpenAI"

@@ -27,13 +27,14 @@ from kiss.core.models.anthropic_model import (
     _parse_data_url,
     _tool_calls_to_tool_use_blocks,
     _uses_adaptive_thinking,
+    cache_creation_tokens,
 )
 from kiss.core.models.anthropic_model import (
     _attachments_to_blocks as anthropic_attachments_to_blocks,
 )
 from kiss.core.models.claude_code_model import (
     ClaudeCodeModel,
-    _claude_code_cache_creation_tokens,
+    _dict_field,
     _find_consecutive_tool_calls_end,
 )
 from kiss.core.models.codex_model import (
@@ -795,16 +796,17 @@ class TestClaudeCodeModel:
         return ClaudeCodeModel("cc/sonnet")
 
     def test_cache_creation_tokens(self) -> None:
-        assert _claude_code_cache_creation_tokens(
+        assert cache_creation_tokens(
             {
                 "cache_creation": {
                     "ephemeral_5m_input_tokens": 3,
                     "ephemeral_1h_input_tokens": 4,
                 }
-            }
+            },
+            _dict_field,
         ) == (3, 4)
-        assert _claude_code_cache_creation_tokens({"cache_creation_input_tokens": 9}) == (0, 9)
-        assert _claude_code_cache_creation_tokens({}) == (0, 0)
+        assert cache_creation_tokens({"cache_creation_input_tokens": 9}, _dict_field) == (0, 9)
+        assert cache_creation_tokens({}, _dict_field) == (0, 0)
 
     def test_find_consecutive_tool_calls_end(self) -> None:
         one = '{"tool_calls": [{"name": "Bash", "arguments": {}}]}'

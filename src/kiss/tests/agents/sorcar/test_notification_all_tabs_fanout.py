@@ -336,16 +336,29 @@ class TestNonUiSubagentDoneReachesAllTabs:
         assert "task-9090__sub_0" in done_tabs
 
     def test_viewer_notified_even_without_parent_task(self) -> None:
-        """With no parent task id (no synthetic tab derivable), the
-        subscribed viewer tab must still be told the sub-agent is
-        done — previously nothing was broadcast at all."""
+        """With no parent task id, the subscribed viewer tab must still
+        be told the sub-agent is done — previously nothing was
+        broadcast at all.
+
+        The sub-agent's own synthetic tab is notified too: the single
+        fan-out engine always names its children ``task-{key}__sub_{n}``
+        (falling back to a generated key when the parent has no
+        persisted task), assigns that id to the child as its
+        ``_tab_id``, and the child registers under it — so it is a real
+        tab, not the phantom the old base-only copy signalled.
+        """
         printer = _CapturePrinter()
         self._run(printer, "")
 
         done_tabs = {
             e.get("tab_id") for e in printer.of_type("subagentDone")
         }
-        assert done_tabs == {_VIEWER_TAB}
+        assert _VIEWER_TAB in done_tabs
+        synthetic = done_tabs - {_VIEWER_TAB}
+        assert len(synthetic) == 1
+        synthetic_tab = synthetic.pop()
+        assert synthetic_tab is not None
+        assert synthetic_tab.endswith("__sub_0")
 
 
 class TestBroadcastTransientPrimitive:

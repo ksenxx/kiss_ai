@@ -198,6 +198,9 @@ class TestModelInfoFactory:
 
         m = model("text-embedding-004")
         assert m.model_name == "text-embedding-004"
+        # Routed by the ``text-embedding`` prefix like every other name in
+        # that family; the exact-name Gemini diversion was dead (audit 01, F5).
+        assert type(m).__name__ == "OpenAICompatibleModel"
 
     def test_model_glm(self) -> None:
         from kiss.core.models.model_info import model

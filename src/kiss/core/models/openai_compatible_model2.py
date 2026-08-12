@@ -145,17 +145,9 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             attachments: Optional list of image / PDF / audio attachments
                 to attach to the initial user message.
         """
-        extra_headers = self.model_config.get("extra_headers") or {}
-        self.client = OpenAI(
-            base_url=self.base_url,
-            api_key=self.api_key,
-            timeout=1800.0,
-            default_headers=extra_headers,
-        )
+        self._ensure_client()
         self.conversation = []
-        self._pending_function_calls = []
-        self._last_stream_item_indexes = {}
-        self._last_stream_message_output_index = None
+        self._reset_turn_state()
         if attachments:
             parts = self._attachments_to_content_parts(attachments)
             parts.append({"type": "input_text", "text": prompt})
@@ -167,6 +159,75 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     "content": [{"type": "input_text", "text": prompt}],
                 }
             )
+
+    def _ensure_client(self) -> None:
+        """Build the SDK client once, so its connection pool is reused.
+
+        ``initialize()`` used to be the only place a client was built,
+        and the delegated tool-calling transport called it before every
+        single agent step — a 100-step run therefore built 100 ``OpenAI``
+        clients and 100 httpx connection pools, each paying a fresh TLS
+        handshake while the previous pool waited on the garbage
+        collector.
+        """
+        if self.client is not None:
+            return
+        extra_headers = self.model_config.get("extra_headers") or {}
+        self.client = OpenAI(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            timeout=1800.0,
+            default_headers=extra_headers,
+        )
+
+    def _reset_stream_indexes(self) -> None:
+        """Forget the item ordering learned from the previous streamed turn."""
+        self._last_stream_item_indexes = {}
+        self._last_stream_message_output_index = None
+
+    def _reset_turn_state(self) -> None:
+        """Drop every scrap of per-turn state left by the previous turn."""
+        self._pending_function_calls = []
+        self._reset_stream_indexes()
+
+    def reset_conversation(self) -> None:
+        """Reset the conversation together with all per-turn state.
+
+        The base implementation clears only the conversation.  Leaving
+        ``_pending_function_calls`` behind would then reject the next
+        generation on a *fresh, empty* conversation — a permanently
+        unusable model object — and leaving the stream indexes behind
+        would order a later non-streamed turn's assistant message using
+        the previous streamed turn's indexes.
+        """
+        super().reset_conversation()
+        self._reset_turn_state()
+
+    def _request_response(
+        self, kwargs: dict[str, Any]
+    ) -> tuple[str, list[dict[str, str]], Any]:
+        """Issue one Responses request, streaming iff a token callback is set.
+
+        The single place the transport talks to ``responses.create``, so
+        the per-turn stream bookkeeping is reset for *every* turn — a
+        non-streamed turn must never be ordered using the indexes of the
+        streamed turn before it.
+
+        Args:
+            kwargs: The request kwargs; ``stream`` is set here when
+                streaming.
+
+        Returns:
+            ``(content, tool_calls, response)``.
+        """
+        self._reset_stream_indexes()
+        if self.token_callback is not None:
+            kwargs["stream"] = True
+            return self._consume_stream(self.client.responses.create(**kwargs))
+        response = self.client.responses.create(**kwargs)
+        self._raise_for_failed_response(response)
+        content, tool_calls = self._parse_non_streaming(response)
+        return content, tool_calls, response
 
     @staticmethod
     def _get_attr_or_key(obj: Any, key: str, default: Any = None) -> Any:
@@ -1224,6 +1285,44 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         self,
         stream: Any,
     ) -> tuple[str, list[dict[str, str]], Any]:
+        """Consume a Responses stream under an abort watchdog.
+
+        ``stop_aware_events`` aborts the request the moment the user
+        presses Stop or the provider goes silent for
+        ``stream_stall_timeout`` seconds; a bare ``for event in stream``
+        would hold the agent inside ``recv()`` until the client's own
+        30-minute timeout expires
+        (``reports/stop_button_delay_2026-08-05.html``).
+
+        Closing the generator explicitly is what makes that safe:
+        :meth:`_consume_stream_events` raises from *inside* the loop on
+        ``response.failed`` / ``response.incomplete``, and an abandoned
+        generator runs its cleanup only whenever the traceback holding
+        its frame is released — until then a daemon watchdog thread stays
+        alive and armed over a connection that never returns to the pool.
+
+        Args:
+            stream: The streaming iterator returned by the SDK.
+
+        Returns:
+            ``(content, tool_calls, response)`` — see
+            :meth:`_consume_stream_events`.
+        """
+        events = stop_aware_events(
+            stream,
+            stall_timeout=self._stream_stall_timeout,
+            on_abort=self._close_thinking_if_open,
+            name="openai-responses-stream-abort-watchdog",
+        )
+        try:
+            return self._consume_stream_events(events)
+        finally:
+            events.close()
+
+    def _consume_stream_events(
+        self,
+        events: Any,
+    ) -> tuple[str, list[dict[str, str]], Any]:
         """Drive callbacks from streaming events and collect final state.
 
         Walks every SSE event from the Responses streaming API:
@@ -1241,7 +1340,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         * ``response.completed`` — captures the final response object.
 
         Args:
-            stream: The streaming iterator returned by the SDK.
+            events: The stop/stall-aware iterator over the SDK stream.
 
         Returns:
             ``(content, tool_calls, response)`` where ``tool_calls`` is a
@@ -1268,15 +1367,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         self._last_stream_item_indexes = item_output_indexes
         self._last_stream_message_output_index = None
 
-        # stop_aware_events aborts the request the moment the user
-        # presses Stop; a bare `for event in stream` would hold the agent
-        # inside recv() until the client's own timeout expires
-        # (reports/stop_button_delay_2026-08-05.html).
-        for event in stop_aware_events(
-            stream,
-            on_abort=self._close_thinking_if_open,
-            name="openai-responses-stream-abort-watchdog",
-        ):
+        for event in events:
             etype = self._event_type(event)
             ev_item_id = str(getattr(event, "item_id", "") or "")
             if not ev_item_id:
@@ -1947,14 +2038,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         """
         self.conversation = self._foreign_items_to_native_input(self.conversation)
         kwargs = self._build_request_kwargs(tools=None)
-        if self.token_callback is not None:
-            kwargs["stream"] = True
-            stream = self.client.responses.create(**kwargs)
-            content, _tc, response = self._consume_stream(stream)
-        else:
-            response = self.client.responses.create(**kwargs)
-            self._raise_for_failed_response(response)
-            content, _tc = self._parse_non_streaming(response)
+        content, _tc, response = self._request_response(kwargs)
 
         if self._is_deepseek_reasoning_model():
             _, content = _extract_deepseek_reasoning(content)
@@ -2005,14 +2089,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         responses_tools = self._flatten_tools_schema(chat_tools)
         kwargs = self._build_request_kwargs(tools=responses_tools)
 
-        if self.token_callback is not None:
-            kwargs["stream"] = True
-            stream = self.client.responses.create(**kwargs)
-            content, raw_tool_calls, response = self._consume_stream(stream)
-        else:
-            response = self.client.responses.create(**kwargs)
-            self._raise_for_failed_response(response)
-            content, raw_tool_calls = self._parse_non_streaming(response)
+        content, raw_tool_calls, response = self._request_response(kwargs)
 
         for tc in raw_tool_calls:
             if not tc.get("id"):
@@ -2228,14 +2305,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         self._ensure_no_pending_function_calls()
         kwargs = self._shape_responses_kwargs(input_items=modified, tools=None)
 
-        if self.token_callback is not None:
-            kwargs["stream"] = True
-            stream = self.client.responses.create(**kwargs)
-            content, _tc, response = self._consume_stream(stream)
-        else:
-            response = self.client.responses.create(**kwargs)
-            self._raise_for_failed_response(response)
-            content, _tc = self._parse_non_streaming(response)
+        content, _tc, response = self._request_response(kwargs)
 
         _, content_clean = _extract_deepseek_reasoning(content)
         function_calls = _parse_text_based_tool_calls(content_clean)

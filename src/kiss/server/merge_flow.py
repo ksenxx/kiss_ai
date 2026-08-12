@@ -42,6 +42,11 @@ logger = logging.getLogger(__name__)
 def _state_task_key(state: AgentState | None) -> str | None:
     """Return the task id *state* last ran, preferring the live agent's.
 
+    The agent's id is read through its ``last_task_id`` property,
+    which takes the same lock the publishing assignment in
+    ``ChatSorcarAgent.run`` takes, so this cross-thread read is paired
+    with its writer.
+
     Args:
         state: The agent state to inspect, or ``None``.
 
@@ -50,8 +55,7 @@ def _state_task_key(state: AgentState | None) -> str | None:
     """
     if state is None:
         return None
-    agent = state.agent
-    task_id = getattr(agent, "_last_task_id", None) if agent is not None else None
+    task_id = getattr(state.agent, "last_task_id", "")
     if task_id:
         return str(task_id)
     return state.task_id or None
@@ -719,6 +723,14 @@ class _MergeFlowMixin:
         edits and new files are included.  Falls back to a branch-
         to-branch diff when the worktree has already been removed.
 
+        The answer describes the worktree the tab's agent owns, so it
+        does NOT depend on the mode of the run currently executing on
+        that tab.  Returning ``[]`` for a tab whose latest run has
+        ``use_worktree`` off would report a worktree full of work as
+        empty, and callers destroy an "empty" worktree (R09-1).  The
+        agent checks below already cover the case of a tab that owns
+        no worktree at all.
+
         Args:
             tab_id: The tab whose worktree to check.
 
@@ -726,7 +738,7 @@ class _MergeFlowMixin:
             Sorted deduplicated list of relative file paths.
         """
         state = agent_state.find_by_tab(tab_id)
-        if state is None or not state.use_worktree:
+        if state is None:
             return []
         wt_agent = state.agent
         if wt_agent is None or not wt_agent._original_branch:

@@ -42,8 +42,9 @@ from typing import Any
 import pytest
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent, _SubagentStopEvent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task
+from kiss.agents.sorcar.sorcar_agent import _SubagentStopEvent
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer

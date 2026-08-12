@@ -844,13 +844,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       case 'worktreeAction': {
         const wtAction = message.action;
         const wtTabId = message.tabId;
-        if (wtAction !== 'discard') {
-          const progressTitle =
-            wtAction === 'merge'
-              ? 'Committing and merging worktree…'
-              : 'Processing worktree action…';
+        // A discard is instant; only a merge is worth a progress toast.
+        if (wtAction === 'merge') {
           this._showActionProgress(
-            progressTitle,
+            'Committing and merging worktree…',
             wtTabId,
             this._worktreeProgresses,
             this._worktreeActionResolves,

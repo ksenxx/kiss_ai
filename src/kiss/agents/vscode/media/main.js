@@ -539,6 +539,18 @@
       streamLlmPanelState: null,
       streamLastToolName: '',
       streamPendingPanel: false,
+      streamStepCount: 0,
+      // A content tab shows a file instead of a conversation: it keeps
+      // its own detached view and never owns task output.
+      isContentTab: false,
+      contentPath: '',
+      contentViewEl: null,
+      contentEditor: null,
+      // Set on a sub-agent tab opened by a run_parallel fan-out, naming
+      // the conversation that started it.
+      isSubagentTab: false,
+      parentTabId: null,
+      isDone: false,
       lastTaskFailed: false,
       hasRunTask: false,
       askPendingQuestion: null,
@@ -857,6 +869,9 @@
       if (inputContainer) inputContainer.style.display = '';
     }
     updateInputDisabled();
+    // A tab that ran while hidden comes back looking like one that ran
+    // on screen: everything but its latest panel collapsed.
+    collapseOlderPanels(O, tab.id);
     resetAdjacentState();
     syncAskModalToActiveTab();
     // visibletask-coverage:start
@@ -1126,6 +1141,7 @@
     for (const id of toClose) {
       const i = tabs.findIndex(t => t.id === id);
       if (i >= 0) tabs.splice(i, 1);
+      forgetPendingFileLinks(id);
       // report-coverage:start
       discardReadyReports(id);
       // report-coverage:end
@@ -2444,6 +2460,7 @@
 
   function clearOutput() {
     if (welcome && welcome.parentNode === O) O.removeChild(welcome);
+    forgetPendingFileLinks(activeTabId);
     O.innerHTML = '';
     // autoscroll-coverage:start
     // The output was rebuilt from scratch (a new task's `clear`, a
@@ -2807,6 +2824,43 @@
         else demoteFileLink(span);
       }
     }
+  }
+
+  /**
+   * Release the file-link bookkeeping of a transcript that is going away.
+   *
+   * The spans of a closed or cleared tab are detached DOM that no reply
+   * will ever promote, and the registry would keep them -- and the work
+   * of walking them on every later reply -- alive for the rest of the
+   * session. Their in-flight keys go with them, so the same paths are
+   * checked afresh if the tab's transcript is rebuilt.
+   *
+   * @param {string} tabId The tab whose transcript is being discarded.
+   */
+  function forgetPendingFileLinks(tabId) {
+    const owner = String(tabId);
+    for (const span of Array.from(_pendingFileLinkSpans)) {
+      if ((span.getAttribute('data-path-tab') || '') === owner) {
+        _pendingFileLinkSpans.delete(span);
+      }
+    }
+    const prefix = owner + '\u0000';
+    for (const key of Array.from(_pendingPathChecks)) {
+      if (key.indexOf(prefix) === 0) _pendingPathChecks.delete(key);
+    }
+  }
+
+  /**
+   * Forget which checks are in flight after losing the daemon.
+   *
+   * Nothing can answer a request that was on the wire when the socket
+   * died, so leaving its key in the dedup set would suppress every later
+   * check of that path and the links would stay inert for the rest of
+   * the session. The spans themselves are kept: they are still on
+   * screen, and the re-issued check promotes them.
+   */
+  function forgetInFlightPathChecks() {
+    _pendingPathChecks.clear();
   }
 
   function hlBlock(el) {
@@ -3381,15 +3435,49 @@
     }
   }
 
-  function collapseOlderPanels() {
-    if (!isRunning) return;
-    const panels = O.querySelectorAll(':scope > .collapsible');
+  /**
+   * True while the task of *tabId* is running.
+   *
+   * The visible tab's flag is the module-level `isRunning` that
+   * setRunningState keeps in step with it; a tab that is not on screen
+   * carries the flag on itself. Reading it per tab is what lets a
+   * background transcript collapse its panels exactly like a visible
+   * one -- it used to consult the visible tab's flag and so never
+   * collapsed anything.
+   *
+   * @param {string} tabId The tab that owns a transcript.
+   * @returns {boolean} Whether that tab's task is running.
+   */
+  function streamTabIsRunning(tabId) {
+    if (tabId === activeTabId) return isRunning;
+    const tab = getTab(tabId);
+    return !!(tab && tab.isRunning);
+  }
+
+  /**
+   * Collapse every top-level panel of a running transcript but the last.
+   *
+   * @param {Element|DocumentFragment} container The transcript.
+   * @param {string} tabId The tab that owns it.
+   */
+  function collapseOlderPanels(container, tabId) {
+    // Only an attached transcript is collapsed as it streams.  A
+    // background tab's fragment is collapsed once, when it is restored
+    // (see restoreTab): collapsing a run_parallel panel adopts its open
+    // sub-agent tabs into the newest fan-out call, and mid-stream that
+    // call does not exist yet, so a live sub-agent tab would be closed
+    // by the very panel it is about to move out of.
+    if (!container || container.nodeType !== 1) return;
+    if (!streamTabIsRunning(tabId)) return;
+    const panels = Array.from(container.children).filter(
+      el => el.classList && el.classList.contains('collapsible'),
+    );
     for (let i = 0; i < panels.length - 1; i++) {
       const p = panels[i];
       if (p.classList.contains('rc') || p.classList.contains('user-pinned'))
         continue;
       if (p.classList.contains('tc-run-parallel'))
-        rpAdoptOpenSubagents(p, activeTabId);
+        rpAdoptOpenSubagents(p, tabId);
       if (rpPanelHasOpenTabs(p) && !p._rpDone) continue;
       p.classList.add('collapsed');
       collapsePreview(p);
@@ -3446,6 +3534,7 @@
     titleOverride,
     showStatus,
     workDir,
+    ownerTabId,
   ) {
     const rc = mkEl('div', 'ev rc');
     let rb = '';
@@ -3493,7 +3582,7 @@
     addCopyButton(rc);
     addPanelTimestamp(rc, ev.ts);
     const rcBody = rc.querySelector('.rc-body');
-    if (rcBody) linkifyFilePaths(rcBody, workDir);
+    if (rcBody) linkifyFilePaths(rcBody, workDir, ownerTabId);
     return rc;
   }
 
@@ -3889,7 +3978,7 @@
           c.appendChild(sd);
         } else {
           c.appendChild(tcBody);
-          verifyFileLinkCandidates(tcBody, evWorkDir);
+          verifyFileLinkCandidates(tcBody, evWorkDir, evOwnerTab);
         }
         addCollapse(c, hdr, ev.ts);
         target.appendChild(c);
@@ -4023,6 +4112,7 @@
               'Previous Sessions',
               false,
               evWorkDir,
+              evOwnerTab,
             ),
           );
           target.appendChild(
@@ -4032,11 +4122,19 @@
               'Result',
               true,
               evWorkDir,
+              evOwnerTab,
             ),
           );
         } else {
           target.appendChild(
-            createResultPanel(ev, undefined, 'Result', true, evWorkDir),
+            createResultPanel(
+              ev,
+              undefined,
+              'Result',
+              true,
+              evWorkDir,
+              evOwnerTab,
+            ),
           );
         }
         if (statusTokens && ev.total_tokens)
@@ -4102,7 +4200,13 @@
         }
         break;
       }
+      case 'autocommit_progress':
+      case 'worktree_progress': {
+        renderActionProgress(target, ev.message || ev.text || '');
+        break;
+      }
       case 'autocommit_done': {
+        clearActionProgress(target);
         const cls2 = ev && ev.success ? 'wt-result-ok' : 'wt-result-err';
         const acDiv = mkEl('div', 'ev ' + cls2);
         acDiv.textContent = (ev && ev.message) || '';
@@ -4137,58 +4241,201 @@
     if (statusSteps) statusSteps.textContent = 'Steps: ' + count;
   }
 
+  // "Steps: 7/100" -- the daemon writes its step count into the usage
+  // line as well as into the numeric fields beside it.
+  const STEPS_TEXT_RE = /Steps:\s*(\d+)\/\d+/;
+
+  /**
+   * The step count the daemon itself reports in *ev*, or 0.
+   *
+   * ``usage_info`` carries it as ``total_steps``, and -- for a payload
+   * without the numeric fields -- inside its ``Steps: N/M`` text, which
+   * is the same pair of forms the renderer reads.
+   *
+   * @param {object} ev A usage_info event.
+   * @returns {number} The reported count, or 0 when it reports none.
+   */
+  function reportedStepCount(ev) {
+    if (ev.total_steps != null) return ev.total_steps;
+    const m = STEPS_TEXT_RE.exec(ev.text || '');
+    return m ? parseInt(m[1], 10) : 0;
+  }
+
+  /**
+   * The mutable state of ONE transcript's event stream.
+   *
+   * Three transcripts run the same state machine: the visible tab, a
+   * background tab's detached fragment, and a replay. Holding that state
+   * in one shape -- and the machine itself in one place (streamBegin /
+   * streamEnd) -- is what stops the three from drifting apart.
+   *
+   * @param {Element|DocumentFragment} container Where panels are added.
+   * @param {string} tabId The tab that owns the transcript.
+   * @returns {object} A fresh stream context.
+   */
+  function mkStreamCtx(container, tabId) {
+    return {
+      container: container,
+      tabId: tabId,
+      // Renderer state for events that land in the transcript itself.
+      state: mkS(),
+      lastToolName: '',
+      llmPanel: null,
+      llmPanelState: mkS(),
+      pendingPanel: false,
+      stepCount: 0,
+      // Called with the new count whenever a step is counted.
+      onStep: null,
+    };
+  }
+
+  function streamCountStep(ctx) {
+    ctx.stepCount += 1;
+    if (ctx.onStep) ctx.onStep(ctx.stepCount);
+  }
+
+  function streamOpenThoughts(ctx, ts, provisional) {
+    const panel = mkThoughtsPanel(ts);
+    if (provisional) panel._provisional = true;
+    ctx.llmPanel = panel;
+    ctx.container.appendChild(panel);
+    collapseOlderPanels(ctx.container, ctx.tabId);
+    ctx.llmPanelState = mkS();
+    ctx.pendingPanel = false;
+  }
+
+  const STREAM_PANEL_TYPES = new Set([
+    'thinking_start',
+    'thinking_delta',
+    'thinking_end',
+    'text_delta',
+    'text_end',
+  ]);
+
+  /**
+   * Apply the panel transitions an event triggers before it is rendered.
+   *
+   * A tool_call ends the current thoughts panel, a tool_result arms the
+   * next one, and the first thinking_start or text_delta after that
+   * opens it and counts a step.
+   *
+   * @param {object} ctx The transcript's stream context.
+   * @param {object} ev The event about to be rendered.
+   * @returns {{target: (Element|DocumentFragment), state: object}} Where
+   *   the event must be rendered, and the renderer state to use.
+   */
+  function streamBegin(ctx, ev) {
+    const t = ev.type;
+    if (t === 'tool_call') {
+      ctx.lastToolName = ev.name || '';
+      if (ctx.llmPanel && ctx.llmPanel._provisional)
+        discardProvisionalPanel(ctx.llmPanel);
+      else if (ctx.llmPanel) finalizePanelTime(ctx.llmPanel);
+      ctx.llmPanel = null;
+      ctx.llmPanelState = mkS();
+      ctx.pendingPanel = true;
+    }
+    if (t === 'tool_result' && ctx.lastToolName !== 'finish') {
+      ctx.pendingPanel = true;
+    }
+    const opensPanel = t === 'thinking_start' || t === 'text_delta';
+    if (ctx.llmPanel && ctx.llmPanel._provisional && opensPanel) {
+      streamCountStep(ctx);
+      ctx.llmPanel._provisional = false;
+    } else if ((ctx.pendingPanel || ctx.stepCount === 0) && opensPanel) {
+      streamCountStep(ctx);
+      streamOpenThoughts(ctx, ev.ts, false);
+    }
+    if (ctx.llmPanel && STREAM_PANEL_TYPES.has(t)) {
+      return {target: ctx.llmPanel, state: ctx.llmPanelState};
+    }
+    return {target: ctx.container, state: ctx.state};
+  }
+
+  /**
+   * Apply the panel transitions that follow an event being rendered.
+   *
+   * @param {object} ctx The transcript's stream context.
+   * @param {object} ev The event that was just rendered.
+   * @param {Element|DocumentFragment} target Where it was rendered.
+   */
+  function streamEnd(ctx, ev, target) {
+    const t = ev.type;
+    if (target === ctx.container) {
+      collapseOlderPanels(ctx.container, ctx.tabId);
+    }
+    if (t === 'tool_result' && ctx.lastToolName !== 'finish' && !ctx.llmPanel) {
+      // The agent is thinking again; the panel its words will land in is
+      // opened now so the transcript does not sit empty, and withdrawn
+      // again if nothing is ever said into it.
+      streamOpenThoughts(ctx, ev.ts, true);
+    }
+    if (t === 'usage_info' && ctx.stepCount > 0) {
+      // The daemon's own count outranks the panel counting, which only
+      // estimates the steps between two of its reports -- a run_parallel
+      // fan-out reports the sub-agents' steps too, so the estimate is
+      // far behind. Adopted only once this transcript has counted a step
+      // of its own: until then stepCount === 0 is also what tells
+      // streamBegin the first thoughts panel is still to be opened, and
+      // the daemon reports a step in progress before its first token.
+      const reported = reportedStepCount(ev);
+      if (reported) ctx.stepCount = reported;
+    }
+    if (t === 'result') {
+      if (ctx.llmPanel && ctx.llmPanel._provisional)
+        discardProvisionalPanel(ctx.llmPanel);
+      else if (ctx.llmPanel) finalizePanelTime(ctx.llmPanel);
+      ctx.llmPanel = null;
+      // The daemon's own count is the authoritative one.
+      if (ev.step_count) ctx.stepCount = ev.step_count;
+      collapseAllExceptResult(ctx.container, ctx.tabId);
+      if (ev.success === false && !ev.is_continue) {
+        const rTab = getTab(ctx.tabId);
+        if (rTab) rTab.lastTaskFailed = true;
+      }
+      ctx.pendingPanel = true;
+    }
+  }
+
+  // The visible transcript's stream state lives in module globals
+  // because a tab switch saves and restores them; they are lent to the
+  // shared machine for the length of one event.
+  function liveStreamCtx() {
+    return {
+      container: O,
+      tabId: activeTabId,
+      state: state,
+      lastToolName: lastToolName,
+      llmPanel: llmPanel,
+      llmPanelState: llmPanelState,
+      pendingPanel: pendingPanel,
+      stepCount: stepCount,
+      onStep: updateStepCount,
+    };
+  }
+
+  function saveLiveStreamCtx(ctx) {
+    lastToolName = ctx.lastToolName;
+    llmPanel = ctx.llmPanel;
+    llmPanelState = ctx.llmPanelState;
+    pendingPanel = ctx.pendingPanel;
+    stepCount = ctx.stepCount;
+  }
+
   function processOutputEvent(ev) {
     normalizeEventTs(ev);
     // visibletask-coverage:start
     // A live event reads and rewrites the status row, so the row must be
     // showing the live task's own numbers while it is handled — the
     // reader may have left it on a neighbouring task. updateVisibleTask()
-    // at the end of this function hands it back.
+    // at the end hands it back.
     showLiveMetrics();
     // visibletask-coverage:end
+    const ctx = liveStreamCtx();
     const t = ev.type;
-    if (t === 'tool_call') {
-      lastToolName = ev.name || '';
-      if (llmPanel && llmPanel._provisional) discardProvisionalPanel(llmPanel);
-      else if (llmPanel) finalizePanelTime(llmPanel);
-      llmPanel = null;
-      llmPanelState = mkS();
-      pendingPanel = true;
-    }
-    if (t === 'tool_result' && lastToolName !== 'finish') {
-      pendingPanel = true;
-    }
-    if (
-      llmPanel &&
-      llmPanel._provisional &&
-      (t === 'thinking_start' || t === 'text_delta')
-    ) {
-      updateStepCount(stepCount + 1);
-      llmPanel._provisional = false;
-    } else if (
-      (pendingPanel || stepCount === 0) &&
-      (t === 'thinking_start' || t === 'text_delta')
-    ) {
-      updateStepCount(stepCount + 1);
-      llmPanel = mkThoughtsPanel(ev.ts);
-      O.appendChild(llmPanel);
-      collapseOlderPanels();
-      llmPanelState = mkS();
-      pendingPanel = false;
-    }
-    let target = O,
-      tState = state;
-    if (
-      llmPanel &&
-      (t === 'thinking_start' ||
-        t === 'thinking_delta' ||
-        t === 'thinking_end' ||
-        t === 'text_delta' ||
-        t === 'text_end')
-    ) {
-      target = llmPanel;
-      tState = llmPanelState;
-    }
+    const where = streamBegin(ctx, ev);
+    const target = where.target;
+    const tState = where.state;
     handleOutputEvent(ev, target, tState);
     // autoscroll-coverage:start
     // Capture the latest event panel now: right below, a provisional
@@ -4199,29 +4446,12 @@
         ? target
         : (t === 'tool_result' && tState.lastToolCallEl) || O.lastElementChild;
     // autoscroll-coverage:end
-    if (target === O) collapseOlderPanels();
-    if (t === 'tool_result' && lastToolName !== 'finish' && !llmPanel) {
-      llmPanel = mkThoughtsPanel(ev.ts);
-      llmPanel._provisional = true;
-      O.appendChild(llmPanel);
-      collapseOlderPanels();
-      llmPanelState = mkS();
-      pendingPanel = false;
-    }
+    streamEnd(ctx, ev, target);
+    saveLiveStreamCtx(ctx);
     if (t === 'result' || t === 'usage_info') {
       currentTaskMetrics.tokens = statusTokens ? statusTokens.textContent : '';
       currentTaskMetrics.budget = statusBudget ? statusBudget.textContent : '';
       currentTaskMetrics.steps = statusSteps ? statusSteps.textContent : '';
-    }
-    if (t === 'result') {
-      if (llmPanel) finalizePanelTime(llmPanel);
-      llmPanel = null;
-      collapseAllExceptResult(O, activeTabId);
-      if (ev.success === false && !ev.is_continue) {
-        const rTab = getTab(activeTabId);
-        if (rTab) rTab.lastTaskFailed = true;
-      }
-      pendingPanel = true;
     }
     // autoscroll-coverage:start
     autoScrollLatestEventPanel(autoScrollPanel);
@@ -4237,136 +4467,78 @@
 
   function processOutputEventForBgTab(ev, tab) {
     normalizeEventTs(ev);
-    const t = ev.type;
-
     if (!tab.outputFragment)
       tab.outputFragment = document.createDocumentFragment();
 
-    let bgLastToolName = tab.streamLastToolName || '';
-    let bgLlmPanel = tab.streamLlmPanel || null;
-    let bgLlmPanelState = tab.streamLlmPanelState || mkS();
-    let bgPendingPanel = tab.streamPendingPanel || false;
-    let bgStepCount = tab.streamStepCount || 0;
-    const bgState = tab.streamState || mkS();
+    const ctx = mkStreamCtx(tab.outputFragment, tab.id);
+    ctx.state = tab.streamState || mkS();
+    ctx.lastToolName = tab.streamLastToolName || '';
+    ctx.llmPanel = tab.streamLlmPanel || null;
+    ctx.llmPanelState = tab.streamLlmPanelState || mkS();
+    ctx.pendingPanel = tab.streamPendingPanel || false;
+    ctx.stepCount = tab.streamStepCount || 0;
+    ctx.onStep = count => {
+      tab.statusStepsText = 'Steps: ' + count;
+    };
 
-    if (t === 'tool_call') {
-      bgLastToolName = ev.name || '';
-      if (bgLlmPanel && bgLlmPanel._provisional)
-        discardProvisionalPanel(bgLlmPanel);
-      else if (bgLlmPanel) finalizePanelTime(bgLlmPanel);
-      bgLlmPanel = null;
-      bgLlmPanelState = mkS();
-      bgPendingPanel = true;
-    }
-    if (t === 'tool_result' && bgLastToolName !== 'finish') {
-      bgPendingPanel = true;
-    }
+    const where = streamBegin(ctx, ev);
+    const target = where.target;
 
-    if (
-      bgLlmPanel &&
-      bgLlmPanel._provisional &&
-      (t === 'thinking_start' || t === 'text_delta')
-    ) {
-      bgStepCount++;
-      tab.statusStepsText = 'Steps: ' + bgStepCount;
-      bgLlmPanel._provisional = false;
-    } else if (
-      (bgPendingPanel || bgStepCount === 0) &&
-      (t === 'thinking_start' || t === 'text_delta')
-    ) {
-      bgStepCount++;
-      tab.statusStepsText = 'Steps: ' + bgStepCount;
-      bgLlmPanel = mkThoughtsPanel(ev.ts);
-      tab.outputFragment.appendChild(bgLlmPanel);
-      bgLlmPanelState = mkS();
-      bgPendingPanel = false;
-    }
+    // The window owns ONE status row, so the hidden tab's numbers are
+    // lent to it for the length of this event and taken back after. That
+    // is what lets a background tab go through exactly the same
+    // renderers as a visible one — usage_info in both its numeric and
+    // its text form included.
+    const prevStepCount = stepCount;
+    const prevTokensText = statusTokens ? statusTokens.textContent : '';
+    const prevBudgetText = statusBudget ? statusBudget.textContent : '';
+    const prevStepsText = statusSteps ? statusSteps.textContent : '';
+    // visibletask-coverage:start
+    // A hidden tab's event runs through the same renderers, so it also
+    // moves the visible tab's remembered numbers unless they are put
+    // back with the status row below.
+    const prevMetrics = currentTaskMetrics;
+    const prevVisibleTab = activeTabId;
+    currentTaskMetrics = {tokens: '', budget: '', steps: ''};
+    // visibletask-coverage:end
+    if (statusTokens) statusTokens.textContent = tab.statusTokensText || '';
+    if (statusBudget) statusBudget.textContent = tab.statusBudgetText || '';
+    if (statusSteps) statusSteps.textContent = tab.statusStepsText || '';
 
-    if (t === 'usage_info') {
-      if (ev.total_tokens != null && ev.cost != null) {
-        tab.statusTokensText = 'Tokens: ' + fmtN(ev.total_tokens);
-        if (ev.cost !== 'N/A') tab.statusBudgetText = 'Cost: ' + ev.cost;
-        if (ev.total_steps != null)
-          tab.statusStepsText = 'Steps: ' + ev.total_steps;
-      }
-    } else {
-      let target = tab.outputFragment;
-      let tState = bgState;
-      if (
-        bgLlmPanel &&
-        (t === 'thinking_start' ||
-          t === 'thinking_delta' ||
-          t === 'thinking_end' ||
-          t === 'text_delta' ||
-          t === 'text_end')
-      ) {
-        target = bgLlmPanel;
-        tState = bgLlmPanelState;
-      }
+    handleOutputEvent(
+      ev,
+      target,
+      where.state,
+      tab.workDir || configWorkDir || '',
+      tab.id,
+    );
 
-      const prevStepCount = stepCount;
-      const prevTokensText = statusTokens ? statusTokens.textContent : '';
-      const prevBudgetText = statusBudget ? statusBudget.textContent : '';
-      const prevStepsText = statusSteps ? statusSteps.textContent : '';
-      // visibletask-coverage:start
-      // A hidden tab's event runs through the same renderers, so it also
-      // moves the visible tab's remembered numbers unless they are put
-      // back with the status row below.
-      const prevMetrics = currentTaskMetrics;
-      const prevVisibleTab = activeTabId;
-      currentTaskMetrics = {tokens: '', budget: '', steps: ''};
-      // visibletask-coverage:end
+    if (statusTokens) tab.statusTokensText = statusTokens.textContent;
+    if (statusBudget) tab.statusBudgetText = statusBudget.textContent;
+    if (statusSteps) tab.statusStepsText = statusSteps.textContent;
 
-      handleOutputEvent(
-        ev,
-        target,
-        tState,
-        tab.workDir || configWorkDir || '',
-        tab.id,
-      );
+    stepCount = prevStepCount;
+    if (statusTokens) statusTokens.textContent = prevTokensText;
+    if (statusBudget) statusBudget.textContent = prevBudgetText;
+    if (statusSteps) statusSteps.textContent = prevStepsText;
+    // visibletask-coverage:start
+    // Collapsing a finished run_parallel panel closes its sub-agent
+    // tabs, so this event may have swapped the tab on screen; the
+    // borrowed numbers only go back to the tab they came from.
+    if (activeTabId === prevVisibleTab) currentTaskMetrics = prevMetrics;
+    // visibletask-coverage:end
 
-      stepCount = prevStepCount;
-      if (statusTokens) statusTokens.textContent = prevTokensText;
-      if (statusBudget) statusBudget.textContent = prevBudgetText;
-      if (statusSteps) statusSteps.textContent = prevStepsText;
-      // visibletask-coverage:start
-      // Collapsing a finished run_parallel panel closes its sub-agent
-      // tabs, so this event may have swapped the tab on screen; the
-      // borrowed numbers only go back to the tab they came from.
-      if (activeTabId === prevVisibleTab) currentTaskMetrics = prevMetrics;
-      // visibletask-coverage:end
-
-      if (t === 'tool_result' && bgLastToolName !== 'finish' && !bgLlmPanel) {
-        bgLlmPanel = mkThoughtsPanel(ev.ts);
-        bgLlmPanel._provisional = true;
-        tab.outputFragment.appendChild(bgLlmPanel);
-        bgLlmPanelState = mkS();
-        bgPendingPanel = false;
-      }
-
-      if (t === 'result') {
-        if (bgLlmPanel) finalizePanelTime(bgLlmPanel);
-        bgLlmPanel = null;
-        if (ev.step_count) {
-          bgStepCount = ev.step_count;
-          tab.statusStepsText = 'Steps: ' + ev.step_count;
-        }
-        if (ev.total_tokens)
-          tab.statusTokensText = 'Tokens: ' + fmtN(ev.total_tokens);
-        if (ev.cost && ev.cost !== 'N/A')
-          tab.statusBudgetText = 'Cost: ' + ev.cost;
-        collapseAllExceptResult(tab.outputFragment, tab.id);
-        if (ev.success === false && !ev.is_continue) tab.lastTaskFailed = true;
-        bgPendingPanel = true;
-      }
+    streamEnd(ctx, ev, target);
+    if (ev.type === 'result' && ev.step_count) {
+      tab.statusStepsText = 'Steps: ' + ev.step_count;
     }
 
-    tab.streamState = bgState;
-    tab.streamLlmPanel = bgLlmPanel;
-    tab.streamLlmPanelState = bgLlmPanelState;
-    tab.streamLastToolName = bgLastToolName;
-    tab.streamPendingPanel = bgPendingPanel;
-    tab.streamStepCount = bgStepCount;
+    tab.streamState = ctx.state;
+    tab.streamLlmPanel = ctx.llmPanel;
+    tab.streamLlmPanelState = ctx.llmPanelState;
+    tab.streamLastToolName = ctx.lastToolName;
+    tab.streamPendingPanel = ctx.pendingPanel;
+    tab.streamStepCount = ctx.stepCount;
     tab.welcomeVisible = false;
   }
 
@@ -4741,7 +4913,7 @@
       text.match(/Context:\s*([\d,]+)\/[\d,]+/) ||
       text.match(/Tokens:\s*([\d,]+)\/[\d,]+/);
     const bm = text.match(/Budget:\s*(\$[0-9.]+)\/\$[0-9.]+/);
-    const sm = text.match(/Steps:\s*(\d+)\/\d+/);
+    const sm = STEPS_TEXT_RE.exec(text);
     if (tm) statusTokens.textContent = 'Tokens: ' + tm[1];
     if (bm) statusBudget.textContent = 'Cost: ' + bm[1];
     if (sm) updateStepCount(parseInt(sm[1], 10));
@@ -5042,6 +5214,7 @@
     switch (t) {
       case 'daemonStatus':
         setServerLoading(!ev.connected);
+        if (!ev.connected) forgetInFlightPathChecks();
         if (ev.connected) {
           // The backend is live, so this window's `ready` is on its way and
           // the running-task news it triggers is about to arrive: the launch
@@ -5285,6 +5458,7 @@
           showSpinner();
         } else if (clearTab) {
           collapseNestedRunParallel(clearTab.outputFragment);
+          forgetPendingFileLinks(clearTab.id);
           clearTab.outputFragment = null;
           clearTab.streamState = null;
           clearTab.streamLlmPanel = null;
@@ -5323,6 +5497,7 @@
             showWelcomeScreen();
           } else {
             collapseNestedRunParallel(swTab.outputFragment);
+            forgetPendingFileLinks(swTabId);
             swTab.outputFragment = null;
             swTab.welcomeVisible = true;
           }
@@ -5442,8 +5617,9 @@
           const teVisibleTab = activeTabId;
           currentTaskMetrics = {tokens: '', budget: '', steps: ''};
           // visibletask-coverage:end
+          let bgSteps = 0;
           try {
-            replayEventsInto(frag, ev.events || [], {
+            bgSteps = replayEventsInto(frag, ev.events || [], {
               ownerTabId: teTabId,
               onFollowupClick: function (text) {
                 inp.value = text;
@@ -5471,7 +5647,6 @@
             // visibletask-coverage:end
           }
           teTab.welcomeVisible = false;
-          const bgSteps = countReplayedSteps(ev.events || []);
           if (bgSteps > 0) teTab.statusStepsText = 'Steps: ' + bgSteps;
           break;
         }
@@ -5683,6 +5858,7 @@
           const bgWrTab = getTab(ev.tabId);
           if (bgWrTab) {
             bgWrTab.worktreeBarEl = null;
+            clearActionProgress(bgWrTab.outputFragment);
             if (bgWrTab.outputFragment && !isSilentDiscardMessage(ev)) {
               const cls = ev.success ? 'wt-result-ok' : 'wt-result-err';
               const div = mkEl('div', 'ev ' + cls);
@@ -5698,6 +5874,7 @@
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgAdTab = getTab(ev.tabId);
           if (bgAdTab) {
+            clearActionProgress(bgAdTab.outputFragment);
             if (bgAdTab.outputFragment) {
               const cls = ev && ev.success ? 'wt-result-ok' : 'wt-result-err';
               const div = mkEl('div', 'ev ' + cls);
@@ -5722,6 +5899,7 @@
         const el = Math.max(0, Math.floor(ms / 1000));
         const em = Math.floor(el / 60);
         markTabDone(ev.tabId, ev.success === false);
+        clearActionProgressForTab(ev.tabId);
         setReady(
           'Done (' + (em > 0 ? em + 'm ' : '') + (el % 60) + 's)',
           ev.tabId,
@@ -5738,6 +5916,7 @@
       case 'task_interrupted':
       case 'task_stopped': {
         markTabDone(ev.tabId, true);
+        clearActionProgressForTab(ev.tabId);
         if (ev.tabId === undefined || ev.tabId === activeTabId) {
           if (llmPanel && llmPanel._provisional)
             discardProvisionalPanel(llmPanel);
@@ -6318,35 +6497,32 @@
    * @param {Element|DocumentFragment} container Where to render.
    * @param {Array<object>} events The transcript to replay.
    * @param {object} [opts] ownerTabId / onFollowupClick.
+   * @returns {number} The number of steps the transcript records.
    */
   function replayEventsInto(container, events, opts) {
     if (_rpDeferredCloses !== null) {
-      renderReplayedEvents(container, events, opts);
-      return;
+      return renderReplayedEvents(container, events, opts);
     }
     _rpDeferredCloses = [];
+    let steps;
     try {
-      renderReplayedEvents(container, events, opts);
+      steps = renderReplayedEvents(container, events, opts);
     } catch (e) {
       _rpDeferredCloses = null;
       throw e;
     }
     rpFlushDeferredCloses();
+    return steps;
   }
 
   function renderReplayedEvents(container, events, opts) {
+    const ownerTabId = opts ? opts.ownerTabId : undefined;
     const rWorkDir =
-      opts && opts.ownerTabId !== undefined
-        ? workDirForTab(opts.ownerTabId) || ''
-        : undefined;
-    const rState = mkS();
+      ownerTabId !== undefined ? workDirForTab(ownerTabId) || '' : undefined;
+    const ctx = mkStreamCtx(container, ownerTabId);
     // report-coverage:start
-    rState.suppressReportOpen = true;
+    ctx.state.suppressReportOpen = true;
     // report-coverage:end
-    let rLlmPanel = null;
-    let rLlmPanelState = mkS();
-    let rLastToolName = '';
-    let rPendingPanel = true;
     const prevDefer = _deferHighlight;
     _deferHighlight = true;
     try {
@@ -6376,46 +6552,14 @@
           container.appendChild(fu);
           return;
         }
-        if (t === 'tool_call') {
-          rLastToolName = ev.name || '';
-          rLlmPanel = null;
-          rLlmPanelState = mkS();
-          rPendingPanel = true;
-        }
-        if (t === 'tool_result' && rLastToolName !== 'finish') {
-          rPendingPanel = true;
-        }
-        if (rPendingPanel && (t === 'thinking_start' || t === 'text_delta')) {
-          rLlmPanel = mkThoughtsPanel(ev.ts);
-          container.appendChild(rLlmPanel);
-          rLlmPanelState = mkS();
-          rPendingPanel = false;
-        }
-        let target = container,
-          tState = rState;
-        if (
-          rLlmPanel &&
-          (t === 'thinking_start' ||
-            t === 'thinking_delta' ||
-            t === 'thinking_end' ||
-            t === 'text_delta' ||
-            t === 'text_end')
-        ) {
-          target = rLlmPanel;
-          tState = rLlmPanelState;
-        }
-        handleOutputEvent(
-          ev,
-          target,
-          tState,
-          rWorkDir,
-          opts ? opts.ownerTabId : undefined,
-        );
+        const where = streamBegin(ctx, ev);
+        handleOutputEvent(ev, where.target, where.state, rWorkDir, ownerTabId);
+        streamEnd(ctx, ev, where.target);
       });
     } finally {
       _deferHighlight = prevDefer;
     }
-    collapseAllExceptResult(container, opts && opts.ownerTabId);
+    collapseAllExceptResult(container, ownerTabId);
     if (typeof hljs !== 'undefined') {
       container.querySelectorAll('code.needs-hl').forEach(bl => {
         if (!bl.closest('.collapsible.collapsed')) {
@@ -6424,35 +6568,14 @@
         }
       });
     }
-  }
-
-  function countReplayedSteps(events) {
-    let steps = 0,
-      pending = false,
-      lastTool = '';
-    (events || []).forEach(ev => {
-      const t = ev.type;
-      if (t === 'tool_call') {
-        lastTool = ev.name || '';
-        pending = true;
-      }
-      if (t === 'tool_result' && lastTool !== 'finish') pending = true;
-      if (steps === 0 && (t === 'thinking_start' || t === 'text_delta'))
-        steps = 1;
-      if (pending && (t === 'thinking_start' || t === 'text_delta')) {
-        steps++;
-        pending = false;
-      }
-      if (t === 'result' && ev.step_count) steps = ev.step_count;
-    });
-    return steps;
+    return ctx.stepCount;
   }
 
   function replayTaskEvents(events) {
     clearOutput();
     resetOutputState();
     clearUsageMetrics();
-    replayEventsInto(O, events, {
+    const rSteps = replayEventsInto(O, events, {
       ownerTabId: activeTabId,
       onFollowupClick: function (text) {
         inp.value = text;
@@ -6460,7 +6583,6 @@
         inp.focus();
       },
     });
-    const rSteps = countReplayedSteps(events);
     if (rSteps > 0) updateStepCount(rSteps);
     // autoscroll-coverage:start
     // clearOutput() above released any user scroll lock: the replayed
@@ -6521,6 +6643,70 @@
     // autoscroll-coverage:end
   }
 
+  /**
+   * Show the daemon's live progress line for a commit or merge flow.
+   *
+   * `autocommit_progress` and `worktree_progress` are the steps of ONE
+   * operation ("Staging changes…" → "Generating commit message…" →
+   * "Committing…"), so they share a single line that is replaced in
+   * place and removed again by the terminal event. Rendering them here
+   * is what gives the remote web client the feedback the VS Code host
+   * gets from its native progress toast.
+   *
+   * @param {Element|DocumentFragment} target Transcript to render into.
+   * @param {string} message The user-facing progress text.
+   */
+  function renderActionProgress(target, message) {
+    if (!target) return;
+    let el = target.querySelector('.ev.wt-progress');
+    if (!el) {
+      el = mkEl('div', 'ev wt-progress');
+      target.appendChild(el);
+    }
+    el.textContent = message || '';
+  }
+
+  /**
+   * Remove the live progress line, if any, from *target*.
+   *
+   * @param {Element|DocumentFragment} target Transcript to clean up.
+   */
+  function clearActionProgress(target) {
+    const el = target ? target.querySelector('.ev.wt-progress') : null;
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+  }
+
+  /**
+   * Drop the live progress line owned by *tabId*, wherever it lives.
+   *
+   * `autocommit_done` and `worktree_result` are the intended way for
+   * the line to go, but neither is guaranteed: the daemon runs both
+   * flows on its post-task path inside a swallow-all handler
+   * (`task_runner._run_task_inner`), and the progress events are
+   * broadcast from inside the call it wraps. Anything raised after the
+   * first message -- a git binary that dies, an LLM call that throws
+   * while writing the commit message, a stopped task unwinding through
+   * the merge -- is logged and dropped, and the terminal event is never
+   * sent. The line then reads as if the operation were still running,
+   * forever.
+   *
+   * The task-end event that follows immediately is the last thing the
+   * flow is bracketed by, so it is where the line is taken down. In the
+   * normal case the terminal event has already removed it and this is a
+   * no-op.
+   *
+   * @param {string|undefined} tabId Tab whose task ended. `undefined`
+   *   means the visible tab, as everywhere else in the dispatcher.
+   */
+  function clearActionProgressForTab(tabId) {
+    if (tabId === undefined || tabId === activeTabId) {
+      clearActionProgress(O);
+      return;
+    }
+    const tab = getTab(tabId);
+    if (tab) clearActionProgress(tab.outputFragment);
+  }
+
   let worktreeBar = null;
 
   function clearWorktreeBar() {
@@ -6565,6 +6751,7 @@
 
   function handleWorktreeResult(ev) {
     clearWorktreeBar();
+    clearActionProgress(O);
     if (isSilentDiscardMessage(ev)) {
       return;
     }
@@ -6572,6 +6759,7 @@
   }
 
   function handleAutocommitResult(ev) {
+    clearActionProgress(O);
     appendActionResult(ev);
     focusInputWithRetry();
   }
@@ -6749,6 +6937,10 @@
     if (welcomePwInp && settingsPwInp) {
       welcomePwInp.addEventListener('input', () => {
         settingsPwInp.value = welcomePwInp.value;
+        // Assigning .value fires no input event, so the mirrored field
+        // has to be marked by hand or the very first password a user
+        // sets from the welcome screen is dropped.
+        markSettingsFieldEdited('cfg-remote-password');
       });
       settingsPwInp.addEventListener('input', () => {
         welcomePwInp.value = settingsPwInp.value;
@@ -7102,6 +7294,13 @@
     }
     if (settingsOverlay) {
       settingsOverlay.addEventListener('click', closeSettingsPanel);
+    }
+    if (settingsPanel) {
+      const noteSettingsEdit = e => {
+        if (e.target && e.target.id) markSettingsFieldEdited(e.target.id);
+      };
+      settingsPanel.addEventListener('input', noteSettingsEdit);
+      settingsPanel.addEventListener('change', noteSettingsEdit);
     }
     historySearch.addEventListener('input', () => {
       resetHistoryPagination();
@@ -8677,17 +8876,27 @@
     }
   }
 
+  /**
+   * Flush the settings form if there is anything to flush.
+   *
+   * A form the reply never reached is not empty of intent: whatever the
+   * user typed into it must still be saved, so those fields alone are
+   * sent. A form nobody touched and nobody populated has nothing to say
+   * and stays silent.
+   */
   function saveSettingsIfPopulated() {
-    if (configFormPopulated) {
-      const data = collectConfigForm();
-      api.saveConfig({...data});
-      if (
-        document.body.classList.contains('remote-chat') &&
-        typeof data.config.work_dir === 'string' &&
-        data.config.work_dir
-      ) {
-        api.setWorkDir({workDir: data.config.work_dir});
-      }
+    const edited = settingsEditedFields;
+    if (!configFormPopulated && edited.size === 0) return;
+    const data = configFormPopulated
+      ? collectConfigForm()
+      : collectConfigForm(edited);
+    api.saveConfig({...data});
+    if (
+      document.body.classList.contains('remote-chat') &&
+      typeof data.config.work_dir === 'string' &&
+      data.config.work_dir
+    ) {
+      api.setWorkDir({workDir: data.config.work_dir});
     }
   }
 
@@ -8709,11 +8918,13 @@
     if (!settingsPanel) return;
     setPanelOpen(settingsPanel, settingsOverlay, true);
     configFormPopulated = false;
+    settingsEditedFields.clear();
     api.getConfig();
   }
 
   function closeSettingsPanel() {
     saveSettingsIfPopulated();
+    settingsEditedFields.clear();
     setPanelOpen(settingsPanel, settingsOverlay, false);
   }
 
@@ -8882,8 +9093,34 @@
   }
 
   let configFormPopulated = false;
+  // Ids of the settings fields the user has edited since the panel was
+  // opened.  `configData` is not a one-shot reply: the host re-pushes it
+  // from a 2-second poll of ~/.kiss/config.json and on every daemon
+  // reconnect, so a field that is being typed into is never repainted --
+  // and a panel closed before any reply arrived still saves what was
+  // touched instead of dropping it.
+  const settingsEditedFields = new Set();
+
+  /**
+   * Remember that a settings field now holds the user's own value.
+   *
+   * @param {string} id The element id of the edited field.
+   */
+  function markSettingsFieldEdited(id) {
+    if (id) settingsEditedFields.add(id);
+  }
+
   function populateConfigForm(cfg, apiKeys) {
     const el = id => document.getElementById(id);
+    const setValue = (id, value) => {
+      const node = el(id);
+      if (!node || settingsEditedFields.has(id)) return;
+      node.value = value;
+    };
+    const setChecked = (node, checked) => {
+      if (!node || settingsEditedFields.has(node.id)) return;
+      node.checked = checked;
+    };
     const prevConfigWorkDir = configWorkDir;
     configWorkDir = cfg.work_dir || '';
     if (prevConfigWorkDir !== configWorkDir) {
@@ -8893,7 +9130,7 @@
     }
     const wdInp = el('cfg-work-dir');
     if (wdInp) {
-      wdInp.value = cfg.work_dir || '';
+      setValue('cfg-work-dir', cfg.work_dir || '');
       if (!document.body.classList.contains('remote-chat')) {
         wdInp.readOnly = true;
         wdInp.title = 'Set by the workspace folder open in this window';
@@ -8904,31 +9141,35 @@
           pinned = sessionStorage.getItem('sorcar-work-dir') || '';
         } catch (_e) {}
         if (pinned) {
-          wdInp.value = pinned;
+          setValue('cfg-work-dir', pinned);
           configWorkDir = pinned;
         } else if (cfg.work_dir) {
           api.setWorkDir({workDir: cfg.work_dir});
         }
       }
     }
-    el('cfg-max-budget').value = cfg.max_budget != null ? cfg.max_budget : 100;
+    // The budget default belongs to Python (`config.DEFAULT_MAX_BUDGET`,
+    // read by `vscode_config.DEFAULTS`), and `load_config()` seeds every
+    // reply from it, so an effective value is always in `configData`.
+    // A copy of the number here could only ever drift away from it, so
+    // the box shows what the daemon sent and nothing when it sent none.
+    if (cfg.max_budget != null) setValue('cfg-max-budget', cfg.max_budget);
     // Initialize the run toggles from the persisted config instead of
     // leaving whatever hardcoded `checked` state chat.html shipped with,
     // so a fresh session (VS Code webview or remote web client) reflects
     // the user's saved preference.  Missing keys default to true, the
     // same defaults as vscode_config.DEFAULTS.
-    if (autocommitToggleBtn) {
-      autocommitToggleBtn.checked = cfg.auto_commit_mode !== false;
+    setChecked(autocommitToggleBtn, cfg.auto_commit_mode !== false);
+    setChecked(worktreeToggleBtn, cfg.is_worktree !== false);
+    setValue('cfg-custom-endpoint', cfg.custom_endpoint || '');
+    setValue('cfg-custom-api-key', cfg.custom_api_key || '');
+    setValue('cfg-custom-headers', cfg.custom_headers || '');
+    setValue('cfg-remote-password', cfg.remote_password || '');
+    // The welcome screen's password box mirrors the settings one, so it
+    // follows the same edited mark.
+    if (!settingsEditedFields.has('cfg-remote-password')) {
+      setValue('welcome-cfg-remote-password', cfg.remote_password || '');
     }
-    if (worktreeToggleBtn) {
-      worktreeToggleBtn.checked = cfg.is_worktree !== false;
-    }
-    el('cfg-custom-endpoint').value = cfg.custom_endpoint || '';
-    el('cfg-custom-api-key').value = cfg.custom_api_key || '';
-    el('cfg-custom-headers').value = cfg.custom_headers || '';
-    el('cfg-remote-password').value = cfg.remote_password || '';
-    const welcomePw = el('welcome-cfg-remote-password');
-    if (welcomePw) welcomePw.value = cfg.remote_password || '';
     configFormPopulated = true;
     const keyIds = [
       'GEMINI_API_KEY',
@@ -8940,22 +9181,57 @@
       'MOONSHOT_API_KEY',
     ];
     keyIds.forEach(k => {
-      el('cfg-key-' + k).value = (apiKeys && apiKeys[k]) || '';
+      setValue('cfg-key-' + k, (apiKeys && apiKeys[k]) || '');
     });
   }
-  function collectConfigForm() {
+  /**
+   * Read the settings form into a `saveConfig` payload.
+   *
+   * @param {Set<string>} [onlyIds] When given, only these field ids are
+   *   read. The daemon MERGES what it is sent (see
+   *   ``vscode_config.save_config``), so a partial payload updates just
+   *   those fields and leaves the rest of config.json alone -- which is
+   *   what lets a panel closed before its `configData` reply arrived
+   *   save the edit instead of flushing a form full of blanks over the
+   *   stored settings.
+   * @returns {{config: object, apiKeys: object}} The payload.
+   */
+  function collectConfigForm(onlyIds) {
     const el = id => document.getElementById(id);
-    const cfg = {
-      max_budget: parseFloat(el('cfg-max-budget').value) || 100,
-      auto_commit_mode: !!(autocommitToggleBtn && autocommitToggleBtn.checked),
-      is_worktree: !!(worktreeToggleBtn && worktreeToggleBtn.checked),
-      custom_endpoint: el('cfg-custom-endpoint').value.trim(),
-      custom_api_key: el('cfg-custom-api-key').value.trim(),
-      custom_headers: el('cfg-custom-headers').value.trim(),
-      remote_password: el('cfg-remote-password').value.trim(),
-    };
+    const want = id => !onlyIds || onlyIds.has(id);
+    const cfg = {};
+    if (want('cfg-max-budget')) {
+      // An unparseable box -- cleared by the user, or never filled
+      // because no `configData` arrived -- means the client has no
+      // budget to report, NOT that it should supply one: the daemon
+      // merges this payload, so leaving the key out keeps whatever is
+      // stored. Writing a locally invented default here is how a user
+      // on a 250 budget silently ended up back on 100.
+      const budget = parseFloat(el('cfg-max-budget').value);
+      if (Number.isFinite(budget)) cfg.max_budget = budget;
+    }
+    if (want('cfg-auto-commit')) {
+      cfg.auto_commit_mode = !!(
+        autocommitToggleBtn && autocommitToggleBtn.checked
+      );
+    }
+    if (want('cfg-use-worktree')) {
+      cfg.is_worktree = !!(worktreeToggleBtn && worktreeToggleBtn.checked);
+    }
+    if (want('cfg-custom-endpoint')) {
+      cfg.custom_endpoint = el('cfg-custom-endpoint').value.trim();
+    }
+    if (want('cfg-custom-api-key')) {
+      cfg.custom_api_key = el('cfg-custom-api-key').value.trim();
+    }
+    if (want('cfg-custom-headers')) {
+      cfg.custom_headers = el('cfg-custom-headers').value.trim();
+    }
+    if (want('cfg-remote-password')) {
+      cfg.remote_password = el('cfg-remote-password').value.trim();
+    }
     const wdInp = el('cfg-work-dir');
-    if (wdInp && !wdInp.readOnly) {
+    if (wdInp && !wdInp.readOnly && want('cfg-work-dir')) {
       cfg.work_dir = wdInp.value.trim();
     }
     const apiKeys = {};
@@ -8969,6 +9245,7 @@
       'MOONSHOT_API_KEY',
     ];
     keyIds.forEach(k => {
+      if (!want('cfg-key-' + k)) return;
       const v = el('cfg-key-' + k).value.trim();
       if (v) apiKeys[k] = v;
     });
@@ -9199,6 +9476,14 @@
         welcome.style.display = 'none';
         refreshWelcomeLayout();
       }
+    },
+    // How much file-link work is still being retained. Both numbers must
+    // come back down; see forgetPendingFileLinks().
+    pendingFileLinkCounts: function () {
+      return {
+        spans: _pendingFileLinkSpans.size,
+        checks: _pendingPathChecks.size,
+      };
     },
   };
 

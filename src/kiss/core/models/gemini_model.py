@@ -13,6 +13,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
+import httpx
 from google import genai
 from google.genai import types
 
@@ -25,8 +26,89 @@ from kiss.core.models.model import (
     parse_binary_attachments,
     responses_items_to_chat_messages,
 )
+from kiss.core.models.stream_abort import (
+    DEFAULT_STREAM_STALL_TIMEOUT,
+    stop_aware_events,
+)
 
 logger = logging.getLogger(__name__)
+
+_CONNECT_TIMEOUT = 10.0
+
+
+class _ResponseTrackingHttpxClient(httpx.Client):
+    """The transport ``GeminiModel`` gives ``genai.Client``.
+
+    Two things the SDK cannot otherwise provide:
+
+    * **A timeout.**  ``ApiClient._request_once`` passes an explicit
+      ``timeout=`` to ``build_request``, which is ``None`` unless
+      ``HttpOptions.timeout`` is set — and an explicit ``None`` in httpx
+      means *no timeout at all*, overriding any client default.  Forcing
+      the timeout here installs a real read deadline (the stall clock)
+      while keeping a short connect deadline, matching
+      :class:`~kiss.core.models.anthropic_model.AnthropicModel`.
+    * **The streamed response.**  ``generate_content_stream`` hands back
+      a bare generator, so :class:`~kiss.core.models.stream_abort.StreamAbortWatchdog`
+      has nothing whose socket it can shut down.  Remembering the
+      in-flight response here is what lets a Stop unblock a thread parked
+      in ``recv()``.
+    """
+
+    def __init__(self, stall_timeout: float) -> None:
+        """Build the transport.
+
+        Args:
+            stall_timeout: Seconds of byte-level silence tolerated before
+                httpx raises ``ReadTimeout``.
+        """
+        super().__init__(follow_redirects=True)
+        self._timeout = httpx.Timeout(stall_timeout, connect=_CONNECT_TIMEOUT)
+        self.last_response: httpx.Response | None = None
+
+    def build_request(self, *args: Any, **kwargs: Any) -> httpx.Request:
+        """Build a request with this client's timeout, ignoring the caller's."""
+        kwargs["timeout"] = self._timeout
+        return super().build_request(*args, **kwargs)
+
+    def send(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        """Send *request*, remembering the response for the abort watchdog."""
+        response = super().send(request, **kwargs)
+        self.last_response = response
+        return response
+
+
+class _AbortableStream:
+    """A Gemini stream in the shape :func:`stop_aware_events` expects.
+
+    The watchdog needs to iterate the stream, reach the underlying
+    ``httpx.Response`` (to half-close its socket) and close the stream.
+    ``response`` is a property because the SDK generator is lazy: the
+    request is not issued until the first ``next()``.
+    """
+
+    def __init__(self, chunks: Any, http_client: _ResponseTrackingHttpxClient) -> None:
+        """Wrap the SDK's chunk generator.
+
+        Args:
+            chunks: The generator ``generate_content_stream`` returned.
+            http_client: The transport that recorded the response.
+        """
+        self._chunks = chunks
+        self._http_client = http_client
+
+    def __iter__(self) -> Any:
+        """Iterate the SDK's chunks."""
+        return iter(self._chunks)
+
+    @property
+    def response(self) -> httpx.Response | None:
+        """The in-flight httpx response, or ``None`` before the request."""
+        return self._http_client.last_response
+
+    def close(self) -> None:
+        """Close the SDK generator."""
+        self._chunks.close()
 
 
 def _coerce_args_dict(args: Any) -> dict[str, Any]:
@@ -52,6 +134,18 @@ def _coerce_args_dict(args: Any) -> dict[str, Any]:
             parsed = {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+def _is_thought(part: Any) -> bool:
+    """Return whether *part* carries summarized reasoning rather than answer text.
+
+    Args:
+        part: A Gemini response part.
+
+    Returns:
+        ``True`` when the part is flagged ``thought``.
+    """
+    return getattr(part, "thought", None) is True
 
 
 def _decode_base64(data: str) -> bytes | None:
@@ -177,10 +271,19 @@ class GeminiModel(Model):
         )
         self.api_key = api_key
         self._thought_signatures: dict[str, bytes] = {}
-        self._in_thinking_stream: bool = False
+        self._stream_stall_timeout = float(
+            self.model_config.get("stream_stall_timeout", DEFAULT_STREAM_STALL_TIMEOUT)
+        )
+        self._http_client = _ResponseTrackingHttpxClient(self._stream_stall_timeout)
 
     def reset_conversation(self) -> None:
-        """Reset conversation state including thought signatures."""
+        """Reset conversation state including thought signatures.
+
+        The signatures are keyed by the conversation the base class is
+        clearing, so keeping them would replay a previous run's
+        reasoning into the next one.  (The thinking bracket is cleared
+        by the base implementation, for every adapter.)
+        """
         super().reset_conversation()
         self._thought_signatures = {}
 
@@ -191,7 +294,10 @@ class GeminiModel(Model):
             prompt: The initial user prompt to start the conversation.
             attachments: Optional list of file attachments (images, PDFs) to include.
         """
-        self.client = genai.Client(api_key=self.api_key)
+        self.client = genai.Client(
+            api_key=self.api_key,
+            http_options=types.HttpOptions(httpx_client=self._http_client),
+        )
         msg: dict[str, Any] = {"role": "user", "content": prompt}
         if attachments:
             msg["attachments"] = attachments
@@ -449,11 +555,18 @@ class GeminiModel(Model):
         return []
 
     def _parse_parts(self, parts: list[Any]) -> tuple[str, list[dict[str, Any]]]:
-        """Build content and function calls from Gemini parts."""
+        """Build content and function calls from Gemini parts.
+
+        Parts flagged ``thought=True`` carry summarized reasoning, which
+        is shown live through the thinking callback but must never become
+        assistant content: it would be printed twice, stored in the
+        conversation and re-uploaded as prompt context on every later
+        step.  This mirrors the SDK's own ``response.text`` property.
+        """
         content = ""
         function_calls: list[dict[str, Any]] = []
         for part in parts:
-            if part.text:
+            if part.text and not _is_thought(part):
                 content += part.text
             if part.function_call:
                 call_id = f"call_{uuid.uuid4().hex[:8]}"
@@ -517,9 +630,10 @@ class GeminiModel(Model):
     def _stream_parts(self, parts: list[Any]) -> None:
         """Stream parts, routing thinking tokens through the thinking callback.
 
-        Tracks thinking state across calls so that multiple chunks of thinking
-        parts produce a single ``thinking_callback(True)`` … ``thinking_callback(False)``
-        boundary pair.
+        Tracks thinking state across calls (on the base
+        :attr:`Model._thinking_open` flag) so that multiple chunks of
+        thinking parts produce a single ``thinking_callback(True)`` …
+        ``thinking_callback(False)`` boundary pair.
 
         Args:
             parts: Gemini response parts from a single streaming chunk.
@@ -527,62 +641,119 @@ class GeminiModel(Model):
         for part in parts:
             if not part.text:
                 continue
-            is_thought = getattr(part, "thought", None) is True
-            if is_thought:
-                if not self._in_thinking_stream:
-                    self._in_thinking_stream = True
-                    self._invoke_thinking_callback(True)
-            else:
-                if self._in_thinking_stream:
-                    self._in_thinking_stream = False
-                    self._invoke_thinking_callback(False)
+            is_thought = _is_thought(part)
+            if is_thought != self._thinking_open:
+                self._invoke_thinking_callback(is_thought)
             self._invoke_token_callback(part.text)
 
-    def _end_thinking_stream(self) -> None:
-        """Close an open thinking block after streaming completes.
+    def _stream_turn(self, contents: list[types.Content], config: Any) -> tuple[list[Any], Any]:
+        """Stream one turn, aborting on a user stop or a stalled connection.
 
-        Must be called after a streaming loop finishes to ensure the
-        thinking panel is closed if the last streamed part was a thought.
+        Args:
+            contents: The conversation in Gemini API format.
+            config: The generation config for this turn.
+
+        Returns:
+            The streamed parts, and the chunk to bill the turn against —
+            the one carrying ``usage_metadata`` rather than whichever
+            chunk happened to come last, since a terminal
+            ``finishReason``-only chunk would otherwise report the step
+            as free.  ``None`` when the stream produced nothing at all.
+
+        The stall is bounded at both levels, because neither alone is
+        enough:
+
+        * **byte level** — the transport's ``httpx.Timeout`` raises
+          ``ReadTimeout`` on a socket carrying nothing.
+        * **event level** — the watchdog inside
+          :func:`~kiss.core.models.stream_abort.stop_aware_events` aborts
+          a stream that keeps *arriving* without ever yielding a chunk.
+          ``ApiClient._iter_response_stream`` drops every blank line
+          before yielding, so ordinary SSE keep-alives reset the
+          byte-level clock while starving the agent indefinitely.
+
+        Raises:
+            KeyboardInterrupt: When the user stopped the task mid-stream.
+            TimeoutError: When no chunk (or no byte) arrives for
+                ``stream_stall_timeout`` seconds.
+                ``KISSAgent._run_agentic_loop`` treats this as retryable
+                and re-asks the model.
         """
-        if self._in_thinking_stream:
-            self._in_thinking_stream = False
-            self._invoke_thinking_callback(False)
+        parts: list[Any] = []
+        usage_chunk = None
+        last_chunk = None
+        stream = _AbortableStream(
+            self.client.models.generate_content_stream(
+                model=self.model_name, contents=contents, config=config
+            ),
+            self._http_client,
+        )
+        try:
+            for chunk in stop_aware_events(
+                stream,
+                stall_timeout=self._stream_stall_timeout,
+                on_abort=self._close_thinking_if_open,
+                name="gemini-stream-abort-watchdog",
+            ):
+                last_chunk = chunk
+                if chunk.usage_metadata is not None:
+                    usage_chunk = chunk
+                chunk_parts = self._parts_from_response(chunk)
+                self._stream_parts(chunk_parts)
+                parts.extend(chunk_parts)
+        except httpx.TimeoutException as e:
+            raise TimeoutError(
+                f"Gemini stream stalled: no data for "
+                f"{self._stream_stall_timeout}s (stream_stall_timeout)"
+            ) from e
+        finally:
+            self._close_thinking_if_open()
+        return parts, usage_chunk or last_chunk
 
-    def generate(self) -> tuple[str, Any]:  # pragma: no cover – API call
+    def _generate_parts(
+        self, contents: list[types.Content], config: Any
+    ) -> tuple[list[Any], Any]:
+        """Run one turn and return its parts plus the response to bill it against.
+
+        Streams when a token callback is bound, and falls back to the
+        unary call when streaming is not wanted or the stream yielded no
+        chunk at all.
+
+        Args:
+            contents: The conversation in Gemini API format.
+            config: The generation config for this turn.
+
+        Returns:
+            The response parts and the raw response.
+        """
+        if self.token_callback is not None:
+            parts, response = self._stream_turn(contents, config)
+            if response is not None:
+                return parts, response
+        response = self.client.models.generate_content(
+            model=self.model_name, contents=contents, config=config
+        )
+        parts = self._parts_from_response(response)
+        if self.token_callback is not None:
+            try:
+                self._stream_parts(parts)
+            finally:
+                self._close_thinking_if_open()
+        return parts, response
+
+    def generate(self) -> tuple[str, Any]:
         """Generates content from prompt without tools.
 
         Returns:
             tuple[str, Any]: A tuple of (generated_text, raw_response).
         """
         contents = self._convert_conversation_to_gemini_contents()
-        config = self._build_config()
-
-        if self.token_callback is not None:
-            content = ""
-            response = None
-            for chunk in self.client.models.generate_content_stream(
-                model=self.model_name, contents=contents, config=config
-            ):
-                self._stream_parts(self._parts_from_response(chunk))
-                if chunk.text:
-                    content += chunk.text
-                response = chunk
-            self._end_thinking_stream()
-            if response is None:
-                response = self.client.models.generate_content(
-                    model=self.model_name, contents=contents, config=config
-                )
-                content = response.text or ""
-        else:
-            response = self.client.models.generate_content(
-                model=self.model_name, contents=contents, config=config
-            )
-            content = response.text or ""
-
+        parts, response = self._generate_parts(contents, self._build_config())
+        content, _ = self._parse_parts(parts)
         self.conversation.append({"role": "assistant", "content": content})
         return content, response
 
-    def generate_and_process_with_tools(  # pragma: no cover – API call
+    def generate_and_process_with_tools(
         self,
         function_map: dict[str, Callable[..., Any]],
         tools_schema: list[dict[str, Any]] | None = None,
@@ -613,30 +784,7 @@ class GeminiModel(Model):
 
         contents = self._convert_conversation_to_gemini_contents()
         config = self._build_config(tools=gemini_tools)
-
-        all_parts: list[Any] = []
-        if self.token_callback is not None:
-            response = None
-            for chunk in self.client.models.generate_content_stream(
-                model=self.model_name, contents=contents, config=config
-            ):
-                response = chunk
-                parts = self._parts_from_response(chunk)
-                self._stream_parts(parts)
-                all_parts.extend(parts)
-            self._end_thinking_stream()
-            if response is None:
-                response = self.client.models.generate_content(
-                    model=self.model_name, contents=contents, config=config
-                )
-                all_parts = self._parts_from_response(response)
-                self._stream_parts(all_parts)
-        else:
-            response = self.client.models.generate_content(
-                model=self.model_name, contents=contents, config=config
-            )
-            all_parts = self._parts_from_response(response)
-
+        all_parts, response = self._generate_parts(contents, config)
         content, function_calls = self._parse_parts(all_parts)
 
         assistant_msg: dict[str, Any] = {"role": "assistant", "content": content}

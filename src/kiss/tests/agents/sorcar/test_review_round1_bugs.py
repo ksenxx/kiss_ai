@@ -319,21 +319,47 @@ def test_sorcar_bug1_is_task_history_id_contract() -> None:
     assert not persistence.is_task_history_id(str(uuid.uuid4()))
 
 
-def test_sorcar_bug3_run_tasks_parallel_guards_none_parent() -> None:
-    """When ``self._last_task_id is None`` the sub-tab key cannot be
-    ``"task-None__sub_*"`` — assert by reading the source guard.
+def test_sorcar_bug3_run_tasks_parallel_guards_none_parent(
+    temp_db: Path,
+) -> None:
+    """A parent with no task id must not yield ``task-None__sub_*``.
+
+    Drives the real fan-out engine with a parent whose
+    ``_last_task_id`` is ``None`` and reads the tab id the child was
+    actually given.
     """
-    src = Path(
-        "src/kiss/agents/sorcar/chat_sorcar_agent.py"
-    ).read_text()
-    guard_idx = src.find(
-        "routing_parent_key = uuid.uuid4().hex"
-    )
-    assert guard_idx != -1, "Sorcar#3 guard missing"
-    sub_tab_idx = src.find(
-        'sub_tab_id = f"task-{parent_task_id}__sub_{idx}"'
-    )
-    assert sub_tab_idx != -1
-    assert guard_idx < sub_tab_idx, (
-        "guard must run BEFORE sub_tab_id is constructed"
+    import threading
+
+    from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+
+    class _Printer:
+        """Thread-local-only printer: the engine needs nothing else."""
+
+        def __init__(self) -> None:
+            self._thread_local = threading.local()
+
+    seen: list[str] = []
+    original_run = ChatSorcarAgent.run
+
+    def _record_tab(
+        self: ChatSorcarAgent,
+        prompt_template: str = "",
+        **kwargs: Any,
+    ) -> str:
+        seen.append(str(getattr(self, "_tab_id", "")))
+        return "success: true\nsummary: done"
+
+    parent = ChatSorcarAgent("round1-parent")
+    parent._last_task_id = None
+    parent.printer = cast(Any, _Printer())
+    try:
+        ChatSorcarAgent.run = _record_tab  # type: ignore[method-assign]
+        parent._run_tasks_parallel(["only task"], max_workers=1)
+    finally:
+        ChatSorcarAgent.run = original_run  # type: ignore[method-assign]
+
+    assert len(seen) == 1
+    assert seen[0].endswith("__sub_0")
+    assert "None" not in seen[0], (
+        f"sub-agent tab id leaked a None parent id: {seen[0]!r}"
     )

@@ -227,6 +227,15 @@ class TestF13SecondServerInitPreservesLiveTasks(unittest.TestCase):
     def test_running_task_row_is_not_marked_process_killed(self) -> None:
         live_id, _ = th._add_task("live task")
         dead_id, _ = th._add_task("dead task")
+        # ``_add_task`` stamps every row with THIS process's owner token,
+        # and the sweep never rewrites a row whose owning process is
+        # still alive.  A row genuinely left behind by a killed daemon
+        # has no live owner, so clear the token on the row that is
+        # playing that part.  ``live_id`` keeps its owner, which is what
+        # makes the assertion below a real test of the F13 invariant.
+        th._get_db().execute(
+            "UPDATE task_history SET owner = '' WHERE id = ?", (dead_id,)
+        )
         self.assertEqual(_task_result(live_id), "Agent Failed Abruptly")
         self.assertEqual(_task_result(dead_id), "Agent Failed Abruptly")
 

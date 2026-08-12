@@ -31,11 +31,8 @@ import threading
 import time
 from typing import Any
 
-from kiss.agents.sorcar.chat_sorcar_agent import (
-    ChatSorcarAgent,
-    _SubagentStopEvent,
-)
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _SubagentStopEvent
 from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer

@@ -2310,6 +2310,14 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
   border-left: 3px solid var(--red); margin: 6px 0;
 }
 
+/* The live "Staging changes… / Generating commit message… / Committing…"
+   line of an auto-commit or worktree merge, replaced in place and removed
+   by the terminal autocommit_done / worktree_result. */
+.wt-progress {
+  color: var(--dim); padding: 8px 12px; font-style: italic;
+  border-left: 3px solid var(--dim); margin: 6px 0;
+}
+
 .adjacent-loader {
   text-align: center;
   padding: 10px;

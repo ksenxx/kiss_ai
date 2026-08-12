@@ -5,21 +5,111 @@
 
 """Docker library for managing Docker containers and executing commands."""
 
+import codecs
 import logging
 import os
+import queue
 import shlex
 import shutil
 import tempfile
 import threading
-from collections.abc import Callable
+import time
+import uuid
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import docker
 from docker.models.containers import Container  # type: ignore[assignment]
 
+from kiss.agents.sorcar.useful_tools import _truncate_output
 from kiss.core.kiss_error import KISSError
 
 logger = logging.getLogger(__name__)
+
+#: Default cap on the characters a single command may return, matching
+#: ``UsefulTools.Bash``.  Without it an unbounded ``pip install`` log goes
+#: straight into the conversation and blows the model's context window.
+MAX_OUTPUT_CHARS = 50000
+
+#: Environment variable used to tag a streaming exec — and every process
+#: it spawns — so a timed-out command can be killed by matching
+#: ``/proc/<pid>/environ`` inside the container's own pid namespace.
+_EXEC_TOKEN_VAR = "KISS_EXEC_TOKEN"
+
+
+def _new_utf8_decoder() -> Any:
+    """Return an incremental UTF-8 decoder that never raises.
+
+    Docker delivers exec output as byte frames split at arbitrary
+    boundaries, so a single multi-byte character (an accented letter, an
+    emoji, a progress-bar glyph) is routinely delivered as two frames.
+    Decoding each frame on its own would raise ``UnicodeDecodeError``
+    nondeterministically, and strict decoding would also lose the entire
+    output of a command that merely printed a stray binary byte.  An
+    incremental decoder in ``replace`` mode carries the partial sequence
+    over to the next frame and substitutes U+FFFD for genuinely invalid
+    bytes — the same guarantee ``UsefulTools._spawn`` gives with
+    ``errors="replace"``.
+
+    Returns:
+        A fresh ``codecs`` incremental decoder; feed it with
+        ``decoder.decode(chunk)`` and flush with ``decoder.decode(b"", True)``.
+    """
+    return codecs.getincrementaldecoder("utf-8")("replace")
+
+
+def _drain_exec_stream(
+    output_gen: Iterator[Any],
+    out_queue: "queue.Queue[tuple[bool, str] | None]",
+) -> None:
+    """Decode a docker exec stream onto *out_queue* until it ends.
+
+    Runs on a reader thread so the caller can enforce a timeout on a
+    generator that otherwise blocks forever.  stdout and stderr each get
+    their own incremental decoder because their frames interleave.
+
+    Args:
+        output_gen: The demuxed generator from ``exec_start``.
+        out_queue: Receives ``(is_stderr, text)`` items and a final
+            ``None`` sentinel marking end of stream.
+    """
+    decoders = {False: _new_utf8_decoder(), True: _new_utf8_decoder()}
+    try:
+        for chunk in output_gen:
+            if isinstance(chunk, tuple):  # pragma: no branch
+                stdout_chunk, stderr_chunk = chunk
+            else:
+                stdout_chunk, stderr_chunk = chunk, None
+            for is_stderr, raw in ((False, stdout_chunk), (True, stderr_chunk)):
+                if not raw:
+                    continue
+                text = decoders[is_stderr].decode(raw)
+                if text:
+                    out_queue.put((is_stderr, text))
+    except Exception:  # pragma: no cover — docker socket error mid-stream
+        logger.debug("docker exec stream failed", exc_info=True)
+    finally:
+        for is_stderr, decoder in decoders.items():
+            trailing = decoder.decode(b"", True)
+            if trailing:
+                out_queue.put((is_stderr, trailing))
+        out_queue.put(None)
+
+
+def _with_exit_code(output: str, exit_code: int) -> str:
+    """Append the ``[exit code: N]`` marker for a failed command.
+
+    Args:
+        output: The command's combined output.
+        exit_code: The command's exit status.
+
+    Returns:
+        *output* unchanged on success, else *output* plus the marker.
+    """
+    if exit_code == 0:
+        return output
+    suffix = f"[exit code: {exit_code}]"
+    return f"{output}\n{suffix}" if output else suffix
 
 class DockerManager:
     """Manages Docker container lifecycle and command execution."""
@@ -96,6 +186,7 @@ class DockerManager:
         command: str,
         description: str,
         timeout_seconds: int = 30,
+        max_output_chars: int = MAX_OUTPUT_CHARS,
     ) -> str:  # noqa: N802
         """
         Execute a bash command in the running Docker container.
@@ -104,6 +195,7 @@ class DockerManager:
             command: The bash command to execute
             description: A short description of the command in natural language
             timeout_seconds: Maximum time to wait before treating the command as hung.
+            max_output_chars: Maximum characters in output before truncation.
 
         Returns:
             The output of the command, including stdout, stderr, and exit code
@@ -114,7 +206,7 @@ class DockerManager:
         print(f"{description}")
 
         if self.stream_callback:
-            return self._bash_streaming(command)
+            return self._bash_streaming(command, timeout_seconds, max_output_chars)
 
         result_holder: dict[str, Any] = {}
         error_holder: dict[str, BaseException] = {}
@@ -148,50 +240,103 @@ class DockerManager:
             stdout_bytes, stderr_bytes = output_payload
         else:
             stdout_bytes, stderr_bytes = None, None
-        stdout = stdout_bytes.decode("utf-8") if stdout_bytes else ""
-        stderr = stderr_bytes.decode("utf-8") if stderr_bytes else ""
-        exit_code = exec_result.exit_code
+        stdout = stdout_bytes.decode("utf-8", errors="replace") if stdout_bytes else ""
+        stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
         output_parts = [part for part in (stdout, stderr) if part]
         output = "\n".join(output_parts)
-        if exit_code != 0:
-            suffix = f"[exit code: {exit_code}]"
-            output = f"{output}\n{suffix}" if output else suffix
-        return output
+        return _truncate_output(
+            _with_exit_code(output, exec_result.exit_code), max_output_chars,
+        )
 
-    def _bash_streaming(self, command: str) -> str:
+    def _bash_streaming(
+        self, command: str, timeout_seconds: float, max_output_chars: int,
+    ) -> str:
+        """Run *command*, streaming its output, and return the full result.
+
+        The docker exec stream is drained on a reader thread so this
+        thread can enforce *timeout_seconds*; the callback is invoked
+        here (not on the reader) because printers attribute output to a
+        task via thread-local state.
+
+        Args:
+            command: The bash command to execute.
+            timeout_seconds: Maximum time to wait before treating the
+                command as hung; the container-side process is killed.
+            max_output_chars: Maximum characters in output before truncation.
+
+        Returns:
+            The command's output, or the timeout error.
+        """
         assert self.container is not None
         assert self.stream_callback is not None
+        token = uuid.uuid4().hex
         exec_resp = self.client.api.exec_create(
             self.container.id,
             f"/bin/bash -c {shlex.quote(command)}",
             stdout=True,
             stderr=True,
             workdir=self.workdir,
+            environment={_EXEC_TOKEN_VAR: token},
         )
         exec_id = exec_resp["Id"]
         output_gen = self.client.api.exec_start(exec_id, stream=True, demux=True)
+        out_queue: queue.Queue[tuple[bool, str] | None] = queue.Queue()
+        threading.Thread(
+            target=_drain_exec_stream, args=(output_gen, out_queue), daemon=True,
+        ).start()
+
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
-        for chunk in output_gen:
-            if isinstance(chunk, tuple):  # pragma: no branch
-                stdout_chunk, stderr_chunk = chunk
-            else:
-                stdout_chunk, stderr_chunk = chunk, None
-            if stdout_chunk:
-                text = stdout_chunk.decode("utf-8")
-                stdout_parts.append(text)
-                self.stream_callback(text)
-            if stderr_chunk:
-                text = stderr_chunk.decode("utf-8")
-                stderr_parts.append(text)
-                self.stream_callback(text)
-        inspect_result = self.client.api.exec_inspect(exec_id)
-        exit_code = inspect_result.get("ExitCode", 0)
-        output = "\n".join(part for part in ("".join(stdout_parts), "".join(stderr_parts)) if part)
-        if exit_code != 0:
-            suffix = f"[exit code: {exit_code}]"
-            output = f"{output}\n{suffix}" if output else suffix
-        return output
+        deadline = time.monotonic() + timeout_seconds
+        eof = False
+        while True:
+            try:
+                item = out_queue.get(timeout=max(deadline - time.monotonic(), 0))
+            except queue.Empty:
+                break
+            if item is None:
+                eof = True
+                break
+            is_stderr, text = item
+            (stderr_parts if is_stderr else stdout_parts).append(text)
+            self.stream_callback(text)
+
+        if not eof:
+            self._kill_exec(token)
+            return f"Error: command timed out after {timeout_seconds}s"
+
+        exit_code = self.client.api.exec_inspect(exec_id).get("ExitCode", 0)
+        output = "\n".join(
+            part for part in ("".join(stdout_parts), "".join(stderr_parts)) if part
+        )
+        return _truncate_output(_with_exit_code(output, exit_code), max_output_chars)
+
+    def _kill_exec(self, token: str) -> None:
+        """Kill the container-side processes of a timed-out exec.
+
+        Without this the hung command keeps running (and holding the
+        stream open) for the rest of the container's life.  The exec is
+        tagged with a unique environment variable, which every child
+        inherits, so matching on ``/proc/<pid>/environ`` kills the whole
+        tree.  ``exec_inspect``'s ``Pid`` is deliberately not used: it is
+        a *host*-namespace pid and means nothing inside the container.
+
+        Args:
+            token: The unique tag given to the exec's environment.
+        """
+        assert self.container is not None
+        script = (
+            "for d in /proc/[0-9]*; do\n"
+            '  env=$(tr "\\0" "\\n" < "$d/environ" 2>/dev/null)\n'
+            f'  case "$env" in *"{_EXEC_TOKEN_VAR}={token}"*)\n'
+            '    kill -9 "${d#/proc/}" 2>/dev/null;;\n'
+            "  esac\n"
+            "done"
+        )
+        try:
+            self.container.exec_run(["/bin/sh", "-c", script])
+        except Exception:  # pragma: no cover — container already gone
+            logger.debug("could not kill timed-out exec", exc_info=True)
 
     def get_host_port(self, container_port: int) -> int | None:
         """Get the host port mapped to a container port.

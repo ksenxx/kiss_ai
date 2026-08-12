@@ -23,7 +23,7 @@ import logging
 import threading
 import time
 from functools import partial
-from typing import Any
+from typing import Any, TypeVar
 
 from kiss.agents.sorcar.persistence import _queue_chat_event
 from kiss.core import stop_signal
@@ -37,6 +37,13 @@ from kiss.core.printer import (
 from kiss.server import agent_state
 
 logger = logging.getLogger(__name__)
+
+_OffsetT = TypeVar("_OffsetT", int, float)
+
+#: How many finished task ids are remembered so a late write cannot
+#: resurrect their per-task state.  Bounded, so the guard itself can
+#: never grow without limit.
+_CLOSED_TASK_MEMORY = 256
 
 _DISPLAY_EVENT_TYPES = frozenset(
     {
@@ -211,6 +218,11 @@ class JsonPrinter(Printer):
         self._tokens_offsets: dict[str, int] = {}
         self._budget_offsets: dict[str, float] = {}
         self._steps_offsets: dict[str, int] = {}
+        # Task ids whose state cleanup_task already freed, newest last
+        # and capped at _CLOSED_TASK_MEMORY entries.  A late usage
+        # offset write for one of them is dropped instead of leaking a
+        # dict entry nothing would pop again.
+        self._closed_tasks: dict[str, None] = {}
         self._recordings: dict[str, list[dict[str, Any]]] = {}
         # task id → (tab_id, conn_id) of the UI tab the task was
         # launched from; set via register_task_ui when a task runs in
@@ -308,12 +320,22 @@ class JsonPrinter(Printer):
     def task_ui(self, task_id: Any) -> tuple[str, str]:
         """Return the ``(tab_id, conn_id)`` registered for *task_id*.
 
+        The registry this reads is deliberately **task-scoped**:
+        :meth:`cleanup_task` drops the entry the moment a task ends,
+        which is precisely why :meth:`_transient_targets` resolves
+        post-task broadcasts from the (longer-lived) subscriber set
+        instead.  That lifetime difference is a load-bearing part of
+        the printer's routing contract, and this accessor is the only
+        way to observe it — the reason it is kept even though event
+        routing itself goes through :meth:`subscribe_tab`.
+
         Args:
             task_id: The task identifier.
 
         Returns:
             The launching tab and connection ids, or ``("", "")`` when
-            the task was not launched from a UI tab.
+            the task was not launched from a UI tab, or once the task
+            has ended.
         """
         key = self._coerce_task_id(task_id)
         with self._lock:
@@ -664,9 +686,12 @@ class JsonPrinter(Printer):
         """Persist a display event to the database if applicable.
 
         Looks up the agent state registered for ``event["taskId"]``
-        and, when its agent carries a non-None ``_last_task_id``,
+        and, when its agent has already published a ``last_task_id``,
         enqueues the event for asynchronous persistence via
-        ``_queue_chat_event``.
+        ``_queue_chat_event``.  The id is read through the agent's
+        property, which takes the same lock the publishing assignment
+        takes; it answers ``""`` for an agent that has not run yet,
+        and an event can never be filed under an empty id.
 
         Args:
             event: The event dictionary (must already have ``taskId``
@@ -679,11 +704,48 @@ class JsonPrinter(Printer):
             return
         state = agent_state.get(key)
         agent = state.agent if state is not None else None
-        if agent is None:
-            return
-        task_id = getattr(agent, "_last_task_id", None)
-        if task_id is not None:
-            _queue_chat_event(event, task_id=task_id)
+        task_id = getattr(agent, "last_task_id", "")
+        if task_id:
+            _queue_chat_event(event, task_id=str(task_id))
+
+    def _read_offset(
+        self, offsets: dict[str, _OffsetT], default: _OffsetT,
+    ) -> _OffsetT:
+        """Read the current task's entry of a usage-offset dict.
+
+        Args:
+            offsets: The task-keyed offset dict to read.
+            default: Value to report when the task has no entry.
+
+        Returns:
+            The current task's offset, or *default*.
+        """
+        with self._lock:
+            return offsets.get(self._task_key(), default)
+
+    def _write_offset(
+        self, offsets: dict[str, _OffsetT], value: _OffsetT,
+    ) -> None:
+        """Store the current task's entry of a usage-offset dict.
+
+        Held under ``self._lock`` — the same lock ``cleanup_task``
+        pops these dicts under — and silently dropped for a task that
+        has already been cleaned up.  Writers are not limited to the
+        task's own thread: ``_attribute_sub_usage`` folds a finished
+        sub-agent's spend into its parent's offsets from the
+        sub-agent's thread, so a write can land after the parent's
+        cleanup.  Without the guard that write re-creates an entry
+        nothing will ever pop again (R09-7).
+
+        Args:
+            offsets: The task-keyed offset dict to write.
+            value: The new offset for the current task.
+        """
+        key = self._task_key()
+        with self._lock:
+            if key in self._closed_tasks:
+                return
+            offsets[key] = value
 
     @property
     def tokens_offset(self) -> int:
@@ -692,29 +754,29 @@ class JsonPrinter(Printer):
         Backed by a ``task_id``-keyed dict so concurrent tasks never
         clobber each other's accumulated tokens.
         """
-        return self._tokens_offsets.get(self._task_key(), 0)
+        return self._read_offset(self._tokens_offsets, 0)
 
     @tokens_offset.setter
     def tokens_offset(self, value: int) -> None:
-        self._tokens_offsets[self._task_key()] = value
+        self._write_offset(self._tokens_offsets, value)
 
     @property
     def budget_offset(self) -> float:
         """Per-task dollar-budget offset used when broadcasting ``usage_info``."""
-        return self._budget_offsets.get(self._task_key(), 0.0)
+        return self._read_offset(self._budget_offsets, 0.0)
 
     @budget_offset.setter
     def budget_offset(self, value: float) -> None:
-        self._budget_offsets[self._task_key()] = value
+        self._write_offset(self._budget_offsets, value)
 
     @property
     def steps_offset(self) -> int:
         """Per-task step-count offset used when broadcasting ``usage_info``."""
-        return self._steps_offsets.get(self._task_key(), 0)
+        return self._read_offset(self._steps_offsets, 0)
 
     @steps_offset.setter
     def steps_offset(self, value: int) -> None:
-        self._steps_offsets[self._task_key()] = value
+        self._write_offset(self._steps_offsets, value)
 
     def cleanup_tab(self, tab_id: str) -> None:
         """Remove *tab_id* from every subscriber and override set.
@@ -805,6 +867,10 @@ class JsonPrinter(Printer):
             self._tokens_offsets.pop(key, None)
             self._budget_offsets.pop(key, None)
             self._steps_offsets.pop(key, None)
+            self._closed_tasks.pop(key, None)
+            self._closed_tasks[key] = None
+            while len(self._closed_tasks) > _CLOSED_TASK_MEMORY:
+                self._closed_tasks.pop(next(iter(self._closed_tasks)))
             self._task_ui.pop(key, None)
             if key in self._subscribers:
                 if subscriber_linger_seconds <= 0:
@@ -841,7 +907,14 @@ class JsonPrinter(Printer):
         """
         self._current_block_type = ""
         with self._bash_lock:
-            bs = self._bash_state
+            # Non-creating lookup, like _flush_bash and the tool_call /
+            # tool_result branches: there is nothing to reset when the
+            # task has no bash state, and creating one here retained an
+            # entry under the "" key of a task-less thread that
+            # cleanup_task can never remove (R09-7).
+            bs = self._bash_states.get(self._task_key())
+        if bs is None:
+            return
         with bs.flush_lock:
             with self._bash_lock:
                 bs.generation += 1

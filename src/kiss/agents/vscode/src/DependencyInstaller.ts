@@ -701,7 +701,68 @@ function spawnKissWebDirect(kissWebBin: string, workDir: string): void {
   }
 }
 
-async function restartKissWebDaemon(
+// A restart is a probe-then-act on a resource every window shares: the
+// daemon on port 8787.  Without a cross-process lock two windows opened
+// together both see "dead", and the second SIGTERMs the daemon the first
+// has just started -- while it is still booting, so it has not yet
+// accepted a UDS connection and cannot report the active tasks that
+// decideRestart() exists to protect.
+const RESTART_LOCK_FILE = path.join(LOG_DIR, '.kiss-web.restart.lock');
+// Long enough to cover a slow launchd/systemd restart, short enough that
+// a window killed mid-restart cannot wedge every later one.
+const RESTART_LOCK_STALE_MS = 120_000;
+
+/**
+ * Take the cross-process kiss-web restart lock.
+ *
+ * The lock is an exclusively created file, which is atomic across
+ * processes on every POSIX filesystem the extension runs on.  A lock
+ * left behind by a window that died mid-restart is broken once it is
+ * older than :data:`RESTART_LOCK_STALE_MS`.
+ *
+ * @param lockFile Path of the lock file (overridable for tests).
+ * @returns A release function, or null when another window holds it.
+ */
+export function acquireDaemonRestartLock(
+  lockFile: string = RESTART_LOCK_FILE,
+): (() => void) | null {
+  const release = () => {
+    try {
+      fs.unlinkSync(lockFile);
+    } catch {}
+  };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      fs.mkdirSync(path.dirname(lockFile), {recursive: true});
+      const fd = fs.openSync(lockFile, 'wx');
+      try {
+        fs.writeSync(fd, `${process.pid}\n`);
+      } finally {
+        fs.closeSync(fd);
+      }
+      return release;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return null;
+      let ageMs = 0;
+      try {
+        ageMs = Date.now() - fs.statSync(lockFile).mtimeMs;
+      } catch {
+        // The holder released it between our open and our stat; retry.
+        continue;
+      }
+      if (ageMs < RESTART_LOCK_STALE_MS) return null;
+      log(`breaking stale kiss-web restart lock (${Math.round(ageMs)}ms old)`);
+      try {
+        fs.unlinkSync(lockFile);
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+export async function restartKissWebDaemon(
   kissProjectPath: string,
   workDir: string,
 ): Promise<void> {
@@ -713,6 +774,23 @@ async function restartKissWebDaemon(
     return;
   }
 
+  const releaseLock = acquireDaemonRestartLock();
+  if (!releaseLock) {
+    log('another window is restarting kiss-web — skipping this one');
+    return;
+  }
+  try {
+    await restartKissWebDaemonLocked(kissProjectPath, workDir, kissWebBin);
+  } finally {
+    releaseLock();
+  }
+}
+
+async function restartKissWebDaemonLocked(
+  kissProjectPath: string,
+  workDir: string,
+  kissWebBin: string,
+): Promise<void> {
   const binDir = path.join(HOME_DIR, '.local', 'bin');
 
   const fpFile = path.join(LOG_DIR, '.kiss-web.fingerprint');

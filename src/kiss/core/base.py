@@ -14,22 +14,12 @@ import time
 from pathlib import Path
 from typing import Any, ClassVar
 
-import yaml
-from yaml.nodes import ScalarNode
-
 from kiss.core import config as config_module
 from kiss.core.models.model_info import get_max_context_length
 from kiss.core.printer import Printer
-from kiss.core.utils import config_to_dict
+from kiss.core.utils import atomic_write_text, config_to_dict, dump_yaml
 
 logger = logging.getLogger(__name__)
-
-def _str_presenter(dumper: yaml.Dumper, data: str) -> ScalarNode:
-    """Use literal block style for multiline strings in YAML output."""
-    return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")  # type: ignore[reportUnknownMemberType]
-
-
-yaml.add_representer(str, _str_presenter)
 
 _kiss_pkg_dir = Path(__file__).parent.parent
 SYSTEM_PROMPT = (_kiss_pkg_dir / "SYSTEM.md").read_text(encoding="utf-8")
@@ -149,11 +139,17 @@ class Base:
         """Save the agent's state to a YAML file in the artifacts directory.
 
         The file is saved to {artifact_dir}/trajectories/trajectory_{name}_{id}_{timestamp}.yaml
+
+        The write is atomic: this runs from the ``finally`` of every
+        ``run()`` while the server is serving the same file to the
+        trajectory visualizer, and trajectories are large enough that a
+        truncate-then-stream write leaves a wide window in which a
+        reader sees an empty or half-written document.
         """
-        filename = self.get_trajectory_path()
-        filename.parent.mkdir(parents=True, exist_ok=True)
-        with filename.open("w", encoding="utf-8") as f:
-            yaml.dump(self._build_state_dict(), f, indent=2)
+        atomic_write_text(
+            self.get_trajectory_path(),
+            dump_yaml(self._build_state_dict(), indent=2),
+        )
 
     def get_trajectory(self) -> str:
         """Return the trajectory as JSON for visualization.

@@ -43,8 +43,7 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar import sorcar_agent
-from kiss.agents.sorcar.chat_sorcar_agent import _SubagentStopEvent
-from kiss.agents.sorcar.sorcar_agent import _await_subagents
+from kiss.agents.sorcar.sorcar_agent import _await_subagents, _SubagentStopEvent
 from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 

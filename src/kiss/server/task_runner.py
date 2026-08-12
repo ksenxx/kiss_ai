@@ -419,9 +419,15 @@ class _TaskRunnerMixin:
                     state.is_running_non_wt = False
                     state.interrupted_by_shutdown = False
                     task_id_for_end = state.task_id
-                    if state.agent is not None and not (
-                        state.use_worktree
-                        and getattr(state.agent, "_wt_pending", False)
+                    # Ownership is decided by the agent alone: it is
+                    # kept exactly while it still holds a worktree.
+                    # Consulting the finished run's ``use_worktree``
+                    # here would drop the agent whenever THIS run was
+                    # a non-worktree one — and that agent may be the
+                    # only in-memory handle to a worktree carried over
+                    # from an earlier run on the same tab (R09-1).
+                    if state.agent is not None and not getattr(
+                        state.agent, "_wt_pending", False,
                     ):
                         state.agent = None
                         state.use_worktree = False
@@ -729,7 +735,15 @@ class _TaskRunnerMixin:
                     return
                 state.is_running_non_wt = True
 
-        if use_worktree and getattr(agent, "_wt_pending", False):
+        if getattr(agent, "_wt_pending", False):
+            # A worktree carried over from an earlier run on this tab
+            # cannot be auto-merged while the main working tree is
+            # busy — and a run that does NOT use a worktree makes it
+            # busy itself: it has just set ``is_running_non_wt`` above
+            # and is about to write the main tree.  Skipping the
+            # release for those runs orphaned the worktree with no
+            # owner and no preserve marker, which let a later reclaim
+            # sweep publish work the user declined to merge (R09-1).
             with self._state_lock:
                 main_tree_busy = self._any_non_wt_running()
             if main_tree_busy:
@@ -766,7 +780,10 @@ class _TaskRunnerMixin:
             )
 
             _vcfg = load_config()
-            _cfg_budget = float(_vcfg.get("max_budget", 100))
+            # ``load_config()`` fills every key from ``DEFAULTS``, so a
+            # literal fallback here would be unreachable code that can
+            # only drift away from the one authoritative default.
+            _cfg_budget = float(_vcfg["max_budget"])
             _cfg_web = _vcfg.get("use_web_browser", True)
             _model_config = build_model_config(_vcfg)
             _agent_budget = coerce_budget_override(cmd.get("maxBudget"))
@@ -816,6 +833,19 @@ class _TaskRunnerMixin:
                         ask_user_question_callback=self._ask_user_question,
                         is_parallel=state.use_parallel,
                         use_worktree=use_worktree,
+                        # The per-run wire toggle WINS over the
+                        # persisted "Auto commit" setting, and both
+                        # sides of the run must read the same value:
+                        # this runner already decides its own
+                        # post-task merge with ``auto_commit_mode``,
+                        # while the agent decides the automatic
+                        # worktree cleanups (retiring the previous
+                        # run's branch, committing this run's) it
+                        # performs on the way.  Left unpassed, the
+                        # agent fell back to the persisted config and
+                        # published work the user had declined to
+                        # merge.
+                        auto_commit=state.auto_commit_mode,
                         max_budget=(_agent_budget if _agent_budget is not None else _cfg_budget),
                         web_tools=(_agent_web if _agent_web is not None else _cfg_web),
                         model_config=(
@@ -862,10 +892,13 @@ class _TaskRunnerMixin:
                         exc_info=True,
                     )
                 finally:
-                    task_history_id = getattr(
-                        agent,
-                        "_last_task_id",
-                        None,
+                    # ``or None`` keeps this local on the ``is not
+                    # None`` protocol the teardown below relies on:
+                    # the property answers ``""`` for an agent that
+                    # has not published a row yet, and an empty id
+                    # must not reach ``printer.cleanup_task``.
+                    task_history_id = (
+                        getattr(agent, "last_task_id", "") or None
                     )
                     state.last_result_summary = result_summary
                 if subtask_failed:

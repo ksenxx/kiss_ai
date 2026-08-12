@@ -38,11 +38,8 @@ from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.chat_sorcar_agent import (
-    ChatSorcarAgent,
-    _SubagentStopEvent,
-)
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.agents.sorcar.sorcar_agent import SorcarAgent, _SubagentStopEvent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core import stop_signal
 from kiss.server import agent_state

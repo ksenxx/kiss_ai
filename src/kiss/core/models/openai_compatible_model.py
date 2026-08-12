@@ -8,6 +8,7 @@
 import json
 import logging
 import re
+import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -28,7 +29,10 @@ from kiss.core.models.model import (
     parse_binary_attachments,
     responses_items_to_chat_messages,
 )
-from kiss.core.models.stream_abort import stop_aware_events
+from kiss.core.models.stream_abort import (
+    DEFAULT_STREAM_STALL_TIMEOUT,
+    stop_aware_events,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +112,45 @@ DEEPSEEK_REASONING_MODELS = {
     "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
 }
 
-_ADAPTIVE_TOOL_EFFORT_VERDICTS: dict[str, bool] = {}
+_ADAPTIVE_TOOL_EFFORT_VERDICTS: dict[tuple[str, str], bool] = {}
+_ADAPTIVE_TOOL_EFFORT_LOCK = threading.Lock()
+
+
+def _tool_effort_verdict(key: tuple[str, str]) -> bool | None:
+    """Return the learned ``tools`` + ``reasoning_effort`` verdict, if any.
+
+    Args:
+        key: The ``(base_url, api_model_name)`` the verdict was learned
+            for.  The capability is a property of the *pair*: a
+            reasoning model can reject the combination while another
+            model on the same host accepts it.
+
+    Returns:
+        ``True``/``False`` when the pair has been probed, ``None``
+        otherwise.
+    """
+    with _ADAPTIVE_TOOL_EFFORT_LOCK:
+        return _ADAPTIVE_TOOL_EFFORT_VERDICTS.get(key)
+
+
+def _record_tool_effort_verdict(key: tuple[str, str], accepted: bool) -> None:
+    """Record what one ``(endpoint, model)`` did with the combination.
+
+    Parallel subagents probe concurrently, so the check and the write
+    straddle an HTTP round trip.  A rejection is definitive and always
+    wins; a success is only recorded when nothing is known yet, so a
+    probe that raced with a rejection can never erase it and the outcome
+    no longer depends on which response happened to arrive last.
+
+    Args:
+        key: The ``(base_url, api_model_name)`` that was probed.
+        accepted: Whether the endpoint accepted the combination.
+    """
+    with _ADAPTIVE_TOOL_EFFORT_LOCK:
+        if accepted:
+            _ADAPTIVE_TOOL_EFFORT_VERDICTS.setdefault(key, True)
+        else:
+            _ADAPTIVE_TOOL_EFFORT_VERDICTS[key] = False
 
 
 _AUDIO_MIME_TO_FORMAT: dict[str, str] = {
@@ -307,6 +349,29 @@ def _merge_tools_prompt_into_content(content: Any, tools_prompt: str) -> Any:
     return str(content) + "\n" + tools_prompt
 
 
+def _accumulate_tool_call_deltas(
+    accum: dict[int, dict[str, str]], tool_call_deltas: list[Any]
+) -> None:
+    """Merge streamed ``tool_calls`` deltas into the per-index accumulator.
+
+    Args:
+        accum: Mapping of tool-call index to its accumulated
+            id / name / arguments strings.  Mutated in place.
+        tool_call_deltas: The ``delta.tool_calls`` entries of one chunk.
+    """
+    for tc_delta in tool_call_deltas:
+        slot = accum.setdefault(
+            tc_delta.index, {"id": "", "name": "", "arguments": ""}
+        )
+        if tc_delta.id:
+            slot["id"] = tc_delta.id
+        if tc_delta.function:
+            if tc_delta.function.name:
+                slot["name"] = tc_delta.function.name
+            if tc_delta.function.arguments:
+                slot["arguments"] += tc_delta.function.arguments
+
+
 class OpenAICompatibleBase(Model):
     """Shared vendor-detection helpers for the OpenAI-compatible transports.
 
@@ -318,6 +383,36 @@ class OpenAICompatibleBase(Model):
     """
 
     _api_model_name: str
+
+    def __init__(
+        self,
+        model_name: str,
+        model_config: dict[str, Any] | None = None,
+        token_callback: TokenCallback | None = None,
+        thinking_callback: ThinkingCallback | None = None,
+    ):
+        """Initialize the shared OpenAI-compatible state.
+
+        Args:
+            model_name: The KISS catalog model name.
+            model_config: Optional model parameters.  ``stream_stall_timeout``
+                (seconds of event-level silence tolerated before a
+                streamed request is aborted with a retryable
+                ``TimeoutError``) is read here for both transports.
+            token_callback: Optional callback for each streamed text token.
+            thinking_callback: Optional callback bracketing thinking blocks.
+        """
+        super().__init__(
+            model_name,
+            model_config=model_config,
+            token_callback=token_callback,
+            thinking_callback=thinking_callback,
+        )
+        self._stream_stall_timeout = float(
+            self.model_config.get(
+                "stream_stall_timeout", DEFAULT_STREAM_STALL_TIMEOUT
+            )
+        )
 
     def _is_deepseek_reasoning_model(self) -> bool:
         """Check if this is a DeepSeek R1 reasoning model.
@@ -392,6 +487,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         self.base_url = base_url
         self.api_key = api_key
         self._api_model_name = _provider_model_name(model_name)
+        self._effort_verdict_key = (base_url, self._api_model_name)
         self._responses_delegate: OpenAICompatibleModel2 | None = None
         self._delegate_raw_items: dict[str, list[dict[str, Any]]] = {}
         thinking_level = _model_thinking_level(self.model_name)
@@ -828,43 +924,141 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         message = getattr(choices[0], "message", None)
         return getattr(message, "audio", None)
 
-    def _stream_text(  # pragma: no cover – API streaming
-        self, kwargs: dict[str, Any],
-    ) -> tuple[str, Any]:
-        """Stream a chat completion, invoking the token callback for each text delta.
+    @staticmethod
+    def _response_error_message(response: Any) -> str:
+        """Return the gateway-level error message carried by a response.
 
-        When no callback is set, falls back to a normal (non-streaming) call.
+        Several OpenAI-compatible gateways answer an upstream failure
+        with ``200 {"choices": [], "error": {...}}`` rather than a 4xx,
+        so the only diagnosis available is this extra field.
 
         Args:
-            kwargs: Keyword arguments for the OpenAI chat completions API.
+            response: A Chat Completions response (SDK object or dict).
 
         Returns:
-            A tuple of (content, response).
+            The error message, or ``""`` when the response carries none.
         """
-        if self.token_callback is None:
-            response = self.client.chat.completions.create(**kwargs)
-            return response.choices[0].message.content or "", response
+        err = (
+            response.get("error")
+            if isinstance(response, dict)
+            else getattr(response, "error", None)
+        )
+        if err is None:
+            return ""
+        message = (
+            err.get("message")
+            if isinstance(err, dict)
+            else getattr(err, "message", None)
+        )
+        return str(message or err)
 
+    @staticmethod
+    def _raise_for_finish_reason(finish_reason: str | None) -> None:
+        """Reject a truncated completion instead of using its partial output.
+
+        ``finish_reason="length"`` means the model hit its output-token
+        budget mid-sentence — and, on a tool-bearing turn, mid-JSON.  The
+        partial ``arguments`` string then fails to parse and
+        :meth:`_build_tool_call_lists` turns it into ``{}``, so the agent
+        calls the tool with no arguments and is told the tool failed for
+        a reason unrelated to the real cause.  The Responses transport
+        already refuses the equivalent ``status="incomplete"`` response.
+
+        Args:
+            finish_reason: The choice's ``finish_reason``, if any.
+
+        Raises:
+            KISSError: When the completion was truncated.
+        """
+        if finish_reason == "length":
+            raise KISSError(
+                "Chat Completions response was truncated "
+                "(finish_reason='length'): the model hit its output-token "
+                "budget, so its text and any tool-call arguments are "
+                "incomplete. Raise max_tokens or lower reasoning_effort."
+            )
+
+    @classmethod
+    def _raise_for_failed_completion(cls, response: Any) -> None:
+        """Reject a non-streamed response that carries no usable choice.
+
+        The counterpart of
+        :meth:`~kiss.core.models.openai_compatible_model2.OpenAICompatibleModel2._raise_for_failed_response`
+        for the Chat Completions transport.
+
+        Args:
+            response: The response returned by ``chat.completions.create``.
+
+        Raises:
+            KISSError: When ``choices`` is empty (surfacing the gateway's
+                own error message) or the single choice was truncated.
+        """
+        choices = getattr(response, "choices", None) or []
+        if not choices:
+            message = cls._response_error_message(response)
+            raise KISSError(
+                "Chat Completions returned no choices"
+                + (f": {message}" if message else "")
+            )
+        cls._raise_for_finish_reason(getattr(choices[0], "finish_reason", None))
+
+    def _stream_chat_completion(
+        self, kwargs: dict[str, Any], adaptive: bool
+    ) -> tuple[str, dict[int, dict[str, str]], Any, str | None]:
+        """Stream one chat completion, driving the token/thinking callbacks.
+
+        The single streaming loop behind both streamed entry points —
+        :meth:`_stream_text` (tool-less) and
+        :meth:`generate_and_process_with_tools` (the agentic path) — which
+        differ only in whether the request goes through the adaptive
+        ``reasoning_effort`` probe.
+
+        ``stop_aware_events`` is used instead of a bare ``for chunk in
+        ...``: otherwise the thread sits in ``recv()`` on a quiet
+        connection for the client's full 1800s timeout, deaf to Stop,
+        because the flag is only read when the agent emits something and
+        an injected ``KeyboardInterrupt`` cannot reach a thread inside C
+        code (``reports/stop_button_delay_2026-08-05.html``).
+
+        Args:
+            kwargs: Fully built request arguments; ``stream`` and
+                ``stream_options`` are set here.
+            adaptive: Send through :meth:`_create_chat_completion_adaptive`
+                (which may retry once without ``reasoning_effort``)
+                instead of a plain create.
+
+        Returns:
+            ``(content, tool_call_accumulator, response, finish_reason)``.
+        """
         kwargs["stream"] = True
         kwargs["stream_options"] = {"include_usage": True}
         content = ""
+        tool_calls_accum: dict[int, dict[str, str]] = {}
         response = None
         last_chunk = None
+        finish_reason: str | None = None
         in_reasoning = False
-        # stop_aware_events, not a bare `for chunk in ...`: otherwise the
-        # thread sits in recv() on a quiet connection for the client's
-        # full 1800s timeout, deaf to Stop, because the flag is only read
-        # when the agent emits something and an injected
-        # KeyboardInterrupt cannot reach a thread inside C code
-        # (reports/stop_button_delay_2026-08-05.html).
+        stream = (
+            self._create_chat_completion_adaptive(kwargs)
+            if adaptive
+            else self.client.chat.completions.create(**kwargs)
+        )
         for chunk in stop_aware_events(
-            self.client.chat.completions.create(**kwargs),
+            stream,
+            stall_timeout=self._stream_stall_timeout,
             on_abort=self._close_thinking_if_open,
-            name="openai-stream-abort-watchdog",
+            name=(
+                "openai-tools-stream-abort-watchdog"
+                if adaptive
+                else "openai-stream-abort-watchdog"
+            ),
         ):
             last_chunk = chunk
             if chunk.choices:
-                delta = chunk.choices[0].delta
+                choice = chunk.choices[0]
+                if getattr(choice, "finish_reason", None):
+                    finish_reason = choice.finish_reason
+                delta = choice.delta
                 if delta:
                     reasoning = _delta_reasoning_text(delta)
                     if reasoning:
@@ -878,11 +1072,40 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                             self._invoke_thinking_callback(False)
                         content += delta.content
                         self._invoke_token_callback(delta.content)
+                    if delta.tool_calls:
+                        if in_reasoning:
+                            in_reasoning = False
+                            self._invoke_thinking_callback(False)
+                        _accumulate_tool_call_deltas(
+                            tool_calls_accum, delta.tool_calls
+                        )
             if chunk.usage is not None:
                 response = chunk
         if in_reasoning:
             self._invoke_thinking_callback(False)
         response = self._finalize_stream_response(response, last_chunk)
+        return content, tool_calls_accum, response, finish_reason
+
+    def _stream_text(self, kwargs: dict[str, Any]) -> tuple[str, Any]:
+        """Stream a chat completion, invoking the token callback for each text delta.
+
+        When no callback is set, falls back to a normal (non-streaming) call.
+
+        Args:
+            kwargs: Keyword arguments for the OpenAI chat completions API.
+
+        Returns:
+            A tuple of (content, response).
+        """
+        if self.token_callback is None:
+            response = self.client.chat.completions.create(**kwargs)
+            self._raise_for_failed_completion(response)
+            return response.choices[0].message.content or "", response
+
+        content, _accum, response, finish_reason = self._stream_chat_completion(
+            kwargs, adaptive=False
+        )
+        self._raise_for_finish_reason(finish_reason)
         return content, response
 
     def _build_chat_kwargs(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
@@ -993,69 +1216,18 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 self.base_url,
             )
 
-        if self.token_callback is not None:  # pragma: no cover – API streaming
-            kwargs["stream"] = True
-            kwargs["stream_options"] = {"include_usage": True}
-            content = ""
-            tool_calls_accum: dict[int, dict[str, str]] = {}
-            response = None
-            last_chunk = None
-            in_reasoning = False
-            # stop_aware_events, not a bare `for chunk in ...`: this is
-            # the path Sorcar's agentic loop takes, and a provider that
-            # goes byte-silent here would otherwise hold the agent for
-            # the client's full 1800s timeout, deaf to Stop
-            # (reports/stop_button_delay_2026-08-05.html).
-            for chunk in stop_aware_events(
-                self._create_chat_completion_adaptive(kwargs),
-                on_abort=self._close_thinking_if_open,
-                name="openai-tools-stream-abort-watchdog",
-            ):
-                last_chunk = chunk
-                if chunk.choices:
-                    delta = chunk.choices[0].delta
-                    if delta:
-                        reasoning = _delta_reasoning_text(delta)
-                        if reasoning:
-                            if not in_reasoning:
-                                in_reasoning = True
-                                self._invoke_thinking_callback(True)
-                            self._invoke_token_callback(reasoning)
-                        if delta.content:
-                            if in_reasoning:
-                                in_reasoning = False
-                                self._invoke_thinking_callback(False)
-                            content += delta.content
-                            self._invoke_token_callback(delta.content)
-                        if delta.tool_calls:
-                            if in_reasoning:
-                                in_reasoning = False
-                                self._invoke_thinking_callback(False)
-                            for tc_delta in delta.tool_calls:
-                                idx = tc_delta.index
-                                if idx not in tool_calls_accum:
-                                    tool_calls_accum[idx] = {
-                                        "id": "",
-                                        "name": "",
-                                        "arguments": "",
-                                    }
-                                if tc_delta.id:
-                                    tool_calls_accum[idx]["id"] = tc_delta.id
-                                if tc_delta.function:
-                                    if tc_delta.function.name:
-                                        tool_calls_accum[idx]["name"] = tc_delta.function.name
-                                    if tc_delta.function.arguments:
-                                        tool_calls_accum[idx]["arguments"] += (
-                                            tc_delta.function.arguments
-                                        )
-                if chunk.usage is not None:
-                    response = chunk
-            if in_reasoning:
-                self._invoke_thinking_callback(False)
-            response = self._finalize_stream_response(response, last_chunk)
+        if self.token_callback is not None:
+            (
+                content,
+                tool_calls_accum,
+                response,
+                finish_reason,
+            ) = self._stream_chat_completion(kwargs, adaptive=True)
+            self._raise_for_finish_reason(finish_reason)
             function_calls, raw_tool_calls = self._parse_tool_call_accum(tool_calls_accum)
         else:
             response = self._create_chat_completion_adaptive(kwargs)
+            self._raise_for_failed_completion(response)
             message = response.choices[0].message
             content = message.content or ""
             function_calls, raw_tool_calls = self._parse_tool_calls_from_message(message)
@@ -1125,7 +1297,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         declared = provider.tools_accept_reasoning_effort if provider else None
         if declared is not None:
             return declared
-        return _ADAPTIVE_TOOL_EFFORT_VERDICTS.get(self.base_url)
+        return _tool_effort_verdict(self._effort_verdict_key)
 
     def _create_chat_completion_adaptive(self, kwargs: dict[str, Any]) -> Any:
         """Create a chat completion, learning the effort capability if unknown.
@@ -1155,7 +1327,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
             response = self.client.chat.completions.create(**kwargs)
         except BadRequestError as e:
             if unverified and "reasoning_effort" in str(e):
-                _ADAPTIVE_TOOL_EFFORT_VERDICTS[self.base_url] = False
+                _record_tool_effort_verdict(self._effort_verdict_key, False)
                 dropped = kwargs.pop("reasoning_effort")
                 logger.debug(
                     "Endpoint %s rejected tools + reasoning_effort=%r; "
@@ -1166,7 +1338,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 return self.client.chat.completions.create(**kwargs)
             raise
         if unverified:
-            _ADAPTIVE_TOOL_EFFORT_VERDICTS[self.base_url] = True
+            _record_tool_effort_verdict(self._effort_verdict_key, True)
         return response
 
     @staticmethod
@@ -1366,7 +1538,15 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 thinking_callback=self.thinking_callback,
             )
             self._responses_delegate = delegate
-        delegate.initialize("_")
+        # The delegate is cached for its connection pool, so its
+        # callbacks have to be re-synced every turn: KISSAgent._reset
+        # rebinds THIS model's callbacks to the new run's printer without
+        # touching the delegate, which would otherwise keep streaming
+        # every token and thinking bracket into a finished task's printer.
+        delegate.token_callback = self.token_callback
+        delegate.thinking_callback = self.thinking_callback
+        delegate._ensure_client()
+        delegate.reset_conversation()
         input_items = self._chat_conversation_to_responses_input()
         delegate.conversation = list(input_items)
 
@@ -1394,7 +1574,43 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         for fc in function_calls:
             self._delegate_raw_items[fc["id"]] = new_items
         self._append_assistant_turn(content, function_calls, raw_tool_calls)
+        self._prune_delegate_raw_items()
         return function_calls, content, response
+
+    def _prune_delegate_raw_items(self) -> None:
+        """Drop cached Responses items whose tool call left the conversation.
+
+        The cache exists so a follow-up turn can replay a delegated
+        turn's raw output items (reasoning included) verbatim, keyed by
+        call_id.  An entry whose call_id is no longer anywhere in the
+        conversation can never be looked up again, so keeping it only
+        grows the process's memory — one whole turn's payload per tool
+        call, for the lifetime of a model instance that Sorcar reuses
+        across sub-sessions.
+        """
+        live = {
+            tc.get("id", "")
+            for msg in self.conversation
+            if isinstance(msg, dict)
+            for tc in (msg.get("tool_calls") or [])
+        }
+        for call_id in [k for k in self._delegate_raw_items if k not in live]:
+            del self._delegate_raw_items[call_id]
+
+    def reset_conversation(self) -> None:
+        """Reset the conversation and every cache derived from it.
+
+        The base implementation clears only the conversation, but this
+        transport also caches raw Responses items per call_id and owns a
+        Responses delegate with its own per-turn state.  Both are dead
+        weight once the conversation they describe is gone, and the
+        delegate's leftover pending function calls would reject the very
+        next generation on the fresh, empty conversation.
+        """
+        super().reset_conversation()
+        self._delegate_raw_items.clear()
+        if self._responses_delegate is not None:
+            self._responses_delegate.reset_conversation()
 
     def _generate_with_text_based_tools(
         self, function_map: dict[str, Callable[..., Any]]
@@ -1505,7 +1721,7 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 )
             return (
                 text_input_tokens,
-                completion_tokens,
+                text_output_tokens,
                 cached_tokens,
                 cache_write_tokens,
             )

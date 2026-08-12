@@ -222,20 +222,28 @@ class TestWorktreeFallbackExceptionContract(_Base):
 
 
 class TestMergeNoAutoCommitMessage(_Base):
-    """F9: don't blame a pre-commit hook under ``--no-auto-commit``."""
+    """F9: don't blame a pre-commit hook when Auto-commit is off."""
 
-    def test_merge_reports_auto_commit_disabled(self) -> None:
+    def test_explicit_merge_commits_even_when_auto_commit_is_off(
+        self,
+    ) -> None:
+        """Clicking merge IS consent to commit, so it must not refuse.
+
+        Auto-commit off governs the AUTOMATIC paths only (see
+        ``test_release_worktree_warning_reports_auto_commit_disabled``
+        below); refusing the user's own merge click would strand the
+        work with no way to publish it from the UI.
+        """
         agent = self._setup_worktree_agent()
         wt = agent._wt
         assert wt is not None
 
         msg = agent.merge()
 
-        self.assertIn("auto-commit is disabled", msg)
+        self.assertIn("Successfully merged", msg)
         self.assertNotIn("pre-commit hook", msg)
-        self.assertTrue(wt.wt_dir.exists())
-        self.assertIn("uncommitted.txt", self._porcelain(wt.wt_dir))
-        agent.discard()
+        self.assertFalse(wt.wt_dir.exists())
+        self.assertTrue(Path(self.repo, "uncommitted.txt").exists())
 
     def test_release_worktree_warning_reports_auto_commit_disabled(
         self,
@@ -248,7 +256,7 @@ class TestMergeNoAutoCommitMessage(_Base):
 
         self.assertIsNone(released)
         warning = agent._merge_conflict_warning or ""
-        self.assertIn("Auto-commit is disabled", warning)
+        self.assertIn("Auto-commit is turned off", warning)
         self.assertNotIn("pre-commit hook", warning)
         self.assertTrue(wt.wt_dir.exists())
         self.assertIn("uncommitted.txt", self._porcelain(wt.wt_dir))

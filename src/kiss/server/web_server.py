@@ -78,7 +78,11 @@ from websockets.http11 import Request, Response
 
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
-from kiss.core.vscode_config import load_config, source_shell_env
+from kiss.core.vscode_config import (
+    apply_config_to_env,
+    load_config,
+    source_shell_env,
+)
 from kiss.server import sorcar as sorcar_api
 from kiss.server.json_printer import JsonPrinter, stamp_event_ts
 from kiss.server.server import VSCodeServer, broadcast_to_conn
@@ -1470,6 +1474,12 @@ def _snapshot_active_tabs() -> list[str]:
     shutdown), and skips malformed entries rather than propagating, so
     callers — the shutdown-signal logger and the ``activeTasksQuery``
     handler — always get a usable (possibly partial) report.
+
+    Liveness is :meth:`AgentState.busy`, not ``is_task_active`` alone:
+    a worker that ``_cmd_run`` has started but that has not yet raised
+    the flag owns a real task, and answering ``count: 0`` for it lets
+    the extension's dependency installer SIGTERM the daemon on top of
+    a just-launched run (F08-2).
     """
     from kiss.server import agent_state
 
@@ -1486,7 +1496,7 @@ def _snapshot_active_tabs() -> list[str]:
     active_tabs: list[str] = []
     for state in states:
         try:
-            if state.is_task_active:
+            if state.busy():
                 active_tabs.append(f"{state.tab_id}(task={state.task_id})")
         except Exception:
             logger.debug(
@@ -1503,7 +1513,10 @@ def _snapshot_running_task_rows() -> list[dict[str, Any]]:
     :func:`_snapshot_active_tabs`) and keeps only top-level running
     tasks:
 
-    * ``is_task_active`` must be true (a task is actually in flight);
+    * the state must be :meth:`AgentState.busy` (a task is actually in
+      flight — including one whose worker has started but has not yet
+      raised ``is_task_active``, which would otherwise be silently
+      omitted from a client connecting in that window, F08-2);
     * sub-agent states are skipped — their chats are reopened by the
       parent tab's own ``resumeSession`` replay
       (``_open_persisted_subagent_tabs``), so listing them here would
@@ -1539,7 +1552,7 @@ def _snapshot_running_task_rows() -> list[dict[str, Any]]:
     seen_chats: set[str] = set()
     for state in states:
         try:
-            if not state.is_task_active or state.is_subagent:
+            if not state.busy() or state.is_subagent:
                 continue
             chat_id = state.chat_id
             if not chat_id or chat_id in seen_chats:
@@ -3191,6 +3204,12 @@ class RemoteAccessServer:
         uds_path: str | Path | None = None,
     ) -> None:
         source_shell_env()
+        # ``saveConfig`` was the only caller of apply_config_to_env, so
+        # a freshly started daemon kept the DECLARED default budget
+        # until the user happened to open and close the settings panel.
+        # Applying the persisted config here makes every process start
+        # in the state the user last saved.
+        apply_config_to_env(load_config())
 
         self.host = host
         self.port = port
@@ -4451,6 +4470,12 @@ class RemoteAccessServer:
             "useWorktree": cmd.get("useWorktree", True),
             "useParallel": cmd.get("useParallel", True),
             "autoCommit": cmd.get("autoCommit", True),
+            # Carried over from the ``submit`` this run was built from:
+            # ``_run_cmd`` bypasses the dispatcher that stamps it, so
+            # without this a browser-launched task would record an
+            # empty owning connection while the identical VS Code
+            # ``run`` records the real one (F08-7).
+            "connId": cmd.get("connId", ""),
         }
         await self._run_cmd(run_cmd)
 
@@ -5561,6 +5586,7 @@ class RemoteAccessServer:
             logger.exception(
                 "SIGTERM shutdown: stopping in-flight agent tasks failed",
             )
+        self._disconnect_mcp_servers()
         loop = self._loop
         if loop is not None and loop.is_running():
             try:
@@ -5583,6 +5609,33 @@ class RemoteAccessServer:
         self._detach_tunnel()
         logging.shutdown()
         os._exit(0)
+
+    def _disconnect_mcp_servers(self) -> None:
+        """Reap the MCP server children agents left behind.
+
+        :class:`~kiss.agents.sorcar.mcp_servers.MCPManager` keeps one
+        long-lived connection per configured MCP server, and a stdio
+        server is a **child process** of this daemon.  The manager only
+        tears those children down from an ``atexit`` hook, which does
+        not run when the daemon is killed, and the daemon itself never
+        referenced MCP at all — so every shutdown that was not a clean
+        interpreter exit orphaned them.
+
+        Called from every shutdown path (SIGTERM, the blocking
+        ``start()`` cleanup, and the embedder/test ``stop_async()``)
+        right after the in-flight agent tasks have been joined, so no
+        agent can open a fresh connection afterwards.
+        ``disconnect_all`` is idempotent, so the repeated calls a
+        single shutdown makes are harmless no-ops, and it leaves the
+        manager usable for an embedder that starts another server in
+        the same process.
+        """
+        try:
+            from kiss.agents.sorcar.mcp_servers import MCPManager
+
+            MCPManager.instance().disconnect_all()
+        except Exception:  # noqa: BLE001 — shutdown must proceed regardless
+            logger.debug("MCP server disconnect failed", exc_info=True)
 
     def _stop_active_agent_tasks(self, timeout: float = 12.0) -> None:
         """Stop in-flight agent worker threads so they unwind cleanly.
@@ -5627,7 +5680,13 @@ class RemoteAccessServer:
         with agent_state.STATE_LOCK:
             for task_id, state in agent_state.agent_states.items():
                 thread = state.task_thread
-                if state.is_task_active and thread is not None and thread.is_alive():
+                # Liveness is AgentState.busy(), not is_task_active
+                # alone: the worker raises that flag only after
+                # _cmd_run has started it, and a task swept in that
+                # window is abandoned outright — no stop event, no
+                # join, no cleanup finally — leaving its history row
+                # stranded at the abrupt-failure sentinel (F08-2).
+                if thread is not None and state.busy():
                     state.interrupted_by_shutdown = True
                     active.append((task_id, state.stop_event, thread))
                     active_task_history_ids.add(task_id)
@@ -5727,6 +5786,7 @@ class RemoteAccessServer:
         finally:
             self._shutdown_initiated = True
             self._stop_active_agent_tasks()
+            self._disconnect_mcp_servers()
             logger.info("Server stopped: pid=%d", pid)
             self._detach_tunnel()
 
@@ -5841,6 +5901,7 @@ class RemoteAccessServer:
             # stop_async returns; cancel stragglers.
             await self._drain_tasks(set(self._uds_handler_tasks))
             await asyncio.to_thread(self._stop_active_agent_tasks)
+            await asyncio.to_thread(self._disconnect_mcp_servers)
             self._stop_tunnel()
             _remove_url_file(self._url_file)
 

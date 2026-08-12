@@ -39,7 +39,10 @@ _DISTINCT_WRITES: dict[str, Any] = {
     "work_dir": "/race/work/dir",
     "last_model": "race-model",
     "auto_commit_mode": False,
-    "is_parallel": False,
+    # ``is_parallel`` used to be here; it is now a retired key that
+    # save_config purges on sight, so a live extension-owned key that
+    # is genuinely read at runtime takes its place.
+    "tunnel_token": "race-tunnel-token",
     "is_worktree": False,
     "use_web_browser": False,
 }

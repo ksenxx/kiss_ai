@@ -8,6 +8,13 @@ import base64
 import shlex
 from collections.abc import Callable
 
+#: Marker the Write script echoes only after the bytes really landed.
+#: Success must be proven positively: the bash function's *other* failure
+#: return — ``"Error: command timed out after Ns"`` — carries no
+#: ``[exit code:`` marker, so sniffing for that marker reported a write
+#: that never happened as a success.
+_WRITE_OK = "__KISS_WRITE_OK__"
+
 
 class DockerTools:
     """File tools that execute inside a Docker container via bash.
@@ -47,11 +54,14 @@ class DockerTools:
                 f"Error: start_line must be >= 1 (got {start_line}); the "
                 f"parameter is 1-indexed."
             )
+        if max_lines < 1:
+            return f"Error: max_lines must be >= 1 (got {max_lines})."
         path = shlex.quote(file_path)
         cmd = (
             f'FILE={path}\n'
             f'if [ ! -f "$FILE" ]; then echo "Error: File not found: $FILE"; exit 1; fi\n'
             f'TOTAL=$(awk \'END{{print NR}}\' "$FILE")\n'
+            f'if [ "$TOTAL" -eq 0 ]; then echo "(file is empty)"; exit 0; fi\n'
             f'START={start_line}\n'
             f'MAX={max_lines}\n'
             f'if [ "$START" -gt "$TOTAL" ] && [ "$TOTAL" -gt 0 ]; then\n'
@@ -80,12 +90,13 @@ class DockerTools:
         encoded = base64.b64encode(content.encode()).decode()
         path = shlex.quote(file_path)
         cmd = (
-            f'mkdir -p "$(dirname {path})" && base64 -d > {path} << \'KISS_B64_EOF\'\n'
+            f'mkdir -p "$(dirname {path})" && base64 -d > {path} '
+            f'<< \'KISS_B64_EOF\' && echo {_WRITE_OK}\n'
             f'{encoded}\n'
             f'KISS_B64_EOF'
         )
         result = self.bash(cmd, f"Write {file_path}")
-        if "[exit code:" in result:
+        if _WRITE_OK not in result:
             return result
         return f"Successfully wrote {len(content)} characters to {file_path}"
 
@@ -104,6 +115,11 @@ class DockerTools:
             new_string: Replacement text, must differ from old_string.
             replace_all: If True, replace all occurrences.
         """
+        if old_string == "":
+            return (
+                "Error: old_string must not be empty. "
+                "Use the Write tool to create or overwrite a file."
+            )
         b64_old = base64.b64encode(old_string.encode()).decode()
         b64_new = base64.b64encode(new_string.encode()).decode()
         path = shlex.quote(file_path)

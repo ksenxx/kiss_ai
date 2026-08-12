@@ -228,6 +228,12 @@ class TestShutdownPersist(_TempDbTestBase):
     def test_recover_orphaned_tasks(self) -> None:
         t1, _ = th._add_task("t1")
         t2, _ = th._add_task("t2")
+        # A row whose owning process is still alive is not an orphan;
+        # clearing ``owner`` makes t1 look like the leftover of a
+        # prior, now-dead process, which is what the sweep is for.
+        th._get_db().execute(
+            "UPDATE task_history SET owner = '' WHERE id = ?", (t1,)
+        )
         assert th._recover_orphaned_tasks({t2}) == 1
         results = {e["id"]: e["result"] for e in th._load_history()}
         assert results[t1] == "Task terminated unexpectedly (process killed)"

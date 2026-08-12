@@ -12,50 +12,45 @@ in single-shot mode, so **no agentic tool use** is involved.
 For agentic use, tool descriptions are injected into the prompt and the
 model's text output is parsed for tool-call JSON — the same approach used
 for DeepSeek R1 in :mod:`kiss.core.models.openai_compatible_model`.
+
+The subprocess supervision both CLI-backed adapters share
+(:class:`~kiss.core.models.model._CLIProcess`,
+:class:`~kiss.core.models.model._ToolCallFilteredStream`) lives beside
+:class:`~kiss.core.models.model.CLITextModel` in
+:mod:`kiss.core.models.model`, which this module and
+:mod:`kiss.core.models.codex_model` both import it from.
 """
 
+import contextlib
 import json
 import logging
-import queue
 import shutil
-import subprocess
-import threading
-import time
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import Attachment as Attachment
+from kiss.core.models.anthropic_model import cache_creation_tokens
 from kiss.core.models.model import (
     CLITextModel,
     ThinkingCallback,
     TokenCallback,
+    _cli_stall_error,
+    _CLIProcess,
     _iter_balanced_json_objects,
     _iter_tool_calls_lists,
     _parse_text_based_tool_calls,
+    _StreamReadTimeoutError,
+    _ToolCallFilteredStream,
     flatten_content_to_text,
-)
-from kiss.core.models.model import Model as Model
-from kiss.core.models.model import (
-    _build_text_based_tools_prompt as _build_text_based_tools_prompt,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def _claude_code_cache_creation_tokens(usage: dict[str, Any]) -> tuple[int, int]:
-    """Return Claude Code 5-minute and 1-hour cache-creation token counts."""
-    cache_creation = usage.get("cache_creation")
-    if isinstance(cache_creation, dict):
-        return (
-            cache_creation.get("ephemeral_5m_input_tokens", 0) or 0,
-            cache_creation.get("ephemeral_1h_input_tokens", 0) or 0,
-        )
-    return 0, usage.get("cache_creation_input_tokens", 0) or 0
+def _dict_field(record: Any, name: str) -> Any:
+    """Return key *name* of the dict *record*, or ``None`` when absent."""
+    return record.get(name) if isinstance(record, dict) else None
 
-
-class _StreamReadTimeoutError(Exception):
-    """Internal sentinel: the CLI stdout stream stalled past the deadline."""
 
 
 def _find_claude_cli() -> str:
@@ -231,95 +226,51 @@ class ClaudeCodeModel(CLITextModel):
         process is terminated before a second assistant message is produced.
 
         Args:
-            stop_on_tool_calls: When ``True``, terminate the CLI process as
-                soon as a complete ``tool_calls`` JSON block is detected in
-                the streaming text.  This prevents reasoning models from
-                hallucinating tool results and generating an unbounded
-                response.
+            stop_on_tool_calls: When ``True``, truncate the response at the
+                end of the first run of complete ``tool_calls`` JSON blocks
+                and stop parsing the turn, so a reasoning model that keeps
+                going cannot hallucinate its own tool results into the
+                content.  The CLI is **not** killed at that instant: the
+                stream is first drained to its terminal ``result`` event,
+                the only carrier of usage and cost (issue #34).  That drain
+                gives up at *timeout* rather than failing a step whose tool
+                call is already parsed, and the process is terminated as
+                soon as it finishes either way.
 
         Returns:
             tuple[str, Any]: (generated_text, parsed_json_response).
 
         Raises:
-            KISSError: If the CLI invocation fails.
+            KISSError: If the CLI could not be started or exited with a
+                failure status.
+            TimeoutError: If the CLI produced no complete turn before the
+                deadline.  Retryable, unlike ``KISSError``.
+            KeyboardInterrupt: If the user stopped the task mid-turn.
         """
         prompt = self._build_prompt()
         timeout = self.model_config.get("timeout", 300)
         args = self._build_cli_args()
-
-        try:
-            proc = subprocess.Popen(
-                args,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-            )
-        except OSError as e:  # pragma: no cover – requires broken PATH
-            raise KISSError(f"Failed to start Claude Code CLI: {e}") from e
-
-        assert proc.stdin is not None
-        proc.stdin.write(prompt)
-        proc.stdin.close()
-
         self._stopped_for_tool_calls = False
-        assert proc.stdout is not None
 
-        stdout = proc.stdout
-        out_queue: queue.Queue[str | None] = queue.Queue()
-
-        def _drain_stdout() -> None:
+        with _CLIProcess(args, "Claude Code CLI", timeout) as proc:
+            proc.send_prompt(prompt)
             try:
-                for line in stdout:
-                    out_queue.put(line)
-            finally:
-                out_queue.put(None)
-
-        threading.Thread(target=_drain_stdout, daemon=True).start()
-        deadline = time.monotonic() + timeout
-
-        def _lines_until_deadline() -> Iterator[str]:
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise _StreamReadTimeoutError()
-                try:
-                    line = out_queue.get(timeout=remaining)
-                except queue.Empty:
-                    raise _StreamReadTimeoutError() from None
-                if line is None:
-                    return
-                yield line
-
-        try:
-            content, result_json = self._parse_stream_events(
-                _lines_until_deadline(), stop_on_tool_calls=stop_on_tool_calls
-            )
-        except _StreamReadTimeoutError:
-            proc.kill()
-            raise KISSError(
-                f"Claude Code CLI timed out after {timeout}s"
-            ) from None
-
-        if self._stopped_for_tool_calls and proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:  # pragma: no cover
-                proc.kill()
-                proc.wait()
-        else:
-            proc.wait(timeout=timeout)
-            if proc.returncode not in (
-                0,
-                -15,
-            ):  # pragma: no cover – requires CLI failure
-                stderr = proc.stderr.read() if proc.stderr else ""
-                raise KISSError(
-                    f"Claude Code CLI failed (exit {proc.returncode}): "
-                    f"{stderr.strip()}"
+                content, result_json = self._parse_stream_events(
+                    proc.lines(), stop_on_tool_calls=stop_on_tool_calls
                 )
+            except _StreamReadTimeoutError:
+                self._close_thinking_if_open()
+                raise _cli_stall_error("Claude Code CLI", timeout) from None
+            except KeyboardInterrupt:
+                self._close_thinking_if_open()
+                raise
+            if not self._stopped_for_tool_calls:
+                status = proc.wait_for_exit()
+                if status not in (0, -15, None):
+                    raise KISSError(
+                        f"Claude Code CLI failed (exit {status}): "
+                        f"{proc.stderr_text().strip()}"
+                    )
 
         self.conversation.append({"role": "assistant", "content": content})
         return content, result_json
@@ -458,10 +409,15 @@ class ClaudeCodeModel(CLITextModel):
             self._stopped_for_tool_calls = True
 
         if self._stopped_for_tool_calls and not result_json:
-            for event in events:
-                if event.get("type") == "result":
-                    result_json = event
-                    break
+            # The tool call is already parsed; this drain only rescues the
+            # usage counts the terminal event carries (issue #34).  A CLI
+            # that overruns the deadline here costs cost-accuracy for one
+            # step, never the step itself.
+            with contextlib.suppress(_StreamReadTimeoutError):
+                for event in events:
+                    if event.get("type") == "result":
+                        result_json = event
+                        break
 
         self._last_thinking_content = thinking_content
         self._pre_result_content = pre_result_content
@@ -479,10 +435,12 @@ class ClaudeCodeModel(CLITextModel):
         returned to the framework for execution — the CLI itself runs in
         pure LLM mode (``--tools ""``), **not** as an agent.
 
-        Thinking and text tokens are streamed directly to the callbacks
-        during generation so the UI renders them incrementally.  This
-        matches how DeepSeek R1's text-based tool calling works in
-        :class:`OpenAICompatibleModel`.
+        Thinking tokens stream to the callbacks as they arrive, but the
+        assistant text is held back and re-emitted once the turn ends,
+        stripped of the ``tool_calls`` JSON the framework parses out of
+        it — otherwise the raw block would be rendered in the chat panel
+        before every tool card.  :class:`CodexModel` filters its stream
+        the same way.
 
         Args:
             function_map: Dictionary mapping function names to callable functions.
@@ -493,7 +451,8 @@ class ClaudeCodeModel(CLITextModel):
         """
         original_config = self._install_tools_prompt_in_system_instruction(function_map)
         try:
-            content, response = self.generate(stop_on_tool_calls=True)
+            with _ToolCallFilteredStream(self):
+                content, response = self.generate(stop_on_tool_calls=True)
         finally:
             self.model_config = original_config
 
@@ -525,12 +484,12 @@ class ClaudeCodeModel(CLITextModel):
         """
         if not isinstance(response, dict):
             return 0, 0, 0, 0, 0
-        usage = response.get("usage", {})
-        cache_write_5m, cache_write_1h = _claude_code_cache_creation_tokens(usage)
+        usage = response.get("usage") or {}
+        cache_write_5m, cache_write_1h = cache_creation_tokens(usage, _dict_field)
         return (
-            usage.get("input_tokens", 0),
-            usage.get("output_tokens", 0),
-            usage.get("cache_read_input_tokens", 0),
+            usage.get("input_tokens") or 0,
+            usage.get("output_tokens") or 0,
+            usage.get("cache_read_input_tokens") or 0,
             cache_write_5m,
             cache_write_1h,
         )

@@ -217,9 +217,8 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
-  const triggerCommitMessageGeneration = async (
+  const runCommitMessageGeneration = async (
     rootUri?: unknown,
-    _context?: unknown,
     token?: vscode.CancellationToken,
   ): Promise<void> => {
     const repoRoot = repoRootOf(rootUri);
@@ -246,6 +245,31 @@ export function activate(context: vscode.ExtensionContext): void {
       pendingCommitRepoRoot = undefined;
       teardown();
     });
+  };
+
+  // The generation currently in flight, if any.
+  //
+  // A second invocation while one is running -- a double click on the SCM
+  // sparkle, or one of the two hijacked ids below firing -- must JOIN it
+  // rather than start a competing one.  The sidebar already de-duplicates
+  // per tab, but it does so by handing back an already-resolved promise
+  // meaning "someone else owns this"; treating that as "my generation
+  // finished" tore down the real one and dropped its result on the floor.
+  // The promise is registered synchronously, before the first `await`, so
+  // two calls made in the same tick cannot both slip past this guard.
+  let commitGenInFlight: Promise<void> | null = null;
+
+  const triggerCommitMessageGeneration = (
+    rootUri?: unknown,
+    _context?: unknown,
+    token?: vscode.CancellationToken,
+  ): Promise<void> => {
+    if (commitGenInFlight) return commitGenInFlight;
+    const running = runCommitMessageGeneration(rootUri, token).finally(() => {
+      if (commitGenInFlight === running) commitGenInFlight = null;
+    });
+    commitGenInFlight = running;
+    return running;
   };
 
   context.subscriptions.push(

@@ -230,17 +230,18 @@ class TestIsWorktreeExtraFlag:
         assert task_id is not None
         assert _load_is_worktree(task_id) is False
 
-    def test_plain_chat_agent_explicit_true_kept_by_final_save(self) -> None:
-        """An explicit ``use_worktree=True`` on a plain ``ChatSorcarAgent``
-        must survive the end-of-run extra save (early save recorded True;
-        the final save used to flip it back to False)."""
+    def test_plain_chat_agent_explicit_true_records_false(self) -> None:
+        """A plain ``ChatSorcarAgent`` creates no worktree, whatever it
+        is asked for, so both the early and the final extra save must
+        record ``is_worktree = False``.  Believing the caller's request
+        instead of the filesystem made the history badge lie."""
         work = Path(self.tmpdir) / "chat"
         work.mkdir()
         agent = ChatSorcarAgent("explicit-true")
         self._run(agent, work_dir=str(work), use_worktree=True)
         task_id = agent._last_task_id
         assert task_id is not None
-        assert _load_is_worktree(task_id) is True
+        assert _load_is_worktree(task_id) is False
 
     def test_worktree_agent_real_worktree_records_true(self) -> None:
         """Regression guard: a real worktree run still records True."""

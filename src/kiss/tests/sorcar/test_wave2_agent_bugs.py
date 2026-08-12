@@ -335,7 +335,7 @@ class TestF15NewChatSurfacesReleaseWarnings(_Base):
             "instead of broadcasting it to the attached printer",
         )
         message = warnings[0].get("message") or ""
-        self.assertIn("Auto-commit is disabled", message)
+        self.assertIn("Auto-commit is turned off", message)
         self.assertIn(str(wt_dir), message)
         self.assertIsNone(agent._merge_conflict_warning)
         self.assertEqual(agent.chat_id, "")
@@ -349,7 +349,7 @@ class TestF15NewChatSurfacesReleaseWarnings(_Base):
 
         warning = agent._merge_conflict_warning or ""
         self.assertIn(
-            "Auto-commit is disabled", warning,
+            "Auto-commit is turned off", warning,
             "with no broadcast-capable printer attached, new_chat() "
             "must retain the warning for the next run()'s flush",
         )
