@@ -90,10 +90,11 @@ def atomic_write_text(target: Path, content: str, mode: int | None = None) -> No
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=f".{target.name}-", dir=str(target.parent))
     try:
-        try:
-            os.write(fd, content.encode("utf-8"))
-        finally:
-            os.close(fd)
+        # A buffered file object rather than a bare os.write, whose
+        # POSIX-legal short return count would otherwise be ignored and
+        # then published as a permanently truncated file.
+        with os.fdopen(fd, "wb") as staged:
+            staged.write(content.encode("utf-8"))
         if mode is not None:
             _try_chmod(tmp, mode)
         os.replace(tmp, target)

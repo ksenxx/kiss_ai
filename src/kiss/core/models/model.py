@@ -1213,19 +1213,58 @@ class _CLIProcess:
     def send_prompt(self, prompt: str) -> None:
         """Write *prompt* to the child's stdin and close it.
 
+        A flattened agent conversation dwarfs the pipe buffer, so the
+        write only completes as fast as the child drains it.  Doing it
+        inline would park the agent thread inside ``write(2)`` — deaf to
+        both the turn deadline and Stop, which are polled only while
+        reading the child's *output* — for as long as a CLI stuck in
+        start-up, auth or plugin loading leaves stdin unread.  The write
+        therefore runs on its own thread and is bounded by exactly the
+        same two conditions :meth:`lines` obeys.
+
         A child that exits before reading breaks the pipe mid-write.
-        That is swallowed here: the caller reports the child's exit
-        status and stderr, which is the failure the user can act on.
+        That is swallowed: the caller reports the child's exit status
+        and stderr, which is the failure the user can act on.
 
         Args:
             prompt: The complete prompt text.
+
+        Raises:
+            KeyboardInterrupt: The user pressed Stop.
+            _StreamReadTimeoutError: The turn outlived its deadline
+                before the child accepted the whole prompt.
+        """
+        writer = threading.Thread(
+            target=self._write_prompt,
+            args=(prompt,),
+            daemon=True,
+            name="cli-stdin-write",
+        )
+        writer.start()
+        while True:
+            remaining = self._deadline - time.monotonic()
+            if remaining <= 0:
+                raise _StreamReadTimeoutError()
+            if stop_signal.stop_requested():
+                raise KeyboardInterrupt("Agent stop requested")
+            writer.join(timeout=min(remaining, _STOP_POLL_SECONDS))
+            if not writer.is_alive():
+                return
+
+    def _write_prompt(self, prompt: str) -> None:
+        """Push the whole prompt into the child's stdin, then close it.
+
+        Runs on the writer thread, where nothing can be reported: a
+        broken or already-closed pipe means the child died or
+        :meth:`close` tore the turn down, and both are diagnosed by the
+        caller from the child's exit status.
         """
         stdin = self._proc.stdin
         assert stdin is not None
         try:
             stdin.write(prompt)
             stdin.close()
-        except OSError:
+        except (OSError, ValueError):
             logger.debug("%s exited before reading its prompt", self._label)
 
     def lines(self) -> Iterator[str]:

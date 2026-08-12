@@ -102,6 +102,44 @@ def open_fd_count() -> int:
     return len(os.listdir("/dev/fd"))
 
 
+def generate_on_a_worker_thread(
+    model: "ClaudeCodeModel | CodexModel", stop_event: threading.Event | None = None
+) -> tuple[threading.Thread, list[BaseException]]:
+    """Run ``generate()`` on a daemon worker thread, capturing what it raises.
+
+    A daemon thread keeps a regression *visible* rather than fatal: when
+    the call under test blocks forever the test still fails on its
+    ``join(timeout=...)`` and the session continues, instead of wedging
+    pytest until somebody kills it.
+
+    Args:
+        model: The adapter whose turn is driven.
+        stop_event: Optional Stop event bound to the worker thread, so
+            the test can press Stop from the outside.
+
+    Returns:
+        The started thread and the list that receives its exception.
+    """
+    raised: list[BaseException] = []
+    running = threading.Event()
+
+    def _worker() -> None:
+        if stop_event is not None:
+            stop_signal.set_thread_stop_event(stop_event)
+        running.set()
+        try:
+            model.generate()
+        except BaseException as exc:  # noqa: BLE001 – the test classifies it
+            raised.append(exc)
+        finally:
+            stop_signal.set_thread_stop_event(None)
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+    running.wait(timeout=5)
+    return thread, raised
+
+
 _SLEEPS_FOREVER = """
     import sys
     import time
@@ -224,6 +262,14 @@ _EXITS_WITHOUT_READING_STDIN = """
     sys.stderr.write("unknown --model value\\n")
     sys.stderr.flush()
     os._exit(2)
+"""
+
+_ALIVE_BUT_NEVER_READS_STDIN = """
+    import time
+
+    # Never touches stdin: the pipe buffer fills and stays full for the
+    # whole minute, so whoever is writing the prompt blocks in write(2).
+    time.sleep(60)
 """
 
 _ONE_EVENT_THEN_QUIET_CODEX = """
@@ -424,31 +470,94 @@ class TestC5EarlyExitDuringPromptWrite:
             model.generate()
 
 
-class TestI6StopAndStallClassification:
-    """The CLI adapters must honour Stop and classify a stall as retryable."""
+class TestC5StalledPromptWrite:
+    """A CLI that stays alive without reading stdin must not wedge the turn.
+
+    The prompt is the flattened conversation, which routinely outgrows
+    the 64 KiB pipe buffer.  A child that hangs in start-up, auth or
+    plugin loading before its first ``read`` therefore parks the agent
+    thread inside ``stdin.write`` — where neither the turn deadline nor
+    the Stop button can be observed, because both are only polled while
+    reading the child's *output*.
+    """
+
+    _BIG_PROMPT = "x" * 4_000_000
 
     @staticmethod
-    def _generate_on_a_stoppable_thread(
-        model: ClaudeCodeModel | CodexModel, stop_event: threading.Event
-    ) -> tuple[threading.Thread, list[BaseException]]:
-        """Run ``generate()`` on a worker thread bound to *stop_event*."""
-        raised: list[BaseException] = []
-        running = threading.Event()
+    def _model(name: str, timeout: int) -> ClaudeCodeModel | CodexModel:
+        """Build the adapter under test with the given turn timeout."""
+        return (
+            CodexModel("codex/default", model_config={"timeout": timeout})
+            if name == "codex"
+            else ClaudeCodeModel("cc/opus", model_config={"timeout": timeout})
+        )
 
-        def _worker() -> None:
-            stop_signal.set_thread_stop_event(stop_event)
-            running.set()
-            try:
-                model.generate()
-            except BaseException as exc:  # noqa: BLE001 – the test classifies it
-                raised.append(exc)
-            finally:
-                stop_signal.set_thread_stop_event(None)
+    @pytest.mark.parametrize("name", ["codex", "claude"])
+    def test_a_stalled_prompt_write_ends_at_the_turn_deadline(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+    ) -> None:
+        """The configured timeout must fire even before the child reads."""
+        install_cli(tmp_path, monkeypatch, name, _ALIVE_BUT_NEVER_READS_STDIN)
+        model = self._model(name, timeout=2)
+        model.initialize(self._BIG_PROMPT)
 
-        thread = threading.Thread(target=_worker, daemon=True)
-        thread.start()
-        running.wait(timeout=5)
-        return thread, raised
+        before_pids = child_pids()
+        started = time.monotonic()
+        thread, raised = generate_on_a_worker_thread(model)
+        thread.join(timeout=25)
+        elapsed = time.monotonic() - started
+
+        assert not thread.is_alive(), "stdin.write ignored the turn deadline"
+        assert raised and isinstance(raised[0], TimeoutError), raised
+        assert not isinstance(raised[0], KISSError), (
+            "a stalled prompt write must stay retryable"
+        )
+        assert elapsed < 20, f"the deadline fired {elapsed:.1f}s late"
+        assert child_pids() - before_pids == set(), "the stalled CLI survived"
+
+    @pytest.mark.parametrize("name", ["codex", "claude"])
+    def test_stop_interrupts_a_stalled_prompt_write(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+    ) -> None:
+        """Stop must unwind a prompt write the child is not draining."""
+        install_cli(tmp_path, monkeypatch, name, _ALIVE_BUT_NEVER_READS_STDIN)
+        model = self._model(name, timeout=120)
+        model.initialize(self._BIG_PROMPT)
+
+        before_pids = child_pids()
+        stop_event = threading.Event()
+        thread, raised = generate_on_a_worker_thread(model, stop_event)
+        time.sleep(1.0)
+        stop_event.set()
+        thread.join(timeout=15)
+
+        assert not thread.is_alive(), "Stop could not reach the blocked writer"
+        assert raised and isinstance(raised[0], KeyboardInterrupt), raised
+        assert child_pids() - before_pids == set(), "the CLI child survived Stop"
+
+    @pytest.mark.parametrize("name", ["codex", "claude"])
+    def test_a_prompt_that_fits_the_pipe_still_completes_the_turn(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+    ) -> None:
+        """The bounded write must not disturb an ordinary, healthy turn."""
+        body = (
+            _ONE_EVENT_THEN_QUIET_CODEX.replace("time.sleep(60)", "")
+            if name == "codex"
+            else _ONE_EVENT_THEN_QUIET_CLAUDE.replace("time.sleep(60)", "")
+        )
+        install_cli(tmp_path, monkeypatch, name, body)
+        model = self._model(name, timeout=20)
+        model.initialize("hi")
+
+        before_pids = child_pids()
+        content, _ = model.generate()
+
+        assert content == "hello"
+        assert child_pids() - before_pids == set()
+
+
+class TestI6StopAndStallClassification:
+    """The CLI adapters must honour Stop and classify a stall as retryable."""
 
     @pytest.mark.parametrize("name", ["codex", "claude"])
     def test_stop_aborts_a_quiet_cli_at_once(
@@ -470,7 +579,7 @@ class TestI6StopAndStallClassification:
 
         before_pids = child_pids()
         stop_event = threading.Event()
-        thread, raised = self._generate_on_a_stoppable_thread(model, stop_event)
+        thread, raised = generate_on_a_worker_thread(model, stop_event)
         time.sleep(1.0)
         stop_event.set()
         thread.join(timeout=6)

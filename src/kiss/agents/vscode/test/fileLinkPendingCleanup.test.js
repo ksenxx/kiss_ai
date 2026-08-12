@@ -134,17 +134,28 @@ function testLostReplyDoesNotWedgeThePathForEver() {
     'a check already in flight must not be sent twice',
   );
 
-  // The daemon dies before answering, then comes back.
+  // The daemon dies before answering, then comes back. The key of a
+  // check nothing can answer must not survive the outage, and the spans
+  // it was for must be asked about again -- see
+  // fileLinkReissueOnReconnect.test.js for the reissue itself.
   send(win, {type: 'daemonStatus', connected: false});
-  send(win, {type: 'daemonStatus', connected: true});
-
   posted.length = 0;
-  sendToolResult(win, tabId, 'and ./src/foo.py once more');
+  send(win, {type: 'daemonStatus', connected: true});
   assert.deepStrictEqual(
     checkPathCommands(posted).map(c => c.paths),
     [['./src/foo.py']],
     'a reply that can never arrive must not suppress the check for the ' +
       'rest of the session — the path would stay inert for ever',
+  );
+
+  // That reissue is itself in flight now, so a later panel mentioning
+  // the same path is deduped against it rather than asking a third time.
+  posted.length = 0;
+  sendToolResult(win, tabId, 'and ./src/foo.py once more');
+  assert.deepStrictEqual(
+    checkPathCommands(posted),
+    [],
+    'the reissued check is in flight, so a later panel must not ask again',
   );
 
   // ...and the eventual reply still resolves every span of that path,

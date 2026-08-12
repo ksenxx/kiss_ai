@@ -1037,52 +1037,55 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         response = None
         last_chunk = None
         finish_reason: str | None = None
-        in_reasoning = False
         stream = (
             self._create_chat_completion_adaptive(kwargs)
             if adaptive
             else self.client.chat.completions.create(**kwargs)
         )
-        for chunk in stop_aware_events(
-            stream,
-            stall_timeout=self._stream_stall_timeout,
-            on_abort=self._close_thinking_if_open,
-            name=(
-                "openai-tools-stream-abort-watchdog"
-                if adaptive
-                else "openai-stream-abort-watchdog"
-            ),
-        ):
-            last_chunk = chunk
-            if chunk.choices:
-                choice = chunk.choices[0]
-                if getattr(choice, "finish_reason", None):
-                    finish_reason = choice.finish_reason
-                delta = choice.delta
-                if delta:
-                    reasoning = _delta_reasoning_text(delta)
-                    if reasoning:
-                        if not in_reasoning:
-                            in_reasoning = True
-                            self._invoke_thinking_callback(True)
-                        self._invoke_token_callback(reasoning)
-                    if delta.content:
-                        if in_reasoning:
-                            in_reasoning = False
-                            self._invoke_thinking_callback(False)
-                        content += delta.content
-                        self._invoke_token_callback(delta.content)
-                    if delta.tool_calls:
-                        if in_reasoning:
-                            in_reasoning = False
-                            self._invoke_thinking_callback(False)
-                        _accumulate_tool_call_deltas(
-                            tool_calls_accum, delta.tool_calls
-                        )
-            if chunk.usage is not None:
-                response = chunk
-        if in_reasoning:
-            self._invoke_thinking_callback(False)
+        # The bracket is closed in `finally`, not after the loop:
+        # `stop_aware_events` runs `on_abort` for a stop and for a stall
+        # but re-raises every other transport failure untouched, and
+        # KISSAgent retries those in the SAME run without resetting the
+        # model — so a provider that drops the connection mid-reasoning
+        # would leave the printer rendering the retry's answer as
+        # thinking.  `_close_thinking_if_open` is a no-op when the turn
+        # ended outside a reasoning block.
+        try:
+            for chunk in stop_aware_events(
+                stream,
+                stall_timeout=self._stream_stall_timeout,
+                on_abort=self._close_thinking_if_open,
+                name=(
+                    "openai-tools-stream-abort-watchdog"
+                    if adaptive
+                    else "openai-stream-abort-watchdog"
+                ),
+            ):
+                last_chunk = chunk
+                if chunk.choices:
+                    choice = chunk.choices[0]
+                    if getattr(choice, "finish_reason", None):
+                        finish_reason = choice.finish_reason
+                    delta = choice.delta
+                    if delta:
+                        reasoning = _delta_reasoning_text(delta)
+                        if reasoning:
+                            if not self._thinking_open:
+                                self._invoke_thinking_callback(True)
+                            self._invoke_token_callback(reasoning)
+                        if delta.content:
+                            self._close_thinking_if_open()
+                            content += delta.content
+                            self._invoke_token_callback(delta.content)
+                        if delta.tool_calls:
+                            self._close_thinking_if_open()
+                            _accumulate_tool_call_deltas(
+                                tool_calls_accum, delta.tool_calls
+                            )
+                if chunk.usage is not None:
+                    response = chunk
+        finally:
+            self._close_thinking_if_open()
         response = self._finalize_stream_response(response, last_chunk)
         return content, tool_calls_accum, response, finish_reason
 

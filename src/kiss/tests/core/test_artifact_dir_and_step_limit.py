@@ -31,7 +31,6 @@ from pathlib import Path
 
 import pytest
 
-import kiss.core.config as config_module
 from kiss.core.base import Base
 from kiss.core.config import get_artifact_dir, get_jobs_root
 from kiss.core.kiss_agent import KISSAgent
@@ -162,20 +161,45 @@ def _run_until_limit(base_url: str, max_steps: int) -> tuple[KISSAgent, KISSErro
     return agent, excinfo.value
 
 
-def test_artifact_dir_is_fixed_for_the_process(tmp_path: Path) -> None:
-    """F8: nothing can move the artifact root out from under a running agent."""
-    first = get_artifact_dir()
-    agent = Base("f8 stability")
-    trajectory = agent.get_trajectory_path()
+def test_a_trajectory_saved_late_lands_where_the_first_save_put_it() -> None:
+    """F8: one run must produce one trajectory file, not two orphans.
 
-    assert get_artifact_dir() == first
-    assert trajectory.parent.parent == Path(first)
-    assert Path(first).parent == get_jobs_root()
-    assert not hasattr(config_module, "set_artifact_base_dir")
+    ``Base.get_trajectory_path`` resolves the artifact root at *save*
+    time rather than at run start, so a root that moved mid-run would
+    scatter a single agent's trajectory across two directories — the
+    later save silently orphaning everything written before it, with no
+    error anywhere.  Real agents, real saves, real files.
+    """
+    agent = Base("f8 lifetime")
+    agent._add_message("user", "written-before")
+    agent._save()
+    first_path = agent.get_trajectory_path()
+    assert first_path.is_file()
+
+    # Everything a busy process does between two saves of the same run.
+    _resolve_roots_concurrently()
+
+    agent._add_message("user", "written-after")
+    agent._save()
+
+    assert agent.get_trajectory_path() == first_path
+    saved = first_path.read_text(encoding="utf-8")
+    assert "written-before" in saved, "the early messages were orphaned"
+    assert "written-after" in saved
+    siblings = sorted(first_path.parent.glob(f"*_{agent.id}_*.yaml"))
+    assert siblings == [first_path], (
+        f"the run left its trajectory in more than one place: {siblings}"
+    )
+    assert first_path.parent.parent == Path(get_artifact_dir())
+    assert Path(get_artifact_dir()).parent == get_jobs_root()
 
 
-def test_concurrent_agents_share_one_stable_artifact_root() -> None:
-    """F8: parallel sub-agents all resolve the same jobs root."""
+def _resolve_roots_concurrently() -> list[str]:
+    """Resolve the artifact root from eight real threads at once.
+
+    Returns:
+        Each thread's resolved job directory.
+    """
     resolved: list[str] = []
     lock = threading.Lock()
 
@@ -189,6 +213,12 @@ def test_concurrent_agents_share_one_stable_artifact_root() -> None:
         thread.start()
     for thread in threads:
         thread.join(timeout=30)
+    return resolved
+
+
+def test_concurrent_agents_share_one_stable_artifact_root() -> None:
+    """F8: parallel sub-agents all resolve the same jobs root."""
+    resolved = _resolve_roots_concurrently()
 
     assert set(resolved) == {get_artifact_dir()}
 

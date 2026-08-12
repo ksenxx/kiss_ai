@@ -66,6 +66,7 @@ class AgentState:
         "unattributed_prompt_echoes",
         "is_task_active",
         "is_merging",
+        "merge_thread",
         "is_running_non_wt",
         "interrupted_by_shutdown",
         "frontend_closed",
@@ -104,6 +105,11 @@ class AgentState:
         self.unattributed_prompt_echoes: list[str] = []
         self.is_task_active: bool = is_task_active
         self.is_merging: bool = False
+        # The thread executing an interactive merge/discard, so
+        # shutdown can WAIT for it: a merge rewrites the repository and
+        # must never be cut short.  It runs in the event loop's default
+        # executor, not in ``task_thread``.
+        self.merge_thread: threading.Thread | None = None
         self.is_running_non_wt: bool = False
         self.interrupted_by_shutdown: bool = False
         self.frontend_closed: bool = False

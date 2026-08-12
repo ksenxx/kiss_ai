@@ -258,8 +258,9 @@ def _read_model_info_json(path: Path) -> dict[str, Any]:
     ``import kiss.core.models.model_info`` — the subagent or CLI process
     dies instead of running.  ``update_models.py`` now publishes the
     catalog atomically, but an external tool (a checkout, an editor, an
-    older kiss) can still truncate it, so the read retries briefly and
-    then fails with a message that names the file.
+    older kiss) can still truncate it — or leave behind syntactically
+    valid JSON that is not a table at all — so the read retries briefly
+    and then fails with a message that names the file.
 
     Args:
         path: The catalog file to read.
@@ -268,13 +269,21 @@ def _read_model_info_json(path: Path) -> dict[str, Any]:
         The decoded catalog object.
 
     Raises:
-        KISSError: When the catalog is still unreadable or unparseable
-            after :data:`_CATALOG_READ_ATTEMPTS` attempts.
+        KISSError: When the catalog is still unreadable, unparseable or
+            not a JSON object after :data:`_CATALOG_READ_ATTEMPTS`
+            attempts.
     """
     last: Exception | None = None
     for attempt in range(_CATALOG_READ_ATTEMPTS):
         try:
-            return dict(json.loads(path.read_text(encoding="utf-8")))
+            decoded = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(decoded, dict):
+                # `dict(None)` / `dict(42)` raise TypeError, which would
+                # escape this handler and reach the importer unclassified.
+                raise ValueError(
+                    f"expected a JSON object, got {type(decoded).__name__}"
+                )
+            return decoded
         except (OSError, ValueError) as e:
             logger.debug("Exception caught", exc_info=True)
             last = e

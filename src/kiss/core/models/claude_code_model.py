@@ -253,8 +253,10 @@ class ClaudeCodeModel(CLITextModel):
         self._stopped_for_tool_calls = False
 
         with _CLIProcess(args, "Claude Code CLI", timeout) as proc:
-            proc.send_prompt(prompt)
             try:
+                # Inside the handlers: sending the prompt is bounded by
+                # the same deadline and Stop signal as reading the reply.
+                proc.send_prompt(prompt)
                 content, result_json = self._parse_stream_events(
                     proc.lines(), stop_on_tool_calls=stop_on_tool_calls
                 )

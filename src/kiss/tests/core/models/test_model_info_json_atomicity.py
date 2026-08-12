@@ -190,6 +190,27 @@ class TestReaderToleratesAConcurrentRewrite:
         with pytest.raises(KISSError):
             _read_model_info_json(tmp_path / "absent.json")
 
+    @pytest.mark.parametrize("payload", ["null", "[]", '"a catalog"', "42"])
+    def test_valid_json_of_the_wrong_shape_raises_a_clear_error(
+        self, tmp_path: Path, payload: str,
+    ) -> None:
+        """A catalog that parses but is not a table must still be classified.
+
+        An editor or an external catalog updater can atomically leave
+        behind syntactically valid JSON of the wrong top-level shape.
+        That is the same "the catalog is unusable" condition as a
+        truncated file, and it happens at **import time**, so it must
+        name the offending path instead of escaping as an unclassified
+        ``TypeError`` from ``dict(...)``.
+        """
+        path = tmp_path / "MODEL_INFO.json"
+        path.write_text(payload, encoding="utf-8")
+
+        with pytest.raises(KISSError) as excinfo:
+            _read_model_info_json(path)
+
+        assert str(path) in str(excinfo.value)
+
 
 class TestNoUserLocalCatalogCopy:
     """F4: the documented ``~/.kiss/MODEL_INFO.json`` sync must not exist.

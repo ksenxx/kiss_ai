@@ -244,3 +244,145 @@ def test_raw_writes_never_land_inside_another_threads_panel(
         if "rawtext" in line and ("╭" in line or "╰" in line or "│" in line)
     ]
     assert not mixed, f"raw output merged into a panel line: {mixed[:3]}"
+
+
+def test_usage_offsets_are_not_shared_between_sub_agents() -> None:
+    """Each sub-agent's result panel must carry its OWN accumulated totals.
+
+    ``RelentlessAgent`` snapshots the totals it has already spent into
+    ``tokens_offset`` / ``budget_offset`` / ``steps_offset`` at every
+    sub-session start, and ``ConsolePrinter`` adds them back when it
+    renders the result panel.  With one shared copy per printer object,
+    whichever parallel sub-agent wrote last decides what every sibling's
+    panel reports — a total that belongs to a different task.
+    """
+    buf = io.StringIO()
+    printer = ConsolePrinter(file=buf)
+    first_snapshot_taken = threading.Event()
+    second_snapshot_taken = threading.Event()
+
+    def early_agent() -> None:
+        printer.tokens_offset = 100
+        printer.budget_offset = 1.0
+        printer.steps_offset = 10
+        first_snapshot_taken.set()
+        assert second_snapshot_taken.wait(timeout=30)
+        printer.print(
+            "early done",
+            type="result",
+            total_tokens=10,
+            cost="$0.1000",
+            step_count=1,
+        )
+
+    def late_agent() -> None:
+        assert first_snapshot_taken.wait(timeout=30)
+        printer.tokens_offset = 200
+        printer.budget_offset = 2.0
+        printer.steps_offset = 20
+        second_snapshot_taken.set()
+
+    _run_threads([
+        threading.Thread(target=early_agent),
+        threading.Thread(target=late_agent),
+    ])
+
+    text = buf.getvalue()
+    assert "tokens=110" in text, f"the sibling's token offset won:\n{text}"
+    assert "cost=$1.1000" in text, f"the sibling's budget offset won:\n{text}"
+    assert "steps=11" in text, f"the sibling's step offset won:\n{text}"
+
+
+def test_usage_offsets_start_at_zero_in_every_thread() -> None:
+    """A sub-agent that never snapshots must report only its own usage.
+
+    Per-thread state must not mean per-thread *garbage*: a thread that
+    has written no offset sees the same zeroes a fresh printer has.
+    """
+    buf = io.StringIO()
+    printer = ConsolePrinter(file=buf)
+    printer.tokens_offset = 500
+    printer.budget_offset = 5.0
+    printer.steps_offset = 50
+    seen: list[tuple[int, float, int]] = []
+
+    def fresh_agent() -> None:
+        seen.append(
+            (printer.tokens_offset, printer.budget_offset, printer.steps_offset)
+        )
+        printer.print(
+            "fresh done", type="result", total_tokens=7, cost="$0.2000", step_count=2
+        )
+
+    _run_threads([threading.Thread(target=fresh_agent)])
+
+    assert seen == [(0, 0.0, 0)]
+    text = buf.getvalue()
+    assert "tokens=7" in text
+    assert "cost=$0.2000" in text
+    assert "steps=2" in text
+
+
+def test_usage_offsets_survive_a_reset_within_the_same_thread() -> None:
+    """The offsets belong to the sub-session, not to a single print call.
+
+    ``reset()`` runs once per turn while a sub-session keeps spending,
+    so clearing the snapshot there would make the panel under-report
+    everything the earlier turns of that session cost.
+    """
+    buf = io.StringIO()
+    printer = ConsolePrinter(file=buf)
+    printer.tokens_offset = 100
+    printer.budget_offset = 1.0
+    printer.steps_offset = 10
+
+    printer.reset()
+    printer.print(
+        "same thread", type="result", total_tokens=10, cost="$0.1000", step_count=1
+    )
+
+    text = buf.getvalue()
+    assert "tokens=110" in text
+    assert "cost=$1.1000" in text
+    assert "steps=11" in text
+
+
+def test_message_result_panel_uses_this_threads_token_offset() -> None:
+    """The Claude-SDK message path reads the same per-thread snapshot."""
+    buf = io.StringIO()
+    printer = ConsolePrinter(file=buf)
+    ready = threading.Event()
+    rendered = threading.Event()
+
+    class _ResultMessage:
+        """A real Claude-SDK-shaped result message (duck-typed by the printer)."""
+
+        def __init__(self, result: str) -> None:
+            self.result = result
+
+    def early_agent() -> None:
+        printer.tokens_offset = 100
+        printer.budget_offset = 1.0
+        ready.set()
+        assert rendered.wait(timeout=30)
+        printer.print(
+            _ResultMessage("early message"),
+            type="message",
+            budget_used=0.1,
+            total_tokens_used=10,
+        )
+
+    def late_agent() -> None:
+        assert ready.wait(timeout=30)
+        printer.tokens_offset = 900
+        printer.budget_offset = 9.0
+        rendered.set()
+
+    _run_threads([
+        threading.Thread(target=early_agent),
+        threading.Thread(target=late_agent),
+    ])
+
+    text = buf.getvalue()
+    assert "tokens=110" in text, f"the sibling's token offset won:\n{text}"
+    assert "cost=$1.1000" in text, f"the sibling's budget offset won:\n{text}"

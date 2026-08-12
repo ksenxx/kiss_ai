@@ -747,6 +747,13 @@ class _TaskRunnerMixin:
             with self._state_lock:
                 main_tree_busy = self._any_non_wt_running()
             if main_tree_busy:
+                # Retiring the previous worktree is an automatic path,
+                # so it obeys the toggle as it stands NOW — the value
+                # this run carried, not the one the run that created
+                # the worktree carried.  ``agent.run`` binds the same
+                # attribute for every cleanup that happens later, but
+                # this release runs before it.
+                agent.auto_commit_enabled = state.auto_commit_mode
                 _release_worktree_without_merging(
                     agent, bool(self._get_worktree_changed_files(tab_id)),
                 )
@@ -992,11 +999,18 @@ class _TaskRunnerMixin:
                 effective_auto_commit = state.auto_commit_mode and not task_failed
                 if not use_worktree:
                     # With the interactive diff review gone, task
-                    # changes on the main tree are always committed
-                    # directly.  The dirty-files probe keeps clean
+                    # changes on the main tree are committed directly —
+                    # but only when this run asked for it and actually
+                    # succeeded, exactly like the worktree path below.
+                    # Committing regardless would make the visible
+                    # per-run checkbox meaningless and would bake a
+                    # failed run's half-finished edits into the user's
+                    # own checkout.  The dirty-files probe keeps clean
                     # trees (and non-git folders) event-free.
                     try:
-                        if self._main_dirty_files(work_dir):
+                        if effective_auto_commit and self._main_dirty_files(
+                            work_dir,
+                        ):
                             self._autocommit_changes(
                                 tab_id, work_dir=work_dir,
                             )

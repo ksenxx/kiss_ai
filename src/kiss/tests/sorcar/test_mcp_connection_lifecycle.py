@@ -43,7 +43,7 @@ from kiss.agents.sorcar.mcp_servers import (
 )
 
 _SERVER_SCRIPT = '''
-import os, sys
+import os, sys, time
 
 from mcp.server.fastmcp import FastMCP
 
@@ -56,6 +56,18 @@ mcp = FastMCP("gsrv")
 def add(a: int, b: int) -> int:
     """Add two integers and return the sum."""
     return a + b
+
+
+@mcp.tool()
+def block_until(started: str, release: str) -> str:
+    """Announce *started*, wait for *release* to appear, then answer."""
+    open(started, "w").close()
+    deadline = time.time() + 120
+    while time.time() < deadline:
+        if os.path.exists(release):
+            return "released"
+        time.sleep(0.02)
+    return "timeout"
 
 
 if __name__ == "__main__":
@@ -215,6 +227,78 @@ def test_least_recently_used_is_evicted_at_the_cap(
         assert _wait_until_dead(pids[0]), "least recently used child survived"
         assert _alive(pids[1]) and _alive(pids[2])
     finally:
+        mgr.shutdown()
+
+
+def test_a_running_tool_call_is_not_evicted_by_the_cap(
+    server_script: Path, tmp_path: Path, real_stdin: None,
+) -> None:
+    """A server executing a tool survives other agents connecting.
+
+    The pool is capped, and every ``connect()`` evicts the oldest
+    connection past the cap.  ``call_tool`` blocks for as long as the
+    tool runs — up to five minutes — so the connection it is using is
+    frequently the oldest one.  Tearing it down turns a valid, still
+    running call into an error the agent can do nothing about.
+    """
+    mgr = MCPManager(idle_timeout_s=3600, max_connections=2, health_interval_s=30)
+    started = tmp_path / "tool-started"
+    release = tmp_path / "tool-release"
+    answer: list[str] = []
+    try:
+        busy_pid_file = tmp_path / "busy_pid"
+        busy = _config(server_script, busy_pid_file, "--busy")
+        busy_key = _connection_key(busy)
+        assert mgr.connect(busy).session is not None
+        busy_pid = _wait_for_pid_file(busy_pid_file)
+
+        caller = threading.Thread(
+            target=lambda: answer.append(
+                mgr.call_tool(
+                    busy_key,
+                    "block_until",
+                    {"started": str(started), "release": str(release)},
+                )
+            ),
+            name="mcp-busy-caller",
+            daemon=True,
+        )
+        caller.start()
+        deadline = time.time() + 60
+        while time.time() < deadline and not started.exists():
+            time.sleep(0.02)
+        assert started.exists(), "the tool call never reached the server"
+
+        # Two more agents connect, taking the pool past its cap while
+        # the first server is still executing its tool.
+        for i in range(2):
+            other = _config(server_script, tmp_path / f"other{i}", f"--o={i}")
+            assert mgr.connect(other).session is not None
+
+        assert _alive(busy_pid), (
+            "the server executing a tool call was torn down to make "
+            "room in the pool"
+        )
+        release.write_text("go", encoding="utf-8")
+        caller.join(timeout=120)
+        assert not caller.is_alive()
+        assert answer == ["released"], (
+            f"the in-flight tool call was broken by pool eviction: {answer}"
+        )
+
+        # Once the call is done the lease is gone and the connection is
+        # an ordinary eviction candidate again — the freshest one, since
+        # it was in use most recently, so it takes two more connects to
+        # push it out.  Without that the cap would leak a slot forever.
+        for name in ("last-a", "last-b"):
+            nxt = _config(server_script, tmp_path / name, f"--{name}")
+            assert mgr.connect(nxt).session is not None
+        assert _wait_until_dead(busy_pid), (
+            "a finished connection was never evicted, so the cap leaks"
+        )
+        assert len(mgr._connections) <= 2
+    finally:
+        release.write_text("go", encoding="utf-8")
         mgr.shutdown()
 
 

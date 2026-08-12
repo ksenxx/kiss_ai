@@ -17,11 +17,16 @@ user-stop the user gets the explicit ``worktree_done`` Merge / Discard
 prompt with the branch preserved, and on success the auto-merge fast
 path is preserved as a regression guard.
 
-Non-worktree tasks behave differently since the removal of the
-interactive diff/merge review: a dirty main working tree is ALWAYS
-auto-committed at task end — auto-commit toggle and task outcome
-notwithstanding — so a failed task's changes are still committed
-rather than silently stranded.
+Non-worktree tasks obey exactly the same rule, and for the same
+reason.  ``effective_auto_commit`` gates the main tree's post-task
+commit too, so a run that carried ``autoCommit: false`` — or that
+failed — leaves its edits in the user's checkout as ordinary
+uncommitted changes.  Nothing is stranded: those files are in the
+working tree the user is looking at, listed by ``git status`` and by
+the editor's source-control view, which is precisely where a
+half-finished change belongs.  Committing it anyway would make the
+visible per-run checkbox meaningless and would bake a failed task's
+partial edits into the user's history.
 
 Each test drives the real :meth:`VSCodeServer._run_task_inner` against
 a fresh git repo, replacing the stateful agent's parent ``run`` with
@@ -240,17 +245,46 @@ class TestWorktreeFailureWithAutocommit(_Base):
         )
 
 
-class TestNonWorktreeFailureWithAutocommit(_Base):
-    """Non-worktree tasks always auto-commit a dirty tree at task end —
-    even when the task failed — now that the interactive diff/merge
-    review is gone.  A failed task's changes must not be stranded."""
+class TestNonWorktreeCommitObeysTheRun(_Base):
+    """A task on the user's own checkout commits only when asked to."""
 
-    def test_runtime_error_still_commits_dirty_tree(self) -> None:
+    def test_successful_run_with_the_toggle_on_commits(self) -> None:
+        """The happy path still commits, so the toggle is real."""
+        pre_head = _head_sha(self.repo)
+        self._original_run = _patch_run("agent_out.txt", raises=None)
+        self.server._run_task_inner({
+            "prompt": "task with the toggle on",
+            "workDir": self.repo,
+            "tabId": "0",
+            "useWorktree": False,
+            "autoCommit": True,
+            "model": "",
+        })
+
+        assert pre_head != _head_sha(self.repo), (
+            f"autoCommit=True must commit the task's work; "
+            f"events={self._types()}"
+        )
+        status = _run_git(self.repo, "status", "--porcelain").stdout.strip()
+        assert status == "", f"tree must be clean after autocommit: {status}"
+
+        types = self._types()
+        assert "autocommit_done" in types, (
+            f"autocommit_done must be broadcast; got: {types}"
+        )
+        done = next(
+            e for e in self.events if e["type"] == "autocommit_done"
+        )
+        assert done["success"] is True
+        assert done["committed"] is True
+
+    def test_failed_run_leaves_its_edits_uncommitted(self) -> None:
         """Stub creates a file in the working tree, then raises.
 
-        Expect: the change is committed anyway (``autocommit_done``
-        with ``committed=True``, HEAD advances, clean tree) — the
-        always-commit policy is independent of the task outcome.
+        The half-finished edit stays in the checkout as an ordinary
+        uncommitted change — visible in ``git status`` and in the
+        editor — instead of being baked into the user's history by a
+        task that did not succeed.
         """
         pre_head = _head_sha(self.repo)
         self._original_run = _patch_run(
@@ -265,28 +299,20 @@ class TestNonWorktreeFailureWithAutocommit(_Base):
             "model": "",
         })
 
-        post_head = _head_sha(self.repo)
-        assert pre_head != post_head, (
-            f"the failed task's changes must still be committed; "
-            f"pre={pre_head} post={post_head}, events={self._types()}"
+        assert pre_head == _head_sha(self.repo), (
+            f"a failed task's partial changes were committed; "
+            f"events={self._types()}"
         )
-        assert (Path(self.repo) / "agent_out.txt").exists()
+        assert (Path(self.repo) / "agent_out.txt").exists(), (
+            "the work must still be in the user's checkout"
+        )
         status = _run_git(self.repo, "status", "--porcelain").stdout.strip()
-        assert status == "", f"tree must be clean after autocommit: {status}"
-
-        types = self._types()
-        assert "autocommit_done" in types, (
-            f"autocommit_done must be broadcast; got: {types}"
+        assert "agent_out.txt" in status, (
+            f"the work must be visible as an uncommitted change: {status}"
         )
-        done = next(
-            e for e in self.events if e["type"] == "autocommit_done"
-        )
-        assert done["success"] is True
-        assert done["committed"] is True
 
-    def test_autocommit_off_commits_dirty_tree_too(self) -> None:
-        """The autoCommit toggle no longer gates the non-worktree
-        commit: OFF behaves exactly like ON."""
+    def test_autocommit_off_leaves_the_dirty_tree_alone(self) -> None:
+        """``autoCommit: false`` must not commit in the user's checkout."""
         pre_head = _head_sha(self.repo)
         self._original_run = _patch_run("agent_out.txt", raises=None)
         self.server._run_task_inner({
@@ -298,12 +324,13 @@ class TestNonWorktreeFailureWithAutocommit(_Base):
             "model": "",
         })
 
-        assert pre_head != _head_sha(self.repo), (
-            f"autoCommit=False must not skip the post-task commit; "
-            f"events={self._types()}"
+        assert pre_head == _head_sha(self.repo), (
+            f"autoCommit=False still committed; events={self._types()}"
         )
         status = _run_git(self.repo, "status", "--porcelain").stdout.strip()
-        assert status == "", f"tree must be clean after autocommit: {status}"
+        assert "agent_out.txt" in status, (
+            f"the work must be left in the checkout: {status}"
+        )
 
     def test_clean_tree_emits_no_autocommit_events(self) -> None:
         """A task that changes nothing produces no autocommit events."""

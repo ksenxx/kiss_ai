@@ -62,6 +62,10 @@ _WRITE_MARKER = "K2-WRITE-A-FILE"
 #: user's branch is the observable symptom of K2-1.
 _PUBLISHED_FILE = "k2-declined-work.txt"
 
+#: Marker that makes the stand-in end the run with ``success: false``,
+#: i.e. a genuinely failed task that still left changes behind.
+_FAIL_MARKER = "K2-FAIL-THE-TASK"
+
 
 class _FakeCredentials:
     """Blank every real provider key, leaving one unusable OpenAI key.
@@ -157,6 +161,11 @@ class _WorktreeRunnerHarness(unittest.TestCase):
                     "description": "create the file the user declines to merge",
                 },
             )
+        if _FAIL_MARKER in text:
+            return tool_call_response(
+                "finish",
+                {"success": "false", "summary_in_html": "k2 failed"},
+            )
         return finish_response("k2 done")
 
     def _run(
@@ -241,6 +250,124 @@ class TestPerRunAutoCommitReachesAgent(_WorktreeRunnerHarness):
             "the run's work never reached the user's branch: the "
             "per-run autoCommit:true was ignored in favour of the "
             "persisted auto_commit_mode:false",
+        )
+
+
+class TestMainTreeCommitObeysTheRunToggle(_WorktreeRunnerHarness):
+    """A run without a worktree commits only when it was asked to."""
+
+    def test_autocommit_off_leaves_the_users_checkout_uncommitted(self) -> None:
+        """``useWorktree:false, autoCommit:false`` must not commit."""
+        self._run(
+            f"{_WRITE_MARKER}: create the file",
+            auto_commit=False,
+            use_worktree=False,
+        )
+
+        self.assertTrue(
+            (self.repo / _PUBLISHED_FILE).is_file(),
+            "the run never produced the file it was asked to write",
+        )
+        self.assertFalse(
+            self._tracked_on_head(_PUBLISHED_FILE),
+            "the run committed in the user's own checkout even though "
+            "the run carried autoCommit:false",
+        )
+
+    def test_autocommit_on_commits_the_users_checkout(self) -> None:
+        """The symmetric case still commits, so the toggle is real."""
+        self.home.write_config(auto_commit_mode=False)
+        self._run(
+            f"{_WRITE_MARKER}: create the file",
+            auto_commit=True,
+            use_worktree=False,
+        )
+
+        self.assertTrue(
+            self._tracked_on_head(_PUBLISHED_FILE),
+            "autoCommit:true no longer commits a non-worktree run",
+        )
+
+    def test_failed_run_does_not_commit_partial_work(self) -> None:
+        """A task that reports failure leaves its half-done work alone."""
+        self._run(
+            f"{_WRITE_MARKER} {_FAIL_MARKER}: create the file, then fail",
+            auto_commit=True,
+            use_worktree=False,
+        )
+
+        self.assertTrue(
+            (self.repo / _PUBLISHED_FILE).is_file(),
+            "the run never produced the file it was asked to write",
+        )
+        self.assertFalse(
+            self._tracked_on_head(_PUBLISHED_FILE),
+            "a failed task's partial changes were committed to the "
+            "user's checkout",
+        )
+
+
+class TestPendingWorktreeRetirementObeysTheCurrentRun(_WorktreeRunnerHarness):
+    """Retiring a carried-over worktree uses THIS run's toggle."""
+
+    def _leave_pending_worktree(self, auto_commit: bool) -> Any:
+        """Run a failing worktree task, leaving its worktree pending."""
+        self._run(
+            f"{_WRITE_MARKER} {_FAIL_MARKER}: create the file, then fail",
+            auto_commit=auto_commit,
+        )
+        agent = self._tab_agent()
+        self.assertTrue(
+            getattr(agent, "_wt_pending", False),
+            "the failed run should leave a worktree pending review",
+        )
+        return agent
+
+    def test_toggling_off_preserves_the_carried_over_worktree(self) -> None:
+        """Auto-commit off at run time must not commit the old worktree."""
+        agent = self._leave_pending_worktree(auto_commit=True)
+        wt_dir = agent._wt.wt_dir
+        branch = agent._wt_branch
+        self.assertTrue((wt_dir / _PUBLISHED_FILE).is_file())
+
+        # The user switches Auto-commit off and starts a run directly
+        # on the main tree, which retires the pending worktree.
+        self._run("follow-up run", auto_commit=False, use_worktree=False)
+
+        committed = run_git(
+            self.repo, "cat-file", "-e", f"{branch}:{_PUBLISHED_FILE}",
+        )
+        self.assertNotEqual(
+            committed.returncode,
+            0,
+            "the pending worktree was committed even though the run "
+            "that retired it carried autoCommit:false",
+        )
+        self.assertTrue(
+            (wt_dir / _PUBLISHED_FILE).is_file(),
+            "the work was neither committed nor left on disk",
+        )
+
+    def test_toggling_on_commits_the_carried_over_worktree(self) -> None:
+        """Auto-commit on at run time commits the old worktree's work."""
+        agent = self._leave_pending_worktree(auto_commit=False)
+        wt_dir = agent._wt.wt_dir
+        branch = agent._wt_branch
+
+        self._run("follow-up run", auto_commit=True, use_worktree=False)
+
+        committed = run_git(
+            self.repo, "cat-file", "-e", f"{branch}:{_PUBLISHED_FILE}",
+        )
+        self.assertEqual(
+            committed.returncode,
+            0,
+            "the run asked for auto-commit, but the retired worktree's "
+            f"work never landed on {branch}",
+        )
+        self.assertFalse(
+            wt_dir.exists(),
+            "a committed worktree directory must be removed",
         )
 
 

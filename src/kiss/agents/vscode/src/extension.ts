@@ -165,34 +165,55 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   const commitCountdownSeconds = 20;
-  let stopCommitCountdown: (() => void) | undefined;
-  // Repository root of the generation currently in flight, or undefined
-  // when none is (used to route the result and ignore canceled ones).
-  let pendingCommitRepoRoot: string | undefined;
-  let commitGenPending = false;
-  const startCommitCountdown = (repoRoot?: string) => {
-    stopCommitCountdown?.();
+
+  // A generation in flight for one repository.
+  //
+  // A workspace can hold several -- a multi-root workspace, or a repo
+  // with a vendored sub-checkout -- and VS Code tells the callback which
+  // one the user clicked in.  Every part of a generation therefore
+  // belongs to a repository: which folder the daemon diffs, which SCM
+  // input box shows the countdown and the answer, and which request the
+  // answer belongs to.  Sharing any of them wrote one repository's
+  // message into another's box.
+  interface CommitGeneration {
+    repoRoot?: string;
+    pending: boolean;
+    stopCountdown?: () => void;
+  }
+
+  // The daemon claims one generation per tabId, so two repositories
+  // asking at once must ask under different ids or the second is
+  // dropped.  The id is derived from the root, so a second click on the
+  // same repository still joins the first.
+  const scmTabIdFor = (repoRoot?: string): string =>
+    repoRoot ? `scm:${repoRoot}` : '';
+
+  const commitGens = new Map<string, CommitGeneration>();
+  const commitGenInFlight = new Map<string, Promise<void>>();
+
+  const startCommitCountdown = (gen: CommitGeneration) => {
+    gen.stopCountdown?.();
     let seconds = commitCountdownSeconds;
-    void setScmMessage(`Generating in ${seconds}s ...`, true, repoRoot);
+    void setScmMessage(`Generating in ${seconds}s ...`, true, gen.repoRoot);
     const interval = setInterval(() => {
       seconds = Math.max(seconds - 1, 0);
-      void setScmMessage(`Generating in ${seconds}s ...`, false, repoRoot);
+      void setScmMessage(`Generating in ${seconds}s ...`, false, gen.repoRoot);
     }, 1000);
-    stopCommitCountdown = () => {
+    gen.stopCountdown = () => {
       clearInterval(interval);
-      stopCommitCountdown = undefined;
+      gen.stopCountdown = undefined;
     };
   };
 
   context.subscriptions.push(
     sidebarView!.onCommitMessage(ev => {
-      if ((ev.tabId ?? '') !== '') return;
+      const gen = commitGens.get(ev.tabId ?? '');
       // A canceled generation must not apply a late backend result.
-      if (!commitGenPending) return;
-      commitGenPending = false;
-      const repoRoot = pendingCommitRepoRoot;
-      const countdownWasRunning = stopCommitCountdown !== undefined;
-      stopCommitCountdown?.();
+      if (!gen || !gen.pending) return;
+      gen.pending = false;
+      const repoRoot = gen.repoRoot;
+      const countdownWasRunning = gen.stopCountdown !== undefined;
+      gen.stopCountdown?.();
       if (ev.error) {
         showWarningNotification(`Commit message: ${ev.error}`);
         if (countdownWasRunning) void setScmMessage('', false, repoRoot);
@@ -226,49 +247,58 @@ export function activate(context: vscode.ExtensionContext): void {
       await setScmMessage('Error: nothing staged', true, repoRoot);
       return;
     }
-    pendingCommitRepoRoot = repoRoot;
-    commitGenPending = true;
-    startCommitCountdown(repoRoot);
+    const tabId = scmTabIdFor(repoRoot);
+    const gen: CommitGeneration = {repoRoot, pending: true};
+    commitGens.set(tabId, gen);
+    startCommitCountdown(gen);
     const teardown = () => {
-      if (stopCommitCountdown) {
-        stopCommitCountdown();
+      if (gen.stopCountdown) {
+        gen.stopCountdown();
         void setScmMessage('', false, repoRoot);
       }
     };
     const cancelSub = token?.onCancellationRequested(() => {
-      commitGenPending = false;
+      gen.pending = false;
       teardown();
     });
-    return sidebarView!.generateCommitMessage(token).finally(() => {
-      cancelSub?.dispose();
-      commitGenPending = false;
-      pendingCommitRepoRoot = undefined;
-      teardown();
-    });
+    return sidebarView!
+      .generateCommitMessage(token, tabId, repoRoot)
+      .finally(() => {
+        cancelSub?.dispose();
+        gen.pending = false;
+        teardown();
+        if (commitGens.get(tabId) === gen) commitGens.delete(tabId);
+      });
   };
 
-  // The generation currently in flight, if any.
+  // The generation in flight for each repository, if any.
   //
-  // A second invocation while one is running -- a double click on the SCM
-  // sparkle, or one of the two hijacked ids below firing -- must JOIN it
-  // rather than start a competing one.  The sidebar already de-duplicates
-  // per tab, but it does so by handing back an already-resolved promise
-  // meaning "someone else owns this"; treating that as "my generation
-  // finished" tore down the real one and dropped its result on the floor.
-  // The promise is registered synchronously, before the first `await`, so
-  // two calls made in the same tick cannot both slip past this guard.
-  let commitGenInFlight: Promise<void> | null = null;
-
+  // A second invocation for the SAME repository while one is running --
+  // a double click on the SCM sparkle, or one of the two hijacked ids
+  // below firing -- must JOIN it rather than start a competing one.  The
+  // sidebar already de-duplicates per tab, but it does so by handing back
+  // an already-resolved promise meaning "someone else owns this";
+  // treating that as "my generation finished" tore down the real one and
+  // dropped its result on the floor.  The promise is registered
+  // synchronously, before the first `await`, so two calls made in the
+  // same tick cannot both slip past this guard.
+  //
+  // A request for a DIFFERENT repository is not a duplicate and must not
+  // be swallowed by it.
   const triggerCommitMessageGeneration = (
     rootUri?: unknown,
     _context?: unknown,
     token?: vscode.CancellationToken,
   ): Promise<void> => {
-    if (commitGenInFlight) return commitGenInFlight;
+    const tabId = scmTabIdFor(repoRootOf(rootUri));
+    const existing = commitGenInFlight.get(tabId);
+    if (existing) return existing;
     const running = runCommitMessageGeneration(rootUri, token).finally(() => {
-      if (commitGenInFlight === running) commitGenInFlight = null;
+      if (commitGenInFlight.get(tabId) === running) {
+        commitGenInFlight.delete(tabId);
+      }
     });
-    commitGenInFlight = running;
+    commitGenInFlight.set(tabId, running);
     return running;
   };
 

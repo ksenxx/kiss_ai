@@ -212,17 +212,27 @@ class TestTaskEndAutocommitsModifiedFile(_LifecycleHarness):
         ).stdout
         assert "new_file.txt" in show
 
-    def test_autocommit_toggle_off_still_commits(self) -> None:
-        """The commit no longer depends on the autoCommit toggle."""
+    def test_autocommit_toggle_off_leaves_the_change_uncommitted(self) -> None:
+        """With the toggle off the change stays in the working tree.
+
+        The user turned auto-commit off for this run, so the edit is
+        theirs to review: it must show up as an ordinary modification
+        instead of a commit, and no auto-commit strip is shown.
+        """
         tab_id = "test-tab-toggle-off"
+        pre_head = _git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
         self._patch_run({"README.md": "# Toggle off\n"})
 
         self._run_task(tab_id, auto_commit=False)
 
-        done = _find_event(self.events, "autocommit_done")
-        assert done["committed"] is True
+        types = _event_types(self.events)
+        assert "autocommit_done" not in types, types
+        assert "autocommit_progress" not in types, types
+        assert pre_head == _git(
+            self.tmpdir, "rev-parse", "HEAD",
+        ).stdout.strip()
         status = _git(self.tmpdir, "status", "--porcelain").stdout.strip()
-        assert status == ""
+        assert "README.md" in status, status
 
 
 class TestTaskEndNoEventsWhenClean(_LifecycleHarness):

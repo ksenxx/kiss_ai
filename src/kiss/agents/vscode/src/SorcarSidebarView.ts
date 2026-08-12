@@ -109,7 +109,7 @@ function isTextLikeExtension(filePath: string): boolean {
   if (!ext) return true;
   return !NATIVE_VIEWER_EXTENSIONS.has(ext);
 }
-import {AgentClient} from './AgentClient';
+import {AgentClient, DroppedCommandReason} from './AgentClient';
 import {SorcarApi} from './SorcarApi';
 import {getGitApi} from './gitApi';
 import {getDefaultModel} from './DependencyInstaller';
@@ -129,6 +129,7 @@ import {
   setWebviewNotificationPoster,
   showErrorNotification,
   showInformationNotification,
+  showWarningNotification,
   withWebviewNotificationProgress,
 } from './WebviewNotifications';
 
@@ -285,6 +286,12 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       this._sendToWebview({type: 'daemonStatus', connected: false});
       this._resolveAllWorktreeActions();
     });
+    client.on(
+      'commandDropped',
+      (cmd: AgentCommand, reason: DroppedCommandReason) => {
+        this._handleDroppedCommand(cmd, reason);
+      },
+    );
     client.connect();
     this._workspaceFoldersSub = vscode.workspace.onDidChangeWorkspaceFolders(
       () => {
@@ -293,6 +300,48 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       },
     );
     return client;
+  }
+
+  /**
+   * Undo the optimistic UI of a command the daemon never received.
+   *
+   * A run is shown as started the instant the user sends it, long
+   * before any daemon has confirmed it: the tab spins and the composer
+   * locks.  Only a `status running:false` ever undoes that, and only
+   * the daemon sends one -- so a command the client gives up on leaves
+   * the tab running for ever, with no agent behind it and nothing the
+   * user can do but reload the window.
+   *
+   * @param cmd The command that was never delivered.
+   * @param reason Why the client gave up on it.
+   */
+  private _handleDroppedCommand(
+    cmd: AgentCommand,
+    reason: DroppedCommandReason,
+  ): void {
+    const dropped = cmd as {type?: string; tabId?: string};
+    const tabId = dropped.tabId;
+    if (dropped.type === 'run') {
+      if (tabId !== undefined) this._runningTabs.delete(tabId);
+      this._sendToWebview({type: 'status', running: false, tabId});
+      const why =
+        reason === 'expired'
+          ? 'the agent was unreachable for too long'
+          : 'too many requests were waiting';
+      showWarningNotification(
+        `Your request was not started because ${why}. Send it again.`,
+      );
+      return;
+    }
+    if (dropped.type === 'generateCommitMessage') {
+      // Its promise, its countdown and the SCM input box are all
+      // waiting on an answer that is never coming.
+      this._onCommitMessage.fire({
+        message: '',
+        error: 'The agent was unreachable',
+        tabId: tabId ?? '',
+      });
+    }
   }
 
   private _installClientListener(client: AgentClient): void {
@@ -1130,16 +1179,34 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     }
   }
 
+  /**
+   * Ask the daemon for a commit message and wait for its answer.
+   *
+   * @param token Cancellation token of the invoking command, if any.
+   * @param tabId Tab the generation belongs to.  The daemon stamps it
+   *     on the answer and claims one generation per tab, so two
+   *     repositories generating at once must pass different ids.
+   * @param workDir Repository to diff.  Defaults to the window's
+   *     working directory, which is only right when the request did not
+   *     come from a specific repository: a workspace can hold several,
+   *     and diffing the wrong one answers the wrong question.
+   * @returns A promise resolved when the answer arrives, the token is
+   *     cancelled, or the wait times out.
+   */
   public generateCommitMessage(
     token?: vscode.CancellationToken,
     tabId: string = '',
+    workDir?: string,
   ): Promise<void> {
     if (this._commitPendingTabs.has(tabId)) return Promise.resolve();
     this._commitPendingTabs.add(tabId);
+    // The answer comes back stamped with this tab, and only messages
+    // for tabs this window owns are forwarded on.
+    if (tabId) this._ownTabs.add(tabId);
     this._getApi().generateCommitMessage(
       this._selectedModel,
       tabId,
-      this._getWorkDir(),
+      workDir || this._getWorkDir(),
     );
 
     return new Promise<void>(resolve => {

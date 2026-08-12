@@ -2863,6 +2863,45 @@
     _pendingPathChecks.clear();
   }
 
+  /**
+   * Re-ask about the candidate spans whose reply the outage swallowed.
+   *
+   * forgetInFlightPathChecks() drops the keys of checks that can never
+   * be answered, but the spans themselves stay on screen -- grey and
+   * unclickable. A finished task renders no further panels, so unless
+   * some later output happened to mention the very same path, nothing
+   * would ever ask about them again and those links would stay dead for
+   * the rest of the session. Reconnecting is their last chance.
+   *
+   * Each span carries the tab and the workDir it was checked under, and
+   * a reply only resolves spans stamped with the same pair, so the
+   * reissue is grouped by both. Spans already covered by a live check
+   * are skipped, and a reconnect with nothing outstanding sends
+   * nothing: every open window reconnects at once after a daemon
+   * restart.
+   */
+  function reissueFileLinkChecks() {
+    const groups = new Map();
+    for (const span of _pendingFileLinkSpans) {
+      const raw = span.getAttribute('data-path-candidate');
+      if (!raw) continue;
+      const owner = span.getAttribute('data-path-tab') || '';
+      const wd = span.getAttribute('data-path-wd') || '';
+      const p = _stripLineSuffix(raw);
+      const key = _fileLinkCacheKey(owner, wd, p);
+      if (_pendingPathChecks.has(key)) continue;
+      _pendingPathChecks.add(key);
+      const groupKey = owner + '\u0000' + wd;
+      let group = groups.get(groupKey);
+      if (!group) {
+        group = {type: 'checkPaths', paths: [], workDir: wd, tabId: owner};
+        groups.set(groupKey, group);
+      }
+      group.paths.push(p);
+    }
+    for (const group of groups.values()) api.send(group);
+  }
+
   function hlBlock(el) {
     if (typeof hljs === 'undefined') return;
     el.querySelectorAll('pre code').forEach(bl => {
@@ -5228,6 +5267,9 @@
           // to any tab that re-joins its task.
           tabs.forEach(t => clearAgentModel(t.id));
           // modelpick-coverage:end
+          // The checks the outage swallowed have to be asked again, or
+          // the file links they were for stay grey for ever.
+          reissueFileLinkChecks();
           refreshHistory();
         }
         return;

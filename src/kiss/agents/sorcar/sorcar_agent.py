@@ -19,7 +19,7 @@ from typing import Any
 
 import yaml
 
-from kiss.agents.sorcar.persistence import _load_last_model
+from kiss.agents.sorcar.persistence import _load_last_model, is_task_history_id
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent
 from kiss.agents.sorcar.skills import make_skill_tool
 from kiss.agents.sorcar.useful_tools import UsefulTools
@@ -1764,6 +1764,17 @@ def run_tasks_parallel(
     # It is a ROUTING key only — never persisted, because a synthetic
     # id names no row in ``task_history``.
     routing_key = persisted_parent_id or parent_key or uuid.uuid4().hex
+    # What the children are PERSISTED under.  A parent that keeps no
+    # history row of its own — every third-party channel agent is a
+    # plain ``SorcarAgent`` — still must not turn each of its children
+    # into a top-level history entry, so the fan-out gets one synthetic
+    # parent id in the canonical row-id shape.  It names no row, which
+    # is exactly right: the children are grouped together and hidden
+    # from the root list, and history keeps only entries a user
+    # actually started.
+    fanout_parent_id = persisted_parent_id or (
+        parent_key if is_task_history_id(parent_key) else uuid.uuid4().hex
+    )
 
     def _run_single(args: tuple[int, str]) -> str:
         idx, task = args
@@ -1780,12 +1791,12 @@ def run_tasks_parallel(
             agent.resume_chat_by_id(chat_id)
         sub_tab_id = f"task-{routing_key}__sub_{idx}"
         agent._tab_id = sub_tab_id
-        # Re-read rather than reuse ``routing_key``: the parent may
+        # Re-read rather than reuse ``fanout_parent_id``: the parent may
         # persist its own row while this fan-out is being submitted, and
         # a child stamped with "" is stored as a top-level history row.
         agent._subagent_info = {
             "parent_task_id": _persisted_task_id(parent_agent)
-            or persisted_parent_id,
+            or fanout_parent_id,
             "parent_tab_id": parent_tab_id,
         }
         if usage_monitor is not None:

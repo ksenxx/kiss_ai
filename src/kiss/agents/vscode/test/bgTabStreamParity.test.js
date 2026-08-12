@@ -26,44 +26,53 @@
 // to a replay, and demands the three transcripts agree.
 //
 // The live stream and the replayed transcript are NOT the same list of
-// events, and the difference is the daemon's, not this test's: only the
-// types in `json_printer._DISPLAY_EVENT_TYPES` are recorded and
-// persisted, and `usage_info` is not one of them. `persistedTranscript()`
-// below applies that filter, reading the whitelist out of the daemon's
-// own source so it cannot drift from it.
+// events, and the difference is the daemon's, not this test's: only
+// display events are recorded and persisted, and `usage_info` is not
+// one of them. Rather than restate that rule here -- or read it out of
+// the daemon's source, which would fail for a harmless refactor and
+// pass for a real change of behaviour -- `persistedTranscript()` below
+// runs the run through the daemon's OWN recorder and replays whatever
+// comes back.
 
 'use strict';
 
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const {spawnSync} = require('child_process');
 const {JSDOM} = require('jsdom');
 
 const MEDIA = path.join(__dirname, '..', 'media');
-const JSON_PRINTER = path.join(
-  __dirname,
-  '..',
-  '..',
-  '..',
-  'server',
-  'json_printer.py',
-);
+const REPO_ROOT = path.join(__dirname, '..', '..', '..', '..', '..');
 
-// The daemon's own record-and-persist whitelist, read from the daemon.
-// An event type outside it never reaches the database, so a replayed
-// transcript can never contain one.
-function displayEventTypes() {
-  const src = fs.readFileSync(JSON_PRINTER, 'utf8');
-  const m = /_DISPLAY_EVENT_TYPES = frozenset\(\s*\{([^}]*)\}/.exec(src);
-  assert.ok(m, 'json_printer.py must declare _DISPLAY_EVENT_TYPES');
-  const types = new Set(
-    m[1]
-      .split(',')
-      .map(s => s.trim().replace(/^"|"$/g, ''))
-      .filter(Boolean),
+// `JsonPrinter._filter_and_coalesce` is the function `stop_recording()`
+// and `peek_recording()` run every event list through on its way to the
+// database, so its answer IS what a reload, a history click or a
+// background tab's `task_events` gets back.
+const RECORDER_PROBE = [
+  'import json, sys',
+  'from kiss.server.json_printer import JsonPrinter',
+  'json.dump(JsonPrinter._filter_and_coalesce(json.load(sys.stdin)), sys.stdout)',
+].join('\n');
+
+/**
+ * Record a run the way the daemon does and hand back what survived.
+ *
+ * @param {Array<object>} events The events the agent broadcast.
+ * @returns {Array<object>} The transcript the daemon would store.
+ */
+function recordAsDaemon(events) {
+  const res = spawnSync('uv', ['run', 'python', '-c', RECORDER_PROBE], {
+    cwd: REPO_ROOT,
+    input: JSON.stringify(events),
+    encoding: 'utf8',
+  });
+  assert.ok(
+    !res.error && res.status === 0,
+    'the daemon\u2019s recorder must be runnable from the repo root: ' +
+      `${res.error || ''} ${res.stderr || ''}`,
   );
-  assert.ok(types.has('result'), 'result must be a recorded event type');
-  return types;
+  return JSON.parse(res.stdout);
 }
 
 function makeWebview() {
@@ -166,13 +175,16 @@ function recordedRun() {
 // What is left of that run once the daemon has recorded it: what a
 // reload, a history click or a background tab's `task_events` gets back.
 function persistedTranscript() {
-  const kept = displayEventTypes();
-  const events = recordedRun().filter(ev => kept.has(ev.type));
+  const events = recordAsDaemon(recordedRun());
+  assert.ok(
+    events.some(ev => ev.type === 'result'),
+    'the daemon must keep the result event, or there is nothing to replay',
+  );
   assert.ok(
     !events.some(ev => ev.type === 'usage_info'),
-    'usage_info is not a recorded event type, so a replayed transcript ' +
-      'must not contain one -- the daemon drops it and the step count ' +
-      'has to survive on what is left',
+    'the daemon drops usage_info before storing a run, so a replayed ' +
+      'transcript must not contain one -- the step count has to survive ' +
+      'on what is left',
   );
   return events;
 }

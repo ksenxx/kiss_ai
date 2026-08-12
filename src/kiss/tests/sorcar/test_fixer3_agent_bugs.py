@@ -155,10 +155,17 @@ class TestSubagentDoneTabIdFormat(_Base):
         )
 
 
-class TestSubagentSentinelConvention(_Base):
-    """F1 regression guard: base path uses the ``""`` sentinel shape."""
+class TestSubagentParentIdConvention(_Base):
+    """The base fan-out nests its children, whoever the parent is.
 
-    def test_base_parallel_subagent_info_matches_chat_convention(self) -> None:
+    A bare functional ``run_tasks_parallel`` has no parent agent and no
+    parent row, but its children are real chat runs that DO create
+    rows.  They must still be stored as sub-agents: a blank
+    ``parent_task_id`` is what the history query reads as "top-level
+    task", which would add one bogus root entry per child.
+    """
+
+    def test_base_parallel_children_share_one_non_blank_parent_id(self) -> None:
         _PARENT_CLASS.run = _raising_run
         printer = JsonPrinter()
         events: list[dict[str, Any]] = []
@@ -180,8 +187,10 @@ class TestSubagentSentinelConvention(_Base):
             "SELECT parent_task_id FROM task_history"
         ).fetchall()
         self.assertTrue(rows)
-        for row in rows:
-            self.assertEqual(row[0], "")
+        parents = {row[0] for row in rows}
+        self.assertNotIn("", parents, "a sub-agent became a root history row")
+        self.assertEqual(len(parents), 1, f"one parent id per fan-out: {parents}")
+        self.assertEqual(_persistence._load_history(), [])
 
 
 class TestWorktreeFallbackExceptionContract(_Base):

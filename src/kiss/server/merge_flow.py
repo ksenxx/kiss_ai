@@ -926,6 +926,13 @@ class _MergeFlowMixin:
                 }
             if not already_claimed:
                 state.is_merging = True
+                # This runs in the event loop's default executor, and
+                # the task that produced the worktree is long gone, so
+                # ``task_thread`` is None and the shutdown sweep of
+                # in-flight tasks cannot see this work.  Publishing the
+                # thread lets shutdown WAIT for the repository to stop
+                # being rewritten instead of returning mid-merge.
+                state.merge_thread = threading.current_thread()
         wt._pending_review = False
         try:
             with repo_lock(repo_root):
@@ -952,6 +959,7 @@ class _MergeFlowMixin:
             if not already_claimed:
                 with self._state_lock:
                     state.is_merging = False
+                    state.merge_thread = None
                 # A close that arrived during the merge/discard saw the
                 # tab busy and deferred disposal; without this call the
                 # backend tab state would leak indefinitely (F4-23).

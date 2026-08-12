@@ -5,24 +5,27 @@
 
 'use strict';
 
-// End-to-end test of a SECOND commit-message generation arriving while
-// the first is still in flight -- a double click on the SCM sparkle, or
-// another extension invoking one of the two ids this extension hijacks
-// (github.copilot.git.generateCommitMessage / git.generateCommitMessage,
-// both bound to the same handler with the same empty tabId).
+// End-to-end test of commit-message generation in a workspace holding
+// more than one git repository.
 //
-// The sidebar de-duplicates per tab by returning an ALREADY-RESOLVED
-// promise, meaning "someone else owns this generation". extension.ts
-// treated every returned promise as "my generation finished", so the
-// second call's .finally immediately cleared the in-flight flag, stopped
-// the countdown and blanked the SCM input -- and when the daemon's real
-// commit message arrived seconds later it was dropped on the floor. The
-// user was left with an empty box, no countdown and no error.
+// VS Code hands the SCM sparkle's callback the repository the user
+// clicked in. The extension used that repository to decide whether
+// anything was staged and to choose which SCM input box gets the
+// answer -- but then asked the daemon for a message WITHOUT it, so the
+// daemon diffed the workspace's first folder instead. Click the sparkle
+// in repository B and you got repository A's commit message written
+// into B's box, or "nothing staged" because A had nothing staged.
+//
+// The two were also collapsed onto one generation: the extension kept a
+// single in-flight promise and the daemon claims one generation per
+// tabId -- and every SCM request carried the same empty tabId. So a
+// generation running for A silently swallowed a request for B.
 //
 // The real compiled extension and the real SorcarSidebarView are driven
 // here; the daemon is a real unix domain socket speaking the real line
-// protocol. Only the VS Code API surface and the git extension -- which
-// do not exist outside VS Code -- are stubbed.
+// protocol, and it answers the way the daemon does: stamping back the
+// tabId it was asked with. Only the VS Code API surface and the git
+// extension -- which do not exist outside VS Code -- are stubbed.
 
 const assert = require('assert');
 const fs = require('fs');
@@ -45,13 +48,20 @@ if (process.platform === 'win32') {
   process.exit(0);
 }
 
-const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-commit2-'));
+const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'kiss-commit-multi-'));
 fs.mkdirSync(path.join(tmpHome, '.kiss'), {recursive: true});
 const sockPath = path.join(tmpHome, '.kiss', 'sorcar.sock');
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 process.env.KISS_HOME = path.join(tmpHome, '.kiss');
 process.env.KISS_SORCAR_SOCK = sockPath;
+
+// Two repositories, side by side, the way a multi-root workspace or a
+// repo with a vendored sub-checkout looks to the git extension.
+const REPO_A = path.join(tmpHome, 'alpha');
+const REPO_B = path.join(tmpHome, 'beta');
+fs.mkdirSync(REPO_A, {recursive: true});
+fs.mkdirSync(REPO_B, {recursive: true});
 
 function makeDisposable() {
   return {dispose: () => {}};
@@ -95,7 +105,9 @@ class StubEventEmitter {
 }
 
 const registeredCommands = new Map();
-const workspaceFolders = [{uri: makeUri(tmpHome)}];
+// The workspace opens on repository A, so A is what _getWorkDir()
+// answers: the bug is invisible unless the two differ.
+const workspaceFolders = [{uri: makeUri(REPO_A)}];
 
 const vscodeStub = {
   window: {
@@ -105,7 +117,10 @@ const vscodeStub = {
       dispose: () => {},
     }),
     withProgress: (_opts, task) =>
-      task({report: () => {}}, {onCancellationRequested: () => makeDisposable()}),
+      task(
+        {report: () => {}},
+        {onCancellationRequested: () => makeDisposable()},
+      ),
     showInformationMessage: () => Promise.resolve(undefined),
     showErrorMessage: () => Promise.resolve(undefined),
     showWarningMessage: () => Promise.resolve(undefined),
@@ -162,16 +177,17 @@ Module._resolveFilename = function (request, parent, ...rest) {
 };
 global.__kissVscodeStub = vscodeStub;
 
-const inputBox = {value: ''};
-const fakeGitApi = {
-  repositories: [
-    {
-      rootUri: makeUri(tmpHome),
-      inputBox,
-      state: {indexChanges: [{}]},
-    },
-  ],
-};
+function makeRepo(root) {
+  return {
+    rootUri: makeUri(root),
+    inputBox: {value: ''},
+    state: {indexChanges: [{}]},
+  };
+}
+
+const repoA = makeRepo(REPO_A);
+const repoB = makeRepo(REPO_B);
+const fakeGitApi = {repositories: [repoA, repoB]};
 
 function stubModule(filePath, exports) {
   const fakeMod = new Module(filePath);
@@ -226,23 +242,16 @@ const server = net.createServer(sock => {
   });
 });
 
-function sendFromDaemon(obj) {
+// The daemon stamps the requesting tabId on every commitMessage it
+// broadcasts, so the printer routes it back to the tab that asked.
+function answerGeneration(tabId, payload) {
   assert.ok(daemonSock, 'the extension must have connected to the daemon');
-  daemonSock.write(JSON.stringify(obj) + '\n');
+  daemonSock.write(JSON.stringify({type: 'commitMessage', tabId, ...payload}));
+  daemonSock.write('\n');
 }
 
-// The daemon stamps the requesting tabId on every commitMessage it
-// broadcasts, so the printer routes the answer back to the tab that
-// asked for it (server.py::_generate_commit_message).  Answering with
-// anything else would be testing a daemon that does not exist.
-function answerLastGeneration(payload) {
-  const asked = daemonLines.filter(m => m.type === 'generateCommitMessage');
-  assert.ok(asked.length, 'nothing asked the daemon for a commit message');
-  sendFromDaemon({
-    type: 'commitMessage',
-    tabId: asked[asked.length - 1].tabId,
-    ...payload,
-  });
+function generations() {
+  return daemonLines.filter(m => m.type === 'generateCommitMessage');
 }
 
 function sleep(ms) {
@@ -251,12 +260,12 @@ function sleep(ms) {
 
 async function waitFor(predicate, message, timeoutMs = 4000) {
   const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
+  for (;;) {
     const v = predicate();
     if (v) return v;
+    if (Date.now() - start >= timeoutMs) throw new Error(message);
     await sleep(10);
   }
-  throw new Error(message || 'waitFor timed out');
 }
 
 async function runTests() {
@@ -279,87 +288,134 @@ async function runTests() {
     const trigger = registeredCommands.get('kissSorcar.generateCommitMessage');
     assert.ok(trigger, 'kissSorcar.generateCommitMessage must be registered');
 
-    // --- the double trigger -------------------------------------------
+    // --- the daemon must be asked about the repo the user clicked -----
     daemonLines.length = 0;
-    inputBox.value = '';
-    const p1 = trigger(makeUri(tmpHome), undefined, undefined);
-    const p2 = trigger(makeUri(tmpHome), undefined, undefined);
-
+    repoA.inputBox.value = '';
+    repoB.inputBox.value = '';
+    const bOnly = trigger(makeUri(REPO_B), undefined, undefined);
     await waitFor(
-      () => daemonLines.filter(m => m.type === 'generateCommitMessage').length,
+      () => generations().length,
       'the extension must ask the daemon for a commit message',
     );
     assert.strictEqual(
-      daemonLines.filter(m => m.type === 'generateCommitMessage').length,
-      1,
-      'a second trigger must join the generation already in flight, not ' +
-        'start a competing one',
+      generations()[0].workDir,
+      REPO_B,
+      'the daemon must be asked to diff the repository the sparkle was ' +
+        'clicked in, not whichever folder the workspace opened on',
     );
 
-    // The daemon answers a few moments later, as a real LLM call would.
-    await sleep(120);
-    answerLastGeneration({message: 'feat: real message'});
-    await Promise.all([p1, p2]);
-    await sleep(150);
-
-    assert.strictEqual(
-      inputBox.value,
-      'feat: real message',
-      'the generated commit message must land in the SCM input box; the ' +
-        "second trigger's teardown must not discard it",
-    );
-
-    // --- the single-click control case --------------------------------
-    daemonLines.length = 0;
-    inputBox.value = '';
-    const p3 = trigger(makeUri(tmpHome), undefined, undefined);
-    await waitFor(
-      () => daemonLines.some(m => m.type === 'generateCommitMessage'),
-      'a fresh generation must reach the daemon after the first finished',
-    );
-    answerLastGeneration({message: 'fix: single click'});
-    await p3;
+    answerGeneration(generations()[0].tabId, {message: 'feat: beta change'});
+    await bOnly;
     await sleep(150);
     assert.strictEqual(
-      inputBox.value,
-      'fix: single click',
-      'a single generation must still work',
+      repoB.inputBox.value,
+      'feat: beta change',
+      "the answer must land in the clicked repository's SCM input",
     );
-
-    // --- an error is still reported, and does not wedge the next one ---
-    daemonLines.length = 0;
-    inputBox.value = '';
-    const p4 = trigger(makeUri(tmpHome), undefined, undefined);
-    await waitFor(
-      () => daemonLines.some(m => m.type === 'generateCommitMessage'),
-      'a generation must reach the daemon',
-    );
-    answerLastGeneration({error: 'no staged changes'});
-    await p4;
-    await sleep(150);
     assert.strictEqual(
-      inputBox.value,
+      repoA.inputBox.value,
       '',
-      'an error must clear the countdown text rather than leave it',
+      'and must not touch the other repository',
     );
 
+    // --- two repositories generate at the same time -------------------
     daemonLines.length = 0;
-    const p5 = trigger(makeUri(tmpHome), undefined, undefined);
+    repoA.inputBox.value = '';
+    repoB.inputBox.value = '';
+    const pA = trigger(makeUri(REPO_A), undefined, undefined);
+    const pB = trigger(makeUri(REPO_B), undefined, undefined);
     await waitFor(
-      () => daemonLines.some(m => m.type === 'generateCommitMessage'),
-      'a generation after an error must still reach the daemon',
+      () => generations().length >= 2,
+      'a request for a second repository must not be swallowed by the ' +
+        'one already running for the first',
+      2000,
     );
-    answerLastGeneration({message: 'chore: after error'});
-    await p5;
+    const two = generations();
+    assert.strictEqual(two.length, 2, 'exactly two generations, one each');
+    const byDir = new Map(two.map(g => [g.workDir, g]));
+    assert.ok(byDir.has(REPO_A) && byDir.has(REPO_B), 'one per repository');
+    assert.notStrictEqual(
+      byDir.get(REPO_A).tabId,
+      byDir.get(REPO_B).tabId,
+      'the two must reach the daemon under different tab ids: it claims ' +
+        'one generation per tab and would otherwise drop the second',
+    );
+
+    // They come back out of order, as two independent LLM calls do.
+    answerGeneration(byDir.get(REPO_B).tabId, {message: 'fix: beta'});
+    await sleep(80);
+    answerGeneration(byDir.get(REPO_A).tabId, {message: 'chore: alpha'});
+    await Promise.all([pA, pB]);
     await sleep(150);
     assert.strictEqual(
-      inputBox.value,
-      'chore: after error',
-      'an error must not wedge later generations',
+      repoA.inputBox.value,
+      'chore: alpha',
+      "each repository must receive its own message, not the other's",
+    );
+    assert.strictEqual(repoB.inputBox.value, 'fix: beta');
+
+    // --- a double click on ONE repository still joins ------------------
+    daemonLines.length = 0;
+    repoB.inputBox.value = '';
+    const d1 = trigger(makeUri(REPO_B), undefined, undefined);
+    const d2 = trigger(makeUri(REPO_B), undefined, undefined);
+    await waitFor(() => generations().length, 'a generation must be sent');
+    await sleep(120);
+    assert.strictEqual(
+      generations().length,
+      1,
+      'two clicks on the SAME repository must join one generation, not ' +
+        'pay for two',
+    );
+    answerGeneration(generations()[0].tabId, {message: 'docs: joined'});
+    await Promise.all([d1, d2]);
+    await sleep(150);
+    assert.strictEqual(
+      repoB.inputBox.value,
+      'docs: joined',
+      "the joined generation's result must still land",
     );
 
-    console.log('  ok - a second trigger joins the generation in flight');
-    console.log('  ok - single generation, error, and recovery still work');
+    // --- staged-ness is judged per repository -------------------------
+    daemonLines.length = 0;
+    repoA.inputBox.value = '';
+    repoB.inputBox.value = '';
+    repoB.state.indexChanges = [];
+    await trigger(makeUri(REPO_B), undefined, undefined);
+    await sleep(100);
+    assert.strictEqual(
+      generations().length,
+      0,
+      'a repository with nothing staged must not cost an LLM call',
+    );
+    assert.strictEqual(
+      repoB.inputBox.value,
+      'Error: nothing staged',
+      'and must say so in its own input box',
+    );
+    assert.strictEqual(
+      repoA.inputBox.value,
+      '',
+      "...without disturbing the other repository's box",
+    );
+
+    // The other repository is still staged and still works.
+    const stillWorks = trigger(makeUri(REPO_A), undefined, undefined);
+    await waitFor(
+      () => generations().length,
+      'the staged repository must still generate',
+    );
+    assert.strictEqual(generations()[0].workDir, REPO_A);
+    answerGeneration(generations()[0].tabId, {message: 'chore: alpha again'});
+    await stillWorks;
+    await sleep(150);
+    assert.strictEqual(repoA.inputBox.value, 'chore: alpha again');
+    repoB.state.indexChanges = [{}];
+
+    console.log('  ok - the clicked repository is the one that is diffed');
+    console.log('  ok - two repositories generate independently');
+    console.log('  ok - two clicks on one repository still join');
+    console.log('  ok - staged-ness and errors are per repository');
   } finally {
     try {
       extension.deactivate();
@@ -375,7 +431,7 @@ async function runTests() {
 
 runTests()
   .then(() => {
-    console.log('commitDoubleTrigger.test.js: all tests passed');
+    console.log('commitMultiRepoRouting.test.js: all tests passed');
   })
   .catch(err => {
     console.error('FAIL:', err && err.stack ? err.stack : err);

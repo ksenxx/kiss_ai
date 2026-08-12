@@ -286,3 +286,46 @@ def test_base_fanout_nests_history_and_shares_chat(
     assert expected <= done_tabs, (
         f"subagentDone fired for tabs {done_tabs}, expected {expected}"
     )
+
+def test_channel_agent_fanout_children_stay_out_of_the_history_list(
+    env: IsolatedKissHome,
+) -> None:
+    """A parent with no history row of its own still nests its children.
+
+    Third-party channel agents (Slack, email, voice) are plain
+    ``SorcarAgent`` subclasses: they persist no ``task_history`` row,
+    so there is no parent id to stamp on the children they fan out.
+    Their children are real ``ChatSorcarAgent`` runs and DO create
+    rows, and a blank parent id makes every one of them a top-level
+    entry in the VS Code history sidebar.
+    """
+    from kiss.agents.sorcar import persistence
+
+    server = StandInModelServer(lambda request: finish_response("child done"))
+    printer = CapturePrinter()
+    parent = SorcarAgent("channel-agent-parent")
+    _configure_parent(parent, printer, server, env.repo)
+
+    # No persisted parent row, and no task id on the printer either:
+    # exactly what a channel agent's fan-out looks like.
+    fanout = _FanoutThread(parent, ["child one", "child two"], printer, "")
+    fanout.start()
+    fanout.join(timeout=120)
+    server.stop()
+    assert fanout.error is None, fanout.error
+    assert fanout.results is not None and len(fanout.results) == 2
+
+    rows = history_rows()
+    assert len(rows) == 2, rows
+    for row in rows:
+        assert row["parent_task_id"], (
+            "a channel agent's sub-agent was persisted as a TOP-LEVEL "
+            "history row, so every fan-out pollutes the history sidebar"
+        )
+    assert {row["parent_task_id"] for row in rows} == {
+        rows[0]["parent_task_id"]
+    }, "siblings of one fan-out must share a parent id"
+    assert persistence._load_history() == [], (
+        "the history list must show no root entry for a fan-out whose "
+        "parent has no row of its own"
+    )

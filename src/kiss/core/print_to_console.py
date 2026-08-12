@@ -33,18 +33,24 @@ _NOTIFICATION_STYLES = {
 class _PrinterThreadState(threading.local):
     """Per-thread streaming state for :class:`ConsolePrinter`.
 
-    ``bash_streamed`` (is a bash RESULT rule currently open?) and
-    ``block_type`` (thinking vs normal text) describe the *agent* that is
-    printing, not the terminal.  Parallel sub-agents each run on their
-    own thread and share one printer, so keeping these per thread is what
-    stops one sub-agent from closing another's bash block or restyling
-    another's tokens.  ``threading.local`` runs ``__init__`` once per
-    thread, so every thread starts from the same defaults.
+    ``bash_streamed`` (is a bash RESULT rule currently open?),
+    ``block_type`` (thinking vs normal text) and the three usage offsets
+    (what the printing agent has already spent in earlier sub-sessions)
+    describe the *agent* that is printing, not the terminal.  Parallel
+    sub-agents each run on their own thread and share one printer, so
+    keeping these per thread is what stops one sub-agent from closing
+    another's bash block, restyling another's tokens, or contributing
+    its own totals to another's result panel.  ``threading.local`` runs
+    ``__init__`` once per thread, so every thread starts from the same
+    defaults.
     """
 
     def __init__(self) -> None:
         self.bash_streamed = False
         self.block_type = ""
+        self.tokens_offset = 0
+        self.budget_offset = 0.0
+        self.steps_offset = 0
 
 
 class ConsolePrinter(Printer):
@@ -66,9 +72,33 @@ class ConsolePrinter(Printer):
         self._lock = threading.RLock()
         self._thread_state = _PrinterThreadState()
         self._mid_line = False
-        self.tokens_offset = 0
-        self.budget_offset = 0.0
-        self.steps_offset = 0
+
+    @property
+    def tokens_offset(self) -> int:
+        """Tokens *this thread's* agent spent before its current session."""
+        return self._thread_state.tokens_offset
+
+    @tokens_offset.setter
+    def tokens_offset(self, value: int) -> None:
+        self._thread_state.tokens_offset = value
+
+    @property
+    def budget_offset(self) -> float:
+        """Dollars *this thread's* agent spent before its current session."""
+        return self._thread_state.budget_offset
+
+    @budget_offset.setter
+    def budget_offset(self, value: float) -> None:
+        self._thread_state.budget_offset = value
+
+    @property
+    def steps_offset(self) -> int:
+        """Steps *this thread's* agent took before its current session."""
+        return self._thread_state.steps_offset
+
+    @steps_offset.setter
+    def steps_offset(self, value: int) -> None:
+        self._thread_state.steps_offset = value
 
     @property
     def _bash_streamed(self) -> bool:

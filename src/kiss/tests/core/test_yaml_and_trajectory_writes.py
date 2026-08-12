@@ -137,6 +137,64 @@ def test_a_failed_write_leaves_the_previous_file_and_no_debris(
     assert list(tmp_path.iterdir()) == [target]
 
 
+_SHORT_WRITE_PROBE = """
+import resource
+import signal
+import sys
+from pathlib import Path
+
+from kiss.core.utils import atomic_write_text
+
+target = Path(sys.argv[1])
+payload = "A" * 4096
+
+# POSIX lets write(2) succeed with a partial count.  A real RLIMIT_FSIZE
+# is the portable way to provoke one: with SIGXFSZ ignored the kernel
+# writes up to the limit and reports how far it got instead of killing
+# the process.
+signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+resource.setrlimit(resource.RLIMIT_FSIZE, (1024, 1024))
+try:
+    atomic_write_text(target, payload)
+except OSError as e:
+    print(f"RAISED {type(e).__name__}")
+else:
+    print("PUBLISHED")
+"""
+
+
+def test_a_short_write_never_publishes_truncated_content(tmp_path: Path) -> None:
+    """F6: a partial ``write(2)`` must fail loudly, not publish a stub.
+
+    ``os.write`` may return fewer bytes than it was given.  Ignoring
+    that count and then ``os.replace``-ing the staged file turns a
+    transient quota/limit/signal condition into a *permanently*
+    truncated trajectory that looks perfectly intact — the very damage
+    the atomic write exists to prevent.
+
+    The limit is applied in a real child process because it is
+    process-wide and irreversible once lowered.
+    """
+    probe = tmp_path / "probe.py"
+    probe.write_text(_SHORT_WRITE_PROBE, encoding="utf-8")
+    target = tmp_path / "trajectory.yaml"
+    atomic_write_text(target, "first: complete\n")
+
+    result = subprocess.run(
+        [sys.executable, str(probe), str(target)],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )
+
+    assert result.stdout.strip().startswith("RAISED"), (
+        f"a short write was reported as success: {result.stdout!r}"
+    )
+    assert target.read_text(encoding="utf-8") == "first: complete\n"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["probe.py", "trajectory.yaml"]
+
+
 def test_atomic_write_applies_the_requested_mode(tmp_path: Path) -> None:
     """F6: the secure variant used for shell RC files keeps 0600."""
     target = tmp_path / "rc"

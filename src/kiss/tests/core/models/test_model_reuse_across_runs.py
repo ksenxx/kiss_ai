@@ -150,14 +150,14 @@ def _run_bounded(call: Any) -> BaseException | None:
     return outcome.get("error")
 
 
-def _leak_thinking_bracket(server: ScriptedOpenAIServer) -> OpenAICompatibleModel:
-    """Run a turn that dies mid-reasoning and return the damaged adapter.
+def _stream_dies_mid_reasoning(server: ScriptedOpenAIServer) -> OpenAICompatibleModel:
+    """Run a turn that dies mid-reasoning and return the reused adapter.
 
     Args:
         server: The scripted endpoint, in ``"cut"`` mode.
 
     Returns:
-        The adapter whose thinking bracket is still open.
+        The adapter that survived the failed turn.
     """
     model = _make_model(
         server.base_url,
@@ -167,22 +167,43 @@ def _leak_thinking_bracket(server: ScriptedOpenAIServer) -> OpenAICompatibleMode
     model.initialize("Think, then answer.")
     error = _run_bounded(model.generate)
     assert error is not None, "the cut stream should have failed the turn"
-    assert model._thinking_open is True, (
-        "test setup no longer reproduces the leak: the adapter closed its "
-        "thinking bracket on a non-stop, non-stall stream failure"
-    )
     return model
 
 
 class TestThinkingBracketIsForgottenOnReset:
     """A run must not inherit the previous run's open thinking block."""
 
+    def test_a_failed_turn_leaves_no_open_bracket_to_inherit(
+        self, reuse_server: tuple[ScriptedOpenAIServer, _ReusePolicy]
+    ) -> None:
+        """The turn itself must hand the next run a closed bracket.
+
+        This used to be the leak A2 describes: the adapter carried the
+        open block out of the dead stream and into whatever ran next.
+        The stream loop now closes its own bracket in ``finally``, so
+        the damage never leaves the turn — see
+        ``test_openai_thinking_bracket_same_run.py`` for the same-run
+        retry this also protects.
+        """
+        server, _policy = reuse_server
+        model = _stream_dies_mid_reasoning(server)
+
+        assert model._thinking_open is False
+
     def test_reset_conversation_clears_the_bracket(
         self, reuse_server: tuple[ScriptedOpenAIServer, _ReusePolicy]
     ) -> None:
-        """The flag itself must be gone once the conversation is reset."""
+        """Reuse must clear the flag even for an adapter that left it set.
+
+        Defence in depth for the *next* transport: the reuse boundary
+        cannot assume every adapter closes its own bracket, so it clears
+        the flag itself.  The block here is opened through the same
+        entry point every adapter uses to report one.
+        """
         server, _policy = reuse_server
-        model = _leak_thinking_bracket(server)
+        model = _stream_dies_mid_reasoning(server)
+        model._invoke_thinking_callback(True)
+        assert model._thinking_open is True
 
         model.reset_conversation()
 
@@ -193,7 +214,7 @@ class TestThinkingBracketIsForgottenOnReset:
     ) -> None:
         """The next run's printer must not be told a block it never saw ended."""
         server, policy = reuse_server
-        model = _leak_thinking_bracket(server)
+        model = _stream_dies_mid_reasoning(server)
 
         thinking: list[bool] = []
         model.reset_conversation()
@@ -214,7 +235,7 @@ class TestThinkingBracketIsForgottenOnReset:
     ) -> None:
         """The user-visible symptom: a rule closing a block that never opened."""
         server, policy = reuse_server
-        model = _leak_thinking_bracket(server)
+        model = _stream_dies_mid_reasoning(server)
 
         out = io.StringIO()
         printer = ConsolePrinter(file=out)

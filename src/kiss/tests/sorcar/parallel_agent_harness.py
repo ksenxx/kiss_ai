@@ -378,6 +378,76 @@ class IsolatedKissHome:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
+_PROVIDER_KEYS = (
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "TOGETHER_API_KEY",
+)
+
+# Enough for git (and every other POSIX tool the agent shells out to)
+# while excluding the per-user and Homebrew directories the vendor
+# CLIs are installed into.
+_MINIMAL_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+class OfflineFastModel:
+    """Make the auto-commit message generator run without any provider.
+
+    Auto-commit asks
+    :func:`~kiss.core.models.model_info.get_fast_model` for a cheap
+    model and runs one non-agentic LLM call to write the commit
+    subject.  That call is the one place in the worktree cleanup path
+    that would otherwise leave the machine (and cost money) even
+    though the agents themselves are pointed at a local stand-in
+    server.
+
+    Entering this context empties the provider credentials the
+    resolver reads and hides the ``claude`` / ``codex`` CLIs it falls
+    back to, so ``get_fast_model()`` answers ``"No model"`` and
+    ``auto_commit_changes`` takes its documented fallback message
+    path.  The real commit still happens; only the message wording
+    changes.
+    """
+
+    def __init__(self) -> None:
+        """Capture nothing yet; state is saved on ``__enter__``."""
+        self._saved_keys: dict[str, str] = {}
+        self._saved_env: dict[str, str | None] = {}
+        self._saved_path: str | None = None
+
+    def __enter__(self) -> OfflineFastModel:
+        """Empty the provider credentials and trim ``PATH``."""
+        from kiss.core import config as config_module
+
+        keys = config_module.DEFAULT_CONFIG
+        for name in _PROVIDER_KEYS:
+            self._saved_keys[name] = getattr(keys, name)
+            setattr(keys, name, "")
+            self._saved_env[name] = os.environ.pop(name, None)
+        self._saved_path = os.environ.get("PATH")
+        os.environ["PATH"] = _MINIMAL_PATH
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        """Restore the credentials and ``PATH``."""
+        from kiss.core import config as config_module
+
+        keys = config_module.DEFAULT_CONFIG
+        for name, value in self._saved_keys.items():
+            setattr(keys, name, value)
+        for env_name, env_value in self._saved_env.items():
+            if env_value is None:
+                os.environ.pop(env_name, None)
+            else:
+                os.environ[env_name] = env_value
+        if self._saved_path is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = self._saved_path
+
+
 def history_rows() -> list[dict[str, Any]]:
     """Return every ``task_history`` row of the isolated DB as dicts."""
     conn = persistence._get_db()

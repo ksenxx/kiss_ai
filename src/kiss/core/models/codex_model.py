@@ -218,8 +218,10 @@ class CodexModel(CLITextModel):
         args = self._build_cli_args()
 
         with _CLIProcess(args, "Codex CLI", timeout) as proc:
-            proc.send_prompt(prompt)
             try:
+                # Inside the handlers: sending the prompt is bounded by
+                # the same deadline and Stop signal as reading the reply.
+                proc.send_prompt(prompt)
                 content, result_json, error_message = self._parse_stream_events(
                     proc.lines()
                 )

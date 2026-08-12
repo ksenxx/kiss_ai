@@ -25,6 +25,8 @@ import yaml
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import (
+    _WORKTREE_BRANCH_PREFIX,
+    _WORKTREE_SUBDIR,
     GitWorktree,
     GitWorktreeOps,
     MergeResult,
@@ -356,8 +358,15 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
 
         Shared engine of :meth:`_finalize_worktree` and
         :meth:`_preserve_pending_worktree_for_review` — the exact
-        auto-commit → late-arriver-retry → preserve-or-remove sequence
-        previously duplicated in both.
+        reclaim → auto-commit → late-arriver-retry → preserve-or-remove
+        sequence previously duplicated in both.
+
+        The reclaim comes first: an abandoned sub-agent thread is
+        still writing into this worktree, and whatever it produces
+        before it finishes has to be visible to the staging passes
+        below.  Waiting after them would let a child that finished
+        during the wait have its last files deleted with the
+        directory.
 
         After the LLM-driven auto-commit, a single-shot retry runs
         :meth:`GitWorktreeOps.commit_all` with a generic message to
@@ -392,6 +401,19 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             writing into this worktree.
         """
         if wt.wt_dir.exists():
+            # A sub-agent thread this agent abandoned still has its
+            # work_dir set to this worktree.  Removing the directory
+            # under a live writer loses whatever it produces next and
+            # can make `git worktree remove` itself fail.  Waiting
+            # BEFORE the commit passes below is what makes the wait
+            # worth anything: a child that finishes during it writes
+            # its last files first, so they are staged and committed
+            # like every other change instead of being deleted with
+            # the directory moments later.
+            if not self.reclaim_abandoned_subagents(
+                timeout=_ABANDONED_SUBAGENT_WAIT_SECONDS,
+            ):
+                return _WorktreeCleanupOutcome.PRESERVED_SUBAGENT_ACTIVE, ""
             self._auto_commit_worktree(force_commit=force_commit)
             if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
                 if not (self.auto_commit_enabled or force_commit):
@@ -403,14 +425,6 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             if GitWorktreeOps.has_uncommitted_changes(wt.wt_dir):
                 leftover = GitWorktreeOps.status_porcelain(wt.wt_dir)
                 return _WorktreeCleanupOutcome.PRESERVED_COMMIT_FAILED, leftover
-            # A sub-agent thread this agent abandoned still has its
-            # work_dir set to this worktree.  Removing the directory
-            # under a live writer loses whatever it produces next and
-            # can make `git worktree remove` itself fail.
-            if not self.reclaim_abandoned_subagents(
-                timeout=_ABANDONED_SUBAGENT_WAIT_SECONDS,
-            ):
-                return _WorktreeCleanupOutcome.PRESERVED_SUBAGENT_ACTIVE, ""
         # No separate ``prune`` is issued: :meth:`GitWorktreeOps.remove`
         # prunes on every path that can leave a stale registration —
         # including the one this call covers when the directory has
@@ -1008,7 +1022,10 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
             except Exception:  # pragma: no cover — filesystem permission error
                 logger.warning("Failed to update git exclude", exc_info=True)
 
-            branch = f"kiss/wt-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+            branch = (
+                f"{_WORKTREE_BRANCH_PREFIX}"
+                f"{int(time.time())}-{uuid.uuid4().hex[:8]}"
+            )
             base_branch = branch
             suffix = 1
             while GitWorktreeOps.branch_exists(repo, branch):  # pragma: no branch
@@ -1016,7 +1033,7 @@ class WorktreeSorcarAgent(ChatSorcarAgent):
                 suffix += 1
 
             slug = branch.replace("/", "_")
-            wt_dir = repo / ".kiss-worktrees" / slug
+            wt_dir = repo / _WORKTREE_SUBDIR / slug
 
             if not GitWorktreeOps.create(repo, branch, wt_dir):
                 # pragma: no cover — git worktree add failure

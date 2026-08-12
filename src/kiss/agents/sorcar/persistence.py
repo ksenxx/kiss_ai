@@ -227,7 +227,18 @@ def _process_owner_token() -> str:
 
     The token is re-minted when ``_KISS_DIR`` is redirected (test
     fixtures, a daemon pointed at another home) so the marker always
-    lives next to the database the rows are written to.
+    lives next to the database the rows are written to; the marker of
+    the home being left is deleted, and so is this process's marker
+    when the interpreter exits normally (:func:`_release_owner_marker`).
+    Without that, every daemon and CLI lifecycle would leave one file
+    behind forever, since a marker is otherwise only unlinked when
+    some *other* process happens to test a sentinel row of the dead
+    owner.
+
+    Without ``fcntl`` there is no way to test whether the owning
+    process is still alive — file existence would make every crashed
+    process's rows look live forever — so no token is minted at all
+    and liveness degrades to the timestamp-only heuristic.
 
     Returns:
         The token to store in ``task_history.owner``, or ``""`` when
@@ -235,16 +246,13 @@ def _process_owner_token() -> str:
         previous timestamp-only heuristic).
     """
     global _owner_state
+    if _fcntl is None:  # pragma: no cover — Windows has no flock
+        return ""
     current_dir = str(_owner_dir())
     with _owner_state_lock:
         if _owner_state is not None and _owner_state[0] == current_dir:
             return _owner_state[1]
-        if _owner_state is not None:
-            try:
-                _owner_state[2].close()
-            except OSError:  # pragma: no cover — close of a dead handle
-                pass
-            _owner_state = None
+        _discard_owner_state()
         token = f"{os.getpid()}-{uuid.uuid4().hex}"
         try:
             _ensure_kiss_dir()
@@ -252,8 +260,7 @@ def _process_owner_token() -> str:
             handle = open(
                 Path(current_dir) / f"{token}.lock", "w", encoding="utf-8",
             )
-            if _fcntl is not None:  # pragma: no branch — POSIX only
-                _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+            _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
             handle.write(f"{os.getpid()}\n")
             handle.flush()
         except OSError:
@@ -263,6 +270,38 @@ def _process_owner_token() -> str:
             return ""
         _owner_state = (current_dir, token, handle)
         return token
+
+
+def _discard_owner_state() -> None:
+    """Close and delete this process's current liveness marker.
+
+    Caller holds :data:`_owner_state_lock` (or is the ``atexit`` hook,
+    which takes it).  Deleting the file is what keeps
+    ``task-owners/`` from growing by one entry per process lifetime;
+    the kernel lock is released by the close either way.
+    """
+    global _owner_state
+    if _owner_state is None:
+        return
+    directory, token, handle = _owner_state
+    _owner_state = None
+    try:
+        handle.close()
+    except OSError:  # pragma: no cover — close of a dead handle
+        pass
+    try:
+        (Path(directory) / f"{token}.lock").unlink()
+    except OSError:  # pragma: no cover — already swept by another process
+        pass
+
+
+def _release_owner_marker() -> None:
+    """``atexit`` hook: drop this process's liveness marker on exit."""
+    with _owner_state_lock:
+        _discard_owner_state()
+
+
+atexit.register(_release_owner_marker)
 
 
 def _owner_is_alive(token: str) -> bool:
@@ -281,11 +320,16 @@ def _owner_is_alive(token: str) -> bool:
     """
     if not token:
         return False
+    if _fcntl is None:  # pragma: no cover — Windows has no flock
+        # No token is stamped without a usable cross-process lock, so
+        # any token seen here was written by a process on another
+        # platform.  Its marker's mere existence proves nothing (a
+        # crashed owner leaves it behind forever), so treat the owner
+        # as gone and let the timestamp heuristic decide.
+        return False
     if _owner_state is not None and _owner_state[1] == token:
         return True
     marker = _owner_dir() / f"{token}.lock"
-    if _fcntl is None:  # pragma: no cover — Windows has no flock
-        return marker.exists()
     try:
         with open(marker, "r+", encoding="utf-8") as handle:
             try:
@@ -1820,6 +1864,55 @@ def _failed_events_path(db_path: str) -> str:
     return db_path + ".failed_events.jsonl"
 
 
+#: Suffix of a journal file a replayer has taken ownership of.  The
+#: live sidecar is renamed to ``<sidecar>.consumed-<pid>-<uuid>``
+#: before it is replayed, so the file that is finally deleted is
+#: exactly the one that was written to the database — never a file
+#: another process has appended to since.
+_JOURNAL_CONSUMED_SUFFIX = ".consumed-"
+
+
+@contextmanager
+def _journal_file_lock(sidecar: str) -> Iterator[None]:
+    """Hold an inter-process lock on *sidecar* for the whole block.
+
+    The database and its journal are shared by every Sorcar process on
+    the machine (the ``kiss-web`` daemon, a ``kiss`` CLI run, a VS Code
+    reload), so the module-level :data:`_journal_lock` — a plain
+    thread lock — cannot order an append in one process against a
+    replay in another.  Without that ordering a replayer deletes
+    batches a peer appended after the replayer read the file, and two
+    replayers write the same batch twice.
+
+    The lock lives in a sibling ``<sidecar>.lock`` file rather than in
+    the journal itself, because the journal is renamed and deleted
+    while the lock is held.  Closing the handle releases the kernel
+    lock, and the kernel releases it anyway if the process dies.
+
+    Args:
+        sidecar: Path of the journal file being appended or replayed.
+
+    Yields:
+        Nothing; the lock is held for the duration of the block.  On
+        platforms without ``fcntl`` the block runs unserialised (the
+        in-process lock still applies), which is why replay also
+        consumes by rename.
+    """
+    if _fcntl is None:  # pragma: no cover — Windows has no flock
+        yield
+        return
+    try:
+        handle = open(sidecar + ".lock", "a+", encoding="utf-8")
+    except OSError:  # pragma: no cover — unwritable journal directory
+        yield
+        return
+    try:
+        _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+        yield
+    finally:
+        handle.close()
+
+
 def _journal_failed_events(
     batch: list[tuple[str, str, float, str]], attempts: int,
 ) -> None:
@@ -1838,6 +1931,10 @@ def _journal_failed_events(
     database happens to be active now: after a database swap the two
     differ, and a journal written next to the new database would be
     replayed into it and dropped.
+
+    The append is serialised against every other process's append and
+    replay by :func:`_journal_file_lock`, so a batch can never be
+    written into a file another process is in the middle of consuming.
     """
     by_origin: dict[str, list[tuple[str, str, float, str]]] = {}
     for row in batch:
@@ -1846,7 +1943,9 @@ def _journal_failed_events(
         for origin, rows in by_origin.items():
             sidecar = _failed_events_path(origin)
             try:
-                with open(sidecar, "a", encoding="utf-8") as stream:
+                with _journal_file_lock(sidecar), open(
+                    sidecar, "a", encoding="utf-8",
+                ) as stream:
                     for task_id, event_json, timestamp, origin_path in rows:
                         stream.write(json.dumps({
                             "task_id": task_id,
@@ -1876,45 +1975,151 @@ def _replay_failed_events() -> None:
     produced no transcript and a stub stream must be synthesized in
     its place.
 
-    The journal is only removed once every row it holds has landed in
-    the database; a still-failing replay leaves the file untouched for
-    the next attempt.
+    A snapshot is only removed once every row it holds has landed in
+    the database; a still-failing replay leaves it on disk for the next
+    attempt.
+
+    Concurrency: the journal is shared by every Sorcar process, so the
+    whole claim → write → delete sequence runs under
+    :func:`_journal_file_lock`, and the rows are claimed by *renaming*
+    the sidecar aside first.  Deleting the renamed snapshot can
+    therefore never destroy a batch a peer appended in the meantime —
+    that batch goes to a fresh sidecar — and no batch is ever replayed
+    by two processes at once.
     """
     path = _failed_events_path(_current_db_path())
-    if not os.path.exists(path):
+    if not _journal_has_pending_rows(path):
+        # The overwhelmingly common case: nothing ever failed to write.
+        # Checked before locking so a healthy database never pays for
+        # the lock file or the lock itself.
         return
-    with _journal_lock:
+    with _journal_lock, _journal_file_lock(path):
+        for snapshot in _claim_journal_snapshots(path):
+            if not _replay_journal_snapshot(snapshot):
+                _restore_journal_snapshot(snapshot, path)
+
+
+def _journal_has_pending_rows(path: str) -> bool:
+    """Return True when a journal or an unfinished snapshot exists.
+
+    Args:
+        path: The live sidecar path for the active database.
+    """
+    if os.path.exists(path):
+        return True
+    directory = os.path.dirname(path) or "."
+    prefix = os.path.basename(path) + _JOURNAL_CONSUMED_SUFFIX
+    try:
+        return any(name.startswith(prefix) for name in os.listdir(directory))
+    except OSError:  # pragma: no cover — unreadable journal directory
+        return False
+
+
+def _claim_journal_snapshots(path: str) -> list[str]:
+    """Take ownership of *path* and return every snapshot to replay.
+
+    The live sidecar is renamed to a unique
+    ``.consumed-<pid>-<uuid>`` sibling, which is what makes the later
+    delete safe.  Snapshots a previous replayer left behind — it
+    crashed, or the database was still refusing writes — are picked up
+    too, so a rename is never a way to lose events.
+
+    Args:
+        path: The live sidecar path for the active database.
+
+    Returns:
+        Snapshot paths to replay, oldest name first.  Caller holds
+        :func:`_journal_file_lock`.
+    """
+    if os.path.exists(path):
+        claimed = (
+            f"{path}{_JOURNAL_CONSUMED_SUFFIX}{os.getpid()}-{uuid.uuid4().hex}"
+        )
         try:
-            with open(path, encoding="utf-8") as stream:
-                lines = stream.read().splitlines()
-        except OSError:  # pragma: no cover — unreadable journal
-            return
-        batch: list[tuple[str, str, float, str]] = []
-        for line in lines:
-            try:
-                record = json.loads(line)
-                batch.append((
-                    str(record["task_id"]),
-                    str(record["event_json"]),
-                    _safe_float(record["timestamp"], 0.0),
-                    str(record["origin_db_path"]),
-                ))
-            except (ValueError, TypeError, KeyError):
-                logger.warning("skipping malformed journal line", exc_info=True)
-        if batch:
-            try:
-                _write_event_batch(batch)
-            except Exception:
-                logger.warning(
-                    "replay of %d journalled events failed; keeping %s",
-                    len(batch), path, exc_info=True,
-                )
-                return
-            logger.info("replayed %d journalled chat events", len(batch))
+            os.replace(path, claimed)
+        except OSError:  # pragma: no cover — unrenamable journal
+            logger.warning("could not claim journal %s", path, exc_info=True)
+    directory = os.path.dirname(path) or "."
+    prefix = os.path.basename(path) + _JOURNAL_CONSUMED_SUFFIX
+    try:
+        names = os.listdir(directory)
+    except OSError:  # pragma: no cover — unreadable journal directory
+        return []
+    return [
+        os.path.join(directory, name)
+        for name in sorted(names)
+        if name.startswith(prefix)
+    ]
+
+
+def _restore_journal_snapshot(snapshot: str, path: str) -> None:
+    """Put a snapshot the database still refuses back under the live name.
+
+    ``<db>.failed_events.jsonl`` stays the single place an operator —
+    and the next replay — looks for pending rows, instead of the
+    pending transcript hiding under a ``.consumed-*`` name after every
+    failed attempt.
+
+    Args:
+        snapshot: The claimed file whose replay failed.
+        path: The live sidecar path for the active database.
+    """
+    if os.path.exists(path):
+        # Another snapshot was restored first (a previous replayer
+        # died before it could restore its own).  Leaving this one as
+        # a snapshot loses nothing: the next replay claims it too.
+        return
+    try:
+        os.replace(snapshot, path)
+    except OSError:  # pragma: no cover — unrenamable snapshot
+        logger.warning(
+            "could not restore journal snapshot %s", snapshot, exc_info=True,
+        )
+
+
+def _replay_journal_snapshot(snapshot: str) -> bool:
+    """Write one claimed journal *snapshot* to the database and delete it.
+
+    Args:
+        snapshot: Path of a ``.consumed-*`` file this process owns.
+
+    Returns:
+        True when the snapshot was replayed (or held nothing usable)
+        and removed; False when the database still refuses the write,
+        in which case the snapshot is kept for the next attempt.
+    """
+    try:
+        with open(snapshot, encoding="utf-8") as stream:
+            lines = stream.read().splitlines()
+    except OSError:  # pragma: no cover — unreadable snapshot
+        return True
+    batch: list[tuple[str, str, float, str]] = []
+    for line in lines:
         try:
-            os.unlink(path)
-        except OSError:  # pragma: no cover — concurrent unlink
-            pass
+            record = json.loads(line)
+            batch.append((
+                str(record["task_id"]),
+                str(record["event_json"]),
+                _safe_float(record["timestamp"], 0.0),
+                str(record["origin_db_path"]),
+            ))
+        except (ValueError, TypeError, KeyError):
+            logger.warning("skipping malformed journal line", exc_info=True)
+    if batch:
+        try:
+            _write_event_batch(batch)
+        except Exception:
+            logger.warning(
+                "replay of %d journalled events failed; keeping %s",
+                len(batch), snapshot, exc_info=True,
+            )
+            return False
+        logger.info("replayed %d journalled chat events", len(batch))
+    try:
+        os.unlink(snapshot)
+    except OSError:  # pragma: no cover — concurrent unlink
+        pass
+    return True
 
 
 def _write_event_batch(batch: list[tuple[str, str, float, str]]) -> None:

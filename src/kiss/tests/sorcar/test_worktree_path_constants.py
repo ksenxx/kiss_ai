@@ -184,3 +184,48 @@ def test_screenshot_still_remaps_into_a_live_worktree(repo_with_worktree):
 
     assert (wt / "shots" / "page.png").is_file(), result
     assert not (repo / "shots").exists(), result
+
+def test_created_worktree_uses_the_canonical_layout(tmp_path):
+    """The producer's layout is the one the guards recognise.
+
+    ``WorktreeSorcarAgent`` creates the worktree; ``UsefulTools`` and
+    the reclaim sweep recognise it.  Both sides must read the layout
+    from the same constants, so this builds every expectation from the
+    imported ones and then proves the real producer's output is
+    accepted by the real consumer.
+    """
+    from kiss.agents.sorcar.git_worktree import _WORKTREE_BRANCH_PREFIX
+    from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+
+    repo = tmp_path / "producer-repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "README.md").write_text("hello\n", encoding="utf-8")
+    _git(repo, "add", "README.md")
+    _git(repo, "commit", "-m", "initial")
+
+    agent = WorktreeSorcarAgent("layout-producer")
+    wt_dir = agent._try_setup_worktree(repo, str(repo))
+    assert wt_dir is not None
+    wt = agent._wt
+    assert wt is not None
+    try:
+        assert wt.branch.startswith(_WORKTREE_BRANCH_PREFIX), wt.branch
+        assert wt_dir.parent == repo / _WORKTREE_SUBDIR, wt_dir
+        assert wt_dir.name.startswith(_WORKTREE_SLUG_PREFIX), wt_dir.name
+
+        # The consumer guard agrees: a parent-repo write from inside
+        # the produced worktree is remapped into it.
+        tools = UsefulTools(work_dir=str(wt_dir))
+        assert "Successfully wrote" in tools.Write(
+            str(repo / "note.txt"), "hi",
+        )
+        assert (wt_dir / "note.txt").is_file()
+        assert not (repo / "note.txt").exists()
+    finally:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(wt_dir)],
+            cwd=repo, check=False, capture_output=True, text=True,
+        )

@@ -51,9 +51,10 @@ def test_run_single_resnapshots_parent_task_id_at_worker_start(
     With ``max_workers=1`` the executor runs task 1, then task 2.  We
     intentionally update ``parent._last_task_id`` from inside task 1's
     ``run()`` so that the snapshot taken inside ``_run_single`` BEFORE
-    task 2's ``run()`` must observe the updated value.  Pre-H5 (no
-    re-snapshot inside the closure), task 2 would inherit task 1's
-    captured value — empty.
+    task 2's ``run()`` must observe the updated value.  Without the
+    re-snapshot inside the closure, task 2 would inherit task 1's
+    captured value — the fan-out's synthetic placeholder, which names
+    no history row.
     """
     parent = ChatSorcarAgent("h5-toctou-probe")
     parent._chat_id = uuid.uuid4().hex  # noqa: SLF001
@@ -75,8 +76,10 @@ def test_run_single_resnapshots_parent_task_id_at_worker_start(
 
     parent._run_tasks_parallel(["task 1", "task 2"], max_workers=1)  # noqa: SLF001
 
-    assert captured[0] == "", (
-        f"task 1's snapshot should be empty (parent had no id yet); got {captured[0]!r}"
+    assert captured[0] and captured[0] != real_parent_tid, (
+        "task 1 ran before the parent had a row, so it must carry the "
+        "fan-out's synthetic parent id — never a blank one (which would "
+        f"make it a top-level history row); got {captured[0]!r}"
     )
     assert captured[1] == real_parent_tid, (
         "H5 re-snapshot failed: task 2 should have observed the parent's "

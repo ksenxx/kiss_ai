@@ -83,6 +83,22 @@ def _live_task_worker(kiss_dir: str, out_queue) -> None:
     time.sleep(300)
 
 
+def _clean_exit_owner_worker(kiss_dir: str, out_queue) -> None:
+    """Child process: publish a liveness marker, then exit normally.
+
+    Models the common case the marker lifecycle has to survive: a
+    daemon or CLI run that finishes every task it owns and terminates
+    without anyone ever having to sweep its rows.
+    """
+    import kiss.agents.sorcar.persistence as child_th
+
+    child_th._KISS_DIR = Path(kiss_dir)
+    child_th._DB_PATH = child_th._KISS_DIR / "sorcar.db"
+    child_th._db_conn = None
+    child_th._owner_state = None
+    out_queue.put(child_th._process_owner_token())
+
+
 def _frequent_task_worker(kiss_dir: str, task: str, barrier) -> None:
     """Child process: record one brand-new frequent task at the barrier."""
     import kiss.agents.sorcar.persistence as child_th
@@ -669,7 +685,8 @@ class ModuleInternalsTest(_PersistenceTestCase):
     def test_owner_token_is_reminted_when_the_home_moves(self) -> None:
         """A redirected KISS home gets its own liveness marker."""
         first = th._process_owner_token()
-        self.assertTrue((th._owner_dir() / f"{first}.lock").is_file())
+        first_marker = th._owner_dir() / f"{first}.lock"
+        self.assertTrue(first_marker.is_file())
 
         moved = self.tmp / "moved"
         moved.mkdir()
@@ -678,6 +695,34 @@ class ModuleInternalsTest(_PersistenceTestCase):
 
         self.assertNotEqual(first, second)
         self.assertTrue((moved / th._OWNER_DIR_NAME / f"{second}.lock").is_file())
+        self.assertFalse(
+            first_marker.exists(),
+            "the abandoned home kept a marker no process will ever "
+            "unlink, so it accumulates one file per redirect",
+        )
+
+    def test_marker_is_removed_when_its_owner_exits_normally(self) -> None:
+        """A process that simply finishes leaves no marker behind."""
+        out_queue: multiprocessing.Queue[str] = multiprocessing.Queue()
+        proc = multiprocessing.Process(
+            target=_clean_exit_owner_worker,
+            args=(str(self.kiss_dir), out_queue),
+        )
+        proc.start()
+        try:
+            token = out_queue.get(timeout=60)
+        finally:
+            proc.join(timeout=60)
+        self.assertEqual(proc.exitcode, 0)
+        self.assertTrue(token, "the child never published a marker")
+
+        marker = self.kiss_dir / th._OWNER_DIR_NAME / f"{token}.lock"
+        self.assertFalse(
+            marker.exists(),
+            "a process that exited normally left its liveness marker "
+            "behind: every daemon and CLI lifecycle leaks one file",
+        )
+        self.assertFalse(th._owner_is_alive(token))
 
     def test_owner_token_is_empty_when_the_marker_cannot_be_written(
         self,

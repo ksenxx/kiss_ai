@@ -34,8 +34,12 @@ export interface AgentClientOptions {
   maxPendingSends?: number;
 }
 
+/** Why a queued command was never delivered. */
+export type DroppedCommandReason = 'expired' | 'overflow';
+
 interface PendingSend {
   line: string;
+  cmd: AgentCommand;
   at: number;
 }
 
@@ -91,7 +95,10 @@ export class AgentClient extends EventEmitter {
       const pending = this._pendingSends;
       this._pendingSends = [];
       for (const item of pending) {
-        if (item.at < cutoff) continue;
+        if (item.at < cutoff) {
+          this._announceDropped(item, 'expired');
+          continue;
+        }
         sock.write(item.line);
       }
     });
@@ -133,14 +140,35 @@ export class AgentClient extends EventEmitter {
       sock.write(line);
       return;
     }
-    this._pendingSends.push({line, at: Date.now()});
-    if (this._pendingSends.length > this._maxPendingSends) {
-      this._pendingSends.splice(
-        0,
-        this._pendingSends.length - this._maxPendingSends,
-      );
+    this._pendingSends.push({line, cmd, at: Date.now()});
+    const surplus = this._pendingSends.length - this._maxPendingSends;
+    if (surplus > 0) {
+      for (const item of this._pendingSends.splice(0, surplus)) {
+        this._announceDropped(item, 'overflow');
+      }
     }
     this.connect();
+  }
+
+  /**
+   * Report a queued command the client has decided never to deliver.
+   *
+   * Both reasons are deliberate -- a `run` replayed into the daemon
+   * that REPLACED the one it was meant for starts an agent nobody asked
+   * for, and an unbounded queue is its own problem -- but neither is
+   * free: the webview shows a task as running the moment it is sent,
+   * so a command that quietly evaporates leaves a tab running for ever
+   * with nothing behind it.  The owner of that optimistic state is
+   * told, and undoes it.
+   *
+   * @param item The queued frame being discarded.
+   * @param reason Why it is being discarded.
+   */
+  private _announceDropped(
+    item: PendingSend,
+    reason: DroppedCommandReason,
+  ): void {
+    this.emit('commandDropped', item.cmd, reason);
   }
 
   dispose(): void {

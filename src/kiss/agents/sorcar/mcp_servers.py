@@ -571,6 +571,10 @@ class _Connection:
     task: Any = None
     finished: threading.Event = field(default_factory=threading.Event)
     last_used: float = field(default_factory=time.monotonic)
+    #: Tool calls currently executing on this connection.  Guarded by
+    #: the manager's lock; a connection is never evicted while it is
+    #: non-zero (see :meth:`MCPManager._evict_surplus`).
+    in_flight: int = 0
 
 
 def _child_errlog() -> Any:
@@ -820,20 +824,34 @@ class MCPManager:
         tool call rebuilds it from :attr:`_configs`, so eviction costs a
         reconnect at worst and never an error.
 
+        A connection with a tool call in flight is never a candidate,
+        however old it is: dropping it makes ``_maintain_connection``
+        leave the session context underneath a live
+        ``session.call_tool``, which strands that call until the
+        five-minute call timeout expires.  Tool calls block for as long
+        as the tool runs, so the busiest connection is regularly also
+        the least recently *started* one.  Such a connection becomes an
+        ordinary candidate again the moment its last call returns, so
+        the cap still holds — it is enforced a little later.
+
         Args:
             keep: The connection key just connected, never evicted.
         """
         now = time.monotonic()
         with self._lock:
-            doomed = {
+            evictable = {
                 key for key, conn in self._connections.items()
-                if key != keep and now - conn.last_used > self._idle_timeout_s
+                if key != keep and conn.in_flight == 0
+            }
+            doomed = {
+                key for key in evictable
+                if now - self._connections[key].last_used > self._idle_timeout_s
             }
             survivors = [key for key in self._connections if key not in doomed]
             surplus = len(survivors) - self._max_connections
             if surplus > 0:
                 oldest = sorted(
-                    (key for key in survivors if key != keep),
+                    (key for key in survivors if key in evictable),
                     key=lambda key: self._connections[key].last_used,
                 )
                 doomed.update(oldest[:surplus])
@@ -910,6 +928,10 @@ class MCPManager:
             why = conn.error if conn else "never connected"
             return f"Error: MCP server {display!r} is not connected ({why})"
         conn.last_used = time.monotonic()
+        # Lease the connection for the whole call so the pool cannot
+        # evict the session this call is running on.
+        with self._lock:
+            conn.in_flight += 1
         future = asyncio.run_coroutine_threadsafe(
             session.call_tool(
                 tool, arguments,
@@ -922,6 +944,10 @@ class MCPManager:
         except Exception as exc:
             future.cancel()
             return f"Error: MCP tool call failed: {exc}"
+        finally:
+            with self._lock:
+                conn.in_flight -= 1
+                conn.last_used = time.monotonic()
         return _result_text(result)
 
     def _reconnect(self, server: str) -> _Connection | None:

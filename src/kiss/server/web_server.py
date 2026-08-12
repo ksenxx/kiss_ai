@@ -5586,6 +5586,7 @@ class RemoteAccessServer:
             logger.exception(
                 "SIGTERM shutdown: stopping in-flight agent tasks failed",
             )
+        self._await_active_merges()
         self._disconnect_mcp_servers()
         loop = self._loop
         if loop is not None and loop.is_running():
@@ -5636,6 +5637,54 @@ class RemoteAccessServer:
             MCPManager.instance().disconnect_all()
         except Exception:  # noqa: BLE001 — shutdown must proceed regardless
             logger.debug("MCP server disconnect failed", exc_info=True)
+
+    def _await_active_merges(self, timeout: float = 30.0) -> None:
+        """Wait for interactive merge/discard work to finish.
+
+        The "Auto-commit and merge" / "Discard" action arrives as a
+        forwarded command and therefore runs in the event loop's
+        default executor.  By then the task that produced the worktree
+        has ended, so ``AgentState.task_thread`` is ``None`` and
+        :meth:`_stop_active_agent_tasks` — which requires a thread —
+        skips the state even though ``busy()`` is true.  Cancelling the
+        asyncio handler does not help either: cancelling a future that
+        awaits ``run_in_executor`` never stops the running function.
+
+        Unlike an agent task, a merge must not be *stopped*: it stashes,
+        commits, checks out and merges, and interrupting it half way
+        leaves the user's repository in a state they did not ask for.
+        Shutdown therefore *waits* for it, bounded by *timeout* so a
+        wedged git invocation cannot hang the process forever.
+
+        Args:
+            timeout: Maximum wall-clock seconds to wait, in aggregate,
+                for all in-flight merges.
+        """
+        from kiss.server import agent_state
+
+        with agent_state.STATE_LOCK:
+            threads = [
+                state.merge_thread
+                for state in agent_state.agent_states.values()
+                if state.merge_thread is not None
+                and state.merge_thread.is_alive()
+            ]
+        if not threads:
+            return
+        logger.warning(
+            "Shutdown: waiting up to %.0fs for %d interactive merge(s) "
+            "to finish rewriting the repository",
+            timeout, len(threads),
+        )
+        deadline = time.monotonic() + timeout
+        for thread in threads:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            if thread.is_alive():
+                logger.error(
+                    "Shutdown: merge thread %s did not finish within the "
+                    "grace period; proceeding without it",
+                    thread.name,
+                )
 
     def _stop_active_agent_tasks(self, timeout: float = 12.0) -> None:
         """Stop in-flight agent worker threads so they unwind cleanly.
@@ -5786,6 +5835,7 @@ class RemoteAccessServer:
         finally:
             self._shutdown_initiated = True
             self._stop_active_agent_tasks()
+            self._await_active_merges()
             self._disconnect_mcp_servers()
             logger.info("Server stopped: pid=%d", pid)
             self._detach_tunnel()
@@ -5900,6 +5950,11 @@ class RemoteAccessServer:
             # them so no coroutine touches server state after
             # stop_async returns; cancel stragglers.
             await self._drain_tasks(set(self._uds_handler_tasks))
+            # An interactive merge/discard runs in the default executor,
+            # not on a task thread: WAIT for it before anything else is
+            # torn down, or the repository keeps being rewritten after
+            # this method promised the server was down.
+            await asyncio.to_thread(self._await_active_merges)
             await asyncio.to_thread(self._stop_active_agent_tasks)
             await asyncio.to_thread(self._disconnect_mcp_servers)
             self._stop_tunnel()
