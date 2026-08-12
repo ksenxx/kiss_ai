@@ -405,13 +405,29 @@ class TestShellRcPath:
         assert _shell_rc_path("fish") == Path.home() / ".config" / "fish" / "config.fish"
 
 
+def _installed_posix_shell() -> str:
+    """Return the first POSIX shell installed on this machine.
+
+    Prefers ``zsh`` to keep exercising the historical default, but
+    falls back to ``bash`` (present on every Linux/macOS CI box) so the
+    end-to-end sourcing tests still run for real — instead of failing —
+    on machines without zsh.  ``source_shell_env`` treats both shells
+    identically (same ``source rc; env`` pipeline).
+    """
+    for shell in ("zsh", "bash"):
+        if _resolve_shell_path(shell) is not None:
+            return shell
+    pytest.skip("no zsh or bash binary available on this system")
+
+
 class TestSourceShellEnv:
     """Test sourcing shell env vars."""
 
     def test_source_picks_up_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        rc = Path.home() / ".zshrc"
+        shell = _installed_posix_shell()
+        rc = _shell_rc_path(shell)
         rc.write_text('export GEMINI_API_KEY="sourced-key"\n')
-        monkeypatch.setenv("SHELL", "/bin/zsh")
+        monkeypatch.setenv("SHELL", f"/bin/{shell}")
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         source_shell_env()
         assert os.environ.get("GEMINI_API_KEY") == "sourced-key"
@@ -429,12 +445,13 @@ class TestSourceShellEnv:
         This covers the branch where ``"=" not in line`` and where
         ``k not in API_KEY_ENV_VARS``.
         """
-        rc = Path.home() / ".zshrc"
+        shell = _installed_posix_shell()
+        rc = _shell_rc_path(shell)
         rc.write_text(
             'echo "no-equals-line"\n'
             'export GEMINI_API_KEY="from-source"\n'
         )
-        monkeypatch.setenv("SHELL", "/bin/zsh")
+        monkeypatch.setenv("SHELL", f"/bin/{shell}")
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         source_shell_env()
         assert os.environ.get("GEMINI_API_KEY") == "from-source"
@@ -450,13 +467,12 @@ class TestSourceShellEnv:
         path via :func:`_resolve_shell_path` and augments the inner
         ``PATH`` with standard system locations.
         """
-        rc = Path.home() / ".zshrc"
+        shell = _installed_posix_shell()
+        rc = _shell_rc_path(shell)
         rc.write_text('export GEMINI_API_KEY="empty-path-key"\n')
-        monkeypatch.setenv("SHELL", "/bin/zsh")
+        monkeypatch.setenv("SHELL", f"/bin/{shell}")
         monkeypatch.setenv("PATH", "")
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        if _resolve_shell_path("zsh") is None:
-            pytest.skip("zsh binary not available on this system")
         source_shell_env()
         assert os.environ.get("GEMINI_API_KEY") == "empty-path-key"
 
@@ -646,7 +662,7 @@ class TestEndToEndFlows:
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Save API key → clear env → source env → key is back."""
-        monkeypatch.setenv("SHELL", "/bin/zsh")
+        monkeypatch.setenv("SHELL", f"/bin/{_installed_posix_shell()}")
         save_api_key_to_shell("GEMINI_API_KEY", "flow-key")
         assert os.environ["GEMINI_API_KEY"] == "flow-key"
 
