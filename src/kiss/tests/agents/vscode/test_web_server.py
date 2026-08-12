@@ -2487,6 +2487,23 @@ class TestHandleReadyRestoredTabs(IsolatedAsyncioTestCase):
             self.assertIn("models", types)
 
 
+class _ForeignMetricsHandler(BaseHTTPRequestHandler):
+    """Stand-in for a FOREIGN cloudflared's ``/quicktunnel`` endpoint."""
+
+    def do_GET(self) -> None:  # noqa: N802 (http.server API)
+        body = json.dumps(
+            {"hostname": "foreign-daemon.trycloudflare.com"},
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
 class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
     """Test _send_welcome_info URL fallback paths."""
 
@@ -2551,9 +2568,34 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
 
         The frontend uses ``tunnelActive: False`` to hide the
         welcome-page remote-password panel when there is no tunnel.
+
+        A tunnel-DISABLED server must not fall back to
+        ``_discover_tunnel_url_from_metrics``: the machine-wide scan
+        can adopt a FOREIGN daemon's tunnel URL that does not route
+        to this server.  A stand-in "foreign cloudflared" metrics
+        endpoint is bound inside the hardcoded 20240-20259 scan range
+        so the leak reproduces deterministically — pre-fix this test
+        broadcast ``https://foreign-daemon.trycloudflare.com`` (or,
+        on this dev machine, the production daemon's real tunnel URL)
+        instead of ``""``.
         """
         self.server._active_url = None
         _URL_FILE.unlink(missing_ok=True)
+
+        foreign = None
+        for scan_port in range(20240, 20260):
+            try:
+                foreign = HTTPServer(
+                    ("127.0.0.1", scan_port), _ForeignMetricsHandler,
+                )
+                break
+            except OSError:
+                continue
+        if foreign is not None:
+            threading.Thread(
+                target=foreign.serve_forever, daemon=True,
+            ).start()
+            self.addCleanup(foreign.shutdown)
 
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws",

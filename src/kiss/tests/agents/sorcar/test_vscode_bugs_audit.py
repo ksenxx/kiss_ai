@@ -83,7 +83,14 @@ class TestCmdRunQueuesFollowup(unittest.TestCase):
         assert state.task_thread is thread
         assert state.pending_user_messages == ["x"]
         assert state.unattributed_prompt_echoes == ["x"]
-        assert new_events == [{"type": "prompt", "text": "x", "tabId": "t1"}]
+        # ``_cmd_run`` unconditionally mirrors the task-panel text to
+        # every client (the ``setTaskText`` submit acknowledgment)
+        # before echoing the queued prompt — also for a queued
+        # follow-up, so all run origins behave identically.
+        assert new_events == [
+            {"type": "setTaskText", "text": "x", "tabId": "t1"},
+            {"type": "prompt", "text": "x", "tabId": "t1"},
+        ]
 
         blocker.set()
         thread.join(timeout=2)

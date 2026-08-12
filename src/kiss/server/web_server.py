@@ -4128,8 +4128,8 @@ class RemoteAccessServer:
         """Broadcast the active remote URL to all connected clients.
 
         Broadcasts the ``remote_url`` event using the in-memory URL,
-        the URL file, or the ``cloudflared`` metrics API as successive
-        fallbacks.
+        the URL file, or — for tunnel-enabled servers only — the
+        ``cloudflared`` metrics API as successive fallbacks.
 
         Historically this method also broadcast a
         ``welcome_suggestions`` event with an empty list because the
@@ -4159,7 +4159,14 @@ class RemoteAccessServer:
             url = await loop.run_in_executor(
                 None, _read_url_from_file, self._url_file,
             )
-        if not url:
+        if not url and self.use_tunnel:
+            # Only a tunnel-enabled server may adopt a discovered
+            # cloudflared URL: the machine-wide scan can find a
+            # FOREIGN process's tunnel (another daemon on this host,
+            # e.g. the production kiss-web next to a test server)
+            # whose URL routes to that other server, not to this one.
+            # A tunnel-less server must never advertise — let alone
+            # persist to its URL file — a URL it does not own.
             discovered = await loop.run_in_executor(
                 None, _discover_tunnel_url_from_metrics,
             )
