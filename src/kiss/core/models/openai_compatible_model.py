@@ -13,20 +13,22 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from openai import BadRequestError, OpenAI
+from openai.resources.chat.completions import Completions
 
 if TYPE_CHECKING:  # pragma: no cover – import cycle avoided at runtime
     from kiss.core.models.openai_compatible_model2 import OpenAICompatibleModel2
 
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import (
+    FRAMEWORK_ONLY_CONFIG_KEYS,
+    TOOL_RESULT_ATTACHMENT_NOTE,
     Attachment,
     Model,
     ThinkingCallback,
     TokenCallback,
     _build_text_based_tools_prompt,
     _parse_text_based_tool_calls,
-    _tool_result_to_string,
-    parse_binary_attachments,
+    accepted_request_params,
     responses_items_to_chat_messages,
 )
 from kiss.core.models.stream_abort import (
@@ -35,6 +37,10 @@ from kiss.core.models.stream_abort import (
 )
 
 logger = logging.getLogger(__name__)
+
+# The request parameters a Chat Completions call accepts, taken from the
+# SDK's own signature (keyword-only, no **kwargs).
+_CHAT_REQUEST_PARAMS = accepted_request_params(Completions.create)
 
 def _provider_model_name(model_name: str) -> str:
     """Return the upstream provider id for a KISS catalog ``model_name``.
@@ -152,6 +158,23 @@ def _record_tool_effort_verdict(key: tuple[str, str], accepted: bool) -> None:
         else:
             _ADAPTIVE_TOOL_EFFORT_VERDICTS[key] = False
 
+
+# The attachment formats OpenAI accepts as input.  Images: PNG, JPEG,
+# WEBP and non-animated GIF ("Image input requirements",
+# https://developers.openai.com/api/docs/guides/images-vision, which states
+# the behaviour "is the same in both the Responses API and the Chat
+# Completions API").  Audio: mp3 and wav, the only values the SDK's own
+# ``input_audio.format`` literal allows — in the Chat Completions param
+# (``chat_completion_content_part_input_audio_param.py``) as well as the
+# Responses one (``response_input_audio_param.py``).
+#
+# Both transports apply this one set: whether a turn goes to Chat
+# Completions or the Responses API is a routing decision the caller never
+# made, so it must not change which attachments the model gets to see.
+OPENAI_INPUT_IMAGE_MIME_TYPES = frozenset(
+    {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"}
+)
+OPENAI_INPUT_AUDIO_FORMATS = frozenset({"mp3", "wav"})
 
 _AUDIO_MIME_TO_FORMAT: dict[str, str] = {
     "audio/mpeg": "mp3",
@@ -543,31 +566,40 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
     def _attachment_to_content_part(att: Attachment) -> dict[str, Any] | None:
         """Convert a single :class:`Attachment` to an OpenAI content-part dict.
 
-        Returns ``None`` for unsupported MIME types (e.g. video, which OpenAI
-        Chat Completions does not accept), logging a warning so the caller
-        knows the attachment was dropped.
+        Only the formats OpenAI actually accepts are carried
+        (:data:`OPENAI_INPUT_IMAGE_MIME_TYPES`,
+        :data:`OPENAI_INPUT_AUDIO_FORMATS` and PDFs) — the same set
+        :class:`~kiss.core.models.openai_compatible_model2.OpenAICompatibleModel2`
+        applies, so a turn delegated to the Responses transport carries
+        exactly the same attachments.  Anything else returns ``None`` with a
+        warning naming the format, rather than being sent for the provider
+        to reject or dropped in silence.
 
         Args:
             att: The attachment to convert.
 
         Returns:
             A content-part dict suitable for the ``content`` array of a
-            chat-completions message, or ``None`` if the MIME type is not
-            supported by OpenAI Chat Completions.
+            chat-completions message, or ``None`` if OpenAI does not accept
+            the format.
         """
-        if att.mime_type.startswith("image/"):
-            return {"type": "image_url", "image_url": {"url": att.to_data_url()}}
         if att.mime_type == "application/pdf":
             return {"type": "file", "file": {"file_data": att.to_data_url()}}
+        if att.mime_type in OPENAI_INPUT_IMAGE_MIME_TYPES:
+            return {"type": "image_url", "image_url": {"url": att.to_data_url()}}
         if att.mime_type.startswith("audio/"):
             fmt = _audio_mime_to_format(att.mime_type)
-            return {
-                "type": "input_audio",
-                "input_audio": {"data": att.to_base64(), "format": fmt},
-            }
+            if fmt in OPENAI_INPUT_AUDIO_FORMATS:
+                return {
+                    "type": "input_audio",
+                    "input_audio": {"data": att.to_base64(), "format": fmt},
+                }
         logger.warning(
-            "OpenAI Chat Completions does not support %s attachments; skipping.",
+            "OpenAI does not accept %s attachments (images: %s; audio: %s; "
+            "application/pdf); skipping.",
             att.mime_type,
+            ", ".join(sorted(OPENAI_INPUT_IMAGE_MIME_TYPES)),
+            ", ".join(sorted(OPENAI_INPUT_AUDIO_FORMATS)),
         )
         return None
 
@@ -593,55 +625,27 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
                 parts.append(part)
         return parts
 
-    def add_function_results_to_conversation_and_return(
-        self, function_results: list[tuple[str, dict[str, Any]]]
+    def _deliver_tool_result_attachments(
+        self, attachments: list[Attachment]
     ) -> None:
-        """Add tool results to the conversation, lifting binary attachments.
+        """Re-attach tool-result bytes as Chat Completions content parts.
 
-        The OpenAI Chat Completions ``tool`` role only accepts string
-        content, so binary attachments produced by the ``Read`` tool (e.g. a
-        PNG screenshot or an MP3 audio file) cannot live inside the tool
-        message.  Each tool message is appended with the sentinel payload
-        stripped to a short placeholder; if attachments were present, a
-        follow-up ``user`` message carrying ``image_url`` / ``file`` /
-        ``input_audio`` content parts is appended right after so the model
-        can actually see the file.  Unsupported MIME types (e.g. video) are
-        dropped with a warning.
+        The ``tool`` role only accepts string content, so binary payloads a
+        tool produced (a PNG screenshot, an MP3) cannot live inside the tool
+        message: they are carried by a follow-up ``user`` message holding
+        ``image_url`` / ``file`` / ``input_audio`` parts.  Formats OpenAI
+        does not accept are dropped by
+        :meth:`_attachments_to_content_parts` with a warning, and when that
+        leaves nothing to send no message is appended at all.
 
         Args:
-            function_results: List of ``(function_name, result_dict)`` tuples.
+            attachments: The attachments lifted out of the tool results.
         """
-        tool_calls = self._find_tool_call_ids_from_last_assistant()
-        pending_attachments: list[Attachment] = []
-
-        for i, (func_name, result_dict) in enumerate(function_results):
-            result_content = _tool_result_to_string(result_dict)
-            result_content, attachments = parse_binary_attachments(result_content)
-            if self.usage_info_for_messages:
-                result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
-
-            tool_call_id = (
-                tool_calls[i][1] if i < len(tool_calls) else f"call_{func_name}_{i}"
-            )
-            self.conversation.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": result_content,
-                }
-            )
-            pending_attachments.extend(attachments)
-
-        if pending_attachments:
-            parts = self._attachments_to_content_parts(pending_attachments)
-            if parts:
-                parts.append(
-                    {
-                        "type": "text",
-                        "text": "[attachments from previous tool result(s)]",
-                    }
-                )
-                self.conversation.append({"role": "user", "content": parts})
+        parts = self._attachments_to_content_parts(attachments)
+        if not parts:
+            return
+        parts.append({"type": "text", "text": TOOL_RESULT_ATTACHMENT_NOTE})
+        self.conversation.append({"role": "user", "content": parts})
 
     @classmethod
     def _normalize_content_blocks(cls, content: Any) -> list[dict[str, Any]]:
@@ -1124,10 +1128,15 @@ class OpenAICompatibleModel(OpenAICompatibleBase):
         Returns:
             The kwargs dict for ``client.chat.completions.create(...)``.
         """
-        kwargs = self.model_config.copy()
-        kwargs.pop("system_instruction", None)
-        kwargs.pop("use_responses_api", None)
-        kwargs.pop("stream_stall_timeout", None)
+        kwargs = self._keep_supported_request_params(
+            {
+                key: value
+                for key, value in self.model_config.items()
+                if key not in FRAMEWORK_ONLY_CONFIG_KEYS
+            },
+            _CHAT_REQUEST_PARAMS,
+            "OpenAI Chat Completions",
+        )
         kwargs.update({"model": self._api_model_name, "messages": messages})
         self._apply_cache_control_for_openrouter_anthropic(kwargs)
         return kwargs

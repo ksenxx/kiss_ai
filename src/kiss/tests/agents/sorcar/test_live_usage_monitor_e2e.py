@@ -322,4 +322,10 @@ class TestRunTasksParallelLiveUsage:
         assert printer.budget_offset == pytest.approx(parent.budget_used)
         assert printer.tokens_offset == parent.total_tokens_used
         assert printer.steps_offset == parent.total_steps
-        assert max(costs) <= parent.budget_used + 1e-9
+        # ``cost`` is the broadcast display string, quantised to four
+        # decimals, so compare against the same quantisation: a true spend of
+        # $0.0187905 is broadcast as "$0.0188".  A tighter bound would fail
+        # or pass purely on how the last cent rounded.  Over-attribution of a
+        # sub-agent's spend is still caught: it would exceed the parent's
+        # total by far more than half of the last displayed digit.
+        assert max(costs) <= round(parent.budget_used, 4) + 1e-9

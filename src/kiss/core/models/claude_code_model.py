@@ -219,23 +219,23 @@ class ClaudeCodeModel(CLITextModel):
         ])
         return args
 
-    def generate(self, stop_on_tool_calls: bool = False) -> tuple[str, Any]:
+    def generate(self) -> tuple[str, Any]:
         """Generate a response using the Claude Code CLI.
 
         Always uses streaming so tokens are delivered incrementally and the
         process is terminated before a second assistant message is produced.
 
-        Args:
-            stop_on_tool_calls: When ``True``, truncate the response at the
-                end of the first run of complete ``tool_calls`` JSON blocks
-                and stop parsing the turn, so a reasoning model that keeps
-                going cannot hallucinate its own tool results into the
-                content.  The CLI is **not** killed at that instant: the
-                stream is first drained to its terminal ``result`` event,
-                the only carrier of usage and cost (issue #34).  That drain
-                gives up at *timeout* rather than failing a step whose tool
-                call is already parsed, and the process is terminated as
-                soon as it finishes either way.
+        On a tool-bearing turn — one wrapped in
+        :class:`~kiss.core.models.model._ToolCallFilteredStream`, which both
+        CLI adapters install — the response is truncated at the end of the
+        first run of complete ``tool_calls`` JSON blocks and parsing stops,
+        so a reasoning model that keeps going cannot hallucinate its own
+        tool results into the content.  The CLI is **not** killed at that
+        instant: the stream is first drained to its terminal ``result``
+        event, the only carrier of usage and cost (issue #34).  That drain
+        gives up at *timeout* rather than failing a step whose tool call is
+        already parsed, and the process is terminated as soon as it finishes
+        either way.
 
         Returns:
             tuple[str, Any]: (generated_text, parsed_json_response).
@@ -251,6 +251,7 @@ class ClaudeCodeModel(CLITextModel):
         timeout = self.model_config.get("timeout", 300)
         args = self._build_cli_args()
         self._stopped_for_tool_calls = False
+        stop_on_tool_calls = self._tool_bearing_turn
 
         with _CLIProcess(args, "Claude Code CLI", timeout) as proc:
             try:
@@ -454,7 +455,7 @@ class ClaudeCodeModel(CLITextModel):
         original_config = self._install_tools_prompt_in_system_instruction(function_map)
         try:
             with _ToolCallFilteredStream(self):
-                content, response = self.generate(stop_on_tool_calls=True)
+                content, response = self.generate()
         finally:
             self.model_config = original_config
 

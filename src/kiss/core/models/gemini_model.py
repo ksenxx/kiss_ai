@@ -19,11 +19,11 @@ from google.genai import types
 
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import (
+    FRAMEWORK_ONLY_CONFIG_KEYS,
     Attachment,
     Model,
     ThinkingCallback,
     TokenCallback,
-    parse_binary_attachments,
     responses_items_to_chat_messages,
 )
 from kiss.core.models.stream_abort import (
@@ -34,6 +34,11 @@ from kiss.core.models.stream_abort import (
 logger = logging.getLogger(__name__)
 
 _CONNECT_TIMEOUT = 10.0
+
+# The request parameters Gemini accepts, taken from the SDK's own config
+# model.  ``GenerateContentConfig`` forbids unknown fields, so this is the
+# authoritative set of ``model_config`` keys that can be forwarded.
+_GEMINI_CONFIG_FIELDS = frozenset(types.GenerateContentConfig.model_fields)
 
 
 class _ResponseTrackingHttpxClient(httpx.Client):
@@ -304,54 +309,6 @@ class GeminiModel(Model):
         self.conversation = [msg]
         self._thought_signatures = {}
 
-    def add_function_results_to_conversation_and_return(
-        self, function_results: list[tuple[str, dict[str, Any]]]
-    ) -> None:
-        """Add tool results to the conversation, lifting binary attachments.
-
-        Gemini's ``FunctionResponse.response`` is a JSON dict and cannot
-        carry raw bytes, so binary attachments produced by the ``Read``
-        tool (e.g. a screenshot, audio, or video clip) are stripped from
-        the tool message and re-attached as a follow-up ``user`` message
-        whose ``attachments`` field is rendered via
-        :meth:`_convert_conversation_to_gemini_contents` into
-        :class:`google.genai.types.Part` instances using
-        ``Part.from_bytes`` — which accepts any Gemini-supported MIME
-        type (images, PDFs, audio, video).
-
-        Args:
-            function_results: List of ``(function_name, result_dict)`` tuples.
-        """
-        tool_calls = self._find_tool_call_ids_from_last_assistant()
-        pending_attachments: list[Attachment] = []
-
-        for i, (func_name, result_dict) in enumerate(function_results):
-            result_content = result_dict.get("result", str(result_dict))
-            result_content, attachments = parse_binary_attachments(result_content)
-            if self.usage_info_for_messages:
-                result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
-
-            tool_call_id = (
-                tool_calls[i][1] if i < len(tool_calls) else f"call_{func_name}_{i}"
-            )
-            self.conversation.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call_id,
-                    "content": result_content,
-                }
-            )
-            pending_attachments.extend(attachments)
-
-        if pending_attachments:
-            self.conversation.append(
-                {
-                    "role": "user",
-                    "content": "[attachments from previous tool result(s)]",
-                    "attachments": pending_attachments,
-                }
-            )
-
     def _tool_call_id_to_name_map(self) -> dict[str, str]:
         """Map tool-call ids to function names across the whole conversation.
 
@@ -489,6 +446,15 @@ class GeminiModel(Model):
         ``system_instruction`` by :meth:`_build_config` and skipped here),
         and Anthropic content-block lists.
 
+        A user message may also carry an ``attachments`` list, which becomes
+        :class:`google.genai.types.Part` instances via ``Part.from_bytes``
+        (any Gemini-supported MIME type: images, PDFs, audio, video).  That
+        is how bytes a tool returned reach the model: Gemini's
+        ``FunctionResponse.response`` is a JSON dict and cannot carry them,
+        so
+        :meth:`~kiss.core.models.model.Model._deliver_tool_result_attachments`
+        appends them as a follow-up user message instead.
+
         Returns:
             list[types.Content]: The conversation in Gemini API format.
         """
@@ -611,21 +577,47 @@ class GeminiModel(Model):
         return "\n\n".join(system_texts) if system_texts else None
 
     def _build_config(self, tools: list[types.Tool] | None = None) -> types.GenerateContentConfig:
-        thinking_config = self.model_config.get("thinking_config")
-        if thinking_config is None:
-            thinking_config = types.ThinkingConfig(include_thoughts=True)
-        max_output_tokens = self.model_config.get("max_tokens")
+        """Translate ``model_config`` into a Gemini generation config.
+
+        Every ``model_config`` key that names a real
+        :class:`~google.genai.types.GenerateContentConfig` field is
+        forwarded — ``seed``, ``top_k``, ``presence_penalty``,
+        ``response_mime_type`` and the rest included — after the portable
+        aliases (``max_tokens`` / ``max_completion_tokens`` →
+        ``max_output_tokens``, ``stop`` → ``stop_sequences``) are
+        translated.  Keys Gemini has no field for are reported rather than
+        dropped in silence: ``GenerateContentConfig`` forbids extras, so
+        forwarding them blindly would raise a ``ValidationError``.
+
+        Args:
+            tools: Optional Gemini tool declarations for this request.
+
+        Returns:
+            The config to pass to ``generate_content``.
+        """
+        params = {
+            key: value
+            for key, value in self.model_config.items()
+            if key not in FRAMEWORK_ONLY_CONFIG_KEYS
+        }
+        max_output_tokens = params.pop("max_tokens", None)
+        max_completion_tokens = params.pop("max_completion_tokens", None)
         if max_output_tokens is None:
-            max_output_tokens = self.model_config.get("max_completion_tokens")
-        return types.GenerateContentConfig(
-            max_output_tokens=max_output_tokens,
-            temperature=self.model_config.get("temperature"),
-            top_p=self.model_config.get("top_p"),
-            stop_sequences=self.model_config.get("stop"),
-            thinking_config=thinking_config,
-            tools=tools,  # type: ignore[arg-type]
-            system_instruction=self._resolve_system_instruction(),
+            max_output_tokens = max_completion_tokens
+        if max_output_tokens is not None:
+            params.setdefault("max_output_tokens", max_output_tokens)
+        stop = params.pop("stop", None)
+        if stop is not None:
+            params.setdefault("stop_sequences", stop)
+        if params.get("thinking_config") is None:
+            params["thinking_config"] = types.ThinkingConfig(include_thoughts=True)
+
+        params = self._keep_supported_request_params(
+            params, _GEMINI_CONFIG_FIELDS, "Gemini"
         )
+        params["tools"] = tools
+        params["system_instruction"] = self._resolve_system_instruction()
+        return types.GenerateContentConfig(**params)
 
     def _stream_parts(self, parts: list[Any]) -> None:
         """Stream parts, routing thinking tokens through the thinking callback.

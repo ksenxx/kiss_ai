@@ -28,7 +28,7 @@ import time
 import types as types_module
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin
 
@@ -527,6 +527,47 @@ def flatten_content_to_text(content: Any) -> str:
     return "\n".join(p for p in parts if p)
 
 
+# model_config keys the framework itself consumes: they configure this
+# framework's behaviour (routing, watchdogs, caching policy, the system
+# prompt) and are never request parameters of any provider, so every
+# adapter strips them before shaping a request.
+# The text of the follow-up user message that carries attachments a tool
+# returned, so the model knows where the bytes came from.
+TOOL_RESULT_ATTACHMENT_NOTE = "[attachments from previous tool result(s)]"
+
+FRAMEWORK_ONLY_CONFIG_KEYS = frozenset(
+    {
+        "system_instruction",
+        "use_responses_api",
+        "stream_stall_timeout",
+        "enable_cache",
+        # Whether a turn streams follows from whether a token callback is
+        # attached, so every adapter sets this itself.
+        "stream",
+    }
+)
+
+
+def accepted_request_params(method: Any) -> frozenset[str]:
+    """Return the keyword parameter names an SDK request method declares.
+
+    The provider SDKs are generated from the vendors' OpenAPI specs and
+    declare every request parameter explicitly with **no** ``**kwargs``,
+    so their signatures are the authoritative list of what a request may
+    carry — and stay correct across SDK upgrades, unlike a hand-written
+    table.
+
+    Args:
+        method: The unbound request function of an SDK resource class
+            (e.g. ``openai.resources.responses.Responses.create``), so the
+            answer does not depend on a client having been built yet.
+
+    Returns:
+        The declared parameter names, without ``self``.
+    """
+    return frozenset(inspect.signature(method).parameters) - {"self"}
+
+
 class Model(ABC):
     """Abstract base class for LLM provider implementations."""
 
@@ -557,6 +598,52 @@ class Model(ABC):
         # Whether a thinking block is currently open, so an aborted
         # stream can close it (see _close_thinking_if_open).
         self._thinking_open = False
+        # model_config keys already reported as unsupported, so a long run
+        # is told once rather than on every step.
+        self._reported_unsupported_config_keys: set[str] = set()
+
+    def _keep_supported_request_params(
+        self,
+        params: dict[str, Any],
+        supported: Collection[str],
+        provider: str,
+    ) -> dict[str, Any]:
+        """Return the ``model_config`` params *provider* accepts, reporting the rest.
+
+        The one policy every adapter applies to the public
+        :attr:`model_config` dict: keys the framework consumes are popped
+        by the adapter, portable keys are translated to the provider's own
+        spelling, and whatever is left is forwarded *iff* the provider
+        declares it.  A key the provider does not declare is dropped with
+        a warning naming both — never forwarded into a keyword-only SDK
+        call (a ``TypeError`` that is neither retryable nor actionable),
+        and never discarded in silence.
+
+        The warning is emitted once per key per model instance.
+
+        Args:
+            params: The candidate request parameters, already translated.
+            supported: The parameter names the provider accepts, taken
+                from the SDK itself (see :func:`accepted_request_params`).
+            provider: Human-readable transport name used in the warning.
+
+        Returns:
+            The subset of *params* the provider accepts.
+        """
+        kept = {key: value for key, value in params.items() if key in supported}
+        dropped = sorted(
+            key
+            for key in params
+            if key not in kept and key not in self._reported_unsupported_config_keys
+        )
+        if dropped:
+            self._reported_unsupported_config_keys.update(dropped)
+            logger.warning(
+                "%s does not support model_config key(s) %s; ignoring them.",
+                provider,
+                ", ".join(dropped),
+            )
+        return kept
 
     def _invoke_token_callback(self, token: str) -> None:
         """Invoke the token callback synchronously."""
@@ -752,36 +839,124 @@ class Model(ABC):
                 break
         return list(reversed(native))
 
+    def tool_result_text_and_attachments(
+        self, result_dict: dict[str, Any]
+    ) -> tuple[str, list[Attachment]]:
+        """Split one tool result into provider-safe text and its attachments.
+
+        The three steps every adapter needs, in the one order that works:
+        JSON-encode a structured result (a regex cannot be run over a dict),
+        lift any binary payload out of the sentinel the tool embedded it in,
+        and append the usage line the framework shows the model.
+
+        Args:
+            result_dict: One tool's result payload, as passed to
+                :meth:`add_function_results_to_conversation_and_return`.
+
+        Returns:
+            The text to put in the tool message, and the attachments the
+            tool produced (empty when it produced none).
+        """
+        text, attachments = parse_binary_attachments(
+            _tool_result_to_string(result_dict)
+        )
+        if self.usage_info_for_messages:
+            text = f"{text}\n\n{self.usage_info_for_messages}"
+        return text, attachments
+
+    @staticmethod
+    def tool_result_call_id(
+        result_dict: dict[str, Any],
+        index: int,
+        tool_calls: list[tuple[str, str]],
+        func_name: str,
+        prefix: str = "call",
+    ) -> str:
+        """Return the id of the tool call one result answers.
+
+        An explicit ``tool_use_id`` in the result wins — it is part of the
+        public signature of
+        :meth:`add_function_results_to_conversation_and_return`, so it is
+        honoured by every adapter rather than by one.  Otherwise results are
+        matched to the last assistant message's tool calls by position, and
+        an id is synthesised when there is nothing to match.
+
+        Args:
+            result_dict: One tool's result payload.
+            index: Its position in the result list.
+            tool_calls: ``(name, id)`` pairs of the calls being answered.
+            func_name: The tool's name, used in a synthesised id.
+            prefix: Prefix of a synthesised id (Anthropic uses ``toolu``).
+
+        Returns:
+            The tool-call id to answer.
+        """
+        explicit = result_dict.get("tool_use_id")
+        if explicit:
+            return str(explicit)
+        if index < len(tool_calls):
+            return tool_calls[index][1]
+        return f"{prefix}_{func_name}_{index}"
+
+    def _deliver_tool_result_attachments(
+        self, attachments: list[Attachment]
+    ) -> None:
+        """Make bytes a tool returned visible to the model.
+
+        A tool result is a string, so an image or audio clip a tool produced
+        cannot live inside the tool message on most transports.  The default
+        is to append a follow-up ``user`` message carrying the attachments,
+        which every adapter that renders an ``attachments`` key turns into
+        real image / file / audio content parts.
+
+        A transport that cannot carry bytes at all must override this and
+        *say so* — to the log and to the model — instead of dropping them.
+
+        Args:
+            attachments: The attachments lifted out of the tool results.
+        """
+        self.conversation.append(
+            {
+                "role": "user",
+                "content": TOOL_RESULT_ATTACHMENT_NOTE,
+                "attachments": list(attachments),
+            }
+        )
+
     def add_function_results_to_conversation_and_return(
         self, function_results: list[tuple[str, dict[str, Any]]]
     ) -> None:
         """Adds function results to the conversation state.
 
-        Matches results to tool calls by index from the last assistant message.
+        Each result becomes one ``tool`` message, answering the tool call
+        named by its ``tool_use_id`` or matched by position against the last
+        assistant message.  Binary payloads are lifted out of the text and
+        handed to :meth:`_deliver_tool_result_attachments`, so what a tool
+        returned actually reaches the model.
 
         Args:
             function_results: List of tuples containing (function_name, result_dict).
         """
         tool_calls = self._find_tool_call_ids_from_last_assistant()
+        pending: list[Attachment] = []
 
         for i, (func_name, result_dict) in enumerate(function_results):
-            result_content = _tool_result_to_string(result_dict)
-            result_content, _ = parse_binary_attachments(result_content)
-            if self.usage_info_for_messages:
-                result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
-
-            if i < len(tool_calls):
-                tool_call_id = tool_calls[i][1]
-            else:
-                tool_call_id = f"call_{func_name}_{i}"
-
+            result_content, attachments = self.tool_result_text_and_attachments(
+                result_dict
+            )
             self.conversation.append(
                 {
                     "role": "tool",
-                    "tool_call_id": tool_call_id,
+                    "tool_call_id": self.tool_result_call_id(
+                        result_dict, i, tool_calls, func_name
+                    ),
                     "content": result_content,
                 }
             )
+            pending.extend(attachments)
+
+        if pending:
+            self._deliver_tool_result_attachments(pending)
 
     def add_message_to_conversation(self, role: str, content: str) -> None:
         """Adds a message to the conversation state.
@@ -1008,6 +1183,11 @@ class CLITextModel(Model):
     _cli_model_name = "CLITextModel"
     _cli_logger = logger
 
+    # Set for the duration of a tool-bearing turn by
+    # :class:`_ToolCallFilteredStream`; adapters that can end such a turn
+    # early at the first complete ``tool_calls`` block consult it.
+    _tool_bearing_turn = False
+
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initialize the conversation with an initial user prompt.
 
@@ -1021,6 +1201,39 @@ class CLITextModel(Model):
                 "they will be ignored."
             )
         self.conversation = [{"role": "user", "content": prompt}]
+
+    def _deliver_tool_result_attachments(
+        self, attachments: list[Attachment]
+    ) -> None:
+        """State that this transport cannot show the bytes a tool returned.
+
+        The CLI is driven by a single text prompt and has no content-part
+        shape, so a screenshot or audio clip a tool produced cannot be
+        handed to the model.  Saying so — in the log and in the prompt
+        itself — is what keeps the model from reasoning about a picture it
+        never received, which is what silently dropping the bytes did.
+
+        Args:
+            attachments: The attachments lifted out of the tool results.
+        """
+        described = ", ".join(
+            f"{att.mime_type} ({len(att.data)} bytes)" for att in attachments
+        )
+        self._cli_logger.warning(
+            "%s cannot show attachments to the model; %s from the tool "
+            "result were not sent.",
+            self._cli_model_name,
+            described,
+        )
+        self.conversation.append(
+            {
+                "role": "user",
+                "content": (
+                    f"[{len(attachments)} attachment(s) in the previous tool "
+                    f"result could not be shown to this model: {described}]"
+                ),
+            }
+        )
 
     def _conversation_as_dialogue(self) -> str:
         """Render the conversation as a ``[User]/[Assistant]/[Tool Result]`` transcript.
@@ -1386,17 +1599,26 @@ class _ToolCallFilteredStream:
         self._escaped = False
 
     def __enter__(self) -> "_ToolCallFilteredStream":
-        """Install the filtering callbacks for the duration of the turn."""
+        """Mark the turn as tool-bearing and install the filtering callbacks.
+
+        The mark is what lets an adapter end the turn at the first complete
+        ``tool_calls`` block, so that capability is reachable through the
+        plain ``generate()`` contract instead of a widened signature only
+        one adapter has.  It is set even when nobody is streaming, because
+        the early stop matters regardless of who is watching.
+        """
+        self._model._tool_bearing_turn = True
         if self._token_callback is not None:
             self._model.token_callback = self._on_token
             self._model.thinking_callback = self._on_thinking
         return self
 
     def __exit__(self, *exc_info: Any) -> None:
-        """Release any buffered text and restore the original callbacks."""
+        """Release buffered text, restore the callbacks and clear the mark."""
         self._flush()
         self._model.token_callback = self._token_callback
         self._model.thinking_callback = self._thinking_callback
+        self._model._tool_bearing_turn = False
 
     def _emit(self, text: str) -> None:
         """Send *text* onward, if there is any and anyone is listening."""
