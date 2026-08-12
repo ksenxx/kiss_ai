@@ -3,10 +3,11 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-// End-to-end test for the remote-webapp reconnect path. The server pushes an
-// `openRunningTasks` event to every client that says `ready` -- including the
-// `ready` a dropped WebSocket sends when it comes back. Once the user is
-// working in the page, that reconnect must not drag them onto a task that is
+// End-to-end test for the mid-session reconnect path. The server answers
+// every `ready` -- including the one a dropped WebSocket sends when it comes
+// back -- with the shared-registry `tabs_state` snapshot, followed by a
+// replayed `status {running:true}` for every task still going. Once the user
+// is working in the page, that resync must not drag them onto a task that is
 // still running: restored tasks get reachable background tabs and nothing
 // else. (Landing on the newest running task is a launch-time affair, and
 // lives in launchTabSwitch.test.js.) Every test here therefore ends the
@@ -91,22 +92,37 @@ function clickTab(win, tabId) {
   el.dispatchEvent(new win.MouseEvent('click', {bubbles: true}));
 }
 
-function resumeCalls(win) {
-  return win._sentMessages.filter(m => m && m.type === 'resumeSession');
+function snapshotEntry(tabId, title, chatId) {
+  return {tabId: tabId, chatId: chatId || '', title: title || '', workDir: ''};
+}
+
+// The registry resync a reconnect triggers: the canonical snapshot plus a
+// replayed running `status` for each still-live task.
+function resync(win, entries, runningTabIds) {
+  send(win, {type: 'tabs_state', tabs: entries});
+  for (const tabId of runningTabIds || []) {
+    send(win, {type: 'status', running: true, tabId: tabId});
+  }
 }
 
 // A launched window with a live backend, in which the user has since touched
-// the page: exactly the state a mid-session snapshot arrives in.
+// the page: exactly the state a mid-session resync arrives in.
 // `daemonStatus connected` is what both clients send once the backend is
 // reachable -- without it the window would still be sitting behind the "server
-// is starting" overlay and no gesture could mean anything.
+// is starting" overlay and no gesture could mean anything. The user works in
+// one registered tab of their own.
 function endLaunch(win) {
   send(win, {type: 'daemonStatus', connected: true});
+  send(win, {
+    type: 'tabs_state',
+    tabs: [snapshotEntry('tab-user', 'my chat', 'chat-user')],
+  });
   win._testApi.endLaunch();
+  assert.strictEqual(win._testApi.getActiveTabId(), 'tab-user');
 }
 
 // A reconnect that restores one running task must leave the user where they
-// were, and must resume that task into its own (background) tab.
+// were, and must open that task in its own (background) tab.
 function testRestoredRunningTaskDoesNotStealFocus() {
   const win = makeWebview();
   const api = win._testApi;
@@ -114,10 +130,14 @@ function testRestoredRunningTaskDoesNotStealFocus() {
   const userTab = api.getActiveTabId();
   const before = tabIds(win);
 
-  send(win, {
-    type: 'openRunningTasks',
-    tasks: [{chatId: 'chat-1', taskId: 'task-1', title: 'background work'}],
-  });
+  resync(
+    win,
+    [
+      snapshotEntry('tab-user', 'my chat', 'chat-user'),
+      snapshotEntry('tab-bg', 'background work', 'chat-1'),
+    ],
+    ['tab-bg'],
+  );
 
   assert.strictEqual(
     api.getActiveTabId(),
@@ -131,28 +151,22 @@ function testRestoredRunningTaskDoesNotStealFocus() {
     before.length + 1,
     'the restored task must get its own tab',
   );
-  const restoredId = after.find(id => before.indexOf(id) < 0);
-  assert.ok(restoredId, 'a new tab id must appear in the tab bar');
+  assert.ok(after.includes('tab-bg'), 'the restored tab is in the tab bar');
   assert.strictEqual(
-    tabTitle(win, restoredId),
+    tabTitle(win, 'tab-bg'),
     'background work',
     'the restored tab must be titled after its task',
   );
-
-  const calls = resumeCalls(win);
-  assert.strictEqual(calls.length, 1, 'exactly one session must be resumed');
-  assert.strictEqual(calls[0].id, 'chat-1');
-  assert.strictEqual(calls[0].taskId, 'task-1');
   assert.strictEqual(
-    calls[0].tabId,
-    restoredId,
-    'the session must resume into its own tab, not the tab the user is on',
+    win._sentMessages.filter(m => m && m.type === 'resumeSession').length,
+    0,
+    'the daemon replays registry tabs itself; the client resumes nothing',
   );
 
-  clickTab(win, restoredId);
+  clickTab(win, 'tab-bg');
   assert.strictEqual(
     api.getActiveTabId(),
-    restoredId,
+    'tab-bg',
     'the restored tab must still be reachable by clicking it',
   );
 
@@ -167,14 +181,16 @@ function testManyRestoredTasksEachGetTheirOwnTab() {
   endLaunch(win);
   const userTab = api.getActiveTabId();
 
-  send(win, {
-    type: 'openRunningTasks',
-    tasks: [
-      {chatId: 'chat-a', taskId: 'task-a', title: 'alpha'},
-      {chatId: 'chat-b', taskId: 'task-b', title: 'beta'},
-      {chatId: 'chat-c', taskId: 'task-c', title: ''},
+  resync(
+    win,
+    [
+      snapshotEntry('tab-user', 'my chat', 'chat-user'),
+      snapshotEntry('tab-a', 'alpha', 'chat-a'),
+      snapshotEntry('tab-b', 'beta', 'chat-b'),
+      snapshotEntry('tab-c', '', 'chat-c'),
     ],
-  });
+    ['tab-a', 'tab-b', 'tab-c'],
+  );
 
   assert.strictEqual(
     api.getActiveTabId(),
@@ -182,20 +198,13 @@ function testManyRestoredTasksEachGetTheirOwnTab() {
     'no restored task may become the active tab',
   );
 
-  const calls = resumeCalls(win);
-  assert.strictEqual(calls.length, 3, 'every task must be resumed');
-  const usedTabIds = calls.map(c => c.tabId);
+  const ids = tabIds(win);
+  for (const id of ['tab-a', 'tab-b', 'tab-c']) {
+    assert.ok(ids.includes(id), `restored task ${id} needs its own tab`);
+    assert.notStrictEqual(id, userTab, "and not the user's tab");
+  }
   assert.strictEqual(
-    new Set(usedTabIds).size,
-    3,
-    'each restored task needs a distinct tab',
-  );
-  assert.ok(
-    usedTabIds.every(id => id !== userTab),
-    "no task may resume into the user's tab",
-  );
-  assert.strictEqual(
-    tabTitle(win, calls[2].tabId),
+    tabTitle(win, 'tab-c'),
     'new chat',
     'a task without a title falls back to the default tab title',
   );
@@ -211,28 +220,20 @@ function testAlreadyOpenTaskIsNeitherDuplicatedNorFocused() {
   const api = win._testApi;
   endLaunch(win);
 
-  send(win, {
-    type: 'openRunningTasks',
-    tasks: [{chatId: 'chat-1', taskId: 'task-1', title: 'first pass'}],
-  });
-  const restoredId = resumeCalls(win)[0].tabId;
+  const entries = [
+    snapshotEntry('tab-user', 'my chat', 'chat-user'),
+    snapshotEntry('tab-1', 'first pass', 'chat-1'),
+  ];
+  resync(win, entries, ['tab-1']);
   const userTab = api.getActiveTabId();
   const tabsAfterFirst = tabIds(win);
 
-  send(win, {
-    type: 'openRunningTasks',
-    tasks: [{chatId: 'chat-1', taskId: 'task-1', title: 'first pass'}],
-  });
+  resync(win, entries, ['tab-1']);
 
   assert.deepStrictEqual(
     tabIds(win),
     tabsAfterFirst,
     'a task that already has a tab must not get a second one',
-  );
-  assert.strictEqual(
-    resumeCalls(win).length,
-    1,
-    'an already-open session must not be resumed twice',
   );
   assert.strictEqual(
     api.getActiveTabId(),
@@ -241,7 +242,7 @@ function testAlreadyOpenTaskIsNeitherDuplicatedNorFocused() {
   );
   assert.notStrictEqual(
     api.getActiveTabId(),
-    restoredId,
+    'tab-1',
     'the restored tab must stay in the background',
   );
 
@@ -249,31 +250,36 @@ function testAlreadyOpenTaskIsNeitherDuplicatedNorFocused() {
   console.log('  ok - an already-open running task is left alone');
 }
 
-// Junk entries must be ignored without disturbing the tab bar.
-function testMalformedTasksAreIgnored() {
+// Junk snapshots must not disturb the tab bar, and junk running statuses
+// must not create or focus anything.
+function testMalformedPayloadsAreIgnored() {
   const win = makeWebview();
   const api = win._testApi;
   endLaunch(win);
   const userTab = api.getActiveTabId();
   const before = tabIds(win);
 
-  send(win, {type: 'openRunningTasks', tasks: [null, {}, {taskId: 'x'}]});
-  send(win, {type: 'openRunningTasks', tasks: 'not-an-array'});
-  send(win, {type: 'openRunningTasks'});
+  send(win, {type: 'tabs_state', tabs: 'not-an-array'});
+  send(win, {type: 'tabs_state'});
+  send(win, {
+    type: 'tabs_state',
+    tabs: [null, {}, {taskId: 'x'}, snapshotEntry('tab-user', 'my chat',
+                                                  'chat-user')],
+  });
+  send(win, {type: 'status', running: true, tabId: 'tab-ghost'});
 
-  assert.deepStrictEqual(tabIds(win), before, 'no tab may be created');
-  assert.strictEqual(resumeCalls(win).length, 0, 'nothing may be resumed');
+  assert.deepStrictEqual(tabIds(win), before, 'no tab may appear or vanish');
   assert.strictEqual(api.getActiveTabId(), userTab, 'the active tab is kept');
 
   win.close();
-  console.log('  ok - malformed openRunningTasks payloads are ignored');
+  console.log('  ok - malformed tabs_state payloads are ignored');
 }
 
 function runTests() {
   testRestoredRunningTaskDoesNotStealFocus();
   testManyRestoredTasksEachGetTheirOwnTab();
   testAlreadyOpenTaskIsNeitherDuplicatedNorFocused();
-  testMalformedTasksAreIgnored();
+  testMalformedPayloadsAreIgnored();
 }
 
 try {

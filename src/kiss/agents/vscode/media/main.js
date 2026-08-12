@@ -1821,8 +1821,7 @@
   // (the remote web app's stand-in for the VS Code editor — editors
   // are per-user surfaces on every client, so file views are not
   // mirrored).
-  function reconcileTabs(entries) {
-    const list = Array.isArray(entries) ? entries : [];
+  function reconcileTabs(list) {
     const byId = new Map(
       tabs.map(t => {
         return [t.id, t];
@@ -1842,6 +1841,9 @@
       } else if (!tab.isSubagentTab && e.title) {
         tab.title = clipTabTitle(e.title);
       }
+      // Once the registry has listed a tab, its removal from a later
+      // snapshot means another client closed it.
+      tab.inRegistry = true;
       if (e.chatId && String(tab.backendChatId || '') !== String(e.chatId)) {
         tab.backendChatId = String(e.chatId);
       }
@@ -1850,14 +1852,19 @@
     });
 
     // A removed registry tab takes its local sub-agent descendants
-    // with it, exactly like a local close would.
+    // with it, exactly like a local close would. An EMPTY snapshot
+    // spares tabs the registry never listed (the boot placeholder):
+    // there is nothing to mirror, so destroying and recreating the
+    // placeholder would only lose its identity and composer draft.
     const removedIds = new Set();
+    const snapshotEmpty = inSnapshot.size === 0;
     tabs.forEach(t => {
       if (
         !inSnapshot.has(t.id) &&
         !t.isSubagentTab &&
         !t.isContentTab &&
-        !pendingOpenTabs.has(t.id)
+        !pendingOpenTabs.has(t.id) &&
+        !(snapshotEmpty && !t.inRegistry)
       ) {
         removedIds.add(t.id);
       }
@@ -2229,12 +2236,6 @@
   let launchSwitchDone = false;
   let launchNewsSeen = false;
 
-  // Start timestamp, keyed by backend chat id, of every task the backend
-  // reported as running in the launch snapshot. The snapshot is only used to
-  // choose the launch tab -- a tab's own running state always comes from its
-  // event replay.
-  const launchRunningStartTs = new Map();
-
   // A launch begins when the backend becomes live, which is not the moment the
   // page loads: until then the chat is hidden behind the "KISS Sorcar Server
   // is starting ..." overlay, so nothing the user did to it counted and the
@@ -2262,8 +2263,6 @@
     // taking over the chat -- the chat is not even on screen yet.
     if (!launchStartedAt) return;
     launchSwitchDone = true;
-    // Launch-only data: from here on a tab's own replayed state is the truth.
-    launchRunningStartTs.clear();
   }
 
   function launchSwitchAllowed() {
@@ -2275,18 +2274,11 @@
     return true;
   }
 
-  function launchStartTsFor(tab) {
-    const snapshot = tab.backendChatId
-      ? launchRunningStartTs.get(tab.backendChatId)
-      : 0;
-    const own = tab.isRunning ? Number(tab.t0) || 0 : 0;
-    return Math.max(Number(snapshot) || 0, own);
-  }
-
+  // A tab counts for the launch only while its own replayed `status`
+  // says it is running; sub-agent and content tabs are implementation
+  // details of some chat tab, never launch targets themselves.
   function isLaunchRunning(tab) {
-    if (tab.isContentTab || tab.isSubagentTab) return false;
-    if (tab.isRunning) return true;
-    return !!tab.backendChatId && launchRunningStartTs.has(tab.backendChatId);
+    return !tab.isContentTab && !tab.isSubagentTab && !!tab.isRunning;
   }
 
   // Ties -- two tasks whose start timestamp is missing, so both read 0 --
@@ -2300,7 +2292,7 @@
     for (let i = 0; i < tabs.length; i++) {
       const tab = tabs[i];
       if (!isLaunchRunning(tab)) continue;
-      const ts = launchStartTsFor(tab);
+      const ts = Number(tab.t0) || 0;
       if (ts >= bestTs) {
         bestTs = ts;
         best = tab;
@@ -5423,9 +5415,6 @@
           }
           if (ev.running) applyChevronState(currentTaskName);
         }
-        if (!ev.running && evTab && evTab.backendChatId) {
-          launchRunningStartTs.delete(evTab.backendChatId);
-        }
         renderTabBar();
         refreshHistory();
         syncMobileInputDrawer();
@@ -5870,7 +5859,9 @@
         break;
       }
       case 'tabs_state':
-        reconcileTabs(ev.tabs);
+        // A snapshot without a well-formed tab list is junk, not an
+        // empty registry: ignore it rather than close every tab.
+        if (Array.isArray(ev.tabs)) reconcileTabs(ev.tabs);
         break;
 
       case 'triggerStop':
