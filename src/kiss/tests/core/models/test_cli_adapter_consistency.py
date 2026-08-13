@@ -56,6 +56,10 @@ _CLAUDE_EMITS_A_TOOL_CALL = """
     import sys
 
     sys.stdin.read()
+    print(json.dumps({"type": "message_delta",
+                      "delta": {"stop_reason": "end_turn"},
+                      "usage": {"input_tokens": 10, "output_tokens": 5,
+                                "cache_read_input_tokens": 0}}), flush=True)
     for chunk in ["Listing now.\\n",
                   '{"tool_calls": [{"name": "finish", ',
                   '"arguments": {"result": "ok"}}]}',
@@ -64,7 +68,8 @@ _CLAUDE_EMITS_A_TOOL_CALL = """
                           "delta": {"type": "text_delta", "text": chunk}}),
               flush=True)
     print(json.dumps({"type": "result", "result": "ignored",
-                      "usage": {"input_tokens": 10, "output_tokens": 5,
+                      "usage": {"input_tokens": 999999,
+                                "output_tokens": 999999,
                                 "cache_read_input_tokens": 0}}), flush=True)
 """
 
@@ -261,12 +266,17 @@ class TestI5FilterEdgeCases:
 
 
 class TestC6EarlyStopDrain:
-    """The drain that rescues usage must not be able to fail the step."""
+    """Early stop must keep usage accounting without draining the CLI."""
 
     def test_early_stop_still_reports_usage(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The terminal ``result`` event is still collected (issue #34)."""
+        """Usage is aggregated from ``message_delta`` events (issue #34).
+
+        The queued terminal ``result`` event (sentinel 999999 counts) must
+        NOT be consumed: draining the now-agentic CLI past the stop would
+        let it keep executing native tools.
+        """
         install_cli(tmp_path, monkeypatch, "claude", _CLAUDE_EMITS_A_TOOL_CALL)
         model = ClaudeCodeModel("cc/opus", model_config={"timeout": 20})
         model.initialize("list the files")
