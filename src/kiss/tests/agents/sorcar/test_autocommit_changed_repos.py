@@ -586,6 +586,44 @@ class TestChangedPathTracking(unittest.TestCase):
         assert self.printer.pop_changed_paths("") == set()
 
 
+class TestWebPrinterChangedPathTracking(unittest.TestCase):
+    """WebPrinter.broadcast must feed the same changed-path record.
+
+    The remote-access daemon installs WebPrinter (a JsonPrinter
+    subclass whose ``broadcast`` override re-implements the recording
+    path) in place of the base printer; without a mirrored
+    ``_track_changed_path`` call the cross-repo auto-commit saw no
+    changed paths for tasks run through it (gpt-5.6-sol merge-review
+    finding).
+    """
+
+    def _broadcast(self, printer: object, name: str, path: str, task: str) -> None:
+        from kiss.server.web_server import WebPrinter
+        assert isinstance(printer, WebPrinter)
+        printer.broadcast({
+            "type": "tool_call",
+            "name": name,
+            "path": path,
+            "taskId": task,
+        })
+
+    def test_write_path_tracked_through_web_printer(self) -> None:
+        from kiss.server.web_server import WebPrinter
+
+        printer = WebPrinter()
+        self._broadcast(printer, "Write", "/tmp/web-tracked.txt", "t-web-track")
+        assert printer.pop_changed_paths("t-web-track") == {
+            "/tmp/web-tracked.txt",
+        }
+
+    def test_read_not_tracked_through_web_printer(self) -> None:
+        from kiss.server.web_server import WebPrinter
+
+        printer = WebPrinter()
+        self._broadcast(printer, "Read", "/tmp/web-read.txt", "t-web-track-2")
+        assert printer.pop_changed_paths("t-web-track-2") == set()
+
+
 class TestSubtaskChangedPathsHelpers(unittest.TestCase):
     """The DB walk over parent_task_id descendants."""
 
