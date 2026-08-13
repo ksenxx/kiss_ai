@@ -62,7 +62,7 @@ ______________________________________________________________________
 | **Multiple models from multiple vendors in the same task** | ✅ Mix OpenAI, Anthropic, Gemini, Together, Z.AI, Moonshot AI, OpenRouter, Claude Code CLI, and Codex CLI | ❌ Anthropic Claude models only | ❌ One model per task |
 | **Primary focus** | ✅ **Quality** — rigorous review, end-to-end tests | Speed and developer ergonomics | Speed |
 | **Core Agents # LoC** | **~2850** | Unknown | Unknown |
-| **Models in bundled catalog** | 606 across 9 provider categories | Claude family only | Subset chosen by Cursor |
+| **Models in bundled catalog** | 616 across 9 provider categories | Claude family only | Subset chosen by Cursor |
 | **Bring your own API key / endpoint** | ✅ Yes — keys stay on your machine | ✅ Anthropic key | ⚠️ Routed through Cursor backend |
 | **Open source** | ✅ Apache-2.0 | ❌ Proprietary | ❌ Proprietary |
 | **Price** | Free framework; pay only your chosen model provider | Subscription / API usage | Subscription |
@@ -185,7 +185,7 @@ These agents live in `src/kiss/agents/third_party_agents/`.
 
 ## 🤖 Models Supported
 
-KISS Sorcar ships a catalog of **606 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
+KISS Sorcar ships a catalog of **616 models** across **9 provider categories**, with built-in prices, context lengths, and capability flags (`fc` function calling, `gen` generation, `emb` embedding). The source of truth is [src/kiss/core/models/MODEL_INFO.json](src/kiss/core/models/MODEL_INFO.json).
 
 | Provider category | Catalog entries |
 |---|---:|
@@ -196,13 +196,13 @@ KISS Sorcar ships a catalog of **606 models** across **9 provider categories**, 
 | Z.AI | 8 |
 | Moonshot AI | 10 |
 | OpenRouter | 348 |
-| Claude Code CLI (`cc/*`) | 3 |
+| Claude Code CLI (`cc/*`) | 13 |
 | Codex CLI (`codex/*`) | 9 |
 
 Current catalog capability totals:
 
-- **588** generation-capable models
-- **429** function-calling-capable models
+- **598** generation-capable models
+- **439** function-calling-capable models
 - **9** embedding models
 
 Full model list:
@@ -841,8 +841,18 @@ Full model list:
 </details>
 
 <details>
-<summary><strong>Claude Code CLI (cc/*) (3)</strong></summary>
+<summary><strong>Claude Code CLI (cc/*) (13)</strong></summary>
 
+- `cc/claude-fable-5`
+- `cc/claude-haiku-4-5-20251001`
+- `cc/claude-opus-4-5-20251101`
+- `cc/claude-opus-4-6`
+- `cc/claude-opus-4-7`
+- `cc/claude-opus-4-8`
+- `cc/claude-opus-5`
+- `cc/claude-sonnet-4-5-20250929`
+- `cc/claude-sonnet-4-6`
+- `cc/claude-sonnet-5`
 - `cc/haiku`
 - `cc/opus`
 - `cc/sonnet`
