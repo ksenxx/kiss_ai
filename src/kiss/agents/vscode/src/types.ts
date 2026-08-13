@@ -114,6 +114,17 @@ type ToWebviewMessageBody =
       language?: string;
     }
   | {type: 'voiceState'; listening: boolean; error?: string}
+  | {type: 'defaultModel'; model: string}
+  | {type: 'kissConfig'; config: Record<string, unknown>}
+  | {type: 'kissConfigSaved'; ok: boolean; error?: string}
+  | {
+      type: 'voiceWakeEvent';
+      event: 'ready' | 'wake' | 'transcribing' | 'no_speech' | 'speech';
+      text?: string;
+      speaker?: number | null;
+      language?: string | null;
+    }
+  | {type: 'voiceWakeState'; listening: boolean; error?: string}
   | {type: 'thinking_start'}
   | {type: 'thinking_delta'; text: string}
   | {type: 'thinking_end'}
@@ -337,9 +348,15 @@ export interface AgentCommand {
     | 'setWorkDir'
     | 'getConfig'
     | 'saveConfig'
+    | 'getDefaultModel'
+    | 'readKissConfig'
+    | 'writeKissConfig'
+    | 'voiceWakeStart'
+    | 'voiceWakeStop'
     | 'serverReset';
   prompt?: string;
   model?: string;
+  sensitivity?: number;
   workDir?: string;
   activeFile?: string;
   attachments?: Attachment[];

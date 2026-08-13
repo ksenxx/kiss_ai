@@ -48,6 +48,7 @@ import hashlib
 import ipaddress
 import json
 import logging
+import math
 import mimetypes
 import os
 import platform
@@ -78,9 +79,11 @@ from websockets.http11 import Request, Response
 
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
+from kiss.core.models.model_info import get_default_model
 from kiss.core.vscode_config import (
     apply_config_to_env,
     load_config,
+    save_config,
     source_shell_env,
 )
 from kiss.server import sorcar as sorcar_api
@@ -88,6 +91,7 @@ from kiss.server.json_printer import JsonPrinter, stamp_event_ts
 from kiss.server.server import VSCodeServer, broadcast_to_conn
 from kiss.server.tips import read_tips
 from kiss.server.tricks import read_tricks
+from kiss.server.voice_wake_control import VoiceWakeController
 from kiss.server.voice_wake import (
     MODEL_NAME,
     SpeakerIdentifier,
@@ -3246,6 +3250,7 @@ class RemoteAccessServer:
         if self.work_dir:
             self._vscode_server.work_dir = self.work_dir
         self._server_api = sorcar_api.ServerApi(self)
+        self._voice_wake = VoiceWakeController()
 
         self._html_bytes = _build_html().encode("utf-8")
         self._tunnel_proc: subprocess.Popen[str] | None = None
@@ -3565,6 +3570,15 @@ class RemoteAccessServer:
         except Exception:
             logger.debug("UDS handler error", exc_info=True)
         finally:
+            # A daemon-hosted wake-word listener is owned by exactly
+            # this connection: reap it here so a closed VS Code window
+            # can never leak a mic-holding child process.
+            try:
+                await self._voice_wake.stop(conn_state["conn_id"])
+            except Exception:
+                logger.debug(
+                    "voice-wake stop on disconnect failed", exc_info=True,
+                )
             local_tabs = conn_state.get("local_tabs")
             self._printer.unregister_local_uds_tabs(
                 conn_state["conn_id"],
@@ -3965,6 +3979,148 @@ class RemoteAccessServer:
                 },
             ),
         )
+
+    async def _handle_get_default_model(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Reply with the key-derived default model name.
+
+        Services the ``getDefaultModel`` command (routed by
+        :meth:`kiss.server.sorcar.ServerApi.get_default_model`): the
+        VS Code extension host historically shelled out to ``uv run
+        python -c ...`` for this value; over the socket the daemon
+        answers from its own environment instead.  The reply is a
+        single direct ``{"type": "defaultModel", "model": <name>}``
+        event to the requesting *endpoint* — never broadcast.
+
+        Args:
+            cmd: The parsed ``getDefaultModel`` command (unused).
+            endpoint: The client connection to reply to.
+        """
+        model = await asyncio.to_thread(get_default_model)
+        await self._endpoint_send(
+            endpoint,
+            json.dumps({"type": "defaultModel", "model": model}),
+        )
+
+    async def _handle_read_kiss_config(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Reply with the raw merged ``~/.kiss/config.json`` contents.
+
+        Services the ``readKissConfig`` command (routed — and gated to
+        local UDS clients — by
+        :meth:`kiss.server.sorcar.ServerApi.read_kiss_config`).  The
+        reply is a single direct ``{"type": "kissConfig", "config":
+        {...}}`` event to the requesting *endpoint* — never broadcast
+        — carrying :func:`kiss.core.vscode_config.load_config`'s
+        sanitized, defaults-merged view of the file, i.e. exactly
+        what the daemon itself acts on.
+
+        Args:
+            cmd: The parsed ``readKissConfig`` command (unused).
+            endpoint: The client connection to reply to.
+        """
+        cfg = await asyncio.to_thread(load_config)
+        await self._endpoint_send(
+            endpoint,
+            json.dumps({"type": "kissConfig", "config": cfg}),
+        )
+
+    async def _handle_write_kiss_config(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Merge the command's ``config`` keys into ``config.json``.
+
+        Services the ``writeKissConfig`` command (routed — and gated
+        to local UDS clients — by
+        :meth:`kiss.server.sorcar.ServerApi.write_kiss_config`).
+        Delegates to :func:`kiss.core.vscode_config.save_config`, so
+        the write shares the daemon's atomic, lock-guarded merge path
+        (existing keys are preserved, API keys are never written) and
+        the freshly saved state is re-applied to the daemon's
+        environment exactly like a settings-panel ``saveConfig``.
+        The reply is a single direct ``{"type": "kissConfigSaved",
+        "ok": <bool>[, "error": <msg>]}`` acknowledgement to the
+        requesting *endpoint* — never broadcast.
+
+        Args:
+            cmd: The parsed ``writeKissConfig`` command whose
+                ``config`` field must be a JSON object.
+            endpoint: The client connection to reply to.
+        """
+        data = cmd.get("config")
+        if not isinstance(data, dict):
+            await self._endpoint_send(endpoint, json.dumps({
+                "type": "kissConfigSaved",
+                "ok": False,
+                "error": "config must be a JSON object",
+            }))
+            return
+        try:
+            await asyncio.to_thread(save_config, data)
+            await asyncio.to_thread(
+                lambda: apply_config_to_env(load_config())
+            )
+        except OSError as err:
+            await self._endpoint_send(endpoint, json.dumps({
+                "type": "kissConfigSaved",
+                "ok": False,
+                "error": f"failed to save config: {err}",
+            }))
+            return
+        await self._endpoint_send(
+            endpoint, json.dumps({"type": "kissConfigSaved", "ok": True}),
+        )
+
+    async def _handle_voice_wake_start(
+        self, cmd: dict[str, Any], endpoint: Any, conn_id: str,
+    ) -> None:
+        """Start a daemon-hosted wake-word listener for one connection.
+
+        Services the ``voiceWakeStart`` command (routed — and gated to
+        local UDS clients — by
+        :meth:`kiss.server.sorcar.ServerApi.voice_wake_start`).  The
+        listener child process is owned by *conn_id*: its protocol
+        lines stream back to the requesting *endpoint* as
+        ``voiceWakeEvent`` / ``voiceWakeState`` events (see
+        :mod:`kiss.server.voice_wake_control`), and the
+        :meth:`_uds_handler` disconnect cleanup stops it when the
+        connection goes away.
+
+        Args:
+            cmd: The parsed ``voiceWakeStart`` command; its optional
+                ``sensitivity`` field (0..100) tunes wake eagerness.
+            endpoint: The client connection to stream events to.
+            conn_id: The owning connection's id.
+        """
+        raw = cmd.get("sensitivity")
+        sensitivity = (
+            round(raw)
+            if isinstance(raw, (int, float))
+            and not isinstance(raw, bool)
+            and math.isfinite(raw)
+            else None
+        )
+
+        async def _send(event: dict[str, Any]) -> None:
+            await self._endpoint_send(endpoint, json.dumps(event))
+
+        await self._voice_wake.start(conn_id, sensitivity, _send)
+
+    async def _handle_voice_wake_stop(self, conn_id: str) -> None:
+        """Stop *conn_id*'s daemon-hosted wake-word listener, if any.
+
+        Services the ``voiceWakeStop`` command (routed — and gated to
+        local UDS clients — by
+        :meth:`kiss.server.sorcar.ServerApi.voice_wake_stop`); also
+        called by the UDS disconnect cleanup, so it is a no-op when
+        the connection owns no listener.
+
+        Args:
+            conn_id: The owning connection's id.
+        """
+        await self._voice_wake.stop(conn_id)
 
     async def _handle_open_file(
         self, cmd: dict[str, Any], endpoint: Any,
@@ -5958,6 +6114,10 @@ class RemoteAccessServer:
             # them so no coroutine touches server state after
             # stop_async returns; cancel stragglers.
             await self._drain_tasks(set(self._uds_handler_tasks))
+            # Reap daemon-hosted wake-word listeners: their owning
+            # connections are gone (or going), and a leaked child
+            # would keep the microphone open past shutdown.
+            await self._voice_wake.stop_all()
             # An interactive merge/discard runs in the default executor,
             # not on a task thread: WAIT for it before anything else is
             # torn down, or the repository keeps being rewritten after

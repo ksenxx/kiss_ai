@@ -337,6 +337,13 @@ API: dict[str, ApiCommand] = _catalog(
     ApiCommand("selectModel", required=("model",)),
     ApiCommand("getConfig"),
     ApiCommand("saveConfig", required=("config",)),
+    ApiCommand("getDefaultModel", handler="get_default_model"),
+    ApiCommand("readKissConfig", handler="read_kiss_config"),
+    ApiCommand(
+        "writeKissConfig", required=("config",), handler="write_kiss_config"
+    ),
+    ApiCommand("voiceWakeStart", handler="voice_wake_start"),
+    ApiCommand("voiceWakeStop", handler="voice_wake_stop"),
     ApiCommand("setWorkDir", required=("workDir",)),
     ApiCommand("getFiles", required=("prefix",)),
     ApiCommand("recordFileUsage", required=("path",)),
@@ -513,6 +520,24 @@ class ServerBackend(Protocol):
     async def _handle_voice_transcribe(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None: ...
+
+    async def _handle_get_default_model(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_read_kiss_config(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_write_kiss_config(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None: ...
+
+    async def _handle_voice_wake_start(
+        self, cmd: dict[str, Any], endpoint: Any, conn_id: str,
+    ) -> None: ...
+
+    async def _handle_voice_wake_stop(self, conn_id: str) -> None: ...
 
     async def _handle_active_tasks_query(self, endpoint: Any) -> None: ...
 
@@ -931,6 +956,121 @@ class ServerApi:
             ctx: The transport context of the current call.
         """
         await self._backend._handle_voice_transcribe(cmd, ctx.endpoint)
+
+    async def get_default_model(
+        self, cmd: dict[str, Any], ctx: ApiContext,
+    ) -> None:
+        """Reply with the daemon's key-derived default model name.
+
+        Services ``getDefaultModel`` so the VS Code extension host can
+        obtain :func:`kiss.core.models.model_info.get_default_model`
+        over the socket instead of spawning a throwaway ``uv run
+        python -c ...`` interpreter (its historical out-of-band
+        channel, still used as a fallback while the daemon is down).
+        The reply is a direct ``defaultModel`` event to the requester.
+
+        Args:
+            cmd: The ``getDefaultModel`` command.
+            ctx: The transport context of the current call.
+        """
+        await self._backend._handle_get_default_model(cmd, ctx.endpoint)
+
+    async def read_kiss_config(
+        self, cmd: dict[str, Any], ctx: ApiContext,
+    ) -> None:
+        """Serve the raw merged ``~/.kiss/config.json`` to a local client.
+
+        Services ``readKissConfig`` so the extension host can read the
+        daemon-owned config file through the socket instead of parsing
+        the file itself.  The reply is a direct ``kissConfig`` event.
+
+        LOCAL (UDS) CLIENTS ONLY: unlike ``getConfig`` (whose reply is
+        shaped for the settings panel), this returns the config
+        verbatim — including ``remote_password`` — so a remote WSS
+        browser must never receive it.  A WSS-delivered command is
+        dropped as a defensive no-op.
+
+        Args:
+            cmd: The ``readKissConfig`` command.
+            ctx: The transport context of the current call.
+        """
+        if not ctx.is_uds:
+            return
+        await self._backend._handle_read_kiss_config(cmd, ctx.endpoint)
+
+    async def write_kiss_config(
+        self, cmd: dict[str, Any], ctx: ApiContext,
+    ) -> None:
+        """Merge a local client's keys into ``~/.kiss/config.json``.
+
+        Services ``writeKissConfig`` so the extension host can update
+        daemon-owned config keys (e.g. ``remote_password``) through
+        the socket — sharing the daemon's atomic, lock-guarded
+        :func:`kiss.core.vscode_config.save_config` write path —
+        instead of rewriting the file itself.  The reply is a direct
+        ``kissConfigSaved`` acknowledgement event.
+
+        LOCAL (UDS) CLIENTS ONLY: a remote WSS browser must not be
+        able to change ``remote_password`` or any other daemon
+        setting through this raw channel; a WSS-delivered command is
+        dropped as a defensive no-op.
+
+        Args:
+            cmd: The ``writeKissConfig`` command carrying ``config``.
+            ctx: The transport context of the current call.
+        """
+        if not ctx.is_uds:
+            return
+        await self._backend._handle_write_kiss_config(cmd, ctx.endpoint)
+
+    async def voice_wake_start(
+        self, cmd: dict[str, Any], ctx: ApiContext,
+    ) -> None:
+        """Start the daemon-hosted wake-word listener for this client.
+
+        Services ``voiceWakeStart`` so the extension host can run
+        :mod:`kiss.server.voice_wake` as a daemon child over the
+        socket — receiving its protocol as ``voiceWakeEvent`` /
+        ``voiceWakeState`` events — instead of spawning the listener
+        process itself and parsing its stdout (its historical
+        out-of-band channel).  The optional ``sensitivity`` field
+        (0..100) tunes wake-word eagerness.  The listener is bound to
+        this connection and stopped on disconnect.
+
+        LOCAL (UDS) CLIENTS ONLY: the listener captures this
+        machine's microphone, so a remote WSS browser must not
+        control it (browser-mode voice capture stays in-page via
+        ``voiceTranscribe``); a WSS-delivered command is dropped as a
+        defensive no-op.
+
+        Args:
+            cmd: The ``voiceWakeStart`` command.
+            ctx: The transport context of the current call.
+        """
+        if not ctx.is_uds:
+            return
+        await self._backend._handle_voice_wake_start(
+            cmd, ctx.endpoint, ctx.conn_state["conn_id"],
+        )
+
+    async def voice_wake_stop(
+        self, cmd: dict[str, Any], ctx: ApiContext,
+    ) -> None:
+        """Stop this client's daemon-hosted wake-word listener.
+
+        Services ``voiceWakeStop``; a no-op when the connection has no
+        running listener.  LOCAL (UDS) CLIENTS ONLY, matching
+        ``voiceWakeStart``.
+
+        Args:
+            cmd: The ``voiceWakeStop`` command (unused).
+            ctx: The transport context of the current call.
+        """
+        if not ctx.is_uds:
+            return
+        await self._backend._handle_voice_wake_stop(
+            ctx.conn_state["conn_id"],
+        )
 
     async def active_tasks_query(
         self, cmd: dict[str, Any], ctx: ApiContext,
