@@ -885,6 +885,11 @@ class _TaskRunnerMixin:
                 client_task_id=_client_task_id_of(cmd),
             )
 
+            # A broken tools file raises ToolsFileError here, inside
+            # this try: the generic task-error handling below turns it
+            # into a failed task result carrying the loader's
+            # diagnostic message — the task must stop rather than run
+            # without the tools the client asked for.
             client_tools = load_tools_file(cmd.get("toolsFile"))
 
             for subtask_index, task_prompt in enumerate(subtasks):
