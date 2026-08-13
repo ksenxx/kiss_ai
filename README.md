@@ -29,6 +29,7 @@ ______________________________________________________________________
 
 - [KISS Sorcar vs Claude Code vs Cursor](#-kiss-sorcar-vs-claude-code-vs-cursor)
 - [What is in the Name](#what-is-in-the-name)
+- [Architecture](#-architecture)
 - [See It in Action](#-see-it-in-action)
 - [Installation](#installation)
   - [Full install from source](#full-install-from-source)
@@ -75,6 +76,41 @@ ______________________________________________________________________
 **KISS Agent Framework** is a deliberately small agent runtime organized around the [KISS principle](https://en.wikipedia.org/wiki/KISS_principle) ("Keep it Simple, Stupid").
 The name “Sorcar” pays homage to [P. C. Sorcar](https://en.wikipedia.org/wiki/P._C._Sorcar), the legendary Bengali magician, evoking the idea of an agent that performs feats that appear magical yet are grounded in disciplined engineering.
 Note: **Sorcar** also means government in Bengali.
+
+## 🏛 Architecture
+
+KISS Sorcar is four strictly-layered packages around one always-on daemon. Each layer only calls downward, and all live progress streams back up as events through a single `Printer` interface, so no lower layer ever knows which UI (if any) is watching.
+
+```
+  VS Code extension host ──┐
+  Python client API ───────┤ newline-delimited JSON over the Unix socket ~/.kiss/sorcar.sock
+                           │
+  web / mobile browsers ───┘ HTTPS/WSS via a cloudflared tunnel
+              │
+              ▼
+  kiss-web daemon (src/kiss/server) — one command catalog shared by every client
+              │
+              ▼
+  agent stack (src/kiss/agents/sorcar) — the workers that do the coding
+              │
+              ▼
+  core runtime (src/kiss/core) — KISSAgent loop, model catalog, Printer, config
+```
+
+| Layer | Directory | Role |
+|---|---|---|
+| **vscode** | `src/kiss/agents/vscode/` | *The face.* A thin TypeScript extension (host code plus the chat webview, which is also served to browsers) with **no agent logic of its own** — it installs the toolchain, launches and restarts the `kiss-web` daemon, and relays commands over the socket. |
+| **server** | `src/kiss/server/` | *The switchboard.* The `kiss-web` daemon owns both transports (Unix socket + WebSocket), dispatches every UI command through one API catalog, runs each task on a background thread, and fans agent events out to every connected client while persisting them. |
+| **sorcar** | `src/kiss/agents/sorcar/` | *The workers.* The agent stack `WorktreeSorcarAgent → ChatSorcarAgent → SorcarAgent → RelentlessAgent`, with coding/browser tools, git-worktree isolation, Docker, MCP, skills, and the SQLite chat store `~/.kiss/sorcar.db`. |
+| **core** | `src/kiss/core/` | *The foundation.* The generic `KISSAgent` function-calling loop, model back-ends and the 616-model catalog, the abstract `Printer` event interface, configuration (`~/.kiss/config.json`), stop signals, and speech synthesis. |
+
+Consequences of this design:
+
+- **One daemon, many equal clients.** The VS Code extension, the web/mobile app, and the Python client all speak the same command catalog to the same daemon, so a task started in one client streams live into all of them. A server-canonical tab registry keeps one tab per chat mirrored across every window and device.
+- **Everything can go through the socket.** The daemon services even config reads/writes, default-model lookup, and the wake-word voice listener as socket commands; privacy-sensitive ones (raw config, microphone control) are answered only for local Unix-socket clients — never for remote browsers.
+- **Tasks outlive clients.** Tasks run on daemon threads, so closing VS Code or a browser tab does not kill a running agent; reconnecting clients replay the persisted event stream.
+
+The full command catalog and Python API are documented in [API.md](API.md).
 
 ## Installation
 
@@ -137,7 +173,7 @@ The remote web app is the same interface served over a cloudflared tunnel: copy 
 
 ### The `kiss-web` daemon
 
-The `kiss-web` daemon hosts all agents, chat sessions, and the web app. The VS Code extension starts it automatically; you can also manage it yourself:
+The `kiss-web` daemon hosts all agents, chat sessions, and the web app, and services every client command — including config reads/writes, default-model lookup, and the wake-word listener — over its socket. The VS Code extension starts it automatically; you can also manage it yourself:
 
 ```bash
 # Start the daemon (serves the web app and the extension).
@@ -164,7 +200,7 @@ print(result.text, result.success, result.cost, result.tokens, result.steps)
 follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 ```
 
-`run()` accepts keyword options mirroring the chat interface — `model`, `work_dir`, `chat_id`, `use_worktree`, `auto_commit`, `max_budget`, `model_config` (custom endpoint/headers), `web_tools`, `is_parallel`, `timeout` — plus `tools="/path/to/my_tools.py"`, a Python file whose top-level functions the daemon registers as extra agent tools.
+`run()` accepts keyword options mirroring the chat interface — `model`, `work_dir`, `chat_id`, `use_worktree`, `auto_commit`, `max_budget`, `model_config` (custom endpoint/headers), `web_tools`, `is_parallel`, `timeout`, `sock_path` (daemon socket override) — plus `tools="/path/to/my_tools.py"`, a Python file whose top-level functions the daemon registers as extra agent tools. The functions are never serialized: only the path travels over the socket, and the daemon imports the file and runs the tools in its own process.
 
 ### Skills, MCP servers, and customization
 
