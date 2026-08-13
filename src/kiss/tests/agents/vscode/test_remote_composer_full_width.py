@@ -56,9 +56,11 @@ def _extract_div_block(src: str, div_id: str) -> str:
 
     Reads the actual shipped ``chat.html`` and balances ``<div>`` /
     ``</div>`` pairs from the opening tag to its matching close tag, so
-    the test exercises the exact DOM the user sees.
+    the test exercises the exact DOM the user sees.  The opening tag may
+    carry additional attributes after the ``id`` (e.g. ``#output`` ships
+    with ``role="tabpanel" aria-label="Chat"``).
     """
-    m = re.search(rf'<div id="{re.escape(div_id)}">', src)
+    m = re.search(rf'<div id="{re.escape(div_id)}"[^>]*>', src)
     assert m, f"{div_id} div not found in chat.html"
     start = m.start()
     i = m.end()
