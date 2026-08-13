@@ -1,0 +1,18 @@
+# Q4 adversarial audit. Data: orderdate in [1992-01-01, 1998-08-02]; window = [DATE, DATE+3mo).
+# Branches: "q4 fast" (prefix-count window overlaps orderdate domain), "q4 window_empty"
+# (window entirely outside domain -> exact empty), "q4 fallback_sorted"/"q4 fallback_unsorted"
+# (baseline scans; only if build_q4_artifacts was skipped - builder invariant, unreachable for
+# any placeholder value).
+{"line": "4 \"1993-09-01\"", "expect": ["q4 fast"], "forbid": ["q4 window_empty", "q4 fallback_sorted"], "note": "seed42 value"}
+{"line": "4 \"1995-11-01\"", "expect": ["q4 fast"], "forbid": ["q4 fallback_sorted"], "note": "seed7 value"}
+{"line": "4 \"1997-06-01\"", "expect": ["q4 fast"], "forbid": ["q4 fallback_sorted"], "note": "seed123 value"}
+{"line": "4 \"1992-01-01\"", "expect": ["q4 fast"], "forbid": [], "note": "window starts exactly at min orderdate"}
+{"line": "4 \"1991-11-15\"", "expect": ["q4 fast"], "forbid": ["q4 window_empty"], "note": "window straddles min orderdate: lo clamped to domain start"}
+{"line": "4 \"1998-08-02\"", "expect": ["q4 fast"], "forbid": ["q4 window_empty"], "note": "window starts exactly at max orderdate: single-day overlap"}
+{"line": "4 \"1998-06-15\"", "expect": ["q4 fast"], "forbid": [], "note": "window straddles max orderdate: hi clamped to domain end"}
+{"line": "4 \"1996-11-30\"", "expect": ["q4 fast"], "forbid": [], "note": "add-3-months day clamp: 1996-11-30 + 3mo -> 1997-02-28"}
+{"line": "4 \"1995-11-30\"", "expect": ["q4 fast"], "forbid": [], "note": "add-3-months leap clamp: 1995-11-30 + 3mo -> 1996-02-29"}
+{"line": "4 \"1998-08-03\"", "expect": ["q4 window_empty"], "forbid": ["q4 fast", "q4 fallback_sorted"], "note": "window starts one day after max orderdate: guard-false, exact empty"}
+{"line": "4 \"1991-10-01\"", "expect": ["q4 window_empty"], "forbid": ["q4 fast"], "note": "window [1991-10-01,1992-01-01) ends at domain start (half-open): empty"}
+{"line": "4 \"1970-01-01\"", "expect": ["q4 window_empty"], "forbid": ["q4 fast"], "note": "window decades before data: empty"}
+{"line": "4 \"2050-01-01\"", "expect": ["q4 window_empty"], "forbid": ["q4 fast"], "note": "window decades after data: empty"}

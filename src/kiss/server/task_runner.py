@@ -26,9 +26,11 @@ import uuid
 from collections.abc import Callable
 from contextlib import suppress
 from functools import partial
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from kiss.agents.sorcar.git_worktree import (
+    GitWorktreeOps,
     strip_worktree_suffix,
 )
 from kiss.agents.sorcar.persistence import (
@@ -309,6 +311,55 @@ def _release_worktree_without_merging(
     agent._set_warnings(merge=f"{reason} {stranded}" if stranded else reason)
 
 
+def _wt_merge_on_repo(state: AgentState, repo: Path | None) -> bool:
+    """True when *state* is merging a worktree into *repo*'s main tree.
+
+    Used by the non-worktree task admission gate: starting a task
+    directly on a main working tree that a concurrent worktree merge
+    is stashing/checking-out/merging would interleave writes, so the
+    start is refused — but only when the two really share a main tree.
+    A merge in a *different* repository never touches *repo*.
+
+    Args:
+        state: The registered state of a potentially merging task.
+        repo: The main repository root the starting task will write,
+            or ``None`` when the task's ``work_dir`` is not in a git
+            repo (then no worktree merge can conflict with it).
+
+    Returns:
+        True when *state* holds a worktree merge whose repository is
+        *repo*, whose worktree directory itself is *repo* (the
+        starting task would run inside the directory the merge is
+        about to remove), or whose repository cannot be determined —
+        the conservative pre-repo-aware behavior.
+    """
+    if not (state.is_merging and state.use_worktree):
+        return False
+    if repo is None:
+        return False
+    agent = state.agent
+    merge_root = getattr(agent, "_repo_root", None) if agent is not None else None
+    if merge_root is None:
+        # The merging task's repository is unknown (e.g. its agent has
+        # already been disposed); keep the conservative refusal.
+        return True
+    try:
+        repo_resolved = repo.resolve()
+        if Path(merge_root).resolve() == repo_resolved:
+            return True
+        # A task starting INSIDE the very worktree being merged (its
+        # work_dir's toplevel is the linked worktree directory) must
+        # also be refused: the merge auto-commits and removes that
+        # directory out from under the task.
+        merge_wt_dir = getattr(agent, "_wt_dir", None)
+        return bool(
+            merge_wt_dir is not None
+            and Path(merge_wt_dir).resolve() == repo_resolved
+        )
+    except OSError:  # pragma: no cover — unresolvable path
+        return True
+
+
 _STOP_SENTINEL: object = object()
 
 
@@ -325,7 +376,9 @@ class _TaskRunnerMixin:
         _tab_models: dict[str, str]
 
         def _tab_model(self, tab_id: str) -> str: ...
-        def _any_non_wt_running(self) -> bool: ...
+        def _any_non_wt_running(
+            self, repo_root: Path | None = None,
+        ) -> bool: ...
         def _dispose_if_closed(self, tab_id: str) -> None: ...
         def _main_dirty_files(self, work_dir: str = "") -> list[str]: ...
         def _autocommit_changes(
@@ -333,6 +386,15 @@ class _TaskRunnerMixin:
             tab_id: str = "",
             *,
             work_dir: str = "",
+        ) -> None: ...
+        def _autocommit_changed_repos(
+            self,
+            tab_id: str = "",
+            *,
+            work_dir: str = "",
+            task_id: str | None = None,
+            extra_paths: set[str] | None = None,
+            extra_task_ids: list[str] | None = None,
         ) -> None: ...
         def _handle_worktree_action(
             self,
@@ -417,6 +479,7 @@ class _TaskRunnerMixin:
                     state.unattributed_prompt_echoes.clear()
                     state.is_task_active = False
                     state.is_running_non_wt = False
+                    state.non_wt_repo_root = None
                     state.interrupted_by_shutdown = False
                     task_id_for_end = state.task_id
                     # Ownership is decided by the agent alone: it is
@@ -718,9 +781,10 @@ class _TaskRunnerMixin:
         self._broadcast_early_prompts(prompt, active_file, tab_id)
 
         if not use_worktree:
+            repo = GitWorktreeOps.discover_repo(Path(work_dir))
             with self._state_lock:
                 if any(
-                    t.is_merging and t.use_worktree
+                    _wt_merge_on_repo(t, repo)
                     for t in agent_state.agent_states.values()
                 ):
                     state.is_task_active = False
@@ -734,6 +798,7 @@ class _TaskRunnerMixin:
                     )
                     return
                 state.is_running_non_wt = True
+                state.non_wt_repo_root = repo.resolve() if repo else None
 
         if getattr(agent, "_wt_pending", False):
             # A worktree carried over from an earlier run on this tab
@@ -745,7 +810,9 @@ class _TaskRunnerMixin:
             # owner and no preserve marker, which let a later reclaim
             # sweep publish work the user declined to merge (R09-1).
             with self._state_lock:
-                main_tree_busy = self._any_non_wt_running()
+                main_tree_busy = self._any_non_wt_running(
+                    getattr(agent, "_repo_root", None),
+                )
             if main_tree_busy:
                 # Retiring the previous worktree is an automatic path,
                 # so it obeys the toggle as it stands NOW — the value
@@ -779,6 +846,13 @@ class _TaskRunnerMixin:
         sub_steps_base = int(getattr(agent, "total_steps", 0) or 0)
         agent_returned: str = ""
         task_history_id: str | None = None
+        # Changed-path records (and history ids) of EARLIER sequential
+        # <task> runs of this submission, taken before their
+        # per-subtask cleanup frees them (see the pop above
+        # _persist_subtask_row).  The ids let the end-of-run cross-repo
+        # auto-commit collect those runs' sub-agent records too.
+        run_changed_paths: set[str] = set()
+        run_task_ids: list[str] = []
         try:
             subtasks = parse_task_tags(prompt)
             from kiss.core.vscode_config import (
@@ -934,6 +1008,15 @@ class _TaskRunnerMixin:
                         self.printer.broadcast(failure_result)
                     break
                 if subtask_index < len(subtasks) - 1:
+                    # _persist_subtask_row's cleanup_task frees this
+                    # subtask's changed-path record; take it first so
+                    # the end-of-run cross-repo auto-commit still sees
+                    # the files EARLIER sequential <task> runs changed.
+                    if task_history_id is not None:
+                        run_changed_paths |= self.printer.pop_changed_paths(
+                            task_history_id,
+                        )
+                        run_task_ids.append(str(task_history_id))
                     self._persist_subtask_row(
                         state,
                         task_id=task_history_id,
@@ -1014,11 +1097,24 @@ class _TaskRunnerMixin:
                             self._autocommit_changes(
                                 tab_id, work_dir=work_dir,
                             )
+                        if effective_auto_commit:
+                            # The action above commits the work_dir
+                            # repository only; files the task changed
+                            # in OTHER repositories would be silently
+                            # left uncommitted without this pass.
+                            self._autocommit_changed_repos(
+                                tab_id,
+                                work_dir=work_dir,
+                                task_id=task_history_id,
+                                extra_paths=run_changed_paths,
+                                extra_task_ids=run_task_ids,
+                            )
                     except BaseException:  # pragma: no cover — autocommit error handler
                         logger.debug("Post-task autocommit error", exc_info=True)
                     finally:
                         with self._state_lock:
                             state.is_running_non_wt = False
+                            state.non_wt_repo_root = None
                 assert task_end_event is not None
                 _append_chat_event(
                     task_end_event,
@@ -1157,6 +1253,7 @@ class _TaskRunnerMixin:
                     state.is_task_active = False
                     if not use_worktree:
                         state.is_running_non_wt = False
+                        state.non_wt_repo_root = None
                 if task_history_id is not None:
                     try:
                         self.printer.cleanup_task(task_history_id)

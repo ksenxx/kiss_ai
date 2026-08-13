@@ -28,15 +28,15 @@ Can you authenticate me with Gmail using the Gmail agent? Use the user's default
 
 ## Task
 
-Can you read \<<url>>, and thoroughly and precisely check for **wrong assumptions**, **cheating**, **irreproducibility issues**, **fraud**, **potential for cheating in evaluation**, **AI Slop**, and **security vulnerabilities**? Use the internet extensively and do not believe what people say -- verify it yourself. Do not hesitate to download code and run it to validate results. For security vulnerabilities, create a POC and test it. Generate an HTML report in ./sorcar_reported_frauds/ and open it in the user's default browser. Thoroughly fact-check everything you claim in the report.
+Can you read \<<url>>, and thoroughly and precisely check for **wrong assumptions**, **cheating**, **irreproducibility issues**, **fraud**, **potential for cheating in evaluation**, **AI Slop**, and **security vulnerabilities**? Use the internet extensively and do not believe what people say -- verify it yourself. Do not hesitate to download code and run it to validate results. For security vulnerabilities, create a POC and test it. Create a report.
 
 ## Task
 
-Sorcar for AI Discovery: Can you AI-discover the lightest and fastest AI model that will give the best accuracy and recall on the data at \<</path/to/data>> at the cheapest price? Separate 20% of the data for evals, and your discovery strategy must not look at the evals data. Use 'modal' CLI to train your models on GPUs and evaluate if needed. The total budget for Modal.com is $ 1,000. Experiment with a smaller subset of data and fewer model parameters to run experiments quickly, then extrapolate. Do not STOP until accuracy/recall reaches 95% on evals and you can process each query in less than 600 seconds and under 50 USD per query, amortized over all queries. Create an HTML report with diagrams and illustrations (which does not look AI-generated) in ./reports and open it in the user's default browser?
+Sorcar for AI Discovery: Can you AI discover the lightest and fastest AI model that will give the best accuracy and recall on the data at \<</path/to/data>> at the cheapest price? Use 'modal' CLI to train your models on GPUs and evaluate if needed. The total budget for Modal.com is $ 1,000. Do not STOP until accuracy/recall reaches 99% and price per query on the model is less that $0.5. Craete a report.
 
 ## Task
 
-Sorcar for Optimization: Can you run the command \<<command>> in the background and monitor its output in real time to optimize the code at \<<folder_name_or_url>> with respect to the following metrics: \<<speed, accuracy, recall, cost>>. Then use AI discovery to optimize. You can add a diagnostic code that prints metrics, such as running time, at a finer granularity. Do not forget to remove the diagnostic code after the optimization is complete. You MUST NOT STOP until the metrics achieve the following values: \<<give_concrete_values_for_metrics>>. Create an HTML report with diagrams and illustrations (that do not look AI-generated) in ./reports, and open it in the user's default browser.
+Sorcar for Optimization: Can you run the command \<<command>> and optimize it with respect to the following metrics: \<<speed, accuracy, recall, cost>>. Then use AI discovery to optimize. You can add a diagnostic code that prints metrics, such as running time, at a finer granularity. Do not forget to remove the diagnostic code after the optimization is complete. You MUST NOT STOP until the metrics achieve the following values: \<<give_concrete_values_for_metrics>>. Create a report.
 
 ## Task
 
