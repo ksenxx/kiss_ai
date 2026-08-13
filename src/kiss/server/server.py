@@ -1194,6 +1194,7 @@ class VSCodeServer(
                     task_id=str(task_id) if task_id else "",
                     create=True,
                 )
+            self._emit_pending_ask(tab_id)
             return
 
         extra_str = str(result.get("extra", "") or "")
@@ -1291,6 +1292,7 @@ class VSCodeServer(
                 "tabId": tab_id,
             }
         )
+        self._emit_pending_ask(tab_id)
         self._emit_pending_worktree(tab_id)
 
         if subagent_info is None and isinstance(rebound_task_id, str) and rebound_task_id:
@@ -1298,6 +1300,45 @@ class VSCodeServer(
                 parent_task_id=rebound_task_id,
                 parent_tab_id=tab_id,
             )
+
+    def _emit_pending_ask(self, tab_id: str) -> None:
+        """Re-broadcast a still-pending ask-user question to *tab_id*.
+
+        Session replays (``resumeSession``) repaint a tab's transcript
+        but the ``askUser`` modal is a live event: a client that
+        connects or reloads while the tab's task is blocked inside
+        ``ask_user_question`` would otherwise never see the question.
+        Called after every ``task_events`` replay broadcast so such
+        clients converge on the same modal every other client shows.
+
+        The pending state is resolved exactly like ``userAnswer``
+        routing (:meth:`_resolve_user_answer_state`): the state
+        launched from *tab_id* itself, else the state of any task the
+        tab is subscribed to.  The broadcast happens under
+        ``_state_lock`` — the same lock ``_cmd_user_answer`` holds
+        while clearing ``pending_ask_question`` — so the re-emitted
+        ``askUser`` can never be ordered after the answer's
+        ``askUserDone`` (which is broadcast after the lock is
+        released), guaranteeing no client is left with a stale modal.
+
+        Args:
+            tab_id: Frontend tab id whose viewers should (re)show the
+                modal.  The event is tabId-stamped, so every connected
+                client mirroring the shared tab renders it.
+        """
+        if not tab_id:
+            return
+        with self._state_lock:
+            state = self._resolve_user_answer_state(tab_id)
+            question = state.pending_ask_question if state is not None else ""
+            if question:
+                self.printer.broadcast(
+                    {
+                        "type": "askUser",
+                        "question": question,
+                        "tabId": tab_id,
+                    }
+                )
 
     def _resolve_parent_tab_id_for_sub(
         self,
@@ -1440,6 +1481,7 @@ class VSCodeServer(
                     "tabId": sub_tab_id,
                 }
             )
+            self._emit_pending_ask(sub_tab_id)
             if not is_done and _subagent_is_done(sub_task_id):
                 self.printer.broadcast(
                     {

@@ -63,6 +63,7 @@ class AgentState:
         "stop_event",
         "task_thread",
         "user_answer_queue",
+        "pending_ask_question",
         "pending_user_messages",
         "unattributed_prompt_echoes",
         "is_task_active",
@@ -103,6 +104,13 @@ class AgentState:
         self.stop_event: threading.Event | None = stop_event
         self.task_thread: threading.Thread | None = task_thread
         self.user_answer_queue: queue.Queue[str] | None = None
+        # The live ``ask_user_question`` text this task is currently
+        # blocked on, or ``""`` when no question is pending.  Set by
+        # the asking agent thread, cleared when an answer is consumed
+        # or the wait aborts; session replays re-broadcast it so a
+        # client that connects mid-question also shows the modal.
+        # Read/written under the server's ``_state_lock``.
+        self.pending_ask_question: str = ""
         self.pending_user_messages: list[str] = []
         self.unattributed_prompt_echoes: list[str] = []
         self.is_task_active: bool = is_task_active

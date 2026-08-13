@@ -573,6 +573,11 @@ class _CommandsMixin:
                 logger.debug("userAnswer dropped: no queue for tabId=%s", ans_tab)
                 return
             answered_task_id = owner.task_id
+            # The question is no longer pending the moment its answer
+            # is consumed: clearing under ``_state_lock`` guarantees a
+            # concurrent session replay (``_emit_pending_ask``) can
+            # never re-show an already-answered modal.
+            owner.pending_ask_question = ""
             while not q.empty():
                 try:
                     q.get_nowait()
