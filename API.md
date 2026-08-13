@@ -279,6 +279,31 @@ ______________________________________________________________________
   - `cmd`: The `voiceTranscribe` command carrying the audio.
   - `ctx`: The transport context of the current call.
 
+- **get_default_model** — Reply with the daemon's key-derived default model name. Services `getDefaultModel` so the VS Code extension host can obtain :func:`kiss.core.models.model_info.get_default_model` over the socket instead of spawning a throwaway `uv run python -c ...` interpreter (its historical out-of-band channel, still used as a fallback while the daemon is down). The reply is a direct `defaultModel` event to the requester.<br/>`async get_default_model(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `getDefaultModel` command.
+  - `ctx`: The transport context of the current call.
+
+- **read_kiss_config** — Serve the raw merged `~/.kiss/config.json` to a local client. Services `readKissConfig` so the extension host can read the daemon-owned config file through the socket instead of parsing the file itself. The reply is a direct `kissConfig` event. LOCAL (UDS) CLIENTS ONLY: unlike `getConfig` (whose reply is shaped for the settings panel), this returns the config verbatim — including `remote_password` — so a remote WSS browser must never receive it. A WSS-delivered command is dropped as a defensive no-op.<br/>`async read_kiss_config(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `readKissConfig` command.
+  - `ctx`: The transport context of the current call.
+
+- **write_kiss_config** — Merge a local client's keys into `~/.kiss/config.json`. Services `writeKissConfig` so the extension host can update daemon-owned config keys (e.g. `remote_password`) through the socket — sharing the daemon's atomic, lock-guarded :func:`kiss.core.vscode_config.save_config` write path — instead of rewriting the file itself. The reply is a direct `kissConfigSaved` acknowledgement event. LOCAL (UDS) CLIENTS ONLY: a remote WSS browser must not be able to change `remote_password` or any other daemon setting through this raw channel; a WSS-delivered command is dropped as a defensive no-op.<br/>`async write_kiss_config(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `writeKissConfig` command carrying `config`.
+  - `ctx`: The transport context of the current call.
+
+- **voice_wake_start** — Start the daemon-hosted wake-word listener for this client. Services `voiceWakeStart` so the extension host can run :mod:`kiss.server.voice_wake` as a daemon child over the socket — receiving its protocol as `voiceWakeEvent` / `voiceWakeState` events — instead of spawning the listener process itself and parsing its stdout (its historical out-of-band channel). The optional `sensitivity` field (0..100) tunes wake-word eagerness. The listener is bound to this connection and stopped on disconnect. LOCAL (UDS) CLIENTS ONLY: the listener captures this machine's microphone, so a remote WSS browser must not control it (browser-mode voice capture stays in-page via `voiceTranscribe`); a WSS-delivered command is dropped as a defensive no-op.<br/>`async voice_wake_start(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `voiceWakeStart` command.
+  - `ctx`: The transport context of the current call.
+
+- **voice_wake_stop** — Stop this client's daemon-hosted wake-word listener. Services `voiceWakeStop`; a no-op when the connection has no running listener. LOCAL (UDS) CLIENTS ONLY, matching `voiceWakeStart`.<br/>`async voice_wake_stop(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `voiceWakeStop` command (unused).
+  - `ctx`: The transport context of the current call.
+
 - **active_tasks_query** — Report in-flight agent tasks back to the requesting client.<br/>`async active_tasks_query(cmd: dict[str, Any], ctx: ApiContext) -> None`
 
   - `cmd`: The `activeTasksQuery` command (unused).
