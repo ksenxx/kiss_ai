@@ -556,7 +556,6 @@
       askPendingQuestion: null,
       askQuestionEl: null,
       askInputEl: null,
-      askSubmitEl: null,
     };
   }
 
@@ -8126,8 +8125,6 @@
     row.appendChild(m);
     tab.askQuestionEl = q;
     tab.askInputEl = i;
-    tab.askSubmitEl = s;
-    tab.askMicEl = m;
     tab.askActionsEl = row;
   }
 

@@ -21,7 +21,6 @@
   --purple: var(--vscode-terminal-ansiMagenta);
   --cyan: var(--vscode-terminal-ansiCyan);
   --orange: color-mix(in srgb, var(--yellow) 55%, var(--red));
-  --blue: var(--vscode-terminal-ansiBlue, #569cd6);
   --fs-xs:  0.636rem;
   --fs-sm:  0.818rem;
   --fs-md:  0.909rem;

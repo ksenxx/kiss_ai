@@ -1092,7 +1092,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
   public stopTask(): void {
     if (this._view && this._webviewReady) {
-      this._sendToWebview({type: 'triggerStop'} as ToWebviewMessage);
+      this._sendToWebview({type: 'triggerStop'});
       return;
     }
     // No resolved webview to relay through — stop running tasks directly.
@@ -1147,7 +1147,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       };
       const inner = (s: {inner: number; screen: number}) => finish(s);
       this._sizeReportResolver = inner;
-      this._sendToWebview({type: 'measureSize'} as ToWebviewMessage);
+      this._sendToWebview({type: 'measureSize'});
       setTimeout(() => finish(undefined), timeoutMs);
     });
   }

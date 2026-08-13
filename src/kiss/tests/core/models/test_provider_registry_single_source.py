@@ -16,9 +16,9 @@ Two findings from ``tmp/audit/01-core-models-a.md``:
   routed to Gemini and credited to the Gemini API key.
 * **F6** — ``OPENAI_COMPATIBLE_PROVIDERS`` calls itself "the single
   source of truth" for how model names route to a vendor and which
-  credential they use, but ``get_available_models``,
-  ``get_model_provider`` and ``get_generation_model_listing`` each
-  restated the same prefix → credential mapping by hand.  A vendor added
+  credential they use, but ``get_available_models`` and
+  ``get_model_provider`` each restated the same prefix → credential
+  mapping by hand.  A vendor added
   to the registry therefore executed correctly yet stayed invisible and
   unselectable in the VS Code / web model picker, with no error anywhere.
 
@@ -42,7 +42,6 @@ from kiss.core.models.model_info import (
     _build_model_info_entry,
     _openai_bare_name,
     get_available_models,
-    get_generation_model_listing,
     get_model_provider,
     model,
 )
@@ -113,16 +112,12 @@ class TestRegistryIsTheOnlyRoutingTable:
         """``get_available_models`` must find the credential via the registry."""
         assert _VENDOR_MODEL in get_available_models()
 
-    def test_listing_reports_the_vendor_as_configured(
+    def test_registry_reports_the_vendor_as_configured(
         self, registered_vendor: OpenAICompatibleProvider,
     ) -> None:
-        """``get_generation_model_listing`` must not report ``Unknown``."""
-        listing = dict(
-            (name, (provider, configured))
-            for name, provider, configured in get_generation_model_listing()
-        )
-
-        assert listing[_VENDOR_MODEL] == (registered_vendor.label, True)
+        """Provider routing and credential lookup must both see the vendor."""
+        assert get_model_provider(_VENDOR_MODEL) == registered_vendor.label
+        assert mi._configured_providers()[registered_vendor.label] is True
 
     def test_unregistered_name_is_still_unknown(self) -> None:
         """Names no route matches must keep reporting ``Unknown``."""

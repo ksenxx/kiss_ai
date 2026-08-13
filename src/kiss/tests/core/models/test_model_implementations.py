@@ -21,8 +21,6 @@ from kiss.core.models.model_info import (
     _apply_cache_pricing,
     _openai_cache_read_multiplier,
     calculate_cost,
-    get_flaky_reason,
-    is_model_flaky,
     model,
 )
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
@@ -162,13 +160,6 @@ class TestOpenAIModel:
 
 
 class TestModelInfo:
-    def test_is_model_flaky(self):
-        assert isinstance(is_model_flaky("gpt-4.1-mini"), bool)
-
-    def test_get_flaky_reason_for_non_flaky_model(self):
-        reason = get_flaky_reason("gpt-4.1-mini")
-        assert reason is None or reason == ""
-
     def test_all_models_have_valid_context_and_pricing(self):
         for name, info in MODEL_INFO.items():
             assert info.context_length > 0, f"{name}: invalid context_length"

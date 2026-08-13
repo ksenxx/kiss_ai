@@ -1833,8 +1833,9 @@ def run_tasks_parallel(
             sub_usage[idx] = _live_agent_usage(agent)
             if printer is not None:
                 # Notify every tab watching the sub-agent: its own
-                # synthetic tab plus any viewer tabs subscribed to the
-                # sub-agent's task stream.
+                # synthetic tab plus any other tabs subscribed to the
+                # sub-agent's task stream via the printer's fan-out
+                # registry.
                 try:
                     viewer_ids: list[str] = []
                     fanout = getattr(printer, "_fanout_targets", None)

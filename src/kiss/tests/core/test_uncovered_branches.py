@@ -216,12 +216,6 @@ class TestModelInfoFactory:
 
 
 class TestGetAvailableModels:
-    def test_get_most_expensive_model(self) -> None:
-        from kiss.core.models.model_info import get_most_expensive_model
-
-        result = get_most_expensive_model()
-        assert isinstance(result, str)
-
     def test_get_default_model_priority(self) -> None:
         """Test that get_default_model picks the right model per API key priority."""
         import os

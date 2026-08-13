@@ -1889,38 +1889,3 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
                 )
 
     return function_calls
-
-
-_EMPTY_FENCE_PATTERN = re.compile(r"```(?:json)?\s*```", re.DOTALL)
-
-
-def _strip_text_based_tool_calls(content: str) -> str:
-    """Remove tool_calls JSON blocks from *content*, keeping surrounding text.
-
-    Uses :func:`_iter_balanced_json_objects` to find every balanced JSON
-    object and strips those that contain a ``tool_calls`` list.  Empty
-    fenced code blocks left behind (e.g. ``"```json\\n\\n```"``) are also
-    cleaned up so the visible Thoughts panel does not show stray fences.
-
-    Args:
-        content: The full model response text.
-
-    Returns:
-        The text with tool_calls JSON removed, stripped of leading/trailing
-        whitespace.  Returns ``""`` if the entire content was a tool_calls
-        wrapper.
-    """
-    spans = [
-        (start, end)
-        for start, end, parsed in _iter_balanced_json_objects(content)
-        if _iter_tool_calls_lists(parsed)
-    ]
-    if not spans:
-        return content.strip()
-    parts: list[str] = []
-    cursor = 0
-    for start, end in spans:
-        parts.append(content[cursor:start])
-        cursor = end
-    parts.append(content[cursor:])
-    return _EMPTY_FENCE_PATTERN.sub("", "".join(parts)).strip()

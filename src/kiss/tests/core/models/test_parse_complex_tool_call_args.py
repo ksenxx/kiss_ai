@@ -20,10 +20,7 @@ The new brace-balanced scanner extracts all of these correctly.
 
 import unittest
 
-from kiss.core.models.model import (
-    _parse_text_based_tool_calls,
-    _strip_text_based_tool_calls,
-)
+from kiss.core.models.model import _parse_text_based_tool_calls
 
 
 class TestParseComplexToolCallArgs(unittest.TestCase):
@@ -103,19 +100,6 @@ class TestParseComplexToolCallArgs(unittest.TestCase):
             calls[0]["arguments"],
             {"changes": {"file": {"line": 5, "ops": ["a", "b"]}}},
         )
-
-    def test_strip_keeps_prose_around_complex_call(self) -> None:
-        """Stripping removes the JSON span and keeps the surrounding prose."""
-        content = (
-            "Before.\n"
-            '{"tool_calls": [{"name": "finish", '
-            '"arguments": {"summary": "see [x](u)"}}]}\n'
-            "After."
-        )
-        result = _strip_text_based_tool_calls(content)
-        self.assertNotIn("tool_calls", result)
-        self.assertIn("Before.", result)
-        self.assertIn("After.", result)
 
 
 if __name__ == "__main__":

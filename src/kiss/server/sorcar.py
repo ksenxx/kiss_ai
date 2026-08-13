@@ -470,8 +470,6 @@ class ApiContext:
             ``websockets`` ``ServerConnection`` (remote browser) or an
             :class:`asyncio.StreamWriter` (local VS Code extension).
             Used for direct replies.
-        tabs_seen: Per-connection set of frontend tab ids, mutated
-            in place (drives the local-UDS talk-muting bookkeeping).
         conn_state: Per-connection mutable state holding at least the
             connection's ``work_dir`` (announced via ``setWorkDir``)
             and unique ``conn_id``.
@@ -481,7 +479,6 @@ class ApiContext:
     """
 
     endpoint: Any
-    tabs_seen: set[str]
     conn_state: dict[str, Any]
     is_uds: bool
 
@@ -650,16 +647,14 @@ class ServerApi:
     def _record_tab(self, tab_id: str, ctx: ApiContext) -> None:
         """Record *tab_id* as touched by this connection.
 
-        Adds the id to ``ctx.tabs_seen`` and, for local UDS peers,
-        registers it with the printer's local-tab set exactly once per
-        connection (talk-playback arbitration).
+        For local UDS peers, registers the id with the printer's
+        local-tab set exactly once per connection (talk-playback
+        arbitration).
 
         Args:
             tab_id: The non-empty frontend tab identifier.
             ctx: The transport context of the current call.
         """
-        if tab_id not in ctx.tabs_seen:
-            ctx.tabs_seen.add(tab_id)
         if ctx.is_uds:
             local_tabs = ctx.conn_state.setdefault("local_tabs", set())
             if tab_id not in local_tabs:

@@ -264,13 +264,6 @@ async function checkForExtensionUpdate(opts) {
 module.exports = {
   checkForExtensionUpdate,
   compareVersions,
-  versionTuple,
-  readVersionPy,
   resolveCurrentVersion,
   scanInstalledExtensionVersions,
-  defaultFetchLatest,
-  DEFAULT_PYPI_URL,
-  DEFAULT_COOLDOWN_MS,
-  DEFAULT_FETCH_TIMEOUT_MS,
-  EXTENSION_DIR_PREFIX,
 };

@@ -5,10 +5,8 @@
 
 """Model information: pricing and context lengths for supported LLM providers.
 
-FLAKY MODEL MARKERS:
-- fc=False: Model has unreliable function calling (use for non-agentic tasks only)
-- Models with comments like "FLAKY" have inconsistent behavior
-- Models with comments like "SLOW" may timeout on some requests
+``fc=False`` marks a model with unreliable function calling (use for
+non-agentic tasks only).
 """
 
 import json
@@ -764,35 +762,6 @@ def _apply_cache_pricing(name: str, info: ModelInfo) -> None:
 for _name, _info in MODEL_INFO.items():
     _apply_cache_pricing(_name, _info)
 
-FLAKY_MODELS: dict[str, str] = {
-    "openrouter/baidu/ernie-4.5-21b-a3b": "Ignores function calling tools",
-}
-
-
-def is_model_flaky(model_name: str) -> bool:
-    """Check if a model is known to be flaky.
-
-    Args:
-        model_name: The name of the model to check.
-
-    Returns:
-        bool: True if the model is known to have reliability issues.
-    """
-    return model_name in FLAKY_MODELS
-
-
-def get_flaky_reason(model_name: str) -> str:
-    """Get the reason why a model is flaky.
-
-    Args:
-        model_name: The name of the model to check.
-
-    Returns:
-        str: The reason for flakiness, or empty string if not flaky.
-    """
-    return FLAKY_MODELS.get(model_name, "")
-
-
 def _strip_provider_prefix(model_name: str) -> str:
     """Strip harbor-style provider prefixes that duplicate KISS's own routing.
 
@@ -982,75 +951,6 @@ def get_model_provider(model_name: str) -> str:
     return "Unknown"
 
 
-def get_generation_model_listing() -> list[tuple[str, str, bool]]:
-    """List every generation-capable model with provider and key status.
-
-    Walks ``MODEL_INFO`` (sorted by model name), skipping non-generation
-    (embedding/image-only) entries, and reports for each model the
-    provider that routes it and whether the credential needed to run it
-    is currently present — an API key for HTTP providers, or the local
-    executable for the ``Claude Code`` / ``Codex`` subscription CLIs.
-
-    Returns:
-        list[tuple[str, str, bool]]: ``(model_name, provider, configured)``
-            triples sorted alphabetically by model name.
-    """
-    provider_configured = _configured_providers()
-    listing: list[tuple[str, str, bool]] = []
-    for name, info in sorted(MODEL_INFO.items()):
-        if not info.is_generation_supported:
-            continue
-        provider = get_model_provider(name)
-        listing.append((name, provider, provider_configured.get(provider, False)))
-    return listing
-
-
-def get_completion_model_names() -> list[str]:
-    """Return model names to offer for input fast-completion, best first.
-
-    Prefers models whose provider API key is configured (so every
-    suggestion is actually runnable), and falls back to every
-    generation-capable model in ``MODEL_INFO`` when no provider key is set
-    (e.g. completing in a fresh checkout) so the picker is never empty.
-
-    Returns:
-        list[str]: A sorted list of generation-capable model names.
-    """
-    available = get_available_models()
-    if available:
-        return available
-    return sorted(
-        name for name, info in MODEL_INFO.items() if info.is_generation_supported
-    )
-
-
-def rank_model_suggestions(query: str, names: list[str] | None = None) -> list[str]:
-    """Rank model names for fast-completion of *query*.
-
-    Case-insensitive prefix matches come first, then case-insensitive
-    substring matches; each group is sorted alphabetically. An empty query
-    returns all candidate names unchanged (already sorted).
-
-    Args:
-        query: The partial model name typed by the user.
-        names: Candidate model names. Defaults to
-            :func:`get_completion_model_names` when ``None``.
-
-    Returns:
-        list[str]: The matching model names, best first.
-    """
-    if names is None:
-        names = get_completion_model_names()
-    q = query.strip().lower()
-    if not q:
-        return list(names)
-    prefix = sorted(n for n in names if n.lower().startswith(q))
-    substring = sorted(
-        n for n in names if q in n.lower() and not n.lower().startswith(q)
-    )
-    return prefix + substring
-
-
 def _model_for_first_configured_provider(choices: dict[str, str]) -> str:
     """Return the choice for the first provider with a configured credential.
 
@@ -1124,19 +1024,6 @@ def get_default_model() -> str:
             "codex": "codex/default",
         }
     )
-
-
-def get_most_expensive_model(fc_only: bool = True) -> str:
-    best_name, best_price = "", -1.0
-    for name in get_available_models():
-        info = MODEL_INFO[name]
-        if fc_only and not info.is_function_calling_supported:
-            continue
-        price = info.input_price_per_1M + info.output_price_per_1M
-        if price > best_price:
-            best_price = price
-            best_name = name
-    return best_name
 
 
 def _openai_long_context_prices(

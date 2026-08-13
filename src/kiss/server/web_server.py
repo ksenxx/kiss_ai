@@ -2274,20 +2274,10 @@ def _build_html() -> str:
         "      --vscode-editor-background: #1e1e1e;\n"
         "      --vscode-editor-foreground: #cccccc;\n"
         "      --vscode-input-background: #3c3c3c;\n"
-        "      --vscode-input-foreground: #cccccc;\n"
-        "      --vscode-input-border: #3c3c3c;\n"
-        "      --vscode-focusBorder: #007acc;\n"
-        "      --vscode-button-background: #0e639c;\n"
         "      --vscode-button-foreground: #ffffff;\n"
-        "      --vscode-button-hoverBackground: #1177bb;\n"
         "      --vscode-sideBar-background: #252526;\n"
-        "      --vscode-list-hoverBackground: #2a2d2e;\n"
-        "      --vscode-badge-background: #4d4d4d;\n"
-        "      --vscode-badge-foreground: #ffffff;\n"
         "      --vscode-textLink-foreground: #3794ff;\n"
         "      --vscode-descriptionForeground: #8b8b8b;\n"
-        "      --vscode-editorWidget-background: #252526;\n"
-        "      --vscode-editorWidget-border: #454545;\n"
         "      --vscode-panel-border: #80808059;\n"
         "      --vscode-terminal-ansiRed: #f44747;\n"
         "      --vscode-terminal-ansiGreen: #6a9955;\n"
@@ -3392,7 +3382,6 @@ class RemoteAccessServer:
             return
 
         self._printer.add_client(websocket)
-        tabs_seen: set[str] = set()
         conn_state: dict[str, Any] = {
             "work_dir": "", "conn_id": uuid.uuid4().hex,
         }
@@ -3407,7 +3396,7 @@ class RemoteAccessServer:
                     continue
                 try:
                     await self._dispatch_client_command(
-                        cmd, websocket, tabs_seen, conn_state,
+                        cmd, websocket, conn_state,
                     )
                 except websockets.exceptions.ConnectionClosed:
                     raise
@@ -3457,7 +3446,6 @@ class RemoteAccessServer:
             self._uds_handler_tasks.add(task)
             task.add_done_callback(self._uds_handler_tasks.discard)
         self._printer.add_uds_writer(writer)
-        tabs_seen: set[str] = set()
         conn_state: dict[str, Any] = {
             "work_dir": "", "conn_id": uuid.uuid4().hex,
         }
@@ -3475,7 +3463,7 @@ class RemoteAccessServer:
                     continue
                 try:
                     await self._dispatch_client_command(
-                        cmd, writer, tabs_seen, conn_state,
+                        cmd, writer, conn_state,
                     )
                 except (ConnectionError, asyncio.IncompleteReadError):
                     raise
@@ -3503,7 +3491,6 @@ class RemoteAccessServer:
         self,
         cmd: dict[str, Any],
         endpoint: Any,
-        tabs_seen: set[str],
         conn_state: dict[str, Any],
     ) -> None:
         """Hand one parsed client command to the server's code API.
@@ -3526,9 +3513,6 @@ class RemoteAccessServer:
                 :class:`ServerConnection` (WSS) or an
                 :class:`asyncio.StreamWriter` (UDS).  Used for direct
                 replies.
-            tabs_seen: Per-connection set of tab ids, mutated in
-                place (drives the per-connection local-UDS tab
-                bookkeeping for talk muting).
             conn_state: Per-connection mutable state holding the
                 connection's own ``work_dir`` and unique ``conn_id``.
                 Each VS Code window owns exactly one connection, and
@@ -3538,7 +3522,6 @@ class RemoteAccessServer:
         """
         ctx = sorcar_api.ApiContext(
             endpoint=endpoint,
-            tabs_seen=tabs_seen,
             conn_state=conn_state,
             is_uds=isinstance(endpoint, asyncio.StreamWriter),
         )

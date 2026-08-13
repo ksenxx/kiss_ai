@@ -109,8 +109,4 @@ async function verifyDaemonStartup(opts) {
 
 module.exports = {
   verifyDaemonStartup,
-  DEFAULT_TIMEOUT_MS,
-  DEFAULT_POLL_INTERVAL_MS,
-  DEFAULT_RESTART_EVERY_MS,
-  DEFAULT_PROBE_TIMEOUT_MS,
 };

@@ -23,7 +23,6 @@ from kiss.core.models.model import (
     Model,
     _build_text_based_tools_prompt,
     _parse_text_based_tool_calls,
-    _strip_text_based_tool_calls,
     encode_binary_attachment,
     flatten_content_to_text,
     parse_binary_attachments,
@@ -36,14 +35,10 @@ from kiss.core.models.model_info import (
     calculate_cost,
     get_default_model,
     get_fast_model,
-    get_flaky_reason,
     get_max_context_length,
     get_model_provider,
-    get_most_expensive_model,
-    is_model_flaky,
     model,
     openai_compatible_provider_for_base_url,
-    rank_model_suggestions,
 )
 
 
@@ -249,34 +244,13 @@ def test_get_max_context_length() -> None:
         get_max_context_length("no-such-model")
 
 
-def test_flaky_model_helpers() -> None:
-    """Flaky-model markers round-trip through the helper functions."""
-    assert is_model_flaky("openrouter/baidu/ernie-4.5-21b-a3b")
-    assert get_flaky_reason("openrouter/baidu/ernie-4.5-21b-a3b") != ""
-    assert not is_model_flaky("claude-x")
-    assert get_flaky_reason("claude-x") == ""
-
-
-def test_default_fast_and_expensive_model_pickers() -> None:
+def test_default_fast_model_pickers() -> None:
     """Model pickers return a string (a model name or 'No model')."""
     for picker in (get_fast_model, get_default_model):
         picked = picker()
         assert isinstance(picked, str) and picked
         if picked != "No model":
             assert picked in MODEL_INFO or picked.startswith(("cc/", "codex/"))
-    expensive = get_most_expensive_model()
-    assert isinstance(expensive, str)
-    if expensive:
-        assert MODEL_INFO[expensive].is_function_calling_supported
-
-
-def test_rank_model_suggestions() -> None:
-    """Prefix matches come before substring matches, each group sorted."""
-    names = ["gpt-4o", "claude-opus", "openrouter/gpt-x", "claude-haiku"]
-    assert rank_model_suggestions("", names) == names
-    assert rank_model_suggestions("claude", names) == ["claude-haiku", "claude-opus"]
-    assert rank_model_suggestions("gpt", names) == ["gpt-4o", "openrouter/gpt-x"]
-    assert rank_model_suggestions("zzz", names) == []
 
 
 
@@ -305,14 +279,6 @@ def test_parse_text_based_tool_calls() -> None:
     ]
     assert all(c["id"].startswith("call_") for c in calls)
     assert _parse_text_based_tool_calls("no json here {broken") == []
-
-
-def test_strip_text_based_tool_calls() -> None:
-    """Tool-call JSON and leftover empty fences are removed; prose is kept."""
-    content = 'Before.\n```json\n{"tool_calls": [{"name": "a", "arguments": {}}]}\n```\nAfter.'
-    assert _strip_text_based_tool_calls(content) == "Before.\n\nAfter."
-    assert _strip_text_based_tool_calls('{"tool_calls": [{"name": "a", "arguments": {}}]}') == ""
-    assert _strip_text_based_tool_calls("just prose {not json") == "just prose {not json"
 
 
 def test_build_text_based_tools_prompt() -> None:

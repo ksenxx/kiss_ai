@@ -73,7 +73,7 @@ def pytest_addoption(parser):
     )
 
 
-collect_ignore = ["test_openevolve.py", "run_all_models_test.py"]
+collect_ignore = ["run_all_models_test.py"]
 
 
 def join_orphan_sweeps() -> None:
