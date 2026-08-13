@@ -464,7 +464,7 @@ class _MergeFlowMixin:
     ) -> None:
         """Auto-commit task changes that landed OUTSIDE the work_dir repo.
 
-        :meth:`_handle_autocommit_action` commits the repository that
+        :meth:`_autocommit_changes` commits the repository that
         contains the tab's *work_dir* — and nothing else.  A task is
         free to change files anywhere (the standard file tools take
         absolute paths), so with auto-commit on, files it wrote in a
