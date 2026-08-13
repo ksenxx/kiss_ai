@@ -34,7 +34,8 @@ import logging
 import os
 import signal
 import sys
-from typing import Any, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -294,7 +295,7 @@ class VoiceWakeController:
                 return
         try:
             await asyncio.wait_for(proc.wait(), _TERM_GRACE_SECONDS)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             try:
                 os.killpg(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError, OSError):

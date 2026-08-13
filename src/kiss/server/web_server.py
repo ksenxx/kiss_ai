@@ -91,13 +91,13 @@ from kiss.server.json_printer import JsonPrinter, stamp_event_ts
 from kiss.server.server import VSCodeServer, broadcast_to_conn
 from kiss.server.tips import read_tips
 from kiss.server.tricks import read_tricks
-from kiss.server.voice_wake_control import VoiceWakeController
 from kiss.server.voice_wake import (
     MODEL_NAME,
     SpeakerIdentifier,
     default_models_dir,
     transcribe_pcm,
 )
+from kiss.server.voice_wake_control import VoiceWakeController
 from kiss.viz_trajectory.server import find_job_dir as find_job_dir
 from kiss.viz_trajectory.server import list_jobs as list_jobs
 from kiss.viz_trajectory.server import (
