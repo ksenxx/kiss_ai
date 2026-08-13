@@ -99,8 +99,12 @@ class _Host(_MergeFlowMixin):
         self._state_lock = threading.RLock()
         self.printer = printer or _RecordingPrinter()
 
-    def _any_non_wt_running(self) -> bool:
-        """True if any state runs a non-worktree task (real server semantics)."""
+    def _any_non_wt_running(self, repo_root: Path | None = None) -> bool:
+        """True if any state runs a non-worktree task (conservative semantics).
+
+        The harness ignores *repo_root*: every simulated non-worktree
+        task in these tests runs on the same main tree as the merge.
+        """
         return any(st.is_running_non_wt for st in agent_state.snapshot())
 
     def _dispose_if_closed(self, tab_id: str) -> None:

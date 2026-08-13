@@ -2398,6 +2398,79 @@ def _task_has_events(task_id: str) -> bool:
         return row is not None
 
 
+def _descendant_task_ids(root_task_id: str) -> list[str]:
+    """Return the ids of all tasks below *root_task_id*.
+
+    Walks the ``parent_task_id`` tree breadth-first (cycle-guarded).
+    The root itself is NOT included.
+
+    Args:
+        root_task_id: Stable ``task_history`` row id of the parent task.
+
+    Returns:
+        List of descendant task-id strings (children first, then
+        grandchildren, ...).  Empty when the task spawned no sub-tasks.
+    """
+    with _rw_lock.read_lock():
+        db = _get_db()
+        ids: list[str] = []
+        seen: set[str] = {str(root_task_id)}
+        frontier = [str(root_task_id)]
+        while frontier:
+            marks = ",".join("?" * len(frontier))
+            rows = db.execute(
+                "SELECT id FROM task_history "
+                f"WHERE parent_task_id IN ({marks})",
+                frontier,
+            ).fetchall()
+            frontier = [
+                str(r["id"]) for r in rows if str(r["id"]) not in seen
+            ]
+            seen.update(frontier)
+            ids.extend(frontier)
+        return ids
+
+
+def _changed_paths_of_tasks(task_ids: list[str]) -> set[str]:
+    """Return file paths the given tasks changed, from persisted events.
+
+    Collects the ``path`` of every persisted ``Write`` / ``Edit``
+    ``tool_call`` event of *task_ids*.  The asynchronous event queue is
+    flushed first so the very last writes of a just-finished task are
+    visible.
+
+    Used with :func:`_descendant_task_ids` by the end-of-task
+    auto-commit to also commit files that sub-agents changed outside
+    the tab's work_dir repository.
+
+    Args:
+        task_ids: Stable ``task_history`` row ids.
+
+    Returns:
+        Set of path strings (as recorded in the events, i.e. absolute
+        for the standard file tools).  Empty when none of the tasks
+        changed a file.
+    """
+    if not task_ids:
+        return set()
+    _flush_chat_events()
+    with _rw_lock.read_lock():
+        db = _get_db()
+        paths: set[str] = set()
+        for start in range(0, len(task_ids), 100):
+            batch = task_ids[start:start + 100]
+            marks = ",".join("?" * len(batch))
+            rows = db.execute(
+                "SELECT DISTINCT json_extract(event_json, '$.path') AS p "
+                f"FROM events WHERE task_id IN ({marks}) "
+                "AND json_extract(event_json, '$.type') = 'tool_call' "
+                "AND json_extract(event_json, '$.name') IN ('Write', 'Edit')",
+                batch,
+            ).fetchall()
+            paths.update(str(r["p"]) for r in rows if r["p"])
+        return paths
+
+
 def _fetch_events_for_task_id(
     db: sqlite3.Connection, task_id: str,
 ) -> list[dict[str, object]]:

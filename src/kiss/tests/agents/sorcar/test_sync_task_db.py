@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests for ``scripts/ship-task-db.sh``.
+"""End-to-end tests for the sending half of ``scripts/sync-task-db.sh``.
 
 Reproduces the reported defect: after ``./sorcar-cloud`` the remote web
 app's History panel showed only a handful of tasks instead of the whole
@@ -39,7 +39,7 @@ from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
 
-_SCRIPT = Path(__file__).resolve().parents[5] / "scripts" / "ship-task-db.sh"
+_SCRIPT = Path(__file__).resolve().parents[5] / "scripts" / "sync-task-db.sh"
 
 _FAKE_SSH = """#!/bin/bash
 # Stand-in for ssh: run the command locally with HOME inside the sandbox.
@@ -71,7 +71,7 @@ def _count(path: Path) -> int:
         con.close()
 
 
-class ShipTaskDbTest(unittest.TestCase):
+class SyncTaskDbPushTest(unittest.TestCase):
     """The whole task list must survive the trip to the remote host."""
 
     def setUp(self) -> None:
@@ -101,7 +101,7 @@ class ShipTaskDbTest(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _ship(self, *relocate: str) -> subprocess.CompletedProcess[str]:
+    def _push(self, *relocate: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["bash", str(_SCRIPT), "user@example.com", *relocate],
             env=self.env, capture_output=True, text=True, timeout=300,
@@ -145,7 +145,7 @@ class ShipTaskDbTest(unittest.TestCase):
         _make_db(self.remote_home / ".kiss" / "sorcar.db", 3)
         _make_db(self.local_home / "sorcar.db", 500)
 
-        result = self._ship()
+        result = self._push()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(_count(self.remote_home / ".kiss" / "sorcar.db"), 500)
 
@@ -159,7 +159,7 @@ class ShipTaskDbTest(unittest.TestCase):
         live.commit()
         _make_db(self.local_home / "sorcar.db", 400)
 
-        self.assertEqual(self._ship().returncode, 0)
+        self.assertEqual(self._push().returncode, 0)
         live.close()  # the stale checkpoint now has nothing to damage
         self.assertEqual(_count(remote_db), 400)
 
@@ -176,7 +176,7 @@ class ShipTaskDbTest(unittest.TestCase):
         writer.commit()
         self.assertTrue((self.local_home / "sorcar.db-wal").exists())
 
-        self.assertEqual(self._ship().returncode, 0)
+        self.assertEqual(self._push().returncode, 0)
         self.assertEqual(_count(self.remote_home / ".kiss" / "sorcar.db"), 100)
 
     def test_no_wal_or_shm_is_left_on_the_remote(self) -> None:
@@ -187,7 +187,7 @@ class ShipTaskDbTest(unittest.TestCase):
         (kiss / "sorcar.db-shm").write_bytes(b"stale shm")
         _make_db(self.local_home / "sorcar.db", 20)
 
-        self.assertEqual(self._ship().returncode, 0)
+        self.assertEqual(self._push().returncode, 0)
         self.assertFalse((kiss / "sorcar.db-wal").exists())
         self.assertFalse((kiss / "sorcar.db-shm").exists())
         self.assertFalse((kiss / "sorcar.db.incoming").exists())
@@ -207,7 +207,7 @@ class ShipTaskDbTest(unittest.TestCase):
         )
         truncating.chmod(0o755)
 
-        self.assertNotEqual(self._ship().returncode, 0)
+        self.assertNotEqual(self._push().returncode, 0)
         self.assertEqual(_count(remote_db), 7)
 
     def test_work_dirs_are_relocated_to_the_remote_checkout(self) -> None:
@@ -237,7 +237,7 @@ class ShipTaskDbTest(unittest.TestCase):
         con.commit()
         con.close()
 
-        result = self._ship("/Users/me/work/kiss", "/home/ubuntu/kiss")
+        result = self._push("/Users/me/work/kiss", "/home/ubuntu/kiss")
         self.assertEqual(result.returncode, 0, result.stderr)
 
         con = sqlite3.connect(self.remote_home / ".kiss" / "sorcar.db")
@@ -266,7 +266,7 @@ class ShipTaskDbTest(unittest.TestCase):
         con.close()
 
         self.assertEqual(
-            self._ship("/Users/me/work/kiss", "/home/ubuntu/kiss").returncode, 0)
+            self._push("/Users/me/work/kiss", "/home/ubuntu/kiss").returncode, 0)
 
         con = sqlite3.connect(local_db)
         try:
@@ -281,7 +281,7 @@ class ShipTaskDbTest(unittest.TestCase):
         """Databases predating the flat ``work_dir`` column must not abort."""
         _make_db(self.local_home / "sorcar.db", 12)  # no work_dir column
 
-        result = self._ship("/Users/me/work/kiss", "/home/ubuntu/kiss")
+        result = self._push("/Users/me/work/kiss", "/home/ubuntu/kiss")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(_count(self.remote_home / ".kiss" / "sorcar.db"), 12)
 
@@ -310,7 +310,7 @@ class ShipTaskDbTest(unittest.TestCase):
         con.commit()
         con.close()
 
-        result = self._ship("/Users/me/work/kiss", "/home/ubuntu/kiss")
+        result = self._push("/Users/me/work/kiss", "/home/ubuntu/kiss")
         self.assertEqual(result.returncode, 0, result.stderr)
 
         con = sqlite3.connect(self.remote_home / ".kiss" / "sorcar.db")
@@ -340,7 +340,7 @@ class ShipTaskDbTest(unittest.TestCase):
         con.commit()
         con.close()
 
-        self.assertEqual(self._ship("/", "/home/ubuntu").returncode, 0)
+        self.assertEqual(self._push("/", "/home/ubuntu").returncode, 0)
 
         con = sqlite3.connect(self.remote_home / ".kiss" / "sorcar.db")
         shipped = dict(con.execute("SELECT task, work_dir FROM task_history"))
@@ -358,7 +358,7 @@ class ShipTaskDbTest(unittest.TestCase):
         gzip.write_text('#!/bin/bash\nexit 3\n')
         gzip.chmod(0o755)
 
-        self.assertNotEqual(self._ship().returncode, 0)
+        self.assertNotEqual(self._push().returncode, 0)
         recorded = self.systemctl_log.read_text()
         self.assertIn("stop kiss-web.service", recorded)
         self.assertIn("start kiss-web.service", recorded)
@@ -374,7 +374,7 @@ class ShipTaskDbTest(unittest.TestCase):
         rm.write_text('#!/bin/bash\nexit 1\n')
         rm.chmod(0o755)
 
-        self.assertNotEqual(self._ship().returncode, 0)
+        self.assertNotEqual(self._push().returncode, 0)
         recorded = self.systemctl_log.read_text()
         self.assertIn("stop kiss-web.service", recorded)
         self.assertIn("start kiss-web.service", recorded)
@@ -389,7 +389,7 @@ class ShipTaskDbTest(unittest.TestCase):
         fake.write_text(f'#!/bin/bash\necho "$@" >> {killed}\nexit 0\n')
         fake.chmod(0o755)
 
-        self.assertEqual(self._ship().returncode, 0)
+        self.assertEqual(self._push().returncode, 0)
         pattern = killed.read_text().split()[-1]
         self.assertRegex(
             f"{self.remote_home}/.venv/bin/kiss-web --workdir {self.remote_home}",
@@ -411,7 +411,7 @@ class ShipTaskDbTest(unittest.TestCase):
             for i in range(25):
                 th._add_task(f"local task {i}", "", {"model": "m"})
 
-            self.assertEqual(self._ship().returncode, 0)
+            self.assertEqual(self._push().returncode, 0)
 
             th._KISS_DIR = self.remote_home / ".kiss"
             th._DB_PATH = th._KISS_DIR / "sorcar.db"

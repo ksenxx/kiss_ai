@@ -22,6 +22,7 @@ from __future__ import annotations
 import queue
 import threading
 from collections.abc import Iterator
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -68,6 +69,7 @@ class AgentState:
         "is_merging",
         "merge_thread",
         "is_running_non_wt",
+        "non_wt_repo_root",
         "interrupted_by_shutdown",
         "frontend_closed",
         "use_worktree",
@@ -111,6 +113,10 @@ class AgentState:
         # executor, not in ``task_thread``.
         self.merge_thread: threading.Thread | None = None
         self.is_running_non_wt: bool = False
+        # Resolved main-repo root a non-worktree task occupies (set
+        # when the task starts), so worktree merges in OTHER
+        # repositories are not blocked by it (repo-aware busy guard).
+        self.non_wt_repo_root: Path | None = None
         self.interrupted_by_shutdown: bool = False
         self.frontend_closed: bool = False
         self.use_worktree: bool = True
