@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import enum
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -27,6 +28,7 @@ from kiss.agents.sorcar.git_worktree import (
     repo_lock,
 )
 from kiss.agents.sorcar.persistence import _append_chat_event
+from kiss.agents.sorcar.sorcar_agent import _commit_subject
 from kiss.agents.sorcar.useful_tools import _stale_worktree_fallback
 from kiss.server import agent_state
 from kiss.server.agent_state import AgentState
@@ -37,6 +39,95 @@ if TYPE_CHECKING:
     from kiss.server.json_printer import JsonPrinter
 
 logger = logging.getLogger(__name__)
+
+
+def _repo_of_dir(work_dir: str) -> Path | None:
+    """Return the resolved repo root containing directory *work_dir*.
+
+    Args:
+        work_dir: Directory path (possibly not in a repo, possibly
+            gone — e.g. a reclaimed worktree).
+
+    Returns:
+        The resolved repository toplevel, or ``None`` when *work_dir*
+        is not inside a git repository.
+    """
+    try:
+        repo = GitWorktreeOps.discover_repo(Path(work_dir))
+    except Exception:
+        return None
+    return repo.resolve() if repo is not None else None
+
+
+def _existing_dir_of(path_str: str) -> Path | None:
+    """Return the nearest existing ancestor DIRECTORY of *path_str*.
+
+    ``git rev-parse --show-toplevel`` needs an existing directory as
+    its cwd, but a recorded path may name a file — or a file the task
+    later deleted.  Relative paths are refused: the caller resolves
+    them against the task's work_dir before coming here.
+
+    Args:
+        path_str: A path string recorded from a tool call.
+
+    Returns:
+        An existing directory to run repo discovery from, or ``None``.
+    """
+    try:
+        p = Path(path_str)
+        if not p.is_absolute():
+            return None
+        for candidate in [p, *p.parents]:
+            if candidate.is_dir():
+                return candidate
+    except OSError:
+        return None
+    return None
+
+
+def _group_paths_by_repo(
+    paths: set[str], *, exclude_repo: Path | None, base_dir: str = "",
+) -> dict[Path, set[str]]:
+    """Group changed *paths* by the git repository containing each.
+
+    Relative paths are resolved against *base_dir* (the task's
+    work_dir — the cwd of the file tools that recorded them); without
+    a base they cannot be attributed and are dropped.
+
+    Paths outside any repository are dropped (nothing to commit them
+    to), as are paths in *exclude_repo* (the work_dir repository —
+    already committed whole by the main auto-commit pass) and paths in
+    ``.kiss-worktrees`` checkouts (the worktree merge flow owns those;
+    committing to a worktree branch behind its agent's back would
+    corrupt the pending merge).
+
+    Args:
+        paths: Path strings recorded from the task's tool calls.
+        exclude_repo: Resolved work_dir repository root, or ``None``.
+        base_dir: Directory relative recorded paths are taken against.
+
+    Returns:
+        Mapping of resolved repo root -> the recorded paths inside it.
+    """
+    groups: dict[Path, set[str]] = {}
+    for path_str in paths:
+        candidate = path_str
+        if not Path(path_str).is_absolute():
+            if not base_dir:
+                continue
+            candidate = str(Path(base_dir) / path_str)
+        start = _existing_dir_of(candidate)
+        if start is None:
+            continue
+        repo = _repo_of_dir(str(start))
+        if repo is None:
+            continue
+        if exclude_repo is not None and repo == exclude_repo:
+            continue
+        if ".kiss-worktrees" in repo.parts:
+            continue
+        groups.setdefault(repo, set()).add(candidate)
+    return groups
 
 
 def _state_task_key(state: AgentState | None) -> str | None:
@@ -187,7 +278,9 @@ class _MergeFlowMixin:
         work_dir: str
         _state_lock: threading.RLock
 
-        def _any_non_wt_running(self) -> bool: ...
+        def _any_non_wt_running(
+            self, repo_root: Path | None = None,
+        ) -> bool: ...
         def _dispose_if_closed(self, tab_id: str) -> None: ...
 
     def _main_dirty_files(self, work_dir: str = "") -> list[str]:
@@ -358,6 +451,269 @@ class _MergeFlowMixin:
             self._broadcast_autocommit_done(
                 tab_id, success=False, committed=False,
                 message=str(e),
+            )
+
+    def _autocommit_changed_repos(
+        self,
+        tab_id: str = "",
+        *,
+        work_dir: str = "",
+        task_id: str | None = None,
+        extra_paths: set[str] | None = None,
+        extra_task_ids: list[str] | None = None,
+    ) -> None:
+        """Auto-commit task changes that landed OUTSIDE the work_dir repo.
+
+        :meth:`_handle_autocommit_action` commits the repository that
+        contains the tab's *work_dir* — and nothing else.  A task is
+        free to change files anywhere (the standard file tools take
+        absolute paths), so with auto-commit on, files it wrote in a
+        DIFFERENT repository were silently left uncommitted (observed
+        in production: tasks with ``work_dir`` in one project editing
+        a sibling project's checkout).
+
+        This companion pass, run right after the work_dir commit at
+        the end of a non-worktree auto-commit task, closes that gap:
+
+        1. Collects the file paths the task changed — the printer's
+           in-memory per-task record of ``Write`` / ``Edit`` tool
+           calls, plus the record of any sub-tasks.
+        2. Groups them by containing git repository, skipping the
+           work_dir repository (already committed), paths outside any
+           repository, and ``.kiss-worktrees`` checkouts (their own
+           merge flow owns those).
+        3. In each remaining repository, commits ONLY the recorded
+           paths — never ``add -A`` — so pre-existing dirty state in a
+           repository the user never designated as the task's work_dir
+           is not swept into the commit.
+
+        Failures are per-repository: one repo that cannot commit does
+        not stop the others, and never propagates to the caller (the
+        task's finally block).  A failure while loading the sub-task
+        record costs only the sub-task paths — the task's own paths
+        (already popped from the printer) are still committed.
+
+        Known limitation, by design: files changed through ``Bash``
+        (``sed -i``, build scripts, ...) carry no attributable path
+        and are not tracked; in the work_dir repository they are still
+        swept up by the main pass's ``git add -A``, elsewhere they
+        stay uncommitted.
+
+        Args:
+            tab_id: The tab that ran the task (echoed in events).
+            work_dir: The tab's working directory (its repository is
+                skipped here).  Falls back to ``self.work_dir``.
+            task_id: The finished task's history id, used to look up
+                the changed paths.  ``None`` does nothing.
+            extra_paths: Additional changed paths the caller collected
+                itself — the task-runner passes the paths of earlier
+                sequential ``<task>`` runs of the same submission,
+                whose printer entries its per-subtask persistence
+                already popped.
+            extra_task_ids: History ids of those earlier sequential
+                runs, so THEIR sub-agents' records are collected (and
+                their printer entries freed) too.
+        """
+        if task_id is None:
+            return
+        paths: set[str] = set(extra_paths or ())
+        paths |= self.printer.pop_changed_paths(task_id)
+        try:
+            from kiss.agents.sorcar.persistence import (
+                _changed_paths_of_tasks,
+                _descendant_task_ids,
+            )
+
+            # Sub-agents record under their own task ids.  Popping
+            # each descendant both collects what has not been
+            # persisted yet and frees the entry — nothing else ever
+            # pops a sub-agent's id, so reading without popping would
+            # leak one set per file-changing sub-agent.
+            sub_ids: list[str] = []
+            for root in [str(task_id), *(extra_task_ids or [])]:
+                sub_ids.extend(_descendant_task_ids(root))
+            for sub_id in sub_ids:
+                paths |= self.printer.pop_changed_paths(sub_id)
+            paths |= _changed_paths_of_tasks(sub_ids)
+        except Exception:  # pragma: no cover — defensive collection
+            logger.debug(
+                "Sub-task changed-path collection failed", exc_info=True,
+            )
+        try:
+            repos = _group_paths_by_repo(
+                paths,
+                exclude_repo=_repo_of_dir(work_dir or self.work_dir),
+                base_dir=work_dir or self.work_dir,
+            )
+        except Exception:  # pragma: no cover — defensive grouping
+            logger.debug("Changed-path grouping failed", exc_info=True)
+            return
+        for repo, repo_paths in sorted(repos.items()):
+            try:
+                self._autocommit_paths_in_repo(
+                    repo, sorted(repo_paths), tab_id,
+                )
+            except Exception:
+                logger.debug(
+                    "Auto-commit in %s failed", repo, exc_info=True,
+                )
+
+    def _autocommit_paths_in_repo(
+        self,
+        repo: Path,
+        paths: list[str],
+        tab_id: str,
+    ) -> None:
+        """Commit exactly *paths* in *repo* and broadcast the outcome.
+
+        Everything is path-limited: only the files the task itself
+        changed enter the commit; unrelated dirty files in *repo* stay
+        as they were, and — since the final ``git commit`` carries the
+        same pathspec — entries the USER had already staged in *repo*
+        for other files stay staged rather than being swept into the
+        task's commit.
+
+        The recorded paths are first filtered through ``git status``:
+        a path the task rewrote to its original bytes, an ignored
+        ``tmp/`` scratch file, or a path that never materialised would
+        otherwise make the pathspec commit fail outright ("did not
+        match any file(s) known to git").  ``git add -A`` on the
+        surviving paths makes the same pathspec cover new files and
+        deletions alike.
+
+        A repo whose HEAD is detached is refused with a toast instead
+        of committed: a commit no branch points at — e.g. in a
+        submodule checkout, which is detached by default — would be
+        unreachable the moment the checkout moves, which is data loss
+        wearing a success message.
+
+        A repo where nothing survives the filter is skipped silently
+        rather than spamming "Nothing to commit" toasts for every
+        repository the task touched.
+
+        Args:
+            repo: Repository root to commit in.
+            paths: The recorded changed paths inside *repo*.
+            tab_id: The tab that ran the task (echoed in events).
+        """
+        # --literal-pathspecs: a recorded filename that happens to
+        # contain pathspec magic (``*``, ``?``, ``[``, ``:(...)``)
+        # must match itself only — never OTHER paths the task did not
+        # record.
+        lit = "--literal-pathspecs"
+        recorded = {os.path.normpath(p) for p in paths}
+        with repo_lock(repo):
+            status = _git(
+                str(repo), lit, "status", "--porcelain", "--", *paths,
+            )
+            if status.returncode != 0:
+                logger.debug(
+                    "git status failed in %s: %s", repo, status.stderr,
+                )
+                return
+            changed: list[str] = []
+            for _code, old_name, new_name in _porcelain_entries(
+                status.stdout,
+            ):
+                # Defense in depth: the pathspec-limited status splits
+                # a rename whose old side is not among *paths* (git
+                # only pairs the sides when both match), but should a
+                # pairing ever surface an old path the task never
+                # recorded — e.g. the user's own staged ``git mv`` —
+                # committing its deletion would break the "only
+                # recorded paths" guarantee.
+                if old_name and (
+                    os.path.normpath(str(repo / old_name)) in recorded
+                ):
+                    changed.append(old_name)
+                changed.append(new_name)
+            if not changed:
+                return
+            if GitWorktreeOps.current_branch(repo) is None:
+                self._broadcast_autocommit_done(
+                    tab_id, success=False, committed=False,
+                    message=(
+                        f"{repo.name} is on a detached HEAD; "
+                        "left its changes uncommitted."
+                    ),
+                )
+                return
+            add_result = _git(str(repo), lit, "add", "-A", "--", *changed)
+            if add_result.returncode != 0:
+                err = (add_result.stderr or "").strip()
+                first_line = err.splitlines()[0] if err else "git add failed"
+                self._broadcast_autocommit_done(
+                    tab_id, success=False, committed=False,
+                    message=f"Staging failed in {repo.name}: {first_line}",
+                )
+                return
+            diff = _git(str(repo), lit, "diff", "--cached", "--", *changed)
+            if diff.returncode != 0:
+                self._broadcast_autocommit_done(
+                    tab_id, success=False, committed=False,
+                    message=f"git diff failed in {repo.name}.",
+                )
+                return
+            if not diff.stdout.strip():
+                return
+            self.printer.broadcast({
+                "type": "autocommit_progress",
+                "message": f"Committing changes in {repo.name}…",
+                "tabId": tab_id,
+            })
+            with self._state_lock:
+                prompt_state = agent_state.find_by_tab(tab_id)
+            user_prompt = (
+                prompt_state.last_user_prompt if prompt_state else ""
+            ) or None
+            task_result = (
+                prompt_state.last_result_summary if prompt_state else ""
+            ) or None
+            try:
+                msg = (
+                    generate_commit_message_from_diff(
+                        diff.stdout,
+                        user_prompt=user_prompt,
+                        task_result=task_result,
+                    )
+                    or "Auto-commit"
+                )
+            except Exception:
+                logger.debug(
+                    "Commit message generation failed; using fallback",
+                    exc_info=True,
+                )
+                msg = "kiss: auto-commit agent changes"
+            # Pathspec-limited commit: takes the listed paths from the
+            # working tree / index and leaves every OTHER staged entry
+            # in the user's index exactly as it was.  A plain
+            # ``git commit`` here would sweep the user's own staged
+            # work into the task's commit.
+            commit = _git(
+                str(repo), lit, "commit", "-m", msg, "--", *changed,
+            )
+            ok = commit.returncode == 0
+        if ok:
+            subject = _commit_subject(msg)
+            done_event = self._broadcast_autocommit_done(
+                tab_id, success=True, committed=True,
+                message=f"Committed in {repo.name}: {subject}",
+                commit_message=msg,
+            )
+            if tab_id:
+                with self._state_lock:
+                    task_key = _state_task_key(
+                        agent_state.find_by_tab(tab_id),
+                    )
+                if task_key is not None:
+                    _append_chat_event(done_event, task_id=task_key)
+        else:
+            self._broadcast_autocommit_done(
+                tab_id, success=False, committed=False,
+                message=(
+                    f"git commit failed in {repo.name} "
+                    "(pre-commit hook?)."
+                ),
             )
 
     def _emit_pending_worktree(self, tab_id: str = "") -> None:
@@ -669,7 +1025,7 @@ class _MergeFlowMixin:
             return True
 
         with self._state_lock:
-            if self._any_non_wt_running():
+            if self._any_non_wt_running(wt.repo_root):
                 return False
         dirty: set[str] = set()
         for extra_flags in ((), ("--cached",)):
@@ -795,11 +1151,18 @@ class _MergeFlowMixin:
             if result.returncode == 0 else []
         )
 
-    def _check_worktree_busy(self, state: AgentState, verb: str) -> dict[str, Any] | None:
+    def _check_worktree_busy(
+        self,
+        state: AgentState,
+        verb: str,
+        repo_root: Path | None = None,
+        wt_dir: Path | None = None,
+    ) -> dict[str, Any] | None:
         """Return an error dict if a worktree action should be refused, else None.
 
         Checks both the tab's own task and any non-worktree task running
-        on the main tree (BUG-35, BUG-72 fixes).
+        on the main tree of *repo_root* (BUG-35, BUG-72 fixes), or
+        inside the pending worktree *wt_dir* itself.
 
         Must be called with ``_state_lock`` already held (RACE-1 fix)
         so the caller can atomically set ``state.is_merging = True``
@@ -811,6 +1174,20 @@ class _MergeFlowMixin:
         Args:
             state: The agent state to check.
             verb: Human-readable action name (e.g. ``"merging"``).
+            repo_root: The main repository root the action would
+                stash/checkout/merge.  Non-worktree tasks running in a
+                different repository (or in no repository at all) do
+                not occupy this main tree and therefore do not block
+                the action.  ``None`` falls back to the conservative
+                "any non-worktree task blocks" behavior.
+            wt_dir: The pending worktree directory the action would
+                remove.  A non-worktree task running *inside* it (its
+                ``git rev-parse --show-toplevel`` is the linked
+                worktree itself — e.g. a sub-task submitted through
+                the daemon API with the parent's worktree as
+                ``work_dir``) does not touch the main tree, but both
+                merge and discard delete this directory out from under
+                that running task, so it must block too.
 
         Returns:
             Error dict with ``success: False`` when busy, otherwise ``None``.
@@ -831,7 +1208,15 @@ class _MergeFlowMixin:
                     f"on this tab. Wait for it to finish before {verb}."
                 ),
             }
-        if self._any_non_wt_running():
+        if wt_dir is not None and self._any_non_wt_running(wt_dir):
+            return {
+                "success": False,
+                "message": (
+                    "Another tab is running a task inside this "
+                    f"task's worktree. Wait for it to finish before {verb}."
+                ),
+            }
+        if self._any_non_wt_running(repo_root):
             return {
                 "success": False,
                 "message": (
@@ -901,10 +1286,13 @@ class _MergeFlowMixin:
             }
         with self._state_lock:
             if not internal:
-                busy = self._check_worktree_busy(state, verb)
+                busy = self._check_worktree_busy(state, verb, repo_root, wt._wt_dir)
                 if busy:
                     return busy
-            elif action == "merge" and self._any_non_wt_running():
+            elif action == "merge" and (
+                self._any_non_wt_running(repo_root)
+                or (wt._wt_dir is not None and self._any_non_wt_running(wt._wt_dir))
+            ):
                 # internal=True only bypasses this tab's OWN
                 # is_task_active/is_merging flags (the post-task
                 # auto-finalize runs on the task thread that owns

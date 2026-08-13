@@ -1,13 +1,27 @@
 # Tip
 
+## Prompt KISS Sorcar like the Developer of KISS Sorcar
+
+**Always write precise 1-6 sentence prompts.** Long prompts confuse models. **Do not plan ahead of time.** Let KISS Sorcar plan dynamically, which is always better than AI-written static plans. The waterfall model does not work that well in contemporary times.
+
+**No need to use generic skills for debugging, code review, etc.** Frontier models have been trained on those skills.
+
+# Tip
+
 ## To get the Highest Quality Work from KISS Sorcar
 
 - Add both ANTHROPIC_API_KEY and OPENAI_API_KEY in the Settings panel
 - Add the following text to your prompt:
 
 ```
-Use 'claude-opus-5' for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs.  Use at most 20% of task budget in gpt-5.6-sol for reviewing and debugging. Use the model names literally without hallucinating new model names.
+Use 'claude-fable-5' for all tasks, including software development. Use 'gpt-5.6-sol' (not codex) for a thorough read-only review and debugging of the other model's work. Thoroughly check whether the other model has missed any code or wiring or introduced any bugs.  Use at most 20% of task budget in gpt-5.6-sol for reviewing and debugging. Use the model names literally without hallucinating new model names.
 ```
+
+# Tip
+
+## What is the status of an agent perfoeming a task?
+
+If you want to get the status of a task, you can open a new chat and ask KISS Sorcar what is the status of the task doing …
 
 # Tip
 
@@ -21,20 +35,12 @@ These are unique features of KISS Sorcar. These two **IPs (intellectual properti
 
 # Tip
 
-## Prompt KISS Sorcar like the Developer of KISS Sorcar
-
-Please look at the commit messages at [https://github.com/ksenxx/kiss_ai/commits/main/], find the prompt that the developer used for that commit in a commit message, and see what changed in the commit. This will help you get started with KISS Sorcar on any task like a pro.
-
-**Always write precise 1-6 sentence prompts.** Long prompts confuse models. **Do not plan ahead of time.** Let KISS Sorcar plan dynamically, which is always better than AI-written static plans. The waterfall model does not work that well in contemporary times.
-
-# Tip
-
 ## Use Optimized Multi-Model Routing to Save Cost or Improve Quality
 
 **Add the following text to your prompt:**
 
 ```
-If ./ROUTING.md exists, use the instructions in the file for model routing. Otherwise, use the best model from ~/.kiss/MODEL_INFO.json for various subtasks. Search the internet extensively to figure out which model is best yet cheap for each sub-task. Here are some hints, but the internet has better knowledge: claude-opus-5 — best for SWE work, gpt-5.6-sol — best for reviewing, and openrouter/z-ai/glm-5.2 — for SWE tasks when budget is low, and gpt-5.6-luna for review when budget is low. Irrespective of whether ./ROUTING.md exists or not, after the task completes, based on your experience in completing the task, create or update the model routing strategy (as text) in ./ROUTING.md that reduces token cost while not degrading the quality of the work.
+If ./ROUTING.md exists, use the instructions in the file for model routing. Otherwise, use the best model from ~/.kiss/MODEL_INFO.json for various subtasks. Search the internet extensively to figure out which model is best yet cheap for each subtask. Here are some hints, but the internet has better knowledge: claude-opus-5 — best for SWE work; gpt-5.6-sol — best for reviewing; openrouter/z-ai/glm-5.2 — for SWE tasks when budget is low; and gpt-5.6-luna for review when budget is low. Irrespective of whether ./ROUTING.md exists or not, after the task completes, based on your experience in completing the task, create or update the model routing strategy (as text) in ./ROUTING.md that reduces token cost while not degrading the quality of the work.
 ```
 
 # Tip
@@ -55,7 +61,7 @@ You can also steer the agent's execution and ask for status when an agent is run
 
 ## To Use the KISS Sorcar Remote Web/Mobile App
 
-Go to the Settings panel and copy the URL at the top. This URL contains a message showing the latest cloudflared URL where you can find the KISS Sorcar webapp. Send the URL from the Settings page to your mobile device. Also see/set the remote password on the Settings page. You can SMS, Slack, or email the URL to the mobile device.
+Go to the Settings panel and copy the URL at the top. This URL contains a message showing the latest cloudflared URL where you can find the KISS Sorcar web app. Send the URL from the Settings page to your mobile device. Also see/set the remote password on the Settings page. You can SMS, Slack, or email the URL to the mobile device.
 
 Open the URL in a browser on the mobile device and enter your remote password. You will see your familiar Codex-like chat interface.
 
@@ -84,20 +90,28 @@ You can also pass a Python file of extra tools via `tools="/path/to/my_tools.py"
 Just run:
 
 ```bash
-~/kiss_ai/sorcar-docker
+sorcar-docker
 ```
 
 It runs KISS Sorcar in a Docker container and exposes a VS Code interface in the host machine's browser.
 
 # Tip
 
-## If You Are Implementing a Software Feature
+## To Run KISS Sorcar on a server via ssh
 
-Definitely add the following sentence to your KISS Sorcar prompt:
+Just run:
 
+```bash
+rsorcar username@ip_address
 ```
-Reproduce the issue by writing real end-to-end tests with 100% coverage. Then fix the issue.
-```
+
+It keeps this checkout and the server's in total sync through `origin`: every branch of both is mirrored, and uncommitted work is committed first so it can travel. Files git does not track (`.venv`, `tmp/`, build output) stay behind, and a branch whose two sides conflict is reported instead of being merged behind your back.
+
+The task history travels both ways too: after a deploy, the History panel here and on the server both list every task and every event either machine ever ran. Only the rows that are missing move, no row is ever deleted, and both web apps keep running while it happens.
+
+Your GitHub.com login travels as well: every account `gh` is logged in to here is logged in on the server too, the same one active, so the agent there can open pull requests, read your private repositories and push over https as you. A token the GitHub API no longer accepts is left behind rather than shipped, the accounts the server was already logged in to are kept in `~/.kiss/`, and `SORCAR_SKIP_GITHUB_AUTH=1 rsorcar username@ip_address` leaves your credentials on this machine.
+
+A deploy restarts the server's web app, which would kill a task running there mid-step, so it stops before it touches anything if it finds one. Wait for the task, or run `SORCAR_FORCE_RESTART=1 rsorcar username@ip_address` to go ahead anyway. Nothing else on the server is overwritten either: a file of its own that the copy of your `~/.ssh` would replace is kept in `~/.kiss/ssh-replaced-<time>/`, its `~/.bashrc` is copied before one block is added to it, and the settings in its `~/.kiss/config.json` other than the password and the work directory are left as they are.
 
 # Tip
 
@@ -132,7 +146,7 @@ Can you AI discover the lightest and fastest AI model that will give >95% accura
 All you need to do is use a variant of the following prompt with KISS Sorcar:
 
 ```
-Can you run the command \<<command>> in the background and monitor its output in real time to optimize the code at \<<folder_name_or_url>> with respect to the following metrics: \<<speed, accuracy, recall, cost>>. Then use AI discovery to optimize.  You can add a diagnostic code that prints metrics, such as running time, at a finer granularity.  Do not forget to remove the diagnostic code after the optimization is complete. You MUST NOT STOP until the metrics achieve the following values: \<<give_concrete_values_for_metrics>>. Create a detailed report.
+Can you run the command \<<command>> in the background and monitor its output in real time to optimize the code at \<<folder_name_or_url>> with respect to the following metrics: \<<speed, accuracy, recall, cost>>. Then use AI discovery to optimize.  You can add a diagnostic code that prints metrics, such as running time, at a finer granularity.  Do not forget to remove the diagnostic code after the optimization is complete. You MUST NOT STOP until the metrics achieve the following values: \<<give_concrete_values_for_metrics>>. Create a report.
 ```
 
 # Tip

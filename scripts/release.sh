@@ -776,8 +776,13 @@ build_vscode_extension() {
     # its `prebuild-install` transitive dep, which npm warns is deprecated.
     npm ci --ignore-scripts --no-audit --no-fund --omit=optional
     npm run compile
-    npm run copy-kiss
-    npm run package
+    # KISS_BUNDLE_EXTRA_DIRS opts copy-kiss.sh into bundling extra dirs —
+    # here the Claude skills downloaded in Step 5 (a plain source install
+    # via install.sh leaves the variable unset and never touches Claude
+    # skills).  It must cover `npm run package` too: packaging re-runs
+    # copy-kiss.sh via the `vscode:prepublish` script.
+    KISS_BUNDLE_EXTRA_DIRS="src/kiss/agents/claude_skills" npm run copy-kiss
+    KISS_BUNDLE_EXTRA_DIRS="src/kiss/agents/claude_skills" npm run package
 
     if [[ ! -f "kiss-sorcar.vsix" ]]; then
         print_error "VSIX file not found: kiss-sorcar.vsix"

@@ -1,0 +1,78 @@
+# Adversarial fast-path audit manifest for Q13-Q17 (group C).
+# Raw request format identical to bench/workloads/seed*/args.txt.
+
+# ---------------------------------------------------------------- Q13
+{"line": "13 \"express\" \"requests\"", "expect": ["q13 fast masked"], "forbid": [], "note": "seed42 values"}
+{"line": "13 \"pending\" \"packages\"", "expect": ["q13 fast masked"], "forbid": [], "note": "seed7 values"}
+{"line": "13 \"express\" \"packages\"", "expect": ["q13 fast masked"], "forbid": [], "note": "seed123 values"}
+{"line": "13 \"\" \"\"", "expect": ["q13 fast nomask"], "forbid": ["q13 fast masked"], "note": "both words empty: %%% matches every comment, every c_count collapses to 0; mask prefilter fully disabled"}
+{"line": "13 \"\" \"requests\"", "expect": ["q13 fast masked"], "forbid": [], "note": "empty WORD1: pattern degenerates to %requests%"}
+{"line": "13 \"express\" \"\"", "expect": ["q13 fast masked"], "forbid": [], "note": "empty WORD2: pattern degenerates to %express%"}
+{"line": "13 \"e\" \"s\"", "expect": ["q13 fast masked"], "forbid": [], "note": "single-char words: bigram prefilter disabled (masks 0), alpha mask still active"}
+{"line": "13 \"requests\" \"requests\"", "expect": ["q13 fast masked"], "forbid": [], "note": "WORD1 == WORD2: second occurrence must start after the first match ends"}
+{"line": "13 \"abab\" \"ab\"", "expect": ["q13 fast masked"], "forbid": [], "note": "overlapping words: 'ab' must be found after the 'abab' match"}
+{"line": "13 \"ests\" \"ts\"", "expect": ["q13 fast masked"], "forbid": [], "note": "WORD2 is a suffix fragment of WORD1: ordered non-overlapping search semantics"}
+{"line": "13 \"Express\" \"Requests\"", "expect": ["q13 fast masked"], "forbid": [], "note": "capitalized words: LIKE is case-sensitive, expect near-total non-match"}
+{"line": "13 \"%\" \"_\"", "expect": ["q13 fast nomask"], "forbid": [], "note": "LIKE metacharacters as literal word text (no letters: alpha mask 0, single chars: bigram 0 -> nomask)"}
+{"line": "13 \"a%b\" \"c_d\"", "expect": ["q13 fast masked"], "forbid": [], "note": "embedded LIKE metacharacters treated literally by both engines"}
+{"line": "13 \"12\" \"34\"", "expect": ["q13 fast masked"], "forbid": [], "note": "digit words: alpha mask 0 but bigram mask nonzero"}
+{"line": "13 \"special requests\" \"deposits\"", "expect": ["q13 fast masked"], "forbid": [], "note": "word with embedded space (std::quoted round-trips it)"}
+{"line": "13 \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\" \"b\"", "expect": ["q13 fast masked"], "forbid": [], "note": "80-char WORD1 longer than most comments: needle longer than haystack must not read out of bounds"}
+{"line": "13 \"zqxjkvbwpf\" \"mghty\"", "expect": ["q13 fast masked"], "forbid": [], "note": "rare-letter words: prefilter rejects nearly every comment"}
+
+# ---------------------------------------------------------------- Q14
+{"line": "14 \"1995-05-01\"", "expect": ["q14 fast in-range"], "forbid": ["q14 fallback"], "note": "seed42 value"}
+{"line": "14 \"1996-01-01\"", "expect": ["q14 fast in-range"], "forbid": ["q14 fallback"], "note": "seed7 value"}
+{"line": "14 \"1993-01-01\"", "expect": ["q14 fast in-range"], "forbid": ["q14 fallback"], "note": "seed123 value"}
+{"line": "14 \"1980-01-01\"", "expect": ["q14 fast empty-range"], "forbid": ["q14 fast in-range"], "note": "window entirely before min shipdate: promo_revenue 0.00 in both engines"}
+{"line": "14 \"1999-01-01\"", "expect": ["q14 fast empty-range"], "forbid": ["q14 fast in-range"], "note": "window entirely after max shipdate"}
+{"line": "14 \"1992-01-01\"", "expect": ["q14 fast in-range"], "forbid": [], "note": "exact low boundary month (data starts 1992-01-02)"}
+{"line": "14 \"1998-12-01\"", "expect": ["q14 fast in-range"], "forbid": [], "note": "exact high boundary month (data ends 1998-12-01)"}
+{"line": "14 \"1991-12-15\"", "expect": ["q14 fast in-range"], "forbid": [], "note": "window straddles the low data boundary: lo clamped to date_min"}
+{"line": "14 \"1998-11-15\"", "expect": ["q14 fast in-range"], "forbid": [], "note": "window straddles the high data boundary: hi clamped to date_max"}
+{"line": "14 \"1995-05-15\"", "expect": ["q14 fast in-range"], "forbid": [], "note": "mid-month start: prefix sums must handle arbitrary day-of-month"}
+{"line": "14 \"1996-01-30\"", "expect": ["q14 fast in-range"], "forbid": [], "note": "start+1month = 1996-02-30 clamps to leap-day 1996-02-29"}
+{"line": "14 \"1997-01-31\"", "expect": ["q14 fast in-range"], "forbid": [], "note": "start+1month = 1997-02-31 clamps to 1997-02-28 (non-leap)"}
+{"line": "14 \"1998-12-02\"", "expect": ["q14 fast empty-range"], "forbid": ["q14 fast in-range"], "note": "window starts one day past max shipdate 1998-12-01: lo > hi, zero rows, promo_revenue 0.00 in both engines"}
+
+# ---------------------------------------------------------------- Q15
+{"line": "15 \"1996-02-01\" \"5\"", "expect": ["q15 fast", "q15 fast full-month"], "forbid": ["q15 fallback", "q15 fast partial-month", "q15 fast month-out-of-range"], "note": "seed42 values: month-start date, 3 full months from the cube"}
+{"line": "15 \"1996-02-01\" \"7\"", "expect": ["q15 fast", "q15 fast full-month"], "forbid": ["q15 fallback", "q15 fast partial-month"], "note": "seed7 values (same date, different stream id)"}
+{"line": "15 \"1994-09-01\" \"8\"", "expect": ["q15 fast", "q15 fast full-month"], "forbid": ["q15 fallback", "q15 fast partial-month"], "note": "seed123 values"}
+{"line": "15 \"1996-02-15\" \"0\"", "expect": ["q15 fast", "q15 fast partial-month", "q15 fast full-month"], "forbid": ["q15 fallback"], "note": "mid-month start: partial Feb + partial May edges, full Mar/Apr from cube"}
+{"line": "15 \"1996-01-31\" \"0\"", "expect": ["q15 fast", "q15 fast partial-month", "q15 fast full-month"], "forbid": ["q15 fallback"], "note": "month-end start: +3 months clamps 1996-04-31 -> 1996-04-30"}
+{"line": "15 \"1980-01-01\" \"0\"", "expect": ["q15 fast", "q15 fast month-out-of-range", "q15 empty-result"], "forbid": ["q15 fallback", "q15 fast full-month", "q15 fast partial-month"], "note": "window before all shipdates: every month outside the cube, empty result in both engines"}
+{"line": "15 \"1999-06-01\" \"0\"", "expect": ["q15 fast", "q15 fast month-out-of-range", "q15 empty-result"], "forbid": ["q15 fallback", "q15 fast full-month"], "note": "window after all shipdates"}
+{"line": "15 \"1991-11-01\" \"0\"", "expect": ["q15 fast", "q15 fast month-out-of-range", "q15 fast full-month"], "forbid": ["q15 fallback", "q15 fast partial-month"], "note": "straddles the low data boundary: Nov/Dec 1991 out of cube, Jan 1992 full"}
+{"line": "15 \"1998-10-15\" \"0\"", "expect": ["q15 fast", "q15 fast partial-month", "q15 fast full-month", "q15 fast month-out-of-range"], "forbid": ["q15 fallback"], "note": "straddles the high boundary: partial Oct, full Nov/Dec 1998, Jan 1999 beyond cube"}
+{"line": "15 \"1998-12-01\" \"0\"", "expect": ["q15 fast", "q15 fast full-month", "q15 fast month-out-of-range"], "forbid": ["q15 fallback", "q15 fast partial-month"], "note": "exact high boundary month full, Jan/Feb 1999 out of cube; ties in max(total_revenue) would emit multiple rows in both engines"}
+{"line": "15 \"1992-01-01\" \"0\"", "expect": ["q15 fast", "q15 fast full-month"], "forbid": ["q15 fallback", "q15 fast partial-month"], "note": "exact low boundary month-start"}
+
+# ---------------------------------------------------------------- Q16
+{"line": "16 \"Brand#12\" \"PROMO POLISHED\" \"22\" \"18\" \"10\" \"14\" \"50\" \"7\" \"6\" \"25\"", "expect": ["q16 fast"], "forbid": ["q16 fallback*"], "note": "seed42 values"}
+{"line": "16 \"Brand#12\" \"STANDARD BRUSHED\" \"9\" \"19\" \"27\" \"10\" \"35\" \"8\" \"37\" \"20\"", "expect": ["q16 fast"], "forbid": ["q16 fallback*"], "note": "seed7 values"}
+{"line": "16 \"Brand#11\" \"STANDARD BURNISHED\" \"9\" \"2\" \"19\" \"28\" \"37\" \"31\" \"17\" \"45\"", "expect": ["q16 fast"], "forbid": ["q16 fallback*"], "note": "seed123 values"}
+{"line": "16 \"Brand#12\" \"PROMO POLISHED\" \"22\" \"22\" \"22\" \"22\" \"22\" \"22\" \"22\" \"22\"", "expect": ["q16 fast"], "forbid": ["q16 fallback*"], "note": "all 8 sizes identical: IN-list dedup must not duplicate groups"}
+{"line": "16 \"Brand#99\" \"PROMO POLISHED\" \"22\" \"18\" \"10\" \"14\" \"50\" \"7\" \"6\" \"25\"", "expect": ["q16 fast"], "forbid": ["q16 fallback*"], "note": "unknown brand: <> filter excludes nothing"}
+{"line": "16 \"Brand#12\" \"ZZZNOSUCHTYPE\" \"22\" \"18\" \"10\" \"14\" \"50\" \"7\" \"6\" \"25\"", "expect": ["q16 fast"], "forbid": ["q16 fallback*"], "note": "type prefix matching no dictionary entry: NOT LIKE excludes nothing"}
+{"line": "16 \"Brand#12\" \"\" \"22\" \"18\" \"10\" \"14\" \"50\" \"7\" \"6\" \"25\"", "expect": ["q16 fast"], "forbid": ["q16 fallback*"], "note": "empty type prefix: every type LIKE '%' is banned -> empty result in both engines"}
+{"line": "16 \"Brand#12\" \"PROMO POLISHED BRASS\" \"22\" \"18\" \"10\" \"14\" \"50\" \"7\" \"6\" \"25\"", "expect": ["q16 fast"], "forbid": ["q16 fallback*"], "note": "full type name as prefix: bans exactly one dictionary type"}
+{"line": "16 \"Brand#12\" \"promo polished\" \"22\" \"18\" \"10\" \"14\" \"50\" \"7\" \"6\" \"25\"", "expect": ["q16 fast"], "forbid": ["q16 fallback*"], "note": "lowercase prefix: case-sensitive LIKE bans nothing"}
+{"line": "16 \"Brand#12\" \"PROMO POLISHED\" \"0\" \"0\" \"0\" \"0\" \"0\" \"0\" \"0\" \"0\"", "expect": ["q16 fast"], "forbid": ["q16 fallback*"], "note": "size 0: valid number, matches no part (p_size >= 1) -> empty result"}
+{"line": "16 \"Brand#12\" \"PROMO POLISHED\" \"-1\" \"-2\" \"-3\" \"-4\" \"-5\" \"-6\" \"-7\" \"-8\"", "expect": ["q16 empty-sizes"], "forbid": ["q16 fast", "q16 fallback*"], "note": "all sizes negative: both parsers drop them, empty IN list -> empty result"}
+{"line": "16 \"Brand#12\" \"PROMO POLISHED\" \"-1\" \"300\" \"51\" \"22\" \"18\" \"10\" \"50\" \"1\"", "expect": ["q16 fast"], "forbid": ["q16 fallback*"], "note": "mixed invalid (-1), too-big (300, 51 > max p_size 50) and valid sizes"}
+{"line": "16 \"Brand#12\" \"PROMO POLISHED\" \"1\" \"2\" \"3\" \"4\" \"5\" \"46\" \"47\" \"50\"", "expect": ["q16 fast"], "forbid": ["q16 fallback*"], "note": "extreme valid sizes incl. boundary 1 and 50"}
+{"line": "16 \"Brand#55\" \"SMALL PLATED\" \"13\" \"26\" \"39\" \"42\" \"3\" \"33\" \"44\" \"21\"", "expect": ["q16 fast"], "forbid": ["q16 fallback*"], "note": "different brand/type mix off the benchmark seeds"}
+
+# ---------------------------------------------------------------- Q17
+{"line": "17 \"Brand#13\" \"MED BOX\"", "expect": ["q17 fast"], "forbid": ["q17 fallback*"], "note": "seed42/seed123 values"}
+{"line": "17 \"Brand#52\" \"SM BOX\"", "expect": ["q17 fast"], "forbid": ["q17 fallback*"], "note": "seed7 values"}
+{"line": "17 \"Brand#99\" \"MED BOX\"", "expect": ["q17 unknown-code"], "forbid": ["q17 fast", "q17 fallback*"], "note": "brand absent from dictionary: early exit 0.00 in both engines"}
+{"line": "17 \"Brand#13\" \"NO SUCH BOX\"", "expect": ["q17 unknown-code"], "forbid": ["q17 fast", "q17 fallback*"], "note": "container absent from dictionary"}
+{"line": "17 \"\" \"MED BOX\"", "expect": ["q17 unknown-code"], "forbid": ["q17 fast"], "note": "empty brand string never in dictionary"}
+{"line": "17 \"<<NULL>>\" \"MED BOX\"", "expect": ["q17 null-arg"], "forbid": ["q17 fast", "q17 unknown-code"], "note": "NULL placeholder sentinel: dedicated early exit in both engines"}
+{"line": "17 \"Brand#13\" \"<<NULL>>\"", "expect": ["q17 null-arg"], "forbid": ["q17 fast"], "note": "NULL container sentinel"}
+{"line": "17 \"Brand#11\" \"JUMBO PKG\"", "expect": ["q17 fast"], "forbid": ["q17 fallback*"], "note": "non-seed valid combination"}
+{"line": "17 \"Brand#55\" \"WRAP DRUM\"", "expect": ["q17 fast"], "forbid": ["q17 fallback*"], "note": "another non-seed valid combination"}
+{"line": "17 \"Brand#21\" \"LG CAN\"", "expect": ["q17 fast"], "forbid": ["q17 fallback*"], "note": "non-seed valid combination"}
+{"line": "17 \"MED BOX\" \"Brand#13\"", "expect": ["q17 unknown-code"], "forbid": ["q17 fast"], "note": "swapped arguments: neither value exists in the respective dictionary"}

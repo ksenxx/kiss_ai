@@ -1,0 +1,17 @@
+# Q3 adversarial audit. Data: orderdate in [1992-01-01, 1998-08-02], shipdate <= 1998-12-01.
+# Branches: "q3 fast" (precomputed per-order segment codes + known SEGMENT), "q3 unknown_segment"
+# (SEGMENT not in mktsegment dictionary -> exact empty via fallback with empty customer bitmap),
+# "q3 fallback_sorted" (baseline scan; engaged when SEGMENT unknown), "q3 fallback_unsorted"
+# (loader invariant, lineitem always orderkey-sorted; unreachable).
+{"line": "3 \"BUILDING\" \"1995-03-08\"", "expect": ["q3 fast"], "forbid": ["q3 fallback_sorted", "q3 unknown_segment"], "note": "seed42 values"}
+{"line": "3 \"AUTOMOBILE\" \"1995-03-27\"", "expect": ["q3 fast"], "forbid": ["q3 fallback_sorted"], "note": "seed7 values"}
+{"line": "3 \"FURNITURE\" \"1995-03-04\"", "expect": ["q3 fast"], "forbid": ["q3 fallback_sorted"], "note": "seed123 values"}
+{"line": "3 \"HOUSEHOLD\" \"1996-02-29\"", "expect": ["q3 fast"], "forbid": [], "note": "leap-day date"}
+{"line": "3 \"MACHINERY\" \"1992-01-01\"", "expect": ["q3 fast"], "forbid": [], "note": "date = min orderdate: no order strictly earlier, empty result"}
+{"line": "3 \"MACHINERY\" \"1992-01-02\"", "expect": ["q3 fast"], "forbid": [], "note": "one day after min orderdate: at most the 1992-01-01 orders qualify"}
+{"line": "3 \"BUILDING\" \"1998-12-01\"", "expect": ["q3 fast"], "forbid": [], "note": "date = max shipdate: no lineitem ships strictly later, empty result"}
+{"line": "3 \"BUILDING\" \"1998-12-31\"", "expect": ["q3 fast"], "forbid": [], "note": "date past both domains: empty result"}
+{"line": "3 \"AUTOMOBILE\" \"1970-01-01\"", "expect": ["q3 fast"], "forbid": [], "note": "date decades before data: zero qualifying orders, empty"}
+{"line": "3 \"AUTOMOBILE\" \"2050-06-15\"", "expect": ["q3 fast"], "forbid": [], "note": "date decades after data: all orders scanned, no shipdate later, empty"}
+{"line": "3 \"NOSUCHSEG\" \"1995-03-15\"", "expect": ["q3 unknown_segment", "q3 fallback_sorted"], "forbid": ["q3 fast"], "note": "out-of-dictionary segment: guard-false, fallback engages, exact empty"}
+{"line": "3 \"building\" \"1995-03-15\"", "expect": ["q3 unknown_segment", "q3 fallback_sorted"], "forbid": ["q3 fast"], "note": "segment comparison is case sensitive: fallback, empty"}

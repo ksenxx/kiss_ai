@@ -100,6 +100,9 @@ class TestF419InternalStillGuardsMainTree:
             "direct-419-key", tab_id="direct-419", server_owned=True,
         )
         non_wt_state.is_running_non_wt = True
+        # Mirror _run_task_inner: a running non-wt task records the
+        # resolved main-repo root of its work_dir on its state.
+        non_wt_state.non_wt_repo_root = repo.resolve()
         agent_state.register(non_wt_state)
         try:
             result = server._handle_worktree_action(
@@ -116,6 +119,7 @@ class TestF419InternalStillGuardsMainTree:
             )
         finally:
             non_wt_state.is_running_non_wt = False
+            non_wt_state.non_wt_repo_root = None
             wt_agent.discard()
             agent_state.agent_states.clear()
 

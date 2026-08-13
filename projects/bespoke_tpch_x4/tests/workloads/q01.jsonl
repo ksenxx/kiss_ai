@@ -1,0 +1,16 @@
+# Q1 adversarial audit. Data: shipdate in [1992-01-02, 1998-12-01]; cutoff = 1998-12-01 - DELTA.
+# Guards: "q1 fast" (cutoff >= q1_date_min), "q1 empty_precutoff" (cutoff < min shipdate -> exact
+# empty), "q1 no_precompute" (builder invariant violated; unreachable for any placeholder value).
+{"line": "1 \"100\"", "expect": ["q1 fast"], "forbid": ["q1 empty_precutoff", "q1 no_precompute"], "note": "seed42 value"}
+{"line": "1 \"80\"", "expect": ["q1 fast"], "forbid": ["q1 empty_precutoff"], "note": "seed7 value"}
+{"line": "1 \"63\"", "expect": ["q1 fast"], "forbid": ["q1 empty_precutoff"], "note": "seed123 value"}
+{"line": "1 \"60\"", "expect": ["q1 fast"], "forbid": [], "note": "TPC-H spec lower bound for DELTA"}
+{"line": "1 \"120\"", "expect": ["q1 fast"], "forbid": [], "note": "TPC-H spec upper bound for DELTA"}
+{"line": "1 \"0\"", "expect": ["q1 fast"], "forbid": [], "note": "cutoff exactly 1998-12-01 = max shipdate: all rows included"}
+{"line": "1 \"1\"", "expect": ["q1 fast"], "forbid": [], "note": "cutoff 1998-11-30, one day inside the domain"}
+{"line": "1 \"-30\"", "expect": ["q1 fast"], "forbid": [], "note": "negative delta: cutoff 1998-12-31 after max shipdate; min() clamp to q1_date_max"}
+{"line": "1 \"-10000\"", "expect": ["q1 fast"], "forbid": [], "note": "hugely negative delta: cutoff ~2026, clamp to q1_date_max, full-table totals"}
+{"line": "1 \"2525\"", "expect": ["q1 fast"], "forbid": ["q1 empty_precutoff"], "note": "cutoff exactly 1992-01-02 = min shipdate: guard-true boundary, d=0 prefix cell"}
+{"line": "1 \"2526\"", "expect": ["q1 empty_precutoff"], "forbid": ["q1 fast"], "note": "cutoff 1992-01-01, one day before min shipdate: guard-false, exact empty result"}
+{"line": "1 \"2600\"", "expect": ["q1 empty_precutoff"], "forbid": ["q1 fast"], "note": "cutoff 1991-10-19 well before min shipdate: empty result"}
+{"line": "1 \"20000\"", "expect": ["q1 empty_precutoff"], "forbid": ["q1 fast"], "note": "huge delta: cutoff ~1944, empty result"}

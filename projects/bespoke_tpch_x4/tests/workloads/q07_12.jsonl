@@ -1,0 +1,72 @@
+# Adversarial fast-path audit manifest for Q7-Q12 (group B).
+# Each line is fed verbatim to both the audited optimized engine and the
+# pristine baseline engine; results are diffed and AUDIT markers asserted.
+
+# ---------------------------------------------------------------- Q7
+{"line": "7 \"ALGERIA\" \"BRAZIL\"", "expect": ["q7 fast"], "forbid": ["q7 fallback*"], "note": "seed42 values, fast cube path"}
+{"line": "7 \"ARGENTINA\" \"BRAZIL\"", "expect": ["q7 fast"], "forbid": ["q7 fallback*"], "note": "seed7 values"}
+{"line": "7 \"ARGENTINA\" \"ETHIOPIA\"", "expect": ["q7 fast"], "forbid": ["q7 fallback*"], "note": "seed123 values"}
+{"line": "7 \"FRANCE\" \"FRANCE\"", "expect": ["q7 fast"], "forbid": ["q7 fallback*"], "note": "same nation twice: OR-predicate degenerates to supp=cust=FRANCE; cube diagonal must match baseline"}
+{"line": "7 \"UNITED STATES\" \"UNITED KINGDOM\"", "expect": ["q7 fast"], "forbid": ["q7 fallback*"], "note": "multi-word nation names survive quoted parsing"}
+{"line": "7 \"MOZAMBIQUE\" \"PERU\"", "expect": ["q7 fast"], "forbid": ["q7 fallback*"], "note": "non-benchmarked nation pair"}
+{"line": "7 \"ATLANTIS\" \"BRAZIL\"", "expect": ["q7 nation_missing"], "forbid": ["q7 fast", "q7 fallback*"], "note": "NATION1 not in dictionary -> empty result before guard"}
+{"line": "7 \"BRAZIL\" \"ATLANTIS\"", "expect": ["q7 nation_missing"], "forbid": ["q7 fast", "q7 fallback*"], "note": "NATION2 not in dictionary"}
+{"line": "7 \"brazil\" \"france\"", "expect": ["q7 nation_missing"], "forbid": ["q7 fast", "q7 fallback*"], "note": "lookup is case sensitive; lowercase names miss the dictionary"}
+
+# ---------------------------------------------------------------- Q8
+{"line": "8 \"FRANCE\" \"AMERICA\" \"ECONOMY BRUSHED TIN\"", "expect": ["q8 fast"], "forbid": ["q8 fallback*"], "note": "seed42 values, fast cube path"}
+{"line": "8 \"JORDAN\" \"EUROPE\" \"STANDARD BURNISHED TIN\"", "expect": ["q8 fast"], "forbid": ["q8 fallback*"], "note": "seed7 values"}
+{"line": "8 \"EGYPT\" \"ASIA\" \"ECONOMY PLATED NICKEL\"", "expect": ["q8 fast"], "forbid": ["q8 fallback*"], "note": "seed123 values"}
+{"line": "8 \"BRAZIL\" \"AMERICA\" \"SMALL POLISHED COPPER\"", "expect": ["q8 fast"], "forbid": ["q8 fallback*"], "note": "target nation inside the region"}
+{"line": "8 \"CHINA\" \"AMERICA\" \"ECONOMY BRUSHED TIN\"", "expect": ["q8 fast"], "forbid": ["q8 fallback*"], "note": "target nation outside the region -> mkt_share 0 rows must still be produced"}
+{"line": "8 \"FRANCE\" \"AMERICA\" \"NO SUCH TYPE\"", "expect": ["q8 fast"], "forbid": ["q8 fallback*"], "note": "TYPE not in dictionary -> zero volume -> empty result on both engines"}
+{"line": "8 \"FRANCE\" \"ATLANTIS\" \"ECONOMY BRUSHED TIN\"", "expect": ["q8 region_missing"], "forbid": ["q8 fast", "q8 fallback*"], "note": "REGION not in dictionary"}
+{"line": "8 \"ATLANTIS\" \"AMERICA\" \"ECONOMY BRUSHED TIN\"", "expect": ["q8 nation_missing"], "forbid": ["q8 fast", "q8 fallback*"], "note": "NATION not in dictionary"}
+{"line": "8 \"KENYA\" \"AFRICA\" \"PROMO ANODIZED STEEL\"", "expect": ["q8 fast"], "forbid": ["q8 fallback*"], "note": "non-benchmarked region AFRICA"}
+
+# ---------------------------------------------------------------- Q9
+{"line": "9 \"rosy\"", "expect": ["q9 fast"], "forbid": ["q9 fallback*"], "note": "seed42 color"}
+{"line": "9 \"rose\"", "expect": ["q9 fast"], "forbid": ["q9 fallback*"], "note": "seed7 color"}
+{"line": "9 \"cyan\"", "expect": ["q9 fast"], "forbid": ["q9 fallback*"], "note": "seed123 color"}
+{"line": "9 \"zzznotacolor\"", "expect": ["q9 fast"], "forbid": ["q9 fallback*"], "note": "substring matches no p_name -> empty result"}
+{"line": "9 \"a\"", "expect": ["q9 fast"], "forbid": ["q9 fallback*"], "note": "single character matches most part names -> near-total aggregation"}
+{"line": "9 \"\"", "expect": ["q9 fast"], "forbid": ["q9 fallback*"], "note": "empty COLOR: LIKE '%%' matches every part"}
+{"line": "9 \"ROSY\"", "expect": ["q9 fast"], "forbid": ["q9 fallback*"], "note": "uppercase color; p_name is lowercase so no matches (case-sensitive LIKE)"}
+{"line": "9 \"n ro\"", "expect": ["q9 fast"], "forbid": ["q9 fallback*"], "note": "substring spanning a space inside p_name"}
+
+# ---------------------------------------------------------------- Q10
+{"line": "10 \"1993-08-01\"", "expect": ["q10 fast"], "forbid": ["q10 fallback", "q10 no_returnflag_R"], "note": "seed42 date"}
+{"line": "10 \"1994-03-01\"", "expect": ["q10 fast"], "forbid": ["q10 fallback"], "note": "seed7 date"}
+{"line": "10 \"1993-02-01\"", "expect": ["q10 fast"], "forbid": ["q10 fallback"], "note": "seed123 date"}
+{"line": "10 \"1992-01-01\"", "expect": ["q10 fast"], "forbid": ["q10 fallback"], "note": "window starts before the first orderdate in the data"}
+{"line": "10 \"1998-10-01\"", "expect": ["q10 fast"], "forbid": ["q10 fallback"], "note": "window after the last orderdate (max 1998-08-02) -> empty result"}
+{"line": "10 \"1999-06-01\"", "expect": ["q10 fast"], "forbid": ["q10 fallback"], "note": "window entirely after all data -> empty result"}
+{"line": "10 \"1990-01-01\"", "expect": ["q10 fast"], "forbid": ["q10 fallback"], "note": "window entirely before all data -> empty result"}
+{"line": "10 \"1995-11-30\"", "expect": ["q10 fast"], "forbid": ["q10 fallback"], "note": "+3 months lands on leap day 1996-02-29 (end-of-month clamping)"}
+{"line": "10 \"1993-11-30\"", "expect": ["q10 fast"], "forbid": ["q10 fallback"], "note": "+3 months clamps 1994-02-30 -> 1994-02-28"}
+{"line": "10 \"1998-05-15\"", "expect": ["q10 fast"], "forbid": ["q10 fallback"], "note": "window partially overlaps the tail of the data"}
+
+# ---------------------------------------------------------------- Q11
+{"line": "11 \"RUSSIA\" \"0.0001\"", "expect": ["q11 fast"], "forbid": ["q11 fallback"], "note": "seed42 values"}
+{"line": "11 \"ARGENTINA\" \"0.0001\"", "expect": ["q11 fast"], "forbid": ["q11 fallback"], "note": "seed7 values"}
+{"line": "11 \"JORDAN\" \"0.0001\"", "expect": ["q11 fast"], "forbid": ["q11 fallback"], "note": "seed123 values"}
+{"line": "11 \"GERMANY\" \"0\"", "expect": ["q11 fast"], "forbid": ["q11 fallback"], "note": "FRACTION 0: strict > keeps every positive-value part"}
+{"line": "11 \"GERMANY\" \"-0.5\"", "expect": ["q11 fast"], "forbid": ["q11 fallback"], "note": "negative FRACTION: negative threshold keeps all parts"}
+{"line": "11 \"GERMANY\" \"1\"", "expect": ["q11 fast"], "forbid": ["q11 fallback"], "note": "FRACTION 1: no single part exceeds the nation total -> empty"}
+{"line": "11 \"GERMANY\" \"100\"", "expect": ["q11 fast"], "forbid": ["q11 fallback"], "note": "huge FRACTION -> empty"}
+{"line": "11 \"GERMANY\" \"0.0000000001\"", "expect": ["q11 fast"], "forbid": ["q11 fallback"], "note": "tiny FRACTION keeps everything"}
+{"line": "11 \"FRANCE\" \"0.5\"", "expect": ["q11 fast"], "forbid": ["q11 fallback"], "note": "large fraction, likely empty or tiny result"}
+{"line": "11 \"ATLANTIS\" \"0.0001\"", "expect": ["q11 nation_missing"], "forbid": ["q11 fast", "q11 fallback"], "note": "NATION not in dictionary"}
+
+# ---------------------------------------------------------------- Q12
+{"line": "12 \"MAIL\" \"FOB\" \"1997-01-01\"", "expect": ["q12 fast"], "forbid": ["q12 shipmodes_missing", "q12 no_precompute", "q12 fast_window_empty"], "note": "seed42 values"}
+{"line": "12 \"FOB\" \"TRUCK\" \"1993-01-01\"", "expect": ["q12 fast"], "forbid": ["q12 shipmodes_missing"], "note": "seed7 values"}
+{"line": "12 \"FOB\" \"AIR\" \"1997-01-01\"", "expect": ["q12 fast"], "forbid": ["q12 shipmodes_missing"], "note": "seed123 values"}
+{"line": "12 \"MAIL\" \"MAIL\" \"1994-01-01\"", "expect": ["q12 fast"], "forbid": ["q12 shipmodes_missing"], "note": "same shipmode twice: IN ('MAIL','MAIL') must count rows once, not twice"}
+{"line": "12 \"ZEBRA\" \"FOB\" \"1994-01-01\"", "expect": ["q12 fast"], "forbid": ["q12 shipmodes_missing"], "note": "one shipmode unknown -> only FOB contributes"}
+{"line": "12 \"ZEBRA\" \"YAK\" \"1994-01-01\"", "expect": ["q12 shipmodes_missing"], "forbid": ["q12 fast*"], "note": "both shipmodes unknown -> empty result"}
+{"line": "12 \"REG AIR\" \"SHIP\" \"1992-01-01\"", "expect": ["q12 fast"], "forbid": ["q12 shipmodes_missing"], "note": "shipmode containing a space; window at the very start of the data"}
+{"line": "12 \"MAIL\" \"FOB\" \"1999-01-01\"", "expect": ["q12 fast", "q12 fast_window_empty"], "forbid": ["q12 shipmodes_missing"], "note": "receiptdate window entirely after the data -> empty result via lo>hi"}
+{"line": "12 \"MAIL\" \"FOB\" \"1990-01-01\"", "expect": ["q12 fast", "q12 fast_window_empty"], "forbid": ["q12 shipmodes_missing"], "note": "receiptdate window entirely before the data -> empty result via lo>hi"}
+{"line": "12 \"MAIL\" \"FOB\" \"1998-02-15\"", "expect": ["q12 fast"], "forbid": ["q12 fast_window_empty"], "note": "window clipped at the right edge of the data range"}
+{"line": "12 \"AIR\" \"RAIL\" \"1996-02-29\"", "expect": ["q12 fast"], "forbid": ["q12 shipmodes_missing"], "note": "leap-day start date; +12 months clamps 1997-02-29 -> 1997-02-28"}
