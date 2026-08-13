@@ -261,6 +261,28 @@ class TestVoiceWakeController(unittest.TestCase):
 
         self._run(_scenario())
 
+    def test_stop_joins_the_pump_tasks(self) -> None:
+        """After stop() returns, no controller coroutine may be live.
+
+        The disconnect cleanup and daemon shutdown rely on this: a
+        pump still running after stop() could touch a torn-down
+        endpoint.
+        """
+
+        async def _scenario() -> None:
+            controller = VoiceWakeController(_args(_PROTOCOL_SCRIPT))
+            collector = _EventCollector()
+            await controller.start("c1", None, collector.send)
+            listener = controller._listeners["c1"]
+            await collector.wait_for(lambda e: e.get("event") == "wake")
+            await controller.stop("c1")
+            self.assertTrue(all(t.done() for t in listener.pumps))
+            before = len(collector.events)
+            await asyncio.sleep(0.05)
+            self.assertEqual(len(collector.events), before)
+
+        self._run(_scenario())
+
     def test_stop_without_listener_is_a_noop(self) -> None:
         async def _scenario() -> None:
             controller = VoiceWakeController(_args(_SLEEP_SCRIPT))
