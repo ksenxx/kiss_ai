@@ -825,7 +825,8 @@ class TestClaudeCodeModel:
         m.conversation.append({"role": "tool", "content": "res"})
         assert m._build_prompt() == "[User]: only\n\n[Assistant]: ans\n\n[Tool Result]: res"
 
-    def test_parse_stream_events_result_authoritative(self) -> None:
+    def test_parse_stream_events_result_is_fallback(self) -> None:
+        """Streamed text is kept; the result event only fills in when empty."""
         m = self.make_cc()
         events = [
             {
@@ -835,11 +836,19 @@ class TestClaudeCodeModel:
             {"type": "result", "result": "final", "usage": {"input_tokens": 1}},
         ]
         content, result = m._parse_stream_events(json.dumps(e) for e in events)
-        assert content == "final"
+        assert content == "partial"
         assert result["usage"] == {"input_tokens": 1}
         assert m._pre_result_content == "partial"
 
-    def test_parse_stream_events_second_assistant_stops(self) -> None:
+        m2 = self.make_cc()
+        events2 = [
+            {"type": "result", "result": "final", "usage": {"input_tokens": 1}},
+        ]
+        content2, _ = m2._parse_stream_events(json.dumps(e) for e in events2)
+        assert content2 == "final"
+
+    def test_parse_stream_events_multiple_assistants_accumulate(self) -> None:
+        """Agentic runs emit several assistant messages; all text is kept."""
         m = self.make_cc()
         events = [
             {
@@ -852,7 +861,7 @@ class TestClaudeCodeModel:
             },
         ]
         content, _ = m._parse_stream_events(json.dumps(e) for e in events)
-        assert content == "first"
+        assert content == "firstsecond"
 
     def test_parse_stream_events_deltas_and_thinking(self) -> None:
         m = self.make_cc()
@@ -909,7 +918,9 @@ class TestClaudeCodeModel:
         )
         assert content == tc
         assert m._stopped_for_tool_calls is True
-        assert result.get("result") == "SHOULD NOT BE USED"
+        # The agentic CLI is killed at the stop: the queued result event is
+        # never consumed (draining it would let native tools keep running).
+        assert result == {}
 
     def test_parse_stream_events_tool_calls_clean_finish(self) -> None:
         m = self.make_cc()
