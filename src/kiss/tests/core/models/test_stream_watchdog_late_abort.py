@@ -187,11 +187,19 @@ class _GatedStreamPolicy:
 
 
 def _watchdog_threads() -> set[str]:
-    """Return the names of the live stream-abort watchdog threads."""
+    """Return the names of this suite's own live watchdog threads.
+
+    Only the ``openai-*`` watchdogs started by the OpenAI-compatible
+    adapter under test are counted.  Other tests in the same pytest
+    process can leave daemon threads behind (real-LLM tasks, agent
+    loops) that start and stop ``anthropic-…``/``gemini-…`` watchdogs
+    concurrently with this test; counting those made the
+    baseline-vs-after comparison race with unrelated churn.
+    """
     return {
         f"{thread.name}#{thread.ident}"
         for thread in threading.enumerate()
-        if _WATCHDOG_MARKER in thread.name
+        if thread.name.startswith("openai-") and _WATCHDOG_MARKER in thread.name
     }
 
 
