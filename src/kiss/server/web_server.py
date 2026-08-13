@@ -1835,6 +1835,11 @@ class WebPrinter(JsonPrinter):
 
         with self._lock:
             self._record_event(event)
+            # Mirror JsonPrinter.broadcast: record the file paths of
+            # mutating tool calls so the end-of-task cross-repo
+            # auto-commit (_autocommit_changed_repos) also sees tasks
+            # run through the web printer.
+            self._track_changed_path(event)
 
         self._persist_event(event)
 
