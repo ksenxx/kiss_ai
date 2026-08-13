@@ -396,6 +396,11 @@ body {
 .chat-tab:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 6%, transparent); }
 .chat-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
+.chat-tab:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
 .chat-tab-label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -442,6 +447,11 @@ body {
   opacity: 1;
 }
 .chat-tab-close:hover { background: color-mix(in srgb, var(--fg) 15%, transparent); color: var(--fg); }
+
+.chat-tab-close:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
 
 .chat-tab-add {
   justify-content: center;

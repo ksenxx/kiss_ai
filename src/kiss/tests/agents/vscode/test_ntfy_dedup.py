@@ -16,114 +16,20 @@ cached message and skips POSTs when the URL is unchanged.
 
 from __future__ import annotations
 
-import json
-import socket
-import threading
 import unittest
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from kiss.server.web_server import (
     _fetch_last_ntfy_message,
     _post_url_to_message_board,
 )
-
-
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        port: int = s.getsockname()[1]
-        return port
-
-
-class _NtfyHandler(BaseHTTPRequestHandler):
-    """Minimal ntfy.sh emulator.
-
-    ``GET /{topic}/json?poll=1`` returns the cached messages for the
-    topic as newline-delimited JSON, in chronological order.
-
-    ``POST /{topic}`` appends the request body to the topic's cache.
-    """
-
-    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
-        return
-
-    def do_GET(self) -> None:  # noqa: N802
-        path = self.path
-        if "?" in path:
-            path, query = path.split("?", 1)
-        else:
-            query = ""
-        parts = path.strip("/").split("/")
-        if len(parts) != 2 or parts[1] != "json" or "poll=1" not in query:
-            self.send_response(404)
-            self.end_headers()
-            return
-        topic = parts[0]
-        store: dict[str, list[str]] = self.server.messages  # type: ignore[attr-defined]
-        msgs = store.get(topic, [])
-        lines: list[str] = []
-        for body in msgs:
-            lines.append(json.dumps({"event": "message", "message": body}))
-        payload = ("\n".join(lines) + ("\n" if lines else "")).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/x-ndjson")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def do_POST(self) -> None:  # noqa: N802
-        topic = self.path.strip("/")
-        if not topic or "/" in topic:
-            self.send_response(404)
-            self.end_headers()
-            return
-        length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(length).decode("utf-8") if length else ""
-        store: dict[str, list[str]] = self.server.messages  # type: ignore[attr-defined]
-        store.setdefault(topic, []).append(body)
-        posts: list[tuple[str, str, dict[str, str]]] = (
-            self.server.posts  # type: ignore[attr-defined]
-        )
-        posts.append((topic, body, dict(self.headers)))
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(b'{"id":"x"}')
-
-
-class _NtfyServerContext:
-    """Spin up the local ntfy emulator on a free port."""
-
-    def __init__(self) -> None:
-        port = _find_free_port()
-        self.server = ThreadingHTTPServer(("127.0.0.1", port), _NtfyHandler)
-        self.server.messages = {}  # type: ignore[attr-defined]
-        self.server.posts = []  # type: ignore[attr-defined]
-        self.thread = threading.Thread(
-            target=self.server.serve_forever, daemon=True,
-        )
-        self.thread.start()
-        self.base_url = f"http://127.0.0.1:{port}"
-
-    def stop(self) -> None:
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=5)
-
-    @property
-    def posts(self) -> list[tuple[str, str, dict[str, str]]]:
-        return self.server.posts  # type: ignore[attr-defined,no-any-return]
-
-    @property
-    def messages(self) -> dict[str, list[str]]:
-        return self.server.messages  # type: ignore[attr-defined,no-any-return]
+from kiss.tests.agents.vscode._ntfy_emulator import NtfyServerContext
 
 
 class TestNtfyDeduplication(unittest.TestCase):
     """End-to-end verification of duplicate-URL suppression."""
 
     def setUp(self) -> None:
-        self.ntfy = _NtfyServerContext()
+        self.ntfy = NtfyServerContext()
 
     def tearDown(self) -> None:
         self.ntfy.stop()

@@ -1258,7 +1258,12 @@ def _get_machine_topic() -> str:
 
     Combines the hostname and MAC address into a SHA-256 hash so the
     topic stays the same across process restarts on the same machine
-    but is not guessable by outsiders.
+    but is not guessable by outsiders.  When ``KISS_HOME`` is not the
+    default ``~/.kiss``, the home path is mixed into the hash as well:
+    processes running against an isolated home (tests, secondary smoke
+    servers) can then never compute — and thus never pollute — the
+    production daemon's discovery topic, while every existing
+    default-home install keeps its topic byte-identical.
 
     The stored topic is read directly (an ``OSError`` — e.g. the file
     vanishing between an existence check and the read — falls through
@@ -1271,14 +1276,19 @@ def _get_machine_topic() -> str:
     Returns:
         A hex string suitable for use as an ntfy.sh topic name.
     """
-    topic_file = _kiss_home_dir() / "ntfy_topic"
+    kiss_home_path = _kiss_home_dir()
+    topic_file = kiss_home_path / "ntfy_topic"
     try:
         stored = topic_file.read_text(encoding="utf-8").strip()
     except OSError:
         stored = ""
     if stored:
         return stored
-    identity = f"{platform.node()}:{uuid.getnode()}"
+    default_home = Path.home() / ".kiss"
+    if kiss_home_path.expanduser().resolve() == default_home.resolve():
+        identity = f"{platform.node()}:{uuid.getnode()}"
+    else:
+        identity = f"{platform.node()}:{uuid.getnode()}:{kiss_home_path}"
     topic = "kiss-" + hashlib.sha256(identity.encode()).hexdigest()[:32]
     try:
         _atomic_write_text(topic_file, topic + "\n")
@@ -3179,6 +3189,10 @@ class RemoteAccessServer:
         work_dir: Working directory for the agent (default cwd).
         certfile: Path to a PEM certificate file for TLS.
         keyfile: Path to a PEM private key file for TLS.
+        ntfy_base_url: Base URL of the ntfy server the active tunnel
+            URL is posted to (default the real ``https://ntfy.sh``).
+            Tests inject a local emulator here so they never post to
+            the production discovery topic.
     """
 
     def __init__(
@@ -3193,6 +3207,7 @@ class RemoteAccessServer:
         keyfile: str | None = None,
         url_file: str | Path | None = None,
         uds_path: str | Path | None = None,
+        ntfy_base_url: str = _NTFY_BASE_URL,
     ) -> None:
         source_shell_env()
         # ``saveConfig`` was the only caller of apply_config_to_env, so
@@ -3238,6 +3253,7 @@ class RemoteAccessServer:
         self._tunnel_rate_limited = False
         self._tunnel_force_restart_count = 0
         self._tunnel_force_restart_next_allowed = 0.0
+        self._ntfy_base_url = ntfy_base_url
         self._last_posted_url: str | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws_server: Any = None
@@ -4174,7 +4190,7 @@ class RemoteAccessServer:
         if self.use_tunnel and url is not None and url != self._last_posted_url:
             assert self._loop is not None
             await self._loop.run_in_executor(
-                None, _post_url_to_message_board, url,
+                None, _post_url_to_message_board, url, self._ntfy_base_url,
             )
             self._last_posted_url = url
 

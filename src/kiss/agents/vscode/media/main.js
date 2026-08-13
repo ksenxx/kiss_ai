@@ -938,6 +938,34 @@
     applyRemoteTheme(next);
   }
 
+  // Arrow-key navigation for the tablist (WAI-ARIA tabs pattern,
+  // manual activation): ArrowLeft/ArrowRight move focus to the
+  // previous/next tab with wrap-around, Home/End jump to the
+  // first/last tab, and the roving Tab stop follows the focus so the
+  // user can Tab away and come back to where they were.  Focus
+  // movement alone never activates; Enter/Space do.  The per-tab close
+  // '×' controls keep tabindex=0 (they are separate buttons, not tabs,
+  // and this keeps them directly Tab-reachable -- the simplest correct
+  // option under the pattern).
+  function moveTabFocus(fromEl, key) {
+    const tabList = document.getElementById('tab-list');
+    if (!tabList) return;
+    const els = Array.from(tabList.querySelectorAll('[role="tab"]'));
+    if (els.length === 0) return;
+    let target;
+    if (key === 'Home') {
+      target = els[0];
+    } else if (key === 'End') {
+      target = els[els.length - 1];
+    } else {
+      const i = els.indexOf(fromEl);
+      const d = key === 'ArrowLeft' ? -1 : 1;
+      target = i < 0 ? els[0] : els[(i + d + els.length) % els.length];
+    }
+    els.forEach(t => t.setAttribute('tabindex', t === target ? '0' : '-1'));
+    target.focus();
+  }
+
   function renderTabBar() {
     const tabList = document.getElementById('tab-list');
     const tabBar = document.getElementById('tab-bar');
@@ -945,7 +973,23 @@
 
     tabBar.style.display = '';
 
+    // Chat tabs are proper a11y tabs: keyboard users reach them with
+    // Tab, screen readers announce "<title>, tab, selected", and
+    // Enter/Space activates them exactly like a click.
+    tabList.setAttribute('role', 'tablist');
+    tabList.setAttribute('aria-label', 'Chat tabs');
+
     tabList.innerHTML = '';
+    // Roving tabindex (WAI-ARIA tabs pattern, manual activation): only
+    // the active tab is a Tab stop; the arrow keys move focus between
+    // tabs (see moveTabFocus) and Enter/Space activate.  If the active
+    // tab is somehow not in the list, the first tab is the stop so the
+    // tablist never becomes keyboard-unreachable.
+    const rovingStopId = tabs.some(t => t.id === activeTabId)
+      ? activeTabId
+      : tabs.length > 0
+        ? tabs[0].id
+        : null;
     tabs.forEach(tab => {
       const el = document.createElement('div');
       el.className =
@@ -954,6 +998,16 @@
         (tab.isSubagentTab ? ' subagent-tab' : '') +
         (tab.isContentTab ? ' content-tab' : '');
       el.dataset.tabId = tab.id;
+      el.setAttribute('role', 'tab');
+      el.setAttribute('tabindex', tab.id === rovingStopId ? '0' : '-1');
+      el.setAttribute(
+        'aria-selected',
+        tab.id === activeTabId ? 'true' : 'false',
+      );
+      el.setAttribute('aria-label', tab.title);
+      // All chat tabs swap the one shared chat surface (#output), so a
+      // single shared tabpanel is the correct association.
+      el.setAttribute('aria-controls', 'output');
 
       if (tab.isContentTab) {
         const fileIcon = document.createElement('span');
@@ -999,14 +1053,38 @@
       const closeBtn = document.createElement('span');
       closeBtn.className = 'chat-tab-close';
       closeBtn.textContent = '\u00d7';
+      closeBtn.setAttribute('role', 'button');
+      closeBtn.setAttribute('tabindex', '0');
+      closeBtn.setAttribute('aria-label', 'Close tab');
       closeBtn.addEventListener('click', e => {
         e.stopPropagation();
         closeTab(tab.id);
+      });
+      closeBtn.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          e.stopPropagation();
+          closeTab(tab.id);
+        }
       });
       el.appendChild(closeBtn);
 
       el.addEventListener('click', () => {
         switchToTab(tab.id);
+      });
+      el.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          switchToTab(tab.id);
+        } else if (
+          e.key === 'ArrowLeft' ||
+          e.key === 'ArrowRight' ||
+          e.key === 'Home' ||
+          e.key === 'End'
+        ) {
+          e.preventDefault();
+          moveTabFocus(el, e.key);
+        }
       });
       el.addEventListener('contextmenu', e => {
         e.preventDefault();
@@ -1022,8 +1100,17 @@
       addBtn.className = 'chat-tab chat-tab-add';
       addBtn.textContent = '+';
       addBtn.title = 'New chat';
+      addBtn.setAttribute('role', 'button');
+      addBtn.setAttribute('tabindex', '0');
+      addBtn.setAttribute('aria-label', 'New chat');
       addBtn.addEventListener('click', () => {
         createNewTab();
+      });
+      addBtn.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          createNewTab();
+        }
       });
       tabBar.appendChild(addBtn);
     }
@@ -1052,10 +1139,19 @@
       const settingsBtn = document.createElement('div');
       settingsBtn.className = 'chat-tab chat-tab-settings';
       settingsBtn.title = 'Settings';
+      settingsBtn.setAttribute('role', 'button');
+      settingsBtn.setAttribute('tabindex', '0');
+      settingsBtn.setAttribute('aria-label', 'Settings');
       settingsBtn.innerHTML =
         '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
       settingsBtn.addEventListener('click', () => {
         openSettingsPanel();
+      });
+      settingsBtn.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          openSettingsPanel();
+        }
       });
       tabBar.appendChild(settingsBtn);
     }

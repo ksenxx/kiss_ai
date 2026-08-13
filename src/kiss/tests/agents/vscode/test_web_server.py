@@ -49,6 +49,7 @@ from kiss.server.web_server import (
     _save_url_file,
     _translate_webview_command,
 )
+from kiss.tests.agents.vscode._ntfy_emulator import unroutable_base_url
 
 
 class TestBuildHtml(unittest.TestCase):
@@ -1704,6 +1705,7 @@ class TestTunnelWatchdog(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
 
@@ -1891,6 +1893,7 @@ class TestStartQuickTunnelUrlParsing(IsolatedAsyncioTestCase):
             port=self.port,
             use_tunnel=True,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
 
     async def asyncTearDown(self) -> None:
@@ -2522,6 +2525,7 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
 
@@ -2707,6 +2711,7 @@ class TestNamedTunnel(IsolatedAsyncioTestCase):
             use_tunnel=False,
             tunnel_token="fake-token",
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         script = (
             "import sys, time\n"
@@ -2819,6 +2824,7 @@ class TestWatchdogBranches(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
 
@@ -2922,6 +2928,7 @@ class TestCheckAndRestartTunnel(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
 
@@ -3551,6 +3558,7 @@ class TestCheckAndRestartTunnelFailedRestart(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
 
@@ -3594,6 +3602,7 @@ class TestWatchdogWSPingException(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
 
@@ -4098,6 +4107,7 @@ class TestServeAsyncBranches(IsolatedAsyncioTestCase):
             port=self.port,
             use_tunnel=False,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await server._setup_server()
 
@@ -4138,6 +4148,7 @@ class TestServeAsyncBranches(IsolatedAsyncioTestCase):
             port=self.port,
             use_tunnel=False,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await server._setup_server()
 
@@ -4602,6 +4613,7 @@ class TestCheckAndRestartTunnelSuccess(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             use_tunnel=False,
+            ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
         self._old_path = os.environ.get("PATH", "")
@@ -4806,6 +4818,7 @@ class TestStartWithTunnel(unittest.TestCase):
                 host="127.0.0.1",
                 port=port,
                 use_tunnel=True,
+                ntfy_base_url=unroutable_base_url(),
             )
 
             started = threading.Event()
@@ -4858,6 +4871,7 @@ class TestStartWithTunnel(unittest.TestCase):
                 host="127.0.0.1",
                 port=port,
                 use_tunnel=True,
+                ntfy_base_url=unroutable_base_url(),
             )
 
             started = threading.Event()
@@ -5249,6 +5263,7 @@ class TestWatchdogEdgeDeregistration(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
         self.server.use_tunnel = True
@@ -5342,6 +5357,7 @@ class TestDeadProcessClearsMetricsState(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
 
