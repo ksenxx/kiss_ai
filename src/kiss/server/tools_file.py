@@ -11,7 +11,10 @@ and resolves the path (:func:`resolve_tools_file`) and sends it on the
 ``run`` command's ``toolsFile`` field; the daemon imports the file and
 hands every top-level public function that is suitable as a tool
 directly to the agent (:func:`load_tools_file`).  The tools therefore
-execute in the daemon process, exactly like native agent tools.
+execute in the daemon process, exactly like native agent tools.  A
+broken tools file (malformed field, missing file, import failure)
+raises :exc:`ToolsFileError` so the task stops with a diagnostic error
+instead of silently running without the requested tools.
 """
 
 from __future__ import annotations
@@ -31,6 +34,19 @@ _SUPPORTED_KINDS = (
     inspect.Parameter.POSITIONAL_OR_KEYWORD,
     inspect.Parameter.KEYWORD_ONLY,
 )
+
+
+class ToolsFileError(Exception):
+    """A ``run`` command's tools file is broken and the task must stop.
+
+    Raised by :func:`load_tools_file` when the ``toolsFile`` wire field
+    is malformed, names a missing or non-``.py`` path, or names a file
+    that raises at import time.  The task runner's generic task-error
+    handling turns the raise into a failed task result whose text
+    carries this exception's diagnostic message, so a broken tools file
+    stops the task loudly instead of silently running it without the
+    tools the client asked for.
+    """
 
 
 def resolve_tools_file(tools: str | Path | None) -> str:
@@ -85,10 +101,10 @@ def load_tools_file(raw_path: Any) -> list[Callable[..., Any]]:
     read or write), so every run observes the file's CURRENT contents
     and the caller's directory is never littered with bytecode.
 
-    The field comes from outside the daemon process, so it is treated
-    as untrusted input: a malformed value, a missing file, or a module
-    that fails to import is logged and yields no tools rather than
-    killing the task thread.
+    A broken tools file stops the task: a malformed field value, a
+    missing file, or a module that fails to import raises
+    :exc:`ToolsFileError` with a diagnostic message instead of
+    silently running the task without the requested tools.
 
     Args:
         raw_path: The ``toolsFile`` field of a ``run`` command —
@@ -97,19 +113,24 @@ def load_tools_file(raw_path: Any) -> list[Callable[..., Any]]:
 
     Returns:
         The tool callables, in module definition order.
+
+    Raises:
+        ToolsFileError: When *raw_path* is not a string, is not the
+            path of an existing ``.py`` file, or names a module that
+            raises at import time.
     """
     if raw_path is None or raw_path == "":
         return []
     if not isinstance(raw_path, str):
-        logger.warning(
-            "Ignoring malformed toolsFile field of type %s",
-            type(raw_path).__name__,
+        raise ToolsFileError(
+            f"tools file field must be a path string, got "
+            f"{type(raw_path).__name__}: {raw_path!r}"
         )
-        return []
     path = Path(raw_path)
     if path.suffix != ".py" or not path.is_file():
-        logger.warning("Ignoring toolsFile %r: not an existing .py file", raw_path)
-        return []
+        raise ToolsFileError(
+            f"tools file {raw_path!r} is not an existing Python (.py) file"
+        )
     module_name = f"_kiss_tools_file_{uuid.uuid4().hex}"
     module = types.ModuleType(module_name)
     module.__file__ = str(path)
@@ -118,15 +139,19 @@ def load_tools_file(raw_path: Any) -> list[Callable[..., Any]]:
         source = path.read_text(encoding="utf-8")
         code = compile(source, str(path), "exec", dont_inherit=True)
         exec(code, module.__dict__)  # noqa: S102
-    except BaseException:  # noqa: BLE001 — untrusted module code may raise anything
+    except BaseException as exc:  # noqa: BLE001 — untrusted module code may raise anything
         # BaseException (not just Exception/SystemExit): a tools file
-        # that raises e.g. KeyboardInterrupt at import time must
-        # degrade to "no extra tools" like any other bad module — the
-        # task runner treats an escaping KeyboardInterrupt as a task
-        # cancellation, so letting it propagate would cancel the whole
-        # agent task because of a broken tools file.
+        # raising e.g. KeyboardInterrupt or SystemExit at import time
+        # is converted into ToolsFileError like any other bad module —
+        # the task runner treats an escaping KeyboardInterrupt as a
+        # task CANCELLATION, so letting it propagate unwrapped would
+        # report a broken tools file as "task cancelled" instead of a
+        # task error with a diagnostic.
         logger.warning("Failed to import toolsFile %r", raw_path, exc_info=True)
-        return []
+        raise ToolsFileError(
+            f"tools file {raw_path!r} failed to import: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
     finally:
         sys.modules.pop(module_name, None)
     tools: list[Callable[..., Any]] = []

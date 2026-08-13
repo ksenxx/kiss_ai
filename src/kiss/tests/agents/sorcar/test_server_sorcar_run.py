@@ -316,7 +316,7 @@ class SorcarRunApiTest(unittest.TestCase):
         self,
         tools_file: Any,
         extra_cmd: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         """Drive one raw ``run`` command over the UDS and wait for the end.
 
         Bypasses :func:`kiss.server.sorcar.run` so malformed
@@ -329,6 +329,10 @@ class SorcarRunApiTest(unittest.TestCase):
                 ``toolsFile`` field.
             extra_cmd: Additional raw fields merged into the ``run``
                 command.
+
+        Returns:
+            The task's last ``result`` event, or ``None`` when the
+            task produced none.
         """
         tab_id = f"raw-{uuid.uuid4().hex}"
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -348,14 +352,23 @@ class SorcarRunApiTest(unittest.TestCase):
             sock.sendall(json.dumps(cmd).encode() + b"\n")
             reader = sock.makefile("rb")
             started = False
+            result_event: dict[str, Any] | None = None
             while True:
                 event = json.loads(reader.readline())
+                if event.get("type") == "result":
+                    # Each test runs its task alone on a private
+                    # daemon, so any result event seen here belongs to
+                    # this run (a failure before the agent publishes a
+                    # task-history row is keyed by tabId, a success by
+                    # taskId).
+                    result_event = event
+                    continue
                 if event.get("tabId") != tab_id or event.get("type") != "status":
                     continue
                 if event.get("running"):
                     started = True
                 elif started:
-                    return
+                    return result_event
         finally:
             sock.close()
 
@@ -727,12 +740,14 @@ class SorcarRunApiTest(unittest.TestCase):
         (good,) = seen["tools"]
         assert good(x="hi") == "hi"
 
-    def test_sys_exit_in_tools_file_is_contained(self) -> None:
-        """A tools file calling ``sys.exit()`` cannot kill the task.
+    def test_sys_exit_in_tools_file_fails_task_with_diagnostic(self) -> None:
+        """A tools file calling ``sys.exit()`` fails the task loudly.
 
         ``SystemExit`` is not an ``Exception`` subclass; the loader
-        must contain it (mirroring ``KISSAgent._execute_tool``) so the
-        task still runs — with no extra tools.
+        must convert it into ``ToolsFileError`` (letting it escape
+        unwrapped would kill the task thread) so the task stops with a
+        diagnostic result instead of silently running without the
+        requested tools — and without ever invoking the agent.
         """
         tools_path = self._write_tools_file(
             "exiting_tools.py",
@@ -748,16 +763,37 @@ class SorcarRunApiTest(unittest.TestCase):
             ''',
         )
         seen: dict[str, Any] = {}
-        self._run_with_tools_file(tools_path, seen)
-        assert seen["tool_lists"] == [[]]
 
-    def test_malformed_tools_file_ignored_by_daemon(self) -> None:
-        """A malformed ``toolsFile`` field never kills the task thread.
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            seen.setdefault("tool_lists", []).append(
+                [t.__name__ for t in kwargs.get("tools") or []],
+            )
+            raise AssertionError("agent must not run with a broken tools file")
+
+        self._parent_class.run = stub_run
+        result = sorcar.run(
+            "use the broken tools file",
+            work_dir=self.repo,
+            tools=tools_path,
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert result.success is False
+        assert "ToolsFileError" in result.text
+        assert "SystemExit" in result.text
+        assert tools_path in result.text
+        assert "tool_lists" not in seen
+
+    def test_broken_tools_file_stops_task_with_diagnostic(self) -> None:
+        """A broken ``toolsFile`` fails the task with a diagnostic error.
 
         A hand-crafted client can send anything: a non-string value, a
         missing path, a directory, a non-``.py`` file, a module that
         raises at import time, or one with a syntax error.  The daemon
-        must log, run the task with NO extra tools, and stay alive.
+        must stop the task with a failed result whose text carries the
+        loader's diagnostic — never invoke the agent — and stay alive
+        for later tasks.  An absent tools file (``None``) still runs
+        the task normally with no extra tools.
         """
         raising = self._write_tools_file(
             "raising_tools.py",
@@ -782,17 +818,24 @@ class SorcarRunApiTest(unittest.TestCase):
             return raw
 
         self._parent_class.run = stub_run
-        for tools_file in (
-            42,
-            str(Path(self.tmpdir) / "nowhere.py"),
-            self.tmpdir,
-            not_py,
-            raising,
-            broken,
-            None,
+        for tools_file, diagnostic in (
+            (42, "path string"),
+            (str(Path(self.tmpdir) / "nowhere.py"), "not an existing"),
+            (self.tmpdir, "not an existing"),
+            (not_py, "not an existing"),
+            (raising, "RuntimeError: boom at import"),
+            (broken, "SyntaxError"),
         ):
-            self._raw_daemon_run(tools_file)
-        assert seen["tool_lists"] == [[]] * 7
+            result_event = self._raw_daemon_run(tools_file)
+            assert result_event is not None, f"no result for {tools_file!r}"
+            assert result_event["success"] is False, f"for {tools_file!r}"
+            assert "ToolsFileError" in result_event["text"], f"for {tools_file!r}"
+            assert diagnostic in result_event["text"], f"for {tools_file!r}"
+        assert "tool_lists" not in seen
+        result_event = self._raw_daemon_run(None)
+        assert result_event is not None
+        assert result_event["success"] is True
+        assert seen["tool_lists"] == [[]]
         result = sorcar.run(
             "still alive?",
             work_dir=self.repo,

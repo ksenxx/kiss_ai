@@ -1238,7 +1238,11 @@ def run(
             parameters define the tool schema the agent sees, exactly
             like a native tool.  The functions are never serialized by
             the client — they run **in the daemon process**.  The path
-            is resolved against this process's working directory.
+            is resolved against this process's working directory.  A
+            broken tools file (deleted before the daemon reads it, or
+            raising at import time) stops the task: the daemon fails
+            the run and the returned :class:`TaskResult` carries the
+            diagnostic error in its ``text`` with ``success=False``.
         use_worktree: Run the task in an isolated git worktree.
             Defaults to True.
         auto_commit: Auto-commit the task's changes on success.
