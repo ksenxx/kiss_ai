@@ -16,7 +16,7 @@ from test_data.calculator.operators import OPERATORS
 
 class TestOperatorRegistry:
     def test_all_operators_registered(self):
-        assert set(OPERATORS.keys()) == {"+", "-", "*", "/"}
+        assert set(OPERATORS.keys()) == {"+", "-"}
 
     def test_each_operator_has_eval_and_precedence(self):
         for sym, mod in OPERATORS.items():
@@ -33,21 +33,6 @@ class TestOperatorRegistry:
         assert subtract.eval(5, 3) == 2
         assert subtract.eval(0, 5) == -5
 
-    def test_multiply(self):
-        from test_data.calculator.operators import multiply
-        assert multiply.eval(6, 7) == 42
-        assert multiply.eval(-3, 2) == -6
-
-    def test_divide(self):
-        from test_data.calculator.operators import divide
-        assert divide.eval(8, 2) == 4
-        assert divide.eval(1, 4) == 0.25
-
-    def test_divide_by_zero_raises(self):
-        from test_data.calculator.operators import divide
-        with pytest.raises(ValueError, match="division by zero"):
-            divide.eval(1, 0)
-
 
 class TestTokenizer:
     def test_simple(self):
@@ -63,9 +48,11 @@ class TestTokenizer:
         with pytest.raises(ValueError, match="unexpected character"):
             tokenize("2 @ 3")
 
-    def test_multiply_and_divide_tokens(self):
-        assert tokenize("6 * 7") == ["6", "*", "7"]
-        assert tokenize("8/2") == ["8", "/", "2"]
+    def test_removed_operators_raise(self):
+        with pytest.raises(ValueError, match="unexpected character"):
+            tokenize("6 * 7")
+        with pytest.raises(ValueError, match="unexpected character"):
+            tokenize("8/2")
 
 
 class TestEvaluator:
@@ -75,26 +62,12 @@ class TestEvaluator:
     def test_subtraction(self):
         assert evaluate("10 - 4") == 6
 
-    def test_multiplication(self):
-        assert evaluate("6 * 7") == 42
-
-    def test_division(self):
-        assert evaluate("8 / 2") == 4
-        assert evaluate("7 / 2") == 3.5
-
-    def test_division_by_zero(self):
-        with pytest.raises(ValueError, match="division by zero"):
-            evaluate("1 / 0")
-
-    def test_precedence(self):
-        assert evaluate("2 + 3 * 4") == 14
-        assert evaluate("10 - 8 / 4") == 8
-        assert evaluate("(2 + 3) * 4") == 20
+    def test_left_associativity(self):
+        assert evaluate("10 - 4 - 3") == 3
 
     def test_chained_operations(self):
         assert evaluate("1 + 2 + 3 + 4") == 10
-        assert evaluate("2 * 3 * 4") == 24
-        assert evaluate("100 / 5 / 2") == 10
+        assert evaluate("20 - 5 - 5 - 5") == 5
 
     def test_parentheses(self):
         assert evaluate("2 - (3 + 4)") == -5
@@ -146,11 +119,12 @@ class TestCLI:
         captured = capsys.readouterr()
         assert "Error" in captured.err
 
-    def test_division_by_zero(self, capsys):
-        ret = main(["8 / 0"])
-        assert ret == 1
-        captured = capsys.readouterr()
-        assert "Error" in captured.err
+    def test_removed_operators_rejected(self, capsys):
+        for expr in ("6 * 7", "8 / 2"):
+            ret = main([expr])
+            assert ret == 1
+            captured = capsys.readouterr()
+            assert "Error" in captured.err
 
     def test_subprocess_integration(self):
         result = subprocess.run(
