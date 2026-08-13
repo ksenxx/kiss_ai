@@ -1748,39 +1748,74 @@ class _TaskRunnerMixin:
             raise KeyboardInterrupt("Stopped while waiting for user")
         return item
 
-    def _resolve_task_answer_queue(self) -> queue.Queue[str] | None:
-        """Resolve the current task's user-answer queue.
+    def _resolve_task_state(self) -> AgentState | None:
+        """Resolve the calling thread's task to its registered agent state.
 
-        The queue lives on the task's own registered agent state, so
+        The state lives in the registry keyed by the task's own id, so
         the calling thread's task id resolves it directly — no viewer
-        tab can ever be routed to another task's queue.
+        tab can ever be routed to another task's state.
 
         Returns:
-            The task's answer queue, or ``None`` when the thread-local
-            ``task_id`` is unset or the task has no live queue (e.g.
+            The task's agent state, or ``None`` when the thread-local
+            ``task_id`` is unset or the task is not registered (e.g.
             it was not launched from a UI tab, or its run ended).
         """
-        state = agent_state.get(
+        return agent_state.get(
             JsonPrinter._coerce_task_id(
                 getattr(self.printer._thread_local, "task_id", None),
             ),
         )
+
+    def _resolve_task_answer_queue(self) -> queue.Queue[str] | None:
+        """Resolve the current task's user-answer queue.
+
+        Returns:
+            The task's answer queue, or ``None`` when the task has no
+            live queue (see :meth:`_resolve_task_state`).
+        """
+        state = self._resolve_task_state()
         return state.user_answer_queue if state is not None else None
 
     def _ask_user_question(self, question: str) -> str:
-        """Callback for agent questions."""
-        q = self._resolve_task_answer_queue()
-        if q is not None:
+        """Callback for agent questions.
+
+        The question is remembered on the task's agent state as
+        ``pending_ask_question`` for as long as the agent thread is
+        blocked on it, so session replays (``resumeSession``) can
+        re-broadcast the modal to clients that connect or reload while
+        the question is pending.  ``_cmd_user_answer`` clears the field
+        the moment an answer is consumed (under ``_state_lock``, so a
+        concurrent replay can never re-show an answered question); the
+        ``finally`` below also clears it when the wait aborts (task
+        stopped) without an answer.
+        """
+        state = self._resolve_task_state()
+        q = state.user_answer_queue if state is not None else None
+        try:
+            # The pending-state assignment and the initial ``askUser``
+            # broadcast form ONE critical section: publishing the
+            # pending question and then broadcasting outside the lock
+            # would let a session replay re-emit the question AND a
+            # client answer it (``askUserDone``) before the initial
+            # broadcast hits the wire — reopening the modal on every
+            # client after its answer already closed it.
             with self._state_lock:
-                while not q.empty():
-                    try:
-                        q.get_nowait()
-                    except queue.Empty:  # pragma: no cover — race guard
-                        break
-        self.printer.broadcast(
-            {
-                "type": "askUser",
-                "question": question,
-            }
-        )
-        return self._await_user_response(q)
+                if q is not None:
+                    while not q.empty():
+                        try:
+                            q.get_nowait()
+                        except queue.Empty:  # pragma: no cover — race guard
+                            break
+                if state is not None:
+                    state.pending_ask_question = question
+                self.printer.broadcast(
+                    {
+                        "type": "askUser",
+                        "question": question,
+                    }
+                )
+            return self._await_user_response(q)
+        finally:
+            if state is not None:
+                with self._state_lock:
+                    state.pending_ask_question = ""

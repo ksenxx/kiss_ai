@@ -5614,7 +5614,15 @@
         const askTabId = ev.tabId !== undefined ? ev.tabId : activeTabId;
         const askTab = getTab(askTabId);
         if (!askTab) break;
-        askTab.askPendingQuestion = ev.question || '';
+        const askQuestion = ev.question || '';
+        // Duplicate delivery of the SAME pending question (the server
+        // re-emits it on every session replay so clients that connect
+        // mid-question also show the modal). Re-initializing would
+        // wipe the answer the user is typing here just because
+        // another client reloaded; a genuinely new question always
+        // follows an askUserDone, which resets the state to null.
+        if (askTab.askPendingQuestion === askQuestion) break;
+        askTab.askPendingQuestion = askQuestion;
         showAskForTab(askTab);
         renderTabBar();
         break;
