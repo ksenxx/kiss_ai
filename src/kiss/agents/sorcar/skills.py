@@ -113,8 +113,9 @@ def parse_frontmatter(path: Path) -> tuple[dict[str, Any], str] | None:
 def collapse_whitespace(value: object) -> str:
     """Collapse all whitespace in *value* into single spaces.
 
-    A YAML block scalar may span lines; the one-line listings (skills
-    catalog, ``/commands``, ``/help``) require single-line strings.
+    A YAML block scalar may span lines; the one-line
+    ``<available_skills>`` catalog embedded in the ``skill`` tool's
+    description requires single-line strings.
 
     Args:
         value: Any value; ``None``/falsy becomes ``""``.

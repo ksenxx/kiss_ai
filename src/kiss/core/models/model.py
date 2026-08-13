@@ -1567,6 +1567,22 @@ class _CLIProcess:
                     pipe.close()
 
 
+# A complete markdown fence opener (``` plus an optional language tag,
+# which may be preceded by spaces) separated from the opening brace by
+# nothing but whitespace — blank lines and CRLF endings included.  That
+# is the shape a model uses to wrap its tool-call JSON in a code block,
+# and it matches the whitespace tolerance of the batch stripper this
+# streaming filter replaced.
+_FENCE_OPENER_RE = re.compile(
+    r"`{3}[ \t]*[A-Za-z0-9_+~.-]{0,20}[ \t\r\n]*\Z"
+)
+# A trailing run that could still grow into a fence opener followed by a
+# brace once the next streaming chunk arrives.
+_FENCE_PREFIX_RE = re.compile(
+    r"(?:`{1,2}|`{3}[ \t]*[A-Za-z0-9_+~.-]{0,20}[ \t\r\n]*)\Z"
+)
+
+
 class _ToolCallFilteredStream:
     """Stream a turn to the UI with its tool-call JSON held back.
 
@@ -1578,6 +1594,13 @@ class _ToolCallFilteredStream:
     update incrementally, not in one dump when the turn ends — but
     buffers each top-level JSON object until it closes, then drops it if
     it is a tool-call block and emits it otherwise.
+
+    A markdown code fence wrapping a suppressed tool call is suppressed
+    with it: a fence opener immediately preceding a ``{`` is held back
+    until the object resolves, and the matching closing fence is consumed
+    after a suppressed call, so the panel never shows the empty wrapper.
+    A fence around anything that is *not* a validated tool call streams
+    untouched.
 
     Thinking tokens are never filtered: they are already displayed apart
     from the answer, and a tool call quoted inside reasoning is content.
@@ -1597,6 +1620,10 @@ class _ToolCallFilteredStream:
         self._depth = 0
         self._in_string = False
         self._escaped = False
+        self._held_prefix = ""
+        self._fence_open = ""
+        self._eat_close = False
+        self._close_buf = ""
 
     def __enter__(self) -> "_ToolCallFilteredStream":
         """Mark the turn as tool-bearing and install the filtering callbacks.
@@ -1640,11 +1667,15 @@ class _ToolCallFilteredStream:
 
     def _feed(self, text: str) -> None:
         """Emit the plain text of *text*, buffering any JSON object in it."""
+        if self._eat_close:
+            text = self._eat_closing_fence(text)
+            if not text:
+                return
         start = 0
         for index, char in enumerate(text):
             if self._depth == 0:
                 if char == "{":
-                    self._emit(text[start:index])
+                    self._begin_object(text[start:index])
                     start = index
                     self._depth = 1
                 continue
@@ -1652,11 +1683,82 @@ class _ToolCallFilteredStream:
             if self._depth == 0:
                 self._pending += text[start : index + 1]
                 self._release_pending()
+                if self._eat_close:
+                    self._feed(text[index + 1 :])
+                    return
                 start = index + 1
         if self._depth == 0:
-            self._emit(text[start:])
+            self._hold_tail(text[start:])
         else:
             self._pending += text[start:]
+
+    def _begin_object(self, before: str) -> None:
+        """Emit the text preceding a ``{``, holding back its fence opener.
+
+        A fence opener directly against the brace may be the wrapper of a
+        tool call, so it is parked in ``_fence_open`` until the object
+        resolves; everything else streams immediately.
+
+        Args:
+            before: The depth-0 text between the previous emission point
+                and the opening brace.
+        """
+        combined = self._held_prefix + before
+        self._held_prefix = ""
+        match = _FENCE_OPENER_RE.search(combined)
+        if match:
+            self._fence_open = match.group(0)
+            combined = combined[: match.start()]
+        else:
+            self._fence_open = ""
+        self._emit(combined)
+
+    def _hold_tail(self, tail: str) -> None:
+        """Emit depth-0 text, holding back a possible partial fence opener.
+
+        The next chunk may complete the opener and its ``{``, so a
+        trailing run that could still become a fence opener waits in
+        ``_held_prefix`` instead of streaming; it is released the moment
+        anything breaks the pattern, or by :meth:`_flush`.
+
+        Args:
+            tail: The depth-0 text ending the current chunk.
+        """
+        combined = self._held_prefix + tail
+        match = _FENCE_PREFIX_RE.search(combined)
+        self._held_prefix = match.group(0) if match else ""
+        self._emit(combined[: len(combined) - len(self._held_prefix)])
+
+    def _eat_closing_fence(self, text: str) -> str:
+        """Consume the closing fence of a suppressed fenced tool call.
+
+        Args:
+            text: The next chunk of depth-0 text.
+
+        Returns:
+            The text left over after the fence — empty while the fence is
+            still being consumed, or everything buffered plus the rest of
+            *text* when it turns out not to be a closing fence.
+        """
+        for index, char in enumerate(text):
+            ticks = self._close_buf.count("`")
+            if ticks == 3:
+                if char in " \t\r":
+                    self._close_buf += char
+                    continue
+                self._eat_close = False
+                self._close_buf = ""
+                return text[index + 1 :] if char == "\n" else text[index:]
+            if char == "`":
+                self._close_buf += char
+            elif ticks == 0 and char in " \t\r\n":
+                self._close_buf += char
+            else:
+                leftover = self._close_buf + text[index:]
+                self._eat_close = False
+                self._close_buf = ""
+                return leftover
+        return ""
 
     def _track_json_char(self, char: str) -> None:
         """Advance the brace/string state machine by one character."""
@@ -1674,24 +1776,40 @@ class _ToolCallFilteredStream:
             self._depth -= 1
 
     def _release_pending(self) -> None:
-        """Emit the completed JSON object unless it is a tool call."""
-        block, self._pending = self._pending, ""
-        if not _parse_text_based_tool_calls(block):
-            self._emit(block)
+        """Emit the completed JSON object unless it is a tool call.
 
-    def _flush(self) -> None:
-        """Release a JSON object the turn ended in the middle of.
-
-        A truncated block is dropped when it looks like a tool call —
-        the early-stop path cuts the stream off exactly there — and
-        emitted otherwise, so no ordinary text is ever swallowed.
+        A suppressed tool call takes its held fence opener with it and
+        arms the closing-fence eater; anything else streams together with
+        the opener that was held for it.
         """
         block, self._pending = self._pending, ""
+        fence, self._fence_open = self._fence_open, ""
+        if _parse_text_based_tool_calls(block):
+            self._eat_close = bool(fence)
+        else:
+            self._emit(fence + block)
+
+    def _flush(self) -> None:
+        """Release text the turn ended in the middle of.
+
+        A pending block is dropped only when it parse-validates as a tool
+        call — the early-stop path cuts the stream off exactly there.
+        Malformed JSON and ordinary text that merely contains the
+        substring ``tool_calls`` are emitted, so no ordinary text is ever
+        swallowed.  A partially consumed closing fence belongs to the
+        already-suppressed wrapper and is discarded with it.
+        """
+        held, self._held_prefix = self._held_prefix, ""
+        fence, self._fence_open = self._fence_open, ""
+        block, self._pending = self._pending, ""
+        self._eat_close = False
+        self._close_buf = ""
         self._depth = 0
         self._in_string = False
         self._escaped = False
-        if "tool_calls" not in block:
-            self._emit(block)
+        if block and _parse_text_based_tool_calls(block):
+            return
+        self._emit(held + fence + block)
 
 
 def _build_text_based_tools_prompt(function_map: dict[str, Callable[..., Any]]) -> str:

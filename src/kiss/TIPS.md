@@ -47,7 +47,7 @@ If you have an **OPENAI_API_KEY**, with the __sorcar__ wake word, KISS Sorcar st
 Speak 'sorcar', your task ...
 ```
 
-Click the **mic** button below the chat input box if it is grey and wait for it to start pulsing blue. For Sorcar CLI, type /voice and enter to activate voice interaction. Speak 'sorcar' followed by your task, and KISS Sorcar will automatically run the task and tell you the results using its own voice. The voice interface distinguishes among different speakers.
+Click the **mic** button below the chat input box if it is grey and wait for it to start pulsing blue. Speak 'sorcar' followed by your task, and KISS Sorcar will automatically run the task and tell you the results using its own voice. The voice interface distinguishes among different speakers.
 
 You can also steer the agent's execution and ask for status when an agent is running using voice.
 
@@ -61,15 +61,21 @@ Open the URL in a browser on the mobile device and enter your remote password. Y
 
 # Tip
 
-## To Use the KISS Sorcar CLI REPL Interface
+## To Run Tasks from Python Scripts
 
-Just run:
+Any Python process can launch a task on the running KISS Sorcar daemon and block until it finishes:
 
-```bash
-sorcar
+```python
+from kiss.server import sorcar
+
+result = sorcar.run("Summarize README.md", work_dir="/path/to/repo")
+print(result.text, result.success, result.cost)
+
+# Continue the same chat with the prior task as context:
+sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 ```
 
-It has a powerful Claude Code-style interface. It supports skills, MCP, commands, etc. The trajectories are streamed, and the output scrolls while being syntax-highlighted.
+You can also pass a Python file of extra tools via `tools="/path/to/my_tools.py"`.
 
 # Tip
 

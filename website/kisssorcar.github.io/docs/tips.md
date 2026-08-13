@@ -22,7 +22,7 @@ If you have an `OPENAI_API_KEY`, with the **sorcar** wake word, KISS Sorcar star
 Speak 'sorcar', your task ...
 ```
 
-Click the mic button below the chat input box if it is grey and wait for it to start pulsing blue. For the Sorcar CLI, type `/voice` and Enter to activate voice interaction. Speak "sorcar" followed by your task; KISS Sorcar will run the task and tell you the results using its own voice. The voice interface distinguishes among different speakers.
+Click the mic button below the chat input box if it is grey and wait for it to start pulsing blue. Speak "sorcar" followed by your task; KISS Sorcar will run the task and tell you the results using its own voice. The voice interface distinguishes among different speakers.
 
 ## Novel Features: set_model and Steering-on-the-Fly
 
@@ -38,15 +38,18 @@ Look at the commit messages at <https://github.com/ksenxx/kiss_ai/commits/main/>
 
 Go to the Settings panel and copy the URL at the top (it points to the latest cloudflared URL for the KISS Sorcar webapp). Send it to your mobile device (SMS, Slack, or email), open it in a browser, and enter your remote password (also set on the Settings page).
 
-## CLI REPL
+## Run Tasks from Python Scripts
 
-Just run:
+Any Python process can launch a task on the running KISS Sorcar daemon and block until it finishes:
 
-```bash
-sorcar
+```python
+from kiss.server import sorcar
+
+result = sorcar.run("Summarize README.md", work_dir="/path/to/repo")
+print(result.text, result.success, result.cost)
 ```
 
-A powerful Claude-Code-style interface with skills, MCP, commands, streamed trajectories, and syntax-highlighted scrolling output.
+You can also pass a Python file of extra tools via `tools="/path/to/my_tools.py"`, and continue a chat with `chat_id=result.chat_id`.
 
 ## Docker
 

@@ -238,10 +238,18 @@ class TestI5FilterEdgeCases:
 
         assert "".join(tokens) == 'Partial: {"answer": 1'
 
-    def test_unterminated_tool_call_is_not_flushed(
+    def test_unterminated_tool_call_fragment_is_flushed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A half-written tool call must never surface in the chat panel."""
+        """Only a parse-validated tool call may be dropped at end of turn.
+
+        This fragment is cut off before any object closes, so nothing in
+        it validates as a tool call and it is released like any other
+        buffered text.  The old substring test swallowed it — and with it
+        every ordinary fragment that merely mentioned ``tool_calls`` (see
+        ``test_tool_call_filter_fence_and_flush.py``, which also pins the
+        drop of a fragment whose truncation *does* validate).
+        """
         install_cli(tmp_path, monkeypatch, "claude", _CLAUDE_STOPS_MID_TOOL_CALL)
         tokens: list[str] = []
         model = ClaudeCodeModel("cc/opus", token_callback=tokens.append)
@@ -249,7 +257,7 @@ class TestI5FilterEdgeCases:
 
         model.generate_and_process_with_tools({"finish": finish})
 
-        assert "".join(tokens) == "Calling: "
+        assert "".join(tokens) == 'Calling: {"tool_calls": [{"name": "finish"'
 
 
 class TestC6EarlyStopDrain:

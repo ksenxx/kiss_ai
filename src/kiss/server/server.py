@@ -456,6 +456,7 @@ class VSCodeServer(
             work_dir=work_dir, task_id=task_id, create=create,
         )
         for old_tab_id in displaced:
+            self._prune_local_uds_tab(old_tab_id)
             self._drop_tab_state(old_tab_id)
         if changed:
             self._broadcast_tabs_state()
@@ -880,7 +881,27 @@ class VSCodeServer(
         """
         if self.tab_registry.close_tab(tab_id):
             self._broadcast_tabs_state()
+        self._prune_local_uds_tab(tab_id)
         self._drop_tab_state(tab_id)
+
+    def _prune_local_uds_tab(self, tab_id: str) -> None:
+        """Drop a closed tab from the printer's talk-playback bookkeeping.
+
+        A tab removed from the canonical registry disappears from
+        every client UI (``tabs_state`` / ``closeSubagentTab``), so no
+        local webview shows it anymore — but a busy tab's task
+        subscription is deliberately retained until the task finishes,
+        and its talk events must not keep triggering daemon-native
+        playback.  Duck-typed like ``cleanup_tab``: only the daemon's
+        :class:`~kiss.server.web_server.WebPrinter` tracks local UDS
+        tabs.
+
+        Args:
+            tab_id: The frontend tab identifier removed from clients.
+        """
+        prune = getattr(self.printer, "prune_local_uds_tab", None)
+        if prune is not None:
+            prune(tab_id)
 
     def _drop_tab_state(self, tab_id: str) -> None:
         """Clean up all backend state for a tab no longer shown.

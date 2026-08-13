@@ -7,9 +7,8 @@
 These exercise the real behaviour end to end: skill directories are
 written to real user (``KISS_HOME``/``CLAUDE_CONFIG_DIR``/``HOME``) and
 project directories, discovery and permission filtering run against the
-real filesystem and the real ``~/.kiss/config.json``, the ``skill``
-tool is built and invoked for real, and the REPL is driven through a
-real subprocess reading piped stdin.  No model calls are made.
+real filesystem and the real ``~/.kiss/config.json``, and the ``skill``
+tool is built and invoked for real.  No model calls are made.
 """
 
 from __future__ import annotations

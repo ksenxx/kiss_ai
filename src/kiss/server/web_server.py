@@ -1741,6 +1741,7 @@ class WebPrinter(JsonPrinter):
         self._ws_clients: set[ServerConnection] = set()
         self._uds_writers: set[asyncio.StreamWriter] = set()
         self._local_uds_tab_counts: dict[str, int] = {}
+        self._uds_local_tab_sets: dict[str, set[str]] = {}
         self._conn_endpoints: dict[str, Any] = {}
         self._ws_lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -1881,18 +1882,79 @@ class WebPrinter(JsonPrinter):
         else:
             counts[key] = count - 1
 
-    def register_local_uds_tab(self, tab_id: str) -> None:
-        """Mark *tab_id* as currently connected over local UDS.
+    def register_local_uds_tab(
+        self, conn_id: str, tab_id: str, local_tabs: set[str]
+    ) -> None:
+        """Mark *tab_id* as shown by the local UDS connection *conn_id*.
 
         Args:
+            conn_id: The UDS connection's id.
             tab_id: The frontend tab id seen on a UDS command.
+            local_tabs: The connection's mutable local-tab set (lives
+                in its ``conn_state``).  Membership is checked and
+                updated under the printer lock, so a concurrent
+                canonical-close prune cannot race the registration.
         """
         with self._ws_lock:
+            self._uds_local_tab_sets[conn_id] = local_tabs
+            if tab_id in local_tabs:
+                return
+            local_tabs.add(tab_id)
             self._increment_count(self._local_uds_tab_counts, tab_id)
 
-    def unregister_local_uds_tabs(self, tab_ids: set[str]) -> None:
-        """Drop this connection's local-UDS tab registrations."""
+    def sync_local_uds_tabs(
+        self, conn_id: str, tab_ids: set[str], local_tabs: set[str]
+    ) -> None:
+        """Reconcile *conn_id*'s local-tab membership to exactly *tab_ids*.
+
+        The ``ready``-time sync: missing ids are added and stale ones
+        dropped (with matching reference-count updates), so a repeated
+        ``ready`` self-heals bookkeeping left over from canonical tabs
+        that were closed while this connection was attached.
+
+        Args:
+            conn_id: The UDS connection's id.
+            tab_ids: The tab ids the connection currently shows.
+            local_tabs: The connection's mutable local-tab set.
+        """
         with self._ws_lock:
+            self._uds_local_tab_sets[conn_id] = local_tabs
+            for tab_id in tab_ids - local_tabs:
+                self._increment_count(self._local_uds_tab_counts, tab_id)
+            for tab_id in local_tabs - tab_ids:
+                self._decrement_count(self._local_uds_tab_counts, tab_id)
+            local_tabs.clear()
+            local_tabs.update(tab_ids)
+
+    def prune_local_uds_tab(self, tab_id: str) -> None:
+        """Drop *tab_id* from every UDS connection's local-tab bookkeeping.
+
+        Called when a tab is removed from the canonical tab registry
+        (explicit close or one-tab-per-chat displacement): the
+        ``tabs_state`` broadcast removes the tab from every client UI,
+        so no local webview shows it anymore — a still-running task's
+        talk for the id must no longer trigger daemon-native playback.
+
+        Args:
+            tab_id: The registry-removed frontend tab id.
+        """
+        with self._ws_lock:
+            for local_tabs in self._uds_local_tab_sets.values():
+                if tab_id in local_tabs:
+                    local_tabs.discard(tab_id)
+                    self._decrement_count(self._local_uds_tab_counts, tab_id)
+
+    def unregister_local_uds_tabs(
+        self, conn_id: str, tab_ids: set[str]
+    ) -> None:
+        """Drop a disconnected UDS connection's local-tab registrations.
+
+        Args:
+            conn_id: The UDS connection's id.
+            tab_ids: The connection's remaining local-tab ids.
+        """
+        with self._ws_lock:
+            self._uds_local_tab_sets.pop(conn_id, None)
             for tab_id in tab_ids:
                 self._decrement_count(self._local_uds_tab_counts, tab_id)
 
@@ -1911,6 +1973,13 @@ class WebPrinter(JsonPrinter):
         speakers (:mod:`kiss.server.talk_player`, ``afplay`` on
         macOS) and stamps every local UDS webview copy ``muted``.
 
+        Muting is per-ENDPOINT, not per-serialization: the canonical
+        tab registry mirrors the same tab ids to every client, so a
+        remote WSS browser shows the very tab the local webview does.
+        The browser is a different device with its own speakers, so
+        when the daemon owns the utterance only the same-machine UDS
+        copies are muted while every WSS copy stays playable.
+
         Otherwise webview subscriber tabs receive the playable copy
         (each webview plays on its own device; ``talkId`` dedupe and
         the talk queue keep intra-webview duplicates silent).
@@ -1928,11 +1997,12 @@ class WebPrinter(JsonPrinter):
         base = json.dumps(event)[:-1]
         muted_base = json.dumps({**event, "muted": True})[:-1]
         for tab_id in targets:
-            local_copy_muted = daemon_plays and tab_id in local_uds_tabs
-            prefix = muted_base if local_copy_muted else base
-            self._send_to_ws_clients(
-                f'{prefix}, "tabId": {json.dumps(tab_id)}}}'
-            )
+            tab_suffix = f', "tabId": {json.dumps(tab_id)}}}'
+            if daemon_plays and tab_id in local_uds_tabs:
+                self._send_to_wss_clients(base + tab_suffix)
+                self._send_to_uds_writers(muted_base + tab_suffix)
+            else:
+                self._send_to_ws_clients(base + tab_suffix)
 
     @staticmethod
     def _play_talk_clip_locally(event: dict[str, Any]) -> bool:
@@ -1986,7 +2056,7 @@ class WebPrinter(JsonPrinter):
     def _send_to_uds_writers(self, data: str) -> None:
         """Send a pre-serialised JSON payload to local UDS peers only.
 
-        UDS peers (VS Code extension webviews, CLI REPL clients) are
+        UDS peers (VS Code extension webviews, Python clients) are
         always on the daemon's machine; talk arbitration sends them
         muted copies when a local player already owns the utterance.
 
@@ -2282,7 +2352,6 @@ def _build_html() -> str:
         "      --vscode-terminal-ansiRed: #f44747;\n"
         "      --vscode-terminal-ansiGreen: #6a9955;\n"
         "      --vscode-terminal-ansiYellow: #d7ba7d;\n"
-        "      --vscode-terminal-ansiBlue: #569cd6;\n"
         "      --vscode-terminal-ansiMagenta: #c586c0;\n"
         "      --vscode-terminal-ansiCyan: #4ec9b0;\n"
         "    }\n"
@@ -3476,8 +3545,10 @@ class RemoteAccessServer:
             logger.debug("UDS handler error", exc_info=True)
         finally:
             local_tabs = conn_state.get("local_tabs")
-            if isinstance(local_tabs, set):
-                self._printer.unregister_local_uds_tabs(local_tabs)
+            self._printer.unregister_local_uds_tabs(
+                conn_state["conn_id"],
+                local_tabs if isinstance(local_tabs, set) else set(),
+            )
             self._vscode_server.drop_connection_state(conn_state["conn_id"])
             self._printer.unbind_conn(conn_state["conn_id"])
             self._printer.remove_uds_writer(writer)

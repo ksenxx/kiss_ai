@@ -91,11 +91,12 @@ def test_cli_defaults_work_dir_to_user_shell_via_kiss_workdir(
 ) -> None:
     """Mimic the installed wrapper: child cwd != user shell, ``KISS_WORKDIR`` set.
 
-    Reproduces the scenario the user hits when invoking the installed
-    ``sorcar`` script: the wrapper exports ``KISS_WORKDIR="$PWD"`` and
-    then ``uv run --directory <kiss_project>`` chdirs the child into
-    the bundled project.  The CLI must still default ``work_dir`` to
-    the user's shell directory, not the bundled project directory.
+    Reproduces the scenario the user hits when invoking an installed
+    channel-agent wrapper (e.g. ``kiss-slack``): the wrapper exports
+    ``KISS_WORKDIR="$PWD"`` and then ``uv run --directory
+    <kiss_project>`` chdirs the child into the bundled project.  The
+    argument parser must still default ``work_dir`` to the user's
+    shell directory, not the bundled project directory.
     """
     user_shell_dir = tmp_path / "user_shell"
     user_shell_dir.mkdir()

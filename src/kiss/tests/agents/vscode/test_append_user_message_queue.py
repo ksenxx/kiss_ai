@@ -475,10 +475,15 @@ class TestPreStepHookInstalledByPerformTask:
         )
 
     def test_hooks_installed_without_drain_capable_printer(self) -> None:
-        """CLI steering queues follow-ups on the agent-local
-        ``pending_user_messages`` list even when no printer is attached
-        (``sorcar -t ... --verbose false``), so the hooks must be
-        installed regardless of printer capability."""
+        """Steering hooks are installed regardless of printer capability.
+
+        An agent driven outside the daemon (programmatically, or with
+        the default :class:`ConsolePrinter`) has no printer with the
+        duck-typed ``drain_pending_user_messages`` bridge, yet the
+        drain hook and the finish guard must still be installed: they
+        degrade to no-ops without the bridge, keeping the wiring
+        identical to a daemon run (whose ``WebPrinter`` supplies the
+        bridge from the task's registered agent state)."""
         captured = self._run_and_capture(None)
         agent = captured["agent"]
         assert captured.get("hook") == agent._drain_pending_user_messages

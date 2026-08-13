@@ -5,7 +5,7 @@
 """The Sorcar server API and a minimal synchronous client for it.
 
 This module is the single source of truth for the wire API of the
-``sorcar web`` daemon and hosts both of its Python ends:
+``kiss-web`` daemon and hosts both of its Python ends:
 
 **The server API** — :data:`API`, :func:`validate_command`, and
 :class:`ServerApi` define every command a user interface (a VS Code
@@ -496,6 +496,7 @@ class ServerBackend(Protocol):
     """
 
     _printer: Any
+    _vscode_server: Any
 
     async def _endpoint_send(self, endpoint: Any, data: str) -> None: ...
 
@@ -648,18 +649,21 @@ class ServerApi:
         """Record *tab_id* as touched by this connection.
 
         For local UDS peers, registers the id with the printer's
-        local-tab set exactly once per connection (talk-playback
-        arbitration).
+        local-tab bookkeeping (talk-playback arbitration).  The
+        connection's ``local_tabs`` set is mutated only inside the
+        printer, under the same lock that guards the shared
+        local-UDS tab counts and the canonical-close prune.
 
         Args:
             tab_id: The non-empty frontend tab identifier.
             ctx: The transport context of the current call.
         """
         if ctx.is_uds:
-            local_tabs = ctx.conn_state.setdefault("local_tabs", set())
-            if tab_id not in local_tabs:
-                local_tabs.add(tab_id)
-                self._backend._printer.register_local_uds_tab(tab_id)
+            self._backend._printer.register_local_uds_tab(
+                ctx.conn_state["conn_id"],
+                tab_id,
+                ctx.conn_state.setdefault("local_tabs", set()),
+            )
 
     async def authenticate(self, websocket: Any) -> bool:
         """Authenticate a remote WSS client with the ``auth`` handshake.
@@ -821,20 +825,40 @@ class ServerApi:
         Sanitizes the command's ``restoredTabs`` ONCE (warnings
         included) and writes the cleaned list back so the backend's
         own sanitize pass finds nothing left to reject or truncate,
-        then records every restored tab id in the connection's
-        bookkeeping (local-UDS talk muting).  Finally fans the
-        command out through the backend's ready handler (models /
-        input history / config / session replay).
+        then RECONCILES a UDS connection's local-tab bookkeeping
+        (local-UDS talk muting) to exactly the tabs the client shows
+        after this ready: its own announced tab, the restored tabs,
+        and every canonical tab-registry tab (after a webview reload
+        ``ready`` announces only the fresh placeholder tab, yet the
+        client adopts every registry tab from the ``tabs_state``
+        snapshot — without the sync a talk event for an adopted
+        background tab would skip daemon-native playback and stay
+        silent, since webviews cannot autoplay).  Reconciling —
+        rather than only adding — also drops stale ids, so a repeated
+        ``ready`` self-heals bookkeeping left over from canonical
+        tabs closed while the connection was attached.  The sync
+        updates the connection's ``local_tabs`` set in place, so
+        disconnect cleanup is unchanged.  Finally fans the command
+        out through the backend's ready handler (models / input
+        history / config / session replay).
 
         Args:
             cmd: The ``ready`` command.
             ctx: The transport context of the current call.
         """
         cmd["restoredTabs"] = self._backend._sanitized_restored_tabs(cmd)
-        for rt in cmd["restoredTabs"]:
-            rt_id = rt["tabId"]
-            if rt_id:
-                self._record_tab(rt_id, ctx)
+        if ctx.is_uds:
+            shown = {rt["tabId"] for rt in cmd["restoredTabs"] if rt["tabId"]}
+            own_tab = cmd.get("tabId")
+            if isinstance(own_tab, str) and own_tab:
+                shown.add(own_tab)
+            registry = self._backend._vscode_server.tab_registry
+            shown.update(entry["tabId"] for entry in registry.snapshot())
+            self._backend._printer.sync_local_uds_tabs(
+                ctx.conn_state["conn_id"],
+                shown,
+                ctx.conn_state.setdefault("local_tabs", set()),
+            )
         await self._backend._handle_ready(cmd, ctx.endpoint)
 
     async def submit(self, cmd: dict[str, Any], ctx: ApiContext) -> None:
@@ -1049,7 +1073,7 @@ def run(
 ) -> TaskResult:
     """Run *prompt* as a task on the local Sorcar daemon and block until done.
 
-    Connects to the ``sorcar web`` daemon's Unix-domain socket, sends
+    Connects to the ``kiss-web`` daemon's Unix-domain socket, sends
     the same ``run`` command a chat webview would, streams the task's
     events, and returns once the daemon reports the task finished.
 
@@ -1126,7 +1150,7 @@ def run(
         except OSError as exc:
             raise ConnectionError(
                 f"Cannot connect to the sorcar daemon at {path}: {exc} "
-                f"— start it with `sorcar web`."
+                f"— start it with `kiss-web`."
             ) from exc
         cmd = {
             "type": "run",

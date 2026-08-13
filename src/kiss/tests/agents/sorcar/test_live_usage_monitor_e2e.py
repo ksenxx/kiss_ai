@@ -7,8 +7,9 @@ agent AND all of its parallel sub-agents at every turn.
 
 Reproduces the issue where, while ``run_parallel`` blocks the parent's
 turn, nothing emits ``usage_info`` on the PARENT task — so the header
-(chat webview top bar, sorcar CLI interactive) shows a stale figure that
-excludes all live sub-agent spend until every sub-agent finishes.
+(the chat webview's top bar in the VS Code extension and the remote
+web client) shows a stale figure that excludes all live sub-agent
+spend until every sub-agent finishes.
 
 The fix is ``_LiveUsageMonitor`` (``sorcar_agent.py``): while parallel
 sub-agents run it polls their live spend and broadcasts parent-task
