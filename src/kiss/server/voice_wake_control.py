@@ -107,6 +107,7 @@ class _Listener:
         self.proc = proc
         self.stderr_tail = ""
         self.stopped = False
+        self.pumps: list[asyncio.Task[None]] = []
 
 
 class VoiceWakeController:
@@ -188,7 +189,10 @@ class VoiceWakeController:
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
+                # POSIX only: gives the child its own process group so
+                # _terminate can reap grandchildren too.  Windows has
+                # no setsid; there _terminate signals the child alone.
+                start_new_session=(os.name == "posix"),
             )
         except OSError as err:
             await self._safe_send(send, {
@@ -199,8 +203,10 @@ class VoiceWakeController:
             return
         listener = _Listener(proc)
         self._listeners[conn_id] = listener
-        asyncio.ensure_future(self._pump_stderr(listener))
-        asyncio.ensure_future(self._pump_stdout(conn_id, listener, send))
+        listener.pumps = [
+            asyncio.ensure_future(self._pump_stderr(listener)),
+            asyncio.ensure_future(self._pump_stdout(conn_id, listener, send)),
+        ]
 
     async def stop(self, conn_id: str) -> None:
         """Stop and reap *conn_id*'s listener, if any.
@@ -216,6 +222,18 @@ class VoiceWakeController:
             return
         listener.stopped = True
         await self._terminate(listener.proc)
+        # JOIN the pump tasks: the caller (disconnect cleanup, daemon
+        # shutdown) must be able to assume no controller coroutine
+        # touches the connection's endpoint after this returns.  The
+        # process is dead, so both pipes are at EOF and the pumps end
+        # promptly; a pump wedged on a stuck client send is cancelled.
+        pending = [t for t in listener.pumps if not t.done()]
+        if pending:
+            _, still_pending = await asyncio.wait(pending, timeout=5.0)
+            for task in still_pending:
+                task.cancel()
+            if still_pending:
+                await asyncio.wait(still_pending, timeout=1.0)
 
     async def stop_all(self) -> None:
         """Stop every running listener (daemon shutdown)."""
@@ -281,14 +299,40 @@ class VoiceWakeController:
         except Exception:
             logger.debug("voice-wake stderr pump failed", exc_info=True)
 
+    @staticmethod
+    def _signal_group(pid: int, sig: signal.Signals) -> bool:
+        """Best-effort signal to *pid*'s process group.
+
+        Args:
+            pid: The group leader's pid (the child was spawned with
+                ``start_new_session=True`` on POSIX).
+            sig: The signal to deliver.
+
+        Returns:
+            ``True`` when the group was signalled; ``False`` when the
+            platform has no ``os.killpg`` (Windows) or the call failed
+            — the caller then falls back to signalling the process
+            alone.
+        """
+        killpg = getattr(os, "killpg", None)
+        if killpg is None:
+            return False
+        try:
+            killpg(pid, sig)
+            return True
+        except (ProcessLookupError, PermissionError, OSError):
+            return False
+
     async def _terminate(self, proc: asyncio.subprocess.Process) -> None:
-        """SIGTERM the child's process group, escalating to SIGKILL."""
+        """SIGTERM the child's process group, escalating to SIGKILL.
+
+        On platforms without process groups (Windows) the child alone
+        is terminated/killed via the ``Process`` API.
+        """
         if proc.returncode is not None:
             return
         pid = proc.pid
-        try:
-            os.killpg(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError, OSError):
+        if not self._signal_group(pid, signal.SIGTERM):
             try:
                 proc.terminate()
             except ProcessLookupError:
@@ -296,9 +340,9 @@ class VoiceWakeController:
         try:
             await asyncio.wait_for(proc.wait(), _TERM_GRACE_SECONDS)
         except TimeoutError:
-            try:
-                os.killpg(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
+            if not self._signal_group(
+                pid, getattr(signal, "SIGKILL", signal.SIGTERM)
+            ):
                 try:
                     proc.kill()
                 except ProcessLookupError:
