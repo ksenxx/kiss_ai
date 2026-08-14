@@ -1046,7 +1046,28 @@ class JsonPrinter(Printer):
             List of display-relevant events with consecutive deltas
             merged.  Empty when no recording is active.
         """
-        key = self._task_key()
+        return self.peek_recording_for_task(self._task_key())
+
+    def peek_recording_for_task(self, task_id: Any) -> list[dict[str, Any]]:
+        """Return a snapshot of *task_id*'s in-memory recording.
+
+        Like :meth:`peek_recording` but keyed explicitly instead of by
+        the calling thread's task binding.  Used by the server when a
+        tab opens a STILL-RUNNING task (e.g. a freshly spawned
+        ``run_parallel`` sub-agent): the task's events reach the
+        database through an asynchronous writer, so a replay loaded
+        from the events table can miss the transcript head — the live
+        recording is the authoritative copy while the task runs.
+
+        Args:
+            task_id: The task identifier (``task_history.id`` int or
+                its string form).
+
+        Returns:
+            List of display-relevant events with consecutive deltas
+            merged.  Empty when the task has no active recording.
+        """
+        key = self._coerce_task_id(task_id)
         if not key:
             return []
         with self._lock:
