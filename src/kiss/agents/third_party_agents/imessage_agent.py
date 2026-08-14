@@ -133,16 +133,6 @@ class IMessageChannelBackend(ToolMethodBackend):
         """Send an iMessage."""
         _run_osascript(_build_send_message_script(channel_id, text))
 
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Reply waiting is not supported for AppleScript-based iMessage."""
-        return None
-
     def send_imessage(self, recipient: str, text: str, service: str = "iMessage") -> str:
         """Send an iMessage or SMS to a recipient.
 

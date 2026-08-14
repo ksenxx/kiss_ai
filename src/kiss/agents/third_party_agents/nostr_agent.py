@@ -73,16 +73,6 @@ class NostrChannelBackend(ToolMethodBackend):
         """Publish a Nostr note."""
         self.publish_note(text)
 
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Reply waiting is not currently supported for Nostr."""
-        return None
-
     def is_from_bot(self, msg: dict[str, Any]) -> bool:
         """Check if event is from this key."""
         sender = msg.get("user") or msg.get("pubkey", "")

@@ -17,11 +17,9 @@ from __future__ import annotations
 
 import json
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -132,29 +130,6 @@ class FeishuChannelBackend(ToolMethodBackend):
         resp = self._client.im.v1.message.create(req)
         if not resp.success():
             raise RuntimeError(resp.msg)
-
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Poll for a reply from a specific user."""
-        oldest = str(int(time.time() * 1000))
-
-        def poll() -> list[dict[str, Any]]:
-            nonlocal oldest
-            msgs, oldest = self.poll_messages(channel_id, oldest)
-            return msgs
-
-        return wait_for_matching_message(
-            poll=poll,
-            matches=lambda msg: msg.get("user") == user_id,
-            extract_text=lambda msg: str(msg.get("text", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=3.0,
-        )
 
     def send_text_message(
         self, receive_id: str, text: str, receive_id_type: str = "chat_id"
