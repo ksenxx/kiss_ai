@@ -33,7 +33,6 @@ from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     drain_queue_messages,
     stop_http_server,
-    wait_for_matching_message,
 )
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
@@ -90,8 +89,8 @@ def _api_request(
 class WhatsAppChannelBackend(ToolMethodBackend):
     """Channel backend for WhatsApp Business Cloud API.
 
-    Provides channel monitoring via webhook queue, message sending,
-    and reply waiting for the channel poller and interactive agent.
+    Provides channel monitoring via webhook queue and message sending
+    for the channel poller and interactive agent.
 
     For message polling, uses a webhook queue pattern: an embedded HTTP
     server receives POST events from the WhatsApp platform and buffers
@@ -278,48 +277,11 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         if "error" in result:
             raise RuntimeError(f"WhatsApp send failed: {result['error']}")
 
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Block until a message from a specific user is received.
-
-        Args:
-            channel_id: Unused for WhatsApp.
-            thread_ts: Unused for WhatsApp.
-            user_id: Phone number to wait for.
-
-        Returns:
-            The text of the user's reply.
-
-        Note:
-            Messages from other senders drained while waiting are discarded.
-        """
-
-        def poll() -> list[dict[str, Any]]:
-            return drain_queue_messages(
-                self._message_queue,
-                limit=50,
-                keep=lambda raw: raw.get("from") == user_id,
-            )
-
-        return wait_for_matching_message(
-            poll=poll,
-            matches=lambda raw: raw.get("from") == user_id,
-            extract_text=lambda raw: str(raw.get("text", {}).get("body", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=2.0,
-        )
-
     def disconnect(self) -> None:
         """Stop the embedded webhook server and release backend resources."""
         self._webhook_server, self._webhook_thread = stop_http_server(
             self._webhook_server, self._webhook_thread
         )
-
 
     def send_text_message(self, to: str, body: str, preview_url: bool = False) -> str:
         """Send a text message to a WhatsApp number.

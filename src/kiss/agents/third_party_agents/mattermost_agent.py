@@ -21,7 +21,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -115,29 +114,6 @@ class MattermostChannelBackend(ToolMethodBackend):
         if thread_ts:  # pragma: no branch
             post["root_id"] = thread_ts
         self._driver.posts.create_post(options=post)
-
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Poll for a reply from a specific user."""
-        oldest = str(self._last_post_time)
-
-        def poll() -> list[dict[str, Any]]:
-            nonlocal oldest
-            msgs, oldest = self.poll_messages(channel_id, oldest)
-            return msgs
-
-        return wait_for_matching_message(
-            poll=poll,
-            matches=lambda msg: msg.get("user") == user_id,
-            extract_text=lambda msg: str(msg.get("text", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=2.0,
-        )
 
     def list_teams(self) -> str:
         """List Mattermost teams.

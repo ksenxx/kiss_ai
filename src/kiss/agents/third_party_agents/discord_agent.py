@@ -25,7 +25,6 @@ from typing import Any
 
 import requests
 
-from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -186,33 +185,9 @@ class DiscordChannelBackend(ToolMethodBackend):
         """
         return bool(self._bot_user_id) and msg.get("user") == self._bot_user_id
 
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Poll for a reply from a specific user."""
-        oldest = self._last_message_id
-
-        def poll() -> list[dict[str, Any]]:
-            nonlocal oldest
-            msgs, oldest = self.poll_messages(channel_id, oldest)
-            return msgs
-
-        return wait_for_matching_message(
-            poll=poll,
-            matches=lambda msg: msg.get("user") == user_id,
-            extract_text=lambda msg: str(msg.get("text", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=2.0,
-        )
-
     def disconnect(self) -> None:
         """Release Discord backend state before stop or reconnect."""
         self._last_message_id = ""
-
 
     def list_guilds(self, limit: int = 100) -> str:
         """List guilds (servers) the bot is a member of.

@@ -26,12 +26,11 @@ import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
@@ -107,14 +106,11 @@ def _clear_token(workspace: str = "default") -> None:
     clear_json_config(_token_path(workspace))
 
 
-_REPLY_POLL_INTERVAL = 2.0
-
-
 class SlackChannelBackend(ToolMethodBackend):
     """Slack channel backend.
 
-    Provides channel monitoring, message sending, and reply waiting for
-    the channel poller and interactive agent.
+    Provides channel monitoring and message sending for the channel
+    poller and interactive agent.
     """
 
     def __init__(self, workspace: str = "default") -> None:
@@ -324,56 +320,6 @@ class SlackChannelBackend(ToolMethodBackend):
             kwargs["thread_ts"] = thread_ts
         self._client.chat_postMessage(**kwargs)
 
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Poll a Slack thread for a reply from a specific user.
-
-        Args:
-            channel_id: Channel ID containing the thread.
-            thread_ts: Timestamp of the parent message (thread root).
-            user_id: User ID to wait for a reply from.
-
-        Returns:
-            The text of the user's reply message, or ``None`` on timeout.
-        """
-        client = self._client
-        assert client is not None
-        seen_ts: set[str] = set()
-        try:
-            resp = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=100)
-            for msg in cast(list[dict[str, Any]], resp.get("messages", [])):
-                seen_ts.add(str(msg["ts"]))
-        except SlackApiError:
-            pass
-
-        def poll() -> list[dict[str, Any]]:
-            try:
-                resp = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=100)
-            except (SlackApiError, OSError):
-                logger.debug("Error polling thread replies", exc_info=True)
-                return []
-            replies: list[dict[str, Any]] = []
-            for reply in cast(list[dict[str, Any]], resp.get("messages", [])):
-                ts = str(reply["ts"])
-                if ts in seen_ts:
-                    continue
-                seen_ts.add(ts)
-                replies.append(reply)
-            return replies
-
-        return wait_for_matching_message(
-            poll=poll,
-            matches=lambda reply: reply.get("user") == user_id,
-            extract_text=lambda reply: str(reply.get("text", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=_REPLY_POLL_INTERVAL,
-        )
-
     def disconnect(self) -> None:
         """Release Slack backend state before stop or reconnect."""
         self._client = None
@@ -402,7 +348,6 @@ class SlackChannelBackend(ToolMethodBackend):
         if self._bot_user_id:
             return text.replace(f"<@{self._bot_user_id}>", "").strip()
         return text
-
 
     def list_third_party_agents(
         self, types: str = "public_channel", limit: int = 200, cursor: str = ""

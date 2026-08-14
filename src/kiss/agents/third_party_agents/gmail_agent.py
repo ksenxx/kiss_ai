@@ -31,16 +31,13 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-from kiss.agents.third_party_agents._backend_utils import (
-    is_headless_environment,
-    wait_for_matching_message,
-)
+from kiss.agents.third_party_agents._backend_utils import is_headless_environment
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
-    _kiss_home,
     channel_main,
 )
+from kiss.core.config import kiss_home
 
 _SCOPES = [
     "https://mail.google.com/",
@@ -54,7 +51,7 @@ def _gmail_dir() -> Path:
         Path to ``$KISS_HOME/third_party_agents/gmail`` (defaults to
         ``~/.kiss/third_party_agents/gmail``).
     """
-    return _kiss_home() / "third_party_agents" / "gmail"
+    return kiss_home() / "third_party_agents" / "gmail"
 
 
 def _token_path() -> Path:
@@ -232,8 +229,8 @@ def _extract_attachments(payload: dict) -> list[dict[str, Any]]:  # type: ignore
 class GmailChannelBackend(ToolMethodBackend):
     """Channel backend for Gmail.
 
-    Provides email monitoring, sending, and reply waiting for
-    the channel poller and interactive agent.
+    Provides email monitoring and sending for the channel poller
+    and interactive agent.
     """
 
     def __init__(self) -> None:
@@ -417,77 +414,6 @@ class GmailChannelBackend(ToolMethodBackend):
         if thread_ts:  # pragma: no branch
             body["threadId"] = thread_ts
         self._service.users().messages().send(userId="me", body=body).execute()
-
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Poll a Gmail thread for a reply from a specific user.
-
-        Args:
-            channel_id: Label ID (unused for Gmail).
-            thread_ts: Thread ID to poll.
-            user_id: Email address of expected sender.
-
-        Returns:
-            The text of the user's reply.
-        """
-        assert self._service is not None
-        seen: set[str] = set()
-        try:
-            existing = (
-                self._service.users()
-                .threads()
-                .get(userId="me", id=thread_ts, format="minimal")
-                .execute()
-            )
-            seen.update(m["id"] for m in existing.get("messages", []))
-        except Exception:
-            pass
-
-        def poll() -> list[dict[str, Any]]:
-            try:
-                thread = (
-                    self._service.users()
-                    .threads()
-                    .get(
-                        userId="me",
-                        id=thread_ts,
-                        format="metadata",
-                        metadataHeaders=["From"],
-                    )
-                    .execute()
-                )
-            except Exception:
-                return []
-            messages: list[dict[str, Any]] = []
-            for msg in thread.get("messages", []):  # pragma: no branch
-                msg_id = msg["id"]
-                if msg_id in seen:  # pragma: no branch
-                    continue
-                seen.add(msg_id)
-                messages.append(msg)
-            return messages
-
-        return wait_for_matching_message(
-            poll=poll,
-            matches=lambda msg: (
-                user_id.lower()
-                in {
-                    h["value"].lower()
-                    for h in msg.get("payload", {}).get("headers", [])
-                    if h.get("name") == "From"
-                }
-                or user_id.lower() in str(msg.get("payload", {})).lower()
-            ),
-            extract_text=lambda msg: str(msg.get("snippet", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=5.0,
-        )
-
 
     def get_profile(self) -> str:
         """Get the current user's Gmail profile.

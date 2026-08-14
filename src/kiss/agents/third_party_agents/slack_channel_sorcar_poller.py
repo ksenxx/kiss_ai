@@ -57,7 +57,7 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
 from kiss.agents.third_party_agents._kiss_web_launcher import (
-    KissWebWorktreeSorcarAgent,
+    KissWebChatAgent,
     run_agent_via_kiss_web,
 )
 from kiss.agents.third_party_agents.slack_agent import _load_token
@@ -259,7 +259,7 @@ def _run_sorcar(prompt: str, chat_id: str) -> tuple[str, str]:
         prompt: The user's Slack message text.
         chat_id: Existing chat to resume, or empty for a new chat.
     """
-    agent = KissWebWorktreeSorcarAgent("Slack Channel Sorcar Poller")
+    agent = KissWebChatAgent("Slack Channel Sorcar Poller")
     if chat_id:
         agent.resume_chat_by_id(chat_id)
     else:
