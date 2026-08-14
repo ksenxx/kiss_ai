@@ -506,28 +506,37 @@ class TestStartupWindowIsLive(_ServerHarness):
             self.assertEqual(auth.get("type"), "auth_ok")
 
             await ws.send(json.dumps({"type": "ready", "tabId": "tab-new"}))
-            await ws.send(json.dumps({"type": "activeTasksQuery"}))
-            seen: list[dict[str, Any]] = []
+            rows: list[dict[str, Any]] = []
+            found = False
+            # The ``tabs_state`` snapshot is broadcast from a worker
+            # thread (``ready_tab_sync`` via ``asyncio.to_thread``)
+            # through ``run_coroutine_threadsafe``, while direct
+            # replies are awaited on the event loop; the per-endpoint
+            # send lock serializes only sends already in flight, so a
+            # later direct reply may legitimately hit the wire before
+            # the scheduled snapshot.  Read until the snapshot with the
+            # running tab arrives instead of using another reply as an
+            # ordering barrier.
             for _ in range(200):
-                ev = json.loads(
-                    await asyncio.wait_for(ws.recv(), timeout=15),
-                )
-                seen.append(ev)
-                if ev.get("type") == "activeTasksResponse":
+                try:
+                    ev = json.loads(
+                        await asyncio.wait_for(ws.recv(), timeout=15),
+                    )
+                except TimeoutError:
+                    break
+                if ev.get("type") != "tabs_state":
+                    continue
+                rows.extend(ev.get("tabs", []))
+                if any(
+                    r.get("tabId") == "tab-restore"
+                    and r.get("chatId") == "chat-restore"
+                    for r in rows
+                ):
+                    found = True
                     break
 
-        rows = [
-            row
-            for ev in seen
-            if ev.get("type") == "tabs_state"
-            for row in ev.get("tabs", [])
-        ]
         self.assertTrue(
-            any(
-                r.get("tabId") == "tab-restore"
-                and r.get("chatId") == "chat-restore"
-                for r in rows
-            ),
+            found,
             "BUG F08-2: a client connecting during the startup window "
             f"silently omitted the running tab; got {rows}",
         )

@@ -158,20 +158,40 @@ class StreamAbortWatchdog:
             return False
 
     def _abort(self) -> None:
-        """Unblock the iterating thread, then close the stream."""
-        self._shutdown_socket()
+        """Unblock the iterating thread.
+
+        A successful ``shutdown(SHUT_RDWR)`` is the whole abort: it
+        wakes a reader already blocked in ``poll()``/``recv()`` AND
+        makes every later read on the still-open descriptor return EOF
+        immediately, so the reading thread always unwinds and closes
+        the stream itself (``stop_aware_events``'s ``finally``, or the
+        adapter's ``with`` block).  ``close()`` must NOT run here as
+        well: it deallocates the file descriptor from under a reader
+        that is just entering its blocking read, and a ``poll()`` on a
+        freed — and possibly already reused — descriptor never sees the
+        EOF, leaving the thread wedged for the SDK client's full read
+        timeout exactly as if the watchdog did not exist.  Closing is
+        therefore only the fallback for transports whose socket the
+        shutdown could not reach.
+        """
+        if self._shutdown_socket():
+            return
         try:
             self._stream.close()
         except Exception:
             logger.debug("Exception caught", exc_info=True)
 
-    def _shutdown_socket(self) -> None:
+    def _shutdown_socket(self) -> bool:
         """Half-close the stream's TCP socket, ignoring any failure.
 
         Reaches the socket through httpcore's documented
         ``network_stream`` response extension.  Best-effort throughout: a
         transport without that extension (or a stream already torn down)
-        just leaves the close above to do what it can.
+        just leaves the close fallback in :meth:`_abort` to do what it
+        can.
+
+        Returns:
+            ``True`` when the socket was found and shut down.
         """
         try:
             extensions = self._stream.response.extensions
@@ -183,8 +203,10 @@ class StreamAbortWatchdog:
             )
             if sock is not None:
                 sock.shutdown(socket.SHUT_RDWR)
+                return True
         except Exception:
             logger.debug("Exception caught", exc_info=True)
+        return False
 
 
 def _stop_requested(
