@@ -5055,6 +5055,44 @@
     updateVisibleTask();
   }
 
+  // taskwheel-coverage:end
+  /**
+   * Scroll the transcript so the task with `taskId` sits at the top of
+   * the viewport.  `scrollTaskRegionToTop` pins the region and re-derives
+   * the static task panel, so the clicked task is what the panel names.
+   *
+   * Returns true when the task's region is in the transcript — either
+   * the tab's own task (`currentTaskId`) or a spliced-in neighbour
+   * (`.adjacent-task[data-task-id]`).  Returns false when the task's
+   * events are not loaded, so the caller can fetch them instead.
+   */
+  function scrollChatToTask(taskId) {
+    if (taskId === undefined || taskId === null || taskId === '')
+      return false;
+    const idStr = String(taskId);
+    const ownIdStr =
+      currentTaskId === undefined || currentTaskId === null
+        ? ''
+        : String(currentTaskId);
+    const regions = getTaskRegions();
+    for (let i = 0; i < regions.length; i++) {
+      const region = regions[i];
+      const neighbour = regionNeighbour(region);
+      const regionId = neighbour
+        ? neighbour.dataset.taskId || ''
+        : ownIdStr;
+      if (regionId === idStr) {
+        scrollTaskRegionToTop(region);
+        return true;
+      }
+    }
+    // The tab's own task may have no rendered region at all (nothing
+    // was output yet).  The restored panel already names it, so there
+    // is nothing to scroll to and nothing to fetch.
+    return ownIdStr !== '' && idStr === ownIdStr;
+  }
+  // taskwheel-coverage:start
+
   function stepTaskFromPanel(dir) {
     const tab = getTab(activeTabId);
     if (tab && tab.isSubagentTab) return;
@@ -8904,6 +8942,23 @@
         const existingChatTab = getTabByBackendChatId(s.id);
         if (existingChatTab) {
           switchToTab(existingChatTab.id);
+          // The tab may be parked on a different task of the same chat.
+          // Scroll the clicked task's region into view so the static
+          // task panel names it; when its events are not spliced into
+          // the transcript yet, replay the tab at that task instead.
+          if (
+            !existingChatTab.isContentTab &&
+            !scrollChatToTask(s.task_id) &&
+            s.task_id !== undefined &&
+            s.task_id !== null &&
+            s.task_id !== ''
+          ) {
+            api.resumeSession({
+              id: s.id,
+              taskId: s.task_id,
+              tabId: existingChatTab.id,
+            });
+          }
         } else if (s.id && (s.has_events || s.is_running)) {
           // A running task is resumable even before its first event is
           // persisted: the server reattaches the live chat on replay.
