@@ -1173,7 +1173,13 @@ class VSCodeServer(
                 self.printer.broadcast(
                     {
                         "type": "task_events",
-                        "events": [],
+                        # The task runs but has no history row yet: the
+                        # live in-memory recording is the only copy of
+                        # what it has already broadcast (the events
+                        # table is written asynchronously).
+                        "events": self.printer.peek_recording_for_task(
+                            task_id,
+                        ),
                         "task": "",
                         "task_id": task_id,
                         "chat_id": chat_id,
@@ -1219,6 +1225,29 @@ class VSCodeServer(
             task_id=rebound_task_id,
             is_subagent=subagent_info is not None,
         )
+        if rebound_running:
+            # The task is still running, so the events table lags
+            # behind it: display events reach the database through an
+            # asynchronous writer, and a tab resumed moments after the
+            # task started (the round trip a freshly spawned
+            # ``run_parallel`` sub-agent's ``new_tab`` triggers) would
+            # replay an EMPTY transcript and permanently miss every
+            # event from before this subscription.  The printer's live
+            # in-memory recording is the authoritative copy while the
+            # task runs; events recorded after this snapshot reach the
+            # tab through the fan-out the reattach above just set up.
+            # Known micro-window: recording and fan-out are two steps
+            # of one broadcast, so an event recorded just before this
+            # snapshot can also fan out just after the replay below and
+            # render twice.  That window is a thread preemption inside
+            # a single broadcast (microseconds); the alternative — the
+            # events-table read this replaces — lost the whole
+            # transcript head for the async writer's full lag.
+            live_events = self.printer.peek_recording_for_task(
+                rebound_task_id,
+            )
+            if live_events:
+                result["events"] = live_events
         with self._state_lock:
             state = agent_state.find_by_tab(tab_id)
             if state is not None:
@@ -1459,6 +1488,16 @@ class VSCodeServer(
                     task_id=str(sub_task_id),
                     is_subagent=True,
                 )
+                # A still-running sub-agent's events table lags behind
+                # the live run (asynchronous writer); its in-memory
+                # recording holds the full transcript so far.  Events
+                # recorded after this snapshot reach the tab through
+                # the fan-out the reattach above just set up.
+                live_events = self.printer.peek_recording_for_task(
+                    str(sub_task_id),
+                )
+                if live_events:
+                    row["events"] = live_events
             self.printer.broadcast(
                 {
                     "type": "openSubagentTab",
