@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Discord Agent — SorcarAgent extension with Discord REST API tools.
+"""Discord Agent — channel agent with Discord REST API tools.
 
 Provides authenticated access to Discord via a bot token. Uses the Discord
 REST API v10 directly via requests (no discord.py needed). Stores the token
@@ -25,7 +25,6 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
@@ -498,8 +497,8 @@ class DiscordChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class DiscordAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with Discord REST API tools.
+class DiscordAgent(BaseChannelAgent):
+    """Channel agent with Discord REST API tools.
 
     Example::
 
@@ -623,14 +622,15 @@ class DiscordAgent(BaseChannelAgent, SorcarAgent):
             Use ask_user_question() if you need user help with login screens.
 
             Returns:
-                Page content of the Discord Developer Portal to begin navigation.
+                Instructions for navigating the Discord Developer Portal.
             """
-            if agent.web_use_tool is None:  # pragma: no branch
-                return (
-                    "Browser not available. Use authenticate_discord(bot_token=...) "
-                    "with a token from https://discord.com/developers/applications."
-                )
-            return agent.web_use_tool.go_to_url("https://discord.com/developers/applications")
+            return (
+                "Open https://discord.com/developers/applications with your "
+                "go_to_url browser tool and complete the bot creation steps "
+                "described above. If browser tools are unavailable, use "
+                "authenticate_discord(bot_token=...) with a token from "
+                "https://discord.com/developers/applications."
+            )
 
         return [
             check_discord_auth,

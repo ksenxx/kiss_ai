@@ -35,8 +35,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 import yaml
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.agents.third_party_agents._api_tools_bridge import (
     register_tools,
     release_tools,
@@ -54,12 +52,6 @@ _API_SERVER_SOCK: str = ""
 _API_SERVER_LOCK = threading.Lock()
 
 _SOCK_PATH_OVERRIDE: str | None = None
-
-
-def _failure_yaml(exc: BaseException) -> str:
-    """Return a YAML failure envelope for a task exception."""
-    summary = "Task interrupted" if isinstance(exc, KeyboardInterrupt) else f"Task failed: {exc}"
-    return str(yaml.safe_dump({"success": False, "summary": summary}, sort_keys=False))
 
 
 def _ensure_api_server() -> str:
@@ -137,60 +129,71 @@ def _collect_live_tools(
     return collected
 
 
-class KissWebChatSorcarAgent(ChatSorcarAgent):
-    """Chat-session carrier agent for API launches.
+class KissWebChatSorcarAgent:
+    """Chat-session carrier for API launches.
 
-    API launches execute on a daemon-built agent, so this instance
-    never runs itself; it carries the chat id across launches (the
-    pollers call :meth:`resume_chat_by_id` before launching and read
-    :attr:`chat_id` after) and records the launcher's YAML result in
-    :attr:`last_run_result`.  Running it directly still works and
-    records its result the same way.
+    Tasks always execute on a daemon-built agent, so this instance
+    never runs anything itself; it carries the chat id across launches
+    (the pollers call :meth:`resume_chat_by_id` before launching and
+    read :attr:`chat_id` after) and receives the launcher's YAML
+    result in :attr:`last_run_result` plus the cost / token / step
+    totals.  :meth:`run` submits the task through
+    :func:`kiss.server.sorcar.run` via :func:`run_agent_via_kiss_web`.
     """
 
-    last_run_result: str = ""
+    def __init__(self, name: str = "") -> None:
+        self.name = name
+        self._chat_id: str = ""
+        self.last_run_result: str = ""
+        self.budget_used: float = 0.0
+        self.total_tokens_used: int = 0
+        self.total_steps: int = 0
 
-    def run(self, prompt_template: str = "", **kwargs: Any) -> str:  # type: ignore[override]
-        """Run the chat agent directly and record the returned YAML result.
+    @property
+    def chat_id(self) -> str:
+        """The daemon chat-session identifier carried across launches."""
+        return self._chat_id
+
+    def new_chat(self) -> None:
+        """Start a fresh chat: the next launch gets a new daemon chat id."""
+        self._chat_id = ""
+
+    def resume_chat_by_id(self, chat_id: str) -> None:
+        """Resume an existing chat session on the next launch.
+
+        Args:
+            chat_id: String chat session identifier to resume.
+        """
+        if chat_id:
+            self._chat_id = chat_id
+
+    def run(self, prompt_template: str = "", **kwargs: Any) -> str:
+        """Submit a task to the kiss-web daemon and record the result.
 
         Args:
             prompt_template: The task prompt.
-            **kwargs: Forwarded to :meth:`ChatSorcarAgent.run`.
+            **kwargs: Launcher keyword arguments; anything outside the
+                :func:`run_agent_via_kiss_web` parameter surface is
+                dropped.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
-        try:
-            result = super().run(prompt_template=prompt_template, **kwargs)
-        except BaseException as exc:
-            self.last_run_result = _failure_yaml(exc)
-            raise
-        self.last_run_result = result
-        return result
+        from kiss.agents.third_party_agents._channel_agent_utils import (
+            filter_launch_kwargs,
+        )
+
+        return run_agent_via_kiss_web(
+            self, prompt_template, **filter_launch_kwargs(kwargs)
+        )
 
 
-class KissWebWorktreeSorcarAgent(WorktreeSorcarAgent):
-    """Worktree carrier agent for API launches (see the chat variant)."""
+class KissWebWorktreeSorcarAgent(KissWebChatSorcarAgent):
+    """Worktree-task carrier for API launches (see the chat variant).
 
-    last_run_result: str = ""
-
-    def run(self, prompt_template: str = "", **kwargs: Any) -> str:  # type: ignore[override]
-        """Run the worktree agent directly and record the returned YAML result.
-
-        Args:
-            prompt_template: The task prompt.
-            **kwargs: Forwarded to :meth:`WorktreeSorcarAgent.run`.
-
-        Returns:
-            YAML string with 'success' and 'summary' keys.
-        """
-        try:
-            result = super().run(prompt_template=prompt_template, **kwargs)
-        except BaseException as exc:
-            self.last_run_result = _failure_yaml(exc)
-            raise
-        self.last_run_result = result
-        return result
+    The daemon runs the task in an isolated git worktree when the
+    launcher's ``use_worktree`` parameter is true (the default).
+    """
 
 
 def run_agent_via_kiss_web(
@@ -228,9 +231,8 @@ def run_agent_via_kiss_web(
     Args:
         agent: The third-party agent instance supplying channel tools,
             ``channel_system_prompt`` guidance, and the chat id to
-            continue (``agent.chat_id`` for
-            :class:`~kiss.agents.sorcar.chat_sorcar_agent.ChatSorcarAgent`
-            derivatives).
+            continue (``agent.chat_id`` on
+            :class:`KissWebChatSorcarAgent` carriers).
         prompt_template: The task prompt.
         model_name: LLM model name; empty selects the daemon default.
         work_dir: Working directory for the run.
@@ -240,7 +242,7 @@ def run_agent_via_kiss_web(
             (e.g. ``ChannelRunner``'s per-message ``reply`` closure).
         use_worktree: Run the task in an isolated git worktree.
         model_config: Per-task model configuration override (custom
-            endpoint / headers), matching ``SorcarAgent.run``.
+            endpoint / headers).
         web_tools: Per-task browser-tool enablement override. ``None``
             uses the kiss-web config default.
         is_parallel: Whether the agent may spawn parallel sub-agents.

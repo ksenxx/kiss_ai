@@ -1692,8 +1692,9 @@ def run_tasks_parallel(
     four correctness fixes (per-sub-agent stop event, stopped-child
     recovery, real ``parent_task_id``, chat/tab propagation) had landed
     only in that twin, so every plain :class:`SorcarAgent` subclass —
-    which is what all the third-party channel agents are — silently ran
-    the unfixed copy.  Keep it single.
+    which is what the third-party channel agents used to be before they
+    became daemon-launched carriers — silently ran the unfixed copy.
+    Keep it single.
 
     The engine still owns no frontend concepts: it marks each spawned
     agent as a sub-agent (via ``_subagent_info``) and the sub-agent

@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Twitch Agent — SorcarAgent extension with Twitch Helix API + Chat tools.
+"""Twitch Agent — channel agent with Twitch Helix API + Chat tools.
 
 Provides authenticated access to Twitch via OAuth2 tokens. Uses requests
 for Helix API and twitchio for chat. Stores config in
@@ -22,7 +22,6 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -325,8 +324,8 @@ class TwitchChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class TwitchAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with Twitch Helix API tools."""
+class TwitchAgent(BaseChannelAgent):
+    """Channel agent with Twitch Helix API tools."""
 
     def __init__(self) -> None:
         super().__init__("Twitch Agent")

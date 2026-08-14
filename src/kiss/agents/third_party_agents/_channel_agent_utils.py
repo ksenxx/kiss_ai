@@ -241,21 +241,73 @@ class ChannelConfig:
         clear_json_config(self.path)
 
 
+LAUNCH_KWARG_NAMES = frozenset(
+    {
+        "model_name",
+        "work_dir",
+        "max_budget",
+        "tools",
+        "use_worktree",
+        "model_config",
+        "web_tools",
+        "is_parallel",
+        "timeout",
+        "sock_path",
+    }
+)
+
+
+def filter_launch_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Keep only the kwargs understood by ``run_agent_via_kiss_web``.
+
+    Channel agent ``run()`` shims historically accepted the wider
+    ``SorcarAgent.run`` keyword surface (``system_prompt``,
+    ``_skip_persistence``, ...).  Tasks now always execute on the
+    kiss-web daemon through :func:`kiss.server.sorcar.run`, whose API
+    supports only the launcher parameters; everything else is dropped.
+
+    Args:
+        kwargs: Arbitrary ``run()`` keyword arguments.
+
+    Returns:
+        The subset of *kwargs* accepted by
+        :func:`~kiss.agents.third_party_agents._kiss_web_launcher.run_agent_via_kiss_web`.
+    """
+    return {k: v for k, v in kwargs.items() if k in LAUNCH_KWARG_NAMES}
+
+
 class BaseChannelAgent:
-    """Mixin for channel agent classes that provides a standard ``_get_tools()``
-    implementation combining auth tools with backend tools.
+    """Base class for channel agents.
 
-    Subclasses must set ``self._backend`` (a ``ToolMethodBackend`` instance)
-    and override :meth:`_is_authenticated` and :meth:`_get_auth_tools`.
+    A channel agent is **not** an executable agent itself: every task
+    is submitted to the kiss-web daemon through the public API
+    :func:`kiss.server.sorcar.run` (via
+    :func:`~kiss.agents.third_party_agents._kiss_web_launcher.run_agent_via_kiss_web`),
+    and the daemon builds and executes its own chat agent with the
+    standard tools (bash, file editing, browser automation).  The
+    channel agent instance is the *carrier* of channel state: the
+    backend, the authentication tools, the
+    :attr:`channel_system_prompt` guidance, and the run results the
+    launcher writes back (:attr:`last_run_result`, :attr:`budget_used`,
+    :attr:`total_tokens_used`, :attr:`total_steps`).
 
-    Use this mixin **before** ``SorcarAgent`` in the MRO::
+    Subclasses must set ``self._backend`` (a ``ToolMethodBackend``
+    instance) and override :meth:`_is_authenticated` and
+    :meth:`_get_auth_tools`::
 
-        class SlackAgent(BaseChannelAgent, SorcarAgent): ...
+        class SlackAgent(BaseChannelAgent): ...
     """
 
     _backend: Any
 
     channel_system_prompt: str = ""
+
+    def __init__(self, name: str = "") -> None:
+        self.name = name
+        self.last_run_result: str = ""
+        self.budget_used: float = 0.0
+        self.total_tokens_used: int = 0
+        self.total_steps: int = 0
 
     def _is_authenticated(self) -> bool:
         """Return True if the backend is authenticated and ready for use.
@@ -272,92 +324,66 @@ class BaseChannelAgent:
         return []
 
     def _get_tools(self) -> list:
-        """Assemble the full tool list: super tools + auth tools + backend tools.
+        """Assemble the channel tool list: auth tools + backend tools.
+
+        The standard agent tools (bash, file editing, browser) are
+        supplied by the daemon-built agent, not by this instance.
 
         Returns:
-            Combined list of tool callables.
+            Combined list of channel tool callables.
         """
-        tools: list = super()._get_tools()  # type: ignore[misc]
-        tools.extend(self._get_auth_tools())
+        tools: list = list(self._get_auth_tools())
         if self._is_authenticated():
             tools.extend(self._backend.get_tool_methods())
         return tools
 
-    def run(self, *args: Any, **kwargs: Any) -> str:  # type: ignore[override]
-        """Run the channel agent directly (outside the launcher).
+    def run(self, prompt_template: str = "", **kwargs: Any) -> str:
+        """Run a task through :func:`kiss.server.sorcar.run`.
 
-        API launches
-        (:func:`~kiss.agents.third_party_agents._kiss_web_launcher.run_agent_via_kiss_web`)
-        never execute the channel agent instance — the daemon builds
-        its own agent — so this shim only serves DIRECT calls: it
-        appends :attr:`channel_system_prompt` to the system prompt,
-        pops chat-session-only kwargs that plain
-        :class:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent` does not
-        accept, and records the returned YAML in
-        :attr:`last_run_result`.  Positional arguments are preserved
-        for channel agents that do not override ``run`` themselves.
+        Submits the task to the kiss-web daemon via
+        :func:`~kiss.agents.third_party_agents._kiss_web_launcher.run_agent_via_kiss_web`,
+        which bridges this agent's live channel tools into the task,
+        appends :attr:`channel_system_prompt` to the prompt, and
+        records the YAML result in :attr:`last_run_result` along with
+        the cost / token / step totals.  Keyword arguments outside the
+        launcher's parameter surface are dropped (see
+        :func:`filter_launch_kwargs`).
 
         Args:
-            *args: Forwarded unchanged to ``super().run()``.
-            **kwargs: Forwarded to ``super().run()`` after filtering.
+            prompt_template: The task prompt.
+            **kwargs: Launcher keyword arguments (``model_name``,
+                ``work_dir``, ``max_budget``, ``tools``,
+                ``use_worktree``, ``model_config``, ``web_tools``,
+                ``is_parallel``, ``timeout``, ``sock_path``).
 
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
-        kwargs.pop("use_worktree", None)
-        kwargs.pop("_skip_persistence", None)
-        kwargs.pop("_subscribe_tab_id", None)
-        kwargs.pop("_on_task_id_allocated", None)
-        if self.channel_system_prompt:
-            kwargs["system_prompt"] = (
-                kwargs.get("system_prompt") or ""
-            ) + self.channel_system_prompt
-        try:
-            result: str = super().run(*args, **kwargs)  # type: ignore[misc]
-        except BaseException as exc:
-            summary = (
-                "Task interrupted" if isinstance(exc, KeyboardInterrupt) else f"Task failed: {exc}"
-            )
-            self.last_run_result = yaml.safe_dump(
-                {"success": False, "summary": summary},
-                sort_keys=False,
-            )
-            raise
-        self.last_run_result = result
-        return result
+        from kiss.agents.third_party_agents._kiss_web_launcher import (
+            run_agent_via_kiss_web,
+        )
+
+        return run_agent_via_kiss_web(
+            self, prompt_template, **filter_launch_kwargs(kwargs)
+        )
 
 
-def _make_runner_channel_agent(agent_name: str) -> Any:
+def _make_runner_channel_agent(agent_name: str) -> BaseChannelAgent:
     """Create the minimal channel agent for a :class:`ChannelRunner` task.
 
-    The agent combines :class:`BaseChannelAgent` (whose ``run`` shim
-    filters chat-session-only kwargs and records ``last_run_result``)
-    with
-    :class:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent`.  It has no
+    The agent is a plain :class:`BaseChannelAgent` carrier with no
     channel-specific auth tools or backend of its own — the runner
     supplies backend tools plus the per-message ``reply`` tool through
-    the launcher's ``tools`` parameter.  Defined via a factory to keep
-    the ``SorcarAgent`` import lazy (this module is imported by every
-    channel agent, some of which are used in minimal environments).
+    the launcher's ``tools`` parameter, and the daemon-built agent
+    supplies the standard tools.
 
     Args:
         agent_name: Human-readable agent name.
 
     Returns:
-        A fresh ``_RunnerChannelAgent`` instance.
+        A fresh :class:`BaseChannelAgent` instance.
     """
-    global _RunnerChannelAgent
-    if _RunnerChannelAgent is None:
-        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-
-        class _RunnerChannelAgentImpl(BaseChannelAgent, SorcarAgent):
-            """Runner channel agent: BaseChannelAgent shim + SorcarAgent."""
-
-        _RunnerChannelAgent = _RunnerChannelAgentImpl
-    return _RunnerChannelAgent(agent_name)
-
-
-_RunnerChannelAgent: type | None = None
+    return BaseChannelAgent(agent_name)
 
 
 class ChannelRunner:
@@ -365,7 +391,7 @@ class ChannelRunner:
 
     Connects to a backend, retrieves recent messages, filters to
     allowed users, skips messages the bot has already replied to, and
-    runs a SorcarAgent for each pending message.
+    runs a kiss-web daemon task for each pending message.
     """
 
     def __init__(
@@ -394,8 +420,8 @@ class ChannelRunner:
 
         Connects to the backend, joins the configured channel, retrieves
         recent messages, filters to allowed users, skips messages the bot
-        has already replied to, and runs a SorcarAgent for each
-        pending message.  Each message is processed synchronously.
+        has already replied to, and runs a kiss-web daemon task for
+        each pending message.  Each message is processed synchronously.
 
         Returns:
             Number of messages processed.

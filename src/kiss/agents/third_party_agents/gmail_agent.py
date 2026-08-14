@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Gmail Agent — SorcarAgent extension with Gmail API tools.
+"""Gmail Agent — channel agent with Gmail API tools.
 
 Provides authenticated access to a Gmail account via OAuth2.
 Handles authentication (reading token from disk or prompting the user
@@ -31,7 +31,6 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import (
     is_headless_environment,
     wait_for_matching_message,
@@ -1024,11 +1023,11 @@ class GmailChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class GmailAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with Gmail API tools.
+class GmailAgent(BaseChannelAgent):
+    """Channel agent with Gmail API tools.
 
-    Inherits all standard SorcarAgent capabilities (bash, file editing,
-    browser automation) and adds authenticated Gmail API tools for
+    Tasks run on the kiss-web daemon's agent (which supplies bash,
+    file editing, and browser automation) with authenticated Gmail API tools for
     reading, sending, searching, labeling, and managing email.
 
     The agent checks for stored OAuth2 credentials on initialization.
@@ -1164,15 +1163,16 @@ class GmailAgent(BaseChannelAgent, SorcarAgent):
             Use ask_user_question() if you need user help with Google account login screens.
 
             Returns:
-                Page content of Google Cloud Console to begin navigation.
+                Instructions for navigating Google Cloud Console.
             """
-            if agent.web_use_tool is None:  # pragma: no branch
-                return (
-                    "Browser not available. Manually download credentials.json from "
-                    "https://console.cloud.google.com/apis/credentials and save it to "
-                    f"{_credentials_path()}, then call authenticate_gmail()."
-                )
-            return agent.web_use_tool.go_to_url("https://console.cloud.google.com/apis/credentials")
+            return (
+                "Open https://console.cloud.google.com/apis/credentials with "
+                "your go_to_url browser tool and complete the credential "
+                "setup steps described above. If browser tools are "
+                "unavailable, manually download credentials.json from "
+                "https://console.cloud.google.com/apis/credentials, save it "
+                f"to {_credentials_path()}, then call authenticate_gmail()."
+            )
 
         return [
             check_gmail_auth,

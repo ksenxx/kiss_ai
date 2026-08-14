@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Synology Chat Agent — SorcarAgent extension with Synology Chat webhook API.
+"""Synology Chat Agent — channel agent with Synology Chat webhook API.
 
 Provides access to Synology Chat via incoming and outgoing webhooks.
 Stores config in ``~/.kiss/third_party_agents/synology/config.json``.
@@ -27,7 +27,6 @@ from urllib.parse import parse_qs
 
 import requests
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     drain_queue_messages,
@@ -233,8 +232,8 @@ class SynologyChatChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class SynologyChatAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with Synology Chat webhook tools."""
+class SynologyChatAgent(BaseChannelAgent):
+    """Channel agent with Synology Chat webhook tools."""
 
     def __init__(self) -> None:
         super().__init__("Synology Chat Agent")

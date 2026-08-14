@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Slack Agent — SorcarAgent extension with Slack API tools.
+"""Slack Agent — channel agent with Slack API tools.
 
 Provides authenticated access to a Slack workspace via a bot token
 with multi-turn chat-session persistence.  Handles authentication
@@ -31,7 +31,6 @@ from typing import Any, cast
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
@@ -846,11 +845,11 @@ class SlackChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class SlackAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with Slack workspace tools.
+class SlackAgent(BaseChannelAgent):
+    """Channel agent with Slack workspace tools.
 
-    Inherits all standard SorcarAgent capabilities (bash, file editing,
-    browser automation) and adds authenticated Slack API tools for
+    Tasks run on the kiss-web daemon's agent (which supplies bash,
+    file editing, and browser automation) with authenticated Slack API tools for
     messaging, channel management, user lookup, reactions, search,
     and file uploads.
 
@@ -977,14 +976,15 @@ class SlackAgent(BaseChannelAgent, SorcarAgent):
             Use ask_user_question() if you need user help with login or workspace-selection screens.
 
             Returns:
-                Page content of the Slack API portal to begin navigation.
+                Instructions for navigating the Slack API portal.
             """
-            if agent.web_use_tool is None:  # pragma: no branch
-                return (
-                    "Browser not available. Use authenticate_slack(token=...) "
-                    "with an xoxb- token from https://api.slack.com/apps."
-                )
-            return agent.web_use_tool.go_to_url("https://api.slack.com/apps")
+            return (
+                "Open https://api.slack.com/apps with your go_to_url browser "
+                "tool and complete the app creation steps described above. "
+                "If browser tools are unavailable, use "
+                "authenticate_slack(token=...) with an xoxb- token from "
+                "https://api.slack.com/apps."
+            )
 
         return [
             check_slack_auth,
