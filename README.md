@@ -239,7 +239,7 @@ Current catalog capability totals:
 
 - **601** generation-capable models
 - **442** function-calling-capable models
-- **9** embedding models
+- **8** embedding models
 
 Full model list:
 
