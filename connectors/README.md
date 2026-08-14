@@ -34,7 +34,14 @@ uv run python connectors/verify.py               # connect to all configured ser
 
 The `github` connector mints its token at launch with `gh auth token`
 (`brew install gh github-mcp-server`; `gh auth login` once) — the token is
-never written to any file.
+never written to any file — and runs with `--read-only` so the server itself
+refuses writes; drop that flag in `~/.kiss/mcp.json` if you want the agent to
+file issues or PRs, and rely on the `mcp_permissions` deny rules instead.
+
+Privacy note: `deepwiki` and `context7` are the only remote entries — their
+operators see the queries you send them (repo names, library names) and
+nothing else. Disable either with `enable.py disable <name>` if that matters.
+All packages are version-pinned in `catalog.json`; bump them deliberately.
 
 ## Available with your own credentials (enable when ready)
 
@@ -54,7 +61,12 @@ never written to any file.
 missing and prints the exact setup steps (from `catalog.json`). Export
 credentials in your shell profile — Sorcar's stdio launcher passes your
 environment to the server at launch, so **no secret is ever stored in
-`mcp.json` or this repository**.
+`mcp.json` or this repository**. Restart Sorcar after changing env vars or
+configs: servers launch with the environment Sorcar started with.
+
+Twilio's team advises against running community MCP servers alongside their
+official one (prompt-injection isolation); if you enable `twilio-sms`, prefer
+project scope (`--scope project`) in a project that has no third-party servers.
 
 ### WhatsApp in three steps
 
