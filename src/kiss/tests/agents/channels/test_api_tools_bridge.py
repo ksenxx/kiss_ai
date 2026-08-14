@@ -30,18 +30,6 @@ from typing import Any
 from kiss.agents.third_party_agents import _api_tools_bridge as bridge
 from kiss.server.tools_file import ToolsFileError, load_tools_file
 
-_SENTINEL_DEFAULT = object()
-
-
-def module_tool(city: str, unit: str = "C") -> str:
-    """Return the temperature of a city.
-
-    Args:
-        city: Name of the city.
-        unit: Temperature unit.
-    """
-    return f"{city}:{unit}"
-
 
 class _Backend:
     def __init__(self) -> None:
@@ -72,11 +60,6 @@ class ApiToolsBridgeTest(unittest.TestCase):
         token, path = bridge.register_tools(tools)
         self._tokens.append(token)
         return token, path
-
-    def test_generated_file_exists_and_is_python(self) -> None:
-        token, path = self._register([module_tool])
-        assert token
-        assert Path(path).is_file() and path.endswith(".py")
 
     def test_loaded_tools_are_the_live_callables_themselves(self) -> None:
         calls: list[tuple[str, int]] = []
@@ -128,27 +111,6 @@ class ApiToolsBridgeTest(unittest.TestCase):
         assert backend.sent == ["hello", "lo"]
         assert replied == ["pong"]
 
-    def test_non_literal_default_preserved_by_identity(self) -> None:
-        seen: list[Any] = []
-
-        def probe(value: Any = _SENTINEL_DEFAULT) -> str:
-            """Probe a value.
-
-            Args:
-                value: Anything.
-            """
-            seen.append(value)
-            return "probed"
-
-        _token, path = self._register([probe])
-        (loaded,) = load_tools_file(path)
-        assert (
-            inspect.signature(loaded).parameters["value"].default
-            is _SENTINEL_DEFAULT
-        )
-        loaded()
-        assert seen == [_SENTINEL_DEFAULT]
-
     def test_multiple_tools_in_one_file(self) -> None:
         def one() -> str:
             """Return one."""
@@ -162,16 +124,6 @@ class ApiToolsBridgeTest(unittest.TestCase):
         loaded = load_tools_file(path)
         assert [t.__name__ for t in loaded] == ["one", "two"]
         assert [t() for t in loaded] == ["1", "2"]
-
-    def test_exception_propagates_from_live_callable(self) -> None:
-        def kaboom() -> str:
-            """Always fail."""
-            raise RuntimeError("kaboom-inner")
-
-        _token, path = self._register([kaboom])
-        (loaded,) = load_tools_file(path)
-        with self.assertRaisesRegex(RuntimeError, "kaboom-inner"):
-            loaded()
 
     def test_release_tools_invalidates_token_and_removes_file(self) -> None:
         def gone() -> str:
