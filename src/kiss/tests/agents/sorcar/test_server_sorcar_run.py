@@ -316,6 +316,7 @@ class SorcarRunApiTest(unittest.TestCase):
         self,
         tools_file: Any,
         extra_cmd: dict[str, Any] | None = None,
+        events_out: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
         """Drive one raw ``run`` command over the UDS and wait for the end.
 
@@ -329,6 +330,8 @@ class SorcarRunApiTest(unittest.TestCase):
                 ``toolsFile`` field.
             extra_cmd: Additional raw fields merged into the ``run``
                 command.
+            events_out: Optional list that receives every event the
+                daemon broadcast for this run's tab, in order.
 
         Returns:
             The task's last ``result`` event, or ``None`` when the
@@ -355,6 +358,8 @@ class SorcarRunApiTest(unittest.TestCase):
             result_event: dict[str, Any] | None = None
             while True:
                 event = json.loads(reader.readline())
+                if events_out is not None and event.get("tabId") == tab_id:
+                    events_out.append(event)
                 if event.get("type") == "result":
                     # Each test runs its task alone on a private
                     # daemon, so any result event seen here belongs to
@@ -948,6 +953,193 @@ class SorcarRunApiTest(unittest.TestCase):
         ), "malformed modelConfig must not reach the agent"
         assert seen["model_config"] != "junk"
         assert seen["web_tools"] is True, "config default web tools apply"
+
+    def test_custom_system_prompt_replaces_default(self) -> None:
+        """A non-empty ``system_prompt`` replaces the SYSTEM.md prompt.
+
+        The custom prompt must become the BASE of the composed system
+        instructions the agent runs with (the default ``SYSTEM_PROMPT``
+        must not appear anywhere in them), and it must be stored on the
+        agent so the ``run_parallel`` fan-out forwards it to
+        sub-agents.
+        """
+        from kiss.core.base import SYSTEM_PROMPT
+
+        custom = (
+            "You are a terse haiku-only assistant.\n"
+            "Answer every request with a single haiku."
+        )
+        seen: dict[str, Any] = {}
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            seen["system_prompt"] = kwargs.get("system_prompt")
+            seen["base_system_prompt"] = getattr(
+                self_agent, "_base_system_prompt", None,
+            )
+            raw = "success: true\nis_continue: false\nsummary: ok\n"
+            printer = kwargs.get("printer")
+            if printer is not None:
+                printer.print(
+                    raw, type="result", step_count=1,
+                    total_tokens=1, cost="$0.0001",
+                )
+            return raw
+
+        self._parent_class.run = stub_run
+        result = sorcar.run(
+            "say hi",
+            work_dir=self.repo,
+            sock_path=self.sock_path,
+            timeout=60,
+            system_prompt=custom,
+        )
+        assert result.success is True
+        composed = seen["system_prompt"]
+        assert isinstance(composed, str)
+        assert composed.startswith(custom), (
+            "custom system prompt must be the base of the composed "
+            "system instructions"
+        )
+        assert SYSTEM_PROMPT not in composed, (
+            "the default SYSTEM.md prompt must be replaced, not kept"
+        )
+        assert seen["base_system_prompt"] == custom, (
+            "the override must be stored on the agent for sub-agent "
+            "fan-out"
+        )
+
+    def test_empty_system_prompt_runs_as_usual(self) -> None:
+        """An empty ``system_prompt`` keeps the default SYSTEM.md prompt."""
+        from kiss.core.base import SYSTEM_PROMPT
+
+        seen: dict[str, Any] = {}
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            seen["system_prompt"] = kwargs.get("system_prompt")
+            seen["base_system_prompt"] = getattr(
+                self_agent, "_base_system_prompt", None,
+            )
+            raw = "success: true\nis_continue: false\nsummary: ok\n"
+            printer = kwargs.get("printer")
+            if printer is not None:
+                printer.print(
+                    raw, type="result", step_count=1,
+                    total_tokens=1, cost="$0.0001",
+                )
+            return raw
+
+        self._parent_class.run = stub_run
+        result = sorcar.run(
+            "say hi",
+            work_dir=self.repo,
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert result.success is True
+        composed = seen["system_prompt"]
+        assert isinstance(composed, str)
+        assert composed.startswith(SYSTEM_PROMPT)
+        assert seen["base_system_prompt"] == ""
+
+    def test_malformed_or_blank_system_prompt_uses_default(self) -> None:
+        """Non-string or whitespace-only ``systemPrompt`` wire fields
+        fall back to the default system prompt instead of crashing."""
+        from kiss.core.base import SYSTEM_PROMPT
+
+        for bad in (42, ["x"], {"a": 1}, None, "   \n\t"):
+            seen: dict[str, Any] = {}
+
+            def stub_run(self_agent: Any, **kwargs: Any) -> str:
+                seen["system_prompt"] = kwargs.get("system_prompt")
+                return "success: true\nis_continue: false\nsummary: ok\n"
+
+            self._parent_class.run = stub_run
+            self._raw_daemon_run(None, extra_cmd={"systemPrompt": bad})
+            composed = seen.get("system_prompt")
+            assert isinstance(composed, str), (
+                f"task must still run for systemPrompt={bad!r}"
+            )
+            assert composed.startswith(SYSTEM_PROMPT), (
+                f"systemPrompt={bad!r} must fall back to the default"
+            )
+
+    def test_custom_system_prompt_shown_in_early_panel(self) -> None:
+        """The early ``system_prompt`` UI event shows the override text."""
+        custom = "Custom base prompt for the early panel."
+        events: list[dict[str, Any]] = []
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            return "success: true\nis_continue: false\nsummary: ok\n"
+
+        self._parent_class.run = stub_run
+        self._raw_daemon_run(
+            None,
+            extra_cmd={"systemPrompt": custom},
+            events_out=events,
+        )
+        early = [
+            e for e in events
+            if e.get("type") == "system_prompt" and e.get("early")
+        ]
+        assert early, "an early system_prompt event must be broadcast"
+        assert early[0].get("text", "").startswith(custom), (
+            "the early panel must show the caller-supplied system prompt"
+        )
+
+    def test_custom_system_prompt_reaches_subagents(self) -> None:
+        """The fan-out engine passes the override to every sub-agent.
+
+        Covers both halves of the sub-agent wiring: the engine's
+        ``base_system_prompt`` parameter (called directly) and the
+        parent-agent forwarding of its stored ``_base_system_prompt``
+        (``SorcarAgent._run_tasks_parallel``).
+        """
+        import threading as _threading
+
+        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+        from kiss.agents.sorcar.sorcar_agent import run_tasks_parallel
+        from kiss.core.base import SYSTEM_PROMPT
+
+        custom = "You are a security-review sub-agent. Be paranoid."
+        lock = _threading.Lock()
+        composed_prompts: list[str] = []
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            with lock:
+                composed_prompts.append(str(kwargs.get("system_prompt")))
+            return "success: true\nis_continue: false\nsummary: ok\n"
+
+        self._parent_class.run = stub_run
+
+        # Half 1: the engine parameter, as forwarded by a parent.
+        results = run_tasks_parallel(
+            ["child task one", "child task two"],
+            work_dir=self.repo,
+            base_system_prompt=custom,
+        )
+        assert len(results) == 2
+        assert len(composed_prompts) == 2
+        for composed in composed_prompts:
+            assert composed.startswith(custom)
+            assert SYSTEM_PROMPT not in composed
+
+        # Half 2: a parent agent that ran with the override stores it
+        # and forwards it through its own fan-out.
+        composed_prompts.clear()
+        parent = ChatSorcarAgent("system-prompt-parent")
+        parent._base_system_prompt = custom
+        results = parent._run_tasks_parallel(["nested child task"])
+        assert len(results) == 1
+        assert len(composed_prompts) == 1
+        assert composed_prompts[0].startswith(custom)
+        assert SYSTEM_PROMPT not in composed_prompts[0]
+
+        # A parent WITHOUT an override spawns default-prompt children.
+        composed_prompts.clear()
+        plain_parent = ChatSorcarAgent("default-prompt-parent")
+        plain_parent._run_tasks_parallel(["plain child task"])
+        assert len(composed_prompts) == 1
+        assert composed_prompts[0].startswith(SYSTEM_PROMPT)
 
     def test_api_tab_state_disposed_after_run(self) -> None:
         """``run()`` explicitly closes its synthetic tab; no state leaks.

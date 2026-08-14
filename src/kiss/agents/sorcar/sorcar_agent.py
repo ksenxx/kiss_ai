@@ -949,6 +949,9 @@ class SorcarAgent(RelentlessAgent):
                 parent_agent=self,
                 chat_id=str(getattr(self, "_chat_id", "") or ""),
                 parent_tab_id=self._subagent_parent_tab_id(),
+                base_system_prompt=str(
+                    getattr(self, "_base_system_prompt", "") or ""
+                ),
             )
         finally:
             # stop() joins the monitor BEFORE the offsets bump below so a
@@ -1447,6 +1450,7 @@ class SorcarAgent(RelentlessAgent):
         current_editor_file: str | None = None,
         attachments: list[Attachment] | None = None,
         ask_user_question_callback: Callable[[str], str] | None = None,
+        base_system_prompt: str = "",
     ) -> str:
         """Run the assistant agent with coding tools and browser automation.
 
@@ -1471,6 +1475,16 @@ class SorcarAgent(RelentlessAgent):
             attachments: Optional file attachments (images, PDFs) for the initial prompt.
             ask_user_question_callback: Optional callback used by the ask_user_question
                 tool to collect a text response from the user.
+            base_system_prompt: Custom base system prompt.  When non-blank it
+                REPLACES the default ``SYSTEM.md`` system prompt
+                (:data:`kiss.core.base.SYSTEM_PROMPT`) for this agent and for
+                every sub-agent it spawns via ``run_parallel``.  The
+                *system_prompt* suffix, the active-editor-file line, and the
+                per-run operational instructions (work dir, PID,
+                ``~/.kiss/SORCAR.md``) are still appended.  Blank (default)
+                keeps the default system prompt.  Keyword-last so every
+                historical positional argument of this public method keeps
+                its position.
 
         Returns:
             YAML string with 'success' and 'summary' keys.
@@ -1478,12 +1492,18 @@ class SorcarAgent(RelentlessAgent):
         self._ask_user_question_callback = ask_user_question_callback
         self._use_web_tools = web_tools
         self._is_parallel = is_parallel
+        # Stored on self (not just a local) so the ``run_parallel``
+        # fan-out — which executes DURING ``super().run`` below — can
+        # forward the same base system prompt to every sub-agent.
+        self._base_system_prompt = (
+            base_system_prompt if base_system_prompt.strip() else ""
+        )
         self.web_use_tool = None
         tl = getattr(printer, "_thread_local", None) if printer else None
         self._stop_event = getattr(tl, "stop_event", None) if tl else None
         try:
             system_instructions = (
-                SYSTEM_PROMPT
+                (self._base_system_prompt or SYSTEM_PROMPT)
                 + (system_prompt if system_prompt else "")
             )
             prompt = prompt_template
@@ -1658,6 +1678,7 @@ def run_tasks_parallel(
     parent_agent: Any = None,
     chat_id: str = "",
     parent_tab_id: str = "",
+    base_system_prompt: str = "",
 ) -> list[str]:
     """Execute multiple SorcarAgent tasks concurrently using threads.
 
@@ -1733,6 +1754,11 @@ def run_tasks_parallel(
         parent_tab_id: Frontend tab id of the parent, forwarded in
             ``_subagent_info`` so the child's ``new_tab`` broadcast
             tells the owning webview which tab spawned it.
+        base_system_prompt: Custom base system prompt forwarded to each
+            sub-agent's ``run``, so a parent running with a caller-supplied
+            system prompt (see :meth:`SorcarAgent.run`) spawns children
+            that use the same prompt instead of the default ``SYSTEM.md``.
+            ``""`` keeps the default.
 
     Returns:
         List of YAML result strings in the **same order** as *tasks*.
@@ -1810,6 +1836,7 @@ def run_tasks_parallel(
                 is_parallel=True,
                 max_budget=max_budget,
                 model_config=model_config,
+                base_system_prompt=base_system_prompt,
             )
             return result
         except KeyboardInterrupt:
