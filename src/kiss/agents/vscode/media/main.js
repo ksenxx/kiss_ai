@@ -5061,14 +5061,15 @@
    * the viewport.  `scrollTaskRegionToTop` pins the region and re-derives
    * the static task panel, so the clicked task is what the panel names.
    *
-   * Returns true when the task's region is in the transcript — either
-   * the tab's own task (`currentTaskId`) or a spliced-in neighbour
-   * (`.adjacent-task[data-task-id]`).  Returns false when the task's
-   * events are not loaded, so the caller can fetch them instead.
+   * Returns true when the task is shown by this tab — a region in the
+   * transcript, either the tab's own task (`currentTaskId`) or a
+   * spliced-in neighbour (`.adjacent-task[data-task-id]`), or the tab's
+   * own task with no rendered region (nothing was output yet).  Returns
+   * false when the task's events are not loaded, so the caller can
+   * fetch them instead.
    */
   function scrollChatToTask(taskId) {
-    if (taskId === undefined || taskId === null || taskId === '')
-      return false;
+    if (taskId === undefined || taskId === null || taskId === '') return false;
     const idStr = String(taskId);
     const ownIdStr =
       currentTaskId === undefined || currentTaskId === null
@@ -5078,18 +5079,24 @@
     for (let i = 0; i < regions.length; i++) {
       const region = regions[i];
       const neighbour = regionNeighbour(region);
-      const regionId = neighbour
-        ? neighbour.dataset.taskId || ''
-        : ownIdStr;
+      const regionId = neighbour ? neighbour.dataset.taskId || '' : ownIdStr;
       if (regionId === idStr) {
         scrollTaskRegionToTop(region);
         return true;
       }
     }
     // The tab's own task may have no rendered region at all (nothing
-    // was output yet).  The restored panel already names it, so there
-    // is nothing to scroll to and nothing to fetch.
-    return ownIdStr !== '' && idStr === ownIdStr;
+    // was output yet), so there is nothing to scroll to and nothing to
+    // fetch.  The panel and the status row may still be lent to a
+    // spliced-in neighbour the reader scrolled into; reclaim them so
+    // the clicked task is what the panel names.
+    if (ownIdStr === '' || idStr !== ownIdStr) return false;
+    if (O.querySelector('.adjacent-task[data-task]')) {
+      taskWheelLastTarget = null;
+      setTaskText(currentTaskName);
+      showLiveMetrics();
+    }
+    return true;
   }
   // taskwheel-coverage:start
 
