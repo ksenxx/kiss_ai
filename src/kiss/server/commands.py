@@ -19,8 +19,10 @@ import subprocess
 import sys
 import threading
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.agents.sorcar.persistence import (
     _record_file_usage,
     _record_model_usage,
@@ -236,6 +238,7 @@ class _CommandsMixin:
         _tab_chat_views: dict[str, str]
         _tab_models: dict[str, str]
         _commit_msg_tabs: set[str]
+        _autocommit_tabs: set[str]
         tab_registry: TabRegistry
 
         def _broadcast_tabs_state(self) -> None: ...
@@ -297,6 +300,16 @@ class _CommandsMixin:
         def _generate_commit_message(
             self, tab_id: str = "", *, work_dir: str = "",
         ) -> None: ...
+        def _autocommit_changes(
+            self, tab_id: str = "", *, work_dir: str = "",
+        ) -> None: ...
+        def _any_non_wt_running(
+            self, repo_root: Path | None = None,
+        ) -> bool: ...
+        def _broadcast_autocommit_done(
+            self, tab_id: str, *, success: bool, committed: bool,
+            message: str, commit_message: str | None = None,
+        ) -> dict[str, Any]: ...
         def _handle_worktree_action(
             self, action: str, tab_id: str = "", *,
             internal: bool = False, already_claimed: bool = False,
@@ -991,6 +1004,77 @@ class _CommandsMixin:
             with self._state_lock:
                 self._commit_msg_tabs.discard(tab_id)
 
+    def _cmd_autocommit_action(self, cmd: dict[str, Any]) -> None:
+        """Stage-all + commit the tab's working tree in the background.
+
+        Serves the settings panel's "Git Commit" button.  Delegates to
+        :meth:`_autocommit_changes` (the same path the post-task
+        autocommit uses), which stages everything, generates an LLM
+        commit message, commits, and reports through broadcast
+        ``autocommit_progress`` / ``autocommit_done`` events that the
+        webview already renders.
+
+        The command's ``workDir`` (the tab's own folder) is forwarded so
+        the commit lands in the tab's repository rather than the
+        daemon-wide ``self.work_dir``, which may point at a different —
+        possibly non-git — folder.
+
+        At most one autocommit runs per tab: the commit-message
+        generation is a billed LLM call and ``git add -A``/``git
+        commit`` mutate the repository, so an impatient double click
+        must not race two commits.  Extra clicks are dropped while the
+        tab's autocommit is in flight.
+
+        While a non-worktree task is running in the tab's repository
+        the commit is refused: ``git add -A`` would snapshot whatever
+        half-written state the agent happens to be in, producing an
+        unintended intermediate commit that claims success while later
+        task writes stay dirty.  Worktree tasks write inside their own
+        linked worktree and never dirty the main tree, so they do not
+        block a manual commit.
+        """
+        tab_id = cmd.get("tabId", "")
+        work_dir = cmd.get("workDir", "") or self.work_dir
+        repo = GitWorktreeOps.discover_repo(Path(work_dir))
+        with self._state_lock:
+            if repo is not None and self._any_non_wt_running(repo):
+                self._broadcast_autocommit_done(
+                    tab_id, success=False, committed=False,
+                    message="A task is still running in this folder; "
+                            "wait for it to finish before committing.",
+                )
+                return
+            if tab_id in self._autocommit_tabs:
+                logger.debug(
+                    "Autocommit already in flight for tab %r; "
+                    "ignoring duplicate request", tab_id,
+                )
+                return
+            self._autocommit_tabs.add(tab_id)
+        threading.Thread(
+            target=self._run_autocommit_job,
+            args=(tab_id, work_dir),
+            daemon=True,
+        ).start()
+
+    def _run_autocommit_job(self, tab_id: str, work_dir: str) -> None:
+        """Commit the tab's working tree and re-arm the button.
+
+        Body of the daemon thread spawned by
+        :meth:`_cmd_autocommit_action`; the ``finally`` releases the
+        tab's in-flight claim so a failed commit never wedges the tab
+        out of ever committing again.
+
+        Args:
+            tab_id: Frontend tab that requested the commit.
+            work_dir: The tab's working directory.
+        """
+        try:
+            self._autocommit_changes(tab_id, work_dir=work_dir)
+        finally:
+            with self._state_lock:
+                self._autocommit_tabs.discard(tab_id)
+
     def _cmd_worktree_action(self, cmd: dict[str, Any]) -> None:
         """Execute a worktree merge/discard action."""
         action = cmd.get("action", "")
@@ -1176,6 +1260,7 @@ class _CommandsMixin:
         "getInputHistory": _cmd_get_input_history,
         "getAdjacentTask": _cmd_get_adjacent_task,
         "generateCommitMessage": _cmd_generate_commit_message,
+        "autocommitAction": _cmd_autocommit_action,
         "worktreeAction": _cmd_worktree_action,
         "setWorkDir": _cmd_set_work_dir,
         "getConfig": _cmd_get_config,

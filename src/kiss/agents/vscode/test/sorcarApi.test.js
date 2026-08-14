@@ -80,6 +80,7 @@ test('SorcarApi (extension host) emits correct wire commands', () => {
   api.recordFileUsage('/f', '/w');
   api.worktreeAction('merge', 't');
   api.generateCommitMessage('m', 't', '/w');
+  api.autocommitAction('t', '/w');
   api.closeTab('t');
   api.serverReset();
   api.forward({type: 'getHistory', query: 'x'});
@@ -89,7 +90,8 @@ test('SorcarApi (extension host) emits correct wire commands', () => {
     'run', 'stop', 'appendUserMessage', 'userAnswer', 'resumeSession',
     'setWorkDir', 'selectModel', 'getModels', 'getInputHistory',
     'getConfig', 'complete', 'recordFileUsage', 'worktreeAction',
-    'generateCommitMessage', 'closeTab', 'serverReset', 'getHistory',
+    'generateCommitMessage', 'autocommitAction', 'closeTab', 'serverReset',
+    'getHistory',
   ]);
   assert.deepStrictEqual(sent[0], {
     type: 'run', prompt: 'p', model: 'm', workDir: '/w', attachments: [],
@@ -101,5 +103,8 @@ test('SorcarApi (extension host) emits correct wire commands', () => {
   });
   assert.deepStrictEqual(sent[12], {
     type: 'worktreeAction', action: 'merge', tabId: 't',
+  });
+  assert.deepStrictEqual(sent[14], {
+    type: 'autocommitAction', tabId: 't', workDir: '/w',
   });
 });

@@ -106,6 +106,10 @@ export class SorcarApi {
     this._post({type: 'generateCommitMessage', model, tabId, workDir});
   }
 
+  autocommitAction(tabId?: string, workDir?: string): void {
+    this._post({type: 'autocommitAction', tabId, workDir});
+  }
+
   closeTab(tabId: string): void {
     this._post({type: 'closeTab', tabId});
   }

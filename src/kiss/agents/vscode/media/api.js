@@ -37,6 +37,7 @@
     'complete',
     'worktreeAction',
     'generateCommitMessage',
+    'autocommitAction',
     'auth',
     'runUpdate',
     'serverReset',

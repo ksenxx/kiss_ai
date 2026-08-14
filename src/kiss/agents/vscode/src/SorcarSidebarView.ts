@@ -910,6 +910,17 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         break;
       }
 
+      // The settings panel's "Git Commit" button: the daemon commits
+      // the tab's working tree and reports progress and the outcome
+      // through broadcast autocommit_progress/autocommit_done events
+      // that the webview renders on its own.
+      case 'autocommitAction':
+        this._getApi().autocommitAction(
+          message.tabId,
+          message.workDir || this._getWorkDir(),
+        );
+        break;
+
       case 'resolveDroppedPaths': {
         const workDir = message.workDir || this._getWorkDir();
         const paths = (message.uris || [])

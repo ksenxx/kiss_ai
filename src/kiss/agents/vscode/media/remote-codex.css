@@ -427,7 +427,8 @@ body.remote-chat .config-label textarea {
   color: var(--fg);
 }
 
-body.remote-chat .config-update-btn {
+body.remote-chat .config-update-btn,
+body.remote-chat .config-gitcommit-btn {
   border-radius: 999px;
 }
 

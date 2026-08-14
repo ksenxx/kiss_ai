@@ -10,7 +10,10 @@ directly: :meth:`_MergeFlowMixin._autocommit_changes` stages
 everything, generates a commit message and commits to the current
 branch, reporting progress through ``autocommit_progress`` /
 ``autocommit_done`` events.  The old ``autocommit_prompt`` event and
-the ``autocommitAction`` / ``mergeAction`` commands no longer exist.
+the ``mergeAction`` command no longer exist; ``autocommitAction`` is
+back as the settings panel's manual "Git Commit" command and runs
+``_autocommit_changes`` directly (see
+``test_settings_git_commit_button.py``).
 
 These tests drive :class:`VSCodeServer` with real ``git`` state — no
 mocks, no test doubles.  The LLM call for commit-message generation is
@@ -199,15 +202,29 @@ class TestAutocommitChanges(_ServerHarness):
 class TestRemovedCommandsAreUnknown(_ServerHarness):
     """The retired review commands are plain unknown commands now."""
 
-    def test_autocommit_action_is_unknown(self) -> None:
+    def test_autocommit_action_is_known_again(self) -> None:
+        """``autocommitAction`` is live again (the settings panel's
+        manual "Git Commit" button) and must not be rejected as an
+        unknown command."""
+        import time
+
         before = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
         self.server._handle_command(
-            {"type": "autocommitAction", "action": "commit", "tabId": "t1"},
+            {"type": "autocommitAction", "tabId": "t1",
+             "workDir": self.tmpdir},
         )
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            if any(e["type"] == "autocommit_done" for e in self.events):
+                break
+            time.sleep(0.05)
+        assert "error" not in self._types(), self.events
+        evt = self._event("autocommit_done")
+        assert evt["success"] is True
+        assert evt["committed"] is False
+        assert evt["message"] == "Nothing to commit."
         after = _run_git(self.tmpdir, "rev-parse", "HEAD").stdout.strip()
-        assert before == after, "a removed command must not commit anything"
-        evt = self._event("error")
-        assert "Unknown command" in evt["text"]
+        assert before == after, "a clean tree must not gain a commit"
 
     def test_merge_action_is_unknown(self) -> None:
         self.server._handle_command(

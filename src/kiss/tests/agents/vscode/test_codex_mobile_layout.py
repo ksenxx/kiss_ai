@@ -140,6 +140,7 @@ CONTROL_IDS = [
     "cfg-voice-sensitivity",
     "cfg-voice-sensitivity-value",
     "tips-btn",
+    "autocommit-btn",
     "cfg-update-btn",
     "cfg-server-reset-btn",
     "cfg-key-ANTHROPIC_API_KEY",
