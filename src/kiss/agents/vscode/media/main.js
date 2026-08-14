@@ -2847,6 +2847,18 @@
   // always the active tab: background fragments are linkified too.
   function linkifyFilePaths(root, workDir, ownerTabId) {
     if (!root || root.nodeType !== 1) return;
+    // Stamp the root with the workDir/tab it is linkified under so the
+    // links can be re-created after hljs.highlightElement() rewrites a
+    // code block inside it (see highlightBlockPreservingLinks).
+    if (root.dataset) {
+      root.dataset.linkWd =
+        typeof workDir === 'string'
+          ? workDir
+          : workDirForTab(activeTabId) || '';
+      root.dataset.linkTab = String(
+        ownerTabId === undefined ? activeTabId : ownerTabId,
+      );
+    }
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
         let p = node.parentNode;
@@ -3098,13 +3110,39 @@
     for (const group of groups.values()) api.send(group);
   }
 
+  /**
+   * Highlight *bl* without permanently destroying its file links.
+   *
+   * hljs.highlightElement() rewrites the block's innerHTML from its
+   * text, wiping the [data-path]/[data-path-candidate] spans that
+   * linkifyFilePaths() put there (deferred highlighting runs AFTER the
+   * panel was linkified).  Unwrap the spans first — so hljs sees plain
+   * text and stale spans are dropped from the pending registry — then
+   * re-linkify the block under the workDir/tab stamped on the panel
+   * root that was linkified originally.
+   */
+  function highlightBlockPreservingLinks(bl) {
+    const spans = bl.querySelectorAll(
+      '[data-path], [data-path-candidate], [data-path-missing]',
+    );
+    for (const span of spans) {
+      _pendingFileLinkSpans.delete(span);
+      span.replaceWith(span.ownerDocument.createTextNode(span.textContent));
+    }
+    hljs.highlightElement(bl);
+    const holder = bl.closest('[data-link-wd]');
+    if (holder) {
+      linkifyFilePaths(bl, holder.dataset.linkWd, holder.dataset.linkTab);
+    }
+  }
+
   function hlBlock(el) {
     if (typeof hljs === 'undefined') return;
     el.querySelectorAll('pre code').forEach(bl => {
       if (_deferHighlight) {
         bl.classList.add('needs-hl');
       } else {
-        hljs.highlightElement(bl);
+        highlightBlockPreservingLinks(bl);
       }
     });
   }
@@ -3113,7 +3151,7 @@
     if (typeof hljs === 'undefined' || !root) return;
     root.querySelectorAll('code.needs-hl').forEach(bl => {
       bl.classList.remove('needs-hl');
-      hljs.highlightElement(bl);
+      highlightBlockPreservingLinks(bl);
     });
   }
 
@@ -6897,7 +6935,7 @@
       container.querySelectorAll('code.needs-hl').forEach(bl => {
         if (!bl.closest('.collapsible.collapsed')) {
           bl.classList.remove('needs-hl');
-          hljs.highlightElement(bl);
+          highlightBlockPreservingLinks(bl);
         }
       });
     }
