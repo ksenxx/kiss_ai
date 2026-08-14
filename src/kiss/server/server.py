@@ -330,6 +330,7 @@ class VSCodeServer(
         self._tab_opened_task_ids: dict[str, str] = {}
         self._tab_models: dict[str, str] = {}
         self._commit_msg_tabs: set[str] = set()
+        self._autocommit_tabs: set[str] = set()
         persisted = _load_last_model()
         self._default_model = persisted or os.environ.get("KISS_MODEL", "") or get_default_model()
         self._state_lock = agent_state.STATE_LOCK

@@ -1247,6 +1247,13 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 {"type": "recordFileUsage", "path": "/tmp/x"},
                 {"type": "generateCommitMessage"},
                 {"type": "worktreeAction", "action": "discard", "tabId": "t"},
+                # A non-repo workDir keeps the manual Git Commit a
+                # side-effect-free "Not a git repository." refusal.
+                {
+                    "type": "autocommitAction",
+                    "tabId": "t",
+                    "workDir": "/tmp/kiss-ws-not-a-repo",
+                },
                 {"type": "saveConfig", "config": {}, "apiKeys": {}},
                 {"type": "openFile", "path": "/tmp/x"},
                 {"type": "checkPaths", "paths": ["/tmp/x"]},
