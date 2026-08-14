@@ -357,7 +357,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
                 self.notes.append(note)
                 return f"recorded:{note}"
 
-        class _Agent(BaseChannelAgent, SorcarAgent):
+        class _Agent(BaseChannelAgent):
             def __init__(self) -> None:
                 super().__init__("Backend Test Agent")
                 self._backend = _Backend()
@@ -609,8 +609,13 @@ class TestInProcessDaemonBootstrap(_ApiLaunchBase):
 
 
 class TestCarrierAgentDirectRuns(_ApiLaunchBase):
-    """Direct (non-launcher) runs of the carrier agents still record
-    their result, preserving the pre-API contract for direct callers."""
+    """``run()`` on the carrier agents routes through the daemon API.
+
+    The carriers are not executable agents: ``run()`` submits the task
+    to the kiss-web daemon via ``kiss.server.sorcar.run`` and records
+    the returned YAML, so a crashing daemon-built agent surfaces as a
+    failure envelope, never as a re-raised exception.
+    """
 
     def test_chat_agent_direct_run_records_result(self) -> None:
         self._install_stub(summary="direct chat ok")
@@ -620,24 +625,23 @@ class TestCarrierAgentDirectRuns(_ApiLaunchBase):
         )
         assert yaml.safe_load(result)["summary"] == "direct chat ok"
         assert agent.last_run_result == result
+        call = self.stub_calls[0]
+        assert call["agent"] is not agent, (
+            "carrier run() must execute on a daemon-built agent"
+        )
 
     def test_chat_agent_direct_run_records_failure(self) -> None:
         self._install_stub(raise_exc=RuntimeError("direct-boom"))
         agent = KissWebChatSorcarAgent("Direct Chat")
-        with self.assertRaises(RuntimeError):
-            agent.run(prompt_template="direct task", work_dir=self.repo)
-        parsed = yaml.safe_load(agent.last_run_result)
+        result = agent.run(
+            prompt_template="direct task", work_dir=self.repo,
+        )
+        parsed = yaml.safe_load(result)
         assert parsed["success"] is False
-        assert "direct-boom" in parsed["summary"]
-
-    def test_chat_agent_direct_run_records_interrupt(self) -> None:
-        self._install_stub(raise_exc=KeyboardInterrupt())
-        agent = KissWebChatSorcarAgent("Direct Chat")
-        with self.assertRaises(KeyboardInterrupt):
-            agent.run(prompt_template="direct task", work_dir=self.repo)
-        parsed = yaml.safe_load(agent.last_run_result)
-        assert parsed["success"] is False
-        assert "Task interrupted" in parsed["summary"]
+        assert str(parsed["summary"]).strip(), (
+            "a crashed task must not produce an empty summary"
+        )
+        assert agent.last_run_result == result
 
     def test_worktree_agent_direct_run_records_result(self) -> None:
         self._install_stub(summary="direct wt ok")
@@ -650,29 +654,31 @@ class TestCarrierAgentDirectRuns(_ApiLaunchBase):
         assert yaml.safe_load(result)["summary"] == "direct wt ok"
         assert agent.last_run_result == result
 
-    def test_worktree_agent_direct_run_records_interrupt(self) -> None:
-        self._install_stub(raise_exc=KeyboardInterrupt())
+    def test_worktree_agent_direct_run_records_failure(self) -> None:
+        self._install_stub(raise_exc=RuntimeError("wt-boom"))
         agent = KissWebWorktreeSorcarAgent("Direct WT")
-        with self.assertRaises(KeyboardInterrupt):
-            agent.run(
-                prompt_template="direct task",
-                work_dir=self.repo,
-                use_worktree=False,
-            )
-        parsed = yaml.safe_load(agent.last_run_result)
+        result = agent.run(
+            prompt_template="direct task",
+            work_dir=self.repo,
+            use_worktree=False,
+        )
+        parsed = yaml.safe_load(result)
         assert parsed["success"] is False
-        assert "Task interrupted" in parsed["summary"]
+        assert str(parsed["summary"]).strip(), (
+            "a crashed task must not produce an empty summary"
+        )
+        assert agent.last_run_result == result
 
 
 class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
-    """Direct (non-launcher) channel agent runs keep their contract."""
+    """Channel agent ``run()`` calls route through the daemon API."""
 
     def _plain_agent(self) -> Any:
         from kiss.agents.third_party_agents._channel_agent_utils import (
             BaseChannelAgent,
         )
 
-        class _Plain(BaseChannelAgent, SorcarAgent):
+        class _Plain(BaseChannelAgent):
             def _is_authenticated(self) -> bool:
                 return False
 
@@ -681,9 +687,7 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
 
         return _Plain("Plain Direct Agent")
 
-    def test_direct_run_appends_channel_prompt_to_system_prompt(
-        self,
-    ) -> None:
+    def test_direct_run_appends_channel_prompt_to_prompt(self) -> None:
         from kiss.agents.third_party_agents.slack_agent import SlackAgent
 
         self._install_stub()
@@ -696,10 +700,13 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
         )
         assert yaml.safe_load(result)["summary"] == STUB_SUMMARY
         assert agent.last_run_result == result
-        system_prompt = str(
-            self.stub_calls[0]["kwargs"].get("system_prompt", ""),
+        call = self.stub_calls[0]
+        assert call["agent"] is not agent, (
+            "channel agent run() must execute on a daemon-built agent"
         )
-        assert "Slack Authentication" in system_prompt
+        prompt = str(call["kwargs"].get("prompt_template", ""))
+        assert "direct slack" in prompt
+        assert "Slack Authentication" in prompt
 
     def test_direct_run_without_channel_prompt(self) -> None:
         self._install_stub()
@@ -708,28 +715,39 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
             prompt_template="direct plain", work_dir=self.repo,
         )
         assert yaml.safe_load(result)["summary"] == STUB_SUMMARY
-        system_prompt = str(
-            self.stub_calls[0]["kwargs"].get("system_prompt", ""),
+        prompt = str(
+            self.stub_calls[0]["kwargs"].get("prompt_template", ""),
         )
-        assert "## Slack Authentication" not in system_prompt
+        assert "direct plain" in prompt
+        assert "## Slack Authentication" not in prompt
 
-    def test_direct_run_failure_recorded_and_reraised(self) -> None:
+    def test_direct_run_failure_returns_failure_yaml(self) -> None:
         self._install_stub(raise_exc=RuntimeError("plain-boom"))
         agent = self._plain_agent()
-        with self.assertRaises(RuntimeError):
-            agent.run(prompt_template="direct plain", work_dir=self.repo)
-        parsed = yaml.safe_load(agent.last_run_result)
+        result = agent.run(
+            prompt_template="direct plain", work_dir=self.repo,
+        )
+        parsed = yaml.safe_load(result)
         assert parsed["success"] is False
-        assert "plain-boom" in parsed["summary"]
+        assert str(parsed["summary"]).strip(), (
+            "a crashed task must not produce an empty summary"
+        )
+        assert agent.last_run_result == result
 
-    def test_direct_run_interrupt_recorded_and_reraised(self) -> None:
-        self._install_stub(raise_exc=KeyboardInterrupt())
-        agent = self._plain_agent()
-        with self.assertRaises(KeyboardInterrupt):
-            agent.run(prompt_template="direct plain", work_dir=self.repo)
-        parsed = yaml.safe_load(agent.last_run_result)
-        assert parsed["success"] is False
-        assert "Task interrupted" in parsed["summary"]
+    def test_direct_run_bridges_channel_auth_tools(self) -> None:
+        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+
+        def on_run(self_agent, kwargs):
+            names = {t.__name__ for t in (kwargs.get("tools") or [])}
+            assert "check_slack_auth" in names
+            return "auth tools bridged"
+
+        self._install_stub(on_run=on_run)
+        agent = SlackAgent()
+        result = agent.run(
+            prompt_template="direct slack tools", work_dir=self.repo,
+        )
+        assert yaml.safe_load(result)["summary"] == "auth tools bridged"
 
 
 class TestKissWebPollerAgents(_ApiLaunchBase):

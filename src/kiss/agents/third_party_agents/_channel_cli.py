@@ -18,14 +18,11 @@ import argparse
 import math
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from kiss.core import config as config_module
 from kiss.core._version import __version__
 from kiss.core.models.model_info import get_default_model
-
-if TYPE_CHECKING:
-    from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 
 _DEFAULT_TASK = """
 can you find what the current weather is in San Francisco and summarize it?
@@ -235,7 +232,7 @@ def _build_run_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     return run_kwargs
 
 
-def _print_run_stats(agent: SorcarAgent, elapsed: float) -> None:
+def _print_run_stats(agent: Any, elapsed: float) -> None:
     """Print post-run statistics (time, cost, tokens)."""
     print(f"\nTime: {elapsed:.1f}s")
     print(f"Cost: ${agent.budget_used:.4f}")

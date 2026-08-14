@@ -236,7 +236,6 @@ def test_check_auth_unauthenticated(info: dict) -> None:
     mod, agent_cls, _ = _load(info)
     _reset_config(mod)
     agent = agent_cls()
-    agent.web_use_tool = None
     tools = {t.__name__: t for t in agent._get_tools()}
     result = tools[info["auth_check"]]()
     lower = result.lower()
@@ -254,7 +253,6 @@ def test_clear_auth_when_not_authenticated(info: dict) -> None:
     mod, agent_cls, _ = _load(info)
     _reset_config(mod)
     agent = agent_cls()
-    agent.web_use_tool = None
     tools = {t.__name__: t for t in agent._get_tools()}
     result = tools[info["auth_clear"]]()
     assert "cleared" in result.lower() or "removed" in result.lower(), (
