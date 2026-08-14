@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import sys
 import time
@@ -819,8 +820,7 @@ class SlackAgent(BaseChannelAgent):
     )
 
     def __init__(self, workspace: str = "default") -> None:
-        super().__init__("Slack Agent")
-        self._workspace = workspace
+        super().__init__("Slack Agent", workspace=workspace)
         self._backend = SlackChannelBackend(workspace=workspace)
         token = _load_token(workspace)
         if token:
@@ -883,14 +883,14 @@ class SlackAgent(BaseChannelAgent):
             agent._backend._client = WebClient(token=token, retry_handlers=[])
             try:
                 resp = agent._backend._client.auth_test()
-                _save_token(token, workspace=agent._workspace)
+                _save_token(token, workspace=agent.workspace)
                 return json.dumps(
                     {
                         "ok": True,
                         "message": "Slack token saved and validated.",
                         "team": resp.get("team", ""),
                         "user": resp.get("user", ""),
-                        "workspace": agent._workspace,
+                        "workspace": agent.workspace,
                     }
                 )
             except SlackApiError as e:
@@ -903,7 +903,7 @@ class SlackAgent(BaseChannelAgent):
             Returns:
                 Status message.
             """
-            _clear_token(workspace=agent._workspace)
+            _clear_token(workspace=agent.workspace)
             agent._backend._client = None
             return "Slack authentication cleared."
 
@@ -1030,6 +1030,20 @@ def main() -> None:
         make_backend=_make_backend,
         extra_usage="[--list-workspaces] [--delete-workspace WS]",
     )
+
+
+def get_tools() -> list:
+    """Return the Slack channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the token
+    persisted under ``~/.kiss`` and returns its authentication and
+    backend tools.  The workspace comes from the
+    ``KISS_CHANNEL_WORKSPACE`` environment variable (set by the
+    launcher while the task runs), defaulting to ``"default"``.
+    """
+    workspace = os.environ.get("KISS_CHANNEL_WORKSPACE", "default") or "default"
+    return SlackAgent(workspace=workspace)._get_tools()
 
 
 if __name__ == "__main__":

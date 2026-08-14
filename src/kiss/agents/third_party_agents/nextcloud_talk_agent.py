@@ -455,5 +455,16 @@ def main() -> None:
     )
 
 
+def get_tools() -> list:
+    """Return the Nextcloud Talk channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return NextcloudTalkAgent()._get_tools()
+
+
 if __name__ == "__main__":
     main()
