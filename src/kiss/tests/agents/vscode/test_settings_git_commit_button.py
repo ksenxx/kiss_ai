@@ -9,8 +9,11 @@ The button (``#autocommit-btn`` in ``media/chat.html``) posts an
 directory.  The command flows through the Sorcar API catalog
 (``kiss.server.sorcar.API``) to the backend dispatcher
 (``VSCodeServer._HANDLERS``), which stages the tab's working tree,
-generates a commit message, commits, and reports through broadcast
-``autocommit_progress`` / ``autocommit_done`` events.
+generates a commit message from the staged diff alone, commits, and
+reports through toast ``notification`` events plus a terminal
+``autocommit_done`` event marked ``manual: True`` (no
+``autocommit_progress`` transcript events — the chat stays clean;
+only a failure's reason is rendered there).
 
 Contract locked in here:
 
@@ -199,8 +202,22 @@ class TestGitCommitCommandEndToEnd(unittest.TestCase):
         progress = [
             e for e in self.events if e.get("type") == "autocommit_progress"
         ]
-        self.assertTrue(progress, "progress events must be broadcast")
-        self.assertEqual(progress[0]["tabId"], self.tab_id)
+        self.assertEqual(
+            progress, [],
+            "a manual commit must not write progress into the chat",
+        )
+        notes = [
+            e for e in self.events if e.get("type") == "notification"
+        ]
+        self.assertTrue(notes, "toast notifications must be broadcast")
+        self.assertEqual(
+            notes[0]["message"], "Auto-generating commit message…",
+        )
+        self.assertEqual(notes[0]["tabId"], self.tab_id)
+        self.assertTrue(
+            notes[-1]["message"].startswith("Committed: "), notes[-1],
+        )
+        self.assertTrue(done[0].get("manual"), done[0])
         with self.server._state_lock:
             self.assertNotIn(
                 self.tab_id, self.server._autocommit_tabs,
