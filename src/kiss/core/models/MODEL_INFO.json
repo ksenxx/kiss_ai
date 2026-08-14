@@ -3102,7 +3102,7 @@
   "openrouter/meta-llama/llama-4-maverick": {
     "context_length": 500000,
     "input_price_per_1M": 0.2,
-    "output_price_per_1M": 0.696,
+    "output_price_per_1M": 0.8,
     "fc": false,
     "emb": false,
     "gen": true
@@ -3501,8 +3501,8 @@
   },
   "openrouter/nvidia/nemotron-3.5-lightning": {
     "context_length": 500000,
-    "input_price_per_1M": 0.0,
-    "output_price_per_1M": 0.0,
+    "input_price_per_1M": 0.1,
+    "output_price_per_1M": 0.25,
     "fc": false,
     "emb": false,
     "gen": true,
@@ -5011,8 +5011,8 @@
   },
   "openrouter/z-ai/glm-5": {
     "context_length": 204800,
-    "input_price_per_1M": 0.95,
-    "output_price_per_1M": 2.55,
+    "input_price_per_1M": 0.6,
+    "output_price_per_1M": 1.92,
     "fc": true,
     "emb": false,
     "gen": true
