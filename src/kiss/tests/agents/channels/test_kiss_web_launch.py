@@ -48,8 +48,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents import _kiss_web_launcher as launcher
 from kiss.agents.third_party_agents._kiss_web_launcher import (
-    KissWebChatSorcarAgent,
-    KissWebWorktreeSorcarAgent,
+    KissWebChatAgent,
     run_agent_via_kiss_web,
 )
 from kiss.core import vscode_config
@@ -525,7 +524,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert agent.last_run_result == result
 
     def test_blank_prompt_returns_failure_yaml(self) -> None:
-        agent = KissWebChatSorcarAgent("Blank Prompt Agent")
+        agent = KissWebChatAgent("Blank Prompt Agent")
         result = run_agent_via_kiss_web(
             agent,
             "   ",
@@ -619,7 +618,7 @@ class TestCarrierAgentDirectRuns(_ApiLaunchBase):
 
     def test_chat_agent_direct_run_records_result(self) -> None:
         self._install_stub(summary="direct chat ok")
-        agent = KissWebChatSorcarAgent("Direct Chat")
+        agent = KissWebChatAgent("Direct Chat")
         result = agent.run(
             prompt_template="direct task", work_dir=self.repo,
         )
@@ -632,7 +631,7 @@ class TestCarrierAgentDirectRuns(_ApiLaunchBase):
 
     def test_chat_agent_direct_run_records_failure(self) -> None:
         self._install_stub(raise_exc=RuntimeError("direct-boom"))
-        agent = KissWebChatSorcarAgent("Direct Chat")
+        agent = KissWebChatAgent("Direct Chat")
         result = agent.run(
             prompt_template="direct task", work_dir=self.repo,
         )
@@ -643,9 +642,9 @@ class TestCarrierAgentDirectRuns(_ApiLaunchBase):
         )
         assert agent.last_run_result == result
 
-    def test_worktree_agent_direct_run_records_result(self) -> None:
+    def test_direct_run_with_use_worktree_false_records_result(self) -> None:
         self._install_stub(summary="direct wt ok")
-        agent = KissWebWorktreeSorcarAgent("Direct WT")
+        agent = KissWebChatAgent("Direct No-WT")
         result = agent.run(
             prompt_template="direct task",
             work_dir=self.repo,
@@ -654,9 +653,9 @@ class TestCarrierAgentDirectRuns(_ApiLaunchBase):
         assert yaml.safe_load(result)["summary"] == "direct wt ok"
         assert agent.last_run_result == result
 
-    def test_worktree_agent_direct_run_records_failure(self) -> None:
+    def test_direct_run_with_use_worktree_false_records_failure(self) -> None:
         self._install_stub(raise_exc=RuntimeError("wt-boom"))
-        agent = KissWebWorktreeSorcarAgent("Direct WT")
+        agent = KissWebChatAgent("Direct No-WT")
         result = agent.run(
             prompt_template="direct task",
             work_dir=self.repo,
@@ -755,7 +754,7 @@ class TestKissWebPollerAgents(_ApiLaunchBase):
 
     def test_chat_agent_gets_daemon_chat_id(self) -> None:
         self._install_stub()
-        agent = KissWebChatSorcarAgent("Test Poller")
+        agent = KissWebChatAgent("Test Poller")
         agent.new_chat()
         result = run_agent_via_kiss_web(
             agent,
@@ -772,7 +771,7 @@ class TestKissWebPollerAgents(_ApiLaunchBase):
 
     def test_chat_agent_resume_chat_by_id(self) -> None:
         self._install_stub()
-        agent = KissWebChatSorcarAgent("Test Poller")
+        agent = KissWebChatAgent("Test Poller")
         agent.new_chat()
         run_agent_via_kiss_web(
             agent,
@@ -790,7 +789,7 @@ class TestKissWebPollerAgents(_ApiLaunchBase):
             return "resumed fine"
 
         self._install_stub(on_run=on_run)
-        resumed = KissWebChatSorcarAgent("Test Poller")
+        resumed = KissWebChatAgent("Test Poller")
         resumed.resume_chat_by_id(first_chat)
         run_agent_via_kiss_web(
             resumed,
@@ -803,9 +802,9 @@ class TestKissWebPollerAgents(_ApiLaunchBase):
             "the resumed run must see the prior task as chat context"
         )
 
-    def test_worktree_agent_records_result(self) -> None:
+    def test_carrier_records_result_with_new_chat(self) -> None:
         self._install_stub()
-        agent = KissWebWorktreeSorcarAgent("Test WT Poller")
+        agent = KissWebChatAgent("Test Poller 2")
         agent.new_chat()
         result = run_agent_via_kiss_web(
             agent,

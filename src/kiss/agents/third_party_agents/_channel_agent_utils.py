@@ -23,12 +23,6 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_KISS_DIR = Path.home() / ".kiss"
 
-
-def _kiss_home() -> Path:
-    """Return the KISS data directory, respecting the ``KISS_HOME`` env var."""
-    return kiss_home()
-
-
 _NON_TOOL_METHODS = frozenset(
     {
         "connect",
@@ -37,7 +31,6 @@ _NON_TOOL_METHODS = frozenset(
         "join_channel",
         "poll_messages",
         "send_message",
-        "wait_for_reply",
         "is_from_bot",
         "strip_bot_mention",
         "disconnect",
@@ -217,7 +210,7 @@ class ChannelConfig:
         parallel test runs and protecting the user's real configs).
         """
         if self._kiss_relative_dir is not None:
-            return _kiss_home() / self._kiss_relative_dir / "config.json"
+            return kiss_home() / self._kiss_relative_dir / "config.json"
         return self._channel_dir / "config.json"
 
     def load(self) -> dict[str, str] | None:
@@ -368,24 +361,6 @@ class BaseChannelAgent:
         )
 
 
-def _make_runner_channel_agent(agent_name: str) -> BaseChannelAgent:
-    """Create the minimal channel agent for a :class:`ChannelRunner` task.
-
-    The agent is a plain :class:`BaseChannelAgent` carrier with no
-    channel-specific auth tools or backend of its own — the runner
-    supplies backend tools plus the per-message ``reply`` tool through
-    the launcher's ``tools`` parameter, and the daemon-built agent
-    supplies the standard tools.
-
-    Args:
-        agent_name: Human-readable agent name.
-
-    Returns:
-        A fresh :class:`BaseChannelAgent` instance.
-    """
-    return BaseChannelAgent(agent_name)
-
-
 class ChannelRunner:
     """One-shot channel message runner.
 
@@ -411,7 +386,7 @@ class ChannelRunner:
         self._extra_tools = extra_tools or []
         self._model_name = model_name
         self._max_budget = max_budget
-        self._work_dir = work_dir or str(_kiss_home() / "channel_work")
+        self._work_dir = work_dir or str(kiss_home() / "channel_work")
         self._allow_users = set(allow_users) if allow_users else None
         self._poll_thread_fn = getattr(backend, "poll_thread_messages", None)
 
@@ -503,7 +478,11 @@ class ChannelRunner:
         thread_ts = msg.get("thread_ts", msg.get("ts", ""))
         session_key = f"{channel_id}:{msg.get('ts', '')}"
 
-        agent = _make_runner_channel_agent(self._agent_name)
+        # A plain carrier with no auth tools or backend of its own: the
+        # runner supplies backend tools plus the per-message ``reply``
+        # tool below, and the daemon-built agent supplies the standard
+        # tools.
+        agent = BaseChannelAgent(self._agent_name)
 
         tools = list(self._extra_tools)
         replied = threading.Event()
@@ -661,7 +640,7 @@ def channel_main(
             extra_tools=backend.get_tool_methods(),
             model_name=args.model_name,
             max_budget=args.max_budget,
-            work_dir=args.work_dir or str(_kiss_home() / "channel_work"),
+            work_dir=args.work_dir,
             allow_users=allow_users,
         )
         print(f"Checking {channel_name} channel for pending messages...")
@@ -675,22 +654,14 @@ def channel_main(
     else:
         agent = agent_cls()
     run_kwargs = _build_run_kwargs(args)
+    prompt = run_kwargs.pop("prompt_template", "")
 
     from kiss.agents.third_party_agents._kiss_web_launcher import (
         run_agent_via_kiss_web,
     )
 
     start_time = _time.time()
-    run_agent_via_kiss_web(
-        agent,
-        run_kwargs.get("prompt_template", ""),
-        model_name=run_kwargs.get("model_name") or "",
-        work_dir=run_kwargs.get("work_dir") or "",
-        max_budget=run_kwargs.get("max_budget"),
-        model_config=run_kwargs.get("model_config"),
-        web_tools=run_kwargs.get("web_tools"),
-        is_parallel=bool(run_kwargs.get("is_parallel", True)),
-    )
+    run_agent_via_kiss_web(agent, prompt, **run_kwargs)
     elapsed = _time.time() - start_time
 
     _print_run_stats(agent, elapsed)

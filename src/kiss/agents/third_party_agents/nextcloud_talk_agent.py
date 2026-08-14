@@ -23,7 +23,6 @@ from typing import Any
 
 import requests
 
-from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -166,22 +165,6 @@ class NextcloudTalkChannelBackend(ToolMethodBackend):
         statuscode = result.get("ocs", {}).get("meta", {}).get("statuscode", 0)
         if statuscode not in (200, 201):
             raise RuntimeError(f"Nextcloud Talk send failed: {result}")
-
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Poll for a reply from a specific user."""
-        return wait_for_matching_message(
-            poll=lambda: self.poll_messages(channel_id, "")[0],
-            matches=lambda msg: msg.get("user") == user_id,
-            extract_text=lambda msg: str(msg.get("text", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=3.0,
-        )
 
     def is_from_bot(self, msg: dict[str, Any]) -> bool:
         """Check if message is from the bot."""

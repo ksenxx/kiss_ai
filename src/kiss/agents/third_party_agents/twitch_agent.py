@@ -114,16 +114,6 @@ class TwitchChannelBackend(ToolMethodBackend):
         if result.get("ok") is False:  # pragma: no branch
             raise RuntimeError(f"Twitch send_message failed: {result}")
 
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Reply waiting is not currently supported for Twitch."""
-        return None
-
     def get_stream_info(self, broadcaster_login: str) -> str:
         """Get live stream information for a Twitch channel.
 

@@ -20,16 +20,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.third_party_agents._backend_utils import (
-    is_headless_environment,
-    wait_for_matching_message,
-)
+from kiss.agents.third_party_agents._backend_utils import is_headless_environment
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
-    _kiss_home,
     channel_main,
 )
+from kiss.core.config import kiss_home
 
 _SCOPES = [
     "https://www.googleapis.com/auth/chat.messages",
@@ -45,7 +42,7 @@ def _gchat_dir() -> Path:
         Path to ``$KISS_HOME/third_party_agents/googlechat`` (defaults to
         ``~/.kiss/third_party_agents/googlechat``).
     """
-    return _kiss_home() / "third_party_agents" / "googlechat"
+    return kiss_home() / "third_party_agents" / "googlechat"
 
 
 def _token_path() -> Path:
@@ -219,30 +216,6 @@ class GoogleChatChannelBackend(ToolMethodBackend):
         if thread_ts:  # pragma: no branch
             body["thread"] = {"name": thread_ts}
         self._service.spaces().messages().create(parent=channel_id, body=body).execute()
-
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Poll for a reply from a specific user."""
-        oldest = ""
-
-        def poll() -> list[dict[str, Any]]:
-            nonlocal oldest
-            msgs, oldest = self.poll_messages(channel_id, oldest)
-            return msgs
-
-        return wait_for_matching_message(
-            poll=poll,
-            matches=lambda msg: msg.get("user") == user_id,
-            extract_text=lambda msg: str(msg.get("text", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=3.0,
-        )
-
 
     def list_spaces(self, page_size: int = 20, page_token: str = "") -> str:
         """List Google Chat spaces (rooms and DMs).
