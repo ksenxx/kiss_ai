@@ -596,6 +596,7 @@ class _TaskRunnerMixin:
         prompt: str,
         active_file: str | None,
         tab_id: str,
+        system_prompt_override: str = "",
     ) -> None:
         """Broadcast optimistic ``system_prompt``/``prompt`` panels at submit.
 
@@ -607,18 +608,26 @@ class _TaskRunnerMixin:
         the frontend replaces them in place once the authoritative
         events from ``KISSAgent.run`` arrive.  The system-prompt text
         mirrors ``SorcarAgent.run``'s ``system_instructions``
-        (``SYSTEM_PROMPT`` plus the active-editor-file line); the later
-        authoritative event additionally carries the per-run
+        (``SYSTEM_PROMPT`` — or the run's caller-supplied override —
+        plus the active-editor-file line); the later authoritative
+        event additionally carries the per-run
         ``IMPORTANT_INSTRUCTIONS`` suffix.
 
         Args:
             prompt: The raw user prompt as submitted.
             active_file: Path of the file open in the editor, if any.
             tab_id: Frontend tab id that owns the run.
+            system_prompt_override: The run's caller-supplied custom
+                base system prompt (the wire ``systemPrompt`` field);
+                shown instead of ``SYSTEM_PROMPT`` when non-blank.
         """
         from kiss.core.base import SYSTEM_PROMPT
 
-        system_text = SYSTEM_PROMPT
+        system_text = (
+            system_prompt_override
+            if system_prompt_override.strip()
+            else SYSTEM_PROMPT
+        )
         if active_file:
             system_text += f"\n\n- The path of the file open in the editor is {active_file}"
         for etype, text in (
@@ -726,6 +735,14 @@ class _TaskRunnerMixin:
         prompt = cmd.get("prompt", "")
         work_dir = cmd.get("workDir") or self.work_dir
         active_file = cmd.get("activeFile")
+        # Caller-supplied custom base system prompt (wire field
+        # ``systemPrompt``).  Non-blank replaces the default SYSTEM.md
+        # prompt for the agent and its sub-agents; anything else
+        # (absent, None, non-string, blank) runs as usual.
+        _raw_system_prompt = cmd.get("systemPrompt")
+        system_prompt_override = (
+            _raw_system_prompt if isinstance(_raw_system_prompt, str) else ""
+        )
         attachments = decode_attachments(cmd.get("attachments", []))
         start_ms = int(cmd.get("_start_ms") or 0)
 
@@ -778,7 +795,9 @@ class _TaskRunnerMixin:
             use_worktree = state.use_worktree
         self.printer._thread_local.stop_event = stop_event
 
-        self._broadcast_early_prompts(prompt, active_file, tab_id)
+        self._broadcast_early_prompts(
+            prompt, active_file, tab_id, system_prompt_override,
+        )
 
         if not use_worktree:
             repo = GitWorktreeOps.discover_repo(Path(work_dir))
@@ -940,6 +959,7 @@ class _TaskRunnerMixin:
                             else _model_config
                         ),
                         tools=client_tools,
+                        base_system_prompt=system_prompt_override,
                         _skip_persistence=True,
                         _on_task_id_allocated=on_task_id_allocated,
                     )

@@ -1201,6 +1201,7 @@ def run(
     work_dir: str = "",
     model: str = "",
     chat_id: str = "",
+    system_prompt: str = "",
     tools: str | Path | None = None,
     use_worktree: bool = True,
     auto_commit: bool = True,
@@ -1227,6 +1228,15 @@ def run(
             this task in the same chat — the agent then sees the prior
             tasks and results of that chat as context.  A new chat is
             started when empty.
+        system_prompt: Optional custom system prompt for the run.
+            When non-empty it is used as the system prompt of the
+            agent AND of every sub-agent it spawns (``run_parallel``),
+            replacing the default system prompt shipped in
+            ``src/kiss/SYSTEM.md``.  The daemon still appends its
+            per-run operational instructions (work directory, process
+            id, ``~/.kiss/SORCAR.md``) so the agent's tool contract
+            keeps working.  Empty (default) runs with the default
+            system prompt as usual.
         tools: Optional path to a Python file supplying extra tools
             for the agent.  The daemon imports the file and registers
             every top-level public function that is suitable as a tool
@@ -1304,6 +1314,7 @@ def run(
             "chatId": chat_id,
             "workDir": work_dir,
             "model": model,
+            "systemPrompt": system_prompt,
             "toolsFile": tools_file,
             "useWorktree": use_worktree,
             "autoCommit": auto_commit,
