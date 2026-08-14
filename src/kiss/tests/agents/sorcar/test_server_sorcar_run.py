@@ -392,15 +392,15 @@ class SorcarRunApiTest(unittest.TestCase):
         return str(path)
 
     def test_tools_file_functions_become_agent_tools(self) -> None:
-        """Top-level public functions of the tools file become agent tools.
+        """The tools returned by ``get_tools()`` become agent tools.
 
         The daemon must import the client-supplied Python file itself
-        (no serialization by the client) and hand every top-level
-        public function to the agent AS-IS: original object identity
-        semantics (docstring, exact signature including keyword-only
-        markers and the return annotation), native return values (an
-        ``int`` stays an ``int`` — no string round trip), and
-        execution in the daemon's task thread.
+        (no serialization by the client), call its ``get_tools()``,
+        and hand every returned function to the agent AS-IS: original
+        object identity semantics (docstring, exact signature
+        including keyword-only markers and the return annotation),
+        native return values (an ``int`` stays an ``int`` — no string
+        round trip), and execution in the daemon's task thread.
         """
         tools_path = self._write_tools_file(
             "my_tools.py",
@@ -408,9 +408,6 @@ class SorcarRunApiTest(unittest.TestCase):
             """Example tools module."""
 
             import threading
-            from os.path import join  # imported: must NOT become a tool
-
-            GREETING = "hello"  # not a function
 
 
             def get_temperature(city: str, unit: str = "C", *, note: str = "") -> str:
@@ -439,12 +436,9 @@ class SorcarRunApiTest(unittest.TestCase):
                 return threading.current_thread().name
 
 
-            def _private_helper(x: str) -> str:
-                return x
-
-
-            class NotATool:
-                """Classes are not tools."""
+            def get_tools():
+                """Return the tools the agent may call."""
+                return [get_temperature, magic_number, which_thread]
             ''',
         )
         seen: dict[str, Any] = {}
@@ -495,12 +489,18 @@ class SorcarRunApiTest(unittest.TestCase):
         assert seen["r3"] == 40
         assert seen["thread"] != threading.current_thread().name
 
-    def test_tools_file_skips_unsuitable_functions(self) -> None:
-        """Functions unsuitable as tools are skipped, the rest are kept."""
+    def test_get_tools_selects_exactly_the_returned_functions(self) -> None:
+        """``get_tools()`` alone decides which functions become tools.
+
+        The daemon must not scan the module: functions the file
+        defines but ``get_tools()`` does not return (helpers, private
+        functions) never become tools, and the returned list's order
+        is preserved.
+        """
         tools_path = self._write_tools_file(
-            "mixed_tools.py",
+            "selected_tools.py",
             '''
-            """Mixed suitability tools module."""
+            """Selection tools module."""
 
 
             def good(x: str = "a") -> str:
@@ -512,29 +512,23 @@ class SorcarRunApiTest(unittest.TestCase):
                 return x
 
 
-            def star_args(*args: str) -> str:
-                """Unsupported: *args."""
-                return ""
+            def also_good(y: int) -> int:
+                """Identity.
+
+                Args:
+                    y: Value to return.
+                """
+                return y
 
 
-            def kw_args(**kwargs: str) -> str:
-                """Unsupported: **kwargs."""
-                return ""
-
-
-            def pos_only(x: str, /) -> str:
-                """Unsupported: positional-only parameter."""
+            def helper_not_a_tool(x: str) -> str:
+                """Defined at top level but NOT returned by get_tools."""
                 return x
 
 
-            async def async_tool(x: str) -> str:
-                """Unsupported: coroutine function."""
-                return x
-
-
-            def gen_tool(x: str):
-                """Unsupported: generator function."""
-                yield x
+            def get_tools():
+                """Return only the selected tools, in this order."""
+                return [also_good, good]
             ''',
         )
         seen: dict[str, Any] = {}
@@ -552,14 +546,14 @@ class SorcarRunApiTest(unittest.TestCase):
 
         self._parent_class.run = stub_run
         result = sorcar.run(
-            "use the suitable tools",
+            "use the selected tools",
             work_dir=self.repo,
             tools=tools_path,
             sock_path=self.sock_path,
             timeout=60,
         )
         assert result.success is True
-        assert seen["names"] == ["good"]
+        assert seen["names"] == ["also_good", "good"]
 
     def test_tools_file_relative_path_and_pathlib(self) -> None:
         """A relative ``Path`` is resolved by the CLIENT before sending.
@@ -580,6 +574,11 @@ class SorcarRunApiTest(unittest.TestCase):
                     name: Who to greet.
                 """
                 return f"hi {name}"
+
+
+            def get_tools():
+                """Return the tools the agent may call."""
+                return [greet]
             ''',
         )
         seen: dict[str, Any] = {}
@@ -664,6 +663,11 @@ class SorcarRunApiTest(unittest.TestCase):
             def version() -> str:
                 """Report the tools file version."""
                 return "ONE"
+
+
+            def get_tools():
+                """Return the tools the agent may call."""
+                return [version]
             ''',
         )
         seen: dict[str, Any] = {}
@@ -676,6 +680,11 @@ class SorcarRunApiTest(unittest.TestCase):
             def version() -> str:
                 """Report the tools file version."""
                 return "TWO"
+
+
+            def get_tools():
+                """Return the tools the agent may call."""
+                return [version]
             ''',
         )
         self._run_with_tools_file(tools_path, seen)
@@ -683,67 +692,77 @@ class SorcarRunApiTest(unittest.TestCase):
         assert v2() == "TWO"
         assert not (Path(self.tmpdir) / "__pycache__").exists()
 
-    def test_lambdas_aliases_and_broken_functions_are_skipped(self) -> None:
-        """Only genuine ``def`` bindings with sane metadata become tools.
+    def test_missing_or_misbehaving_get_tools_fails_task(self) -> None:
+        """A tools file with a bad ``get_tools()`` fails the task loudly.
 
-        A lambda binding (``__name__ == "<lambda>"`` would break the
-        tool schema), an alias of another top-level function (would
-        register the same tool twice and crash ``_add_functions``), a
-        re-exported nested function, and functions whose signature
-        introspection raises (corrupted ``__signature__``,
-        self-referential ``__wrapped__``) must all be skipped — while
-        the well-formed functions are kept and callable.
+        The contract requires a top-level callable ``get_tools()``
+        returning a list/tuple of callables.  A module that lacks it,
+        binds it to a non-callable, raises inside it, or returns a
+        non-sequence or non-callable entries must stop the task with a
+        ``ToolsFileError`` diagnostic — never invoke the agent.
         """
-        tools_path = self._write_tools_file(
-            "tricky_tools.py",
+        no_get_tools = self._write_tools_file(
+            "no_get_tools.py",
             '''
-            """Tricky bindings tools module."""
-
-            shout = lambda x: x.upper()  # noqa: E731
-
-
-            def good(x: str) -> str:
-                """Echo.
+            def orphan(x: str) -> str:
+                """Never exposed.
 
                 Args:
                     x: Value to echo.
                 """
                 return x
-
-
-            alias = good
-
-
-            def _outer():
-                def nested(x: str) -> str:
-                    return x
-                return nested
-
-
-            exported = _outer()
-
-
-            def bad_signature(x: str) -> str:
-                """Corrupted ``__signature__``."""
-                return x
-
-
-            bad_signature.__signature__ = "not a signature"
-
-
-            def wrapper_loop(x: str) -> str:
-                """Self-referential ``__wrapped__``."""
-                return x
-
-
-            wrapper_loop.__wrapped__ = wrapper_loop
+            ''',
+        )
+        not_callable = self._write_tools_file(
+            "not_callable_get_tools.py",
+            "get_tools = 42\n",
+        )
+        raising_get_tools = self._write_tools_file(
+            "raising_get_tools.py",
+            '''
+            def get_tools():
+                """Raise instead of returning tools."""
+                raise RuntimeError("boom in get_tools")
+            ''',
+        )
+        bad_return = self._write_tools_file(
+            "bad_return_get_tools.py",
+            '''
+            def get_tools():
+                """Return a non-sequence."""
+                return "not a list"
+            ''',
+        )
+        non_callable_entry = self._write_tools_file(
+            "non_callable_entry_get_tools.py",
+            '''
+            def get_tools():
+                """Return a list with a non-callable entry."""
+                return [42]
             ''',
         )
         seen: dict[str, Any] = {}
-        self._run_with_tools_file(tools_path, seen)
-        assert seen["tool_lists"][-1] == ["good"]
-        (good,) = seen["tools"]
-        assert good(x="hi") == "hi"
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            seen.setdefault("tool_lists", []).append(
+                [t.__name__ for t in kwargs.get("tools") or []],
+            )
+            raise AssertionError("agent must not run with a broken tools file")
+
+        self._parent_class.run = stub_run
+        for tools_file, diagnostic in (
+            (no_get_tools, "must define a top-level get_tools()"),
+            (not_callable, "must define a top-level get_tools()"),
+            (raising_get_tools, "RuntimeError: boom in get_tools"),
+            (bad_return, "must return a list or tuple"),
+            (non_callable_entry, "non-callable entry"),
+        ):
+            result_event = self._raw_daemon_run(tools_file)
+            assert result_event is not None, f"no result for {tools_file!r}"
+            assert result_event["success"] is False, f"for {tools_file!r}"
+            assert "ToolsFileError" in result_event["text"], f"for {tools_file!r}"
+            assert diagnostic in result_event["text"], f"for {tools_file!r}"
+        assert "tool_lists" not in seen
 
     def test_sys_exit_in_tools_file_fails_task_with_diagnostic(self) -> None:
         """A tools file calling ``sys.exit()`` fails the task loudly.

@@ -11,8 +11,8 @@ Every agent in ``kiss/agents/third_party_agents/`` must launch through
 synchronous client API :func:`kiss.server.sorcar.run`: the launcher
 connects to a daemon's Unix-domain socket, sends the documented ``run``
 command, and supplies the agent's live channel tools through the
-API's ``tools=`` *file path* contract (a generated tools file whose
-top-level functions bridge back to the live callables — see
+API's ``tools=`` *file path* contract (a tiny generated tools file
+whose ``get_tools()`` returns the live callables themselves — see
 ``kiss.agents.third_party_agents._api_tools_bridge``).  The task is
 executed by a daemon-built chat agent, NOT by the passed instance.
 
@@ -288,7 +288,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert "Slack Authentication" in prompt
         assert "start_slack_browser_auth" in prompt
 
-    def test_auth_and_extra_tools_bridged_via_tools_file(self) -> None:
+    def test_auth_and_extra_tools_passed_live(self) -> None:
         from kiss.agents.third_party_agents.slack_agent import SlackAgent
 
         live_calls: list[str] = []
@@ -312,13 +312,12 @@ class TestLaunchViaApi(_ApiLaunchBase):
                 "start_slack_browser_auth",
                 "mytool",
             ):
-                assert expected in tools, f"missing bridged tool {expected}"
-            wrapper = tools["mytool"]
-            assert wrapper is not mytool
-            assert wrapper.__module__.startswith("_kiss_tools_file_")
-            assert "Echo *text* repeated" in (wrapper.__doc__ or "")
-            assert wrapper(text="hi") == "hi"
-            assert wrapper("bye", repeat=2) == "byebye"
+                assert expected in tools, f"missing live tool {expected}"
+            live = tools["mytool"]
+            assert live is mytool, "the live callable must arrive AS-IS"
+            assert "Echo *text* repeated" in (live.__doc__ or "")
+            assert live(text="hi") == "hi"
+            assert live("bye", repeat=2) == "byebye"
             auth_out = tools["check_slack_auth"]()
             assert "Not authenticated with Slack" in auth_out
             return "tools bridged ok"

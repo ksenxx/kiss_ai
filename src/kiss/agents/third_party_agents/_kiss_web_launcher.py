@@ -17,10 +17,10 @@ like a task started from the chat UI.
 The agent's live channel tools (authentication closures, authenticated
 backend bound methods, per-message ``reply`` closures) are supplied
 through the API's ``tools=`` *file path* contract via
-:mod:`._api_tools_bridge`: the launcher generates a real tools file
-whose top-level wrappers dispatch back to the live callables, which
-works because the daemon the launcher talks to runs in this same
-process (see :func:`_ensure_api_server`).
+:mod:`._api_tools_bridge`: the launcher generates a tiny real tools
+file whose ``get_tools()`` returns the live callables themselves,
+which works because the daemon the launcher talks to runs in this
+same process (see :func:`_ensure_api_server`).
 """
 
 from __future__ import annotations
