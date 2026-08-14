@@ -73,6 +73,7 @@ export type FromWebviewMessage =
   | {type: 'closeTab'; tabId: string}
   | {type: 'getInputHistory'}
   | {type: 'worktreeAction'; action: 'merge' | 'discard'; tabId?: string}
+  | {type: 'autocommitAction'; tabId?: string; workDir?: string}
   | {type: 'resolveDroppedPaths'; uris: string[]; workDir?: string}
   | {type: 'webviewFocusChanged'; focused: boolean}
   | {type: 'activeTabChanged'; tabId: string}
@@ -342,6 +343,7 @@ export interface AgentCommand {
     | 'closeTab'
     | 'ready'
     | 'generateCommitMessage'
+    | 'autocommitAction'
     | 'getInputHistory'
     | 'worktreeAction'
     | 'getAdjacentTask'

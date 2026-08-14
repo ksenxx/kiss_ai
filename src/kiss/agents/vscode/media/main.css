@@ -327,7 +327,8 @@ body {
   margin-bottom: 12px;
 }
 
-.config-update-btn {
+.config-update-btn,
+.config-gitcommit-btn {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
@@ -342,10 +343,18 @@ body {
   font-family: inherit;
   cursor: pointer;
 }
-.config-update-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--fg) 10%, transparent); border-color: color-mix(in srgb, var(--fg) 24%, transparent); }
-.config-update-btn:focus-visible { outline: 1px solid var(--accent); }
-.config-update-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.config-update-btn svg { flex-shrink: 0; }
+
+.config-update-btn:hover:not(:disabled),
+.config-gitcommit-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--fg) 10%, transparent); border-color: color-mix(in srgb, var(--fg) 24%, transparent); }
+
+.config-update-btn:focus-visible,
+.config-gitcommit-btn:focus-visible { outline: 1px solid var(--accent); }
+
+.config-update-btn:disabled,
+.config-gitcommit-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.config-update-btn svg,
+.config-gitcommit-btn svg { flex-shrink: 0; }
 
 .config-update-btn.has-update {
   border-color: color-mix(in srgb, #2ea043 60%, var(--border));

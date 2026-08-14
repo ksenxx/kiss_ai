@@ -2177,6 +2177,7 @@
   const inputContainer = document.getElementById('input-container');
   const inputClearBtn = document.getElementById('input-clear-btn');
   const worktreeToggleBtn = document.getElementById('cfg-use-worktree');
+  const autocommitBtn = document.getElementById('autocommit-btn');
   const updateBtn = document.getElementById('cfg-update-btn');
   const serverResetBtn = document.getElementById('cfg-server-reset-btn');
   const serverResetConfirmModal = document.getElementById(
@@ -6109,6 +6110,10 @@
         handleWorktreeResult(ev);
         break;
       case 'autocommit_done':
+        // Terminal for any manual Git Commit in flight (the daemon
+        // broadcasts one per request, including refusals), so the
+        // settings button re-arms no matter which tab was targeted.
+        setAutocommitInFlight(false);
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgAdTab = getTab(ev.tabId);
           if (bgAdTab) {
@@ -7031,6 +7036,38 @@
     focusInputWithRetry();
   }
 
+  // The settings panel's Git Commit button is disabled while its
+  // manual autocommit is in flight (the daemon silently drops
+  // duplicate requests, so a still-enabled button would look dead).
+  // The timer is a failsafe: if the daemon dies mid-commit and the
+  // terminal autocommit_done never arrives, the button re-arms on its
+  // own instead of staying wedged forever.
+  let autocommitRearmTimer = null;
+
+  function setAutocommitInFlight(pending) {
+    if (autocommitRearmTimer) {
+      clearTimeout(autocommitRearmTimer);
+      autocommitRearmTimer = null;
+    }
+    if (autocommitBtn) autocommitBtn.disabled = pending;
+    if (pending) {
+      autocommitRearmTimer = setTimeout(() => {
+        setAutocommitInFlight(false);
+      }, 120000);
+    }
+  }
+
+  // Content tabs (opened HTML files, subagent viewers…) have no
+  // transcript of their own — a result addressed to one would render
+  // into the hidden shared output and be destroyed on the next tab
+  // switch.  Commit on behalf of the chat tab the host currently
+  // considers active instead.
+  function autocommitTargetTabId() {
+    const active = getTab(activeTabId);
+    if (active && !active.isContentTab) return activeTabId;
+    return reportedChatTabId || activeTabId;
+  }
+
   // The `ready` announcement: hands the daemon this client's legacy
   // locally-persisted tabs exactly once (adopted only into an empty
   // registry) — or, on a re-`ready` after a daemon restart, the tabs
@@ -7250,6 +7287,24 @@
           _flushPw();
           settingsPwInp.blur();
         }
+      });
+    }
+
+    if (autocommitBtn) {
+      autocommitBtn.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (autocommitBtn.disabled) return;
+        const commitTabId = autocommitTargetTabId();
+        setAutocommitInFlight(true);
+        // Close the drawer so the transcript's autocommit_progress /
+        // autocommit_done lines are visible instead of hidden behind
+        // the opaque settings sheet.
+        closeSettingsPanel();
+        api.autocommitAction({
+          tabId: commitTabId,
+          workDir: workDirForTab(commitTabId),
+        });
       });
     }
 
