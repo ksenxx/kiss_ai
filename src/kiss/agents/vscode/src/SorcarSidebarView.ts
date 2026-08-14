@@ -420,7 +420,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           }
         }
       }
-      if (msg.type === 'autocommit_done' && this._isOwnTab(msg.tabId)) {
+      if (
+        msg.type === 'autocommit_done' &&
+        this._isOwnTab(msg.tabId) &&
+        // A manual Git Commit already broadcasts its own toast
+        // notification from the daemon; toasting here too would
+        // show the same outcome twice.
+        !msg.manual
+      ) {
         if (msg.success) {
           showInformationNotification(msg.message || 'Auto-commit completed.');
         } else {

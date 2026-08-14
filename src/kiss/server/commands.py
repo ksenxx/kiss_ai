@@ -302,6 +302,7 @@ class _CommandsMixin:
         ) -> None: ...
         def _autocommit_changes(
             self, tab_id: str = "", *, work_dir: str = "",
+            manual: bool = False,
         ) -> None: ...
         def _any_non_wt_running(
             self, repo_root: Path | None = None,
@@ -309,6 +310,7 @@ class _CommandsMixin:
         def _broadcast_autocommit_done(
             self, tab_id: str, *, success: bool, committed: bool,
             message: str, commit_message: str | None = None,
+            manual: bool = False,
         ) -> dict[str, Any]: ...
         def _handle_worktree_action(
             self, action: str, tab_id: str = "", *,
@@ -1008,11 +1010,14 @@ class _CommandsMixin:
         """Stage-all + commit the tab's working tree in the background.
 
         Serves the settings panel's "Git Commit" button.  Delegates to
-        :meth:`_autocommit_changes` (the same path the post-task
-        autocommit uses), which stages everything, generates an LLM
-        commit message, commits, and reports through broadcast
-        ``autocommit_progress`` / ``autocommit_done`` events that the
-        webview already renders.
+        :meth:`_autocommit_changes` with ``manual=True`` (the same
+        path the post-task autocommit uses), which stages everything,
+        generates an LLM commit message from the staged diff alone
+        (no ``User prompt:`` / ``Result:`` sections), commits, and
+        reports through toast ``notification`` events — the chat
+        transcript stays clean except for a failure, whose reason is
+        still rendered there via the non-silent ``autocommit_done``
+        event.
 
         The command's ``workDir`` (the tab's own folder) is forwarded so
         the commit lands in the tab's repository rather than the
@@ -1042,6 +1047,7 @@ class _CommandsMixin:
                     tab_id, success=False, committed=False,
                     message="A task is still running in this folder; "
                             "wait for it to finish before committing.",
+                    manual=True,
                 )
                 return
             if tab_id in self._autocommit_tabs:
@@ -1070,7 +1076,7 @@ class _CommandsMixin:
             work_dir: The tab's working directory.
         """
         try:
-            self._autocommit_changes(tab_id, work_dir=work_dir)
+            self._autocommit_changes(tab_id, work_dir=work_dir, manual=True)
         finally:
             with self._state_lock:
                 self._autocommit_tabs.discard(tab_id)

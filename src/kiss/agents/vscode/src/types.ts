@@ -265,6 +265,7 @@ type ToWebviewMessageBody =
       message: string;
       commitMessage?: string;
       tabId?: string;
+      manual?: boolean;
     }
   | {type: 'droppedPaths'; paths: string[]}
   | {
