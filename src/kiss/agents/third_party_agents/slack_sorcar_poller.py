@@ -13,7 +13,8 @@ polling under cron's one-minute scheduling granularity.
 
 Behaviour for each new message from the target user:
 
-* **Top-level message** — runs a brand-new ``ChatSorcarAgent`` chat,
+* **Top-level message** — runs a brand-new Sorcar chat on the
+  kiss-web daemon (via ``kiss.server.sorcar.run``),
   posts the result back as a threaded reply, and records the new
   ``chat_id`` against the message's ``ts`` so future replies in the
   same thread continue the same chat.
@@ -32,7 +33,7 @@ Environment variables (all optional):
   ``"learningsystems"``).
 * ``KISS_SLACK_USER`` — Slack handle or real name of the user whose DMs
   to handle (default ``"ksen"``).
-* ``KISS_SLACK_MODEL`` — Model name passed to ``ChatSorcarAgent.run``.
+* ``KISS_SLACK_MODEL`` — Model name for the daemon-run tasks.
 * ``KISS_SLACK_BUDGET`` — Per-task budget in USD (default ``5.0``).
 """
 

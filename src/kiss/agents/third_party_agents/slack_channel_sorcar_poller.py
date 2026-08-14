@@ -13,7 +13,8 @@ one-minute scheduling granularity.
 
 Behaviour for each new message from the target user:
 
-* **Top-level message** — runs a brand-new ``ChatSorcarAgent`` chat,
+* **Top-level message** — runs a brand-new Sorcar chat on the
+  kiss-web daemon (via ``kiss.server.sorcar.run``),
   posts the result back as a threaded reply, and records the new
   ``chat_id`` against the message's ``ts`` so future replies in the
   same thread continue the same chat.
@@ -34,7 +35,7 @@ Environment variables (all optional):
   messages to handle (default ``"ksen"``).
 * ``KISS_SLACK_CHANNEL`` — Channel name to poll (default
   ``"sorcar"``).
-* ``KISS_SLACK_MODEL`` — Model name passed to ``ChatSorcarAgent.run``.
+* ``KISS_SLACK_MODEL`` — Model name for the daemon-run tasks.
 * ``KISS_SLACK_BUDGET`` — Per-task budget in USD (default ``5.0``).
 """
 
@@ -250,10 +251,9 @@ def _is_empty_reply(reply: str) -> bool:
 def _run_sorcar(prompt: str, chat_id: str) -> tuple[str, str]:
     """Run a Sorcar task and return ``(slack_text, chat_id)``.
 
-    Uses :class:`WorktreeSorcarAgent` so that ``update_settings`` calls
-    for ``is_worktree`` and ``auto_commit`` have real effects (git
-    worktree isolation, actual git commits, persisted config) even
-    without a UI.
+    Honors the persisted ``is_worktree`` setting so that
+    ``update_settings`` calls have real effects (git worktree
+    isolation on the daemon-built agent) even without a UI.
 
     Args:
         prompt: The user's Slack message text.
@@ -269,17 +269,13 @@ def _run_sorcar(prompt: str, chat_id: str) -> tuple[str, str]:
     cfg = load_config()
     use_worktree = bool(cfg.get("is_worktree", True))
 
-    try:
-        result = run_agent_via_kiss_web(
-            agent,
-            full_prompt,
-            model_name=MODEL_NAME,
-            max_budget=MAX_BUDGET,
-            use_worktree=use_worktree,
-        )
-    finally:
-        if agent._wt_pending:
-            agent._release_worktree()
+    result = run_agent_via_kiss_web(
+        agent,
+        full_prompt,
+        model_name=MODEL_NAME,
+        max_budget=MAX_BUDGET,
+        use_worktree=use_worktree,
+    )
     return _markdown_to_mrkdwn(_extract_summary(result)), agent.chat_id
 
 

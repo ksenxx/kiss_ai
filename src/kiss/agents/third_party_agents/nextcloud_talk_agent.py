@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Nextcloud Talk Agent — SorcarAgent extension with Nextcloud Talk API tools.
+"""Nextcloud Talk Agent — channel agent with Nextcloud Talk API tools.
 
 Provides authenticated access to Nextcloud Talk via username/password.
 Stores config in ``~/.kiss/third_party_agents/nextcloud/config.json``.
@@ -23,7 +23,6 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
@@ -363,8 +362,8 @@ class NextcloudTalkChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class NextcloudTalkAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with Nextcloud Talk API tools."""
+class NextcloudTalkAgent(BaseChannelAgent):
+    """Channel agent with Nextcloud Talk API tools."""
 
     def __init__(self) -> None:
         super().__init__("Nextcloud Talk Agent")
