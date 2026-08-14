@@ -92,9 +92,26 @@ class IRCChannelBackend(ToolMethodBackend):
             return False
 
     def _send_raw(self, line: str) -> None:
-        """Send a raw IRC line."""
-        if self._sock:  # pragma: no branch
-            self._sock.sendall(f"{line}\r\n".encode("utf-8", errors="replace"))
+        """Send a raw IRC line, connecting on demand.
+
+        A fresh backend built by this module's ``get_tools()`` inside
+        the kiss-web daemon starts disconnected; the first send
+        connects it from the persisted config instead of silently
+        dropping the line.
+
+        Args:
+            line: The raw IRC protocol line (without CRLF).
+
+        Raises:
+            RuntimeError: When there is no connection and connecting
+                from the persisted config fails.
+        """
+        if self._sock is None and not self.connect():
+            raise RuntimeError(f"Not connected to IRC: {self._connection_info}")
+        sock = self._sock
+        if sock is None:
+            raise RuntimeError("IRC connection lost")
+        sock.sendall(f"{line}\r\n".encode("utf-8", errors="replace"))
 
     def _read_loop(self) -> None:
         """Background thread reading IRC data."""
@@ -150,13 +167,12 @@ class IRCChannelBackend(ToolMethodBackend):
         return messages, oldest
 
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
-        """Send an IRC PRIVMSG.
+        """Send an IRC PRIVMSG, connecting on demand.
 
         Raises:
-            RuntimeError: If the backend is not connected to a server.
+            RuntimeError: If the backend is not connected and cannot
+                connect from the persisted config.
         """
-        if self._sock is None:
-            raise RuntimeError("Not connected to IRC")
         self._send_raw(f"PRIVMSG {channel_id} :{text}")
 
     def disconnect(self) -> None:
@@ -479,6 +495,17 @@ def main() -> None:
         channel_name="IRC",
         make_backend=_make_backend,
     )
+
+
+def get_tools() -> list:
+    """Return the IRC channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return IRCAgent()._get_tools()
 
 
 if __name__ == "__main__":

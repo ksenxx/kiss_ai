@@ -337,5 +337,16 @@ def main() -> None:
     channel_main(TlonAgent, "kiss-tlon")
 
 
+def get_tools() -> list:
+    """Return the Tlon/Urbit channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return TlonAgent()._get_tools()
+
+
 if __name__ == "__main__":
     main()

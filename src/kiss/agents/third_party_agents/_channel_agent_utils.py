@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import logging
 import sys
-import threading
 import time as _time
 from collections.abc import Callable
 from pathlib import Path
@@ -269,6 +268,30 @@ def filter_launch_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in kwargs.items() if k in LAUNCH_KWARG_NAMES}
 
 
+def agent_tools_file(agent_cls: type) -> str:
+    """Return the tools-file path for a channel agent class.
+
+    The ``kiss.server.sorcar.run`` API takes extra agent tools as the
+    path of a Python file whose top-level ``get_tools()`` returns the
+    tool callables.  For channel agents that file is the agent's OWN
+    defining module: each agent module defines a ``get_tools()`` that
+    builds a fresh agent from the credentials persisted under
+    ``~/.kiss`` and returns its authentication and backend tools.
+
+    Args:
+        agent_cls: The channel agent class (e.g. ``SlackAgent``).
+
+    Returns:
+        The absolute path of the module defining *agent_cls*, or ``""``
+        when that module does not define a callable ``get_tools()``
+        (e.g. ``BaseChannelAgent`` itself or test-local classes).
+    """
+    module = sys.modules.get(agent_cls.__module__)
+    if module is None or not callable(getattr(module, "get_tools", None)):
+        return ""
+    return str(getattr(module, "__file__", "") or "")
+
+
 class BaseChannelAgent:
     """Base class for channel agents.
 
@@ -278,29 +301,46 @@ class BaseChannelAgent:
     :func:`~kiss.agents.third_party_agents._kiss_web_launcher.run_agent_via_kiss_web`),
     and the daemon builds and executes its own chat agent with the
     standard tools (bash, file editing, browser automation).  The
-    channel agent instance is the *carrier* of channel state: the
-    backend, the authentication tools, the
-    :attr:`channel_system_prompt` guidance, and the run results the
-    launcher writes back (:attr:`last_run_result`, :attr:`budget_used`,
+    channel agent instance is the *carrier* of channel identity: the
+    :attr:`tools_file` naming the module whose ``get_tools()`` the
+    daemon calls to build the channel tools, the :attr:`workspace`
+    those tools authenticate under, the :attr:`channel_system_prompt`
+    guidance, and the run results the launcher writes back
+    (:attr:`last_run_result`, :attr:`budget_used`,
     :attr:`total_tokens_used`, :attr:`total_steps`).
 
     Subclasses must set ``self._backend`` (a ``ToolMethodBackend``
-    instance) and override :meth:`_is_authenticated` and
-    :meth:`_get_auth_tools`::
+    instance), override :meth:`_is_authenticated` and
+    :meth:`_get_auth_tools`, and define a module-level ``get_tools()``
+    in their own module::
 
         class SlackAgent(BaseChannelAgent): ...
+
+        def get_tools() -> list:
+            return SlackAgent()._get_tools()
     """
 
     _backend: Any
 
     channel_system_prompt: str = ""
 
-    def __init__(self, name: str = "") -> None:
+    def __init__(self, name: str = "", workspace: str = "default") -> None:
         self.name = name
+        self.workspace = workspace or "default"
         self.last_run_result: str = ""
         self.budget_used: float = 0.0
         self.total_tokens_used: int = 0
         self.total_steps: int = 0
+
+    @property
+    def tools_file(self) -> str:
+        """Path of the module whose ``get_tools()`` supplies this agent's tools.
+
+        ``""`` when the agent's defining module has no ``get_tools()``
+        (plain carriers such as ``KissWebChatAgent`` add no channel
+        tools).
+        """
+        return agent_tools_file(type(self))
 
     def _is_authenticated(self) -> bool:
         """Return True if the backend is authenticated and ready for use.
@@ -335,12 +375,13 @@ class BaseChannelAgent:
 
         Submits the task to the kiss-web daemon via
         :func:`~kiss.agents.third_party_agents._kiss_web_launcher.run_agent_via_kiss_web`,
-        which bridges this agent's live channel tools into the task,
-        appends :attr:`channel_system_prompt` to the prompt, and
-        records the YAML result in :attr:`last_run_result` along with
-        the cost / token / step totals.  Keyword arguments outside the
-        launcher's parameter surface are dropped (see
-        :func:`filter_launch_kwargs`).
+        which supplies this agent's channel tools through the API's
+        ``tools=`` file-path contract (:attr:`tools_file` — the agent
+        module whose ``get_tools()`` the daemon calls), appends
+        :attr:`channel_system_prompt` to the prompt, and records the
+        YAML result in :attr:`last_run_result` along with the cost /
+        token / step totals.  Keyword arguments outside the launcher's
+        parameter surface are dropped (see :func:`filter_launch_kwargs`).
 
         Args:
             prompt_template: The task prompt.
@@ -374,20 +415,22 @@ class ChannelRunner:
         backend: Any,
         channel_name: str,
         agent_name: str,
-        extra_tools: list | None = None,
+        tools_file: str = "",
         model_name: str = "",
         max_budget: float = 5.0,
         work_dir: str = "",
         allow_users: list[str] | None = None,
+        workspace: str = "default",
     ) -> None:
         self._backend = backend
         self._channel_name = channel_name
         self._agent_name = agent_name
-        self._extra_tools = extra_tools or []
+        self._tools_file = tools_file
         self._model_name = model_name
         self._max_budget = max_budget
         self._work_dir = work_dir or str(kiss_home() / "channel_work")
         self._allow_users = set(allow_users) if allow_users else None
+        self._workspace = workspace or "default"
         self._poll_thread_fn = getattr(backend, "poll_thread_messages", None)
 
     def run_once(self) -> int:
@@ -448,9 +491,27 @@ class ChannelRunner:
         Returns:
             True if the bot has already replied in the thread.
         """
-        if self._poll_thread_fn is None:
-            return False
         if msg.get("reply_count", 0) == 0:
+            return False
+        return self._bot_replied_in_thread(channel_id, msg)
+
+    def _bot_replied_in_thread(self, channel_id: str, msg: dict[str, Any]) -> bool:
+        """Poll a message's thread and check whether the bot has posted there.
+
+        Unlike :meth:`_has_bot_reply` there is no ``reply_count``
+        shortcut: the *msg* dict is a snapshot from before the agent
+        task ran, so its counters cannot reflect a reply the agent just
+        posted with its channel tools.
+
+        Args:
+            channel_id: Channel ID containing the message.
+            msg: Message dict from poll_messages.
+
+        Returns:
+            True if the bot has posted in the message's thread.  False
+            when thread polling is unavailable or fails.
+        """
+        if self._poll_thread_fn is None:
             return False
         msg_ts = msg.get("ts", "")
         if not msg_ts:
@@ -468,7 +529,11 @@ class ChannelRunner:
         The agent is launched as a kiss-web registered agent via
         :func:`run_agent_via_kiss_web` (``_cmd_run``) so the task is
         live-visible and interactable from any connected remote
-        webview while it runs.
+        webview while it runs.  The channel tools come from the
+        runner's tools file (the agent module's ``get_tools()``, per
+        the ``kiss.server.sorcar.run`` tools-file contract); after the
+        run the task summary is posted to the message's thread unless
+        the agent already replied there itself.
         """
         from kiss.agents.third_party_agents._kiss_web_launcher import (
             run_agent_via_kiss_web,
@@ -479,43 +544,44 @@ class ChannelRunner:
         session_key = f"{channel_id}:{msg.get('ts', '')}"
 
         # A plain carrier with no auth tools or backend of its own: the
-        # runner supplies backend tools plus the per-message ``reply``
-        # tool below, and the daemon-built agent supplies the standard
-        # tools.
-        agent = BaseChannelAgent(self._agent_name)
+        # channel tools come from the runner's tools file (the agent
+        # module's ``get_tools()``), and the daemon-built agent supplies
+        # the standard tools.
+        agent = BaseChannelAgent(self._agent_name, workspace=self._workspace)
 
-        tools = list(self._extra_tools)
-        replied = threading.Event()
-
-        def reply(message: str) -> str:
-            """Send a reply to the current conversation.
-
-            Args:
-                message: Text to send as the bot's reply.
-
-            Returns:
-                JSON string with ok status.
-            """
-            replied.set()
-            try:
-                self._backend.send_message(channel_id, message, thread_ts)
-                return json.dumps({"ok": True})
-            except Exception as e:
-                return json.dumps({"ok": False, "error": str(e)})
-
-        tools.append(reply)
+        prompt = text
+        if self._tools_file:
+            context = (
+                f"\n\n[Channel context: you are answering a message in "
+                f"channel {channel_id!r}, thread {thread_ts!r}."
+            )
+            if self._poll_thread_fn is not None:
+                # Only thread-polling backends can detect the agent's
+                # own reply and suppress the automatic summary.
+                context += (
+                    " If you post a reply there yourself with the "
+                    "channel messaging tools, no automatic summary "
+                    "reply is sent.]"
+                )
+            else:
+                context += (
+                    " A summary of this task is posted to the thread "
+                    "automatically when you finish, so do not post "
+                    "one yourself.]"
+                )
+            prompt += context
 
         Path(self._work_dir).mkdir(parents=True, exist_ok=True)
         try:
             result = run_agent_via_kiss_web(
                 agent,
-                text,
+                prompt,
                 model_name=self._model_name,
                 max_budget=self._max_budget,
                 work_dir=self._work_dir,
-                tools=tools,
+                tools=self._tools_file or None,
             )
-            if not replied.is_set():  # pragma: no branch
+            if not self._bot_replied_in_thread(channel_id, msg):
                 result_yaml = yaml.safe_load(result)
                 summary = (result_yaml.get("summary", "") if result_yaml else "") or result
                 self._send_reply(channel_id, summary, thread_ts)
@@ -637,11 +703,12 @@ def channel_main(
             backend=backend,
             channel_name=channel,
             agent_name=f"{channel_name} Background Agent",
-            extra_tools=backend.get_tool_methods(),
+            tools_file=agent_tools_file(agent_cls),
             model_name=args.model_name,
             max_budget=args.max_budget,
             work_dir=args.work_dir,
             allow_users=allow_users,
+            workspace=workspace,
         )
         print(f"Checking {channel_name} channel for pending messages...")
         count = runner.run_once()

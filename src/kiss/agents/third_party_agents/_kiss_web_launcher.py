@@ -14,31 +14,30 @@ lifecycle — live event broadcasts to every connected webview,
 follow-up message injection, stop support, chat persistence — exactly
 like a task started from the chat UI.
 
-The agent's live channel tools (authentication closures, authenticated
-backend bound methods, per-message ``reply`` closures) are supplied
-through the API's ``tools=`` *file path* contract via
-:mod:`._api_tools_bridge`: the launcher generates a tiny real tools
-file whose ``get_tools()`` returns the live callables themselves,
-which works because the daemon the launcher talks to runs in this
-same process (see :func:`_ensure_api_server`).
+The agent's channel tools are supplied through the API's ``tools=``
+*file path* contract directly: each agent module defines a top-level
+``get_tools()`` that builds a fresh agent from the credentials
+persisted under ``~/.kiss`` and returns its authentication and backend
+tools, so the agent's OWN module file (``agent.tools_file``) is passed
+as the ``tools=`` argument and the daemon imports it and calls its
+``get_tools()``.  No bridge, registry, wrapper, or generated file is
+involved.  The active workspace travels to the daemon-side
+``get_tools()`` through the ``KISS_CHANNEL_WORKSPACE`` environment
+variable.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import tempfile
 import threading
-from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from kiss.agents.third_party_agents._api_tools_bridge import (
-    register_tools,
-    release_tools,
-)
 from kiss.agents.third_party_agents._channel_agent_utils import BaseChannelAgent
 
 if TYPE_CHECKING:
@@ -47,6 +46,57 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _NO_TIMEOUT_SECONDS = 10 * 365 * 24 * 3600.0
+
+_WORKSPACE_ENV_VAR = "KISS_CHANNEL_WORKSPACE"
+_WORKSPACE_LOCK = threading.Lock()
+_ACTIVE_WORKSPACES: dict[str, int] = {}
+
+
+def _enter_workspace(workspace: str) -> None:
+    """Mark a launch's workspace active and publish it to the env var.
+
+    The env var is process-global, so it is managed by reference
+    counting rather than save/restore snapshots: snapshots taken by
+    overlapping launches restore each other's values out of order,
+    leaving a stale workspace exported after every task has finished.
+
+    Args:
+        workspace: The launching agent's workspace identifier.
+    """
+    with _WORKSPACE_LOCK:
+        _ACTIVE_WORKSPACES[workspace] = _ACTIVE_WORKSPACES.get(workspace, 0) + 1
+        os.environ[_WORKSPACE_ENV_VAR] = workspace
+        if len(_ACTIVE_WORKSPACES) > 1:
+            logger.warning(
+                "concurrent kiss-web launches use different workspaces %s "
+                "but share the single process-global %s environment "
+                "variable; their daemon-side get_tools() may see the "
+                "wrong workspace",
+                sorted(_ACTIVE_WORKSPACES),
+                _WORKSPACE_ENV_VAR,
+            )
+
+
+def _exit_workspace(workspace: str) -> None:
+    """Mark a launch's workspace inactive and clean up the env var.
+
+    When the last active launch finishes the env var is removed; while
+    other launches remain active the env var is kept pointing at one of
+    their workspaces.
+
+    Args:
+        workspace: The workspace passed to :func:`_enter_workspace`.
+    """
+    with _WORKSPACE_LOCK:
+        count = _ACTIVE_WORKSPACES.get(workspace, 0) - 1
+        if count > 0:
+            _ACTIVE_WORKSPACES[workspace] = count
+        else:
+            _ACTIVE_WORKSPACES.pop(workspace, None)
+        if not _ACTIVE_WORKSPACES:
+            os.environ.pop(_WORKSPACE_ENV_VAR, None)
+        elif os.environ.get(_WORKSPACE_ENV_VAR) not in _ACTIVE_WORKSPACES:
+            os.environ[_WORKSPACE_ENV_VAR] = next(iter(_ACTIVE_WORKSPACES))
 
 _API_SERVER: RemoteAccessServer | None = None
 _API_SERVER_SOCK: str = ""
@@ -62,9 +112,8 @@ def _ensure_api_server() -> str:
     the production daemon class — serving only a private Unix-domain
     socket (mode 0o600 in a private temp directory) on a dedicated
     asyncio loop thread.  The launcher's ``sorcar.run`` calls connect
-    to this socket.  The daemon MUST live in this process: the live
-    tool callables bridged by :mod:`._api_tools_bridge` are reachable
-    only through this process's registry.
+    to this socket, so channel agents work without any externally
+    started kiss-web daemon.
 
     Returns:
         The Unix-domain socket path of the in-process daemon.
@@ -140,7 +189,7 @@ def run_agent_via_kiss_web(
     model_name: str = "",
     work_dir: str = "",
     max_budget: float | None = None,
-    tools: list[Callable[..., Any]] | None = None,
+    tools: str | Path | None = None,
     use_worktree: bool = True,
     model_config: dict[str, Any] | None = None,
     web_tools: bool | None = None,
@@ -150,23 +199,32 @@ def run_agent_via_kiss_web(
 ) -> str:
     """Launch *agent*'s task through :func:`kiss.server.sorcar.run`.
 
-    Bridges the agent's live channel tools into a generated tools file
-    (:func:`~._api_tools_bridge.register_tools`), appends the agent's
-    ``channel_system_prompt`` guidance to the prompt (the API carries
-    no system prompt), and submits the task to the in-process kiss-web
-    daemon over its Unix-domain socket.  Blocks until the daemon
-    reports the task finished (or *timeout* elapses) and returns the
-    task's YAML result.
+    Supplies the agent's channel tools through the API's ``tools=``
+    file-path contract (by default ``agent.tools_file`` — the agent's
+    own module, whose top-level ``get_tools()`` the daemon calls to
+    build a fresh agent from the credentials persisted under
+    ``~/.kiss``), appends the agent's ``channel_system_prompt``
+    guidance to the prompt (the API carries no system prompt), and
+    submits the task to the in-process kiss-web daemon over its
+    Unix-domain socket.  Blocks until the daemon reports the task
+    finished (or *timeout* elapses) and returns the task's YAML result.
+
+    While the task runs, the ``KISS_CHANNEL_WORKSPACE`` environment
+    variable holds ``agent.workspace`` so the daemon-side
+    ``get_tools()`` authenticates under the same workspace (concurrent
+    launches from one process should therefore use the same
+    workspace).
 
     The passed *agent* instance is never executed — the daemon builds
     its own chat agent.  The instance serves as the carrier of channel
-    tools and chat identity: the launcher propagates the daemon chat
-    id onto it (so pollers can resume the conversation), records the
-    YAML result in ``agent.last_run_result``, and copies the task's
-    cost / token / step totals onto the instance for CLI run stats.
+    identity: the launcher propagates the daemon chat id onto it (so
+    pollers can resume the conversation), records the YAML result in
+    ``agent.last_run_result``, and copies the task's cost / token /
+    step totals onto the instance for CLI run stats.
 
     Args:
-        agent: The third-party agent instance supplying channel tools,
+        agent: The third-party agent instance supplying the channel
+            tools file (``agent.tools_file``), the workspace,
             ``channel_system_prompt`` guidance, and the chat id to
             continue (``agent.chat_id`` on :class:`KissWebChatAgent`
             carriers).
@@ -175,8 +233,10 @@ def run_agent_via_kiss_web(
         work_dir: Working directory for the run.
         max_budget: Per-task budget override in USD; ``None`` uses the
             kiss-web config default.
-        tools: Extra live tool callables bridged into the task's tools
-            (e.g. ``ChannelRunner``'s per-message ``reply`` closure).
+        tools: Path of a Python file whose top-level ``get_tools()``
+            supplies the task's extra tools (the API's tools-file
+            contract).  ``None`` uses ``agent.tools_file`` — the
+            agent's own module.
         use_worktree: Run the task in an isolated git worktree.
         model_config: Per-task model configuration override (custom
             endpoint / headers).
@@ -195,9 +255,8 @@ def run_agent_via_kiss_web(
         the task did not finish within *timeout*.
 
     Raises:
-        ValueError: When a live tool cannot be expressed through the
-            API's tools-file contract (see
-            :func:`~._api_tools_bridge.register_tools`).
+        ValueError: When *tools* (or ``agent.tools_file``) is not the
+            path of an existing Python file.
         ConnectionError: When the daemon socket cannot be reached.
     """
     from kiss.server import sorcar
@@ -212,15 +271,12 @@ def run_agent_via_kiss_web(
         return result_yaml
     chat_id = agent.chat_id if isinstance(agent, KissWebChatAgent) else ""
     # The agent's channel tools (auth tools + authenticated backend
-    # methods) plus any launcher-supplied extras (e.g. ChannelRunner's
-    # per-message ``reply`` closure); the daemon-built agent supplies
-    # the standard tools itself.
-    live_tools = [*agent._get_tools(), *(tools or [])]
-    token = ""
-    tools_path: str | None = None
-    if live_tools:
-        token, tools_path = register_tools(live_tools)
+    # methods) are built inside the daemon: it imports the tools file
+    # and calls its get_tools(); the daemon-built agent supplies the
+    # standard tools itself.
+    tools_path = str(tools) if tools else agent.tools_file
     sock = sock_path or _SOCK_PATH_OVERRIDE or _ensure_api_server()
+    _enter_workspace(agent.workspace)
     try:
         try:
             result = sorcar.run(
@@ -228,7 +284,7 @@ def run_agent_via_kiss_web(
                 work_dir=work_dir,
                 model=model_name,
                 chat_id=chat_id,
-                tools=tools_path,
+                tools=tools_path or None,
                 use_worktree=use_worktree,
                 max_budget=max_budget,
                 model_config=model_config,
@@ -245,8 +301,7 @@ def run_agent_via_kiss_web(
             )
             return ""
     finally:
-        if token:
-            release_tools(token)
+        _exit_workspace(agent.workspace)
 
     summary = result.text or ("" if result.success else "Task failed")
     result_yaml = str(yaml.safe_dump(
