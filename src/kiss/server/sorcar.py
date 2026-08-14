@@ -42,12 +42,12 @@ already-running daemon and block until it finishes::
 
 Caller-supplied tools become agent tools: pass the path of a Python
 file via ``tools="/path/to/my_tools.py"`` and the daemon imports the
-file and registers every top-level public function that is suitable as
-a tool (plain synchronous functions with keyword-bindable,
-type-annotated parameters and Google-style docstrings).  The client
-never serializes Python functions — the daemon loads the file itself,
-so the tools execute **in the daemon process** like native agent
-tools::
+file and calls its top-level ``get_tools()`` function, which returns
+the functions in the file the agent may call (plain synchronous
+functions with keyword-bindable, type-annotated parameters and
+Google-style docstrings).  The client never serializes Python
+functions — the daemon loads the file itself, so the tools execute
+**in the daemon process** like native agent tools::
 
     # my_tools.py
     def get_temperature(city: str) -> str:
@@ -57,6 +57,10 @@ tools::
             city: Name of the city to look up.
         \"\"\"
         return lookup_sensor(city)
+
+    def get_tools():
+        \"\"\"Return the tools the agent may call.\"\"\"
+        return [get_temperature]
 
     result = sorcar.run("What's the temperature in Paris?",
                         tools="my_tools.py")
@@ -1239,20 +1243,21 @@ def run(
             keeps working.  Empty (default) runs with the default
             system prompt as usual.
         tools: Optional path to a Python file supplying extra tools
-            for the agent.  The daemon imports the file and registers
-            every top-level public function that is suitable as a tool
-            (plain synchronous functions whose parameters are all
-            keyword-bindable; ``*args``/``**kwargs``/positional-only
-            parameters and coroutine/generator functions are skipped).
-            Each function's name, docstring (Google-style ``Args:``
-            section for parameter descriptions), and annotated
-            parameters define the tool schema the agent sees, exactly
-            like a native tool.  The functions are never serialized by
-            the client — they run **in the daemon process**.  The path
-            is resolved against this process's working directory.  A
-            broken tools file (deleted before the daemon reads it, or
-            raising at import time) stops the task: the daemon fails
-            the run and the returned :class:`TaskResult` carries the
+            for the agent.  The file must define a top-level
+            ``get_tools()`` function returning the functions in the
+            file the agent may call; the daemon imports the file,
+            calls ``get_tools()``, and registers the returned
+            callables as agent tools.  Each function's name, docstring
+            (Google-style ``Args:`` section for parameter
+            descriptions), and annotated keyword-bindable parameters
+            define the tool schema the agent sees, exactly like a
+            native tool.  The functions are never serialized by the
+            client — they run **in the daemon process**.  The path is
+            resolved against this process's working directory.  A
+            broken tools file (deleted before the daemon reads it,
+            raising at import time, or missing/misbehaving
+            ``get_tools()``) stops the task: the daemon fails the run
+            and the returned :class:`TaskResult` carries the
             diagnostic error in its ``text`` with ``success=False``.
         use_worktree: Run the task in an isolated git worktree.
             Defaults to True.

@@ -5,27 +5,30 @@
 """End-to-end tests for the live-callable → tools-file bridge.
 
 ``kiss.server.sorcar.run`` takes extra agent tools as a *file path*
-whose top-level public functions the daemon imports.  Third-party
-agents, however, hold LIVE callables (bound backend methods, per-
-message ``reply`` closures).  ``_api_tools_bridge`` closes the gap: it
-registers the live callables in a process-global registry and
-generates a real tools file whose genuine top-level ``def`` wrappers
-mirror each callable's name / signature / docstring and dispatch back
-to the registry.  These tests drive the FULL production round trip:
-``register_tools`` → the daemon-side loader
-:func:`kiss.server.tools_file.load_tools_file` importing the generated
-file → wrapper invocation → the live callable.
+whose ``get_tools()`` function the daemon imports and calls.
+Third-party agents, however, hold LIVE callables (bound backend
+methods, per-message ``reply`` closures).  ``_api_tools_bridge``
+closes the gap: it registers the live callables in a process-global
+registry and generates a tiny real tools file whose ``get_tools()``
+returns the registered callables THEMSELVES — no wrapper code, so the
+agent receives the original functions with their exact names,
+signatures, docstrings, and default objects.  These tests drive the
+FULL production round trip: ``register_tools`` → the daemon-side
+loader :func:`kiss.server.tools_file.load_tools_file` importing the
+generated file and calling its ``get_tools()`` → the live callables.
 """
 
 from __future__ import annotations
 
 import inspect
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 
 from kiss.agents.third_party_agents import _api_tools_bridge as bridge
-from kiss.server.tools_file import load_tools_file
+from kiss.server.tools_file import ToolsFileError, load_tools_file
 
 _SENTINEL_DEFAULT = object()
 
@@ -56,7 +59,7 @@ class _Backend:
 
 
 class ApiToolsBridgeTest(unittest.TestCase):
-    """Full register → load_tools_file → dispatch round trips."""
+    """Full register → load_tools_file → live-callable round trips."""
 
     def setUp(self) -> None:
         self._tokens: list[str] = []
@@ -75,30 +78,32 @@ class ApiToolsBridgeTest(unittest.TestCase):
         assert token
         assert Path(path).is_file() and path.endswith(".py")
 
-    def test_public_function_wrapper_fidelity_and_dispatch(self) -> None:
+    def test_loaded_tools_are_the_live_callables_themselves(self) -> None:
         calls: list[tuple[str, int]] = []
 
-        def greet(name: str, times: int = 2) -> str:
+        def greet(name: str, times: int = 2, *, shout: bool = False) -> str:
             """Greet someone.
 
             Args:
                 name: Who to greet.
                 times: How many times.
+                shout: Whether to shout.
             """
             calls.append((name, times))
-            return "hi " * times + name
+            text = "hi " * times + name
+            return text.upper() if shout else text
 
         _token, path = self._register([greet])
-        (wrapper,) = load_tools_file(path)
-        assert wrapper.__name__ == "greet"
-        assert "Who to greet." in (wrapper.__doc__ or "")
-        params = inspect.signature(wrapper).parameters
-        assert list(params) == ["name", "times"]
-        assert params["times"].annotation == "int"
-        assert params["name"].annotation == "str"
+        (loaded,) = load_tools_file(path)
+        assert loaded is greet, "the live callable must be handed over AS-IS"
+        assert loaded.__name__ == "greet"
+        assert "Who to greet." in (loaded.__doc__ or "")
+        params = inspect.signature(loaded).parameters
+        assert list(params) == ["name", "times", "shout"]
         assert params["times"].default == 2
-        assert wrapper(name="ada") == "hi hi ada"
-        assert wrapper("bob", times=1) == "hi bob"
+        assert params["shout"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert loaded(name="ada") == "hi hi ada"
+        assert loaded("bob", times=1) == "hi bob"
         assert calls == [("ada", 2), ("bob", 1)]
 
     def test_bound_method_and_closure_share_live_state(self) -> None:
@@ -123,23 +128,6 @@ class ApiToolsBridgeTest(unittest.TestCase):
         assert backend.sent == ["hello", "lo"]
         assert replied == ["pong"]
 
-    def test_keyword_only_parameters_preserved(self) -> None:
-        def tag(prefix: str = ">", *, label: str) -> str:
-            """Tag a label.
-
-            Args:
-                prefix: Prefix text.
-                label: The label.
-            """
-            return prefix + label
-
-        _token, path = self._register([tag])
-        (wrapper,) = load_tools_file(path)
-        params = inspect.signature(wrapper).parameters
-        assert params["label"].kind is inspect.Parameter.KEYWORD_ONLY
-        assert params["prefix"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
-        assert wrapper(label="x") == ">x"
-
     def test_non_literal_default_preserved_by_identity(self) -> None:
         seen: list[Any] = []
 
@@ -153,28 +141,13 @@ class ApiToolsBridgeTest(unittest.TestCase):
             return "probed"
 
         _token, path = self._register([probe])
-        (wrapper,) = load_tools_file(path)
+        (loaded,) = load_tools_file(path)
         assert (
-            inspect.signature(wrapper).parameters["value"].default
+            inspect.signature(loaded).parameters["value"].default
             is _SENTINEL_DEFAULT
-        ), "non-literal defaults must be hoisted by identity, not repr"
-        wrapper()
+        )
+        loaded()
         assert seen == [_SENTINEL_DEFAULT]
-
-    def test_unannotated_params_supported(self) -> None:
-        def loose(a, b=5):  # type: ignore[no-untyped-def]
-            """Add two things.
-
-            Args:
-                a: First.
-                b: Second.
-            """
-            return a + b
-
-        _token, path = self._register([loose])
-        (wrapper,) = load_tools_file(path)
-        assert wrapper(a=1) == 6
-        assert wrapper(a=1, b=2) == 3
 
     def test_multiple_tools_in_one_file(self) -> None:
         def one() -> str:
@@ -196,37 +169,41 @@ class ApiToolsBridgeTest(unittest.TestCase):
             raise RuntimeError("kaboom-inner")
 
         _token, path = self._register([kaboom])
-        (wrapper,) = load_tools_file(path)
+        (loaded,) = load_tools_file(path)
         with self.assertRaisesRegex(RuntimeError, "kaboom-inner"):
-            wrapper()
+            loaded()
 
-    def test_release_tools_invalidates_dispatch_and_removes_file(self) -> None:
+    def test_release_tools_invalidates_token_and_removes_file(self) -> None:
         def gone() -> str:
             """Return gone."""
             return "gone"
 
         token, path = bridge.register_tools([gone])
-        (wrapper,) = load_tools_file(path)
+        (loaded,) = load_tools_file(path)
+        assert loaded is gone
         bridge.release_tools(token)
         assert not Path(path).exists(), "release must delete the tools file"
         with self.assertRaises(RuntimeError):
-            wrapper()
+            bridge.live_tools(token)
+        bridge.release_tools(token)  # idempotent
+
+    def test_released_token_fails_a_late_load_with_diagnostic(self) -> None:
+        # A daemon loading a copy of the generated file AFTER release
+        # must fail with the loader's diagnostic error, not silently
+        # yield no tools.
+        def late() -> str:
+            """Return late."""
+            return "late"
+
+        token, path = bridge.register_tools([late])
+        source = Path(path).read_text(encoding="utf-8")
         bridge.release_tools(token)
-
-    def test_dispatch_unknown_token_or_tool_raises(self) -> None:
-        def known() -> str:
-            """Return known."""
-            return "known"
-
-        token, _path = self._register([known])
-        with self.assertRaises(RuntimeError):
-            bridge.dispatch("no-such-token", "known", {})
-        with self.assertRaises(RuntimeError):
-            bridge.dispatch(token, "unknown", {})
-        with self.assertRaises(RuntimeError):
-            bridge.tool_default("no-such-token", "known", "x")
-        with self.assertRaises(RuntimeError):
-            bridge.tool_doc("no-such-token", "known")
+        directory = tempfile.mkdtemp(prefix="kiss_tp_tools_test_")
+        self.addCleanup(shutil.rmtree, directory, True)
+        copy = Path(directory) / "copy_tools.py"
+        copy.write_text(source, encoding="utf-8")
+        with self.assertRaisesRegex(ToolsFileError, "not registered"):
+            load_tools_file(str(copy))
 
     def test_empty_tools_rejected(self) -> None:
         with self.assertRaises(ValueError):
@@ -237,39 +214,14 @@ class ApiToolsBridgeTest(unittest.TestCase):
             """Return ok."""
             return "ok"
 
-        def star_args(*args: str) -> str:
-            """Star args.
-
-            Args:
-                *args: Anything.
-            """
-            return ",".join(args)
-
-        def star_kwargs(**kwargs: str) -> str:
-            """Star kwargs."""
-            return str(kwargs)
-
-        def underscore_param(_hidden: str) -> str:
-            """Underscore param.
-
-            Args:
-                _hidden: Hidden.
-            """
-            return _hidden
-
         cases: list[Any] = [
             [ok, ok],
             ["not callable"],
             [lambda x: x],
-            [star_args],
-            [star_kwargs],
-            [underscore_param],
         ]
         for tools in cases:
             with self.assertRaises(ValueError, msg=repr(tools)):
                 bridge.register_tools(tools)
-        with self.assertRaises(ValueError):
-            bridge.register_tools([divmod])
 
     def test_private_named_tool_rejected(self) -> None:
         def _private() -> str:
@@ -279,34 +231,23 @@ class ApiToolsBridgeTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             bridge.register_tools([_private])
 
-    def test_unparseable_annotation_falls_back_to_string_literal(
-        self,
-    ) -> None:
-        def odd(x: str) -> str:
-            """Odd tool.
+    def test_tool_named_get_tools_is_bridged_like_any_other(self) -> None:
+        # The generated file's own ``get_tools`` selector lives at
+        # module level; a LIVE tool that happens to be named
+        # ``get_tools`` is just an entry in the returned list and must
+        # not collide with it.
+        def get_tools(query: str) -> str:
+            """Homonymous live tool.
 
             Args:
-                x: X.
+                query: Anything.
             """
-            return x
+            return f"live:{query}"
 
-        odd.__annotations__["x"] = "not valid ("
-        _token, path = self._register([odd])
-        (wrapper,) = load_tools_file(path)
-        assert (
-            inspect.signature(wrapper).parameters["x"].annotation
-            == repr("not valid (")
-        ), "unparseable annotation text must survive via a string literal"
-        assert wrapper(x="ok") == "ok"
-
-    def test_broken_signature_rejected(self) -> None:
-        def weird() -> str:
-            """Return weird."""
-            return "weird"
-
-        weird.__signature__ = "not a signature"  # type: ignore[attr-defined]
-        with self.assertRaises(ValueError):
-            bridge.register_tools([weird])
+        _token, path = self._register([get_tools])
+        (loaded,) = load_tools_file(path)
+        assert loaded is get_tools
+        assert loaded(query="x") == "live:x"
 
 
 if __name__ == "__main__":

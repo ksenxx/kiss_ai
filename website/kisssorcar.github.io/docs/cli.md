@@ -57,7 +57,7 @@ Keyword options:
 | `work_dir` | Working directory for the task; the daemon's default when empty |
 | `model` | Model name; the daemon's selected default when empty |
 | `chat_id` | Existing chat session id to continue; a new chat when empty |
-| `tools` | Path to a Python file whose top-level public functions the daemon registers as extra agent tools |
+| `tools` | Path to a Python file whose `get_tools()` function returns the functions the daemon registers as extra agent tools |
 | `use_worktree` | Run the task in an isolated git worktree (default `True`) |
 | `auto_commit` | Auto-commit the task's changes on success (default `True`) |
 | `max_budget` | Per-task budget override in USD |
