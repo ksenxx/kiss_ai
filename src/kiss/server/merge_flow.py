@@ -318,8 +318,18 @@ class _MergeFlowMixin:
         committed: bool,
         message: str,
         commit_message: str | None = None,
+        manual: bool = False,
     ) -> dict[str, Any]:
         """Broadcast an ``autocommit_done`` event and return it.
+
+        For a *manual* commit (the user pressed the Git Commit button)
+        the outcome is reported as a toast ``notification`` — info on
+        success, error on failure — instead of transcript text: the
+        event carries ``manual: True`` so the webview and the VS Code
+        host skip their own chat/toast rendering for the successful
+        case (the event itself must still be broadcast so the Git
+        Commit button re-arms).  A failed manual commit stays
+        non-silent so its reason is also shown in the chat webview.
 
         Args:
             tab_id: Frontend tab identifier.
@@ -327,10 +337,23 @@ class _MergeFlowMixin:
             committed: Whether a commit was actually created.
             message: Human-readable status message.
             commit_message: Full commit message (only when committed).
+            manual: ``True`` when the user pressed the Git Commit
+                button (as opposed to the post-task autocommit).
 
         Returns:
             The event dict (for optional persistence).
         """
+        if manual:
+            # Same stable id as the "Auto-generating commit message…"
+            # toast, so the outcome replaces it in place (the webview
+            # dedups toasts by id) instead of stacking a second one.
+            self.printer.broadcast({
+                "type": "notification",
+                "id": f"manual-commit:{tab_id}",
+                "severity": "info" if success else "error",
+                "message": message,
+                "tabId": tab_id,
+            })
         event: dict[str, Any] = {
             "type": "autocommit_done",
             "success": success,
@@ -340,11 +363,13 @@ class _MergeFlowMixin:
         }
         if commit_message is not None:
             event["commitMessage"] = commit_message
+        if manual:
+            event["manual"] = True
         self.printer.broadcast(event)
         return event
 
     def _autocommit_changes(
-        self, tab_id: str = "", *, work_dir: str = "",
+        self, tab_id: str = "", *, work_dir: str = "", manual: bool = False,
     ) -> None:
         """Stage-all + generate-message + commit the tab's working tree.
 
@@ -353,6 +378,21 @@ class _MergeFlowMixin:
         directly and reported through ``autocommit_progress`` /
         ``autocommit_done`` events.  A clean tree is a cheap no-op
         ("Nothing to commit.").
+
+        Also called with ``manual=True`` when the user presses the Git
+        Commit button.  A manual commit differs from the post-task
+        path in three ways:
+
+        - The commit message is generated from the staged diff ALONE —
+          the tab's last user prompt and task result are NOT appended
+          (no ``User prompt:`` / ``Result:`` sections).
+        - Progress and outcome are reported as toast ``notification``
+          events ("Auto-generating commit message…", then the
+          committed subject or the failure reason) instead of
+          transcript text, and nothing is appended to the chat
+          transcript or its persisted history on success.
+        - A failure still shows its reason in the chat webview (the
+          ``autocommit_done`` failure event stays non-silent).
 
         Args:
             tab_id: The tab that ran the task (echoed in the
@@ -363,6 +403,8 @@ class _MergeFlowMixin:
                 synced to) a different — possibly non-git — folder than
                 the window that owns this tab.  Falls back to
                 ``self.work_dir`` when empty.
+            manual: ``True`` when the user pressed the Git Commit
+                button (as opposed to the post-task autocommit).
         """
         work_dir = work_dir or self.work_dir
         try:
@@ -376,15 +418,16 @@ class _MergeFlowMixin:
             if repo is None:
                 self._broadcast_autocommit_done(
                     tab_id, success=False, committed=False,
-                    message="Not a git repository.",
+                    message="Not a git repository.", manual=manual,
                 )
                 return
             with repo_lock(repo):
-                self.printer.broadcast({
-                    "type": "autocommit_progress",
-                    "message": "Staging changes…",
-                    "tabId": tab_id,
-                })
+                if not manual:
+                    self.printer.broadcast({
+                        "type": "autocommit_progress",
+                        "message": "Staging changes…",
+                        "tabId": tab_id,
+                    })
                 add_result = _git(work_dir, "add", "-A")
                 if add_result.returncode != 0:
                     err = (add_result.stderr or "").strip()
@@ -392,28 +435,44 @@ class _MergeFlowMixin:
                     self._broadcast_autocommit_done(
                         tab_id, success=False, committed=False,
                         message=f"Staging failed: {first_line}",
+                        manual=manual,
                     )
                     return
                 diff = _git(work_dir, "diff", "--cached")
                 if not diff.stdout.strip():
                     self._broadcast_autocommit_done(
                         tab_id, success=True, committed=False,
-                        message="Nothing to commit.",
+                        message="Nothing to commit.", manual=manual,
                     )
                     return
-                self.printer.broadcast({
-                    "type": "autocommit_progress",
-                    "message": "Generating commit message…",
-                    "tabId": tab_id,
-                })
-                with self._state_lock:
-                    prompt_state = agent_state.find_by_tab(tab_id)
-                user_prompt = (
-                    prompt_state.last_user_prompt if prompt_state else ""
-                ) or None
-                task_result = (
-                    prompt_state.last_result_summary if prompt_state else ""
-                ) or None
+                if manual:
+                    self.printer.broadcast({
+                        "type": "notification",
+                        "id": f"manual-commit:{tab_id}",
+                        "severity": "info",
+                        "message": "Auto-generating commit message…",
+                        "tabId": tab_id,
+                    })
+                else:
+                    self.printer.broadcast({
+                        "type": "autocommit_progress",
+                        "message": "Generating commit message…",
+                        "tabId": tab_id,
+                    })
+                if manual:
+                    # A user-invoked commit describes the DIFF, not the
+                    # last task: no User prompt: / Result: sections.
+                    user_prompt = None
+                    task_result = None
+                else:
+                    with self._state_lock:
+                        prompt_state = agent_state.find_by_tab(tab_id)
+                    user_prompt = (
+                        prompt_state.last_user_prompt if prompt_state else ""
+                    ) or None
+                    task_result = (
+                        prompt_state.last_result_summary if prompt_state else ""
+                    ) or None
                 msg = (
                     generate_commit_message_from_diff(
                         diff.stdout,
@@ -422,35 +481,48 @@ class _MergeFlowMixin:
                     )
                     or "Auto-commit"
                 )
-                self.printer.broadcast({
-                    "type": "autocommit_progress",
-                    "message": "Committing…",
-                    "tabId": tab_id,
-                })
-                ok = GitWorktreeOps.commit_staged(repo, msg)
+                if not manual:
+                    self.printer.broadcast({
+                        "type": "autocommit_progress",
+                        "message": "Committing…",
+                        "tabId": tab_id,
+                    })
+                # Commit directly (the staged diff was verified
+                # non-empty above) so a failure's actual git output —
+                # pre-commit hook rejection text, identity/config
+                # errors, … — can be reported to the user instead of
+                # a guess.
+                commit_result = _git(work_dir, "commit", "-m", msg)
+                ok = commit_result.returncode == 0
             if ok:
                 msg_lines = msg.splitlines()
                 subject = msg_lines[0] if msg_lines else msg
                 done_event = self._broadcast_autocommit_done(
                     tab_id, success=True, committed=True,
                     message=f"Committed: {subject}",
-                    commit_message=msg,
+                    commit_message=msg, manual=manual,
                 )
-                if tab_id:
+                if tab_id and not manual:
                     with self._state_lock:
                         task_id = _state_task_key(agent_state.find_by_tab(tab_id))
                     if task_id is not None:
                         _append_chat_event(done_event, task_id=task_id)
             else:
+                err = (
+                    (commit_result.stderr or "").strip()
+                    or (commit_result.stdout or "").strip()
+                )
+                reason = err.splitlines()[0] if err else "pre-commit hook?"
                 self._broadcast_autocommit_done(
                     tab_id, success=False, committed=False,
-                    message="git commit failed (pre-commit hook?).",
+                    message=f"git commit failed: {reason}",
+                    manual=manual,
                 )
         except Exception as e:  # pragma: no cover — unexpected git/LLM error
             logger.debug("Autocommit action failed", exc_info=True)
             self._broadcast_autocommit_done(
                 tab_id, success=False, committed=False,
-                message=str(e),
+                message=str(e), manual=manual,
             )
 
     def _autocommit_changed_repos(

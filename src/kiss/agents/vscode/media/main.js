@@ -4442,6 +4442,9 @@
       }
       case 'autocommit_done': {
         clearActionProgress(target);
+        // A successful manual Git Commit is reported by a toast
+        // notification instead; only failures earn transcript text.
+        if (ev && ev.manual && ev.success) break;
         const cls2 = ev && ev.success ? 'wt-result-ok' : 'wt-result-err';
         const acDiv = mkEl('div', 'ev ' + cls2);
         acDiv.textContent = (ev && ev.message) || '';
@@ -5490,7 +5493,18 @@
         // tableak-coverage:start
         // An untagged toast is window-level (install progress, updates);
         // a tagged one belongs to a task and must stay with its tab.
-        if (ev.tabId !== undefined && !isForActiveTab(ev)) break;
+        // The chat tab this window currently REPRESENTS also counts:
+        // when a content tab is on screen, actions taken on its
+        // behalf (the settings panel's Git Commit targets
+        // reportedChatTabId then) must still toast here — the toast
+        // container is window-level, not transcript-bound, so nothing
+        // can leak into another conversation's transcript.
+        if (
+          ev.tabId !== undefined &&
+          ev.tabId !== reportedChatTabId &&
+          !isForActiveTab(ev)
+        )
+          break;
         // tableak-coverage:end
         updateNotification(ev);
         break;
@@ -6118,7 +6132,9 @@
           const bgAdTab = getTab(ev.tabId);
           if (bgAdTab) {
             clearActionProgress(bgAdTab.outputFragment);
-            if (bgAdTab.outputFragment) {
+            // A successful manual Git Commit is reported by a toast
+            // notification instead; only failures earn transcript text.
+            if (bgAdTab.outputFragment && !(ev && ev.manual && ev.success)) {
               const cls = ev && ev.success ? 'wt-result-ok' : 'wt-result-err';
               const div = mkEl('div', 'ev ' + cls);
               div.textContent = (ev && ev.message) || '';
@@ -7032,7 +7048,9 @@
 
   function handleAutocommitResult(ev) {
     clearActionProgress(O);
-    appendActionResult(ev);
+    // A successful manual Git Commit is reported by a toast
+    // notification instead; only failures earn transcript text.
+    if (!(ev && ev.manual && ev.success)) appendActionResult(ev);
     focusInputWithRetry();
   }
 
