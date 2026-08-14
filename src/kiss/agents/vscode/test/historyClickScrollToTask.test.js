@@ -349,8 +349,109 @@ function testClickRowWithoutTaskIdJustSwitches() {
   console.log('PASS history row without a task id only switches tabs');
 }
 
+// The tab's own task produced no output, so it has no rendered region,
+// while a spliced-in neighbour fills the transcript and the reader has
+// scrolled into it.  Clicking the own task's history row must reclaim
+// the static panel and the status row from the neighbour — without
+// issuing a resumeSession, since the own task is already loaded.
+function testClickOwnTaskWithoutRegionReclaimsPanel() {
+  const {win, posted} = makeWebview();
+  disableWorkspaceFilter(win);
+  const tabId = posted.find(msg => msg && msg.type === 'ready').tabId;
+  win._testApi.hideWelcome();
+  // The tab's own "Task B" (id 42) recorded no output at all.
+  send(win, {
+    type: 'task_events',
+    tabId,
+    chat_id: 'chat-1',
+    task_id: '42',
+    task: 'Task B',
+    events: [],
+  });
+  send(win, {
+    type: 'adjacent_task_events',
+    tabId,
+    direction: 'prev',
+    task: 'Task A',
+    task_id: '41',
+    events: [
+      {type: 'task_start', task: 'Task A'},
+      {type: 'system_output', text: 'output of task A\n'},
+    ],
+  });
+  const O = win.document.getElementById('output');
+  const container = O.querySelector('.adjacent-task[data-task-id="41"]');
+  assert.ok(
+    container,
+    'sanity: the neighbour task must be spliced into the transcript',
+  );
+  // The neighbour is the only rendered region: fake its geometry and give
+  // it borrowable metrics, then scroll into it as a real reader would.
+  Object.defineProperty(O, 'scrollHeight', {value: 1000, configurable: true});
+  Object.defineProperty(O, 'clientHeight', {value: 500, configurable: true});
+  O.getBoundingClientRect = () => ({top: 0, bottom: 500, left: 0, right: 400});
+  container.getBoundingClientRect = () => ({
+    top: 0 - O.scrollTop,
+    bottom: 1000 - O.scrollTop,
+    left: 0,
+    right: 400,
+  });
+  container.dataset.metricTokens = 'Tokens: 999';
+  O.scrollTop = 100;
+  O.dispatchEvent(new win.Event('scroll'));
+  assert.strictEqual(
+    taskPanelText(win),
+    'Task A',
+    'sanity: the panel names the neighbour once the reader scrolls into it',
+  );
+  const statusTokens = win.document.getElementById('status-tokens');
+  assert.strictEqual(
+    statusTokens.textContent,
+    'Tokens: 999',
+    'sanity: the status row is lent to the neighbour before the click',
+  );
+  const resumeBefore = resumeMessages(posted).length;
+
+  send(win, {
+    type: 'history',
+    offset: 0,
+    generation: 0,
+    sessions: [historySession('chat-1', 42, 'Task B')],
+  });
+  historyRow(win, 0).click();
+
+  assert.strictEqual(
+    chatTabs(win).length,
+    1,
+    'clicking the own task of the open chat must not open a new tab',
+  );
+  assert.strictEqual(
+    win._testApi.getActiveTabId(),
+    tabId,
+    'the open tab showing the chat must stay active',
+  );
+  assert.strictEqual(
+    resumeMessages(posted).length,
+    resumeBefore,
+    'the tab own task is already loaded: no resumeSession',
+  );
+  assert.strictEqual(
+    taskPanelText(win),
+    'Task B',
+    'the static task panel must be reclaimed for the clicked own task',
+  );
+  assert.strictEqual(
+    statusTokens.textContent,
+    '',
+    'the status row must show the own task metrics again after the click',
+  );
+  win.close();
+  console.log('PASS history click reclaims the panel for a region-less task');
+}
+
 testClickScrollsToSplicedNeighbour();
 testClickScrollsBackToOwnTask();
 testClickLoadsTaskNotInTranscript();
 testClickRowWithoutTaskIdJustSwitches();
+testClickOwnTaskWithoutRegionReclaimsPanel();
 console.log('All historyClickScrollToTask tests passed');
