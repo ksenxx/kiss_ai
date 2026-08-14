@@ -200,7 +200,7 @@ print(result.text, result.success, result.cost, result.tokens, result.steps)
 follow_up = sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 ```
 
-`run()` accepts keyword options mirroring the chat interface — `model`, `work_dir`, `chat_id`, `use_worktree`, `auto_commit`, `max_budget`, `model_config` (custom endpoint/headers), `web_tools`, `is_parallel`, `timeout`, `sock_path` (daemon socket override) — plus `tools="/path/to/my_tools.py"`, a Python file whose top-level functions the daemon registers as extra agent tools. The functions are never serialized: only the path travels over the socket, and the daemon imports the file and runs the tools in its own process.
+`run()` accepts keyword options mirroring the chat interface — `model`, `work_dir`, `chat_id`, `use_worktree`, `auto_commit`, `max_budget`, `model_config` (custom endpoint/headers), `web_tools`, `is_parallel`, `timeout`, `sock_path` (daemon socket override) — plus `tools="/path/to/my_tools.py"`, a Python file whose `get_tools()` function returns the functions the daemon registers as extra agent tools. The functions are never serialized: only the path travels over the socket, and the daemon imports the file, calls `get_tools()`, and runs the tools in its own process.
 
 ### Skills, MCP servers, and customization
 
