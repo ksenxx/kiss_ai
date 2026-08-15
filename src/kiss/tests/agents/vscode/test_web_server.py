@@ -1119,6 +1119,102 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             self.assertEqual(reply["workDir"], "")
             self.assertEqual(reply["tabId"], "")
 
+    async def test_ws_check_paths_pending_worktree_fallback(self) -> None:
+        """A path existing only in the tab's pending worktree resolves.
+
+        A finished worktree task keeps its committed artifacts on the
+        un-merged branch: the file lives under
+        ``<repo>/.kiss-worktrees/<branch>/`` but not under the tab's
+        workDir until the merge.  ``checkPaths`` must report such a
+        path as existing for THAT tab only, ``openFile`` must serve the
+        worktree copy, and a successful ``worktree_result`` (merge or
+        discard finished) must drop the fallback so the workDir verdict
+        wins again.
+        """
+        work_dir = self.server.work_dir
+        wt_dir = Path(work_dir) / ".kiss-worktrees" / "kiss_wt-1"
+        (wt_dir / "reports").mkdir(parents=True)
+        report = wt_dir / "reports" / "analysis.html"
+        report.write_text("<h1>report</h1>\n")
+
+        # The daemon announces the finished task's pending worktree
+        # with the tab already stamped (merge_flow's worktree_done).
+        self.server._printer.broadcast(
+            {
+                "type": "worktree_done",
+                "branch": "kiss/wt-1",
+                "worktreeDir": str(wt_dir),
+                "tabId": "wt-tab",
+            }
+        )
+
+        async def recv_type(ws: Any, wanted: str) -> dict[str, Any]:
+            deadline = asyncio.get_event_loop().time() + 5
+            while asyncio.get_event_loop().time() < deadline:
+                raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                ev: dict[str, Any] = json.loads(raw)
+                if ev.get("type") == wanted:
+                    return ev
+            raise AssertionError(f"no {wanted} reply received")
+
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            query = {
+                "type": "checkPaths",
+                "paths": ["reports/analysis.html"],
+                "workDir": work_dir,
+                "tabId": "wt-tab",
+            }
+            await ws.send(json.dumps(query))
+            reply = await recv_type(ws, "pathsExist")
+            self.assertEqual(
+                reply["results"],
+                {"reports/analysis.html": True},
+                "path in the tab's pending worktree must resolve",
+            )
+
+            await ws.send(json.dumps({**query, "tabId": "other-tab"}))
+            reply = await recv_type(ws, "pathsExist")
+            self.assertEqual(
+                reply["results"],
+                {"reports/analysis.html": False},
+                "another tab must not see this tab's worktree",
+            )
+
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "openFile",
+                        "path": "reports/analysis.html",
+                        "workDir": work_dir,
+                        "tabId": "wt-tab",
+                    }
+                )
+            )
+            content = await recv_type(ws, "fileContent")
+            self.assertEqual(content["content"], "<h1>report</h1>\n")
+            self.assertEqual(content["path"], str(report.resolve()))
+
+            # Merge finished: the fallback is dropped, and the file is
+            # still absent from the workDir, so the path is dead again.
+            self.server._printer.broadcast(
+                {
+                    "type": "worktree_result",
+                    "success": True,
+                    "message": "Merged branch 'kiss/wt-1'.",
+                    "tabId": "wt-tab",
+                }
+            )
+            await ws.send(json.dumps(query))
+            reply = await recv_type(ws, "pathsExist")
+            self.assertEqual(
+                reply["results"],
+                {"reports/analysis.html": False},
+                "a finished worktree_result must drop the fallback",
+            )
+
     async def test_ws_generate_commit_message(self) -> None:
         """generateCommitMessage command does not produce Unknown command error."""
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
