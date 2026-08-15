@@ -27,12 +27,13 @@
 //
 // The live stream and the replayed transcript are NOT the same list of
 // events, and the difference is the daemon's, not this test's: only
-// display events are recorded and persisted, and `usage_info` is not
-// one of them. Rather than restate that rule here -- or read it out of
-// the daemon's source, which would fail for a harmless refactor and
-// pass for a real change of behaviour -- `persistedTranscript()` below
-// runs the run through the daemon's OWN recorder and replays whatever
-// comes back.
+// display events are recorded and persisted (`usage_info` among them,
+// so a reload can repopulate the tokens/cost header of a task that has
+// no `result` event yet). Rather than restate that rule here -- or read
+// it out of the daemon's source, which would fail for a harmless
+// refactor and pass for a real change of behaviour --
+// `persistedTranscript()` below runs the run through the daemon's OWN
+// recorder and replays whatever comes back.
 
 'use strict';
 
@@ -181,10 +182,10 @@ function persistedTranscript() {
     'the daemon must keep the result event, or there is nothing to replay',
   );
   assert.ok(
-    !events.some(ev => ev.type === 'usage_info'),
-    'the daemon drops usage_info before storing a run, so a replayed ' +
-      'transcript must not contain one -- the step count has to survive ' +
-      'on what is left',
+    events.some(ev => ev.type === 'usage_info'),
+    'the daemon keeps usage_info when storing a run: it is the only ' +
+      'carrier of the tokens/cost header for a task that stopped, ' +
+      'errored, or is still running (no result event yet)',
   );
   return events;
 }
@@ -318,9 +319,9 @@ function testBothUsageFormsAreReadTheSameWayByBothTranscripts() {
 }
 
 // The counters shown for a replayed transcript must match the counters
-// the live stream produced for the very same run -- even though the
-// daemon threw the usage_info away before storing it, so the replay has
-// only the result's step_count to go on.
+// the live stream produced for the very same run -- the stored
+// usage_info and the result's step_count both survive recording, and
+// either alone must be enough to rebuild the header.
 function testReplayAgreesWithTheLiveStream() {
   const {win} = makeWebview();
   const tabA = win._testApi.getActiveTabId();
@@ -442,11 +443,62 @@ function testTheStepCounterNeverRunsBackwards() {
   console.log('  ok - the step counter never runs backwards');
 }
 
+// The remote web app's reconnect path: the daemon replays every open
+// tab's transcript as a `task_events` envelope, and only one of those
+// tabs is on screen. A hidden tab's replay borrows the visible status
+// row while it renders and gives it back afterwards -- but the numbers
+// the replayed usage_info / result painted belong to the hidden tab and
+// must come back with it. This used to keep only the step count, so a
+// reloaded web app showed "· Steps: 22" with no tokens and no cost
+// until the task's next live step.
+function testBackgroundReplayKeepsTokensAndCost() {
+  const {win} = makeWebview();
+  const tabA = win._testApi.getActiveTabId();
+  win._testApi.createNewTab();
+  const tabB = win._testApi.getActiveTabId();
+  clickTab(win, tabA);
+
+  const before = snapshot(win);
+  send(win, {
+    type: 'task_events',
+    tabId: tabB,
+    task: 'benchmark research',
+    events: persistedTranscript(),
+  });
+  const after = snapshot(win);
+  assert.strictEqual(
+    after.tokens,
+    before.tokens,
+    'a hidden tab\u2019s replay must not leave its numbers on the ' +
+      'visible tab\u2019s status row',
+  );
+  assert.strictEqual(after.budget, before.budget, 'nor its cost');
+  assert.strictEqual(after.steps, before.steps, 'nor its step count');
+
+  clickTab(win, tabB);
+  const replayed = snapshot(win);
+  assert.strictEqual(
+    replayed.tokens,
+    'Tokens: 12,345',
+    'switching to a tab whose transcript was replayed while hidden ' +
+      'must show the tokens the replay carried',
+  );
+  assert.strictEqual(
+    replayed.budget,
+    'Cost: $0.42',
+    'and the cost -- not a bare "· Steps: N" header',
+  );
+  assert.strictEqual(replayed.steps, 'Steps: 7', 'and the step count');
+  win.close();
+  console.log('  ok - a background replay keeps its tokens and cost');
+}
+
 function main() {
   testHiddenTabRendersLikeAVisibleOne();
   testBothUsageFormsAreReadTheSameWayByBothTranscripts();
   testReplayAgreesWithTheLiveStream();
   testTheStepCounterNeverRunsBackwards();
+  testBackgroundReplayKeepsTokensAndCost();
   console.log('bgTabStreamParity.test.js: all tests passed');
 }
 

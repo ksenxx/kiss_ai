@@ -191,10 +191,27 @@ async function runTests() {
   const wtReport = path.join(wt, 'reports', 'analysis.html');
   fs.writeFileSync(wtReport, '<h1>report</h1>\n');
 
+  // reports/analysis.html is an HTML file, so openFile renders it in a
+  // webview panel tab (not the text editor). The panel's asWebviewUri
+  // call receives the opened file's directory and the panel title is
+  // its basename, which together identify the file that was opened.
   const opened = [];
-  vscodeStub.workspace.openTextDocument = uri => {
-    opened.push(uri.fsPath);
-    return Promise.resolve({getText: () => ''});
+  vscodeStub.window.createWebviewPanel = (viewType, title) => {
+    const panel = {
+      viewType,
+      title,
+      webview: {
+        html: '',
+        asWebviewUri: uri => {
+          opened.push(path.join(uri.fsPath, title));
+          return makeUri(uri.fsPath);
+        },
+      },
+      reveal: () => {},
+      onDidDispose: () => ({dispose: () => {}}),
+      dispose: () => {},
+    };
+    return panel;
   };
 
   const view = new SorcarSidebarView(makeUri(path.join(__dirname, '..')));

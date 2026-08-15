@@ -251,11 +251,25 @@ async function runTests() {
   console.log('  ok - replayed worktree_created restores the fallback');
 
   // 2. openFile serves the worktree copy from the nested cwd.
+  // reports/live.html is an HTML file, so openFile renders it in a
+  // webview panel tab (not the text editor). The panel's asWebviewUri
+  // call receives the opened file's directory and the panel title is
+  // its basename, which together identify the file that was opened.
   const opened = [];
-  vscodeStub.workspace.openTextDocument = uri => {
-    opened.push(uri.fsPath);
-    return Promise.resolve({getText: () => ''});
-  };
+  vscodeStub.window.createWebviewPanel = (viewType, title) => ({
+    viewType,
+    title,
+    webview: {
+      html: '',
+      asWebviewUri: uri => {
+        opened.push(path.join(uri.fsPath, title));
+        return makeUri(uri.fsPath);
+      },
+    },
+    reveal: () => {},
+    onDidDispose: () => ({dispose: () => {}}),
+    dispose: () => {},
+  });
   wv.fireMessage({
     type: 'openFile',
     path: 'reports/live.html',
