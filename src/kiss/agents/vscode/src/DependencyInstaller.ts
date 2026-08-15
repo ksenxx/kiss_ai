@@ -1195,7 +1195,13 @@ function installCliScript(kissProjectPath: string, uvPath: string): void {
     try {
       const whichCmd =
         process.platform === 'win32' ? `where ${uvPath}` : `which ${uvPath}`;
-      absUvPath = execSync(whichCmd, {encoding: 'utf-8'}).trim().split('\n')[0];
+      // `where` on Windows emits CRLF line endings and may print several
+      // matches; splitting on '\n' alone left a trailing '\r' on the first
+      // line, which then got baked into the generated sorcar.cmd.
+      absUvPath = execSync(whichCmd, {encoding: 'utf-8'})
+        .trim()
+        .split(/\r?\n/)[0]
+        .trim();
     } catch {
       const suffix = process.platform === 'win32' ? '.exe' : '';
       absUvPath = path.join(HOME_DIR, '.local', 'bin', `uv${suffix}`);
