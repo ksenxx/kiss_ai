@@ -6253,7 +6253,15 @@
           inp.focus();
         }
         break;
+      case 'worktree_created':
       case 'worktree_done':
+        // The host/server just recorded the tab's pending-worktree
+        // fallback dir. Links checked before that (e.g. a result
+        // rendered after a reconnect replay dropped the tracking, or
+        // before worktree_done re-presented it) were demoted as
+        // missing, so re-verify them now that they can resolve.
+        recheckFileLinksForTab(ev.tabId);
+        if (ev.type === 'worktree_created') break;
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgWtTab = getTab(ev.tabId);
           if (bgWtTab) {

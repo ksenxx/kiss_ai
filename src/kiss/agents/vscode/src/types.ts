@@ -245,11 +245,17 @@ type ToWebviewMessageBody =
   | {type: 'appendToInput'; text: string}
   | {type: 'insertAndSubmit'; text: string}
   | {type: 'focusInput'}
-  | {type: 'worktree_created'; worktreeDir: string; branch: string}
+  | {
+      type: 'worktree_created';
+      worktreeDir: string;
+      worktreeWorkDir?: string;
+      branch: string;
+    }
   | {
       type: 'worktree_done';
       branch: string;
       worktreeDir: string;
+      worktreeWorkDir?: string;
       originalBranch: string;
       changedFiles: string[];
       hasConflict?: boolean;
