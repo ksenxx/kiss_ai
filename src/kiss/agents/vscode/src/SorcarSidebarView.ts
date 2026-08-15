@@ -409,11 +409,25 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           // pending-worktree fallback for _resolveTabFile(). Recording
           // a directory is side-effect free; only the SCM view below
           // stays scoped to tabs this window interacted with.
-          this._worktreeDirs.set(wtTabId, dir);
+          // worktreeWorkDir (the task's cwd inside the worktree) wins
+          // over the worktree root so relative paths from tasks
+          // launched in a repo subdirectory resolve correctly.
+          this._worktreeDirs.set(wtTabId, msg.worktreeWorkDir || dir);
         }
         if (dir && this._isOwnTab(wtTabId)) {
           void this._openWorktreeInScm(dir);
         }
+      }
+      if (msg.type === 'task_events' && Array.isArray(msg.events)) {
+        // A session replay (reconnect, adopted canonical tab) reaches a
+        // host that may have no _worktreeDirs entry for the tab: the
+        // daemon dropped its own tracking in cleanup_tab() before the
+        // replay, and while the task is still running nothing re-emits
+        // worktree_done. The historical worktree events nested in the
+        // replayed transcript are the only copy of the directory, so
+        // scan them in order (a later successful worktree_result nets
+        // out an earlier worktree_created).
+        this._trackReplayedWorktreeEvents(msg.tabId, msg.events);
       }
       if (msg.type === 'tabs_state' && Array.isArray(msg.tabs)) {
         // The snapshot is canonical and complete: a tab it no longer
@@ -636,6 +650,36 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
    * the `worktree_result` handler drops the entry and the workspace
    * copy (or genuine absence) wins again.
    */
+  /**
+   * Restore the pending-worktree fallback from a replayed transcript.
+   *
+   * Applies the same net effect as receiving the nested worktree
+   * events live: `worktree_created` / `worktree_done` record the
+   * directory (preferring the task's cwd inside the worktree), a
+   * successful `worktree_result` retires it.
+   */
+  private _trackReplayedWorktreeEvents(
+    tabId: string | undefined,
+    events: unknown[],
+  ): void {
+    if (tabId === undefined) return;
+    for (const raw of events) {
+      if (!raw || typeof raw !== 'object') continue;
+      const ev = raw as {
+        type?: string;
+        worktreeDir?: string;
+        worktreeWorkDir?: string;
+        success?: boolean;
+      };
+      if (ev.type === 'worktree_created' || ev.type === 'worktree_done') {
+        const dir = ev.worktreeWorkDir || ev.worktreeDir;
+        if (dir) this._worktreeDirs.set(tabId, dir);
+      } else if (ev.type === 'worktree_result' && ev.success) {
+        this._worktreeDirs.delete(tabId);
+      }
+    }
+  }
+
   private _resolveTabFile(
     p: string,
     wd: string,
@@ -866,7 +910,15 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
 
         const trimmed = message.prompt.trim();
         if (trimmed && !trimmed.includes('\n')) {
-          const resolved = resolveWorkspaceFile(trimmed, effectiveWorkDir);
+          // _resolveTabFile (not plain resolveWorkspaceFile): a report
+          // that lives only in the tab's pending worktree must open
+          // like any other file link — falling through to _startTask
+          // would launch an unintended agent run on a path-only prompt.
+          const resolved = this._resolveTabFile(
+            trimmed,
+            effectiveWorkDir,
+            tabId,
+          );
           if (resolved) {
             const uri = vscode.Uri.file(resolved);
             const doc = await vscode.workspace.openTextDocument(uri);

@@ -1775,19 +1775,41 @@ class WebPrinter(JsonPrinter):
         until the branch is merged, so ``checkPaths``/``openFile``
         requests from remote clients need the tab's worktree dir as a
         resolution fallback (:meth:`RemoteAccessServer._resolve_tab_file`).
-        ``worktree_created`` / ``worktree_done`` record the directory;
-        a successful ``worktree_result`` (merge or discard finished)
+        ``worktree_created`` / ``worktree_done`` record the directory
+        (preferring ``worktreeWorkDir`` — the task's cwd inside the
+        worktree — over the worktree root, so relative paths from tasks
+        launched in a repo subdirectory resolve correctly); a
+        successful ``worktree_result`` (merge or discard finished)
         drops it, so the main checkout wins again.
+
+        A ``task_events`` replay envelope is scanned too, in event
+        order: session replay first runs :meth:`cleanup_tab` (dropping
+        the entry) and, while the task is still running, nothing else
+        re-presents the worktree — the historical ``worktree_created``
+        nested in the replayed transcript is the only copy of the
+        directory, so it must restore the tracking.
 
         Args:
             event: The event being broadcast.
             tab_id: The tab the event copy is addressed to.
         """
-        etype = event.get("type")
         if not isinstance(tab_id, str) or not tab_id:
             return
+        etype = event.get("type")
+        if etype == "task_events":
+            nested = event.get("events")
+            if isinstance(nested, list):
+                for sub in nested:
+                    if isinstance(sub, dict):
+                        self._track_worktree_event(sub, tab_id)
+            return
         if etype in ("worktree_created", "worktree_done"):
-            wt_dir = event.get("worktreeDir")
+            wt_work_dir = event.get("worktreeWorkDir")
+            wt_dir = (
+                wt_work_dir
+                if isinstance(wt_work_dir, str) and wt_work_dir
+                else event.get("worktreeDir")
+            )
             if isinstance(wt_dir, str) and wt_dir:
                 self._tab_worktree_dirs[tab_id] = wt_dir
         elif etype == "worktree_result" and event.get("success"):
@@ -1816,10 +1838,12 @@ class WebPrinter(JsonPrinter):
 
         Also runs when a live tab merely re-subscribes (session
         replay, new chat).  That is safe: after rebinding a chat the
-        server re-presents a still-pending worktree
+        server re-presents a finished pending worktree
         (``_emit_pending_worktree`` broadcasts ``worktree_done``),
-        which re-records the entry via
-        :meth:`_track_worktree_event` before any file link is checked.
+        and for a still-running task the replayed ``task_events``
+        transcript carries the historical ``worktree_created`` — either
+        way :meth:`_track_worktree_event` re-records the entry before
+        any file link is checked.
 
         Args:
             tab_id: The frontend tab identifier to drop.
