@@ -313,3 +313,7 @@ for (const makeClient of [makeExtensionClient, makeWebappClient]) {
   testParentlessDeterministicId(makeClient);
 }
 console.log('subagentTabDeterministicId.test.js: all tests passed');
+// JSDOM windows keep timers alive (running-task UI timer, shim
+// reconnect); an assertion failure above throws and exits non-zero, so
+// reaching this line means success.
+process.exit(0);
