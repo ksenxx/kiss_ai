@@ -4042,10 +4042,11 @@
     if (el.scrollTop !== top) el.scrollTop = top;
   }
 
-  // User scroll lock: when a task is running and the user scrolls the
-  // chat up by at least 1/8th of its visible height, outer auto-scroll
-  // is disabled; it resumes once the user scrolls back to the bottom
-  // of the chat.
+  // User scroll lock: whenever the chat is scrolled away from its
+  // bottom — e.g. the user scrolled up to read a previous task — outer
+  // auto-scroll is disabled; it resumes only once the user scrolls
+  // back to the bottom of the chat.  Programmatic auto-scrolls always
+  // land at the bottom, so they never engage the lock.
   let userScrollLock = false;
 
   function chatDistanceFromBottom() {
@@ -4053,12 +4054,7 @@
   }
 
   function updateUserScrollLock() {
-    const dist = chatDistanceFromBottom();
-    if (dist >= O.clientHeight / 8) {
-      if (isRunning) userScrollLock = true;
-    } else if (dist <= 1) {
-      userScrollLock = false;
-    }
+    userScrollLock = chatDistanceFromBottom() > 1;
   }
 
   function resetUserScrollLock() {
@@ -4068,6 +4064,14 @@
   function autoScrollChat() {
     // The outer chat follows the tail only while the user has not
     // scrolled up (the lock re-arms when they return to the bottom).
+    // A collapse (e.g. older panels folding) can shrink the chat until
+    // it rests at its bottom without the browser firing any scroll
+    // event; a lock cached before the shrink would then suppress
+    // following forever, so a lock observed at the bottom is stale and
+    // is re-derived here.  An engaged lock is never created here: an
+    // append grows the distance from the bottom, so recomputing an
+    // UNLOCKED state right after one would wrongly engage the lock.
+    if (userScrollLock) updateUserScrollLock();
     if (!userScrollLock) scrollPanelToEnd(O);
   }
 
