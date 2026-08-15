@@ -19,12 +19,11 @@ Reproduces the following bug:
    extension replays this as a ``resumeSession`` command to the freshly
    started daemon.
 4. The daemon's ``_replay_session`` handles ``resumeSession`` by
-   recording ``_tab_chat_views[T] = X`` and, when a
-   ``_RunningAgentState[T]`` already exists, by writing
-   ``tab.chat_id = X``.  After a cold daemon restart no state exists
-   yet, so *only* ``_tab_chat_views`` gets the association.
+   recording ``_tab_chat_views[T] = X``.  After a cold daemon restart
+   no agent state exists yet, so *only* ``_tab_chat_views`` gets the
+   association.
 5. User submits a new prompt on the SAME tab.  ``_cmd_run`` opens a
-   fresh ``_RunningAgentState`` for ``T`` with an empty ``chat_id``,
+   fresh ``AgentState`` for ``T`` with an empty ``chat_id``,
    mints a brand new UUID chat id, and runs the task.  The
    ``ChatSorcarAgent.build_chat_prompt`` call therefore queries
    ``_load_chat_context`` for the FRESH uuid, finds nothing, and sends
@@ -35,7 +34,7 @@ The end-to-end test drives the real :class:`VSCodeServer` through
 start.  Only :meth:`SorcarAgent.__mro__[1].run` (the grandparent's
 plain ``run``) is stubbed so we can capture the augmented prompt that
 :meth:`ChatSorcarAgent.build_chat_prompt` produced and inspect the
-final ``tab.chat_id`` recorded on the tab state.
+final ``chat_id`` recorded on the tab's agent state.
 """
 
 from __future__ import annotations
@@ -179,8 +178,9 @@ class TestRelaunchPreservesChatHistory(unittest.TestCase):
         assert "prior session" in str(ctx[0]["task"] or "")
         assert "Prior assistant answer" in str(ctx[0]["result"] or "")
 
-        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-        _RunningAgentState.running_agent_states.clear()
+        from kiss.server import agent_state
+        agent_state.agent_states.clear()
+        self.addCleanup(agent_state.agent_states.clear)
 
         server = VSCodeServer()
 
@@ -211,21 +211,28 @@ class TestRelaunchPreservesChatHistory(unittest.TestCase):
             assert done.wait(timeout=30), (
                 "grandparent run never fired for the submitted task"
             )
-            assert _wait_until(
-                lambda: (
-                    server._get_tab(tab_id).task_thread is None
-                    or not server._get_tab(tab_id).task_thread.is_alive()  # type: ignore[union-attr]
-                ),
-                timeout=30,
-            ), "task worker thread never completed"
+
+            def _worker_done() -> bool:
+                state = agent_state.find_by_tab(tab_id)
+                if state is None:
+                    return True
+                thread = state.task_thread
+                return thread is None or not thread.is_alive()
+
+            assert _wait_until(_worker_done, timeout=30), (
+                "task worker thread never completed"
+            )
         finally:
             _unpatch_grandparent_run(original_run)
 
-        tab = server._get_tab(tab_id)
+        tab_state = agent_state.find_by_tab(tab_id)
+        assert tab_state is not None, (
+            "server-owned agent state for the tab disappeared after the run"
+        )
         self.assertEqual(
-            tab.chat_id, prior_chat_id,
+            tab_state.chat_id, prior_chat_id,
             f"Restored tab lost its prior chat_id after relaunch: "
-            f"tab.chat_id={tab.chat_id!r} expected={prior_chat_id!r}",
+            f"chat_id={tab_state.chat_id!r} expected={prior_chat_id!r}",
         )
 
         self.assertTrue(

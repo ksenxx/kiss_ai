@@ -242,6 +242,19 @@ function makeDomWebview() {
     fs.readFileSync(path.join(mediaDir, 'main.js'), 'utf8'),
     dom.getInternalVMContext(),
   );
+  // The daemon's canonical tab snapshot (tabs are server-owned now);
+  // combined with the persisted chatId above it restores the selection.
+  win.dispatchEvent(
+    new win.MessageEvent('message', {
+      data: {
+        type: 'tabs_state',
+        tabs: [
+          {tabId: PRELOADED_TAB_ID, chatId: '', title: 'new chat',
+           workDir: ''},
+        ],
+      },
+    }),
+  );
   return {win, posted, close: () => win.close()};
 }
 

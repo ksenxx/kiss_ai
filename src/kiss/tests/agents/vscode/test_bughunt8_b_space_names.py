@@ -12,8 +12,8 @@ Two independent stripping bugs, one per assigned source file:
   name ends (or begins) with a space — legal on every POSIX
   filesystem, and NOT C-quoted by git (space is a printable
   character) — was therefore recorded under a mangled name that does
-  not exist on disk, so ``_prepare_merge_view`` silently dropped the
-  agent-created file from the merge review entirely.
+  not exist on disk, silently hiding the agent-created file from
+  every caller.
 
 * ``merge_flow._unquoted_name_lines`` called ``output.strip()`` on the
   whole ``git diff --name-only`` output before splitting, eating the
@@ -28,16 +28,16 @@ real ``WorktreeSorcarAgent`` worktree, real server mixin methods.
 
 from __future__ import annotations
 
-import json
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.server.diff_merge import _capture_untracked, _prepare_merge_view
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
+from kiss.server.diff_merge import _capture_untracked
 from kiss.server.server import VSCodeServer
 
 
@@ -63,8 +63,6 @@ class TestUntrackedSpaceNames(unittest.TestCase):
         (self.repo / "seed.txt").write_text("seed\n")
         _git(self.repo, "add", "-A")
         _git(self.repo, "commit", "-qm", "init")
-        self.data_dir = Path(self.tmpdir) / "mergedata"
-        self.data_dir.mkdir()
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -82,25 +80,6 @@ class TestUntrackedSpaceNames(unittest.TestCase):
             " lead.txt", captured,
             f"leading-space name mangled by capture: {sorted(captured)}",
         )
-
-    def test_new_trailing_space_file_appears_in_merge_review(self) -> None:
-        """An agent-created ``trail `` file must be reviewable, not
-        silently dropped from the merge view."""
-        (self.repo / "trail ").write_text("agent line\n")
-        result = _prepare_merge_view(
-            str(self.repo), str(self.data_dir), {}, set(),
-        )
-        self.assertEqual(
-            result.get("status"), "opened",
-            "the new untracked file was dropped from the merge review "
-            f"entirely: {result}",
-        )
-        manifest = json.loads(
-            (self.data_dir / "pending-merge.json").read_text(),
-        )
-        names = [f["name"] for f in manifest["files"]]
-        self.assertIn("trail ", names, f"mangled manifest names: {names}")
-
 
 class TestWorktreeLeadingSpaceChangedFiles(unittest.TestCase):
     """Worktree changed-file listing must keep leading spaces in names."""
@@ -123,10 +102,15 @@ class TestWorktreeLeadingSpaceChangedFiles(unittest.TestCase):
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment]
 
         self.tab_id = "t-wt-space"
-        self.tab = self.server._get_tab(self.tab_id)
-        self.tab.use_worktree = True
         self.agent = WorktreeSorcarAgent("wt-space-test")
-        self.tab.agent = self.agent
+        self.state = AgentState(
+            "task-t-wt-space",
+            agent=self.agent,
+            tab_id=self.tab_id,
+            server_owned=True,
+        )
+        self.state.use_worktree = True
+        agent_state.register(self.state)
         wt_work_dir = self.agent._try_setup_worktree(Path(self.repo), self.repo)
         assert wt_work_dir is not None
         assert self.agent._wt is not None
@@ -138,7 +122,7 @@ class TestWorktreeLeadingSpaceChangedFiles(unittest.TestCase):
                 self.agent.discard()
         except Exception:
             pass
-        _RunningAgentState.running_agent_states.pop(self.tab_id, None)
+        agent_state.unregister(self.state.task_id, self.state)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_changed_files_keep_leading_space(self) -> None:

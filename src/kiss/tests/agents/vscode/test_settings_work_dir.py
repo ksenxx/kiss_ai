@@ -2,26 +2,23 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""The settings panel exposes a "Working directory" option.
+"""The daemon side of the settings panel's "Working directory" option.
 
-Frontend behaviour (real ``populateConfigForm`` / ``collectConfigForm``
-from ``main.js`` replayed through a Node harness):
-
-* the ``#cfg-work-dir`` field is populated from ``configData``'s
-  ``config.work_dir``;
-* in a VS Code webview (no ``remote-chat`` body class) the field is
-  read-only — the work_dir is ALWAYS the workspace folder open in that
-  window — and is omitted from ``saveConfig`` so one window's save can
-  never overwrite the persisted work_dir;
-* in the standalone web client (``remote-chat`` body class) the field
-  is editable and its value is sent back via ``saveConfig``.
-
-Backend behaviour (real ``RemoteAccessServer`` over UDS):
+Tested against a real ``RemoteAccessServer`` over its UDS socket:
 
 * ``getConfig`` reports each connection's (= each VS Code window's)
-  own work_dir when nothing is persisted;
+  own work_dir when nothing is persisted, and keeps preferring it over a
+  work_dir another client persisted globally;
 * a remote ``saveConfig`` carrying ``config.work_dir`` persists it to
-  ``config.json`` and updates the daemon-wide fallback.
+  ``config.json`` and moves the daemon-wide fallback;
+* a ``saveConfig`` that omits ``work_dir`` -- which is what a VS Code
+  window sends, since its field is read-only -- leaves the persisted
+  value alone.
+
+The webview half of the field (read-only and never saved in VS Code,
+editable, saved and re-pinned in the standalone web client) is covered
+by the real DOM tests in
+``agents/vscode/test/settingsWorkDirField.test.js``.
 """
 
 from __future__ import annotations
@@ -29,9 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
-import subprocess
 import tempfile
-import unittest
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -40,223 +35,6 @@ from unittest import IsolatedAsyncioTestCase
 import kiss.agents.sorcar.persistence as th
 import kiss.core.vscode_config as vc
 from kiss.server.web_server import RemoteAccessServer
-
-_VSCODE_DIR = Path(__file__).resolve().parents[3] / "agents" / "vscode"
-_MAIN_JS = _VSCODE_DIR / "media" / "main.js"
-_API_JS = _VSCODE_DIR / "media" / "api.js"
-
-
-def _extract_fn_body(src: str, header: str) -> str:
-    """Return the source of a top-level ``function name(...) { ... }``
-    block whose header matches *header* (braces matched by counting).
-    """
-    start = src.index(header)
-    brace = src.index("{", start)
-    depth = 0
-    i = brace
-    while i < len(src):
-        c = src[i]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-            if depth == 0:
-                return src[start : i + 1]
-        i += 1
-    raise AssertionError(f"unterminated function body for {header}")
-
-
-def _run_config_form_harness(
-    body_classes: list[str],
-    populate_cfg: dict[str, Any],
-    edited_work_dir: str | None,
-    pinned_work_dir: str | None = None,
-) -> dict[str, Any]:
-    """Replay the real config-form functions in Node.
-
-    Builds a minimal DOM stub (including ``sessionStorage`` and a
-    ``vscode.postMessage`` recorder), optionally pre-pins
-    *pinned_work_dir* under the ``sorcar-work-dir`` sessionStorage key
-    (simulating a webapp instance that already adopted a folder), runs
-    ``populateConfigForm(populate_cfg)``, optionally overwrites the
-    ``#cfg-work-dir`` value (simulating the user editing the field),
-    runs ``collectConfigForm()`` and ``saveSettingsIfPopulated()``, and
-    returns the observed state — including every message posted to the
-    backend — as a dict.
-    """
-    src = _MAIN_JS.read_text()
-    api_src = _API_JS.read_text()
-    populate = _extract_fn_body(src, "function populateConfigForm(")
-    collect = _extract_fn_body(src, "function collectConfigForm()")
-    save = _extract_fn_body(src, "function saveSettingsIfPopulated()")
-    script = f"""
-'use strict';
-const elements = {{}};
-function getEl(id) {{
-  if (!elements[id]) {{
-    elements[id] = {{
-      value: '', checked: false, readOnly: false, title: '',
-      type: 'text', style: {{display: ''}},
-    }};
-  }}
-  return elements[id];
-}}
-const bodyClasses = {json.dumps(body_classes)};
-const document = {{
-  getElementById: getEl,
-  body: {{classList: {{contains: c => bodyClasses.indexOf(c) >= 0}}}},
-}};
-const _ss = {{}};
-const pinned = {json.dumps(pinned_work_dir)};
-if (pinned !== null) _ss['sorcar-work-dir'] = pinned;
-const sessionStorage = {{
-  getItem: k => (k in _ss ? _ss[k] : null),
-  setItem: (k, v) => {{ _ss[k] = String(v); }},
-}};
-const posted = [];
-const vscode = {{postMessage: m => posted.push(m)}};
-{api_src}
-const api = createSorcarApi(m => vscode.postMessage(m));
-let configFormPopulated = false;
-// Module-scope declaration (main.js line 165) that the extracted
-// populateConfigForm/getCurrentWorkDir bodies assign to and read.
-let configWorkDir = '';
-{populate}
-{collect}
-{save}
-populateConfigForm({json.dumps(populate_cfg)}, {{}});
-const afterPopulate = {{
-  value: getEl('cfg-work-dir').value,
-  readOnly: getEl('cfg-work-dir').readOnly,
-}};
-const edited = {json.dumps(edited_work_dir)};
-if (edited !== null) getEl('cfg-work-dir').value = edited;
-const collected = collectConfigForm();
-saveSettingsIfPopulated();
-console.log(JSON.stringify({{
-  afterPopulate,
-  hasWorkDir: 'work_dir' in collected.config,
-  collectedWorkDir: collected.config.work_dir,
-  posted,
-}}));
-"""
-    result = subprocess.run(
-        ["node", "-e", script],
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    assert result.returncode == 0, (
-        f"node error: {result.stderr}\nstdout: {result.stdout}"
-    )
-    out = json.loads(result.stdout.strip())
-    assert isinstance(out, dict)
-    return out
-
-
-class TestSettingsPanelWorkDirField(unittest.TestCase):
-    """Behaviour of the ``#cfg-work-dir`` settings field."""
-
-    def test_remote_client_field_is_editable_and_saved(self) -> None:
-        """In the standalone web client the field is populated from
-        ``configData``, stays editable, and the (trimmed) edited value
-        is included in the ``saveConfig`` payload."""
-        out = _run_config_form_harness(
-            body_classes=["remote-chat"],
-            populate_cfg={"work_dir": "/srv/project"},
-            edited_work_dir="  /srv/elsewhere  ",
-        )
-        self.assertEqual(out["afterPopulate"]["value"], "/srv/project")
-        self.assertFalse(out["afterPopulate"]["readOnly"])
-        self.assertTrue(out["hasWorkDir"])
-        self.assertEqual(out["collectedWorkDir"], "/srv/elsewhere")
-
-    def test_vscode_webview_field_is_read_only_and_not_saved(self) -> None:
-        """In a VS Code webview the field shows the window's work_dir
-        but is read-only, and ``saveConfig`` omits ``work_dir`` so one
-        window's save can never clobber the persisted value."""
-        out = _run_config_form_harness(
-            body_classes=[],
-            populate_cfg={"work_dir": "/home/user/ws_a"},
-            edited_work_dir=None,
-        )
-        self.assertEqual(out["afterPopulate"]["value"], "/home/user/ws_a")
-        self.assertTrue(out["afterPopulate"]["readOnly"])
-        self.assertFalse(out["hasWorkDir"])
-
-    def test_empty_work_dir_populates_blank(self) -> None:
-        """A missing ``work_dir`` in ``configData`` leaves the field
-        blank (and an untouched blank remote field saves as empty)."""
-        out = _run_config_form_harness(
-            body_classes=["remote-chat"],
-            populate_cfg={},
-            edited_work_dir=None,
-        )
-        self.assertEqual(out["afterPopulate"]["value"], "")
-        self.assertTrue(out["hasWorkDir"])
-        self.assertEqual(out["collectedWorkDir"], "")
-
-    @staticmethod
-    def _set_work_dirs(out: dict[str, Any]) -> list[str]:
-        """Extract the workDir of every posted ``setWorkDir`` message."""
-        return [
-            str(m.get("workDir", ""))
-            for m in out["posted"]
-            if m.get("type") == "setWorkDir"
-        ]
-
-    def test_remote_instance_prefers_pinned_work_dir(self) -> None:
-        """A webapp instance with a pinned work_dir (sessionStorage
-        ``sorcar-work-dir``) displays the pin, NOT the globally
-        persisted ``config.work_dir`` another instance may have saved,
-        and does not re-adopt the global value."""
-        out = _run_config_form_harness(
-            body_classes=["remote-chat"],
-            populate_cfg={"work_dir": "/srv/other-instance"},
-            edited_work_dir=None,
-            pinned_work_dir="/srv/mine",
-        )
-        self.assertEqual(out["afterPopulate"]["value"], "/srv/mine")
-        self.assertNotIn("/srv/other-instance", self._set_work_dirs(out))
-
-    def test_remote_instance_adopts_global_work_dir_when_unpinned(
-        self,
-    ) -> None:
-        """A fresh webapp instance (no pin yet) adopts the globally
-        persisted work_dir as its own pin by posting ``setWorkDir``."""
-        out = _run_config_form_harness(
-            body_classes=["remote-chat"],
-            populate_cfg={"work_dir": "/srv/project"},
-            edited_work_dir=None,
-            pinned_work_dir=None,
-        )
-        self.assertEqual(out["afterPopulate"]["value"], "/srv/project")
-        adoption = out["posted"][0]
-        self.assertEqual(adoption.get("type"), "setWorkDir")
-        self.assertEqual(adoption.get("workDir"), "/srv/project")
-
-    def test_remote_save_repins_edited_work_dir(self) -> None:
-        """Saving an edited work_dir from the remote settings panel
-        re-pins THIS instance via ``setWorkDir`` (in addition to the
-        global ``saveConfig`` persistence)."""
-        out = _run_config_form_harness(
-            body_classes=["remote-chat"],
-            populate_cfg={"work_dir": "/srv/project"},
-            edited_work_dir="/srv/elsewhere",
-            pinned_work_dir="/srv/project",
-        )
-        self.assertIn("/srv/elsewhere", self._set_work_dirs(out))
-
-    def test_vscode_webview_never_posts_set_work_dir(self) -> None:
-        """The VS Code webview must not post ``setWorkDir`` from the
-        settings form — the extension itself announces the workspace
-        folder on connect; the form is read-only there."""
-        out = _run_config_form_harness(
-            body_classes=[],
-            populate_cfg={"work_dir": "/home/user/ws_a"},
-            edited_work_dir=None,
-        )
-        self.assertEqual(self._set_work_dirs(out), [])
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Path, object, Path]:

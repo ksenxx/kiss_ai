@@ -82,24 +82,12 @@ export class SorcarApi {
     this._post({type: 'worktreeAction', action, tabId});
   }
 
-  autocommitAction(
-    action: 'commit' | 'skip',
-    tabId?: string,
-    workDir?: string,
-  ): void {
-    this._post({type: 'autocommitAction', action, tabId, workDir});
-  }
-
-  mergeAction(
-    action: 'merge' | 'discard' | 'all-done' | 'commit' | 'skip',
-    tabId?: string,
-    workDir?: string,
-  ): void {
-    this._post({type: 'mergeAction', action, tabId, workDir});
-  }
-
   generateCommitMessage(model: string, tabId: string, workDir: string): void {
     this._post({type: 'generateCommitMessage', model, tabId, workDir});
+  }
+
+  autocommitAction(tabId?: string, workDir?: string): void {
+    this._post({type: 'autocommitAction', tabId, workDir});
   }
 
   closeTab(tabId: string): void {

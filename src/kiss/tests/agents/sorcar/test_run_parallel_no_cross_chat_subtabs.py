@@ -144,19 +144,45 @@ class TestSubagentNewTabBroadcastIncludesParentTabId:
     def test_run_tasks_parallel_stores_parent_tab_id_in_subagent_info(
         self,
     ) -> None:
-        """``_run_tasks_parallel`` must capture the parent's frontend
-        tab id from the running-agent registry and pass it to the
-        sub-agent via ``_subagent_info`` so ``ChatSorcarAgent.run``
-        can stamp the ``new_tab`` broadcast with it."""
-        src = CHAT_AGENT_PY.read_text()
-        marker = "def _run_tasks_parallel"
-        start = src.find(marker)
-        assert start > 0
-        next_def = src.find("\n    def ", start + len(marker))
-        block = src[start:next_def] if next_def > 0 else src[start:]
-        assert "parent_tab_id" in block, (
-            "_run_tasks_parallel must resolve the parent's tab_id and "
-            "thread it through _subagent_info so the sub-agent's "
-            "new_tab broadcast carries parent_tab_id.  Block was:\n"
-            + block
+        """The fan-out must thread the parent's tab id to each child.
+
+        ``ChatSorcarAgent.run`` stamps its ``new_tab`` broadcast with
+        ``_subagent_info["parent_tab_id"]``, so the child has to be
+        given the parent's real frontend tab id when it is spawned.
+        """
+        import threading
+        from typing import Any
+
+        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+
+        class _Printer:
+            """Thread-local-only printer: the engine needs nothing else."""
+
+            def __init__(self) -> None:
+                self._thread_local = threading.local()
+
+        seen: list[Any] = []
+        original_run = ChatSorcarAgent.run
+
+        def _record(
+            self: ChatSorcarAgent,
+            prompt_template: str = "",
+            **kwargs: Any,
+        ) -> str:
+            seen.append(self._subagent_info)
+            return "success: true\nsummary: done"
+
+        parent = ChatSorcarAgent("cross-chat-parent")
+        parent._tab_id = "tab-owner-1"
+        parent.printer = _Printer()  # type: ignore[assignment]
+        try:
+            ChatSorcarAgent.run = _record  # type: ignore[method-assign]
+            parent._run_tasks_parallel(["a task"], max_workers=1)
+        finally:
+            ChatSorcarAgent.run = original_run  # type: ignore[method-assign]
+
+        assert seen and seen[0] is not None
+        assert seen[0].get("parent_tab_id") == "tab-owner-1", (
+            "the sub-agent was not told which tab spawned it, so its "
+            "new_tab broadcast cannot be routed to the owning webview"
         )

@@ -11,7 +11,7 @@ bypassing the per-process ``KISS_HOME`` isolation that
 raced on the REAL user files (``token.json`` / ``credentials.json``) — the
 same class of bug previously fixed for slack tokens and tlon configs.
 
-These tests prove the paths now resolve lazily via ``_kiss_home()`` so each
+These tests prove the paths now resolve lazily via ``kiss.core.config.kiss_home()`` so each
 pytest process (and each ``KISS_HOME`` change) gets fully isolated state, and
 that the ``channel_work`` working-directory default follows suit.
 """

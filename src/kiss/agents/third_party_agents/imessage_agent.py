@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""iMessage Agent — SorcarAgent extension with iMessage tools via AppleScript.
+"""iMessage Agent — channel agent with iMessage tools via AppleScript.
 
 macOS only. Uses osascript to send/receive iMessages via the Messages app.
 Stores config in ``~/.kiss/third_party_agents/imessage/config.json``.
@@ -21,7 +21,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -134,16 +133,6 @@ class IMessageChannelBackend(ToolMethodBackend):
         """Send an iMessage."""
         _run_osascript(_build_send_message_script(channel_id, text))
 
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Reply waiting is not supported for AppleScript-based iMessage."""
-        return None
-
     def send_imessage(self, recipient: str, text: str, service: str = "iMessage") -> str:
         """Send an iMessage or SMS to a recipient.
 
@@ -242,8 +231,8 @@ end tell"""
         )
 
 
-class IMessageAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with iMessage tools (macOS only)."""
+class IMessageAgent(BaseChannelAgent):
+    """Channel agent with iMessage tools (macOS only)."""
 
     def __init__(self) -> None:
         super().__init__("iMessage Agent")
@@ -311,6 +300,17 @@ class IMessageAgent(BaseChannelAgent, SorcarAgent):
 def main() -> None:
     """Run the IMessageAgent from the command line with chat persistence."""
     channel_main(IMessageAgent, "kiss-imessage")
+
+
+def get_tools() -> list:
+    """Return the iMessage channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return IMessageAgent()._get_tools()
 
 
 if __name__ == "__main__":

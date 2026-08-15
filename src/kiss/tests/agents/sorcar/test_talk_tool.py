@@ -21,6 +21,7 @@ import unittest
 from typing import Any
 
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.core.speech_synthesis import audio_timeout_seconds
 from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
 
 
@@ -196,7 +197,10 @@ class TestTalkTool(unittest.TestCase):
 
         t = threading.Thread(target=agent_thread, daemon=True)
         t.start()
-        t.join(timeout=10.0)
+        # Each talk() may run one real TTS synthesis network call capped
+        # at audio_timeout_seconds() (default 60s); with two sequential
+        # calls a fixed 10s join budget flakes under parallel test load.
+        t.join(timeout=2 * audio_timeout_seconds() + 10.0)
         self.assertFalse(t.is_alive())
 
         talk_events = [

@@ -701,7 +701,169 @@ function spawnKissWebDirect(kissWebBin: string, workDir: string): void {
   }
 }
 
-async function restartKissWebDaemon(
+// A restart is a probe-then-act on a resource every window shares: the
+// daemon on port 8787.  Without a cross-process lock two windows opened
+// together both see "dead", and the second SIGTERMs the daemon the first
+// has just started -- while it is still booting, so it has not yet
+// accepted a UDS connection and cannot report the active tasks that
+// decideRestart() exists to protect.
+const RESTART_LOCK_FILE = path.join(LOG_DIR, '.kiss-web.restart.lock');
+// How long a lock whose owner cannot be identified -- an empty file
+// caught mid-write, or one written by an older extension build -- is
+// honoured before it is assumed abandoned.
+const RESTART_LOCK_STALE_MS = 120_000;
+// The backstop for a lock whose owner is still ALIVE.  Age is no
+// evidence that a live window is finished: verifyDaemonStartup() alone
+// is allowed 180s, and a laptop suspended mid-restart adds however long
+// it slept.  Only a window that has been in the restart path for longer
+// than any restart could conceivably take is treated as wedged.
+const RESTART_LOCK_MAX_HOLD_MS = 600_000;
+
+interface RestartLockOwner {
+  pid: number;
+  token: string;
+}
+
+/**
+ * Read the identity stamped in a restart lock file.
+ *
+ * @param lockFile Path of the lock file.
+ * @returns The owner, or null when the file is missing, half-written or
+ *     not in the current format.
+ */
+function readRestartLockOwner(lockFile: string): RestartLockOwner | null {
+  try {
+    const data: unknown = JSON.parse(fs.readFileSync(lockFile, 'utf-8'));
+    const {pid, token} = data as {pid?: unknown; token?: unknown};
+    if (typeof pid !== 'number' || !pid) return null;
+    if (typeof token !== 'string' || !token) return null;
+    return {pid, token};
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Report whether a process id still exists.
+ *
+ * @param pid The process id stamped in the lock.
+ * @returns True when the process is running (EPERM counts: it exists,
+ *     it just belongs to another user).
+ */
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * Delete a restart lock that nobody is using any more, if there is one.
+ *
+ * @param lockFile Path of the lock file.
+ * @returns True when the caller should retry taking the lock.
+ */
+function breakAbandonedRestartLock(lockFile: string): boolean {
+  let ageMs: number;
+  try {
+    ageMs = Date.now() - fs.statSync(lockFile).mtimeMs;
+  } catch {
+    // The holder released it between our open and our stat; retry.
+    return true;
+  }
+  const owner = readRestartLockOwner(lockFile);
+  if (owner && processIsAlive(owner.pid)) {
+    if (ageMs < RESTART_LOCK_MAX_HOLD_MS) return false;
+    log(
+      `breaking kiss-web restart lock wedged by live pid ${owner.pid} ` +
+        `(${Math.round(ageMs)}ms old)`,
+    );
+  } else if (owner) {
+    log(`breaking kiss-web restart lock left by dead pid ${owner.pid}`);
+  } else if (ageMs < RESTART_LOCK_STALE_MS) {
+    // No readable owner: most likely a lock created moments ago whose
+    // identity has not been written yet.  Assume it is live.
+    return false;
+  } else {
+    log(
+      'breaking unreadable kiss-web restart lock ' +
+        `(${Math.round(ageMs)}ms old)`,
+    );
+  }
+  try {
+    fs.unlinkSync(lockFile);
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Take the cross-process kiss-web restart lock.
+ *
+ * The lock is an exclusively created file, which is atomic across
+ * processes on every POSIX filesystem the extension runs on, and it
+ * carries the owner's pid and a one-off token.
+ *
+ * Both are load-bearing.  A lock is broken only when its owner is
+ * provably gone -- or has held it for longer than any restart could
+ * take -- because age alone says nothing about whether a window is
+ * still inside the restart path, and evicting one that is puts us back
+ * to a window SIGTERMing the daemon another just started.  And because
+ * a lock CAN change hands that way, the release checks the token: an
+ * evicted owner that finishes later must not delete its successor's
+ * lock and let a third window in beside it.
+ *
+ * @param lockFile Path of the lock file (overridable for tests).
+ * @returns A release function, or null when another window holds it.
+ */
+export function acquireDaemonRestartLock(
+  lockFile: string = RESTART_LOCK_FILE,
+): (() => void) | null {
+  const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      fs.mkdirSync(path.dirname(lockFile), {recursive: true});
+      const fd = fs.openSync(lockFile, 'wx');
+      try {
+        fs.writeSync(fd, JSON.stringify({pid: process.pid, token}));
+      } finally {
+        fs.closeSync(fd);
+      }
+      return () => releaseDaemonRestartLock(lockFile, token);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return null;
+      if (!breakAbandonedRestartLock(lockFile)) return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Release a restart lock, but only while we still own it.
+ *
+ * @param lockFile Path of the lock file.
+ * @param token The token stamped when the lock was taken.
+ */
+function releaseDaemonRestartLock(lockFile: string, token: string): void {
+  const owner = readRestartLockOwner(lockFile);
+  if (!owner || owner.token !== token) {
+    if (owner) {
+      log(
+        `kiss-web restart lock now belongs to pid ${owner.pid}; ` +
+          'leaving it alone',
+      );
+    }
+    return;
+  }
+  try {
+    fs.unlinkSync(lockFile);
+  } catch {}
+}
+
+export async function restartKissWebDaemon(
   kissProjectPath: string,
   workDir: string,
 ): Promise<void> {
@@ -713,6 +875,23 @@ async function restartKissWebDaemon(
     return;
   }
 
+  const releaseLock = acquireDaemonRestartLock();
+  if (!releaseLock) {
+    log('another window is restarting kiss-web — skipping this one');
+    return;
+  }
+  try {
+    await restartKissWebDaemonLocked(kissProjectPath, workDir, kissWebBin);
+  } finally {
+    releaseLock();
+  }
+}
+
+async function restartKissWebDaemonLocked(
+  kissProjectPath: string,
+  workDir: string,
+  kissWebBin: string,
+): Promise<void> {
   const binDir = path.join(HOME_DIR, '.local', 'bin');
 
   const fpFile = path.join(LOG_DIR, '.kiss-web.fingerprint');
@@ -1016,7 +1195,13 @@ function installCliScript(kissProjectPath: string, uvPath: string): void {
     try {
       const whichCmd =
         process.platform === 'win32' ? `where ${uvPath}` : `which ${uvPath}`;
-      absUvPath = execSync(whichCmd, {encoding: 'utf-8'}).trim().split('\n')[0];
+      // `where` on Windows emits CRLF line endings and may print several
+      // matches; splitting on '\n' alone left a trailing '\r' on the first
+      // line, which then got baked into the generated sorcar.cmd.
+      absUvPath = execSync(whichCmd, {encoding: 'utf-8'})
+        .trim()
+        .split(/\r?\n/)[0]
+        .trim();
     } catch {
       const suffix = process.platform === 'win32' ? '.exe' : '';
       absUvPath = path.join(HOME_DIR, '.local', 'bin', `uv${suffix}`);

@@ -56,9 +56,11 @@ def _extract_div_block(src: str, div_id: str) -> str:
 
     Reads the actual shipped ``chat.html`` and balances ``<div>`` /
     ``</div>`` pairs from the opening tag to its matching close tag, so
-    the test exercises the exact DOM the user sees.
+    the test exercises the exact DOM the user sees.  The opening tag may
+    carry additional attributes after the ``id`` (e.g. ``#output`` ships
+    with ``role="tabpanel" aria-label="Chat"``).
     """
-    m = re.search(rf'<div id="{re.escape(div_id)}">', src)
+    m = re.search(rf'<div id="{re.escape(div_id)}"[^>]*>', src)
     assert m, f"{div_id} div not found in chat.html"
     start = m.start()
     i = m.end()
@@ -126,7 +128,6 @@ def _build_test_page(body_class: str) -> str:
       --vscode-terminal-ansiRed: #f44747;
       --vscode-terminal-ansiGreen: #6a9955;
       --vscode-terminal-ansiYellow: #d7ba7d;
-      --vscode-terminal-ansiBlue: #569cd6;
       --vscode-terminal-ansiMagenta: #c586c0;
       --vscode-terminal-ansiCyan: #4ec9b0;
     }}

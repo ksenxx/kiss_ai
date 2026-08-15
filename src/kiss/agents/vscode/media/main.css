@@ -21,7 +21,6 @@
   --purple: var(--vscode-terminal-ansiMagenta);
   --cyan: var(--vscode-terminal-ansiCyan);
   --orange: color-mix(in srgb, var(--yellow) 55%, var(--red));
-  --blue: var(--vscode-terminal-ansiBlue, #569cd6);
   --fs-xs:  0.636rem;
   --fs-sm:  0.818rem;
   --fs-md:  0.909rem;
@@ -317,7 +316,7 @@ body {
 
 .config-divider { border-top: 1px solid var(--border); margin: 12px 0; }
 
-/* Tips / Git Commit / Update / Reset Server.  ``flex-wrap`` + the
+/* Tips / Update / Reset Server.  ``flex-wrap`` + the
    ``white-space: nowrap`` on the buttons below make the row break
    BETWEEN buttons when it is too narrow, never inside a label. */
 .config-update-row {
@@ -328,6 +327,7 @@ body {
   margin-bottom: 12px;
 }
 
+.config-update-btn,
 .config-gitcommit-btn {
   display: inline-flex;
   flex: 0 0 auto;
@@ -343,30 +343,18 @@ body {
   font-family: inherit;
   cursor: pointer;
 }
-.config-gitcommit-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--fg) 10%, transparent); border-color: color-mix(in srgb, var(--fg) 24%, transparent); }
-.config-gitcommit-btn:focus-visible { outline: 1px solid var(--accent); }
-.config-gitcommit-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.config-gitcommit-btn svg { flex-shrink: 0; }
 
-.config-update-btn {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  white-space: nowrap;
-  background: color-mix(in srgb, var(--fg) 4%, transparent);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--fg);
-  font-size: var(--fs-sm);
-  font-family: inherit;
-  cursor: pointer;
-}
-.config-update-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--fg) 10%, transparent); border-color: color-mix(in srgb, var(--fg) 24%, transparent); }
-.config-update-btn:focus-visible { outline: 1px solid var(--accent); }
-.config-update-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-.config-update-btn svg { flex-shrink: 0; }
+.config-update-btn:hover:not(:disabled),
+.config-gitcommit-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--fg) 10%, transparent); border-color: color-mix(in srgb, var(--fg) 24%, transparent); }
+
+.config-update-btn:focus-visible,
+.config-gitcommit-btn:focus-visible { outline: 1px solid var(--accent); }
+
+.config-update-btn:disabled,
+.config-gitcommit-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.config-update-btn svg,
+.config-gitcommit-btn svg { flex-shrink: 0; }
 
 .config-update-btn.has-update {
   border-color: color-mix(in srgb, #2ea043 60%, var(--border));
@@ -417,6 +405,11 @@ body {
 .chat-tab:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 6%, transparent); }
 .chat-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
+.chat-tab:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
 .chat-tab-label {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -463,6 +456,11 @@ body {
   opacity: 1;
 }
 .chat-tab-close:hover { background: color-mix(in srgb, var(--fg) 15%, transparent); color: var(--fg); }
+
+.chat-tab-close:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
 
 .chat-tab-add {
   justify-content: center;
@@ -2258,147 +2256,6 @@ body.remote-chat #welcome-config { display: none !important; }
   background: color-mix(in srgb, var(--fg) 4%, transparent); font-weight: 600;
 }
 
-.merge-toolbar-card {
-  background: var(--input-bg); border: 1px solid var(--border);
-  border-radius: 10px; padding: 6px 10px; animation: fadeIn 0.2s ease;
-  overflow: hidden; min-width: 0;
-}
-
-.merge-toolbar-header {
-  display: flex; align-items: center; justify-content: space-between;
-  margin-bottom: 4px; min-width: 0;
-}
-
-.merge-toolbar-title {
-  font-size: var(--fs-sm); font-weight: 600; text-transform: uppercase;
-  letter-spacing: 0.04em; color: var(--accent); opacity: 0.8;
-}
-
-.merge-toolbar-hint {
-  font-size: var(--fs-xs); color: var(--dim); opacity: 0.7;
-}
-
-.merge-toolbar-actions {
-  display: flex; flex-direction: column; gap: 2px; min-width: 0;
-}
-
-.merge-toolbar-row {
-  display: flex; align-items: center; gap: 2px; width: 100%; min-width: 0;
-}
-
-.merge-btn {
-  font-size: var(--fs-sm); font-family: inherit; border: none; border-radius: 6px;
-  padding: 4px 6px; cursor: pointer; transition: all 0.15s;
-  white-space: nowrap; font-weight: 500;
-  display: inline-flex; align-items: center; background: none;
-  justify-content: center; flex: 1 1 0;
-}
-
-.merge-btn.merge-accept {
-  background: color-mix(in srgb, var(--green) 12%, transparent); color: var(--green);
-}
-.merge-btn.merge-accept:hover { background: color-mix(in srgb, var(--green) 22%, transparent); }
-
-.merge-btn.merge-reject {
-  background: color-mix(in srgb, var(--red) 10%, transparent); color: var(--red);
-}
-.merge-btn.merge-reject:hover { background: color-mix(in srgb, var(--red) 18%, transparent); }
-
-.merge-btn.merge-nav {
-  color: var(--dim); padding: 4px 6px;
-}
-.merge-btn.merge-nav:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); color: var(--fg); }
-
-.merge-info {
-  border: 1px solid rgb(210 153 34 / 20%); border-radius: 8px;
-  padding: 10px 14px; margin: 8px 0;
-  background: color-mix(in srgb, var(--yellow) 4%, transparent);
-}
-
-.merge-info-hdr {
-  color: var(--yellow); font-weight: 600;
-  font-size: var(--fs-base); margin-bottom: 4px;
-}
-
-.merge-info-body {
-  font-size: var(--fs-md); color: var(--dim);
-}
-
-.merge-file-diff { margin-top: 10px; }
-
-.merge-file-name {
-  font-weight: 600;
-  color: var(--vscode-textLink-foreground, var(--accent));
-  margin-bottom: 4px;
-}
-
-.merge-ctx {
-  margin: 0; padding: 2px 8px;
-  background: var(--vscode-input-background, var(--surface2));
-  color: var(--dim); opacity: 0.65;
-  font-size: 12px; line-height: 1.4;
-  white-space: pre-wrap; word-break: break-word;
-  overflow-x: auto; border-radius: 0;
-}
-
-.merge-hunk {
-  display: block; margin: 4px 0; padding: 6px 8px;
-  background: var(--vscode-input-background, var(--surface2));
-  border: 1px solid transparent; border-radius: 4px;
-  font-size: 12px; line-height: 1.4;
-  white-space: pre-wrap; word-break: break-word;
-  overflow-x: auto;
-  transition: border-color 0.15s, opacity 0.15s, background 0.15s;
-}
-
-.merge-hunk-label {
-  display: block; font-size: var(--fs-sm); font-weight: 600;
-  color: var(--dim); margin-bottom: 4px;
-  text-transform: uppercase; letter-spacing: 0.04em;
-}
-
-.merge-hunk.current {
-  border-color: var(--yellow);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--yellow) 25%, transparent);
-}
-
-.merge-hunk.accepted {
-  opacity: 0.45;
-  border-color: color-mix(in srgb, var(--green) 40%, transparent);
-  background: color-mix(in srgb, var(--green) 6%, var(--surface2));
-}
-
-.merge-hunk.accepted .merge-hunk-label::after {
-  content: ' · ACCEPTED'; color: var(--green);
-}
-
-.merge-hunk.rejected {
-  opacity: 0.45;
-  border-color: color-mix(in srgb, var(--red) 40%, transparent);
-  background: color-mix(in srgb, var(--red) 6%, var(--surface2));
-}
-
-.merge-hunk.rejected .diff-del,
-.merge-hunk.rejected .diff-add {
-  text-decoration: line-through;
-}
-
-.merge-hunk.rejected .merge-hunk-label::after {
-  content: ' · REJECTED'; color: var(--red);
-}
-
-.merge-hunk .diff-del {
-  display: block; color: var(--red);
-  background: color-mix(in srgb, var(--red) 12%, transparent);
-  padding: 0 2px;
-}
-
-.merge-hunk .diff-add {
-  display: block; color: var(--green);
-  background: color-mix(in srgb, var(--green) 12%, transparent);
-  padding: 0 2px;
-}
-
 code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', monospace); }
 .hljs { background: var(--surface2) !important; border-radius: 6px; padding: 10px !important; }
 
@@ -2469,6 +2326,14 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .wt-result-err {
   color: var(--red); padding: 8px 12px;
   border-left: 3px solid var(--red); margin: 6px 0;
+}
+
+/* The live "Staging changes… / Generating commit message… / Committing…"
+   line of an auto-commit or worktree merge, replaced in place and removed
+   by the terminal autocommit_done / worktree_result. */
+.wt-progress {
+  color: var(--dim); padding: 8px 12px; font-style: italic;
+  border-left: 3px solid var(--dim); margin: 6px 0;
 }
 
 .adjacent-loader {
@@ -2572,8 +2437,6 @@ code { font-family: var(--vscode-editor-font-family, 'SF Mono', 'Fira Code', mon
 .prompt.collapsed .prompt-body { display: none; }
 
 .tr.collapsed .tr-content { display: none; }
-
-.merge-info.collapsed .merge-info-body { display: none; }
 
 .chv-hidden { display: none !important; }
 

@@ -79,6 +79,7 @@ class TestCodexModelStuckBug:
         """End-to-end: submitting a task with codex/gpt-5.5 when the CLI is
         missing must broadcast a result event promptly, not hang."""
         import kiss.agents.sorcar.persistence as th
+        from kiss.server import agent_state
         from kiss.server.server import VSCodeServer
 
         saved_path = os.environ.get("PATH", "")
@@ -122,8 +123,9 @@ class TestCodexModelStuckBug:
                 "tabId": tab_id,
             })
 
-            tab = server._get_tab(tab_id)
-            t = tab.task_thread
+            state = agent_state.find_by_tab(tab_id)
+            assert state is not None
+            t = state.task_thread
             assert t is not None
             t.join(timeout=30)
             assert not t.is_alive(), (
@@ -160,6 +162,7 @@ class TestCodexModelStuckBug:
         finally:
             os.environ["PATH"] = saved_path
             codex_module._UI_CANDIDATE_PATHS = saved_candidates
+            agent_state.agent_states.clear()
             if th._db_conn is not None:
                 th._db_conn.close()
                 th._db_conn = None

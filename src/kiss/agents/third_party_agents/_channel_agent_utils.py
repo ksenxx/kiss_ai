@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import logging
 import sys
-import threading
 import time as _time
 from collections.abc import Callable
 from pathlib import Path
@@ -23,12 +22,6 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_KISS_DIR = Path.home() / ".kiss"
 
-
-def _kiss_home() -> Path:
-    """Return the KISS data directory, respecting the ``KISS_HOME`` env var."""
-    return kiss_home()
-
-
 _NON_TOOL_METHODS = frozenset(
     {
         "connect",
@@ -37,7 +30,6 @@ _NON_TOOL_METHODS = frozenset(
         "join_channel",
         "poll_messages",
         "send_message",
-        "wait_for_reply",
         "is_from_bot",
         "strip_bot_mention",
         "disconnect",
@@ -217,7 +209,7 @@ class ChannelConfig:
         parallel test runs and protecting the user's real configs).
         """
         if self._kiss_relative_dir is not None:
-            return _kiss_home() / self._kiss_relative_dir / "config.json"
+            return kiss_home() / self._kiss_relative_dir / "config.json"
         return self._channel_dir / "config.json"
 
     def load(self) -> dict[str, str] | None:
@@ -241,21 +233,114 @@ class ChannelConfig:
         clear_json_config(self.path)
 
 
+LAUNCH_KWARG_NAMES = frozenset(
+    {
+        "model_name",
+        "work_dir",
+        "max_budget",
+        "tools",
+        "use_worktree",
+        "model_config",
+        "web_tools",
+        "is_parallel",
+        "timeout",
+        "sock_path",
+    }
+)
+
+
+def filter_launch_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Keep only the kwargs understood by ``run_agent_via_kiss_web``.
+
+    Channel agent ``run()`` shims historically accepted the wider
+    ``SorcarAgent.run`` keyword surface (``system_prompt``,
+    ``_skip_persistence``, ...).  Tasks now always execute on the
+    kiss-web daemon through :func:`kiss.server.sorcar.run`, whose API
+    supports only the launcher parameters; everything else is dropped.
+
+    Args:
+        kwargs: Arbitrary ``run()`` keyword arguments.
+
+    Returns:
+        The subset of *kwargs* accepted by
+        :func:`~kiss.agents.third_party_agents._kiss_web_launcher.run_agent_via_kiss_web`.
+    """
+    return {k: v for k, v in kwargs.items() if k in LAUNCH_KWARG_NAMES}
+
+
+def agent_tools_file(agent_cls: type) -> str:
+    """Return the tools-file path for a channel agent class.
+
+    The ``kiss.server.sorcar.run`` API takes extra agent tools as the
+    path of a Python file whose top-level ``get_tools()`` returns the
+    tool callables.  For channel agents that file is the agent's OWN
+    defining module: each agent module defines a ``get_tools()`` that
+    builds a fresh agent from the credentials persisted under
+    ``~/.kiss`` and returns its authentication and backend tools.
+
+    Args:
+        agent_cls: The channel agent class (e.g. ``SlackAgent``).
+
+    Returns:
+        The absolute path of the module defining *agent_cls*, or ``""``
+        when that module does not define a callable ``get_tools()``
+        (e.g. ``BaseChannelAgent`` itself or test-local classes).
+    """
+    module = sys.modules.get(agent_cls.__module__)
+    if module is None or not callable(getattr(module, "get_tools", None)):
+        return ""
+    return str(getattr(module, "__file__", "") or "")
+
+
 class BaseChannelAgent:
-    """Mixin for channel agent classes that provides a standard ``_get_tools()``
-    implementation combining auth tools with backend tools.
+    """Base class for channel agents.
 
-    Subclasses must set ``self._backend`` (a ``ToolMethodBackend`` instance)
-    and override :meth:`_is_authenticated` and :meth:`_get_auth_tools`.
+    A channel agent is **not** an executable agent itself: every task
+    is submitted to the kiss-web daemon through the public API
+    :func:`kiss.server.sorcar.run` (via
+    :func:`~kiss.agents.third_party_agents._kiss_web_launcher.run_agent_via_kiss_web`),
+    and the daemon builds and executes its own chat agent with the
+    standard tools (bash, file editing, browser automation).  The
+    channel agent instance is the *carrier* of channel identity: the
+    :attr:`tools_file` naming the module whose ``get_tools()`` the
+    daemon calls to build the channel tools, the :attr:`workspace`
+    those tools authenticate under, the :attr:`channel_system_prompt`
+    guidance, and the run results the launcher writes back
+    (:attr:`last_run_result`, :attr:`budget_used`,
+    :attr:`total_tokens_used`, :attr:`total_steps`).
 
-    Use this mixin **before** ``SorcarAgent`` in the MRO::
+    Subclasses must set ``self._backend`` (a ``ToolMethodBackend``
+    instance), override :meth:`_is_authenticated` and
+    :meth:`_get_auth_tools`, and define a module-level ``get_tools()``
+    in their own module::
 
-        class SlackAgent(BaseChannelAgent, SorcarAgent): ...
+        class SlackAgent(BaseChannelAgent): ...
+
+        def get_tools() -> list:
+            return SlackAgent()._get_tools()
     """
 
     _backend: Any
 
     channel_system_prompt: str = ""
+
+    def __init__(self, name: str = "", workspace: str = "default") -> None:
+        self.name = name
+        self.workspace = workspace or "default"
+        self.last_run_result: str = ""
+        self.budget_used: float = 0.0
+        self.total_tokens_used: int = 0
+        self.total_steps: int = 0
+
+    @property
+    def tools_file(self) -> str:
+        """Path of the module whose ``get_tools()`` supplies this agent's tools.
+
+        ``""`` when the agent's defining module has no ``get_tools()``
+        (plain carriers such as ``KissWebChatAgent`` add no channel
+        tools).
+        """
+        return agent_tools_file(type(self))
 
     def _is_authenticated(self) -> bool:
         """Return True if the backend is authenticated and ready for use.
@@ -272,92 +357,49 @@ class BaseChannelAgent:
         return []
 
     def _get_tools(self) -> list:
-        """Assemble the full tool list: super tools + auth tools + backend tools.
+        """Assemble the channel tool list: auth tools + backend tools.
+
+        The standard agent tools (bash, file editing, browser) are
+        supplied by the daemon-built agent, not by this instance.
 
         Returns:
-            Combined list of tool callables.
+            Combined list of channel tool callables.
         """
-        tools: list = super()._get_tools()  # type: ignore[misc]
-        tools.extend(self._get_auth_tools())
+        tools: list = list(self._get_auth_tools())
         if self._is_authenticated():
             tools.extend(self._backend.get_tool_methods())
         return tools
 
-    def run(self, *args: Any, **kwargs: Any) -> str:  # type: ignore[override]
-        """Run the channel agent directly (outside the launcher).
+    def run(self, prompt_template: str = "", **kwargs: Any) -> str:
+        """Run a task through :func:`kiss.server.sorcar.run`.
 
-        API launches
-        (:func:`~kiss.agents.third_party_agents._kiss_web_launcher.run_agent_via_kiss_web`)
-        never execute the channel agent instance — the daemon builds
-        its own agent — so this shim only serves DIRECT calls: it
-        appends :attr:`channel_system_prompt` to the system prompt,
-        pops chat-session-only kwargs that plain
-        :class:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent` does not
-        accept, and records the returned YAML in
-        :attr:`last_run_result`.  Positional arguments are preserved
-        for channel agents that do not override ``run`` themselves.
+        Submits the task to the kiss-web daemon via
+        :func:`~kiss.agents.third_party_agents._kiss_web_launcher.run_agent_via_kiss_web`,
+        which supplies this agent's channel tools through the API's
+        ``tools=`` file-path contract (:attr:`tools_file` — the agent
+        module whose ``get_tools()`` the daemon calls), appends
+        :attr:`channel_system_prompt` to the prompt, and records the
+        YAML result in :attr:`last_run_result` along with the cost /
+        token / step totals.  Keyword arguments outside the launcher's
+        parameter surface are dropped (see :func:`filter_launch_kwargs`).
 
         Args:
-            *args: Forwarded unchanged to ``super().run()``.
-            **kwargs: Forwarded to ``super().run()`` after filtering.
+            prompt_template: The task prompt.
+            **kwargs: Launcher keyword arguments (``model_name``,
+                ``work_dir``, ``max_budget``, ``tools``,
+                ``use_worktree``, ``model_config``, ``web_tools``,
+                ``is_parallel``, ``timeout``, ``sock_path``).
 
         Returns:
             YAML string with 'success' and 'summary' keys.
         """
-        kwargs.pop("use_worktree", None)
-        kwargs.pop("_skip_persistence", None)
-        kwargs.pop("_subscribe_tab_id", None)
-        kwargs.pop("_on_task_id_allocated", None)
-        if self.channel_system_prompt:
-            kwargs["system_prompt"] = (
-                kwargs.get("system_prompt") or ""
-            ) + self.channel_system_prompt
-        try:
-            result: str = super().run(*args, **kwargs)  # type: ignore[misc]
-        except BaseException as exc:
-            summary = (
-                "Task interrupted" if isinstance(exc, KeyboardInterrupt) else f"Task failed: {exc}"
-            )
-            self.last_run_result = yaml.safe_dump(
-                {"success": False, "summary": summary},
-                sort_keys=False,
-            )
-            raise
-        self.last_run_result = result
-        return result
+        from kiss.agents.third_party_agents._kiss_web_launcher import (
+            run_agent_via_kiss_web,
+        )
 
-
-def _make_runner_channel_agent(agent_name: str) -> Any:
-    """Create the minimal channel agent for a :class:`ChannelRunner` task.
-
-    The agent combines :class:`BaseChannelAgent` (whose ``run`` shim
-    filters chat-session-only kwargs and records ``last_run_result``)
-    with
-    :class:`~kiss.agents.sorcar.sorcar_agent.SorcarAgent`.  It has no
-    channel-specific auth tools or backend of its own — the runner
-    supplies backend tools plus the per-message ``reply`` tool through
-    the launcher's ``tools`` parameter.  Defined via a factory to keep
-    the ``SorcarAgent`` import lazy (this module is imported by every
-    channel agent, some of which are used in minimal environments).
-
-    Args:
-        agent_name: Human-readable agent name.
-
-    Returns:
-        A fresh ``_RunnerChannelAgent`` instance.
-    """
-    global _RunnerChannelAgent
-    if _RunnerChannelAgent is None:
-        from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-
-        class _RunnerChannelAgentImpl(BaseChannelAgent, SorcarAgent):
-            """Runner channel agent: BaseChannelAgent shim + SorcarAgent."""
-
-        _RunnerChannelAgent = _RunnerChannelAgentImpl
-    return _RunnerChannelAgent(agent_name)
-
-
-_RunnerChannelAgent: type | None = None
+        return run_agent_via_kiss_web(
+            self, prompt_template, **filter_launch_kwargs(kwargs)
+        )
 
 
 class ChannelRunner:
@@ -365,7 +407,7 @@ class ChannelRunner:
 
     Connects to a backend, retrieves recent messages, filters to
     allowed users, skips messages the bot has already replied to, and
-    runs a SorcarAgent for each pending message.
+    runs a kiss-web daemon task for each pending message.
     """
 
     def __init__(
@@ -373,20 +415,22 @@ class ChannelRunner:
         backend: Any,
         channel_name: str,
         agent_name: str,
-        extra_tools: list | None = None,
+        tools_file: str = "",
         model_name: str = "",
         max_budget: float = 5.0,
         work_dir: str = "",
         allow_users: list[str] | None = None,
+        workspace: str = "default",
     ) -> None:
         self._backend = backend
         self._channel_name = channel_name
         self._agent_name = agent_name
-        self._extra_tools = extra_tools or []
+        self._tools_file = tools_file
         self._model_name = model_name
         self._max_budget = max_budget
-        self._work_dir = work_dir or str(_kiss_home() / "channel_work")
+        self._work_dir = work_dir or str(kiss_home() / "channel_work")
         self._allow_users = set(allow_users) if allow_users else None
+        self._workspace = workspace or "default"
         self._poll_thread_fn = getattr(backend, "poll_thread_messages", None)
 
     def run_once(self) -> int:
@@ -394,8 +438,8 @@ class ChannelRunner:
 
         Connects to the backend, joins the configured channel, retrieves
         recent messages, filters to allowed users, skips messages the bot
-        has already replied to, and runs a SorcarAgent for each
-        pending message.  Each message is processed synchronously.
+        has already replied to, and runs a kiss-web daemon task for
+        each pending message.  Each message is processed synchronously.
 
         Returns:
             Number of messages processed.
@@ -447,9 +491,27 @@ class ChannelRunner:
         Returns:
             True if the bot has already replied in the thread.
         """
-        if self._poll_thread_fn is None:
-            return False
         if msg.get("reply_count", 0) == 0:
+            return False
+        return self._bot_replied_in_thread(channel_id, msg)
+
+    def _bot_replied_in_thread(self, channel_id: str, msg: dict[str, Any]) -> bool:
+        """Poll a message's thread and check whether the bot has posted there.
+
+        Unlike :meth:`_has_bot_reply` there is no ``reply_count``
+        shortcut: the *msg* dict is a snapshot from before the agent
+        task ran, so its counters cannot reflect a reply the agent just
+        posted with its channel tools.
+
+        Args:
+            channel_id: Channel ID containing the message.
+            msg: Message dict from poll_messages.
+
+        Returns:
+            True if the bot has posted in the message's thread.  False
+            when thread polling is unavailable or fails.
+        """
+        if self._poll_thread_fn is None:
             return False
         msg_ts = msg.get("ts", "")
         if not msg_ts:
@@ -467,7 +529,11 @@ class ChannelRunner:
         The agent is launched as a kiss-web registered agent via
         :func:`run_agent_via_kiss_web` (``_cmd_run``) so the task is
         live-visible and interactable from any connected remote
-        webview while it runs.
+        webview while it runs.  The channel tools come from the
+        runner's tools file (the agent module's ``get_tools()``, per
+        the ``kiss.server.sorcar.run`` tools-file contract); after the
+        run the task summary is posted to the message's thread unless
+        the agent already replied there itself.
         """
         from kiss.agents.third_party_agents._kiss_web_launcher import (
             run_agent_via_kiss_web,
@@ -477,40 +543,45 @@ class ChannelRunner:
         thread_ts = msg.get("thread_ts", msg.get("ts", ""))
         session_key = f"{channel_id}:{msg.get('ts', '')}"
 
-        agent = _make_runner_channel_agent(self._agent_name)
+        # A plain carrier with no auth tools or backend of its own: the
+        # channel tools come from the runner's tools file (the agent
+        # module's ``get_tools()``), and the daemon-built agent supplies
+        # the standard tools.
+        agent = BaseChannelAgent(self._agent_name, workspace=self._workspace)
 
-        tools = list(self._extra_tools)
-        replied = threading.Event()
-
-        def reply(message: str) -> str:
-            """Send a reply to the current conversation.
-
-            Args:
-                message: Text to send as the bot's reply.
-
-            Returns:
-                JSON string with ok status.
-            """
-            replied.set()
-            try:
-                self._backend.send_message(channel_id, message, thread_ts)
-                return json.dumps({"ok": True})
-            except Exception as e:
-                return json.dumps({"ok": False, "error": str(e)})
-
-        tools.append(reply)
+        prompt = text
+        if self._tools_file:
+            context = (
+                f"\n\n[Channel context: you are answering a message in "
+                f"channel {channel_id!r}, thread {thread_ts!r}."
+            )
+            if self._poll_thread_fn is not None:
+                # Only thread-polling backends can detect the agent's
+                # own reply and suppress the automatic summary.
+                context += (
+                    " If you post a reply there yourself with the "
+                    "channel messaging tools, no automatic summary "
+                    "reply is sent.]"
+                )
+            else:
+                context += (
+                    " A summary of this task is posted to the thread "
+                    "automatically when you finish, so do not post "
+                    "one yourself.]"
+                )
+            prompt += context
 
         Path(self._work_dir).mkdir(parents=True, exist_ok=True)
         try:
             result = run_agent_via_kiss_web(
                 agent,
-                text,
+                prompt,
                 model_name=self._model_name,
                 max_budget=self._max_budget,
                 work_dir=self._work_dir,
-                tools=tools,
+                tools=self._tools_file or None,
             )
-            if not replied.is_set():  # pragma: no branch
+            if not self._bot_replied_in_thread(channel_id, msg):
                 result_yaml = yaml.safe_load(result)
                 summary = (result_yaml.get("summary", "") if result_yaml else "") or result
                 self._send_reply(channel_id, summary, thread_ts)
@@ -574,7 +645,7 @@ def channel_main(
     """
     import inspect
 
-    from kiss.agents.sorcar.cli_helpers import (
+    from kiss.agents.third_party_agents._channel_cli import (
         _build_arg_parser,
         _build_run_kwargs,
         _print_run_stats,
@@ -632,11 +703,12 @@ def channel_main(
             backend=backend,
             channel_name=channel,
             agent_name=f"{channel_name} Background Agent",
-            extra_tools=backend.get_tool_methods(),
+            tools_file=agent_tools_file(agent_cls),
             model_name=args.model_name,
             max_budget=args.max_budget,
-            work_dir=args.work_dir or str(_kiss_home() / "channel_work"),
+            work_dir=args.work_dir,
             allow_users=allow_users,
+            workspace=workspace,
         )
         print(f"Checking {channel_name} channel for pending messages...")
         count = runner.run_once()
@@ -648,25 +720,15 @@ def channel_main(
         agent = agent_cls(workspace=workspace)
     else:
         agent = agent_cls()
-    from kiss.ui.cli.cli_printer import RecordingConsolePrinter
-
-    run_kwargs = _build_run_kwargs(args, printer_factory=RecordingConsolePrinter)
+    run_kwargs = _build_run_kwargs(args)
+    prompt = run_kwargs.pop("prompt_template", "")
 
     from kiss.agents.third_party_agents._kiss_web_launcher import (
         run_agent_via_kiss_web,
     )
 
     start_time = _time.time()
-    run_agent_via_kiss_web(
-        agent,
-        run_kwargs.get("prompt_template", ""),
-        model_name=run_kwargs.get("model_name") or "",
-        work_dir=run_kwargs.get("work_dir") or "",
-        max_budget=run_kwargs.get("max_budget"),
-        model_config=run_kwargs.get("model_config"),
-        web_tools=run_kwargs.get("web_tools"),
-        is_parallel=bool(run_kwargs.get("is_parallel", False)),
-    )
+    run_agent_via_kiss_web(agent, prompt, **run_kwargs)
     elapsed = _time.time() - start_time
 
     _print_run_stats(agent, elapsed)

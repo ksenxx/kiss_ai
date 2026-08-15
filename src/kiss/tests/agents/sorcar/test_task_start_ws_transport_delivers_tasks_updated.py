@@ -52,6 +52,7 @@ from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 from kiss.server.web_server import WebPrinter
 
@@ -142,13 +143,11 @@ class TestTaskStartWsTransportDeliversTasksUpdated(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.blocker.release_event.set()
-        try:
-            tab = self.server._get_tab("tab-tx")
-        except Exception:
-            tab = None
-        if tab is not None and tab.task_thread is not None:
-            tab.task_thread.join(timeout=10)
+        state = agent_state.find_by_tab("tab-tx")
+        if state is not None and state.task_thread is not None:
+            state.task_thread.join(timeout=10)
         _uninstall_parent_run(self.original_run)
+        agent_state.agent_states.clear()
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -212,13 +211,10 @@ class TestTaskStartWsTransportDeliversTasksUpdated(unittest.TestCase):
         self.blocker.release_event.set()
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
-            try:
-                tab = self.server._get_tab(tab_id)
-            except Exception:
-                tab = None
-            if tab is None or tab.task_thread is None:
+            state = agent_state.find_by_tab(tab_id)
+            if state is None or state.task_thread is None:
                 break
-            if not tab.task_thread.is_alive():
+            if not state.task_thread.is_alive():
                 break
             time.sleep(0.05)
 

@@ -15,15 +15,17 @@ Reproduces the chat-webview scenario with REAL LLM calls (no mocks):
    mid-task, then finish.
 3. After task 1 the global model preference — the persisted
    ``last_model``, the daemon-wide ``_default_model`` (what the picker
-   shows), and the tab's ``selected_model`` — must all still be model A.
+   shows), and the tab's model in ``_tab_models`` — must all still be
+   model A.
 4. Task 2 is submitted the way the chat webview does it (the frontend
    sends the picker's current model, which mirrors the daemon's
    ``_default_model``); the agent that executes task 2 must run on
    model A, not on the model B that task 1's agent switched itself to.
 
 The agent under test is the production ``WorktreeSorcarAgent`` that
-``_get_tab`` allocates; both tasks perform real LLM calls against real
-provider endpoints (Anthropic for model A, Gemini for model B).
+the task runner allocates on the task's ``AgentState``; both tasks
+perform real LLM calls against real provider endpoints (Anthropic for
+model A, Gemini for model B).
 """
 
 from __future__ import annotations
@@ -38,8 +40,8 @@ import pytest
 import kiss.core.vscode_config as vscode_config
 from kiss.agents.sorcar import persistence as sorcar_persistence
 from kiss.agents.sorcar.persistence import _load_last_model
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.core.models.model_info import get_available_models
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 from kiss.tests.conftest import (
     requires_anthropic_api_key,
@@ -62,7 +64,6 @@ TASK_2_PROMPT = (
     "Immediately call finish with success='true' and summary='ok'. "
     "Do not use any other tool and do not do anything else."
 )
-
 
 @pytest.fixture(autouse=True)
 def _isolate_config(tmp_path: Path) -> Any:
@@ -94,6 +95,15 @@ def _isolate_sorcar_db(tmp_path: Path) -> Any:
     sorcar_persistence._DB_PATH = orig_db_path
 
 
+def _persisted_task_models() -> list[str]:
+    """Return the ``model`` column of every task_history row, oldest first."""
+    conn = sorcar_persistence._get_db()
+    rows = conn.execute(
+        "SELECT model FROM task_history ORDER BY timestamp ASC, rowid ASC"
+    ).fetchall()
+    return [str(model or "") for (model,) in rows]
+
+
 def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]]]:
     """Spin up a real :class:`VSCodeServer` whose broadcasts land in a list."""
     server = VSCodeServer()
@@ -113,20 +123,21 @@ def _make_server() -> tuple[VSCodeServer, list[dict[str, Any]]]:
 class _ModelSampler:
     """Polls the live agent's ``model_name`` while a task runs.
 
-    ``_run_task`` disposes ``tab.agent`` when the task ends, so the
+    ``_run_task`` disposes ``state.agent`` when the task ends, so the
     only way to observe which model the task actually ran on is to
     sample the live agent (and its inner per-session executor) while
     the run is in flight.  Real LLM round-trips take seconds, so a
     2 ms poll cannot miss the model that served them.
     """
 
-    def __init__(self, tab: _RunningAgentState) -> None:
-        """Start sampling *tab*'s live agent on a daemon thread.
+    def __init__(self, state: agent_state.AgentState) -> None:
+        """Start sampling *state*'s live agent on a daemon thread.
 
         Args:
-            tab: The per-tab state whose ``agent`` should be sampled.
+            state: The task's agent state whose ``agent`` should be
+                sampled.
         """
-        self._tab = tab
+        self._state = state
         self.samples: set[str] = set()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._poll, daemon=True)
@@ -135,7 +146,7 @@ class _ModelSampler:
     def _poll(self) -> None:
         """Record every distinct model name the live agent exposes."""
         while not self._stop.is_set():
-            agent = self._tab.agent
+            agent = self._state.agent
             if agent is not None:
                 name = getattr(agent, "model_name", "")
                 if name:
@@ -154,25 +165,16 @@ class _ModelSampler:
         return self.samples
 
 
-def _persisted_task_models() -> list[str]:
-    """Return the ``model`` column of every task_history row, oldest first."""
-    conn = sorcar_persistence._get_db()
-    rows = conn.execute(
-        "SELECT model FROM task_history ORDER BY timestamp ASC, rowid ASC"
-    ).fetchall()
-    return [str(model or "") for (model,) in rows]
-
-
 @requires_anthropic_api_key
 @requires_gemini_api_key
 class TestSetModelDoesNotLeakIntoNextWebviewTask:
     """Mid-task ``set_model`` must never change the picker/global model."""
 
     def setup_method(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def teardown_method(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     @pytest.mark.slow
     def test_next_task_runs_on_picker_model(self, tmp_path: Any) -> None:
@@ -186,16 +188,17 @@ class TestSetModelDoesNotLeakIntoNextWebviewTask:
 
         server._cmd_select_model({"tabId": TAB_ID, "model": MODEL_A})
         assert _load_last_model() == MODEL_A
-        tab = _RunningAgentState.running_agent_states[TAB_ID]
-        assert tab.selected_model == MODEL_A
+        assert server._tab_models[TAB_ID] == MODEL_A
 
-        sampler1 = _ModelSampler(tab)
-        server._run_task({
+        cmd1: dict[str, Any] = {
             "tabId": TAB_ID,
             "prompt": TASK_1_PROMPT,
             "model": MODEL_A,
             "workDir": str(tmp_path),
-        })
+        }
+        state = server._resolve_run_state(cmd1)
+        sampler1 = _ModelSampler(state)
+        server._run_task(cmd1)
         samples1 = sampler1.stop()
 
         assert MODEL_B in samples1, (
@@ -212,19 +215,24 @@ class TestSetModelDoesNotLeakIntoNextWebviewTask:
             "set_model leaked into the daemon-wide default model "
             f"(the model picker's selection): {server._default_model!r}"
         )
-        assert tab.selected_model == MODEL_A, (
+        assert server._tab_models[TAB_ID] == MODEL_A, (
             "set_model leaked into the tab's selected model: "
-            f"{tab.selected_model!r}"
+            f"{server._tab_models[TAB_ID]!r}"
         )
 
         picker_model = server._default_model
-        sampler2 = _ModelSampler(tab)
-        server._run_task({
+        cmd2: dict[str, Any] = {
             "tabId": TAB_ID,
             "prompt": TASK_2_PROMPT,
             "model": picker_model,
             "workDir": str(tmp_path),
-        })
+        }
+        state2 = server._resolve_run_state(cmd2)
+        assert state2 is state, (
+            "the tab's idle state was not reused for the second run"
+        )
+        sampler2 = _ModelSampler(state2)
+        server._run_task(cmd2)
         samples2 = sampler2.stop()
 
         assert MODEL_A in samples2, (
@@ -258,10 +266,10 @@ class TestSetModelDoesNotLeakIntoPersistedTaskModel:
     """
 
     def setup_method(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def teardown_method(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def test_persisted_model_is_launch_model(self, tmp_path: Any) -> None:
         """A run that switches to model B must still be recorded as A."""

@@ -318,69 +318,6 @@ def test_run_tasks_parallel_does_not_persist_synthetic_parent(
 
 
 
-def test_cli_printer_normalises_event_task_id_to_lowercase(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from kiss.ui.cli import cli_daemon_bridge, cli_printer
-
-    sent_events: list[dict[str, Any]] = []
-    monkeypatch.setattr(
-        cli_daemon_bridge, "send_event",
-        lambda ev: sent_events.append(ev),
-    )
-    monkeypatch.setattr(
-        cli_daemon_bridge, "send_cli_task_start",
-        lambda _t: None,
-    )
-    monkeypatch.setattr(
-        cli_daemon_bridge, "send_cli_task_end",
-        lambda _t: None,
-    )
-
-    upper = uuid.uuid4().hex.upper()
-    printer = cli_printer.RecordingConsolePrinter()
-    printer._inject_task_id = lambda event: {**event, "taskId": upper}  # type: ignore[method-assign]
-
-    printer.broadcast({"type": "step", "data": "x"})
-    assert sent_events, "Event must be forwarded to bridge."
-    forwarded_task_id = sent_events[-1].get("taskId")
-    assert forwarded_task_id == upper.lower(), (
-        f"Forwarded taskId must be canonical lowercase; got "
-        f"{forwarded_task_id!r}"
-    )
-
-
-
-def test_cli_printer_emits_start_before_event_and_end_after(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from kiss.ui.cli import cli_daemon_bridge, cli_printer
-
-    order: list[str] = []
-    monkeypatch.setattr(
-        cli_daemon_bridge, "send_event",
-        lambda ev: order.append(f"event:{ev.get('type')}"),
-    )
-    monkeypatch.setattr(
-        cli_daemon_bridge, "send_cli_task_start",
-        lambda _t: order.append("start"),
-    )
-    monkeypatch.setattr(
-        cli_daemon_bridge, "send_cli_task_end",
-        lambda _t: order.append("end"),
-    )
-
-    tid = uuid.uuid4().hex
-    printer = cli_printer.RecordingConsolePrinter()
-    printer._inject_task_id = lambda event: {**event, "taskId": tid}  # type: ignore[method-assign]
-
-    printer.broadcast({"type": "result", "data": "done"})
-    assert order == ["start", "event:result", "end"], (
-        f"Lifecycle envelopes out of order: {order}"
-    )
-
-
-
 def test_on_task_id_allocated_callback_logs_on_exception(
     temp_db: Path,
     caplog: pytest.LogCaptureFixture,

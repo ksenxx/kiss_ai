@@ -24,8 +24,8 @@ from pathlib import Path
 from typing import Any, cast
 
 import kiss.server.server as _server_module
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -63,7 +63,7 @@ class TestBadAttachment(unittest.TestCase):
     def tearDown(self) -> None:
         self._parent_class.run = self._original_run
         _server_module.generate_followup_text = self._orig_followup
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_malformed_attachments_do_not_kill_task_thread(self) -> None:

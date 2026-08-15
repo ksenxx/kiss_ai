@@ -25,11 +25,12 @@ import subprocess
 import tempfile
 import threading
 import unittest
+import uuid
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -40,6 +41,22 @@ def _is_inside_git_repo(path: str) -> bool:
         cwd=path, capture_output=True, text=True,
     )
     return res.returncode == 0 and res.stdout.strip() == "true"
+
+
+def _register_tab_state(
+    tab_id: str,
+    *,
+    agent: WorktreeSorcarAgent | None = None,
+) -> agent_state.AgentState:
+    """Register an idle server-owned state for *tab_id* and return it."""
+    state = agent_state.AgentState(
+        uuid.uuid4().hex,
+        agent=agent,
+        tab_id=tab_id,
+        server_owned=True,
+    )
+    agent_state.register(state)
+    return state
 
 
 class _NonGitHarness(unittest.TestCase):
@@ -66,6 +83,7 @@ class _NonGitHarness(unittest.TestCase):
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
     def tearDown(self) -> None:
+        agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _types(self) -> list[str]:
@@ -121,16 +139,16 @@ class TestNonGitCommandsDoNotCrash(_NonGitHarness):
         self.server._handle_command(
             {"type": "selectModel", "tabId": "t-sel", "model": m},
         )
-        assert self.server._get_tab("t-sel").selected_model == m
+        assert self.server._tab_models["t-sel"] == m
 
     def test_new_chat(self) -> None:
         self.server._handle_command({"type": "newChat", "tabId": "t-nc"})
         assert any(e.get("type") == "showWelcome" for e in self.events)
 
     def test_close_tab_clean(self) -> None:
-        self.server._get_tab("t-close")
+        state = _register_tab_state("t-close")
         self.server._handle_command({"type": "closeTab", "tabId": "t-close"})
-        assert "t-close" not in _RunningAgentState.running_agent_states
+        assert agent_state.get(state.task_id) is None
 
     def test_user_answer_no_queue(self) -> None:
         self.server._handle_command(
@@ -167,13 +185,17 @@ class TestNonGitCommandsDoNotCrash(_NonGitHarness):
         errs = self._events_of("error")
         assert any("Unknown command" in e.get("text", "") for e in errs)
 
-    def test_merge_action_no_op(self) -> None:
-        self.server._get_tab("t-merge").is_merging = True
+    def test_merge_action_is_unknown_command(self) -> None:
+        """The interactive merge review was removed: ``mergeAction`` is
+        an unknown command and must not touch the tab's merge flag."""
+        state = _register_tab_state("t-merge")
+        state.is_merging = True
         self.server._handle_command(
             {"type": "mergeAction", "action": "all-done", "tabId": "t-merge"},
         )
-        assert "autocommit_prompt" not in self._types()
-        assert "merge_ended" in self._types()
+        errs = self._events_of("error")
+        assert any("Unknown command" in e.get("text", "") for e in errs)
+        assert state.is_merging is True
 
 
 class TestNonGitWorktreeActions(_NonGitHarness):
@@ -196,9 +218,10 @@ class TestNonGitWorktreeActions(_NonGitHarness):
         assert evt and evt[-1]["success"] is False
 
     def test_worktree_action_unknown(self) -> None:
-        tab = self.server._get_tab("t-wt3")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
+        state = _register_tab_state(
+            "t-wt3", agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        )
+        state.use_worktree = True
         self.server._handle_command(
             {"type": "worktreeAction", "action": "frobnicate", "tabId": "t-wt3"},
         )
@@ -207,37 +230,19 @@ class TestNonGitWorktreeActions(_NonGitHarness):
 
 
 class TestNonGitAutocommit(_NonGitHarness):
-    """Autocommit prompt + action paths must not crash in non-git."""
+    """The post-task autocommit path must not crash in non-git."""
 
-    def test_finish_merge_no_autocommit_prompt(self) -> None:
-        tab = self.server._get_tab("t1")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = False
-        tab.is_merging = True
+    def test_autocommit_reports_not_a_git_repository(self) -> None:
+        """``_autocommit_changes`` in a non-git dir reports a graceful
+        failure through ``autocommit_done`` instead of crashing."""
+        _register_tab_state("t2").use_worktree = False
         Path(self.tmpdir, "loose.txt").write_text("x\n")
-        self.server._finish_merge("t1")
-        assert "autocommit_prompt" not in self._types()
-        assert "merge_ended" in self._types()
-
-    def test_autocommit_commit_reports_failure(self) -> None:
-        self.server._get_tab("t2").use_worktree = False
-        self.server._handle_command(
-            {"type": "autocommitAction", "action": "commit", "tabId": "t2"},
-        )
+        self.server._autocommit_changes("t2", work_dir=self.tmpdir)
         evt = self._events_of("autocommit_done")
         assert evt
         assert evt[-1]["success"] is False
         assert evt[-1]["committed"] is False
-
-    def test_autocommit_skip(self) -> None:
-        self.server._get_tab("t3").use_worktree = False
-        self.server._handle_command(
-            {"type": "autocommitAction", "action": "skip", "tabId": "t3"},
-        )
-        evt = self._events_of("autocommit_done")
-        assert evt
-        assert evt[-1]["success"] is True
-        assert evt[-1]["committed"] is False
+        assert evt[-1]["message"] == "Not a git repository."
 
 
 class TestNonGitGenerateCommitMessage(_NonGitHarness):
@@ -264,22 +269,25 @@ class TestNonGitRunTask(_NonGitHarness):
     """Driving _run_task in a non-git dir must complete cleanly:
     no merge view, no error events, status broadcasts both ways."""
 
-    def _patch_agent_run(self, tab_id: str) -> dict[str, Any]:
-        """Replace tab.agent.run with a no-op that simulates a clean
-        agent invocation creating a single new file."""
+    def _patch_agent_run(
+        self, tab_id: str,
+    ) -> tuple[dict[str, Any], WorktreeSorcarAgent]:
+        """Register a tab state whose agent.run is a no-op that
+        simulates a clean agent invocation creating a single new file."""
         called: dict[str, Any] = {"called": False, "kwargs": None}
-        tab = self.server._get_tab(tab_id)
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        state = _register_tab_state(tab_id, agent=agent)
+        state.stop_event = threading.Event()
+        state.user_answer_queue = queue.Queue()
 
         def fake_run(**kwargs: Any) -> str:
             called["called"] = True
             called["kwargs"] = kwargs
             Path(self.tmpdir, "agent_output.txt").write_text("hi\n")
-            assert tab.agent is not None
-            tab.agent.total_tokens_used = 10
-            tab.agent.budget_used = 0.001
-            tab.agent.step_count = 1
-            tab.agent._last_task_id = None
+            agent.total_tokens_used = 10
+            agent.budget_used = 0.001
+            agent.step_count = 1
+            agent._last_task_id = None
             printer = kwargs.get("printer", self.server.printer)
             printer.print(
                 "success: true\nsummary: ok",
@@ -290,8 +298,8 @@ class TestNonGitRunTask(_NonGitHarness):
             )
             return "success: true\nsummary: ok"
 
-        tab.agent.run = fake_run  # type: ignore[assignment]
-        return called
+        agent.run = fake_run  # type: ignore[assignment]
+        return called, agent
 
     def test_run_task_non_worktree(self) -> None:
         from kiss.core import config as config_module
@@ -300,10 +308,7 @@ class TestNonGitRunTask(_NonGitHarness):
         try:
             keys.ANTHROPIC_API_KEY = "test-key"
             tab_id = "t-run"
-            called = self._patch_agent_run(tab_id)
-            tab = self.server._get_tab(tab_id)
-            tab.stop_event = threading.Event()
-            tab.user_answer_queue = queue.Queue()
+            called, _agent = self._patch_agent_run(tab_id)
 
             self.server._run_task({
                 "type": "run",
@@ -337,10 +342,7 @@ class TestNonGitRunTask(_NonGitHarness):
         try:
             keys.ANTHROPIC_API_KEY = "test-key"
             tab_id = "t-wt-fallback"
-            called = self._patch_agent_run(tab_id)
-            tab = self.server._get_tab(tab_id)
-            tab.stop_event = threading.Event()
-            tab.user_answer_queue = queue.Queue()
+            called, agent = self._patch_agent_run(tab_id)
 
             self.server._run_task({
                 "type": "run",
@@ -354,8 +356,8 @@ class TestNonGitRunTask(_NonGitHarness):
             errors = self._events_of("error")
             assert not errors, f"unexpected error events: {errors}"
             assert "merge_started" not in self._types()
-            assert tab.agent is None or tab.agent._wt_branch is None
-            assert tab.agent is None or tab.agent._wt_pending is False
+            assert agent._wt_branch is None
+            assert agent._wt_pending is False
         finally:
             keys.ANTHROPIC_API_KEY = saved
 

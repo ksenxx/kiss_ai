@@ -7,10 +7,8 @@
 These exercise the real behaviour end to end: MCP config files are
 written to real user (``KISS_HOME``) and project directories, a real
 stdio MCP server (FastMCP) is spawned and spoken to over the real
-protocol, tool wrappers are built and invoked for real, the OAuth
-token storage and callback server use the real filesystem and real
-HTTP, and the ``sorcar mcp`` CLI plus the REPL ``/mcp`` command are
-driven through real subprocesses.  No model calls are made.
+protocol, tool wrappers are built and invoked for real, and the OAuth
+token storage uses the real filesystem.  No model calls are made.
 """
 
 from __future__ import annotations
@@ -20,9 +18,7 @@ import inspect
 import json
 import os
 import pty
-import subprocess
 import sys
-import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -42,7 +38,6 @@ from kiss.agents.sorcar.mcp_servers import (
     remove_mcp_server,
     save_mcp_server,
 )
-from kiss.ui.cli.mcp_cli import _OAuthCallbackServer, run_mcp_cli
 
 _SERVER_SCRIPT = '''
 from mcp.server.fastmcp import FastMCP
@@ -406,178 +401,11 @@ def test_file_token_storage_roundtrip(isolated_homes: Path) -> None:
     assert asyncio.run(storage.get_tokens()) is None
 
 
-def test_oauth_callback_server_receives_redirect() -> None:
-    """The local callback server captures code and state from a real GET."""
-    server = _OAuthCallbackServer()
-    try:
-        url = f"http://localhost:{server.port}/callback?code=abc123&state=st9"
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            assert resp.status == 200
-            assert b"close this tab" in resp.read()
-        code, state = server.wait(timeout=10)
-        assert code == "abc123"
-        assert state == "st9"
-    finally:
-        server.close()
-
-
 def test_noninteractive_oauth_refuses_browser_flow() -> None:
-    """Agent runs never block on OAuth; they direct to ``sorcar mcp auth``."""
-    with pytest.raises(RuntimeError, match="sorcar mcp auth"):
+    """Agent runs never block on OAuth; they direct to token provisioning."""
+    with pytest.raises(RuntimeError, match="interactive OAuth login"):
         asyncio.run(_noninteractive_redirect("https://auth.example/authorize"))
 
-
-
-def test_cli_add_list_get_remove(
-    isolated_homes: Path, capsys: pytest.CaptureFixture[str],
-) -> None:
-    """The add → list → get → remove lifecycle works end to end."""
-    project = str(isolated_homes / "project")
-    assert run_mcp_cli(
-        ["add", "--env", "K=V", "echo-srv", "--", "echo", "hello"], project,
-    ) == 0
-    assert run_mcp_cli(["list"], project) == 0
-    assert run_mcp_cli(["get", "echo-srv"], project) == 0
-    assert run_mcp_cli(["remove", "echo-srv"], project) == 0
-    out = capsys.readouterr().out
-    assert "Added stdio MCP server 'echo-srv'" in out
-    assert "echo hello" in out
-    assert '"command": "echo"' in out
-    assert "Removed 'echo-srv'" in out
-    assert run_mcp_cli(["get", "echo-srv"], project) == 1
-
-
-def test_cli_add_remote_with_headers(
-    isolated_homes: Path, capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Remote servers are added with transport and headers."""
-    project = str(isolated_homes / "project")
-    assert run_mcp_cli(
-        [
-            "add", "--transport", "http", "--scope", "project",
-            "--header", "X-Key: abc", "rsrv", "https://x.example/mcp",
-        ],
-        project,
-    ) == 0
-    cfg = load_mcp_servers(project)["rsrv"]
-    assert cfg.transport == "http"
-    assert cfg.headers == (("X-Key", "abc"),)
-    assert cfg.source == "project"
-    assert "Added http MCP server 'rsrv'" in capsys.readouterr().out
-
-
-def test_cli_add_missing_target_fails(
-    isolated_homes: Path, capsys: pytest.CaptureFixture[str],
-) -> None:
-    """``add`` without a command/URL fails with a message."""
-    assert run_mcp_cli(["add", "x"], str(isolated_homes / "project")) == 1
-    assert "missing command" in capsys.readouterr().out
-
-
-def test_cli_add_bad_env_exits(isolated_homes: Path) -> None:
-    """``--env`` entries must look like KEY=VALUE."""
-    with pytest.raises(SystemExit):
-        run_mcp_cli(
-            ["add", "--env", "NOEQUALS", "x", "echo"],
-            str(isolated_homes / "project"),
-        )
-
-
-def test_cli_unknown_server_paths(
-    isolated_homes: Path, capsys: pytest.CaptureFixture[str],
-) -> None:
-    """get/remove/auth/debug on unknown servers exit 1."""
-    project = str(isolated_homes / "project")
-    for argv in (
-        ["get", "nope"], ["remove", "nope"], ["auth", "nope"], ["debug", "nope"],
-    ):
-        assert run_mcp_cli(argv, project) == 1
-    assert capsys.readouterr().out.count("Unknown MCP server: nope") == 4
-
-
-def test_cli_logout(
-    isolated_homes: Path, capsys: pytest.CaptureFixture[str],
-) -> None:
-    """``logout`` deletes the token file and reports when absent."""
-    from mcp.shared.auth import OAuthToken
-
-    project = str(isolated_homes / "project")
-    storage = FileTokenStorage("srv")
-    asyncio.run(storage.set_tokens(OAuthToken(access_token="a", token_type="Bearer")))
-    assert run_mcp_cli(["logout", "srv"], project) == 0
-    assert run_mcp_cli(["logout", "srv"], project) == 1
-    out = capsys.readouterr().out
-    assert "Deleted stored OAuth tokens" in out
-    assert "No stored OAuth tokens" in out
-
-
-def test_cli_auth_stdio_is_noop(
-    isolated_homes: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str],
-) -> None:
-    """``auth`` on a stdio server explains no login is needed."""
-    project = str(isolated_homes / "project")
-    save_mcp_server(_stdio_config(tmp_path), "user", project)
-    assert run_mcp_cli(["auth", "testsrv"], project) == 0
-    assert "needs no OAuth login" in capsys.readouterr().out
-
-
-def test_cli_debug_live_server(
-    isolated_homes: Path, tmp_path: Path,
-    capsys: pytest.CaptureFixture[str], mcp_permission_rules,
-    real_stdin: None,
-) -> None:
-    """``debug`` connects for real and dumps tools with permissions."""
-    mcp_permission_rules({"testsrv_secret*": "deny"})
-    project = str(isolated_homes / "project")
-    save_mcp_server(_stdio_config(tmp_path), "user", project)
-    assert run_mcp_cli(["debug", "testsrv"], project) == 0
-    out = capsys.readouterr().out
-    assert "✓ Connected." in out
-    assert "✓ testsrv_add [allow]" in out
-    assert "✗ testsrv_secret_word [deny]" in out
-    assert "inputSchema" in out
-
-
-def test_cli_debug_connection_failure(
-    isolated_homes: Path, capsys: pytest.CaptureFixture[str],
-) -> None:
-    """``debug`` reports a failure to start the server command."""
-    project = str(isolated_homes / "project")
-    save_mcp_server(
-        MCPServerConfig(name="bad", command="/nonexistent-cmd-xyz"),
-        "user", project,
-    )
-    assert run_mcp_cli(["debug", "bad"], project) == 1
-    assert "✗ Connection failed" in capsys.readouterr().out
-
-
-
-def _subprocess_env(homes: Path) -> dict[str, str]:
-    """Environment for subprocesses with isolated user dirs."""
-    return dict(
-        os.environ,
-        KISS_HOME=str(homes / ".kisshome"),
-        HOME=str(homes / "home"),
-    )
-
-
-def test_sorcar_mcp_subcommand_subprocess(
-    isolated_homes: Path, tmp_path: Path,
-) -> None:
-    """``python -m kiss.ui.cli.sorcar_cli mcp`` dispatches to the CLI."""
-    project = isolated_homes / "project"
-    save_mcp_server(_stdio_config(tmp_path), "user", str(project))
-    proc = subprocess.run(
-        [
-            sys.executable, "-m",
-            "kiss.ui.cli.sorcar_cli", "mcp", "list",
-        ],
-        capture_output=True, text=True, timeout=120,
-        cwd=str(project), env=_subprocess_env(isolated_homes),
-    )
-    assert proc.returncode == 0
-    assert "testsrv" in proc.stdout
-    assert "(user, stdio)" in proc.stdout
 
 
 def test_agent_get_tools_includes_mcp_tools(

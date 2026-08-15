@@ -13,15 +13,15 @@ being lost forever).
 Reproduces and pins two bugs in the multi-viewer routing layer:
 
 1. **Follow-up input dropped on viewer tab.**
-   ``_cmd_append_user_message`` queues the prompt onto
-   ``_RunningAgentState[tab_id].pending_user_messages``.  A viewer tab
-   created by a history-resume click has a registry entry, but the
-   live task runs in a different tab's state (the launcher tab) and
-   the viewer's ``is_task_active`` is ``False``.  Without the routing
-   fix, ``_cmd_append_user_message`` decides the viewer's tab has
-   no live task and silently drops the prompt — the user types a
-   follow-up while the task runs, sees their text disappear from the
-   input box, but the agent never sees the message.
+   ``_cmd_append_user_message`` queues the prompt onto the running
+   task's ``agent_state.AgentState.pending_user_messages``.  A viewer
+   tab created by a history-resume click is not the tab a live task
+   was launched from, so a naive tab-keyed lookup finds no live task
+   for it.  Without the routing fix, ``_cmd_append_user_message``
+   decides the viewer's tab has no live task and silently drops the
+   prompt — the user types a follow-up while the task runs, sees
+   their text disappear from the input box, but the agent never sees
+   the message.
 
 2. **No ``status running=false`` reaches the viewer tab when the task
    ends.**  ``_run_task``'s ``finally`` broadcasts ``status
@@ -65,6 +65,7 @@ import yaml
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import get_available_models
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 _LIVE_TEXT = "live-delta-marker"
@@ -196,6 +197,11 @@ class TestResumeRunningFollowupInput(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.release.set()
+        for state in agent_state.snapshot():
+            thread = state.task_thread
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=30)
+        agent_state.agent_states.clear()
         _unpatch_grandparent_run(self.original_run)
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -223,7 +229,8 @@ class TestResumeRunningFollowupInput(unittest.TestCase):
         tab's live agent, not be silently dropped."""
         tab_launcher, tab_viewer = "tab-launcher", "tab-viewer"
         self._start_blocking_task(tab_launcher, "long running task")
-        launcher_state = self.server._get_tab(tab_launcher)
+        launcher_state = agent_state.find_by_tab(tab_launcher)
+        assert launcher_state is not None
         chat_id = launcher_state.chat_id
         assert chat_id
 
@@ -276,7 +283,9 @@ class TestResumeRunningFollowupInput(unittest.TestCase):
         the pulsing green indicator in its tab title turns off."""
         tab_launcher, tab_viewer = "tab-launcher", "tab-viewer"
         self._start_blocking_task(tab_launcher, "long running task")
-        chat_id = self.server._get_tab(tab_launcher).chat_id
+        launcher_state = agent_state.find_by_tab(tab_launcher)
+        assert launcher_state is not None
+        chat_id = launcher_state.chat_id
 
         self.server._handle_command(
             {"type": "newChat", "tabId": tab_viewer},
@@ -285,15 +294,15 @@ class TestResumeRunningFollowupInput(unittest.TestCase):
             "type": "resumeSession", "chatId": chat_id, "tabId": tab_viewer,
         })
 
-        mark = len(self.events)
+        mark = len(self._events())
         self.release.set()
-        task_thread = self.server._get_tab(tab_launcher).task_thread
+        task_thread = launcher_state.task_thread
         if task_thread is not None:
             task_thread.join(timeout=30)
         assert _wait_until(
-            lambda: self.server._get_tab(tab_launcher).task_thread is None,
+            lambda: launcher_state.task_thread is None,
             timeout=30,
-        ), "task worker thread never completed"
+        ), "task worker thread state was never cleaned up"
 
         after_end = self._events()[mark:]
         running_false_viewer = [
@@ -317,7 +326,9 @@ class TestResumeRunningFollowupInput(unittest.TestCase):
         textbox after the running task finished."""
         tab_launcher, tab_viewer = "tab-launcher", "tab-viewer"
         self._start_blocking_task(tab_launcher, "first task")
-        chat_id = self.server._get_tab(tab_launcher).chat_id
+        launcher_state = agent_state.find_by_tab(tab_launcher)
+        assert launcher_state is not None
+        chat_id = launcher_state.chat_id
 
         self.server._handle_command(
             {"type": "newChat", "tabId": tab_viewer},
@@ -328,9 +339,9 @@ class TestResumeRunningFollowupInput(unittest.TestCase):
 
         self.release.set()
         assert _wait_until(
-            lambda: self.server._get_tab(tab_launcher).task_thread is None,
+            lambda: launcher_state.task_thread is None,
             timeout=30,
-        )
+        ), "task worker thread state was never cleaned up"
 
         self.started.clear()
 
@@ -344,7 +355,8 @@ class TestResumeRunningFollowupInput(unittest.TestCase):
             "run loop — the user's typed text was lost"
         )
 
-        viewer_state = self.server._get_tab(tab_viewer)
+        viewer_state = agent_state.find_by_tab(tab_viewer)
+        assert viewer_state is not None
         assert _wait_until(
             lambda: viewer_state.task_thread is None,
             timeout=30,

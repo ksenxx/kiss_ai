@@ -161,16 +161,22 @@ class TestBug63DiscardLiesOnDeleteFailure:
     ) -> None:
         """Regression: a clean discard must still succeed cleanly."""
         repo = _make_repo(tmp_path)
+        original = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
         branch = "kiss/wt-bug63c-1"
         wt_dir = repo / ".kiss-worktrees" / branch.replace("/", "_")
         assert GitWorktreeOps.create(repo, branch, wt_dir)
-        GitWorktreeOps.save_original_branch(repo, branch, "main")
+        GitWorktreeOps.save_original_branch(repo, branch, original)
 
         agent = WorktreeSorcarAgent("test")
         agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
-            original_branch="main",
+            original_branch=original,
             wt_dir=wt_dir,
             baseline_commit=None,
         )

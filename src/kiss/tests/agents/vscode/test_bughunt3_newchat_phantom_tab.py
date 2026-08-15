@@ -2,14 +2,14 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Bug-hunt 3: empty-tabId commands must not mint phantom tabs (BUG-E).
+"""Bug-hunt 3: empty-tabId commands must not mint phantom state (BUG-E).
 
-``{"type": "newChat"}`` without a ``tabId`` created a permanent
-registry entry keyed ``""`` (plus a ``WorktreeSorcarAgent`` via
-``_get_tab``).  ``_cmd_close_tab`` guards against empty tab ids, so
-the phantom could NEVER be disposed — inconsistent with
-``_stop_task`` / ``_replay_session``, which both no-op on an empty
-tab id.  ``selectModel`` had the same hole via ``_get_tab``.
+``{"type": "newChat"}`` without a ``tabId`` used to create a permanent
+registry entry keyed ``""`` that could never be disposed.  In the
+task-keyed architecture the equivalent hazard is a phantom ``""`` key
+in the per-tab stickiness dicts (``_tab_models``) or a phantom entry in
+``kiss.server.agent_state.agent_states``.  ``selectModel`` without a
+``tabId`` must only update the daemon-wide default model.
 """
 
 from __future__ import annotations
@@ -21,12 +21,12 @@ from typing import Any
 
 import kiss.agents.sorcar.persistence as _pm
 import kiss.core.vscode_config as _vc
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
 class TestEmptyTabIdPhantom(unittest.TestCase):
-    """Empty tabId must not create an undisposable registry entry."""
+    """Empty tabId must not create undisposable per-tab or task state."""
 
     def setUp(self) -> None:
         _pm._close_db()
@@ -48,7 +48,7 @@ class TestEmptyTabIdPhantom(unittest.TestCase):
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         _pm._close_db()
         (
             _pm._KISS_DIR, _pm._DB_PATH, _vc.CONFIG_DIR, _vc.CONFIG_PATH,
@@ -57,16 +57,22 @@ class TestEmptyTabIdPhantom(unittest.TestCase):
 
     def test_new_chat_empty_tab_id_creates_no_phantom(self) -> None:
         self.server._handle_command({"type": "newChat"})
-        assert "" not in _RunningAgentState.running_agent_states, (
-            "BUG: newChat without tabId minted a phantom registry entry "
-            'keyed "" that _cmd_close_tab can never dispose'
+        assert "" not in self.server._tab_models, (
+            'BUG: newChat without tabId minted a phantom "" entry in '
+            "_tab_models that _cmd_close_tab can never dispose"
+        )
+        assert "" not in agent_state.agent_states, (
+            'BUG: newChat without tabId minted a phantom "" AgentState'
         )
 
     def test_select_model_empty_tab_id_creates_no_phantom(self) -> None:
         self.server._handle_command({"type": "selectModel", "model": "m-x"})
-        assert "" not in _RunningAgentState.running_agent_states, (
-            "BUG: selectModel without tabId minted a phantom registry "
-            'entry keyed "" that _cmd_close_tab can never dispose'
+        assert "" not in self.server._tab_models, (
+            'BUG: selectModel without tabId minted a phantom "" entry in '
+            "_tab_models that _cmd_close_tab can never dispose"
+        )
+        assert "" not in agent_state.agent_states, (
+            'BUG: selectModel without tabId minted a phantom "" AgentState'
         )
         assert self.server._default_model == "m-x"
 

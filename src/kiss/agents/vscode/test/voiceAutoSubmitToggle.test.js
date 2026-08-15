@@ -160,10 +160,7 @@ test('with auto submit off nothing is sent and the draft is kept', () => {
     0,
     JSON.stringify(posted),
   );
-  assert.strictEqual(
-    input(win).value,
-    'Speaker #1 says that: Fix the parser bug',
-  );
+  assert.strictEqual(input(win).value, 'Fix the parser bug');
 });
 
 test('with auto submit off no "working on it" ack is played', () => {
@@ -220,6 +217,22 @@ test('caret is restored before listeners see the input event', () => {
   );
   win.setTimeout = clock;
   assert.strictEqual(fired, false);
+});
+
+test('with auto submit off the exact spoken text is inserted, with no speaker or language prefix', () => {
+  const {win} = makeWebview({stored: 'off'});
+  const inp = input(win);
+  inp.value = 'before after';
+  caret(win, 6);
+  send(win, {
+    type: 'voiceSpeech',
+    text: 'Fix the bug',
+    speaker: 2,
+    language: 'fr',
+  });
+  assert.strictEqual(inp.value, 'before Fix the bug after');
+  assert.strictEqual(inp.selectionStart, 18);
+  assert.strictEqual(inp.selectionEnd, 18);
 });
 
 test('with auto submit off the text lands at the caret', () => {
@@ -292,13 +305,7 @@ test('with auto submit off a running agent is not steered', () => {
     0,
     JSON.stringify(posted),
   );
-  assert.strictEqual(
-    input(win).value,
-    'Speaker #2 says in the language en that: Also update the docs'.replace(
-      ' in the language en',
-      '',
-    ),
-  );
+  assert.strictEqual(input(win).value, 'Also update the docs');
 });
 
 test('an empty transcript never edits the draft in either mode', () => {

@@ -185,7 +185,6 @@
   const api = {
     getRawText: getRawText,
     addCopyButton: addCopyButton,
-    normalise: normalise,
     formatEventTs: formatEventTs,
     ensurePanelFoot: ensurePanelFoot,
     addPanelTimestamp: addPanelTimestamp,

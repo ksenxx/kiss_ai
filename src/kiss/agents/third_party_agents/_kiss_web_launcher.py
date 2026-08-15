@@ -14,33 +14,31 @@ lifecycle — live event broadcasts to every connected webview,
 follow-up message injection, stop support, chat persistence — exactly
 like a task started from the chat UI.
 
-The agent's live channel tools (authentication closures, authenticated
-backend bound methods, per-message ``reply`` closures) are supplied
-through the API's ``tools=`` *file path* contract via
-:mod:`._api_tools_bridge`: the launcher generates a real tools file
-whose top-level wrappers dispatch back to the live callables, which
-works because the daemon the launcher talks to runs in this same
-process (see :func:`_ensure_api_server`).
+The agent's channel tools are supplied through the API's ``tools=``
+*file path* contract directly: each agent module defines a top-level
+``get_tools()`` that builds a fresh agent from the credentials
+persisted under ``~/.kiss`` and returns its authentication and backend
+tools, so the agent's OWN module file (``agent.tools_file``) is passed
+as the ``tools=`` argument and the daemon imports it and calls its
+``get_tools()``.  No bridge, registry, wrapper, or generated file is
+involved.  The active workspace travels to the daemon-side
+``get_tools()`` through the ``KISS_CHANNEL_WORKSPACE`` environment
+variable.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import tempfile
 import threading
-from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.agents.third_party_agents._api_tools_bridge import (
-    register_tools,
-    release_tools,
-)
+from kiss.agents.third_party_agents._channel_agent_utils import BaseChannelAgent
 
 if TYPE_CHECKING:
     from kiss.server.web_server import RemoteAccessServer
@@ -49,17 +47,62 @@ logger = logging.getLogger(__name__)
 
 _NO_TIMEOUT_SECONDS = 10 * 365 * 24 * 3600.0
 
+_WORKSPACE_ENV_VAR = "KISS_CHANNEL_WORKSPACE"
+_WORKSPACE_LOCK = threading.Lock()
+_ACTIVE_WORKSPACES: dict[str, int] = {}
+
+
+def _enter_workspace(workspace: str) -> None:
+    """Mark a launch's workspace active and publish it to the env var.
+
+    The env var is process-global, so it is managed by reference
+    counting rather than save/restore snapshots: snapshots taken by
+    overlapping launches restore each other's values out of order,
+    leaving a stale workspace exported after every task has finished.
+
+    Args:
+        workspace: The launching agent's workspace identifier.
+    """
+    with _WORKSPACE_LOCK:
+        _ACTIVE_WORKSPACES[workspace] = _ACTIVE_WORKSPACES.get(workspace, 0) + 1
+        os.environ[_WORKSPACE_ENV_VAR] = workspace
+        if len(_ACTIVE_WORKSPACES) > 1:
+            logger.warning(
+                "concurrent kiss-web launches use different workspaces %s "
+                "but share the single process-global %s environment "
+                "variable; their daemon-side get_tools() may see the "
+                "wrong workspace",
+                sorted(_ACTIVE_WORKSPACES),
+                _WORKSPACE_ENV_VAR,
+            )
+
+
+def _exit_workspace(workspace: str) -> None:
+    """Mark a launch's workspace inactive and clean up the env var.
+
+    When the last active launch finishes the env var is removed; while
+    other launches remain active the env var is kept pointing at one of
+    their workspaces.
+
+    Args:
+        workspace: The workspace passed to :func:`_enter_workspace`.
+    """
+    with _WORKSPACE_LOCK:
+        count = _ACTIVE_WORKSPACES.get(workspace, 0) - 1
+        if count > 0:
+            _ACTIVE_WORKSPACES[workspace] = count
+        else:
+            _ACTIVE_WORKSPACES.pop(workspace, None)
+        if not _ACTIVE_WORKSPACES:
+            os.environ.pop(_WORKSPACE_ENV_VAR, None)
+        elif os.environ.get(_WORKSPACE_ENV_VAR) not in _ACTIVE_WORKSPACES:
+            os.environ[_WORKSPACE_ENV_VAR] = next(iter(_ACTIVE_WORKSPACES))
+
 _API_SERVER: RemoteAccessServer | None = None
 _API_SERVER_SOCK: str = ""
 _API_SERVER_LOCK = threading.Lock()
 
 _SOCK_PATH_OVERRIDE: str | None = None
-
-
-def _failure_yaml(exc: BaseException) -> str:
-    """Return a YAML failure envelope for a task exception."""
-    summary = "Task interrupted" if isinstance(exc, KeyboardInterrupt) else f"Task failed: {exc}"
-    return str(yaml.safe_dump({"success": False, "summary": summary}, sort_keys=False))
 
 
 def _ensure_api_server() -> str:
@@ -69,9 +112,8 @@ def _ensure_api_server() -> str:
     the production daemon class — serving only a private Unix-domain
     socket (mode 0o600 in a private temp directory) on a dedicated
     asyncio loop thread.  The launcher's ``sorcar.run`` calls connect
-    to this socket.  The daemon MUST live in this process: the live
-    tool callables bridged by :mod:`._api_tools_bridge` are reachable
-    only through this process's registry.
+    to this socket, so channel agents work without any externally
+    started kiss-web daemon.
 
     Returns:
         The Unix-domain socket path of the in-process daemon.
@@ -103,144 +145,101 @@ def _ensure_api_server() -> str:
         return _API_SERVER_SOCK
 
 
-def _collect_live_tools(
-    agent: Any,
-    extra_tools: list[Callable[..., Any]] | None,
-) -> list[Callable[..., Any]]:
-    """Assemble the live channel tools to bridge into the task.
+class KissWebChatAgent(BaseChannelAgent):
+    """Chat-session carrier for API launches.
 
-    Mirrors ``BaseChannelAgent._get_tools``'s channel-specific portion:
-    authentication tools first, then — only when the channel backend is
-    authenticated — the backend's tool methods, then any launcher-
-    supplied extra tools (e.g. ``ChannelRunner``'s per-message
-    ``reply`` closure).  The daemon-built agent supplies the standard
-    SorcarAgent tools itself.
-
-    Args:
-        agent: The third-party agent instance.
-        extra_tools: Extra tool callables from the launcher's caller.
-
-    Returns:
-        The live callables to expose to the daemon task.
-    """
-    collected: list[Callable[..., Any]] = []
-    get_auth_tools = getattr(agent, "_get_auth_tools", None)
-    if callable(get_auth_tools):
-        collected.extend(
-            cast("list[Callable[..., Any]]", get_auth_tools() or []),
-        )
-    is_authenticated = getattr(agent, "_is_authenticated", None)
-    backend = getattr(agent, "_backend", None)
-    if callable(is_authenticated) and backend is not None and is_authenticated():
-        collected.extend(backend.get_tool_methods() or [])
-    collected.extend(extra_tools or [])
-    return collected
-
-
-class KissWebChatSorcarAgent(ChatSorcarAgent):
-    """Chat-session carrier agent for API launches.
-
-    API launches execute on a daemon-built agent, so this instance
-    never runs itself; it carries the chat id across launches (the
+    A plain :class:`BaseChannelAgent` (no auth tools, no backend) that
+    additionally carries the daemon chat id across launches: the
     pollers call :meth:`resume_chat_by_id` before launching and read
-    :attr:`chat_id` after) and records the launcher's YAML result in
-    :attr:`last_run_result`.  Running it directly still works and
-    records its result the same way.
+    :attr:`chat_id` after, so each conversation thread maps to a
+    persistent daemon chat.  Like every channel agent it never runs
+    anything itself — the inherited ``run()`` submits the task through
+    :func:`kiss.server.sorcar.run` via :func:`run_agent_via_kiss_web`,
+    which records the YAML result in ``last_run_result`` plus the
+    cost / token / step totals.
     """
 
-    last_run_result: str = ""
+    def __init__(self, name: str = "") -> None:
+        super().__init__(name)
+        self._chat_id: str = ""
 
-    def run(self, prompt_template: str = "", **kwargs: Any) -> str:  # type: ignore[override]
-        """Run the chat agent directly and record the returned YAML result.
+    @property
+    def chat_id(self) -> str:
+        """The daemon chat-session identifier carried across launches."""
+        return self._chat_id
 
-        Args:
-            prompt_template: The task prompt.
-            **kwargs: Forwarded to :meth:`ChatSorcarAgent.run`.
+    def new_chat(self) -> None:
+        """Start a fresh chat: the next launch gets a new daemon chat id."""
+        self._chat_id = ""
 
-        Returns:
-            YAML string with 'success' and 'summary' keys.
-        """
-        try:
-            result = super().run(prompt_template=prompt_template, **kwargs)
-        except BaseException as exc:
-            self.last_run_result = _failure_yaml(exc)
-            raise
-        self.last_run_result = result
-        return result
-
-
-class KissWebWorktreeSorcarAgent(WorktreeSorcarAgent):
-    """Worktree carrier agent for API launches (see the chat variant)."""
-
-    last_run_result: str = ""
-
-    def run(self, prompt_template: str = "", **kwargs: Any) -> str:  # type: ignore[override]
-        """Run the worktree agent directly and record the returned YAML result.
+    def resume_chat_by_id(self, chat_id: str) -> None:
+        """Resume an existing chat session on the next launch.
 
         Args:
-            prompt_template: The task prompt.
-            **kwargs: Forwarded to :meth:`WorktreeSorcarAgent.run`.
-
-        Returns:
-            YAML string with 'success' and 'summary' keys.
+            chat_id: String chat session identifier to resume.
         """
-        try:
-            result = super().run(prompt_template=prompt_template, **kwargs)
-        except BaseException as exc:
-            self.last_run_result = _failure_yaml(exc)
-            raise
-        self.last_run_result = result
-        return result
+        if chat_id:
+            self._chat_id = chat_id
 
 
 def run_agent_via_kiss_web(
-    agent: Any,
+    agent: BaseChannelAgent,
     prompt_template: str,
     *,
     model_name: str = "",
     work_dir: str = "",
     max_budget: float | None = None,
-    tools: list[Callable[..., Any]] | None = None,
-    use_worktree: bool = False,
+    tools: str | Path | None = None,
+    use_worktree: bool = True,
     model_config: dict[str, Any] | None = None,
     web_tools: bool | None = None,
-    is_parallel: bool = False,
+    is_parallel: bool = True,
     timeout: float | None = None,
     sock_path: str | None = None,
 ) -> str:
     """Launch *agent*'s task through :func:`kiss.server.sorcar.run`.
 
-    Bridges the agent's live channel tools into a generated tools file
-    (:func:`~._api_tools_bridge.register_tools`), appends the agent's
-    ``channel_system_prompt`` guidance to the prompt (the API carries
-    no system prompt), and submits the task to the in-process kiss-web
-    daemon over its Unix-domain socket.  Blocks until the daemon
-    reports the task finished (or *timeout* elapses) and returns the
-    task's YAML result.
+    Supplies the agent's channel tools through the API's ``tools=``
+    file-path contract (by default ``agent.tools_file`` — the agent's
+    own module, whose top-level ``get_tools()`` the daemon calls to
+    build a fresh agent from the credentials persisted under
+    ``~/.kiss``), appends the agent's ``channel_system_prompt``
+    guidance to the prompt (the API carries no system prompt), and
+    submits the task to the in-process kiss-web daemon over its
+    Unix-domain socket.  Blocks until the daemon reports the task
+    finished (or *timeout* elapses) and returns the task's YAML result.
+
+    While the task runs, the ``KISS_CHANNEL_WORKSPACE`` environment
+    variable holds ``agent.workspace`` so the daemon-side
+    ``get_tools()`` authenticates under the same workspace (concurrent
+    launches from one process should therefore use the same
+    workspace).
 
     The passed *agent* instance is never executed — the daemon builds
     its own chat agent.  The instance serves as the carrier of channel
-    tools and chat identity: the launcher propagates the daemon chat
-    id onto it (so pollers can resume the conversation), records the
-    YAML result in ``agent.last_run_result``, and copies the task's
-    cost / token / step totals onto the instance for CLI run stats.
+    identity: the launcher propagates the daemon chat id onto it (so
+    pollers can resume the conversation), records the YAML result in
+    ``agent.last_run_result``, and copies the task's cost / token /
+    step totals onto the instance for CLI run stats.
 
     Args:
-        agent: The third-party agent instance supplying channel tools,
+        agent: The third-party agent instance supplying the channel
+            tools file (``agent.tools_file``), the workspace,
             ``channel_system_prompt`` guidance, and the chat id to
-            continue (``agent.chat_id`` for
-            :class:`~kiss.agents.sorcar.chat_sorcar_agent.ChatSorcarAgent`
-            derivatives).
+            continue (``agent.chat_id`` on :class:`KissWebChatAgent`
+            carriers).
         prompt_template: The task prompt.
         model_name: LLM model name; empty selects the daemon default.
         work_dir: Working directory for the run.
         max_budget: Per-task budget override in USD; ``None`` uses the
             kiss-web config default.
-        tools: Extra live tool callables bridged into the task's tools
-            (e.g. ``ChannelRunner``'s per-message ``reply`` closure).
+        tools: Path of a Python file whose top-level ``get_tools()``
+            supplies the task's extra tools (the API's tools-file
+            contract).  ``None`` uses ``agent.tools_file`` — the
+            agent's own module.
         use_worktree: Run the task in an isolated git worktree.
         model_config: Per-task model configuration override (custom
-            endpoint / headers), matching ``SorcarAgent.run``.
+            endpoint / headers).
         web_tools: Per-task browser-tool enablement override. ``None``
             uses the kiss-web config default.
         is_parallel: Whether the agent may spawn parallel sub-agents.
@@ -256,16 +255,13 @@ def run_agent_via_kiss_web(
         the task did not finish within *timeout*.
 
     Raises:
-        ValueError: When a live tool cannot be expressed through the
-            API's tools-file contract (see
-            :func:`~._api_tools_bridge.register_tools`).
+        ValueError: When *tools* (or ``agent.tools_file``) is not the
+            path of an existing Python file.
         ConnectionError: When the daemon socket cannot be reached.
     """
     from kiss.server import sorcar
 
-    prompt = prompt_template + str(
-        getattr(agent, "channel_system_prompt", "") or "",
-    )
+    prompt = prompt_template + agent.channel_system_prompt
     if not prompt.strip():
         result_yaml = str(yaml.safe_dump(
             {"success": False, "summary": "Task failed: empty prompt"},
@@ -273,15 +269,14 @@ def run_agent_via_kiss_web(
         ))
         agent.last_run_result = result_yaml
         return result_yaml
-    chat_id = str(
-        getattr(agent, "chat_id", "") or getattr(agent, "_chat_id", "") or "",
-    )
-    live_tools = _collect_live_tools(agent, tools)
-    token = ""
-    tools_path: str | None = None
-    if live_tools:
-        token, tools_path = register_tools(live_tools)
+    chat_id = agent.chat_id if isinstance(agent, KissWebChatAgent) else ""
+    # The agent's channel tools (auth tools + authenticated backend
+    # methods) are built inside the daemon: it imports the tools file
+    # and calls its get_tools(); the daemon-built agent supplies the
+    # standard tools itself.
+    tools_path = str(tools) if tools else agent.tools_file
     sock = sock_path or _SOCK_PATH_OVERRIDE or _ensure_api_server()
+    _enter_workspace(agent.workspace)
     try:
         try:
             result = sorcar.run(
@@ -289,7 +284,7 @@ def run_agent_via_kiss_web(
                 work_dir=work_dir,
                 model=model_name,
                 chat_id=chat_id,
-                tools=tools_path,
+                tools=tools_path or None,
                 use_worktree=use_worktree,
                 max_budget=max_budget,
                 model_config=model_config,
@@ -306,15 +301,14 @@ def run_agent_via_kiss_web(
             )
             return ""
     finally:
-        if token:
-            release_tools(token)
+        _exit_workspace(agent.workspace)
 
     summary = result.text or ("" if result.success else "Task failed")
     result_yaml = str(yaml.safe_dump(
         {"success": result.success, "summary": summary},
         sort_keys=False,
     ))
-    if result.chat_id and hasattr(agent, "_chat_id"):
+    if result.chat_id and isinstance(agent, KissWebChatAgent):
         agent._chat_id = result.chat_id
     agent.last_run_result = result_yaml
     agent.budget_used = result.cost

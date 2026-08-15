@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""LINE Agent — SorcarAgent extension with LINE Messaging API tools.
+"""LINE Agent — channel agent with LINE Messaging API tools.
 
 Provides authenticated access to LINE via channel access token. Uses webhook
 queue pattern for receiving messages. Stores config in
@@ -25,12 +25,10 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     drain_queue_messages,
     stop_http_server,
-    wait_for_matching_message,
 )
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
@@ -156,22 +154,6 @@ class LineChannelBackend(ToolMethodBackend):
 
         self._api.push_message(
             PushMessageRequest(to=channel_id, messages=[TextMessage(text=text)])
-        )
-
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Poll for a reply from a specific user."""
-        return wait_for_matching_message(
-            poll=lambda: self.poll_messages(channel_id, "")[0],
-            matches=lambda msg: msg.get("user") == user_id,
-            extract_text=lambda msg: str(msg.get("text", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=2.0,
         )
 
     def disconnect(self) -> None:
@@ -310,8 +292,8 @@ class LineChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class LineAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with LINE Messaging API tools."""
+class LineAgent(BaseChannelAgent):
+    """Channel agent with LINE Messaging API tools."""
 
     def __init__(self) -> None:
         super().__init__("LINE Agent")
@@ -418,6 +400,17 @@ def main() -> None:
         channel_name="LINE",
         make_backend=_make_backend,
     )
+
+
+def get_tools() -> list:
+    """Return the LINE channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return LineAgent()._get_tools()
 
 
 if __name__ == "__main__":

@@ -10,11 +10,13 @@ Every agent in ``kiss/agents/third_party_agents/`` must launch through
 ``run_agent_via_kiss_web``, which is implemented ON TOP OF the public
 synchronous client API :func:`kiss.server.sorcar.run`: the launcher
 connects to a daemon's Unix-domain socket, sends the documented ``run``
-command, and supplies the agent's live channel tools through the
-API's ``tools=`` *file path* contract (a generated tools file whose
-top-level functions bridge back to the live callables — see
-``kiss.agents.third_party_agents._api_tools_bridge``).  The task is
-executed by a daemon-built chat agent, NOT by the passed instance.
+command, and supplies the agent's channel tools through the API's
+``tools=`` *file path* contract: the agent's OWN module is the tools
+file, and the daemon imports it and calls its top-level ``get_tools()``
+to build a fresh agent from the credentials persisted under the
+active kiss home.  No bridge, registry, wrapper, or generated file is
+involved.  The task is executed by a daemon-built chat agent, NOT by
+the passed instance.
 
 Test strategy (no mocks)
 ------------------------
@@ -45,15 +47,14 @@ import yaml
 
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents import _kiss_web_launcher as launcher
 from kiss.agents.third_party_agents._kiss_web_launcher import (
-    KissWebChatSorcarAgent,
-    KissWebWorktreeSorcarAgent,
+    KissWebChatAgent,
     run_agent_via_kiss_web,
 )
 from kiss.core import vscode_config
+from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
 
 STUB_SUMMARY = "stub summary done"
@@ -129,13 +130,13 @@ class _ApiLaunchBase(unittest.TestCase):
     def tearDown(self) -> None:
         launcher._SOCK_PATH_OVERRIDE = self._saved_sock_override
         self._parent_class.run = self._original_run
-        for tab in list(_RunningAgentState.running_agent_states.values()):
-            if tab.agent is not None and tab.agent._wt_pending:
+        for state in agent_state.snapshot():
+            if state.agent is not None and state.agent._wt_pending:
                 try:
-                    tab.agent.discard()
+                    state.agent.discard()
                 except Exception:  # pragma: no cover — best-effort cleanup
                     pass
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
         async def _shutdown() -> None:
             with self.server._printer._ws_lock:
@@ -289,20 +290,14 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert "Slack Authentication" in prompt
         assert "start_slack_browser_auth" in prompt
 
-    def test_auth_and_extra_tools_bridged_via_tools_file(self) -> None:
+    def test_agent_module_is_the_tools_file(self) -> None:
+        from kiss.agents.third_party_agents import slack_agent
         from kiss.agents.third_party_agents.slack_agent import SlackAgent
 
-        live_calls: list[str] = []
-
-        def mytool(text: str, repeat: int = 1) -> str:
-            """Echo *text* repeated *repeat* times.
-
-            Args:
-                text: The text to echo.
-                repeat: How many times to repeat it.
-            """
-            live_calls.append(text)
-            return text * repeat
+        agent = SlackAgent()
+        assert agent.tools_file == str(slack_agent.__file__), (
+            "the agent's own module must be its tools file"
+        )
 
         def on_run(self_agent: Any, kwargs: dict[str, Any]) -> str:
             tools = {t.__name__: t for t in (kwargs.get("tools") or [])}
@@ -311,81 +306,212 @@ class TestLaunchViaApi(_ApiLaunchBase):
                 "authenticate_slack",
                 "clear_slack_auth",
                 "start_slack_browser_auth",
-                "mytool",
             ):
-                assert expected in tools, f"missing bridged tool {expected}"
-            wrapper = tools["mytool"]
-            assert wrapper is not mytool
-            assert wrapper.__module__.startswith("_kiss_tools_file_")
-            assert "Echo *text* repeated" in (wrapper.__doc__ or "")
-            assert wrapper(text="hi") == "hi"
-            assert wrapper("bye", repeat=2) == "byebye"
+                assert expected in tools, f"missing channel tool {expected}"
             auth_out = tools["check_slack_auth"]()
             assert "Not authenticated with Slack" in auth_out
-            return "tools bridged ok"
+            return "module tools loaded ok"
+
+        self._install_stub(on_run=on_run)
+        result = run_agent_via_kiss_web(
+            agent,
+            "use the tools",
+            work_dir=self.repo,
+            sock_path=self.sock_path,
+        )
+        assert yaml.safe_load(result)["summary"] == "module tools loaded ok"
+
+    def test_explicit_tools_file_overrides_agent_module(self) -> None:
+        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+
+        tools_py = Path(self.tmpdir) / "extra_tools.py"
+        tools_py.write_text(
+            "from pathlib import Path\n"
+            f"_LOG = Path({str(Path(self.tmpdir) / 'tool_calls.log')!r})\n"
+            "\n"
+            "def mytool(text: str, repeat: int = 1) -> str:\n"
+            '    """Echo *text* repeated *repeat* times.\n'
+            "\n"
+            "    Args:\n"
+            "        text: The text to echo.\n"
+            "        repeat: How many times to repeat it.\n"
+            '    """\n'
+            "    with _LOG.open('a') as f:\n"
+            "        f.write(text + '\\n')\n"
+            "    return text * repeat\n"
+            "\n"
+            "def get_tools():\n"
+            '    """Return the tools the agent may call."""\n'
+            "    return [mytool]\n",
+            encoding="utf-8",
+        )
+
+        def on_run(self_agent: Any, kwargs: dict[str, Any]) -> str:
+            tools = {t.__name__: t for t in (kwargs.get("tools") or [])}
+            assert set(tools) >= {"mytool"}, "explicit tools file must win"
+            assert "check_slack_auth" not in tools, (
+                "an explicit tools= path must replace the agent module"
+            )
+            assert "Echo *text* repeated" in (tools["mytool"].__doc__ or "")
+            assert tools["mytool"](text="hi") == "hi"
+            assert tools["mytool"]("bye", repeat=2) == "byebye"
+            return "explicit tools ok"
 
         self._install_stub(on_run=on_run)
         result = run_agent_via_kiss_web(
             SlackAgent(),
             "use the tools",
             work_dir=self.repo,
-            tools=[mytool],
+            tools=str(tools_py),
             sock_path=self.sock_path,
         )
-        assert yaml.safe_load(result)["summary"] == "tools bridged ok"
-        assert live_calls == ["hi", "bye"], (
-            "bridged tool invocations must execute the live closure in "
-            "the launching code"
+        assert yaml.safe_load(result)["summary"] == "explicit tools ok"
+        log = Path(self.tmpdir) / "tool_calls.log"
+        assert log.read_text().splitlines() == ["hi", "bye"], (
+            "tools-file tools must really execute in the daemon process"
         )
 
     def test_backend_tools_included_when_authenticated(self) -> None:
-        from kiss.agents.third_party_agents._channel_agent_utils import (
-            BaseChannelAgent,
-            ToolMethodBackend,
+        notes = Path(self.tmpdir) / "notes.log"
+        agent_py = Path(self.tmpdir) / "note_agent.py"
+        agent_py.write_text(
+            "from pathlib import Path\n"
+            "\n"
+            "from kiss.agents.third_party_agents._channel_agent_utils import (\n"
+            "    BaseChannelAgent,\n"
+            "    ToolMethodBackend,\n"
+            ")\n"
+            "\n"
+            f"_NOTES = Path({str(notes)!r})\n"
+            "\n"
+            "\n"
+            "class NoteBackend(ToolMethodBackend):\n"
+            "    def add_note(self, note: str) -> str:\n"
+            '        """Record a note in the persistent notes file.\n'
+            "\n"
+            "        Args:\n"
+            "            note: The note text to record.\n"
+            '        """\n'
+            "        with _NOTES.open('a') as f:\n"
+            "            f.write(note + '\\n')\n"
+            "        return f'recorded:{note}'\n"
+            "\n"
+            "\n"
+            "class NoteAgent(BaseChannelAgent):\n"
+            "    def __init__(self) -> None:\n"
+            "        super().__init__('Backend Test Agent')\n"
+            "        self._backend = NoteBackend()\n"
+            "\n"
+            "    def _is_authenticated(self) -> bool:\n"
+            "        return True\n"
+            "\n"
+            "    def _get_auth_tools(self) -> list:\n"
+            "        return []\n"
+            "\n"
+            "\n"
+            "def get_tools() -> list:\n"
+            '    """Return the note-channel tools."""\n'
+            "    return NoteAgent()._get_tools()\n",
+            encoding="utf-8",
         )
-
-        class _Backend(ToolMethodBackend):
-            def __init__(self) -> None:
-                self.notes: list[str] = []
-
-            def add_note(self, note: str) -> str:
-                """Record a note on the backend.
-
-                Args:
-                    note: The note text to record.
-                """
-                self.notes.append(note)
-                return f"recorded:{note}"
-
-        class _Agent(BaseChannelAgent, SorcarAgent):
-            def __init__(self) -> None:
-                super().__init__("Backend Test Agent")
-                self._backend = _Backend()
-
-            def _is_authenticated(self) -> bool:
-                return True
-
-            def _get_auth_tools(self) -> list:
-                return []
-
-        agent = _Agent()
 
         def on_run(self_agent: Any, kwargs: dict[str, Any]) -> str:
             tools = {t.__name__: t for t in (kwargs.get("tools") or [])}
-            assert "add_note" in tools, "backend tool must be bridged"
+            assert "add_note" in tools, (
+                "the authenticated backend's tool must come from the "
+                "module's get_tools()"
+            )
             return str(tools["add_note"](note="from daemon"))
 
         self._install_stub(on_run=on_run)
         result = run_agent_via_kiss_web(
-            agent,
+            KissWebChatAgent("Note Launch"),
             "note task",
             work_dir=self.repo,
+            tools=str(agent_py),
             sock_path=self.sock_path,
         )
         assert yaml.safe_load(result)["summary"] == "recorded:from daemon"
-        assert agent._backend.notes == ["from daemon"], (
-            "the bridged bound method must mutate the live backend "
-            "instance in the launching code"
+        assert notes.read_text().splitlines() == ["from daemon"], (
+            "backend tools must act on state shared through persistence, "
+            "not on the launcher-side instance"
+        )
+
+    def test_workspace_env_var_set_while_task_runs(self) -> None:
+        import os
+
+        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+
+        seen: list[str | None] = []
+
+        def on_run(self_agent: Any, kwargs: dict[str, Any]) -> str:
+            seen.append(os.environ.get("KISS_CHANNEL_WORKSPACE"))
+            return "ws ok"
+
+        self._install_stub(on_run=on_run)
+        assert os.environ.get("KISS_CHANNEL_WORKSPACE") is None
+        run_agent_via_kiss_web(
+            SlackAgent(workspace="teamspace"),
+            "ws task",
+            work_dir=self.repo,
+            sock_path=self.sock_path,
+        )
+        assert seen == ["teamspace"], (
+            "the daemon-side get_tools() must see the launch workspace"
+        )
+        assert os.environ.get("KISS_CHANNEL_WORKSPACE") is None, (
+            "the launcher must restore the workspace env var"
+        )
+
+    def test_workspace_env_var_survives_overlapping_launches(self) -> None:
+        import os
+
+        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+
+        release = {"A": threading.Event(), "B": threading.Event()}
+        started = {"A": threading.Event(), "B": threading.Event()}
+
+        def on_run(self_agent: Any, kwargs: dict[str, Any]) -> str:
+            key = "A" if "task-A" in str(kwargs.get("prompt_template")) else "B"
+            started[key].set()
+            release[key].wait(timeout=30)
+            return f"overlap-{key}"
+
+        self._install_stub(on_run=on_run)
+        assert os.environ.get("KISS_CHANNEL_WORKSPACE") is None
+
+        def launch(key: str, workspace: str) -> None:
+            run_agent_via_kiss_web(
+                SlackAgent(workspace=workspace),
+                f"task-{key}",
+                work_dir=self.repo,
+                sock_path=self.sock_path,
+            )
+
+        thread_a = threading.Thread(target=launch, args=("A", "wsA"), daemon=True)
+        thread_b = threading.Thread(target=launch, args=("B", "wsB"), daemon=True)
+        try:
+            thread_a.start()
+            assert started["A"].wait(timeout=30)
+            thread_b.start()
+            assert started["B"].wait(timeout=30)
+            # A finishes first while B is still running: the env var
+            # must keep naming an ACTIVE workspace (B's), not be popped
+            # or reset to A's out-of-order snapshot.
+            release["A"].set()
+            thread_a.join(timeout=30)
+            assert not thread_a.is_alive()
+            assert os.environ.get("KISS_CHANNEL_WORKSPACE") == "wsB", (
+                "finishing one launch must not clobber the env var of a "
+                "still-running launch"
+            )
+        finally:
+            release["A"].set()
+            release["B"].set()
+            thread_a.join(timeout=30)
+            thread_b.join(timeout=30)
+        assert os.environ.get("KISS_CHANNEL_WORKSPACE") is None, (
+            "the env var must be removed once every launch has finished"
         )
 
     def test_unauthenticated_backend_tools_excluded(self) -> None:
@@ -525,7 +651,7 @@ class TestLaunchViaApi(_ApiLaunchBase):
         assert agent.last_run_result == result
 
     def test_blank_prompt_returns_failure_yaml(self) -> None:
-        agent = KissWebChatSorcarAgent("Blank Prompt Agent")
+        agent = KissWebChatAgent("Blank Prompt Agent")
         result = run_agent_via_kiss_web(
             agent,
             "   ",
@@ -553,13 +679,11 @@ class TestLaunchViaApi(_ApiLaunchBase):
         finally:
             release.set()
             deadline = 30.0
-            for state in list(
-                _RunningAgentState.running_agent_states.values()
-            ):
+            for state in agent_state.snapshot():
                 if state.task_thread is not None:
                     state.task_thread.join(timeout=deadline)
 
-    def test_invalid_tool_raises_before_connecting(self) -> None:
+    def test_invalid_tools_file_raises_before_connecting(self) -> None:
         from kiss.agents.third_party_agents.slack_agent import SlackAgent
 
         self._install_stub()
@@ -568,10 +692,10 @@ class TestLaunchViaApi(_ApiLaunchBase):
                 SlackAgent(),
                 "task",
                 work_dir=self.repo,
-                tools=[lambda x: x],
+                tools=str(Path(self.tmpdir) / "missing_tools.py"),
                 sock_path=self.sock_path,
             )
-        assert not self.stub_calls, "no task may start for invalid tools"
+        assert not self.stub_calls, "no task may start for a bad tools file"
 
 
 class TestInProcessDaemonBootstrap(_ApiLaunchBase):
@@ -611,39 +735,43 @@ class TestInProcessDaemonBootstrap(_ApiLaunchBase):
 
 
 class TestCarrierAgentDirectRuns(_ApiLaunchBase):
-    """Direct (non-launcher) runs of the carrier agents still record
-    their result, preserving the pre-API contract for direct callers."""
+    """``run()`` on the carrier agents routes through the daemon API.
+
+    The carriers are not executable agents: ``run()`` submits the task
+    to the kiss-web daemon via ``kiss.server.sorcar.run`` and records
+    the returned YAML, so a crashing daemon-built agent surfaces as a
+    failure envelope, never as a re-raised exception.
+    """
 
     def test_chat_agent_direct_run_records_result(self) -> None:
         self._install_stub(summary="direct chat ok")
-        agent = KissWebChatSorcarAgent("Direct Chat")
+        agent = KissWebChatAgent("Direct Chat")
         result = agent.run(
             prompt_template="direct task", work_dir=self.repo,
         )
         assert yaml.safe_load(result)["summary"] == "direct chat ok"
         assert agent.last_run_result == result
+        call = self.stub_calls[0]
+        assert call["agent"] is not agent, (
+            "carrier run() must execute on a daemon-built agent"
+        )
 
     def test_chat_agent_direct_run_records_failure(self) -> None:
         self._install_stub(raise_exc=RuntimeError("direct-boom"))
-        agent = KissWebChatSorcarAgent("Direct Chat")
-        with self.assertRaises(RuntimeError):
-            agent.run(prompt_template="direct task", work_dir=self.repo)
-        parsed = yaml.safe_load(agent.last_run_result)
+        agent = KissWebChatAgent("Direct Chat")
+        result = agent.run(
+            prompt_template="direct task", work_dir=self.repo,
+        )
+        parsed = yaml.safe_load(result)
         assert parsed["success"] is False
-        assert "direct-boom" in parsed["summary"]
+        assert str(parsed["summary"]).strip(), (
+            "a crashed task must not produce an empty summary"
+        )
+        assert agent.last_run_result == result
 
-    def test_chat_agent_direct_run_records_interrupt(self) -> None:
-        self._install_stub(raise_exc=KeyboardInterrupt())
-        agent = KissWebChatSorcarAgent("Direct Chat")
-        with self.assertRaises(KeyboardInterrupt):
-            agent.run(prompt_template="direct task", work_dir=self.repo)
-        parsed = yaml.safe_load(agent.last_run_result)
-        assert parsed["success"] is False
-        assert "Task interrupted" in parsed["summary"]
-
-    def test_worktree_agent_direct_run_records_result(self) -> None:
+    def test_direct_run_with_use_worktree_false_records_result(self) -> None:
         self._install_stub(summary="direct wt ok")
-        agent = KissWebWorktreeSorcarAgent("Direct WT")
+        agent = KissWebChatAgent("Direct No-WT")
         result = agent.run(
             prompt_template="direct task",
             work_dir=self.repo,
@@ -652,29 +780,31 @@ class TestCarrierAgentDirectRuns(_ApiLaunchBase):
         assert yaml.safe_load(result)["summary"] == "direct wt ok"
         assert agent.last_run_result == result
 
-    def test_worktree_agent_direct_run_records_interrupt(self) -> None:
-        self._install_stub(raise_exc=KeyboardInterrupt())
-        agent = KissWebWorktreeSorcarAgent("Direct WT")
-        with self.assertRaises(KeyboardInterrupt):
-            agent.run(
-                prompt_template="direct task",
-                work_dir=self.repo,
-                use_worktree=False,
-            )
-        parsed = yaml.safe_load(agent.last_run_result)
+    def test_direct_run_with_use_worktree_false_records_failure(self) -> None:
+        self._install_stub(raise_exc=RuntimeError("wt-boom"))
+        agent = KissWebChatAgent("Direct No-WT")
+        result = agent.run(
+            prompt_template="direct task",
+            work_dir=self.repo,
+            use_worktree=False,
+        )
+        parsed = yaml.safe_load(result)
         assert parsed["success"] is False
-        assert "Task interrupted" in parsed["summary"]
+        assert str(parsed["summary"]).strip(), (
+            "a crashed task must not produce an empty summary"
+        )
+        assert agent.last_run_result == result
 
 
 class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
-    """Direct (non-launcher) channel agent runs keep their contract."""
+    """Channel agent ``run()`` calls route through the daemon API."""
 
     def _plain_agent(self) -> Any:
         from kiss.agents.third_party_agents._channel_agent_utils import (
             BaseChannelAgent,
         )
 
-        class _Plain(BaseChannelAgent, SorcarAgent):
+        class _Plain(BaseChannelAgent):
             def _is_authenticated(self) -> bool:
                 return False
 
@@ -683,9 +813,7 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
 
         return _Plain("Plain Direct Agent")
 
-    def test_direct_run_appends_channel_prompt_to_system_prompt(
-        self,
-    ) -> None:
+    def test_direct_run_appends_channel_prompt_to_prompt(self) -> None:
         from kiss.agents.third_party_agents.slack_agent import SlackAgent
 
         self._install_stub()
@@ -698,10 +826,13 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
         )
         assert yaml.safe_load(result)["summary"] == STUB_SUMMARY
         assert agent.last_run_result == result
-        system_prompt = str(
-            self.stub_calls[0]["kwargs"].get("system_prompt", ""),
+        call = self.stub_calls[0]
+        assert call["agent"] is not agent, (
+            "channel agent run() must execute on a daemon-built agent"
         )
-        assert "Slack Authentication" in system_prompt
+        prompt = str(call["kwargs"].get("prompt_template", ""))
+        assert "direct slack" in prompt
+        assert "Slack Authentication" in prompt
 
     def test_direct_run_without_channel_prompt(self) -> None:
         self._install_stub()
@@ -710,28 +841,39 @@ class TestBaseChannelAgentDirectRuns(_ApiLaunchBase):
             prompt_template="direct plain", work_dir=self.repo,
         )
         assert yaml.safe_load(result)["summary"] == STUB_SUMMARY
-        system_prompt = str(
-            self.stub_calls[0]["kwargs"].get("system_prompt", ""),
+        prompt = str(
+            self.stub_calls[0]["kwargs"].get("prompt_template", ""),
         )
-        assert "## Slack Authentication" not in system_prompt
+        assert "direct plain" in prompt
+        assert "## Slack Authentication" not in prompt
 
-    def test_direct_run_failure_recorded_and_reraised(self) -> None:
+    def test_direct_run_failure_returns_failure_yaml(self) -> None:
         self._install_stub(raise_exc=RuntimeError("plain-boom"))
         agent = self._plain_agent()
-        with self.assertRaises(RuntimeError):
-            agent.run(prompt_template="direct plain", work_dir=self.repo)
-        parsed = yaml.safe_load(agent.last_run_result)
+        result = agent.run(
+            prompt_template="direct plain", work_dir=self.repo,
+        )
+        parsed = yaml.safe_load(result)
         assert parsed["success"] is False
-        assert "plain-boom" in parsed["summary"]
+        assert str(parsed["summary"]).strip(), (
+            "a crashed task must not produce an empty summary"
+        )
+        assert agent.last_run_result == result
 
-    def test_direct_run_interrupt_recorded_and_reraised(self) -> None:
-        self._install_stub(raise_exc=KeyboardInterrupt())
-        agent = self._plain_agent()
-        with self.assertRaises(KeyboardInterrupt):
-            agent.run(prompt_template="direct plain", work_dir=self.repo)
-        parsed = yaml.safe_load(agent.last_run_result)
-        assert parsed["success"] is False
-        assert "Task interrupted" in parsed["summary"]
+    def test_direct_run_bridges_channel_auth_tools(self) -> None:
+        from kiss.agents.third_party_agents.slack_agent import SlackAgent
+
+        def on_run(self_agent, kwargs):
+            names = {t.__name__ for t in (kwargs.get("tools") or [])}
+            assert "check_slack_auth" in names
+            return "auth tools bridged"
+
+        self._install_stub(on_run=on_run)
+        agent = SlackAgent()
+        result = agent.run(
+            prompt_template="direct slack tools", work_dir=self.repo,
+        )
+        assert yaml.safe_load(result)["summary"] == "auth tools bridged"
 
 
 class TestKissWebPollerAgents(_ApiLaunchBase):
@@ -739,7 +881,7 @@ class TestKissWebPollerAgents(_ApiLaunchBase):
 
     def test_chat_agent_gets_daemon_chat_id(self) -> None:
         self._install_stub()
-        agent = KissWebChatSorcarAgent("Test Poller")
+        agent = KissWebChatAgent("Test Poller")
         agent.new_chat()
         result = run_agent_via_kiss_web(
             agent,
@@ -756,7 +898,7 @@ class TestKissWebPollerAgents(_ApiLaunchBase):
 
     def test_chat_agent_resume_chat_by_id(self) -> None:
         self._install_stub()
-        agent = KissWebChatSorcarAgent("Test Poller")
+        agent = KissWebChatAgent("Test Poller")
         agent.new_chat()
         run_agent_via_kiss_web(
             agent,
@@ -774,7 +916,7 @@ class TestKissWebPollerAgents(_ApiLaunchBase):
             return "resumed fine"
 
         self._install_stub(on_run=on_run)
-        resumed = KissWebChatSorcarAgent("Test Poller")
+        resumed = KissWebChatAgent("Test Poller")
         resumed.resume_chat_by_id(first_chat)
         run_agent_via_kiss_web(
             resumed,
@@ -787,9 +929,9 @@ class TestKissWebPollerAgents(_ApiLaunchBase):
             "the resumed run must see the prior task as chat context"
         )
 
-    def test_worktree_agent_records_result(self) -> None:
+    def test_carrier_records_result_with_new_chat(self) -> None:
         self._install_stub()
-        agent = KissWebWorktreeSorcarAgent("Test WT Poller")
+        agent = KissWebChatAgent("Test Poller 2")
         agent.new_chat()
         result = run_agent_via_kiss_web(
             agent,
@@ -836,7 +978,11 @@ class TestKissWebPollerAgents(_ApiLaunchBase):
 class TestChannelRunnerViaApi(_ApiLaunchBase):
     """ChannelRunner._handle_message must launch through the API."""
 
-    def _make_runner(self) -> Any:
+    def _make_runner(
+        self,
+        tools_file: str = "",
+        thread_replies: list[dict[str, Any]] | None = None,
+    ) -> Any:
         from kiss.agents.third_party_agents._channel_agent_utils import (
             ChannelRunner,
         )
@@ -855,32 +1001,117 @@ class TestChannelRunnerViaApi(_ApiLaunchBase):
             ) -> None:
                 outbox.append((channel_id, text, thread_ts))
 
+            def is_from_bot(self, msg: dict[str, Any]) -> bool:
+                return bool(msg.get("bot_id"))
+
             def disconnect(self) -> None:
                 pass
 
+        backend = _FakeBackend()
+        if thread_replies is not None:
+            def poll_thread_messages(
+                channel_id: str,
+                thread_ts: str,
+                oldest: str,
+                limit: int = 100,
+            ) -> tuple[list[dict[str, Any]], str]:
+                return list(thread_replies), "0"
+
+            backend.poll_thread_messages = (  # type: ignore[attr-defined]
+                poll_thread_messages
+            )
         runner = ChannelRunner(
-            backend=_FakeBackend(),
+            backend=backend,
             channel_name="chan",
             agent_name="Test Channel Agent",
+            tools_file=tools_file,
             work_dir=str(Path(self.tmpdir) / "chanwork"),
         )
         return runner, outbox
 
-    def test_handle_message_bridges_reply_tool(self) -> None:
-        runner, outbox = self._make_runner()
+    def test_handle_message_passes_tools_file_and_context(self) -> None:
+        tools_py = Path(self.tmpdir) / "chan_tools.py"
+        tools_py.write_text(
+            "def shout(text: str) -> str:\n"
+            '    """Return *text* uppercased.\n'
+            "\n"
+            "    Args:\n"
+            "        text: The text to uppercase.\n"
+            '    """\n'
+            "    return text.upper()\n"
+            "\n"
+            "def get_tools():\n"
+            '    """Return the channel tools."""\n'
+            "    return [shout]\n",
+            encoding="utf-8",
+        )
+        runner, outbox = self._make_runner(tools_file=str(tools_py))
 
         def on_run(self_agent: Any, kwargs: dict[str, Any]) -> str:
             tools = {t.__name__: t for t in (kwargs.get("tools") or [])}
-            assert "reply" in tools, (
-                "the per-message reply closure must be bridged as a tool"
+            assert "shout" in tools, (
+                "the runner's tools file must supply the task's tools"
             )
-            out = tools["reply"](message="hello from the daemon agent")
-            assert '"ok": true' in out
-            return "replied myself"
+            assert tools["shout"](text="hi") == "HI"
+            prompt = str(kwargs.get("prompt_template", ""))
+            assert "'C123'" in prompt and "'1.0'" in prompt, (
+                "the prompt must carry the channel/thread context"
+            )
+            assert "posted to the thread automatically" in prompt, (
+                "a backend without thread polling cannot suppress the "
+                "summary, so the agent must be told not to self-post"
+            )
+            assert "no automatic summary" not in prompt
+            return "channel tools ok"
 
         self._install_stub(on_run=on_run)
         runner._handle_message("C123", {"text": "hi", "ts": "1.0"})
-        assert outbox == [("C123", "hello from the daemon agent", "1.0")]
+        assert outbox == [("C123", "channel tools ok", "1.0")], (
+            "the summary must be posted as the thread reply"
+        )
+
+    def test_handle_message_skips_summary_when_bot_replied(self) -> None:
+        runner, outbox = self._make_runner(
+            thread_replies=[
+                {"user": "U_BOT", "bot_id": "B1", "ts": "1.5", "text": "done"},
+            ],
+        )
+        self._install_stub(summary="already answered in-thread")
+        runner._handle_message("C123", {"text": "hi", "ts": "1.0"})
+        assert outbox == [], (
+            "no summary reply may be posted when the agent already "
+            "replied in the thread with its channel tools"
+        )
+
+    def test_context_promises_suppression_only_with_thread_polling(self) -> None:
+        tools_py = Path(self.tmpdir) / "noop_tools.py"
+        tools_py.write_text(
+            "def ping() -> str:\n"
+            '    """Return pong."""\n'
+            "    return 'pong'\n"
+            "\n"
+            "def get_tools():\n"
+            '    """Return the channel tools."""\n'
+            "    return [ping]\n",
+            encoding="utf-8",
+        )
+        runner, outbox = self._make_runner(
+            tools_file=str(tools_py), thread_replies=[],
+        )
+
+        def on_run(self_agent: Any, kwargs: dict[str, Any]) -> str:
+            prompt = str(kwargs.get("prompt_template", ""))
+            assert "no automatic summary reply is sent" in prompt, (
+                "a thread-polling backend suppresses duplicate summaries, "
+                "so the agent may be promised suppression"
+            )
+            return "suppression promised"
+
+        self._install_stub(on_run=on_run)
+        runner._handle_message("C123", {"text": "hi", "ts": "1.0"})
+        assert outbox == [("C123", "suppression promised", "1.0")], (
+            "with no bot reply in the thread the summary is still posted"
+        )
 
     def test_handle_message_sends_summary_when_no_reply(self) -> None:
         runner, outbox = self._make_runner()

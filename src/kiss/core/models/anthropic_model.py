@@ -13,21 +13,24 @@ from typing import Any
 
 import httpx
 from anthropic import Anthropic, APITimeoutError
+from anthropic.resources.messages import Messages
 
 from kiss.core import stop_signal
 from kiss.core.kiss_error import KISSError, ModelRefusalError
 from kiss.core.models.model import (
+    FRAMEWORK_ONLY_CONFIG_KEYS,
     Attachment,
     Model,
     ThinkingCallback,
     TokenCallback,
-    parse_binary_attachments,
+    accepted_request_params,
     responses_items_to_chat_messages,
     transcribe_audio,
 )
 from kiss.core.models.stream_abort import (
     DEFAULT_STREAM_STALL_TIMEOUT,
     StreamAbortWatchdog,
+    stall_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,16 +38,44 @@ logger = logging.getLogger(__name__)
 _CONNECT_TIMEOUT = 10.0
 _MAX_RETRIES = 1
 
+# The request parameters an Anthropic message call accepts, taken from the
+# SDK's own signature (keyword-only, no **kwargs), so an unsupported
+# model_config key is reported instead of raising TypeError.
+_ANTHROPIC_REQUEST_PARAMS = accepted_request_params(Messages.stream)
 
-def _anthropic_cache_creation_tokens(usage: Any) -> tuple[int, int]:
-    """Return Anthropic 5-minute and 1-hour cache-creation token counts."""
-    cache_creation = getattr(usage, "cache_creation", None)
+
+def cache_creation_tokens(usage: Any, get: Callable[[Any, str], Any]) -> tuple[int, int]:
+    """Return the 5-minute and 1-hour cache-creation token counts.
+
+    Anthropic reports cache writes either split by TTL under
+    ``cache_creation`` or as a single aggregate.  An aggregate is
+    attributed to the one-hour bucket, the more expensive of the two, so
+    an unknown TTL is never under-billed.  The Claude Code CLI re-emits
+    exactly this shape as JSON, so :mod:`kiss.core.models.claude_code_model`
+    shares this parser and differs only in *get* — otherwise a change to
+    Anthropic's cache tiers would have to be made twice.
+
+    Args:
+        usage: The provider's usage record — an SDK object for the API
+            transport, a decoded JSON dict for the CLI transport.
+        get: Reads a named field off *usage* or a nested record,
+            returning ``None`` when the field is absent.
+
+    Returns:
+        ``(cache_write_5m_tokens, cache_write_1h_tokens)``.
+    """
+    cache_creation = get(usage, "cache_creation")
     if cache_creation is not None:
-        five_minute = getattr(cache_creation, "ephemeral_5m_input_tokens", 0) or 0
-        one_hour = getattr(cache_creation, "ephemeral_1h_input_tokens", 0) or 0
-        return five_minute, one_hour
-    aggregate = getattr(usage, "cache_creation_input_tokens", 0) or 0
-    return 0, aggregate
+        return (
+            get(cache_creation, "ephemeral_5m_input_tokens") or 0,
+            get(cache_creation, "ephemeral_1h_input_tokens") or 0,
+        )
+    return 0, get(usage, "cache_creation_input_tokens") or 0
+
+
+def _attribute_field(record: Any, name: str) -> Any:
+    """Return attribute *name* of *record*, or ``None`` when it is absent."""
+    return getattr(record, name, None)
 
 
 _THINKING_FAMILIES = ("opus", "sonnet", "haiku", "fable")
@@ -647,12 +678,13 @@ class AnthropicModel(Model):
         Returns:
             dict[str, Any]: The keyword arguments for the API call.
         """
-        kwargs = self.model_config.copy()
-        enable_cache = kwargs.pop("enable_cache", True)
-        system_instruction = kwargs.pop("system_instruction", None)
-        kwargs.pop("reasoning_effort", None)
-        kwargs.pop("use_responses_api", None)
-        kwargs.pop("stream_stall_timeout", None)
+        kwargs = {
+            key: value
+            for key, value in self.model_config.items()
+            if key not in FRAMEWORK_ONLY_CONFIG_KEYS
+        }
+        enable_cache = self.model_config.get("enable_cache", True)
+        system_instruction = self.model_config.get("system_instruction")
 
         system_texts: list[str] = [system_instruction] if system_instruction else []
         for msg in self.conversation:
@@ -683,6 +715,12 @@ class AnthropicModel(Model):
                 kwargs["stop_sequences"] = [stop_val]
             elif isinstance(stop_val, list):
                 kwargs["stop_sequences"] = stop_val
+
+        kwargs = self._keep_supported_request_params(
+            kwargs,
+            _ANTHROPIC_REQUEST_PARAMS,
+            "Anthropic Messages",
+        )
 
         if "thinking" not in kwargs and _supports_extended_thinking(self.model_name):
             if not user_set_max_tokens:
@@ -896,9 +934,16 @@ class AnthropicModel(Model):
     def _stall_error(self, thinking_started: bool) -> TimeoutError:
         """Build the retryable stall error, closing any open thinking bracket.
 
-        A stall can strike mid-thinking; without the closing
-        ``thinking_callback(False)`` the printer/UI would render everything
-        after the retry as "thinking" forever.
+        The message itself comes from
+        :func:`~kiss.core.models.stream_abort.stall_error`, so this
+        transport's hand-run watchdog loop reports a stall in exactly the
+        words the wrapped transports do; only the offending model is
+        added, because a stall is usually diagnosed from a log line that
+        does not say which model was being asked.
+
+        The extra side effect is the closing ``thinking_callback(False)``:
+        a stall can strike mid-thinking, and without it the printer/UI
+        would render everything after the retry as "thinking" forever.
 
         Args:
             thinking_started: Whether ``thinking_callback(True)`` was
@@ -910,10 +955,8 @@ class AnthropicModel(Model):
         if thinking_started:
             self._invoke_thinking_callback(False)
         return TimeoutError(
-            f"Anthropic stream for model {self.model_name} stalled: no "
-            f"data received for {self._stream_stall_timeout:.0f}s "
-            f"(model_config 'stream_stall_timeout'). The request was "
-            f"aborted instead of hanging; it will be retried."
+            f"Anthropic model {self.model_name}: "
+            f"{stall_error(self._stream_stall_timeout)}"
         )
 
     def _raise_on_refusal(self, response: Any) -> None:
@@ -1005,53 +1048,41 @@ class AnthropicModel(Model):
     def add_function_results_to_conversation_and_return(
         self, function_results: list[tuple[str, dict[str, Any]]]
     ) -> None:
-        """Add tool results to the conversation.
+        """Add tool results to the conversation as ``tool_result`` blocks.
+
+        Anthropic is the one provider whose tool result may carry the bytes
+        directly, so binary payloads a tool produced become image blocks
+        inside the ``tool_result`` instead of a follow-up user message.
 
         Args:
             function_results: List of (func_name, result_dict) tuples.
                 result_dict can contain:
-                - "result": The result content string
+                - "result": The result content (a string, or any
+                  JSON-encodable value)
                 - "tool_use_id": Optional explicit tool_use_id to use
         """
         tool_call_ids = self._find_tool_call_ids_from_last_assistant()
 
         tool_results_blocks: list[dict[str, Any]] = []
         for i, (func_name, result_dict) in enumerate(function_results):
-            result_content = result_dict.get("result", str(result_dict))
-            if self.usage_info_for_messages:
-                result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
-
-            tool_use_id = result_dict.get("tool_use_id")
-            if tool_use_id is None and i < len(tool_call_ids):
-                tool_use_id = tool_call_ids[i][1]
-            if tool_use_id is None:
-                tool_use_id = f"toolu_{func_name}_{i}"
-
-            plain_text, attachments = parse_binary_attachments(result_content)
+            text, attachments = self.tool_result_text_and_attachments(result_dict)
+            tool_use_id = self.tool_result_call_id(
+                result_dict, i, tool_call_ids, func_name, prefix="toolu"
+            )
+            content: str | list[dict[str, Any]] = text
             if attachments:
-                content_blocks: list[dict[str, Any]] = []
-                if plain_text.strip():
-                    content_blocks.append({"type": "text", "text": plain_text})
-                content_blocks.extend(_attachments_to_blocks(attachments))
-                if not content_blocks:
-                    content_blocks.append(
-                        {"type": "text", "text": plain_text or result_content}
-                    )
-                tool_results_blocks.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": content_blocks,
-                    }
-                )
-            else:
-                tool_results_blocks.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": result_content,
-                    }
-                )
+                blocks: list[dict[str, Any]] = []
+                if text.strip():
+                    blocks.append({"type": "text", "text": text})
+                blocks.extend(_attachments_to_blocks(attachments))
+                content = blocks or text
+            tool_results_blocks.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": content,
+                }
+            )
 
         self.conversation.append({"role": "user", "content": tool_results_blocks})
 
@@ -1065,7 +1096,9 @@ class AnthropicModel(Model):
             cache_write_5m_tokens, cache_write_1h_tokens).
         """
         if hasattr(response, "usage") and response.usage:
-            cache_write_5m, cache_write_1h = _anthropic_cache_creation_tokens(response.usage)
+            cache_write_5m, cache_write_1h = cache_creation_tokens(
+                response.usage, _attribute_field
+            )
             return (
                 getattr(response.usage, "input_tokens", 0) or 0,
                 getattr(response.usage, "output_tokens", 0) or 0,

@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Synology Chat Agent — SorcarAgent extension with Synology Chat webhook API.
+"""Synology Chat Agent — channel agent with Synology Chat webhook API.
 
 Provides access to Synology Chat via incoming and outgoing webhooks.
 Stores config in ``~/.kiss/third_party_agents/synology/config.json``.
@@ -27,12 +27,10 @@ from urllib.parse import parse_qs
 
 import requests
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     drain_queue_messages,
     stop_http_server,
-    wait_for_matching_message,
 )
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
@@ -163,22 +161,6 @@ class SynologyChatChannelBackend(ToolMethodBackend):
         if isinstance(data, dict) and data.get("success") is False:
             raise RuntimeError(f"Synology Chat send failed: {data}")
 
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Poll for a reply from a specific user."""
-        return wait_for_matching_message(
-            poll=lambda: self.poll_messages(channel_id, "")[0],
-            matches=lambda msg: msg.get("user") == user_id,
-            extract_text=lambda msg: str(msg.get("text", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=2.0,
-        )
-
     def disconnect(self) -> None:
         """Stop the embedded webhook server and release backend resources."""
         self._webhook_server, self._webhook_thread = stop_http_server(
@@ -203,7 +185,7 @@ class SynologyChatChannelBackend(ToolMethodBackend):
             with self._send_lock:
                 resp = requests.post(
                     self._webhook_url,
-                    params={"payload": json.dumps(payload)},
+                    data={"payload": json.dumps(payload)},
                     timeout=30,
                 )
             return json.dumps({"ok": resp.status_code == 200})
@@ -225,7 +207,7 @@ class SynologyChatChannelBackend(ToolMethodBackend):
             with self._send_lock:
                 resp = requests.post(
                     self._webhook_url,
-                    params={"payload": json.dumps(payload)},
+                    data={"payload": json.dumps(payload)},
                     timeout=30,
                 )
             return json.dumps({"ok": resp.status_code == 200})
@@ -233,8 +215,8 @@ class SynologyChatChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class SynologyChatAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with Synology Chat webhook tools."""
+class SynologyChatAgent(BaseChannelAgent):
+    """Channel agent with Synology Chat webhook tools."""
 
     def __init__(self) -> None:
         super().__init__("Synology Chat Agent")
@@ -322,6 +304,17 @@ def main() -> None:
         channel_name="Synology Chat",
         make_backend=_make_backend,
     )
+
+
+def get_tools() -> list:
+    """Return the Synology Chat channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return SynologyChatAgent()._get_tools()
 
 
 if __name__ == "__main__":

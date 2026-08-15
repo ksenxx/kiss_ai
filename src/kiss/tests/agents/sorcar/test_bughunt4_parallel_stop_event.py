@@ -20,7 +20,11 @@ from pathlib import Path
 from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent, run_tasks_parallel
+from kiss.agents.sorcar.sorcar_agent import (
+    SorcarAgent,
+    _SubagentStopEvent,
+    run_tasks_parallel,
+)
 
 
 class _Printer:
@@ -50,12 +54,17 @@ def _restore_db(saved: tuple) -> None:
 def test_module_level_run_tasks_parallel_propagates_stop_event(
     tmp_path: Path,
 ) -> None:
-    """The parent's stop_event must reach the sub-agent's ``_stop_event``.
+    """A parent stop must reach the sub-agent's ``_stop_event``.
 
     ``SorcarAgent.run`` resolves ``self._stop_event`` from the *worker*
     thread's ``printer._thread_local.stop_event``, so unless
-    ``run_tasks_parallel`` copies the parent's event into the worker
+    ``run_tasks_parallel`` binds a stop event into the worker
     thread-local, the sub-agent sees ``None``.
+
+    The child gets its OWN event chained to the parent's rather than
+    the parent object itself, so that stopping one sub-agent does not
+    stop the parent and its siblings; a parent stop still reaches the
+    child through the chain.
     """
     saved = _redirect_db(tmp_path)
     parent_class = cast(Any, SorcarAgent.__mro__[1])
@@ -80,7 +89,17 @@ def test_module_level_run_tasks_parallel_propagates_stop_event(
         _restore_db(saved)
 
     assert len(results) == 1
-    assert captured.get("stop_event") is ev, (
-        "module-level run_tasks_parallel did not propagate the parent "
-        f"stop_event into the worker thread (got {captured.get('stop_event')!r})"
+    child_ev = captured.get("stop_event")
+    assert isinstance(child_ev, _SubagentStopEvent), (
+        "run_tasks_parallel did not bind a per-sub-agent stop event "
+        f"into the worker thread (got {child_ev!r})"
+    )
+    assert child_ev is not ev, (
+        "the child was handed the PARENT's own event, so stopping the "
+        "child would stop the parent and its siblings"
+    )
+    assert not child_ev.is_set()
+    ev.set()
+    assert child_ev.is_set(), (
+        "a parent stop must still reach the child through the chain"
     )

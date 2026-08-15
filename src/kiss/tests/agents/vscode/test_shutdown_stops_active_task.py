@@ -49,8 +49,9 @@ from typing import Any
 from unittest import TestCase
 
 from kiss.agents.sorcar import persistence as _persistence
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 
 
 def _make_remote_server() -> Any:
@@ -58,11 +59,11 @@ def _make_remote_server() -> Any:
 
     Constructing the remote server also constructs its owned
     :class:`VSCodeServer`, whose ``__init__`` *clears* the process-global
-    ``_RunningAgentState.running_agent_states`` registry.  Tests must
-    therefore build the remote server FIRST and then run their task
-    through ``remote._vscode_server`` so the worker registers into the
-    same registry the shutdown helper later scans — exactly as in
-    production where a single server owns both.
+    ``kiss.server.agent_state`` registry.  Tests must therefore build
+    the remote server FIRST and then run their task through
+    ``remote._vscode_server`` so the worker registers into the same
+    registry the shutdown helper later scans — exactly as in production
+    where a single server owns both.
     """
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
     from kiss.server.web_server import RemoteAccessServer
@@ -87,10 +88,17 @@ class TestShutdownStopsActiveTask(TestCase):
         tab_id = "shutdown-active-1"
         remote = _make_remote_server()
         vscode = remote._vscode_server
-        tab = vscode._get_tab(tab_id)
         agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.agent = agent
-        tab.chat_id = ""
+        state = AgentState(
+            f"pre-{tab_id}",
+            agent=agent,
+            tab_id=tab_id,
+            server_owned=True,
+            stop_event=threading.Event(),
+        )
+        state.user_answer_queue = queue.Queue()
+        agent_state.register(state)
+        self.addCleanup(agent_state.agent_states.clear)
 
         captured: dict[str, str] = {}
         entered = threading.Event()
@@ -120,9 +128,6 @@ class TestShutdownStopsActiveTask(TestCase):
 
         agent.run = fake_run  # type: ignore[assignment]
 
-        tab.stop_event = threading.Event()
-        tab.user_answer_queue = queue.Queue()
-
         worker = threading.Thread(
             target=vscode._run_task,
             args=({
@@ -136,15 +141,17 @@ class TestShutdownStopsActiveTask(TestCase):
             },),
             daemon=True,
         )
-        tab.task_thread = worker
+        state.task_thread = worker
         worker.start()
 
         assert entered.wait(timeout=10), "worker never entered agent.run"
         for _ in range(100):
-            if tab.is_task_active:
+            if state.is_task_active:
                 break
             time.sleep(0.02)
-        assert tab.is_task_active, "is_task_active was never set on the tab"
+        assert state.is_task_active, (
+            "is_task_active was never set on the state"
+        )
 
         remote._stop_active_agent_tasks(timeout=12.0)
 
@@ -174,9 +181,9 @@ class TestShutdownStopsActiveTask(TestCase):
 
     def test_stop_active_agent_tasks_is_noop_without_active_tasks(self) -> None:
         """With no active worker the shutdown helper must be a safe no-op."""
-        with _RunningAgentState._registry_lock:
-            for tab in _RunningAgentState.running_agent_states.values():
-                thread = tab.task_thread
+        with agent_state.STATE_LOCK:
+            for st in agent_state.agent_states.values():
+                thread = st.task_thread
                 if thread is not None and thread.is_alive():
                     self.skipTest("another test left an active worker running")
         remote = _make_remote_server()

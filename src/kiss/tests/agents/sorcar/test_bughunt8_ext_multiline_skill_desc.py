@@ -10,12 +10,9 @@ they didn't.  The body-fallback path collapses whitespace with
 ``" ".join(paragraph.split())``, but the frontmatter path only called
 ``.strip()``.  A YAML block scalar (``description: |``) or folded
 multi-line description — perfectly valid frontmatter — therefore kept
-its inner newlines, which:
-
-* broke the aligned one-entry-per-line ``/skills`` listing
-  (``format_skill_listing``), and
-* put raw newlines inside the ``<description>...</description>`` line
-  of the ``skill`` tool's catalog docstring.
+its inner newlines, which put
+raw newlines inside the ``<description>...</description>`` line of the
+``skill`` tool's catalog docstring.
 """
 
 from __future__ import annotations
@@ -24,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from kiss.agents.sorcar.skills import discover_skills, format_skill_listing
+from kiss.agents.sorcar.skills import discover_skills
 
 
 @pytest.fixture
@@ -60,8 +57,6 @@ def test_block_scalar_description_is_one_line(isolated_homes: Path) -> None:
     assert skill.description == (
         "Reviews pull requests carefully and suggests focused improvements."
     )
-    listing = format_skill_listing({"multi": skill})
-    assert len(listing.splitlines()) == 1
 
 
 def test_frontmatter_and_body_fallback_paths_agree(

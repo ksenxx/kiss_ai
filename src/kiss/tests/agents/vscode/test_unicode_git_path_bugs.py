@@ -7,21 +7,18 @@
 These tests use real temporary git repositories with ``core.quotePath``
 enabled.  In that configuration git emits non-ASCII filenames as
 C-style quoted paths such as ``"caf\\303\\251.txt"``.  Several VS Code /
-Sorcar helpers currently parse those command outputs as if they were
-plain UTF-8 paths, so merge review, autocommit prompts, worktree dirty
-state copying, and changed-file lists either miss the files entirely or
-surface escaped pseudo-paths to the UI.
+Sorcar helpers previously parsed those command outputs as if they were
+plain UTF-8 paths, so autocommit, worktree dirty state copying, and
+changed-file lists either missed the files entirely or surfaced escaped
+pseudo-paths to the UI.
 """
 
 from __future__ import annotations
 
-import json
 import subprocess
 from pathlib import Path
-from typing import Any
 
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
-from kiss.server.diff_merge import _prepare_merge_view
 from kiss.server.server import VSCodeServer
 
 
@@ -50,59 +47,6 @@ def _make_repo(tmp_path: Path) -> Path:
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "initial")
     return repo
-
-
-def _read_pending_merge(data_dir: Path) -> dict[str, Any]:
-    """Load the pending merge manifest written by ``_prepare_merge_view``."""
-    manifest: dict[str, Any] = json.loads((data_dir / "pending-merge.json").read_text())
-    return manifest
-
-
-def test_merge_view_includes_modified_tracked_unicode_file(tmp_path: Path) -> None:
-    """A modified tracked non-ASCII file must open a merge review.
-
-    Reproduction: ``git diff -U0`` outputs ``diff --git
-    "a/caf\\303\\251.txt" "b/caf\\303\\251.txt"``.  The VS Code diff parser
-    does not unquote that form, so ``_prepare_merge_view`` reports
-    ``No changes`` even though ``café.txt`` is modified.
-    """
-    repo = _make_repo(tmp_path)
-    filename = "café.txt"
-    (repo / filename).write_text("before\n")
-    _git(repo, "add", filename)
-    _git(repo, "commit", "-m", "add unicode file")
-
-    (repo / filename).write_text("before\nafter\n")
-    data_dir = tmp_path / "merge-data"
-
-    result = _prepare_merge_view(str(repo), str(data_dir), {}, set())
-
-    assert result.get("status") == "opened"
-    manifest = _read_pending_merge(data_dir)
-    names = [f["name"] for f in manifest["files"]]
-    assert filename in names
-
-
-def test_merge_view_includes_new_untracked_unicode_file(tmp_path: Path) -> None:
-    """A new untracked non-ASCII file must open a merge review.
-
-    Reproduction: ``git ls-files --others`` emits the quoted string
-    ``"\\346\\227\\245.txt"`` for ``日.txt`` when ``core.quotePath`` is true.
-    ``_capture_untracked`` returns that literal escaped pseudo-path, so
-    ``_prepare_merge_view`` looks for a file that does not exist and drops
-    the real untracked file from the merge review.
-    """
-    repo = _make_repo(tmp_path)
-    filename = "日.txt"
-    (repo / filename).write_text("new file\n")
-    data_dir = tmp_path / "merge-data"
-
-    result = _prepare_merge_view(str(repo), str(data_dir), {}, set())
-
-    assert result.get("status") == "opened"
-    manifest = _read_pending_merge(data_dir)
-    names = [f["name"] for f in manifest["files"]]
-    assert filename in names
 
 
 def test_autocommit_dirty_files_are_real_unicode_paths(tmp_path: Path) -> None:

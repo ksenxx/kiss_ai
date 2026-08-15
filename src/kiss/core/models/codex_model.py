@@ -23,24 +23,20 @@ import json
 import logging
 import os
 import shutil
-import subprocess
-import threading
 from collections.abc import Callable, Iterable
 from typing import Any
 
 from kiss.core.kiss_error import KISSError
-from kiss.core.models.model import Attachment as Attachment
 from kiss.core.models.model import (
     CLITextModel,
     ThinkingCallback,
     TokenCallback,
+    _cli_stall_error,
+    _CLIProcess,
     _parse_text_based_tool_calls,
-    _strip_text_based_tool_calls,
+    _StreamReadTimeoutError,
+    _ToolCallFilteredStream,
     flatten_content_to_text,
-)
-from kiss.core.models.model import Model as Model
-from kiss.core.models.model import (
-    _build_text_based_tools_prompt as _build_text_based_tools_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -210,68 +206,42 @@ class CodexModel(CLITextModel):
             response is a dict ``{"usage": {...}, "thread_id": "..."}``.
 
         Raises:
-            KISSError: If the CLI invocation fails or the model emits a
-                ``turn.failed`` / ``error`` event.
+            KISSError: If the CLI could not be started, exited with a
+                failure status, or emitted a ``turn.failed`` / ``error``
+                event.
+            TimeoutError: If the CLI produced no complete turn before the
+                deadline.  Retryable, unlike ``KISSError``.
+            KeyboardInterrupt: If the user stopped the task mid-turn.
         """
         prompt = self._build_prompt()
         timeout = self.model_config.get("timeout", 300)
         args = self._build_cli_args()
 
-        try:
-            proc = subprocess.Popen(
-                args,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-            )
-        except OSError as e:  # pragma: no cover – requires broken PATH
-            raise KISSError(f"Failed to start Codex CLI: {e}") from e
-
-        assert proc.stdin is not None
-        proc.stdin.write(prompt)
-        proc.stdin.close()
-
-        assert proc.stdout is not None
-
-        parse_result: list[tuple[str, dict[str, Any], str | None]] = []
-        parse_error: list[BaseException] = []
-
-        def _read_stream() -> None:
+        with _CLIProcess(args, "Codex CLI", timeout) as proc:
             try:
-                parse_result.append(self._parse_stream_events(proc.stdout))  # type: ignore[arg-type]
-            except BaseException as exc:
-                parse_error.append(exc)
-
-        reader = threading.Thread(target=_read_stream, daemon=True)
-        reader.start()
-        reader.join(timeout=timeout)
-
-        if reader.is_alive():
-            proc.kill()
-            reader.join(timeout=5)
-            raise KISSError(f"Codex CLI timed out after {timeout}s")
-
-        if parse_error:
-            raise KISSError(
-                f"Codex CLI stream parsing failed: {parse_error[0]}"
-            ) from parse_error[0]
-
-        content, result_json, error_message = parse_result[0]
-
-        proc.wait(timeout=10)
-        if error_message is not None:
-            stderr = proc.stderr.read() if proc.stderr else ""
-            raise KISSError(
-                f"Codex CLI failed: {error_message}"
-                + (f"\nstderr: {stderr.strip()}" if stderr.strip() else "")
-            )
-        if proc.returncode != 0:  # pragma: no cover – non-error non-zero exit
-            stderr = proc.stderr.read() if proc.stderr else ""
-            raise KISSError(
-                f"Codex CLI failed (exit {proc.returncode}): {stderr.strip()}"
-            )
+                # Inside the handlers: sending the prompt is bounded by
+                # the same deadline and Stop signal as reading the reply.
+                proc.send_prompt(prompt)
+                content, result_json, error_message = self._parse_stream_events(
+                    proc.lines()
+                )
+            except _StreamReadTimeoutError:
+                self._close_thinking_if_open()
+                raise _cli_stall_error("Codex CLI", timeout) from None
+            except KeyboardInterrupt:
+                self._close_thinking_if_open()
+                raise
+            status = proc.wait_for_exit()
+            if error_message is not None:
+                stderr = proc.stderr_text().strip()
+                raise KISSError(
+                    f"Codex CLI failed: {error_message}"
+                    + (f"\nstderr: {stderr}" if stderr else "")
+                )
+            if status not in (0, None):
+                raise KISSError(
+                    f"Codex CLI failed (exit {status}): {proc.stderr_text().strip()}"
+                )
 
         self.conversation.append({"role": "assistant", "content": content})
         return content, result_json
@@ -395,6 +365,11 @@ class CodexModel(CLITextModel):
         the framework for execution.  The CLI is run as a stateless LLM,
         not as an agent.
 
+        Thinking tokens stream to the callbacks as they arrive; the
+        assistant text is held back and re-emitted once the turn ends,
+        stripped of the ``tool_calls`` JSON, so the raw block is never
+        rendered in the chat panel.
+
         Args:
             function_map: Dictionary mapping function names to callable functions.
             tools_schema: Ignored — text-based tool calling builds its own prompt.
@@ -403,41 +378,13 @@ class CodexModel(CLITextModel):
             Tuple of ``(function_calls, content, response)``.
         """
         original_config = self._install_tools_prompt_in_system_instruction(function_map)
-
-        original_token_cb = self.token_callback
-        original_thinking_cb = self.thinking_callback
-        buffer: list[str] = []
-        in_thinking = False
-
-        if original_token_cb is not None:
-            def _thinking_wrapper(is_start: bool) -> None:
-                nonlocal in_thinking
-                in_thinking = is_start
-                if original_thinking_cb is not None:
-                    original_thinking_cb(is_start)
-
-            def _token_wrapper(token: str) -> None:
-                if in_thinking:
-                    original_token_cb(token)
-                else:
-                    buffer.append(token)
-
-            self.token_callback = _token_wrapper
-            self.thinking_callback = _thinking_wrapper
-
         try:
-            content, response = self.generate()
+            with _ToolCallFilteredStream(self):
+                content, response = self.generate()
         finally:
             self.model_config = original_config
-            self.token_callback = original_token_cb
-            self.thinking_callback = original_thinking_cb
 
         function_calls = _parse_text_based_tool_calls(content)
-
-        if original_token_cb is not None:
-            cleaned = _strip_text_based_tool_calls(content) if function_calls else content
-            if cleaned:
-                original_token_cb(cleaned)
 
         if function_calls:
             self._replace_last_assistant_with_tool_calls(content, function_calls)
@@ -464,13 +411,13 @@ class CodexModel(CLITextModel):
         """
         if not isinstance(response, dict):
             return 0, 0, 0, 0
-        usage = response.get("usage", {})
-        total_input = usage.get("input_tokens", 0)
-        cache_read = usage.get("cached_input_tokens", 0)
+        usage = response.get("usage") or {}
+        total_input = usage.get("input_tokens") or 0
+        cache_read = usage.get("cached_input_tokens") or 0
         non_cached_input = max(total_input - cache_read, 0)
         return (
             non_cached_input,
-            usage.get("output_tokens", 0),
+            usage.get("output_tokens") or 0,
             cache_read,
             0,
         )

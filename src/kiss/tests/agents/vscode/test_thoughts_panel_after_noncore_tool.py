@@ -2,140 +2,24 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests: thinking/text after a tool_call must go into Thoughts panels.
+"""What the daemon broadcasts around a tool call.
 
-Originally a non-core ``tool_result`` (screenshot, go_to_url, scroll,
-click, …) was suppressed by ``JsonPrinter`` and the frontend's
-``pendingPanel`` flag stayed ``false`` after such a tool_call — the next
-thinking/text block then bypassed Thoughts-panel creation.
+Originally ``JsonPrinter`` only rendered the return value of a handful of
+"core" tools (Bash, Read, Edit, Write) and swallowed the rest, so a
+screenshot or a go_to_url left a tool call with nothing after it.  Commit
+a8d394a7 removed that whitelist: every tool's return value is broadcast
+except ``finish``, whose value the agentic loop renders as its own
+``result`` panel.  These tests pin that, and the event ORDER the webview
+is entitled to rely on -- a tool's result reaching the transcript before
+the next thinking block starts.
 
-The backend now broadcasts ``tool_result`` for every tool *except*
-``finish`` (commit a8d394a7), so the suppression branch is gone.  The
-frontend fix — set ``pendingPanel = true`` on ``tool_call`` itself — is
-still required as a defensive invariant: it guarantees a Thoughts
-panel for the next thinking/text block regardless of how the printer
-decides to render the tool's return value.  These tests pin that
-invariant in:
-  1. ``processOutputEvent``
-  2. ``processOutputEventForBgTab``
-  3. ``replayEventsInto``
-  4. Step-counting loops (bg tab task_events replay + replayTaskEvents)
+The webview's own half of this story -- that a thought following a tool
+call always lands inside a Thoughts panel, even when its result never
+arrives -- is covered by the real DOM tests in
+``agents/vscode/test/thoughtsPanelArming.test.js``.
 """
 
 from __future__ import annotations
-
-import re
-from pathlib import Path
-
-MAIN_JS = (
-    Path(__file__).resolve().parents[3]
-    / "agents"
-    / "vscode"
-    / "media"
-    / "main.js"
-)
-
-BROWSER_UI = (
-    Path(__file__).resolve().parents[3]
-    / "server"
-    / "json_printer.py"
-)
-
-
-def _read_main_js() -> str:
-    assert MAIN_JS.is_file(), f"main.js not found at {MAIN_JS}"
-    return MAIN_JS.read_text()
-
-
-def _extract_function_body(src: str, name: str) -> str:
-    """Extract the full body of function *name* from JavaScript source."""
-    pattern = re.compile(rf"function {re.escape(name)}\s*\([^)]*\)\s*\{{")
-    m = pattern.search(src)
-    assert m, f"function {name} not found in main.js"
-    start = m.end() - 1
-    depth = 0
-    i = start
-    while i < len(src):
-        if src[i] == "{":
-            depth += 1
-        elif src[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return src[start : i + 1]
-        i += 1
-    raise AssertionError(f"unmatched braces in function {name}")
-
-
-
-def test_process_output_event_tool_call_sets_pending_panel_true() -> None:
-    """processOutputEvent must set pendingPanel = true on tool_call.
-
-    Without this, non-core tools (screenshot, go_to_url, scroll) whose
-    tool_result is suppressed leave pendingPanel = false, causing the
-    next thinking/text to render outside a Thoughts panel.
-    """
-    src = _read_main_js()
-    body = _extract_function_body(src, "processOutputEvent")
-
-    m = re.search(
-        r"t\s*===\s*'tool_call'[^}]*?pendingPanel\s*=\s*(\w+)",
-        body,
-    )
-    assert m, (
-        "processOutputEvent must set pendingPanel on tool_call events"
-    )
-    assert m.group(1) == "true", (
-        f"processOutputEvent sets pendingPanel = {m.group(1)} on tool_call; "
-        "must be true so that non-core tools (screenshot, go_to_url, scroll) "
-        "whose tool_result is suppressed still trigger Thoughts panel creation "
-        "for the subsequent thinking/text."
-    )
-
-
-def test_process_output_event_for_bg_tab_tool_call_sets_pending_true() -> None:
-    """processOutputEventForBgTab must set bgPendingPanel = true on tool_call."""
-    src = _read_main_js()
-    body = _extract_function_body(src, "processOutputEventForBgTab")
-
-    m = re.search(
-        r"t\s*===\s*'tool_call'[^}]*?bgPendingPanel\s*=\s*(\w+)",
-        body,
-    )
-    assert m, (
-        "processOutputEventForBgTab must set bgPendingPanel on tool_call"
-    )
-    assert m.group(1) == "true", (
-        f"processOutputEventForBgTab sets bgPendingPanel = {m.group(1)} "
-        "on tool_call; must be true."
-    )
-
-
-def test_replay_events_into_tool_call_sets_pending_true() -> None:
-    """The replay path must set rPendingPanel = true on tool_call.
-
-    ``replayEventsInto`` is a thin wrapper that delegates the actual
-    event rendering to ``renderReplayedEvents`` (refactor b08ee852),
-    so the invariant lives in the helper's body.
-    """
-    src = _read_main_js()
-    wrapper = _extract_function_body(src, "replayEventsInto")
-    assert "renderReplayedEvents(" in wrapper, (
-        "replayEventsInto must delegate to renderReplayedEvents"
-    )
-    body = _extract_function_body(src, "renderReplayedEvents")
-
-    m = re.search(
-        r"t\s*===\s*'tool_call'[^}]*?rPendingPanel\s*=\s*(\w+)",
-        body,
-    )
-    assert m, (
-        "renderReplayedEvents must set rPendingPanel on tool_call"
-    )
-    assert m.group(1) == "true", (
-        f"renderReplayedEvents sets rPendingPanel = {m.group(1)} "
-        "on tool_call; must be true."
-    )
-
 
 
 def test_noncore_tool_result_is_broadcast() -> None:
@@ -238,31 +122,3 @@ def test_thinking_after_noncore_tool_gets_panel_events() -> None:
 
 
 
-def test_step_count_code_uses_tool_call_pending_true() -> None:
-    """Step-counting code in task_events and replayTaskEvents must use
-    bgPending/rPending = true on tool_call so non-core tools don't
-    under-count steps.
-    """
-    src = _read_main_js()
-
-    bg_step_match = re.search(
-        r"bgSteps\s*===\s*0.*?tool_call.*?bgPending\s*=\s*(\w+)",
-        src,
-        re.DOTALL,
-    )
-    if bg_step_match:
-        assert bg_step_match.group(1) == "true", (
-            f"Step counting sets bgPending = {bg_step_match.group(1)} on "
-            "tool_call; must be true for consistency."
-        )
-
-    replay_step_match = re.search(
-        r"rSteps\s*===\s*0.*?tool_call.*?rPending\s*=\s*(\w+)",
-        src,
-        re.DOTALL,
-    )
-    if replay_step_match:
-        assert replay_step_match.group(1) == "true", (
-            f"Step counting sets rPending = {replay_step_match.group(1)} on "
-            "tool_call; must be true for consistency."
-        )

@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Zalo Agent — SorcarAgent extension with Zalo Official Account API tools.
+"""Zalo Agent — channel agent with Zalo Official Account API tools.
 
 Provides authenticated access to Zalo OA via access token. Covers both
 extensions/zalo/ (OA API) and extensions/zalouser/ (personal). Stores
@@ -27,12 +27,10 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     drain_queue_messages,
     stop_http_server,
-    wait_for_matching_message,
 )
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
@@ -144,22 +142,6 @@ class ZaloChannelBackend(ToolMethodBackend):
         result = json.loads(self.send_text_message(channel_id, text))
         if not result.get("ok"):
             raise RuntimeError(result.get("error", "Zalo send failed"))
-
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Poll for a reply from a specific user."""
-        return wait_for_matching_message(
-            poll=lambda: self.poll_messages(channel_id, "")[0],
-            matches=lambda msg: msg.get("user") == user_id,
-            extract_text=lambda msg: str(msg.get("text", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=2.0,
-        )
 
     def disconnect(self) -> None:
         """Stop the embedded webhook server and release backend resources."""
@@ -373,8 +355,8 @@ class ZaloChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class ZaloAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with Zalo OA API tools."""
+class ZaloAgent(BaseChannelAgent):
+    """Channel agent with Zalo OA API tools."""
 
     def __init__(self) -> None:
         super().__init__("Zalo Agent")
@@ -472,6 +454,17 @@ def main() -> None:
         channel_name="Zalo",
         make_backend=_make_backend,
     )
+
+
+def get_tools() -> list:
+    """Return the Zalo channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return ZaloAgent()._get_tools()
 
 
 if __name__ == "__main__":

@@ -58,11 +58,10 @@ class TestNoWorktreePromptWhenEmpty(_WorktreeNoAutocommitBase):
             f"is empty. Events: {types}"
         )
 
-    def test_merge_review_starts_when_changes_exist(self) -> None:
+    def test_worktree_done_when_changes_exist(self) -> None:
         """Sanity / non-regression: when the agent actually modified
-        files in the worktree, the interactive merge review starts
-        (which itself leads to the merge/discard prompt once the user
-        finishes reviewing each hunk)."""
+        files in the worktree, ``worktree_done`` is broadcast so the
+        user gets the Merge / Discard buttons."""
         self._original_run = _patch_parent_run_create_file("agent_out.txt")
         self.server._run_task_inner({
             "prompt": "task with changes",
@@ -73,8 +72,8 @@ class TestNoWorktreePromptWhenEmpty(_WorktreeNoAutocommitBase):
             "model": "",
         })
         types = self._types()
-        assert "merge_started" in types, (
-            f"Expected merge_started event when changes exist; got {types}"
+        assert "worktree_done" in types, (
+            f"Expected worktree_done event when changes exist; got {types}"
         )
 
 

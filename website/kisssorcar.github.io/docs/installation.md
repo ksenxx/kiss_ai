@@ -10,9 +10,9 @@ curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install
 
 The installer targets macOS and Linux on `x86_64`, `aarch64`, and `arm64`. It installs or checks the tools needed to run KISS Sorcar and build/install the VS Code extension.
 
-## Python Package / CLI Install
+## Python Package Install
 
-If you only want the Python package and CLI entry points:
+If you only want the Python package (the `kiss-web` daemon, the Python client API, and the messaging-agent entry points):
 
 ```bash
 pipx install kiss-agent-framework
@@ -20,7 +20,7 @@ pipx install kiss-agent-framework
 uv tool install kiss-agent-framework
 ```
 
-KISS Sorcar requires **Python 3.13+**. The PyPI package name is `kiss-agent-framework` and the CLI entry point is `sorcar`.
+KISS Sorcar requires **Python 3.13+**. The PyPI package name is `kiss-agent-framework` and the daemon entry point is `kiss-web`.
 
 ## Configure Model Access
 
@@ -36,11 +36,7 @@ export OPENROUTER_API_KEY=...
 export GEMINI_API_KEY=...
 ```
 
-You can also configure a custom endpoint with `--endpoint` / `-e` and optional repeated `--header Key:Value` CLI flags — useful for local or self-hosted models:
-
-```bash
-sorcar -e "http://localhost:8000/v1" --header "Authorization:Bearer xxx" -t "Summarize this codebase."
-```
+You can also set API keys, a custom model endpoint, and custom HTTP headers in the Settings panel of the VS Code extension or web app — useful for local or self-hosted models.
 
 ## VS Code Extension
 
@@ -56,6 +52,6 @@ To run KISS Sorcar in a Docker container (exposes a VS Code interface in the hos
 
 ## Next Steps
 
-- [CLI Reference](cli.md) — learn the `sorcar` command
+- [Client Interfaces](cli.md) — the `kiss-web` daemon, chat clients, and Python API
 - [Supported Models](models.md) — pick a model
 - [Tips](tips.md) — get the highest-quality results

@@ -83,13 +83,18 @@ ______________________________________________________________________
 
 **Constructor:** `SorcarAgent(name: str) -> None`
 
+- **reclaim_abandoned_subagents** — Bank abandoned sub-agents' spend and report whether any live on. A child that ignored its stop event is abandoned, not killed (see :func:`_await_subagents`), so two things outlive the fan-out: the thread — which is still writing into this agent's `work_dir` — and the budget it keeps spending after the parent froze its totals. This waits up to *timeout* for those threads, folds whatever they have spent since they were last counted into this agent's totals, and forgets the ones that finished. Callers use the return value to decide whether it is safe to delete the shared working directory.<br/>`reclaim_abandoned_subagents(timeout: float = 0.0) -> bool`
+
+  - `timeout`: Seconds to wait for the abandoned threads. `0` polls without waiting.
+  - **Returns:** True when no abandoned sub-agent is still running.
+
 - **perform_task** — Execute the task, building docker-aware tools after docker_manager is set.<br/>`perform_task(tools: list, attachments: list | None = None) -> str`
 
   - `tools`: Extra tools passed by the caller (from run(tools=...)).
   - `attachments`: Optional file attachments for the initial prompt.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
-- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, web_tools: bool = True, is_parallel: bool = False, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, ask_user_question_callback: Callable[[str], str] | None = None) -> str`
+- **run** — Run the assistant agent with coding tools and browser automation.<br/>`run(model_name: str | None = None, prompt_template: str = '', arguments: dict[str, str] | None = None, system_prompt: str | None = None, tools: list[Callable[..., Any]] | None = None, max_steps: int | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, work_dir: str | None = None, printer: Printer | None = None, max_sub_sessions: int | None = None, docker_image: str | None = None, web_tools: bool = True, is_parallel: bool = True, verbose: bool | None = None, current_editor_file: str | None = None, attachments: list[Attachment] | None = None, ask_user_question_callback: Callable[[str], str] | None = None, base_system_prompt: str = '') -> str`
 
   - `model_name`: LLM model to use. Defaults to config value.
   - `prompt_template`: Task prompt template with format placeholders.
@@ -103,11 +108,12 @@ ______________________________________________________________________
   - `max_sub_sessions`: Maximum continuation sub-sessions. Defaults to config value.
   - `docker_image`: Docker image name to run tools inside a container.
   - `web_tools`: Whether to include browser/web tools. Defaults to True. Set to False for terminal-only environments.
-  - `is_parallel`: Whether to include the run_parallel tool. Defaults to False. When True, the agent can spawn parallel sub-agents for independent tasks.
+  - `is_parallel`: Whether to include the run_parallel tool. Defaults to True. When True, the agent can spawn parallel sub-agents for independent tasks.
   - `verbose`: Whether to print output to console. Defaults to config verbose setting.
   - `current_editor_file`: Path to the currently active editor file, appended to prompt.
   - `attachments`: Optional file attachments (images, PDFs) for the initial prompt.
   - `ask_user_question_callback`: Optional callback used by the ask_user_question tool to collect a text response from the user.
+  - `base_system_prompt`: Custom base system prompt. When non-blank it REPLACES the default `SYSTEM.md` system prompt (:data:`kiss.core.base.SYSTEM_PROMPT`) for this agent and for every sub-agent it spawns via `run_parallel`. The *system_prompt* suffix, the active-editor-file line, and the per-run operational instructions (work dir, PID, `~/.kiss/SORCAR.md`) are still appended. Blank (default) keeps the default system prompt. Keyword-last so every historical positional argument of this public method keeps its position.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
 **`auto_commit_changes`** — Stage all changes, generate a commit message, and commit. Stages once so *message_fn* can compute the diff, runs *message_fn* (typically a slow LLM call) to generate the commit subject/body, then re-stages immediately before the commit so any file that appeared in the worktree during the LLM call (e.g. `PROGRESS.md` rewrites, macOS `.DS_Store` materializing after an `open` of the report, an editor side-channel saving swap files) is included in the same commit. Without the second `stage_all` those late-arriving files would be left uncommitted, `_finalize_worktree` would see them via `has_uncommitted_changes` and abort the auto-merge with the misleading "pre-commit hook may have rejected" warning (observed in production on 2026-06-26 07:23:14 for worktree `kiss_wt-1782483430-cb03445c` even though the repo had no custom pre-commit hooks installed). Falls back to a generic commit message when *message_fn* raises (e.g. the LLM-based generator is unavailable).<br/>`def auto_commit_changes(commit_dir: Path, user_prompt: str | None, message_fn: Callable[[Path, str | None, str | None], str], notify_fn: Callable[[str, str], None] | None = None, task_result: str | None = None) -> bool`
@@ -119,7 +125,7 @@ ______________________________________________________________________
 - `notify_fn`: Optional UI callback invoked at two life-cycle points so the chat webview can render toasts: - `notify_fn("generating", "")` immediately before *message_fn* runs (typically a slow LLM call) so the user sees "Generating commit message" while the LLM works. - `notify_fn("committed", subject)` immediately after a successful commit, where *subject* is the first non-empty line of the committed message. Both hooks are SKIPPED when there is nothing to commit (no staged diff after the initial `stage_all`), so the webview never sees a misleading "Generating commit message" toast without a follow-up. When `commit_staged` returns `False` after *message_fn* (e.g. a pre-commit hook rejected the commit), `notify_fn("failed", "")` is invoked instead so the sticky "generating" toast always gets a terminal update. All `notify_fn` exceptions are swallowed so a broken UI hook can never block the commit itself.
 - **Returns:** True if a commit was created, False if nothing to commit.
 
-**`run_tasks_parallel`** — Execute multiple SorcarAgent tasks concurrently using threads. Each task gets its own `ChatSorcarAgent` instance and runs in a separate thread via :class:`~concurrent.futures.ThreadPoolExecutor`. This is ideal for I/O-bound workloads (LLM API calls, network requests) where the GIL is released during I/O waits. This helper is a pure parallel executor: it has no knowledge of backend task ids or any frontend concepts. It simply marks each spawned agent as a sub-agent (via `_subagent_info`) and the sub-agent itself owns any sub-agent-specific behaviour (such as broadcasting `new_tab` to a browser-based frontend) inside its own `run()` method.<br/>`def run_tasks_parallel(tasks: list[str], max_workers: int | None = None, model_name: str | None = None, work_dir: str | None = None, printer: Printer | None = None, totals_out: dict[str, float] | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, usage_monitor: _LiveUsageMonitor | None = None) -> list[str]`
+**`run_tasks_parallel`** — Execute multiple SorcarAgent tasks concurrently using threads. Each task gets its own `ChatSorcarAgent` instance and runs in a separate thread via :class:`~concurrent.futures.ThreadPoolExecutor`. This is ideal for I/O-bound workloads (LLM API calls, network requests) where the GIL is released during I/O waits. This is the ONE fan-out engine in the codebase. It used to have a near-identical twin in `ChatSorcarAgent._run_tasks_parallel`, and four correctness fixes (per-sub-agent stop event, stopped-child recovery, real `parent_task_id`, chat/tab propagation) had landed only in that twin, so every plain :class:`SorcarAgent` subclass — which is what the third-party channel agents used to be before they became daemon-launched carriers — silently ran the unfixed copy. Keep it single. The engine still owns no frontend concepts: it marks each spawned agent as a sub-agent (via `_subagent_info`) and the sub-agent itself broadcasts its own `new_tab` inside `run()`.<br/>`def run_tasks_parallel(tasks: list[str], max_workers: int | None = None, model_name: str | None = None, work_dir: str | None = None, printer: Printer | None = None, totals_out: dict[str, float] | None = None, max_budget: float | None = None, model_config: dict[str, Any] | None = None, usage_monitor: _LiveUsageMonitor | None = None, parent_agent: Any = None, chat_id: str = '', parent_tab_id: str = '', base_system_prompt: str = '') -> list[str]`
 
 - `tasks`: List of task description strings. Each string is passed as the `prompt_template` argument to :meth:`SorcarAgent.run`. Example:: [ "Summarize file A", "Summarize file B", ]
 - `max_workers`: Maximum number of threads. `None` lets :class:`~concurrent.futures.ThreadPoolExecutor` pick a default (typically `min(32, cpu_count + 4)`).
@@ -130,6 +136,10 @@ ______________________________________________________________________
 - `max_budget`: Per-sub-agent budget cap in USD, forwarded to each sub-agent's `run`. Callers spawning sub-agents on behalf of a parent task pass each child one share of the parent's remaining budget and reserve one equal share for the parent (see :meth:`SorcarAgent._subagent_budget_share`), so even a one-child fan-out cannot spend the parent's whole remainder. `None` uses the sub-agent's default (config value).
 - `model_config`: Model configuration (e.g. custom `base_url` / `api_key` routing) forwarded to each sub-agent's `run` so sub-agents talk to the same provider endpoint as the parent. `None` uses default provider routing.
 - `usage_monitor`: Optional :class:`_LiveUsageMonitor` that each spawned sub-agent is registered with, so the parent task's cost/tokens header can stream live aggregate usage while the sub-agents run. `None` disables live tracking.
+- `parent_agent`: The agent that is fanning out, when there is one. Its persisted `task_history` row id is re-read as each worker starts and stamped on the child, so the child is stored as a nested sub-task rather than a bogus top-level history row. `None` (a bare functional call) falls back to the printer's thread-local task id.
+- `chat_id`: Chat session the children resume, so a sub-agent starts with the parent's conversation context instead of a brand-new empty session. `""` gives each child a fresh chat.
+- `parent_tab_id`: Frontend tab id of the parent, forwarded in `_subagent_info` so the child's `new_tab` broadcast tells the owning webview which tab spawned it.
+- `base_system_prompt`: Custom base system prompt forwarded to each sub-agent's `run`, so a parent running with a caller-supplied system prompt (see :meth:`SorcarAgent.run`) spawns children that use the same prompt instead of the default `SYSTEM.md`. `""` keeps the default.
 - **Returns:** List of YAML result strings in the **same order** as *tasks*. Each string contains `success` and `summary` keys. If a task raises an unhandled exception the corresponding entry is a YAML string with `success: false` and the traceback in `summary`.
 
 ______________________________________________________________________
@@ -141,6 +151,10 @@ ______________________________________________________________________
 **Constructor:** `ChatSorcarAgent(name: str) -> None`
 
 - **chat_id** — Return the current chat session ID ("" means new session).<br/>`chat_id() -> str` *(property)*
+
+- **last_task_id** — Return the `task_history` row id this agent last allocated. The readers live on other threads — the WebSocket command handler stamping a queued user message, the merge/discard flow, the printer's broadcast fan-out — so the read takes `_task_id_lock`, the same lock the publishing assignment in :meth:`run` takes. That pairing is what makes the lock mean anything: a lock only the writer holds excludes nobody.<br/>`last_task_id() -> str` *(property)*
+
+  - **Returns:** The row id, or `""` before this agent's first `run`.
 
 - **tool_call_guard** — The per-tool-call guard copied onto each session executor. Always returns :meth:`_summary_tool_guard`, which delegates to any guard installed by parent classes (stored by the setter below) and then enforces the every-5-steps `summary` gate. A property for the same reason as :attr:`pre_step_hook`: `RelentlessAgent` reads this attribute when wiring each per-session executor, after `_reset` has assigned `None` through the setter.<br/>`tool_call_guard() -> Any` *(property)*
 
@@ -188,12 +202,12 @@ ______________________________________________________________________
 
 **Constructor:** `WorktreeSorcarAgent(name: str) -> None`
 
-- **new_chat** — Reset to a new chat session, retiring any pending worktree. If a worktree task is pending from the previous session it is retired through :meth:`_retire_previous_worktree`, so finished work is auto-committed and squash-merged into the original branch while work the user has not accepted yet — a failed or stopped task, flagged by `_pending_review` — is only committed to its own `kiss/wt-*` branch. Opening a new chat is not a decision about the old task's work. When the release fails (merge conflict, checkout failure, stash failure, --no-auto-commit with uncommitted changes), `_release_worktree` sets a warning describing the manual recovery steps. Flush it to the attached printer NOW: if the user opens a new chat and never runs another task on this agent instance, no later `run()` will ever call `_flush_warnings` and the warning would be silently lost. When no printer is attached the warning is retained for the next `run()`'s flush (`_flush_warnings` no-ops without a `broadcast`-capable printer).<br/>`new_chat() -> None`
+- **new_chat** — Reset to a new chat session, retiring any pending worktree. If a worktree task is pending from the previous session it is retired through :meth:`_retire_previous_worktree`, so finished work is auto-committed and squash-merged into the original branch while work the user has not accepted yet — a failed or stopped task, flagged by `_pending_review` — is only committed to its own `kiss/wt-*` branch. Opening a new chat is not a decision about the old task's work. When the release fails (merge conflict, checkout failure, stash failure, Auto-commit off with uncommitted changes), `_release_worktree` sets a warning describing the manual recovery steps. Flush it to the attached printer NOW: if the user opens a new chat and never runs another task on this agent instance, no later `run()` will ever call `_flush_warnings` and the warning would be silently lost. When no printer is attached the warning is retained for the next `run()`'s flush (`_flush_warnings` no-ops without a `broadcast`-capable printer).<br/>`new_chat() -> None`
 
 - **run** — Run a task on an isolated git worktree branch. Creates a new worktree and branch, redirects `work_dir` into the worktree, and delegates to `ChatSorcarAgent.run()`. Each call starts a fresh worktree; any previously pending branch from an earlier run is retired first by :meth:`_retire_previous_worktree` — auto-committed and squash-merged into its original branch (kept in git for manual resolution when that auto-merge fails or conflicts), or, when the earlier run failed or was stopped, committed to its own branch without ever touching the original one. Falls back to direct execution (no worktree) when: - `use_worktree` kwarg is explicitly `False` - `work_dir` is not inside a git repo - The repo has no commits - HEAD is detached (no merge target) - Any git command fails during setup<br/>`run(prompt_template: str = '', **kwargs: Any) -> str`
 
   - `prompt_template`: The task prompt.
-  - `**kwargs`: All other arguments forwarded to `ChatSorcarAgent.run()`. The optional `use_worktree` kwarg (default `True`) gates the worktree behavior — when `False` the call is equivalent to `ChatSorcarAgent.run()`.
+  - `**kwargs`: All other arguments forwarded to `ChatSorcarAgent.run()`. The optional `use_worktree` kwarg (default `True`) gates the worktree behavior — when `False` the call is equivalent to `ChatSorcarAgent.run()`. The optional `auto_commit` kwarg overrides the user's persisted "Auto commit" setting for this run and every automatic cleanup that follows it; omit it to use the setting.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
 - **merge** — Merge the task branch into the original branch. Every step is idempotent — safe to re-run after a crash. Auto-commits any uncommitted changes in the worktree before merging. If the main working tree has uncommitted changes, they are stashed before the merge and restored afterward so user edits don't block the merge.<br/>`merge() -> str`
@@ -222,12 +236,12 @@ ______________________________________________________________________
 
 - `backend`: The daemon object providing the transports and command implementations (in production the `RemoteAccessServer`).
 
-- **dispatch** — Route one client command to its API method. The single entry point of the code API. Applies, in order: 1. Silently drops :data:`DROPPED_COMMANDS` (host-consumed messages) BEFORE validation so they never surface errors. 2. Validates *cmd* against the catalog (:func:`validate_command`) and answers an invalid command with a direct `error` event to the sender only. 3. Records the command's `tabId` for the transport's deferred-close bookkeeping (:meth:`_record_tab`). 4. Stamps the connection's `conn_id` as `connId` — overwriting any client-supplied value so it cannot be spoofed — which keys the backend's per-connection autocomplete state. 5. Maintains the per-window work_dir invariant: a `setWorkDir` updates the connection's `work_dir`; every other command lacking an explicit `workDir` is stamped with it, so two VS Code windows sharing the daemon can never observe each other's folder through the daemon-global fallback. The CLI-bridge commands (:data:`_CLI_HANDLERS`) are exempt: they describe tasks the CLI runs itself, never read `workDir`, and must not be mutated on their way to the relay. 6. Invokes the :class:`ServerApi` method named by the command's catalog entry.<br/>`async dispatch(cmd: dict[str, Any], ctx: ApiContext) -> None`
+- **dispatch** — Route one client command to its API method. The single entry point of the code API. Applies, in order: 1. Silently drops :data:`DROPPED_COMMANDS` (host-consumed messages) BEFORE validation so they never surface errors. 2. Validates *cmd* against the catalog (:func:`validate_command`) and answers an invalid command with a direct `error` event to the sender only. 3. Records the command's `tabId` in the connection's bookkeeping (:meth:`_record_tab`). 4. Stamps the connection's `conn_id` as `connId` — overwriting any client-supplied value so it cannot be spoofed — which keys the backend's per-connection autocomplete state. 5. Maintains the per-window work_dir invariant: a `setWorkDir` updates the connection's `work_dir`; every other command lacking an explicit `workDir` is stamped with it, so two VS Code windows sharing the daemon can never observe each other's folder through the daemon-global fallback. 6. Invokes the :class:`ServerApi` method named by the command's catalog entry.<br/>`async dispatch(cmd: dict[str, Any], ctx: ApiContext) -> None`
 
   - `cmd`: The parsed JSON command dictionary (the transport guarantees a dict).
   - `ctx`: The transport context of this call.
 
-- **authenticate** — Authenticate a remote WSS client with the `auth` handshake. The remote webapp's entry point into the API: before a browser connection may issue any catalog command, its very first frames must complete this handshake (the `_WS_SHIM_JS` shim served with the webapp sends `{"type": "auth", "password": ...}` as soon as the socket opens). Local UDS clients (the VS Code extension, the CLI) skip it — POSIX file permissions on the socket already gate access to the owning user. Protocol serviced here, in order: 1. A source IP that is still rate-limited after too many failed logins is answered with `auth_locked` (carrying `retry_after` seconds) and closed — telling the client WHY instead of leaving its loading overlay spinning. 2. Otherwise up to two `auth` attempts are read: a correct password (constant-time compare against the configured `remote_password`, which may be empty) is answered with `auth_ok`; the first wrong password elicits an `auth_required` retry prompt; the second failure is answered with an `error` event and the socket is closed. A first message that is not an `auth` at all closes the socket without counting a failed login. 3. Only NON-EMPTY wrong guesses count toward the brute-force lockout: every fresh page load probes with the (possibly empty) password stored in `localStorage`, and behind the shared cloudflared tunnel penalising that benign empty probe would let a handful of normal page loads lock the password prompt away from every visitor.<br/>`async authenticate(websocket: Any) -> bool`
+- **authenticate** — Authenticate a remote WSS client with the `auth` handshake. The remote webapp's entry point into the API: before a browser connection may issue any catalog command, its very first frames must complete this handshake (the `_WS_SHIM_JS` shim served with the webapp sends `{"type": "auth", "password": ...}` as soon as the socket opens). Local UDS clients (the VS Code extension, Python clients) skip it — POSIX file permissions on the socket already gate access to the owning user. Protocol serviced here, in order: 1. A source IP that is still rate-limited after too many failed logins is answered with `auth_locked` (carrying `retry_after` seconds) and closed — telling the client WHY instead of leaving its loading overlay spinning. 2. Otherwise up to two `auth` attempts are read: a correct password (constant-time compare against the configured `remote_password`, which may be empty) is answered with `auth_ok`; the first wrong password elicits an `auth_required` retry prompt; the second failure is answered with an `error` event and the socket is closed. A first message that is not an `auth` at all closes the socket without counting a failed login. 3. Only NON-EMPTY wrong guesses count toward the brute-force lockout: every fresh page load probes with the (possibly empty) password stored in `localStorage`, and behind the shared cloudflared tunnel penalising that benign empty probe would let a handful of normal page loads lock the password prompt away from every visitor.<br/>`async authenticate(websocket: Any) -> bool`
 
   - `websocket`: The remote client's WebSocket connection.
   - **Returns:** `True` when the client authenticated; `False` when it failed (the socket is then already closed).
@@ -242,7 +256,7 @@ ______________________________________________________________________
   - `cmd`: The `resumeSession` command.
   - `ctx`: The transport context of the current call.
 
-- **ready** — Initialize a (re)loaded chat webview. Sanitizes the command's `restoredTabs` ONCE (warnings included) and writes the cleaned list back so the backend's own sanitize pass finds nothing left to reject or truncate, then records every restored tab id in the connection's bookkeeping: the deferred-close contract is "schedule a closeTab for every tab id this connection touched", and `_handle_ready` re-claims (cancels the pending close of, and resumes) every `restoredTabs` entry — without recording them a later disconnect would never re-arm their deferred close, leaking the restored backend state forever. Finally fans the command out through the backend's ready handler (models / input history / config / session replay).<br/>`async ready(cmd: dict[str, Any], ctx: ApiContext) -> None`
+- **ready** — Initialize a (re)loaded chat webview. Sanitizes the command's `restoredTabs` ONCE (warnings included) and writes the cleaned list back so the backend's own sanitize pass finds nothing left to reject or truncate, then RECONCILES a UDS connection's local-tab bookkeeping (local-UDS talk muting) to exactly the tabs the client shows after this ready: its own announced tab, the restored tabs, and every canonical tab-registry tab (after a webview reload `ready` announces only the fresh placeholder tab, yet the client adopts every registry tab from the `tabs_state` snapshot — without the sync a talk event for an adopted background tab would skip daemon-native playback and stay silent, since webviews cannot autoplay). Reconciling — rather than only adding — also drops stale ids, so a repeated `ready` self-heals bookkeeping left over from canonical tabs closed while the connection was attached. The sync updates the connection's `local_tabs` set in place, so disconnect cleanup is unchanged. Finally fans the command out through the backend's ready handler (models / input history / config / session replay).<br/>`async ready(cmd: dict[str, Any], ctx: ApiContext) -> None`
 
   - `cmd`: The `ready` command.
   - `ctx`: The transport context of the current call.
@@ -251,16 +265,6 @@ ______________________________________________________________________
 
   - `cmd`: The `submit` command.
   - `ctx`: The transport context of the current call (unused).
-
-- **close_tab** — Dispose the backend state of a closed frontend tab. A WEB (WSS) client closing its chat tab destroys the only UI that could ever finish an in-flight (server-tracked) merge review for that tab, so the review is ended first (close = accept the remaining hunks; no disk writes) and the tab is disposed instead of leaking in `is_merging` limbo. UDS (VS Code) clients are exempt: their TypeScript MergeManager owns the review in real editor tabs that survive the chat tab's closure and will still send `all-done` — their `closeTab` forwards to the backend unchanged.<br/>`async close_tab(cmd: dict[str, Any], ctx: ApiContext) -> None`
-
-  - `cmd`: The `closeTab` command.
-  - `ctx`: The transport context of the current call.
-
-- **merge_action** — Advance a merge review (accept / reject / navigate / finish). Non-`all-done` actions are processed by the daemon's server-side merge engine (the web twin of the VS Code TypeScript `MergeManager`). An `all-done` arriving FROM a client is the extension's MergeManager finishing its editor-managed review (its per-hunk actions never reach the backend): the server-side shadow merge state registered when the `merge_data` event was broadcast is dropped — leaving it would replay a ZOMBIE review on the next webview reload, fire a spurious second all-done from the deferred-close path, and leak one state (with full file payloads) per finished review — and the command still falls through to the backend (`_cmd_merge_action` → `_finish_merge`).<br/>`async merge_action(cmd: dict[str, Any], ctx: ApiContext) -> None`
-
-  - `cmd`: The `mergeAction` command.
-  - `ctx`: The transport context of the current call.
 
 - **open_file** — Serve a file's content to a remote-web client. A remote-web (WSS) client clicked a file link in a chat webview. The browser has no editor to open the file in, so the daemon reads the file and replies with its content for an in-page content tab. UDS clients (VS Code windows) never take this path: their webview's `openFile` is consumed by the extension host, which opens the file in a real editor tab — so a UDS-delivered `openFile` is dropped as a defensive no-op.<br/>`async open_file(cmd: dict[str, Any], ctx: ApiContext) -> None`
 
@@ -275,6 +279,31 @@ ______________________________________________________________________
 - **voice_transcribe** — Transcribe a remote-web client's post-wake utterance. A remote-web (browser mode) client heard the "Sorcar" wake word and captured the utterance that followed in the page (VS Code webviews never send this: their speech is captured and translated by the extension host's local listener). The audio is translated with the same gpt-audio call the local listener uses and answered with the `voiceSpeech` message `voice.js` already handles.<br/>`async voice_transcribe(cmd: dict[str, Any], ctx: ApiContext) -> None`
 
   - `cmd`: The `voiceTranscribe` command carrying the audio.
+  - `ctx`: The transport context of the current call.
+
+- **get_default_model** — Reply with the daemon's key-derived default model name. Services `getDefaultModel` so the VS Code extension host can obtain :func:`kiss.core.models.model_info.get_default_model` over the socket instead of spawning a throwaway `uv run python -c ...` interpreter (its historical out-of-band channel, still used as a fallback while the daemon is down). The reply is a direct `defaultModel` event to the requester.<br/>`async get_default_model(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `getDefaultModel` command.
+  - `ctx`: The transport context of the current call.
+
+- **read_kiss_config** — Serve the raw merged `~/.kiss/config.json` to a local client. Services `readKissConfig` so the extension host can read the daemon-owned config file through the socket instead of parsing the file itself. The reply is a direct `kissConfig` event. LOCAL (UDS) CLIENTS ONLY: unlike `getConfig` (whose reply is shaped for the settings panel), this returns the config verbatim — including `remote_password` — so a remote WSS browser must never receive it. A WSS-delivered command is dropped as a defensive no-op.<br/>`async read_kiss_config(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `readKissConfig` command.
+  - `ctx`: The transport context of the current call.
+
+- **write_kiss_config** — Merge a local client's keys into `~/.kiss/config.json`. Services `writeKissConfig` so the extension host can update daemon-owned config keys (e.g. `remote_password`) through the socket — sharing the daemon's atomic, lock-guarded :func:`kiss.core.vscode_config.save_config` write path — instead of rewriting the file itself. The reply is a direct `kissConfigSaved` acknowledgement event. LOCAL (UDS) CLIENTS ONLY: a remote WSS browser must not be able to change `remote_password` or any other daemon setting through this raw channel; a WSS-delivered command is dropped as a defensive no-op.<br/>`async write_kiss_config(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `writeKissConfig` command carrying `config`.
+  - `ctx`: The transport context of the current call.
+
+- **voice_wake_start** — Start the daemon-hosted wake-word listener for this client. Services `voiceWakeStart` so the extension host can run :mod:`kiss.server.voice_wake` as a daemon child over the socket — receiving its protocol as `voiceWakeEvent` / `voiceWakeState` events — instead of spawning the listener process itself and parsing its stdout (its historical out-of-band channel). The optional `sensitivity` field (0..100) tunes wake-word eagerness. The listener is bound to this connection and stopped on disconnect. LOCAL (UDS) CLIENTS ONLY: the listener captures this machine's microphone, so a remote WSS browser must not control it (browser-mode voice capture stays in-page via `voiceTranscribe`); a WSS-delivered command is dropped as a defensive no-op.<br/>`async voice_wake_start(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `voiceWakeStart` command.
+  - `ctx`: The transport context of the current call.
+
+- **voice_wake_stop** — Stop this client's daemon-hosted wake-word listener. Services `voiceWakeStop`; a no-op when the connection has no running listener. LOCAL (UDS) CLIENTS ONLY, matching `voiceWakeStart`.<br/>`async voice_wake_stop(cmd: dict[str, Any], ctx: ApiContext) -> None`
+
+  - `cmd`: The `voiceWakeStop` command (unused).
   - `ctx`: The transport context of the current call.
 
 - **active_tasks_query** — Report in-flight agent tasks back to the requesting client.<br/>`async active_tasks_query(cmd: dict[str, Any], ctx: ApiContext) -> None`
@@ -296,26 +325,6 @@ ______________________________________________________________________
 
   - `cmd`: The `serverReset` command (unused).
   - `ctx`: The transport context of the current call; supplies the requesting `conn_id` so acknowledgement notifications reach only the requesting window.
-
-- **cli_event** — Relay one CLI display event to subscribed webview tabs. CLI → daemon live-stream bridge: the sorcar CLI forwards every display event here so any chat webview subscribed to the task's chat id sees the event immediately instead of having to reload to replay it from the events DB.<br/>`async cli_event(cmd: dict[str, Any], ctx: ApiContext) -> None`
-
-  - `cmd`: The `cliEvent` envelope carrying the event.
-  - `ctx`: The transport context of the current call (unused).
-
-- **cli_tab_hello** — Register a sorcar CLI REPL's tab id for talk arbitration. A CLI REPL announces its tab id so talk-playback arbitration can tell CLI terminal players apart from webview tabs. Only local UDS peers are terminal players; a WSS/browser peer cannot suppress playback on the daemon machine.<br/>`async cli_tab_hello(cmd: dict[str, Any], ctx: ApiContext) -> None`
-
-  - `cmd`: The `cliTabHello` command.
-  - `ctx`: The transport context of the current call.
-
-- **cli_task_start** — Record a CLI-launched task as running. The CLI announces a fresh running task so a webview tab that later resumes it from the history sidebar is subscribed to the live stream and shows the blinking-green-circle "running" indicator.<br/>`async cli_task_start(cmd: dict[str, Any], ctx: ApiContext) -> None`
-
-  - `cmd`: The `cliTaskStart` command.
-  - `ctx`: The transport context of the current call.
-
-- **cli_task_end** — Mark a CLI-launched task as finished. The CLI announces the task finished; the daemon stops the running indicator on every subscribed webview tab.<br/>`async cli_task_end(cmd: dict[str, Any], ctx: ApiContext) -> None`
-
-  - `cmd`: The `cliTaskEnd` command.
-  - `ctx`: The transport context of the current call.
 
 - **trajectory_jobs** — List all trajectory jobs (the `/api/jobs` endpoint). Mirrors the `/api/jobs` endpoint of the standalone trajectory visualizer (:mod:`kiss.viz_trajectory.server`, imported lazily so this client-importable module stays light).<br/>`trajectory_jobs() -> tuple[int, str, bytes]`
 
@@ -342,19 +351,20 @@ ______________________________________________________________________
 - `b`: Second password string.
 - **Returns:** `True` when the two strings are equal.
 
-**`run`** — Run *prompt* as a task on the local Sorcar daemon and block until done. Connects to the `sorcar web` daemon's Unix-domain socket, sends the same `run` command a chat webview would, streams the task's events, and returns once the daemon reports the task finished.<br/>`def run(prompt: str, *, work_dir: str = '', model: str = '', chat_id: str = '', tools: str | Path | None = None, use_worktree: bool = False, auto_commit: bool = False, max_budget: float | None = None, model_config: dict[str, Any] | None = None, web_tools: bool | None = None, is_parallel: bool = False, timeout: float = 3600.0, sock_path: str | Path | None = None) -> TaskResult`
+**`run`** — Run *prompt* as a task on the local Sorcar daemon and block until done. Connects to the `kiss-web` daemon's Unix-domain socket, sends the same `run` command a chat webview would, streams the task's events, and returns once the daemon reports the task finished.<br/>`def run(prompt: str, *, work_dir: str = '', model: str = '', chat_id: str = '', system_prompt: str = '', tools: str | Path | None = None, use_worktree: bool = True, auto_commit: bool = True, max_budget: float | None = None, model_config: dict[str, Any] | None = None, web_tools: bool | None = None, is_parallel: bool = True, timeout: float = 3600.0, sock_path: str | Path | None = None) -> TaskResult`
 
 - `prompt`: The task instruction to run.
 - `work_dir`: Working directory for the task; the daemon's current default is used when empty.
 - `model`: Model name; the daemon's selected default when empty.
 - `chat_id`: Optional existing chat session id to continue. Pass the `chat_id` of a previous :class:`TaskResult` to run this task in the same chat — the agent then sees the prior tasks and results of that chat as context. A new chat is started when empty.
-- `tools`: Optional path to a Python file supplying extra tools for the agent. The daemon imports the file and registers every top-level public function that is suitable as a tool (plain synchronous functions whose parameters are all keyword-bindable; `*args`/`**kwargs`/positional-only parameters and coroutine/generator functions are skipped). Each function's name, docstring (Google-style `Args:` section for parameter descriptions), and annotated parameters define the tool schema the agent sees, exactly like a native tool. The functions are never serialized by the client — they run **in the daemon process**. The path is resolved against this process's working directory.
-- `use_worktree`: Run the task in an isolated git worktree.
-- `auto_commit`: Auto-commit the task's changes on success.
+- `system_prompt`: Optional custom system prompt for the run. When non-empty it is used as the system prompt of the agent AND of every sub-agent it spawns (`run_parallel`), replacing the default system prompt shipped in `src/kiss/SYSTEM.md`. The daemon still appends its per-run operational instructions (work directory, process id, `~/.kiss/SORCAR.md`) so the agent's tool contract keeps working. Empty (default) runs with the default system prompt as usual.
+- `tools`: Optional path to a Python file supplying extra tools for the agent. The file must define a top-level `get_tools()` function returning the functions in the file the agent may call; the daemon imports the file, calls `get_tools()`, and registers the returned callables as agent tools. Each function's name, docstring (Google-style `Args:` section for parameter descriptions), and annotated keyword-bindable parameters define the tool schema the agent sees, exactly like a native tool. The functions are never serialized by the client — they run **in the daemon process**. The path is resolved against this process's working directory. A broken tools file (deleted before the daemon reads it, raising at import time, or missing/misbehaving `get_tools()`) stops the task: the daemon fails the run and the returned :class:`TaskResult` carries the diagnostic error in its `text` with `success=False`.
+- `use_worktree`: Run the task in an isolated git worktree. Defaults to True.
+- `auto_commit`: Auto-commit the task's changes on success. Defaults to True.
 - `max_budget`: Per-task budget override in USD; `None` uses the daemon's configured default.
 - `model_config`: Per-task model configuration override (custom endpoint / headers); `None` uses the daemon's configured model endpoint. Must be JSON-serializable.
 - `web_tools`: Per-task browser-tool enablement override; `None` uses the daemon's configured default.
-- `is_parallel`: Whether the agent may spawn parallel sub-agents.
+- `is_parallel`: Whether the agent may spawn parallel sub-agents. Defaults to True.
 - `timeout`: Maximum seconds to wait for the task to finish.
 - `sock_path`: Daemon UDS path override (defaults to `$KISS_SORCAR_SOCK` or `$KISS_HOME/sorcar.sock`).
 - **Returns:** A :class:`TaskResult` with the result text, success flag, cost (USD), total tokens, step count, chat id, and task id of the task. `chat_id` is the daemon chat session id and `task_id` the persisted `task_history` row id — both usable later to look up or resume the run in the daemon's history.

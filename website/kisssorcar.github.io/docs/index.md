@@ -6,7 +6,7 @@
 
 - [Overview](overview.md) — What KISS Sorcar is, the name, and how it compares to Claude Code and Cursor
 - [Installation](installation.md) — Install from source, pipx/uv, API-key configuration, VS Code extension, Docker
-- [CLI Reference](cli.md) — The `sorcar` CLI: modes, options, interactive features, `sorcar mcp`
+- [Client Interfaces](cli.md) — The `kiss-web` daemon, VS Code extension, web/mobile app, and Python client API
 - [Python API Reference](api.md) — KISSAgent, RelentlessAgent, SorcarAgent, ChatSorcarAgent, WorktreeSorcarAgent, GitWorktreeOps
 - [Supported Models](models.md) — 603-model catalog across 9 provider categories
 - [Messaging & Third-Party Agents](messaging-agents.md) — 23 messaging agents plus the Govee smart-home CLI
@@ -27,15 +27,21 @@
 # Full install (macOS/Linux)
 curl -fsSL https://raw.githubusercontent.com/ksenxx/kiss_ai/main/scripts/install.sh | bash
 
-# Or Python package + CLI only (Python 3.13+)
+# Or Python package only (Python 3.13+)
 pipx install kiss-agent-framework
 
 # Set at least one model API key
 export ANTHROPIC_API_KEY=...   # or OPENAI_API_KEY, GEMINI_API_KEY, ...
 
-# Launch the interactive CLI
-sorcar
+# Start the daemon that serves the VS Code extension and the web app
+kiss-web
+```
 
-# Or run a one-shot task
-sorcar -t "What is 2435*234?"
+Then open the KISS Sorcar sidebar in VS Code, or open the remote web app URL shown in the Settings panel. From Python:
+
+```python
+from kiss.server import sorcar
+
+result = sorcar.run("What is 2435*234?")
+print(result.text)
 ```

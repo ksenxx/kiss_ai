@@ -19,12 +19,12 @@ import re
 import shlex
 import shutil
 import subprocess
-import tempfile
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from kiss.core.config import kiss_home
+from kiss.core.config import DEFAULT_MAX_BUDGET, kiss_home
+from kiss.core.utils import atomic_write_text
 
 logger = logging.getLogger(__name__)
 
@@ -58,20 +58,19 @@ def __getattr__(name: str) -> Path:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 DEFAULTS: dict[str, Any] = {
-    "max_budget": 100,
+    "max_budget": DEFAULT_MAX_BUDGET,
     "custom_endpoint": "",
     "custom_api_key": "",
     "custom_headers": "",
     "use_web_browser": True,
     "remote_password": "",
     "auto_commit_mode": True,
-    "is_parallel": True,
     "is_worktree": True,
     "work_dir": "",
     "last_model": "",
 }
 
-RETIRED_KEYS: frozenset[str] = frozenset({"demo_mode"})
+RETIRED_KEYS: frozenset[str] = frozenset({"demo_mode", "is_parallel"})
 """Settings that used to exist and must be forgotten on sight.
 
 ``config.json`` is written by every previous release, so dropping a key
@@ -82,6 +81,13 @@ survive), and :func:`save_config` rewrites the file from its own previous
 contents.  A retired key would therefore be read back, echoed to every
 client in ``configData``, and re-persisted forever.  Listing it here
 purges it from both the value read and the file written.
+
+``is_parallel`` is retired rather than merely removed for that reason:
+it never had a single reader — whether a run may spawn parallel
+sub-agents comes from the run command's ``useParallel`` flag — yet it
+was written to every user's ``config.json`` and broadcast in every
+``configData``, which invites a future reader to wire it up and
+silently disagree with the real source of truth.
 """
 
 API_KEY_ENV_VARS: frozenset[str] = frozenset({
@@ -203,10 +209,15 @@ def load_config() -> dict[str, Any]:
 def save_config(data: dict[str, Any]) -> None:
     """Save configuration to ``~/.kiss/config.json``.
 
-    Merges incoming DEFAULTS keys with the existing file contents so
-    that non-DEFAULTS keys already present (e.g. ``email``,
-    ``tunnel_token``) are preserved.  API keys are never written to
-    the config file.
+    Merges *data* into the existing file contents, so keys already
+    present but absent from *data* are preserved.  Extension-owned keys
+    outside :data:`DEFAULTS` (``tunnel_token``, ``skill_permissions``,
+    ``mcp_permissions``, ``email``) are written like any other: they are
+    read at runtime, so accepting them and then dropping them would be
+    silent data loss that only surfaces after a daemon restart.  API
+    keys are never written to the config file — they belong in the
+    shell RC (see :func:`save_api_key_to_shell`) — and
+    :data:`RETIRED_KEYS` are purged on every write.
 
     The write is **atomic** — content is staged in a sibling temp file
     and then ``os.replace``-d into position so that concurrent readers
@@ -235,24 +246,16 @@ def save_config(data: dict[str, Any]) -> None:
                         existing = stored
                 except (json.JSONDecodeError, OSError):
                     pass
-            for k in DEFAULTS:
-                if k in data:
-                    existing[k] = data[k]
+            for k, v in data.items():
+                if k not in API_KEY_ENV_VARS:
+                    existing[k] = v
             for k in RETIRED_KEYS:
                 existing.pop(k, None)
-            serialized = json.dumps(existing, indent=2)
-            fd, tmp = tempfile.mkstemp(
-                prefix=".kiss-config-", dir=str(cfg_dir),
-            )
-            try:
-                try:
-                    os.write(fd, serialized.encode("utf-8"))
-                finally:
-                    os.close(fd)
-                os.replace(tmp, cfg_path)
-            except BaseException:
-                Path(tmp).unlink(missing_ok=True)
-                raise
+            # atomic_write_text stages the payload in a sibling temp file
+            # through a buffered file object (a bare ``os.write`` may
+            # legally write fewer bytes than asked and the truncated file
+            # would be published) and ``os.replace``-s it into position.
+            atomic_write_text(cfg_path, json.dumps(existing, indent=2))
         finally:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
 
@@ -382,40 +385,31 @@ def save_api_key_to_shell(key_name: str, key_value: str) -> None:
 def _atomic_write_text_secure(target: Path, content: str) -> None:
     """Write *content* to *target* atomically with mode 0600.
 
-    Uses a temp file in the same directory + ``os.replace`` so that
-    readers never observe a partially written RC, and forces the final
-    file to be readable only by the owner.
+    The RC file holds API keys, so it must never be world-readable and
+    must never be observed half-written by a shell that is sourcing it.
 
     On Windows ``os.chmod`` honours only the read-only bit, but the
     atomic-replace pattern still applies.
     """
-    parent = target.parent
-    parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".kiss-rc-", dir=str(parent))
-    try:
-        try:
-            os.write(fd, content.encode("utf-8"))
-        finally:
-            os.close(fd)
-        try:
-            os.chmod(tmp, 0o600)
-        except OSError:
-            logger.debug("chmod 0600 failed on temp RC", exc_info=True)
-        os.replace(tmp, target)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-    try:
-        os.chmod(target, 0o600)
-    except OSError:
-        logger.debug("chmod 0600 failed on RC", exc_info=True)
+    atomic_write_text(target, content, mode=0o600)
 
 
 def _refresh_config() -> None:
-    """Rebuild ``DEFAULT_CONFIG`` so it picks up new env vars."""
+    """Re-read the API keys from the environment into ``DEFAULT_CONFIG``.
+
+    The singleton is updated **in place** rather than rebound to a fresh
+    ``Config()``.  A rebuild re-reads only the environment-backed fields,
+    so it also reset ``max_budget`` — which is not environment-backed —
+    to its declared default, silently discarding whatever
+    :func:`apply_config_to_env` had just applied.  That made a settings
+    save that changed the budget *and* an API key in one payload lose the
+    budget, because the handler applies the budget first and saves the
+    keys second.
+    """
     from kiss.core import config as config_module
 
-    config_module.DEFAULT_CONFIG = config_module.Config()
+    for key in API_KEY_ENV_VARS:
+        setattr(config_module.DEFAULT_CONFIG, key, os.environ.get(key, ""))
 
 
 def apply_config_to_env(cfg: dict[str, Any]) -> None:

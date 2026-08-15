@@ -17,10 +17,10 @@ Covers:
   thread-local ``task_id`` was already cleared to ``""``, so it
   mutated (generation-bumped and drained) the SHARED ``""`` fallback
   bash state belonging to task-less broadcasters.
-- F9: ``_ask_user_question`` resolved the answer queue once (drain +
-  pending-registry entry) while ``_await_user_response`` re-resolved
-  it, so the agent could block on a DIFFERENT queue than the one it
-  registered.
+- F9: ``_ask_user_question`` resolves the answer queue once and hands
+  that SAME queue object to ``_await_user_response``, so the agent
+  can never block on a different queue than the one it drained (e.g.
+  after the tab's queue is swapped by a close/reopen mid-question).
 - F13: ``_cmd_save_config`` wrote ``self.work_dir`` without
   ``_state_lock`` and, unlike ``_cmd_set_work_dir``, neither cleared
   the ``@``-mention file cache nor synced ``printer.work_dir``.
@@ -51,9 +51,10 @@ import pytest
 
 from kiss.agents.sorcar import persistence
 from kiss.agents.sorcar.persistence import _add_task
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import get_available_models
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter, _BashState
 from kiss.server.server import VSCodeServer
 
@@ -70,10 +71,23 @@ class _CapturePrinter(JsonPrinter):
         self.events.append(event)
 
 
-def _pop_tabs(*tab_ids: str) -> None:
-    """Remove test-created entries from the global tab registry."""
-    for tab_id in tab_ids:
-        _RunningAgentState.running_agent_states.pop(tab_id, None)
+def _pop_states(*task_ids: str) -> None:
+    """Remove test-created entries from the global agent-state registry.
+
+    The run may have re-keyed the pre-registered state to the real
+    ``task_history`` id, so also drop any state whose tab was created
+    by this test (``w2``-prefixed tab ids).
+    """
+    for task_id in task_ids:
+        agent_state.unregister(task_id)
+    with agent_state.STATE_LOCK:
+        stale = [
+            key
+            for key, st in agent_state.iter_items()
+            if st.tab_id.startswith("w2")
+        ]
+        for key in stale:
+            agent_state.unregister(key)
 
 
 
@@ -135,15 +149,17 @@ def _run_scripted_task(
         pytest.skip("no models configured in this environment")
     printer = _CapturePrinter()
     server = _NoFollowupServer(printer)
-    tab = _RunningAgentState(tab_id, models[0])
-    _RunningAgentState.running_agent_states[tab_id] = tab
     agent = _ScriptedAgent("Sorcar VS Code")
-    tab.agent = agent
+    state = AgentState(
+        f"pre-{tab_id}", agent=agent, tab_id=tab_id, server_owned=True,
+    )
+    agent_state.register(state)
     server._run_task({
         "tabId": tab_id,
         "prompt": prompt,
         "workDir": str(tmp_path),
         "model": models[0],
+        "_state_key": state.task_id,
     })
     return server, printer, agent
 
@@ -181,7 +197,7 @@ def test_f2_every_subtask_row_gets_result_and_extra(tmp_path: Path) -> None:
             assert tokens == 100, task_text
             assert cost == pytest.approx(0.25), task_text
     finally:
-        _pop_tabs(tab_id)
+        _pop_states(f"pre-{tab_id}")
 
 
 def test_f2_single_task_persistence_unchanged(tmp_path: Path) -> None:
@@ -199,7 +215,7 @@ def test_f2_single_task_persistence_unchanged(tmp_path: Path) -> None:
         assert cost == pytest.approx(0.25)
         assert len(server.followups) == 1
     finally:
-        _pop_tabs(tab_id)
+        _pop_states(f"pre-{tab_id}")
 
 
 
@@ -217,19 +233,22 @@ def test_f6_task_cleanup_leaves_fallback_bash_state_alone(
         fallback.generation = 7
         fallback.buffer.append("pending task-less output")
         printer._bash_states[""] = fallback
-        tab = _RunningAgentState(tab_id, models[0])
-        _RunningAgentState.running_agent_states[tab_id] = tab
-        tab.agent = _ScriptedAgent("Sorcar VS Code")
+        agent = _ScriptedAgent("Sorcar VS Code")
+        state = AgentState(
+            f"pre-{tab_id}", agent=agent, tab_id=tab_id, server_owned=True,
+        )
+        agent_state.register(state)
         server._run_task({
             "tabId": tab_id,
             "prompt": "w2f6 reset probe",
             "workDir": str(tmp_path),
             "model": models[0],
+            "_state_key": state.task_id,
         })
         assert fallback.generation == 7
         assert fallback.buffer == ["pending task-less output"]
     finally:
-        _pop_tabs(tab_id)
+        _pop_states(f"pre-{tab_id}")
 
 
 
@@ -310,7 +329,7 @@ def test_f5_reset_during_inflight_flush_still_discards_stale_text() -> None:
 
 class _AskUserGatePrinter(_CapturePrinter):
     """Printer that gates the askUser broadcast so the test can act
-    between the queue registration and the blocking wait."""
+    between the queue resolution and the blocking wait."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -325,16 +344,19 @@ class _AskUserGatePrinter(_CapturePrinter):
             self.release_ask_user.wait(timeout=10)
 
 
-def test_f9_ask_user_question_waits_on_registered_queue() -> None:
+def test_f9_ask_user_question_waits_on_resolved_queue() -> None:
+    """The agent must block on the queue resolved at ask time, even if
+    the task's ``user_answer_queue`` is swapped mid-question (tab
+    close + reopen)."""
     printer = _AskUserGatePrinter()
     server = VSCodeServer(printer=printer)
     tab_id = "w2f9-tab"
     task_key = "990901"
     try:
-        tab = _RunningAgentState(tab_id, "test-model")
-        _RunningAgentState.running_agent_states[tab_id] = tab
+        state = AgentState(task_key, tab_id=tab_id, server_owned=True)
+        agent_state.register(state)
         q1: queue.Queue[str] = queue.Queue(maxsize=1)
-        tab.user_answer_queue = q1
+        state.user_answer_queue = q1
         printer.subscribe_tab(task_key, tab_id)
 
         outcome: dict[str, Any] = {}
@@ -350,22 +372,18 @@ def test_f9_ask_user_question_waits_on_registered_queue() -> None:
         worker = threading.Thread(target=agent_thread, daemon=True)
         worker.start()
         assert printer.ask_user_sent.wait(timeout=5)
-        with server._state_lock:
-            assert server._pending_user_answer_tasks.get(id(q1)) == task_key
         q2: queue.Queue[str] = queue.Queue(maxsize=1)
-        tab.user_answer_queue = q2
+        state.user_answer_queue = q2
         printer.release_ask_user.set()
         q1.put("yes-go-ahead", timeout=1)
         worker.join(timeout=2)
         assert not worker.is_alive(), (
             "agent blocked on a re-resolved queue instead of the one it "
-            "drained and registered"
+            "drained at ask time"
         )
         assert outcome.get("answer") == "yes-go-ahead"
-        with server._state_lock:
-            assert id(q1) not in server._pending_user_answer_tasks
     finally:
-        _pop_tabs(tab_id)
+        _pop_states(task_key)
 
 
 

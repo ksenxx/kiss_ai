@@ -17,10 +17,63 @@ import os
 import shutil
 import subprocess
 import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import IO, Any
 
 logger = logging.getLogger(__name__)
+
+try:
+    import fcntl as _fcntl
+except ImportError:  # pragma: no cover — Windows has no fcntl
+    _fcntl = None  # type: ignore[assignment]
+
+
+@contextmanager
+def _file_lock(handle: IO[Any]) -> Iterator[None]:
+    """Hold an exclusive advisory lock on *handle* for its block.
+
+    ``repo_lock`` only serialises threads inside ONE process, but two
+    Sorcar processes (the ``kiss-web`` daemon and a ``kiss`` CLI run,
+    or two checkouts sharing a ``--git-common-dir``) mutate the same
+    repo-local plumbing files.  A ``flock`` is held by the OS on the
+    open file description, so it serialises across processes and is
+    released automatically if the holder dies.
+
+    On platforms without ``fcntl`` (Windows) this degrades to a no-op,
+    matching the previous in-process-only behaviour.
+
+    Args:
+        handle: An open file object to lock.
+    """
+    if _fcntl is None:  # pragma: no cover — Windows has no fcntl
+        yield
+        return
+    _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX)
+    try:
+        yield
+    finally:
+        _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+
+
+def _race_delay() -> None:
+    """Sleep briefly when ``KISS_RACE_DELAY`` is set (no-op by default).
+
+    Concurrency tests need to widen a read-modify-write window to make
+    a cross-process race deterministic.  The delay is opt-in via an
+    environment variable that production never sets, and is capped at
+    100 ms so a stray value can never stall a real run.
+    """
+    raw = os.environ.get("KISS_RACE_DELAY")
+    if not raw:
+        return
+    try:
+        time.sleep(min(float(raw), 0.1))
+    except ValueError:
+        pass
 
 _repo_locks: dict[str, threading.RLock] = {}
 _repo_locks_guard = threading.Lock()
@@ -516,44 +569,60 @@ class GitWorktreeOps:
            corrupted worktrees — e.g. a deleted ``.git`` link file —
            that fail git's removal validation entirely).
 
+        Teardown mutates the shared worktree registry under
+        ``$GIT_COMMON_DIR/worktrees/``, so it takes ``repo_lock``
+        itself rather than relying on every caller to remember: one
+        unlocked caller is enough to let an ``rmtree``/``prune`` run
+        while another tab holds the lock for ``worktree add`` /
+        ``stash`` / ``checkout`` / ``cherry-pick``.  The lock is
+        re-entrant, so callers that already hold it are unaffected.
+
         Args:
             repo: Git repo root path.
             wt_dir: Worktree directory to remove.
         """
-        if _same_path(wt_dir, repo):
-            # The main working tree is not an agent worktree: git
-            # rightly refuses to remove it, and the ``rmtree`` fallback
-            # below would delete the user's whole project.
-            logger.error(
-                "Refusing to remove %s: it is the main working tree, "
-                "not an agent worktree",
-                wt_dir,
-            )
-            return
-        if not wt_dir.exists():
-            GitWorktreeOps.prune(repo)
-            return
-        result = _git("worktree", "remove", str(wt_dir), "--force", cwd=repo)
-        if result.returncode != 0:
-            result = _git(
-                "worktree", "remove", "--force", "--force", str(wt_dir), cwd=repo
-            )
-        if result.returncode != 0:
-            logger.warning(
-                "worktree remove failed: %s; deleting directory directly",
-                result.stderr.strip(),
-            )
-            shutil.rmtree(str(wt_dir), ignore_errors=True)
-            GitWorktreeOps.prune(repo)
+        with repo_lock(repo):
+            if _same_path(wt_dir, repo):
+                # The main working tree is not an agent worktree: git
+                # rightly refuses to remove it, and the ``rmtree``
+                # fallback below would delete the user's whole project.
+                logger.error(
+                    "Refusing to remove %s: it is the main working tree, "
+                    "not an agent worktree",
+                    wt_dir,
+                )
+                return
+            if not wt_dir.exists():
+                GitWorktreeOps.prune(repo)
+                return
+            result = _git("worktree", "remove", str(wt_dir), "--force", cwd=repo)
+            if result.returncode != 0:
+                result = _git(
+                    "worktree", "remove", "--force", "--force", str(wt_dir),
+                    cwd=repo,
+                )
+            if result.returncode != 0:
+                logger.warning(
+                    "worktree remove failed: %s; deleting directory directly",
+                    result.stderr.strip(),
+                )
+                shutil.rmtree(str(wt_dir), ignore_errors=True)
+                GitWorktreeOps.prune(repo)
 
     @staticmethod
     def prune(repo: Path) -> None:
         """Prune stale worktree bookkeeping entries.
 
+        Rewrites the shared worktree registry, so it takes the
+        re-entrant ``repo_lock`` for the same reason :meth:`remove`
+        does — a prune racing another tab's ``git worktree add`` can
+        drop a registration that is being created.
+
         Args:
             repo: Git repo root path.
         """
-        _git("worktree", "prune", cwd=repo)
+        with repo_lock(repo):
+            _git("worktree", "prune", cwd=repo)
 
     @staticmethod
     def stage_all(wt_dir: Path) -> None:
@@ -977,6 +1046,13 @@ class GitWorktreeOps:
         tracked file in the user's repo.  Idempotent: the line is only
         appended when not already present.
 
+        The read-then-append is performed while holding an exclusive
+        ``flock`` on the file itself, so the idempotence also holds
+        across PROCESSES (daemon + CLI, or two checkouts sharing a
+        ``--git-common-dir``).  ``repo_lock`` alone would let both
+        processes read a file without the entry and both append it,
+        duplicating the line on every racing pair of runs.
+
         Args:
             repo: Git repo root path.
             filename: File under ``info/`` (e.g. ``"exclude"``).
@@ -989,15 +1065,15 @@ class GitWorktreeOps:
                 git_common = (repo / git_common).resolve()
             info_file = git_common / "info" / filename
             info_file.parent.mkdir(parents=True, exist_ok=True)
-            content = ""
-            if info_file.exists():
-                content = info_file.read_bytes().decode(
-                    "utf-8", errors="surrogateescape"
-                )
+            with open(
+                info_file, "a+", encoding="utf-8", errors="surrogateescape",
+            ) as f, _file_lock(f):
+                f.seek(0)
+                content = f.read()
                 if entry in content.splitlines():
                     return
-            prefix = "" if not content or content.endswith("\n") else "\n"
-            with open(info_file, "a", encoding="utf-8") as f:
+                _race_delay()
+                prefix = "" if not content or content.endswith("\n") else "\n"
                 f.write(f"{prefix}{entry}\n")
 
     @staticmethod
@@ -1414,13 +1490,14 @@ class GitWorktreeOps:
         if GitWorktreeOps._head_matches_baseline_parent(repo, baseline):
             cherry_pick_args.extend(["-X", "theirs"])
         cherry_pick_args.append(f"{baseline}..{branch}")
+        before = GitWorktreeOps.status_porcelain(repo)
         result = _git(*cherry_pick_args, cwd=repo)
         if result.returncode != 0:
             logger.warning(
                 "squash merge from baseline failed: %s",
                 result.stderr.strip(),
             )
-            _git("cherry-pick", "--abort", cwd=repo)
+            GitWorktreeOps._abort_cherry_pick(repo, before)
             return MergeResult.CONFLICT
 
         return GitWorktreeOps._commit_staged_merge(
@@ -1428,8 +1505,50 @@ class GitWorktreeOps:
         )
 
     @staticmethod
+    def _abort_cherry_pick(repo: Path, before: str) -> None:
+        """Undo a failed cherry-pick, verifying the abort actually worked.
+
+        ``git cherry-pick --abort`` restores the pre-pick state when a
+        sequencer is in progress, but it fails outright when there is
+        nothing to abort — e.g. the pick was refused up front, or the
+        sequencer state was already cleared.  Its return code must not
+        be discarded: on failure the main tree can be left with a
+        partially-applied index while the caller reports
+        :attr:`MergeResult.CONFLICT`, and ``_do_merge`` deliberately
+        does not pop the user's stash on CONFLICT because it assumes
+        the tree is clean enough for a manual merge.
+
+        When the abort fails AND the tree no longer matches *before*,
+        the sequencer state is discarded (``--quit``) and the tree is
+        reset — the same guarantee :meth:`squash_merge_branch` already
+        gives on its conflict path.  When nothing changed there is
+        nothing to undo, so the user's own uncommitted work is left
+        exactly as it was.
+
+        Args:
+            repo: Git repo root path.
+            before: ``status_porcelain`` output captured immediately
+                before the cherry-pick.
+        """
+        if _git("cherry-pick", "--abort", cwd=repo).returncode == 0:
+            return
+        if GitWorktreeOps.status_porcelain(repo) == before:
+            return
+        logger.warning(
+            "cherry-pick --abort failed and the tree changed; "
+            "discarding sequencer state and resetting %s", repo,
+        )
+        _git("cherry-pick", "--quit", cwd=repo)
+        _git("reset", "--hard", "HEAD", cwd=repo)
+
+    @staticmethod
     def cleanup_partial(repo: Path, branch: str, wt_dir: Path) -> None:
         """Remove a partially-created worktree and branch (best-effort).
+
+        No explicit ``prune`` is issued: :meth:`remove` already prunes
+        on every path that can leave a stale registration behind, and
+        a successful ``git worktree remove`` unregisters the worktree
+        itself.
 
         Args:
             repo: Git repo root path.
@@ -1437,7 +1556,6 @@ class GitWorktreeOps:
             wt_dir: The worktree directory to remove.
         """
         GitWorktreeOps.remove(repo, wt_dir)
-        GitWorktreeOps.prune(repo)
         GitWorktreeOps.delete_branch(repo, branch)
 
     @staticmethod
@@ -1453,15 +1571,8 @@ class GitWorktreeOps:
         Returns:
             Set of branch names, empty if the listing fails.
         """
-        result = _git("worktree", "list", "--porcelain", cwd=repo)
-        if result.returncode != 0:  # pragma: no cover — git failure
-            return set()
-        prefix = "branch refs/heads/"
-        return {
-            line[len(prefix):].strip()
-            for line in result.stdout.splitlines()
-            if line.startswith(prefix)
-        }
+        return {branch for _wt_dir, branch in
+                GitWorktreeOps.registered_worktrees(repo)}
 
     @staticmethod
     def _config_branch_sections(repo: Path) -> set[str]:
@@ -1477,16 +1588,23 @@ class GitWorktreeOps:
             Set of ``kiss/wt-*`` branch names present in git config.
         """
         prefix = "branch."
-        result = _git("config", "--get-regexp", rf"^{prefix}kiss/wt-", cwd=repo)
+        result = _git(
+            "config", "-z", "--get-regexp", rf"^{prefix}kiss/wt-", cwd=repo,
+        )
         if result.returncode != 0:
             # git config exits 1 when the regexp matches nothing.
             return set()
-        # Each line is "branch.<name>.<setting> <value>"; strip the
-        # known prefix off the front and the setting off the tail.
-        return {
-            line.split(" ", 1)[0][len(prefix):].rpartition(".")[0]
-            for line in result.stdout.splitlines()
-        }
+        # ``-z`` emits one NUL-terminated "<key>\n<value>" record per
+        # match.  Splitting the raw output on newlines instead would
+        # turn a multi-line config value (git stores those verbatim)
+        # into bogus extra "branch names".
+        names: set[str] = set()
+        for record in result.stdout.split("\0"):
+            if not record:
+                continue
+            key = record.split("\n", 1)[0]
+            names.add(key[len(prefix):].rpartition(".")[0])
+        return names
 
     @staticmethod
     def _branch_is_expendable(repo: Path, branch: str) -> bool:
@@ -1582,6 +1700,13 @@ class GitWorktreeOps:
         Detached-HEAD worktrees are skipped because they have no
         branch name to reclaim by.
 
+        Worktree paths are emitted verbatim by git, so the output is
+        split on ``"\\n"`` only and the path tail is never stripped:
+        ``splitlines()`` would also break on ``\\v``/``\\f``/``\\x85``/
+        ``\\u2028``, and ``strip()`` would silently rewrite a directory
+        whose name ends in a space into a DIFFERENT existing path —
+        which :meth:`remove`'s ``rmtree`` fallback would then delete.
+
         Args:
             repo: Git repo root path.
 
@@ -1595,14 +1720,15 @@ class GitWorktreeOps:
         pairs: list[tuple[Path, str]] = []
         cur_dir: Path | None = None
         cur_branch: str | None = None
-        for raw in result.stdout.splitlines():
+        for line in result.stdout.split("\n"):
+            raw = line[:-1] if line.endswith("\r") else line
             if raw.startswith("worktree "):
                 if cur_dir is not None and cur_branch is not None:
                     pairs.append((cur_dir, cur_branch))
-                cur_dir = Path(raw[len("worktree "):].strip())
+                cur_dir = Path(raw[len("worktree "):])
                 cur_branch = None
             elif raw.startswith("branch refs/heads/"):
-                cur_branch = raw[len("branch refs/heads/"):].strip()
+                cur_branch = raw[len("branch refs/heads/"):]
         if cur_dir is not None and cur_branch is not None:
             pairs.append((cur_dir, cur_branch))
         return pairs
@@ -1749,7 +1875,10 @@ class GitWorktreeOps:
                     )
                     continue
                 if GitWorktreeOps.has_uncommitted_changes(wt_dir):
-                    GitWorktreeOps.stage_all(wt_dir)
+                    # ``commit_all`` stages first; an extra
+                    # ``stage_all`` here would run a second full
+                    # ``git add -A`` index scan and widen the window
+                    # in which a late-arriving file is staged.
                     GitWorktreeOps.commit_all(
                         wt_dir, "kiss: reclaim orphan worktree",
                     )
@@ -1795,8 +1924,6 @@ class GitWorktreeOps:
                         wt_dir, original_branch, result.value,
                     )
                     continue
-                GitWorktreeOps.remove(repo, wt_dir)
-                GitWorktreeOps.prune(repo)
-                GitWorktreeOps.delete_branch(repo, branch)
+                GitWorktreeOps.cleanup_partial(repo, branch, wt_dir)
                 reclaimed += 1
         return reclaimed

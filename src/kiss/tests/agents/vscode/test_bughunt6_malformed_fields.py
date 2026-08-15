@@ -15,7 +15,7 @@ values:
 
 * ``run``/``userAnswer``/``appendUserMessage``/``selectModel``/
   ``complete``/``closeTab``/``newChat``/``stop``/``getAdjacentTask``/
-  ``mergeAction``/``getFiles`` with a list ``tabId``/``workDir``:
+  ``getFiles`` with a list ``tabId``/``workDir``:
   ``TypeError: unhashable type`` out of a registry/dict lookup.
 * ``selectModel`` with a list ``model``: corrupted
   ``tab.selected_model`` / ``self._default_model`` to a list FIRST,
@@ -55,7 +55,7 @@ from typing import Any
 import pytest
 
 from kiss.agents.sorcar.persistence import _close_db
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -114,7 +114,7 @@ class TestMalformedFields(unittest.TestCase):
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def test_nonstring_tab_id_does_not_raise(self) -> None:
         payloads = [
@@ -127,13 +127,16 @@ class TestMalformedFields(unittest.TestCase):
             {"type": "newChat", "tabId": [1]},
             {"type": "stop", "tabId": [1]},
             {"type": "getAdjacentTask", "tabId": [1]},
-            {"type": "mergeAction", "action": "all-done", "tabId": [1]},
+            {"type": "worktreeAction", "action": "discard", "tabId": [1]},
             {"type": "resumeSession", "chatId": "c", "tabId": [1]},
         ]
         for p in payloads:
             self.server._handle_command(dict(p))
-        for key in _RunningAgentState.running_agent_states:
+        for key, state in agent_state.agent_states.items():
             assert isinstance(key, str), f"non-string registry key {key!r}"
+            assert isinstance(state.tab_id, str), (
+                f"non-string state tab_id {state.tab_id!r}"
+            )
 
     def test_nonstring_model_does_not_corrupt_default(self) -> None:
         before = self.server._default_model
@@ -143,10 +146,10 @@ class TestMalformedFields(unittest.TestCase):
         assert self.server._default_model == before, (
             f"_default_model corrupted to {self.server._default_model!r}"
         )
-        tab = _RunningAgentState.running_agent_states.get("t1")
-        if tab is not None:
-            assert isinstance(tab.selected_model, str), (
-                f"selected_model corrupted to {tab.selected_model!r}"
+        tab_model = self.server._tab_models.get("t1")
+        if tab_model is not None:
+            assert isinstance(tab_model, str), (
+                f"selected model corrupted to {tab_model!r}"
             )
 
     def test_nonstring_work_dir_does_not_corrupt_state(self) -> None:

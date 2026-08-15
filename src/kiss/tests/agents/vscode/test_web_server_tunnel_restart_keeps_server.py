@@ -35,6 +35,7 @@ from kiss.server.web_server import (
     _TUNNEL_UNHEALTHY_LIMIT_QUICK,
     RemoteAccessServer,
 )
+from kiss.tests.agents.vscode._ntfy_emulator import unroutable_base_url
 
 
 def _free_port() -> int:
@@ -56,6 +57,7 @@ class TestTunnelRestartKeepsServer(IsolatedAsyncioTestCase):
             use_tunnel=False,
             url_file=tmp / "remote-url.json",
             uds_path=tmp / "sorcar.sock",
+            ntfy_base_url=unroutable_base_url(),
         )
         await self.server._setup_server()
         for task in (

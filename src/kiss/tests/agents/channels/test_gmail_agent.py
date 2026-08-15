@@ -238,7 +238,6 @@ class TestGmailAgent:
 
     def test_check_auth_unauthenticated_no_creds_file(self) -> None:
         agent = GmailAgent()
-        agent.web_use_tool = None
         tools = agent._get_tools()
         check = next(t for t in tools if t.__name__ == "check_gmail_auth")
         result = check()
@@ -250,7 +249,6 @@ class TestGmailAgent:
         cp.parent.mkdir(parents=True, exist_ok=True)
         cp.write_text(json.dumps({"installed": {"client_id": "fake"}}))
         agent = GmailAgent()
-        agent.web_use_tool = None
         tools = agent._get_tools()
         check = next(t for t in tools if t.__name__ == "check_gmail_auth")
         result = check()
@@ -259,7 +257,6 @@ class TestGmailAgent:
 
     def test_authenticate_no_creds_file(self) -> None:
         agent = GmailAgent()
-        agent.web_use_tool = None
         tools = agent._get_tools()
         auth = next(t for t in tools if t.__name__ == "authenticate_gmail")
         result = auth()
@@ -270,7 +267,6 @@ class TestGmailAgent:
         tp.parent.mkdir(parents=True, exist_ok=True)
         tp.write_text("{}")
         agent = GmailAgent()
-        agent.web_use_tool = None
         tools = agent._get_tools()
         clear = next(t for t in tools if t.__name__ == "clear_gmail_auth")
         result = clear()
@@ -280,7 +276,6 @@ class TestGmailAgent:
 
     def test_clear_auth_when_not_authenticated(self) -> None:
         agent = GmailAgent()
-        agent.web_use_tool = None
         tools = agent._get_tools()
         clear = next(t for t in tools if t.__name__ == "clear_gmail_auth")
         result = clear()
@@ -289,7 +284,6 @@ class TestGmailAgent:
     def test_check_auth_with_invalid_token(self) -> None:
         """check_gmail_auth with an invalid token returns an error."""
         agent = GmailAgent()
-        agent.web_use_tool = None
         agent._backend = _make_error_backend()
         tools = agent._get_tools()
         check = next(t for t in tools if t.__name__ == "check_gmail_auth")

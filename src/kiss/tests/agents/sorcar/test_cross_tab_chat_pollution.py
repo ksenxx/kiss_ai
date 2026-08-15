@@ -45,6 +45,8 @@ import json
 import threading
 from typing import Any
 
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
 from kiss.server.web_server import WebPrinter
 
@@ -105,13 +107,18 @@ class TestCrossTabChatPollution:
         server, printer = _make_server()
 
         printer.subscribe_tab("200", "tabB")
-        server._get_tab("tabB").task_history_id = "200"
+        try:
+            agent_state.register(AgentState(
+                "200", tab_id="tabB", server_owned=True, is_task_active=True,
+            ))
 
-        server._run_task_inner({
-            "tabId": "tabA",
-            "prompt": "hello",
-            "model": "__definitely_not_a_real_model__",
-        })
+            server._run_task_inner({
+                "tabId": "tabA",
+                "prompt": "hello",
+                "model": "__definitely_not_a_real_model__",
+            })
+        finally:
+            agent_state.agent_states.clear()
 
         results = [e for e in printer.sent if e.get("type") == "result"]
         assert results, "Expected a no-model result broadcast for tabA"
@@ -139,13 +146,18 @@ class TestCrossTabChatPollution:
         server, printer = _make_server()
 
         printer.subscribe_tab("200", "tabB")
-        server._get_tab("tabB").task_history_id = "200"
+        try:
+            agent_state.register(AgentState(
+                "200", tab_id="tabB", server_owned=True, is_task_active=True,
+            ))
 
-        server._run_task_inner({
-            "tabId": "tabA",
-            "prompt": "hello",
-            "model": "__definitely_not_a_real_model__",
-        })
+            server._run_task_inner({
+                "tabId": "tabA",
+                "prompt": "hello",
+                "model": "__definitely_not_a_real_model__",
+            })
+        finally:
+            agent_state.agent_states.clear()
 
         leaked = [
             e

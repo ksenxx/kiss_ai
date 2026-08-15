@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Nostr Agent — SorcarAgent extension with Nostr protocol tools.
+"""Nostr Agent — channel agent with Nostr protocol tools.
 
 Provides access to the Nostr decentralized protocol via pynostr.
 Stores config in ``~/.kiss/third_party_agents/nostr/config.json``.
@@ -20,7 +20,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -73,16 +72,6 @@ class NostrChannelBackend(ToolMethodBackend):
     def send_message(self, channel_id: str, text: str, thread_ts: str = "") -> None:
         """Publish a Nostr note."""
         self.publish_note(text)
-
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Reply waiting is not currently supported for Nostr."""
-        return None
 
     def is_from_bot(self, msg: dict[str, Any]) -> bool:
         """Check if event is from this key."""
@@ -269,8 +258,8 @@ class NostrChannelBackend(ToolMethodBackend):
         return json.dumps({"ok": True, "relays": self._relays})
 
 
-class NostrAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with Nostr protocol tools."""
+class NostrAgent(BaseChannelAgent):
+    """Channel agent with Nostr protocol tools."""
 
     def __init__(self) -> None:
         super().__init__("Nostr Agent")
@@ -375,6 +364,17 @@ class NostrAgent(BaseChannelAgent, SorcarAgent):
 def main() -> None:
     """Run the NostrAgent from the command line with chat persistence."""
     channel_main(NostrAgent, "kiss-nostr")
+
+
+def get_tools() -> list:
+    """Return the Nostr channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return NostrAgent()._get_tools()
 
 
 if __name__ == "__main__":

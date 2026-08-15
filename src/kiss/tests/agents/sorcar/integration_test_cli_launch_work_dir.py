@@ -2,16 +2,17 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end integration tests for the sorcar CLI launch ``work_dir``.
+"""End-to-end integration tests for the agent launch ``work_dir``.
 
-The installed ``sorcar`` wrapper at ``~/.local/bin/sorcar`` runs
-``uv run --directory <bundled_kiss_project> sorcar ...``.  uv's
+Wrapper scripts that launch agent entry points (e.g. the channel
+agents' ``kiss-slack`` / ``kiss-gmail`` console scripts) may run
+``uv run --directory <bundled_kiss_project> ...``.  uv's
 ``--directory`` flag changes the *child* process working directory to
-the bundled project before the CLI starts, so the CLI's
+the bundled project before the entry point starts, so
 :func:`pathlib.Path.cwd` no longer reflects the user's shell
-directory.  The wrapper captures the original ``$PWD`` in the
-``KISS_WORKDIR`` environment variable and the CLI must default the
-task ``work_dir`` to that value.
+directory.  Such a wrapper captures the original ``$PWD`` in the
+``KISS_WORKDIR`` environment variable and the argument parser must
+default the task ``work_dir`` to that value.
 
 These tests reproduce the wrapper scenario end-to-end by spawning a
 real child Python interpreter whose:
@@ -20,10 +21,10 @@ real child Python interpreter whose:
   ``uv run --directory <kiss_project>`` chdir),
 * environment carries ``KISS_WORKDIR=<user_shell_dir>``,
 
-and then asserting that the CLI argument parser resolves
-``--work_dir`` to the user's shell directory rather than the chdir'd
-project directory.  Without the launch-dir capture in
-:func:`kiss.agents.sorcar.cli_helpers._launch_work_dir`, the parser
+and then asserting that the argument parser resolves ``--work_dir``
+to the user's shell directory rather than the chdir'd project
+directory.  Without the launch-dir capture in
+:func:`kiss.agents.third_party_agents._channel_cli._launch_work_dir`, the parser
 would return the bundled-project path instead and break every task
 run by the wrapper.
 """
@@ -38,7 +39,7 @@ from pathlib import Path
 
 _PROBE_SOURCE = textwrap.dedent(
     """
-    from kiss.agents.sorcar.cli_helpers import (
+    from kiss.agents.third_party_agents._channel_cli import (
         _build_arg_parser,
         _build_run_kwargs,
     )
@@ -90,11 +91,12 @@ def test_cli_defaults_work_dir_to_user_shell_via_kiss_workdir(
 ) -> None:
     """Mimic the installed wrapper: child cwd != user shell, ``KISS_WORKDIR`` set.
 
-    Reproduces the scenario the user hits when invoking the installed
-    ``sorcar`` script: the wrapper exports ``KISS_WORKDIR="$PWD"`` and
-    then ``uv run --directory <kiss_project>`` chdirs the child into
-    the bundled project.  The CLI must still default ``work_dir`` to
-    the user's shell directory, not the bundled project directory.
+    Reproduces the scenario the user hits when invoking an installed
+    channel-agent wrapper (e.g. ``kiss-slack``): the wrapper exports
+    ``KISS_WORKDIR="$PWD"`` and then ``uv run --directory
+    <kiss_project>`` chdirs the child into the bundled project.  The
+    argument parser must still default ``work_dir`` to the user's
+    shell directory, not the bundled project directory.
     """
     user_shell_dir = tmp_path / "user_shell"
     user_shell_dir.mkdir()
@@ -169,7 +171,7 @@ def test_explicit_w_flag_still_overrides_launch_dir(tmp_path: Path) -> None:
     env["KISS_WORKDIR"] = str(user_shell_dir)
     source = textwrap.dedent(
         f"""
-        from kiss.agents.sorcar.cli_helpers import (
+        from kiss.agents.third_party_agents._channel_cli import (
             _build_arg_parser,
             _build_run_kwargs,
         )

@@ -109,10 +109,8 @@ class _UpdateCheckTestBase(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect_persistence(self.tmpdir)
-        self._orig_grace = ws._TAB_CLOSE_GRACE
         self._orig_url = ws._PYPI_LATEST_URL
         self._orig_interval = ws._VERSION_CHECK_INTERVAL
-        ws._TAB_CLOSE_GRACE = 0.05
         ws._VERSION_CHECK_INTERVAL = 0.2
 
         self.pypi = _PypiStub(self.PYPI_PAYLOAD, status=self.PYPI_STATUS)
@@ -136,7 +134,6 @@ class _UpdateCheckTestBase(IsolatedAsyncioTestCase):
         await self.server.start_async()
 
     async def asyncTearDown(self) -> None:
-        ws._TAB_CLOSE_GRACE = self._orig_grace
         ws._PYPI_LATEST_URL = self._orig_url
         ws._VERSION_CHECK_INTERVAL = self._orig_interval
         await self.server.stop_async()

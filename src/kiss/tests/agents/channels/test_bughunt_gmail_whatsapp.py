@@ -185,24 +185,6 @@ class TestWhatsAppPollMessages:
             thief.join(timeout=5.0)
 
 
-class TestWhatsAppWaitForReply:
-    """wait_for_reply must use safe draining and match the expected sender."""
-
-    def test_wait_for_reply_returns_matching_text(self) -> None:
-        backend = WhatsAppChannelBackend()
-        backend._message_queue.put(
-            {"from": "999", "id": "m1", "timestamp": "1", "type": "text", "text": {"body": "yes"}}
-        )
-        assert backend.wait_for_reply("", "", "999", timeout_seconds=3.0) == "yes"
-
-    def test_wait_for_reply_times_out_without_match(self) -> None:
-        backend = WhatsAppChannelBackend()
-        backend._message_queue.put(
-            {"from": "888", "id": "m1", "timestamp": "1", "type": "text", "text": {"body": "no"}}
-        )
-        assert backend.wait_for_reply("", "", "999", timeout_seconds=0.2) is None
-
-
 class TestGmailOAuthFlow:
     """Bug (A): headless OAuth flow must not call the removed run_console()."""
 

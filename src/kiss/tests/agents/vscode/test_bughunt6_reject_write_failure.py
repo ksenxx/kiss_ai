@@ -2,32 +2,21 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Bug-hunt 6: a failing reject write must not kill the client connection.
+"""Bug-hunt 6: a malformed client field must not kill the connection.
 
-``_reject_hunk_in_file``'s final ``open(write_to, "w")`` (and
-``_restore_base_bytes``'s ``write_bytes``) can raise ``OSError`` — the
-canonical real-world trigger is the agent deleting a tracked file and
-creating a DIRECTORY at the same path: the merge view lists the file
-as deleted (with a ``.deleted`` placeholder as ``current``), and the
-user rejecting that deletion makes the server try to write the
-restored content to a path that is now a directory
-(``IsADirectoryError``).
+The websocket handler's message loop wraps dispatch in one ``except
+Exception``; before the fix, ANY malformed client field that raises
+(e.g. an unhashable ``tabId``) EXITED the loop and tore down the whole
+authenticated WebSocket connection over a single bad message.
 
-Before the fix the exception propagated out of
-``_apply_web_merge_action`` → ``_handle_web_merge_action`` →
-``_dispatch_client_command`` → the ``_ws_handler`` message loop's
-``except Exception``, which EXITED the loop: the whole authenticated
-WebSocket connection was torn down over one failed hunk rejection, the
-``finally`` block armed deferred ``closeTab`` timers for every tab the
-connection had touched, and after the grace window the in-flight
-review was force-finished (all-done = accept remaining) and the tab
-closed — silently accepting changes the user was actively rejecting.
-
-The same unguarded dispatch also let ANY malformed client field that
-raises (e.g. an unhashable ``tabId``) kill the connection.
+Historically this file also reproduced the same connection-teardown
+bug through failing hunk-reject writes in the interactive diff/merge
+review; that review workflow (``mergeAction``, ``_merge_states``,
+``web_merge.py``) has been removed from the server, so only the
+malformed-field reproduction remains.
 
 These tests use a real ``RemoteAccessServer`` with real wss://
-connections and real files on disk — no mocks.
+connections — no mocks.
 """
 
 from __future__ import annotations
@@ -41,7 +30,6 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from typing import Any
 from unittest import IsolatedAsyncioTestCase
 
 from websockets.asyncio.client import ClientConnection, connect
@@ -86,49 +74,8 @@ def _no_verify_ssl() -> ssl.SSLContext:
     return ctx
 
 
-def _deleted_file_entry(work: Path, name: str) -> dict[str, Any]:
-    """Build a merge entry for a tracked file the agent deleted.
-
-    Mirrors ``_prepare_merge_view``: ``current`` is an empty
-    ``.deleted`` placeholder, ``target`` is the real workspace path,
-    ``base`` holds the pre-task content, and the single hunk is the
-    whole-file deletion.  The caller decides what (if anything) sits
-    at the target path on disk.
-    """
-    merge_tmp = work / "merge-temp"
-    placeholder = merge_tmp / ".deleted" / name
-    placeholder.parent.mkdir(parents=True, exist_ok=True)
-    placeholder.write_text("")
-    base = merge_tmp / name
-    base.parent.mkdir(parents=True, exist_ok=True)
-    base.write_text("alpha\nbeta\n")
-    return {
-        "name": name,
-        "current": str(placeholder),
-        "base": str(base),
-        "target": str(work / name),
-        "hunks": [{"bs": 0, "bc": 2, "cs": 0, "cc": 0}],
-    }
-
-
-def _modified_file_entry(work: Path, name: str) -> dict[str, Any]:
-    """Build a merge entry for a normally-modified text file."""
-    current = work / name
-    base = work / f"{name}.base"
-    lines = "".join(f"line{i}\n" for i in range(8))
-    current.write_text(lines.replace("line2\n", "edit2\n"))
-    base.write_text(lines)
-    return {
-        "name": name,
-        "current": str(current),
-        "base": str(base),
-        "target": str(current),
-        "hunks": [{"bs": 2, "bc": 1, "cs": 2, "cc": 1}],
-    }
-
-
-class TestRejectWriteFailure(IsolatedAsyncioTestCase):
-    """A failed reject write must degrade gracefully, never drop the client."""
+class TestMalformedFieldConnectionRobustness(IsolatedAsyncioTestCase):
+    """A malformed client field must degrade gracefully, never drop the client."""
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-bughunt6-rejfail-")
@@ -179,34 +126,6 @@ class TestRejectWriteFailure(IsolatedAsyncioTestCase):
         self.assertEqual(resp["type"], "auth_ok")
         return ws
 
-    def _open_review(self, tab_id: str, files: list[dict[str, Any]]) -> None:
-        """Register an in-flight review through the real broadcast path."""
-        merge_data = {"work_dir": self.tmpdir, "files": files}
-        hunk_count = sum(len(f["hunks"]) for f in files)
-        self.server._printer.broadcast({
-            "type": "merge_data",
-            "tabId": tab_id,
-            "data": merge_data,
-            "hunk_count": hunk_count,
-        })
-        with self.server._merge_states_lock:
-            self.assertIn(tab_id, self.server._merge_states)
-
-    async def _collect_events(
-        self, ws: ClientConnection, timeout: float,
-    ) -> list[dict[str, Any]]:
-        """Drain events from *ws* for *timeout* seconds."""
-        got: list[dict[str, Any]] = []
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            remaining = max(0.05, deadline - time.monotonic())
-            try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
-            except TimeoutError:
-                break
-            got.append(json.loads(raw))
-        return got
-
     async def _assert_connection_alive(self, ws: ClientConnection) -> None:
         """Probe liveness: an activeTasksQuery must get a direct reply."""
         await ws.send(json.dumps({"type": "activeTasksQuery"}))
@@ -217,96 +136,6 @@ class TestRejectWriteFailure(IsolatedAsyncioTestCase):
             if ev.get("type") == "activeTasksResponse":
                 return
         self.fail("no activeTasksResponse received")  # pragma: no cover
-
-    async def test_reject_on_dir_target_keeps_connection_and_review(self) -> None:
-        """Rejecting a deletion whose target is now a directory must not
-        kill the connection, must surface an error event, and must leave
-        the hunk unresolved (the write did not happen)."""
-        tab_id = "tab-rej-dir"
-        work = Path(self.tmpdir) / "work-rej-dir"
-        work.mkdir()
-        entry = _deleted_file_entry(work, "cfg")
-        (work / "cfg").mkdir()
-        (work / "cfg" / "inner.txt").write_text("x\n")
-        self._open_review(tab_id, [entry])
-
-        ws = await self._connect_ok()
-        await ws.send(json.dumps({
-            "type": "mergeAction", "action": "reject", "tabId": tab_id,
-        }))
-        events = await self._collect_events(ws, timeout=2.0)
-
-        try:
-            await self._assert_connection_alive(ws)
-        except Exception as exc:  # noqa: BLE001 — turn closure into a failure
-            self.fail(
-                "BUG: a failed reject write killed the whole WebSocket "
-                f"connection ({type(exc).__name__}: {exc})",
-            )
-
-        error_events = [e for e in events if e.get("type") == "error"]
-        self.assertTrue(
-            error_events,
-            f"no error event broadcast for the failed reject: {events}",
-        )
-
-        with self.server._merge_states_lock:
-            state = self.server._merge_states.get(tab_id)
-        self.assertIsNotNone(state, "merge state must survive the failure")
-        assert state is not None
-        self.assertEqual(state.remaining, 1)
-        self.assertEqual(state.resolutions(), [])
-        self.assertTrue((work / "cfg").is_dir())
-        self.assertEqual((work / "cfg" / "inner.txt").read_text(), "x\n")
-
-    async def test_reject_all_partial_failure_keeps_good_file_and_review(
-        self,
-    ) -> None:
-        """reject-all with one restorable and one unrestorable file must
-        restore the good file, report the bad one, and keep its hunk
-        unresolved instead of dying mid-way / zombifying the review."""
-        tab_id = "tab-rejall-dir"
-        work = Path(self.tmpdir) / "work-rejall-dir"
-        work.mkdir()
-        good = _modified_file_entry(work, "good.txt")
-        bad = _deleted_file_entry(work, "cfg")
-        (work / "cfg").mkdir()
-        (work / "cfg" / "inner.txt").write_text("x\n")
-        self._open_review(tab_id, [bad, good])
-
-        ws = await self._connect_ok()
-        await ws.send(json.dumps({
-            "type": "mergeAction", "action": "reject-all", "tabId": tab_id,
-        }))
-        events = await self._collect_events(ws, timeout=2.0)
-
-        try:
-            await self._assert_connection_alive(ws)
-        except Exception as exc:  # noqa: BLE001
-            self.fail(
-                "BUG: a failed reject-all write killed the whole "
-                f"WebSocket connection ({type(exc).__name__}: {exc})",
-            )
-
-        self.assertEqual(
-            (work / "good.txt").read_text(),
-            "".join(f"line{i}\n" for i in range(8)),
-            "restorable file must be reverted even when a sibling fails",
-        )
-        error_events = [e for e in events if e.get("type") == "error"]
-        self.assertTrue(
-            error_events,
-            f"no error event broadcast for the failed reject-all: {events}",
-        )
-        with self.server._merge_states_lock:
-            state = self.server._merge_states.get(tab_id)
-        self.assertIsNotNone(state, "merge state must survive the failure")
-        assert state is not None
-        self.assertEqual(state.remaining, 1)
-        statuses = {
-            (r["fi"], r["hi"]): r["status"] for r in state.resolutions()
-        }
-        self.assertEqual(statuses, {(1, 0): "rejected"})
 
     async def test_unhashable_tab_id_does_not_kill_connection(self) -> None:
         """A malformed client field that raises (unhashable tabId) must be

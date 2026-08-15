@@ -197,7 +197,7 @@ class TestD2SourceShellEnvRcExitStatus:
 
 class TestD3TempFileLeaks:
     def test_save_config_replace_failure_leaves_no_temp(self) -> None:
-        """A failing ``os.replace`` must unlink the ``.kiss-config-*`` file."""
+        """A failing ``os.replace`` must unlink the ``.config.json-*`` file."""
         cfg_dir = vc.CONFIG_DIR
         cfg_path = vc.CONFIG_PATH
         original = cfg_path.read_bytes() if cfg_path.is_file() else None
@@ -211,7 +211,7 @@ class TestD3TempFileLeaks:
             leftovers = sorted(
                 p.name
                 for p in cfg_dir.iterdir()
-                if p.name.startswith(".kiss-config-")
+                if p.name.startswith((".kiss-config-", f".{cfg_path.name}-"))
             )
             assert leftovers == [], (
                 f"staging temp files leaked into {cfg_dir}: {leftovers}"

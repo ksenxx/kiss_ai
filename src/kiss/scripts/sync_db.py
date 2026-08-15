@@ -45,9 +45,15 @@ Both databases must have the same columns for the two tables; a mismatch
 is refused rather than half-applied.
 
 A ``task_history`` row that exists on both sides is updated from SOURCE
-unless TARGET's copy is further along (a larger ``steps``, ``tokens``,
-``cost`` or ``end_ts``), which stops a stale SOURCE from clobbering a
-run that progressed on TARGET.  ``--force`` always takes SOURCE's row,
+only when SOURCE's copy actually carried the task further: no smaller
+``steps``, ``tokens``, ``cost`` or ``end_ts``, and at least one of them
+larger.  That stops a stale SOURCE from clobbering a run that progressed
+on TARGET, and -- because the two databases sync in both directions --
+it also stops a row that merely *differs* from overwriting whatever the
+receiving machine has recorded about the same task since.  The two
+columns that a user or a later event sets on their own, ``is_favorite``
+and ``has_events``, are merged rather than copied: once either side has
+them set, both do.  ``--force`` always takes SOURCE's row as it stands,
 ``--insert-only`` never updates an existing row.
 
 The remote side runs this very file through ``ssh <host> python3 -c
@@ -94,6 +100,10 @@ EVENT_TABLE = "events"
 # Columns of the task table that only ever grow while a task runs; used
 # to decide whether SOURCE's copy of a task supersedes TARGET's copy.
 MONOTONE_COLUMNS = ("steps", "tokens", "cost", "end_ts")
+# Columns that are set independently of a task's progress -- by the user
+# marking a task a favourite, and by the first event a task emits -- and
+# that are therefore merged into the target rather than copied over it.
+STICKY_COLUMNS = ("is_favorite", "has_events")
 # Where each table's column list lives in the manifest.
 MANIFEST_COLUMN_KEYS = {TASK_TABLE: "task_columns", EVENT_TABLE: "event_columns"}
 COPY_BUFFER = 1 << 20
@@ -765,35 +775,129 @@ def _merge_tasks(conn: sqlite3.Connection, mode: str) -> tuple[int, int]:
     if mode == MODE_INSERT_ONLY or not updatable:
         sql += ' ON CONFLICT("id") DO NOTHING'
     else:
-        assignments = ", ".join(
-            f"{quote_name(c)} = excluded.{quote_name(c)}" for c in updatable
-        )
+        assignments = ", ".join(_assignment(c, mode) for c in updatable)
         sql += f' ON CONFLICT("id") DO UPDATE SET {assignments}'
         if mode != MODE_FORCE:
             sql += " WHERE " + _supersedes_clause(columns)
     before = _count(conn, "main", TASK_TABLE)
     changed = conn.execute(sql).rowcount
     inserted = _count(conn, "main", TASK_TABLE) - before
-    return inserted, max(changed - inserted, 0)
+    updated = max(changed - inserted, 0)
+    if mode == MODE_DEFAULT:
+        updated += _raise_sticky_columns(conn, columns)
+    return inserted, updated
+
+
+def _raise_sticky_columns(conn: sqlite3.Connection, columns: list[str]) -> int:
+    """Carry a set ``is_favorite`` or ``has_events`` flag over to the target.
+
+    These two columns are not progress: the user marks a favourite
+    whenever they like, and the flag saying a task has events is set by
+    the first event it emits.  A row that is otherwise not further along
+    -- the usual case for two copies of a finished task -- does not get
+    to overwrite the target's row, so the flags are raised here instead.
+    Only raised, never cleared: once either machine has one set, both do.
+
+    All the flags are raised by a single statement, so a row counts once
+    however many of them rose, and a column the incoming row does not
+    raise is not written at all.
+
+    Args:
+        conn: Target connection with the delta attached as ``delta``.
+        columns: Columns of the target's task table.
+
+    Returns:
+        The number of rows whose flags were raised.
+    """
+    table = quote_name(TASK_TABLE)
+    present = [c for c in STICKY_COLUMNS if c in columns]
+    if not present:
+        return 0
+    assignments, rose = [], []
+    for column in present:
+        name = quote_name(column)
+        incoming = (
+            f"(SELECT d.{name} FROM delta.{table} d"
+            f' WHERE d."id" = main.{table}."id")'
+        )
+        larger = f"COALESCE({incoming}, 0) > COALESCE({name}, 0)"
+        assignments.append(f"{name} = CASE WHEN {larger} THEN {incoming} ELSE {name} END")
+        rose.append(larger)
+    return int(
+        conn.execute(
+            f"UPDATE main.{table} SET {', '.join(assignments)}"
+            f" WHERE {' OR '.join(rose)}"
+        ).rowcount
+    )
+
+
+def _assignment(column: str, mode: str) -> str:
+    """Build one ``SET`` assignment of the conflict update.
+
+    Args:
+        column: Column being written.
+        mode: ``default``, ``force`` or ``insert-only``.
+
+    Returns:
+        An SQL assignment: the source's value, or the larger of the two
+        values for a sticky column, which is how a favourite marked on
+        one machine survives a row arriving from the other.
+    """
+    name = quote_name(column)
+    if mode == MODE_FORCE or column not in STICKY_COLUMNS:
+        return f"{name} = excluded.{name}"
+    table = quote_name(TASK_TABLE)
+    return (
+        f"{name} = MAX(COALESCE(excluded.{name}, 0),"
+        f" COALESCE({table}.{name}, 0))"
+    )
 
 
 def _supersedes_clause(columns: list[str]) -> str:
     """Build the guard that keeps a stale source row from winning.
 
+    A row is only allowed to overwrite the target's row when it carried
+    the task *further*: not behind on any of the columns that grow as a
+    task runs, and ahead on at least one of them.  A row that merely
+    differs -- same progress, some other column edited on the receiving
+    machine since -- leaves the target's row alone, which is what makes
+    syncing the same two databases in both directions non-destructive.
+
+    A table without any of those columns says nothing about which of two
+    copies of a task is the later one, so no copy is allowed to overwrite
+    the other; ``--force`` is how such a table is overwritten on purpose.
+
     Args:
         columns: Columns available on both sides of the merge.
 
     Returns:
-        An SQL boolean expression that is true when the incoming row is
-        at least as far along as the row already in the target.
+        An SQL boolean expression that is true when the incoming row
+        supersedes the row already in the target.
     """
-    table = quote_name(TASK_TABLE)
-    tests = [
-        f"COALESCE(excluded.{quote_name(c)}, 0) >= COALESCE({table}.{quote_name(c)}, 0)"
-        for c in MONOTONE_COLUMNS
-        if c in columns
-    ]
-    return " AND ".join(tests) if tests else "1"
+    present = [c for c in MONOTONE_COLUMNS if c in columns]
+    if not present:
+        return "0"
+    not_behind = " AND ".join(_compare_monotone(c, ">=") for c in present)
+    ahead = " OR ".join(_compare_monotone(c, ">") for c in present)
+    return f"({not_behind}) AND ({ahead})"
+
+
+def _compare_monotone(column: str, operator: str) -> str:
+    """Compare one column of the incoming task row with the target's.
+
+    Args:
+        column: Name of a column that grows as a task runs.
+        operator: SQL comparison operator, ``">="`` or ``">"``.
+
+    Returns:
+        An SQL boolean expression comparing the two values, treating a
+        missing value as zero on either side.
+    """
+    name = quote_name(column)
+    return (
+        f"COALESCE(excluded.{name}, 0) {operator}"
+        f" COALESCE({quote_name(TASK_TABLE)}.{name}, 0)"
+    )
 
 
 def _merge_events(conn: sqlite3.Connection) -> int:

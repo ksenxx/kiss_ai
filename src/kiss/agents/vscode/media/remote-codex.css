@@ -60,12 +60,10 @@ body.remote-chat {
   --chat-min-w: 360px;
 
   /*
-   * Settings drawer width on desktop — a narrow drawer instead of the
-   * 90vw mobile sheet.  The lower bound is the width the "Tips",
-   * "Git Commit", "Update" and "Reset Server" buttons of the settings
-   * form need to sit on ONE line with none of their labels wrapping:
-   * ~417px of buttons plus the panel's 2 x 16px padding, rounded up so
-   * platforms with wider font metrics (Segoe UI, Roboto) still fit.
+   * Settings drawer width on desktop — wide enough for the Tips,
+   * Update, and Reset Server actions to stay on one line across font
+   * metrics, while remaining a narrow drawer instead of the 90vw
+   * mobile sheet.
    */
   --settings-panel-w: 480px;
 
@@ -84,25 +82,14 @@ body.remote-chat.light-theme {
   --vscode-editor-background: #fff;
   --vscode-editor-foreground: #3b3b3b;
   --vscode-input-background: #fff;
-  --vscode-input-foreground: #3b3b3b;
-  --vscode-input-border: #cecece;
-  --vscode-focusBorder: #005fb8;
-  --vscode-button-background: #005fb8;
   --vscode-button-foreground: #fff;
-  --vscode-button-hoverBackground: #0258a8;
   --vscode-sideBar-background: #f8f8f8;
-  --vscode-list-hoverBackground: #f2f2f2;
-  --vscode-badge-background: #ccc;
-  --vscode-badge-foreground: #3b3b3b;
   --vscode-textLink-foreground: #005fb8;
   --vscode-descriptionForeground: #616161;
-  --vscode-editorWidget-background: #f8f8f8;
-  --vscode-editorWidget-border: #c8c8c8;
   --vscode-panel-border: #e5e5e5;
   --vscode-terminal-ansiRed: #cd3131;
   --vscode-terminal-ansiGreen: #107c10;
   --vscode-terminal-ansiYellow: #949800;
-  --vscode-terminal-ansiBlue: #0451a5;
   --vscode-terminal-ansiMagenta: #bc05bc;
   --vscode-terminal-ansiCyan: #0598bc;
   --accent: #005fb8;
@@ -111,7 +98,6 @@ body.remote-chat.light-theme {
   --yellow: #949800;
   --purple: #bc05bc;
   --cyan: #0598bc;
-  --blue: #0451a5;
   --orange: color-mix(in srgb, var(--yellow) 55%, var(--red));
   --bg: #fff;
   --bg2: #fff;

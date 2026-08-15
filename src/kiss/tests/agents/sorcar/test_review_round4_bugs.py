@@ -92,34 +92,6 @@ def test_resolve_task_id_returns_real_id_on_valid_match(temp_db: Path) -> None: 
     assert resolved == real_id
 
 
-def test_cli_printer_forwards_empty_taskid_global_event_to_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
-    from kiss.ui.cli import cli_daemon_bridge, cli_printer
-
-    captured: list[dict[str, object]] = []
-    monkeypatch.setattr(
-        cli_daemon_bridge,
-        "send_event",
-        lambda env: captured.append(env),
-    )
-    monkeypatch.setattr(
-        cli_daemon_bridge, "send_cli_task_start", lambda _tid: None,
-    )
-    monkeypatch.setattr(
-        cli_daemon_bridge, "send_cli_task_end", lambda _tid: None,
-    )
-
-    printer = cli_printer.RecordingConsolePrinter()
-    printer.broadcast({
-        "type": "new_tab",
-        "task_id": "a" * 32,
-        "parent_tab_id": "",
-        "taskId": "",
-    })
-    assert any(e.get("type") == "new_tab" for e in captured), (
-        "expected new_tab envelope to reach daemon despite empty taskId"
-    )
-
-
 def test_chat_sorcar_agent_has_per_instance_task_id_lock() -> None:
     import threading
 

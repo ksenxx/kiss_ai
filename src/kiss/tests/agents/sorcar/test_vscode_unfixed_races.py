@@ -16,7 +16,6 @@ the point: they prove the race exists.
 
 from __future__ import annotations
 
-import queue
 import threading
 import time
 import unittest
@@ -80,75 +79,6 @@ class TestStaleBashBroadcastAfterReset(unittest.TestCase):
             len(stale_recorded), 0,
             "Stale event should be discarded after reset — race fixed",
         )
-
-
-
-class TestDefaultModelNoLock(unittest.TestCase):
-    """_default_model write is now protected by _state_lock (fixed)."""
-
-
-    def test_concurrent_select_and_get_tab(self) -> None:
-        """Two threads: one selecting model, one creating a tab.
-
-        With the fix, both operations go through _state_lock so the
-        new tab always sees a consistent model value.
-        """
-        server = VSCodeServer()
-        with server._state_lock:
-            server._default_model = "old-model"
-        results: list[str] = []
-        barrier = threading.Barrier(2)
-
-        def select_model() -> None:
-            barrier.wait(timeout=2)
-            with server._state_lock:
-                server._default_model = "new-model"
-
-        def create_tab() -> None:
-            barrier.wait(timeout=2)
-            tab = server._get_tab("race-tab")
-            results.append(tab.selected_model)
-
-        t1 = threading.Thread(target=select_model)
-        t2 = threading.Thread(target=create_tab)
-        t1.start()
-        t2.start()
-        t1.join(timeout=2)
-        t2.join(timeout=2)
-
-        self.assertIn(results[0], ("old-model", "new-model"))
-
-
-class TestUserAnswerQueueStaleReference(unittest.TestCase):
-    """userAnswer handler reads queue without _state_lock."""
-
-    def test_answer_put_on_abandoned_queue(self) -> None:
-        """Answer is put on a queue after the task already finished.
-
-        Scenario:
-          1. Task starts, creates user_answer_queue
-          2. Task asks user a question (broadcasts askUser)
-          3. Main thread reads queue ref from tab (no lock)
-          4. Task thread's finally sets queue = None (under lock)
-          5. Main thread puts answer on the stale queue ref
-          6. Nobody reads the answer — it is lost
-        """
-        server = VSCodeServer()
-        tab_id = "answer-race"
-        tab = server._get_tab(tab_id)
-
-        answer_queue: queue.Queue[str] = queue.Queue(maxsize=1)
-        tab.user_answer_queue = answer_queue
-
-        q_ref = tab.user_answer_queue
-
-        with server._state_lock:
-            tab.user_answer_queue = None
-
-        q_ref.put("user's answer")
-
-        self.assertIsNone(tab.user_answer_queue)
-        self.assertEqual(q_ref.get_nowait(), "user's answer")
 
 
 

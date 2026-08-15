@@ -21,8 +21,6 @@ from kiss.core.models.model_info import (
     _apply_cache_pricing,
     _openai_cache_read_multiplier,
     calculate_cost,
-    get_flaky_reason,
-    is_model_flaky,
     model,
 )
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
@@ -162,13 +160,6 @@ class TestOpenAIModel:
 
 
 class TestModelInfo:
-    def test_is_model_flaky(self):
-        assert isinstance(is_model_flaky("gpt-4.1-mini"), bool)
-
-    def test_get_flaky_reason_for_non_flaky_model(self):
-        reason = get_flaky_reason("gpt-4.1-mini")
-        assert reason is None or reason == ""
-
     def test_all_models_have_valid_context_and_pricing(self):
         for name, info in MODEL_INFO.items():
             assert info.context_length > 0, f"{name}: invalid context_length"
@@ -210,6 +201,49 @@ class TestModelInfo:
         assert get_required_api_key_for_model("glm-4.5-flash") == "ZAI_API_KEY"
         assert get_required_api_key_for_model("kimi-k2.6") == "MOONSHOT_API_KEY"
         assert get_required_api_key_for_model("moonshot-v1-32k") == "MOONSHOT_API_KEY"
+
+    def test_native_provider_and_keyless_routing(self):
+        """The non-OpenAI-compatible branches route the same way ``model()`` does."""
+        from kiss.tests.conftest import get_required_api_key_for_model
+
+        assert get_required_api_key_for_model("claude-fable-5") == "ANTHROPIC_API_KEY"
+        assert get_required_api_key_for_model("gemini-3-pro") == "GEMINI_API_KEY"
+        # The subscription CLIs authenticate through a local executable,
+        # so a test asking for one must not be skipped for a missing key.
+        assert get_required_api_key_for_model("cc/opus-4-8") is None
+        assert get_required_api_key_for_model("codex/gpt-5.6-sol") is None
+        assert get_required_api_key_for_model("no-such-vendor/model") is None
+
+    def test_every_model_asks_for_its_own_provider_key(self):
+        """Every catalog entry's key must match the provider that routes it.
+
+        The skip decision in ``has_api_key_for_model`` is only as good as
+        this agreement: a vendor added to the routing registry with no
+        matching credential here would make its live tests run without
+        one (hanging on a 401) or skip when the key is present.
+        """
+        from kiss.core.models.model_info import get_model_provider
+        from kiss.tests.conftest import get_required_api_key_for_model
+
+        expected_by_provider = {
+            "OpenAI": "OPENAI_API_KEY",
+            "OpenRouter": "OPENROUTER_API_KEY",
+            "Together": "TOGETHER_API_KEY",
+            "Z.AI": "ZAI_API_KEY",
+            "Moonshot": "MOONSHOT_API_KEY",
+            "Anthropic": "ANTHROPIC_API_KEY",
+            "Gemini": "GEMINI_API_KEY",
+            "Claude Code CLI": None,
+            "Codex CLI": None,
+            "Unknown": None,
+        }
+        seen = set()
+        for name in MODEL_INFO:
+            provider = get_model_provider(name)
+            assert provider in expected_by_provider, f"{name} → {provider}"
+            assert get_required_api_key_for_model(name) == expected_by_provider[provider]
+            seen.add(provider)
+        assert {"OpenAI", "Anthropic", "Gemini", "Codex CLI"} <= seen
 
 
 class TestCachePricing:

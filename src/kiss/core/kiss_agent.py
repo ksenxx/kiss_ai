@@ -126,8 +126,9 @@ class KISSAgent(Base):
             and existing.model_config == (model_config or {})
         ):
             existing.reset_conversation()
-            existing.token_callback = token_callback
-            existing.thinking_callback = thinking_callback
+            # Through the hook, not the two attributes: a transport that
+            # owns a sub-model with its own callbacks re-binds it there.
+            existing.rebind_callbacks(token_callback, thinking_callback)
             self.model = existing
         else:
             self.model = model(
@@ -373,7 +374,11 @@ class KISSAgent(Base):
 
     def _run_agentic_loop(self) -> str:
         consecutive_errors = 0
-        for _ in range(self.max_steps):
+        # The step bound lives here and nowhere else: driving the loop
+        # off ``step_count`` (rather than a fixed ``range``) keeps it
+        # correct even if steps are ever counted from outside the loop,
+        # and leaves exactly one message for "out of steps".
+        while self.step_count < self.max_steps:
             self.step_count += 1
             self._check_limits()
             try:
@@ -429,9 +434,7 @@ class KISSAgent(Base):
                 self.model.add_message_to_conversation("user", content)
                 self._add_message("user", content)
 
-        raise KISSError(  # pragma: no cover
-            f"Agent {self.name} completed {self.max_steps} steps without finishing."
-        )
+        raise KISSError(f"Agent {self.name} exceeded {self.max_steps} steps.")
 
     def _execute_step(self) -> str | None:
         """Execute a single step in the ReAct loop.
@@ -603,15 +606,19 @@ class KISSAgent(Base):
         return function_name, function_response
 
     def _check_limits(self) -> None:
-        """Check budget and step limits, raise KISSError if exceeded.
+        """Check budget and context limits, raise KISSError if exceeded.
+
+        The step limit is deliberately *not* checked here: it is owned by
+        ``_run_agentic_loop``, the only place that advances
+        ``step_count``.  Checking it in both places gave one condition
+        two differently worded errors, and the copy here could never
+        fire because the loop stops first.
 
         Raises:
-            KISSError: If agent budget or step limit is exceeded.
+            KISSError: If the agent's budget or context limit is exceeded.
         """
         if self.budget_used >= self.max_budget:
             raise BudgetExceededError(f"Agent {self.name} budget exceeded.")
-        if self.step_count > self.max_steps:
-            raise KISSError(f"Agent {self.name} exceeded {self.max_steps} steps.")
         if self.budget_check_hook is not None:
             self.budget_check_hook()
         try:

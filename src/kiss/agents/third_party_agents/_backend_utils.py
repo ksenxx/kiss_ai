@@ -10,7 +10,6 @@ import os
 import queue
 import sys
 import threading
-import time
 from collections.abc import Callable
 from http.server import HTTPServer
 from pathlib import Path
@@ -23,37 +22,6 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 
     daemon_threads = True
     allow_reuse_address = True
-
-
-def wait_for_matching_message(
-    *,
-    poll: Callable[[], list[dict[str, Any]]],
-    matches: Callable[[dict[str, Any]], bool],
-    extract_text: Callable[[dict[str, Any]], str],
-    timeout_seconds: float,
-    poll_interval: float,
-) -> str | None:
-    """Wait for a message matching a predicate with timeout.
-
-    Args:
-        poll: Callable returning newly observed messages.
-        matches: Predicate selecting the desired message.
-        extract_text: Callable extracting the reply text from a matching message.
-        timeout_seconds: Maximum time to wait.
-        poll_interval: Delay between polls.
-
-    Returns:
-        Extracted reply text, or ``None`` on timeout.
-    """
-    deadline = time.monotonic() + timeout_seconds
-    while True:
-        for message in poll():
-            if matches(message):
-                return extract_text(message)
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return None
-        time.sleep(min(poll_interval, remaining))
 
 
 def drain_queue_messages(
