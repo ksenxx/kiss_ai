@@ -96,9 +96,11 @@ class TestWalCorruptionGuard:
             assert [h["task"] for h in history] == ["wal guard probe task"]
             loaded = th._load_chat_events_by_task_id(task_id)
             assert loaded is not None
+            events = loaded["events"]
+            assert isinstance(events, list)
             assert any(
-                e.get("text") == "committed via WAL"
-                for e in loaded["events"]
+                isinstance(e, dict) and e.get("text") == "committed via WAL"
+                for e in events
             )
             # Writes too: the result lands in the same database.
             th._save_task_result("survived the outage", task_id=task_id)
