@@ -25,7 +25,7 @@ Covers:
 
 No mocks/patches/fakes: real :class:`JsonPrinter` subclasses (the same
 technique the existing vscode regression tests use) capture or steer
-broadcasts, real :class:`VSCodeServer` / :class:`_RunningAgentState` /
+broadcasts, real :class:`VSCodeServer` / :class:`AgentState` /
 :class:`WorktreeSorcarAgent` objects are exercised, and the wake-word
 test streams real synthesized speech through the real Vosk recognizer.
 """
@@ -43,8 +43,9 @@ from typing import Any
 
 import pytest
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
 
@@ -61,10 +62,10 @@ class _CapturePrinter(JsonPrinter):
         self.events.append(event)
 
 
-def _pop_tabs(*tab_ids: str) -> None:
-    """Remove test-created entries from the global tab registry."""
-    for tab_id in tab_ids:
-        _RunningAgentState.running_agent_states.pop(tab_id, None)
+def _clear_states() -> None:
+    """Remove every entry from the global task-state registry."""
+    with agent_state.STATE_LOCK:
+        agent_state.agent_states.clear()
 
 
 
@@ -86,16 +87,20 @@ def test_f1_failed_clear_broadcast_does_not_wedge_tab() -> None:
     try:
         with pytest.raises(RuntimeError):
             server._cmd_run(dict(cmd))
-        tab = _RunningAgentState.running_agent_states[tab_id]
+        tab = agent_state.find_by_tab(tab_id)
+        assert tab is not None
         assert tab.task_thread is None
         assert tab.stop_event is None
         assert tab.user_answer_queue is None
         with pytest.raises(RuntimeError):
             server._cmd_run(dict(cmd))
+        tab = agent_state.find_by_tab(tab_id)
+        assert tab is not None
+        assert tab.task_thread is None
         assert tab.pending_user_messages == []
         assert all(e.get("type") != "prompt" for e in printer.events)
     finally:
-        _pop_tabs(tab_id)
+        _clear_states()
 
 
 
@@ -106,12 +111,12 @@ def test_f3_stale_viewer_answer_not_hijacked_by_unrelated_task() -> None:
     try:
         printer.subscribe_tab(100, viewer)
         printer.subscribe_tab(100, owner)
-        owner_state = _RunningAgentState(owner, "test-model")
-        _RunningAgentState.running_agent_states[owner] = owner_state
+        owner_state = AgentState("200", tab_id=owner, server_owned=True)
         owner_state.user_answer_queue = queue.Queue(maxsize=1)
         owner_state.is_task_active = True
         owner_state.agent = WorktreeSorcarAgent("Sorcar VS Code")
         owner_state.agent._last_task_id = "200"
+        agent_state.register(owner_state)
         printer.subscribe_tab(200, owner)
 
         server._cmd_user_answer({"tabId": viewer, "answer": "stale"})
@@ -119,10 +124,11 @@ def test_f3_stale_viewer_answer_not_hijacked_by_unrelated_task() -> None:
         assert all(e.get("type") != "askUserDone" for e in printer.events)
 
         owner_state.agent._last_task_id = "100"
+        agent_state.rekey(owner_state, "100")
         server._cmd_user_answer({"tabId": viewer, "answer": "real answer"})
         assert owner_state.user_answer_queue.get_nowait() == "real answer"
     finally:
-        _pop_tabs(viewer, owner)
+        _clear_states()
 
 
 
@@ -305,8 +311,8 @@ class _StopDuringSetupPrinter(_CapturePrinter):
 
     Raises on the first ``status running:true`` broadcast — i.e. inside
     ``_run_task``'s ``try`` before ``_run_task_inner`` runs, the same
-    place a Stop-injected ``KeyboardInterrupt`` lands during
-    ``_capture_pre_snapshot`` of a large repo.
+    place a Stop-injected ``KeyboardInterrupt`` lands during pre-task
+    setup on a large repo.
     """
 
     def __init__(self) -> None:
@@ -347,4 +353,4 @@ def test_f16_keyboard_interrupt_during_setup_broadcasts_result(
             for e in printer.events
         )
     finally:
-        _pop_tabs(tab_id)
+        _clear_states()

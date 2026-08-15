@@ -11,8 +11,10 @@ autocomplete feature.  Split out of ``server.py`` for organisation.
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import re
+import stat
 import threading
 from typing import TYPE_CHECKING, Any
 
@@ -71,14 +73,37 @@ def read_active_file_head(path: str) -> str:
     Unreadable or non-UTF-8 files yield ``""`` (best effort — the
     active file is only a suggestion source).
 
+    ``path`` is client-supplied and this function runs on the single
+    autocomplete worker shared by every connection, so it must never
+    block: the file is opened with ``O_NONBLOCK`` (a plain ``open``
+    of a writer-less FIFO blocks forever) and anything that is not a
+    regular file — FIFOs, device nodes, sockets — is rejected via
+    ``fstat`` before any read.  For regular files ``O_NONBLOCK`` is a
+    no-op, so normal behaviour is unchanged.  Windows has no
+    ``O_NONBLOCK`` (and no FIFO open-blocking hazard); the flag
+    degrades to 0 there instead of raising ``AttributeError``.
+
     Args:
         path: Path of the active editor file.
 
     Returns:
-        The capped file content, or ``""`` on any read failure.
+        The capped file content, or ``""`` on any read failure or when
+        *path* is not a regular file.
     """
     try:
-        with open(path, encoding="utf-8") as f:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return ""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return ""
+        f = os.fdopen(fd, encoding="utf-8")
+    except OSError:
+        os.close(fd)
+        return ""
+    try:
+        with f:
             return f.read(_ACTIVE_FILE_READ_CAP)
     except (OSError, UnicodeDecodeError):
         return ""
@@ -90,8 +115,7 @@ def identifier_prefix_matches(content: str, partial: str) -> list[str]:
     Harvests single-word identifiers and dot-chained identifiers
     (e.g. ``self.method``, ``os.path.join``) from *content* and keeps
     those that case-sensitively start with *partial* and are longer
-    than it.  Shared by the VS Code daemon's ghost-text completion and
-    the sorcar CLI completer so both surfaces harvest identically.
+    than it.  Used by the VS Code daemon's ghost-text completion.
 
     Args:
         content: Text to harvest identifiers from.
@@ -113,9 +137,7 @@ def model_picker_sort_key(name: str) -> tuple[int, float]:
 
     Models are grouped by vendor (see
     :func:`~kiss.server.helpers.model_vendor`) with the most
-    expensive model first within each vendor.  Shared by the daemon's
-    ``getModels`` reply and the CLI's ``--model`` value completion so
-    both pickers order identically.
+    expensive model first within each vendor.  Used by the daemon's ``getModels`` reply.
 
     Args:
         name: A model name present in ``MODEL_INFO``.
@@ -134,7 +156,7 @@ def ranked_function_calling_models() -> list[str]:
     Candidates are the currently-runnable models (a provider credential
     is configured) that support function calling, sorted by
     :func:`model_picker_sort_key` — the single business rule behind
-    both the VS Code model picker and the CLI's model completion.
+    the VS Code model picker.
 
     Returns:
         Model names, best-vendor-first, most expensive first per vendor.
@@ -190,7 +212,8 @@ class _AutocompleteMixin:
         work_dir: str
         _state_lock: threading.RLock
         _complete_queue: (
-            queue.Queue[tuple[str, int, str, str, str, str, str]] | None
+            queue.Queue[tuple[str, int, str, str | None, str, str, str]]
+            | None
         )
         _complete_worker: threading.Thread | None
         _complete_seq_latest: dict[str, int]
@@ -319,12 +342,22 @@ class _AutocompleteMixin:
         # now would overwrite the newer request's result with a stale
         # one (the frontend only compares the echoed query text, which
         # can be identical across the two requests).
+        fast = _ghost_suffix(query, completions)
+        fast = clip_autocomplete_suggestion(query, fast)
         if seq >= 0:
+            # Publish while still holding the lock: invalidators
+            # (``setWorkDir``, disconnect) also take ``_state_lock``,
+            # so once they return no stale event can be broadcast —
+            # a check-then-emit outside the lock would leave a window
+            # in which an already-checked stale result still escapes.
+            # Nothing in the broadcast path acquires ``_state_lock``
+            # (an RLock in any case), so this cannot deadlock.
             with self._state_lock:
                 if seq != self._complete_seq_latest.get(conn_id, -1):
                     return
-        fast = _ghost_suffix(query, completions)
-        fast = clip_autocomplete_suggestion(query, fast)
+                self._emit_ghost(fast, query, conn_id, tab_id)
+                self._emit_completions(completions, query, conn_id, tab_id)
+            return
         self._emit_ghost(fast, query, conn_id, tab_id)
         self._emit_completions(completions, query, conn_id, tab_id)
 
@@ -701,14 +734,20 @@ class _AutocompleteMixin:
             reqs[conn_id] = token
             cache = self._file_cache.get(wd)
         if cache is None:
+            # The placeholder must be emitted BEFORE the scan is
+            # started.  Both events belong to the same request and
+            # carry the same prefix, so the client cannot tell a stale
+            # one from a fresh one; starting the producer first lets a
+            # quick scan's populated reply be overwritten by the empty
+            # placeholder that follows it (R09-3).
+            self._emit_files(
+                [], conn_id, loading=True, prefix=prefix, tab_id=tab_id,
+            )
             self._refresh_file_cache(
                 then_emit_for_prefix=prefix,
                 work_dir=wd,
                 conn_id=conn_id,
                 tab_id=tab_id,
-            )
-            self._emit_files(
-                [], conn_id, loading=True, prefix=prefix, tab_id=tab_id,
             )
             return
         usage = _load_file_usage()

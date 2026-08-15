@@ -450,9 +450,10 @@ class TestSubagentResultNotInParent:
         should be stamped with the parent's tab id.
 
         This test subscribes a tab to the parent task (mimicking the
-        VS Code server's ``_subscribe_tab_id`` flow) and verifies that
-        the fan-out targets for sub-agent result events never include
-        the parent tab.
+        VS Code server's ``printer.register_task_ui`` flow, driven by
+        the ``_on_task_id_allocated`` hook) and verifies that the
+        fan-out targets for sub-agent result events never include the
+        parent tab.
         """
         model_config: dict[str, Any] = {
             "base_url": self.url,
@@ -463,6 +464,10 @@ class TestSubagentResultNotInParent:
 
         parent = ChatSorcarAgent("parent")
         parent_tab_id = "parent-tab-XYZ"
+
+        def _register_parent_tab(task_id: Any, chat_id: str) -> None:
+            printer.register_task_ui(task_id, parent_tab_id)
+
         parent.run(
             prompt_template=(
                 "Use run_parallel to compute three arithmetic expressions."
@@ -472,7 +477,7 @@ class TestSubagentResultNotInParent:
             work_dir=self.tmpdir,
             printer=printer,
             is_parallel=True,
-            _subscribe_tab_id=parent_tab_id,
+            _on_task_id_allocated=_register_parent_tab,
         )
 
         parent_task_id = parent._last_task_id

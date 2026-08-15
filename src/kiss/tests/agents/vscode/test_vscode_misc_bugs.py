@@ -9,12 +9,8 @@ C1  ``diff_merge._load_gitignore_dirs`` keeps the leading ``/`` of a
     ``_scan_files`` never matches the directory name and wrongly
     returns files inside it.
 
-C2  ``diff_merge._write_base_copy`` materialises the base copy of a
-    *text* file via a text-mode ``git show`` (universal newlines turn
-    CRLF into LF) + ``write_text``, so for CRLF files every line of the
-    base differs from the working file and the merge view shows
-    spurious whole-file hunks.  The base copy must preserve the exact
-    committed bytes (like the binary path already does).
+C2  (obsolete) ``diff_merge._write_base_copy`` was removed together
+    with the interactive diff/merge review workflow.
 
 C3  ``server._get_history`` builds each session with
     ``failed=_is_failed_result(result)`` independently of
@@ -33,7 +29,6 @@ C4  ``task_runner._run_task_inner``'s subtask-failure broadcast sends
 from __future__ import annotations
 
 import shutil
-import subprocess
 import tempfile
 import threading
 import unittest
@@ -43,7 +38,8 @@ from typing import Any
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import get_available_models
-from kiss.server.diff_merge import _scan_files, _write_base_copy
+from kiss.server import agent_state
+from kiss.server.diff_merge import _scan_files
 from kiss.server.server import VSCodeServer
 
 
@@ -82,48 +78,6 @@ class TestGitignoreRootAnchoredEntry(unittest.TestCase):
         self.assertNotIn("build/out.o", paths)
 
 
-class TestWriteBaseCopyPreservesCrlf(unittest.TestCase):
-    """C2: the text-file base copy must preserve the committed bytes."""
-
-    def setUp(self) -> None:
-        self._tmp = Path(tempfile.mkdtemp(prefix="kiss-c2-"))
-
-    def tearDown(self) -> None:
-        shutil.rmtree(self._tmp, ignore_errors=True)
-
-    def _git(self, *args: str) -> None:
-        subprocess.run(
-            [
-                "git",
-                "-c", "user.email=test@test",
-                "-c", "user.name=test",
-                "-c", "commit.gpgsign=false",
-                *args,
-            ],
-            cwd=self._tmp,
-            check=True,
-            capture_output=True,
-        )
-
-    def test_crlf_file_base_copy_keeps_crlf_bytes(self) -> None:
-        committed = b"alpha\r\nbeta\r\ngamma\r\n"
-        self._git("init")
-        (self._tmp / "crlf.txt").write_bytes(committed)
-        self._git("add", "crlf.txt")
-        self._git("commit", "-m", "add crlf file")
-
-        merge_dir = self._tmp / "merge-temp"
-        ub_dir = self._tmp / "untracked-base"
-
-        base_path = _write_base_copy(
-            str(self._tmp), merge_dir, ub_dir, "crlf.txt", "HEAD",
-        )
-
-        produced = base_path.read_bytes()
-        self.assertIn(b"\r\n", produced)
-        self.assertEqual(produced, committed)
-
-
 class _TempDbTestCase(unittest.TestCase):
     """Shared temp-sqlite + event-capturing VSCodeServer fixture."""
 
@@ -147,6 +101,7 @@ class _TempDbTestCase(unittest.TestCase):
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
     def tearDown(self) -> None:
+        agent_state.agent_states.clear()
         th._close_db()
         th._DB_PATH = self._orig_db_path  # type: ignore[attr-defined]
         shutil.rmtree(self._tmp, ignore_errors=True)
@@ -162,9 +117,14 @@ class TestRunningTaskNotMarkedFailed(_TempDbTestCase):
         worker = threading.Thread(target=release.wait, daemon=True)
         worker.start()
         try:
-            tab = self.server._get_tab("c3-tab")
-            tab.task_history_id = task_id
-            tab.task_thread = worker
+            state = agent_state.AgentState(
+                str(task_id),
+                tab_id="c3-tab",
+                server_owned=True,
+                task_thread=worker,
+                is_task_active=True,
+            )
+            agent_state.register(state)
 
             self.server._handle_command({"type": "getHistory"})
         finally:
@@ -211,10 +171,15 @@ class TestSubtaskFailureStepCount(_TempDbTestCase):
             self.skipTest("no model API key configured")
 
         tab_id = "c4-tab"
-        tab = self.server._get_tab(tab_id)
         agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.agent = agent
-        tab.chat_id = ""
+        state = agent_state.AgentState(
+            "task-c4",
+            agent=agent,
+            tab_id=tab_id,
+            server_owned=True,
+            stop_event=threading.Event(),
+        )
+        agent_state.register(state)
 
         def fake_run(**kwargs: Any) -> str:
             agent.total_tokens_used = 11

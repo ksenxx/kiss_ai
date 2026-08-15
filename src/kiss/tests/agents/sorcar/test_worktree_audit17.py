@@ -28,10 +28,10 @@ BUG-72: ``VSCodeServer._handle_worktree_action("merge"/"discard")``
 
 Both bugs have a common root cause: there is no per-tab "a task is
 actively executing ``agent.run()``" flag.  The fix adds
-``_RunningAgentState.is_task_active`` (set True immediately before the
+``AgentState.is_task_active`` (set True immediately before the
 ``agent.run()`` loop and cleared in the post-task ``finally`` block
 BEFORE ``worktree_done`` is broadcast), and wires it into the
-``_new_chat`` and ``_handle_worktree_action`` guards.
+``_handle_worktree_action`` guard (``_check_worktree_busy``).
 """
 
 from __future__ import annotations
@@ -42,7 +42,29 @@ from typing import Any, cast
 
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
+
+
+def _register_state(
+    task_id: str,
+    tab_id: str,
+    agent: WorktreeSorcarAgent,
+    *,
+    use_worktree: bool = True,
+    is_task_active: bool = False,
+) -> agent_state.AgentState:
+    """Register a server-owned AgentState for *tab_id* running *agent*."""
+    state = agent_state.AgentState(
+        task_id,
+        agent=agent,
+        tab_id=tab_id,
+        server_owned=True,
+        is_task_active=is_task_active,
+    )
+    state.use_worktree = use_worktree
+    agent_state.register(state)
+    return state
 
 
 def _make_repo(path: Path) -> Path:
@@ -118,22 +140,20 @@ class TestNewChatSimpleBroadcast:
         server.printer = cast(Any, printer)
 
         tab_id = "tab-bug71-ok"
-        tab = server._get_tab(tab_id)
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        tab.is_task_active = False
-
-        agent = cast(WorktreeSorcarAgent, tab.agent)
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
         agent._wt = None
-
-        server._new_chat(tab_id)
-        welcome = [
-            e for e in printer.events if e.get("type") == "showWelcome"
-        ]
-        assert welcome, (
-            "Regression: showWelcome must be broadcast when no task "
-            f"is active.  Events: {printer.events}"
-        )
+        state = _register_state("task-bug71-ok", tab_id, agent)
+        try:
+            server._new_chat(tab_id)
+            welcome = [
+                e for e in printer.events if e.get("type") == "showWelcome"
+            ]
+            assert welcome, (
+                "Regression: showWelcome must be broadcast when no task "
+                f"is active.  Events: {printer.events}"
+            )
+        finally:
+            agent_state.unregister(state.task_id, state)
 
 
 class TestBug72WorktreeActionDuringRunningTask:
@@ -149,17 +169,18 @@ class TestBug72WorktreeActionDuringRunningTask:
         server.printer = cast(Any, printer)
 
         tab_id = "tab-bug72-merge"
-        tab = server._get_tab(tab_id)
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-
-        agent = cast(WorktreeSorcarAgent, tab.agent)
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
         wt = _create_wt(repo, "kiss/wt-bug72m-1", agent)
 
-        tab.is_task_active = True
+        state = _register_state(
+            "task-bug72-merge", tab_id, agent, is_task_active=True,
+        )
         assert wt.wt_dir.exists()
 
-        result = server._handle_worktree_action("merge", tab_id)
+        try:
+            result = server._handle_worktree_action("merge", tab_id)
+        finally:
+            agent_state.unregister(state.task_id, state)
 
         assert result["success"] is False, (
             "BUG-72: merge must be refused while a worktree task is "
@@ -190,17 +211,18 @@ class TestBug72WorktreeActionDuringRunningTask:
         server.printer = cast(Any, printer)
 
         tab_id = "tab-bug72-discard"
-        tab = server._get_tab(tab_id)
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-
-        agent = cast(WorktreeSorcarAgent, tab.agent)
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
         wt = _create_wt(repo, "kiss/wt-bug72d-1", agent)
 
-        tab.is_task_active = True
+        state = _register_state(
+            "task-bug72-discard", tab_id, agent, is_task_active=True,
+        )
         assert wt.wt_dir.exists()
 
-        result = server._handle_worktree_action("discard", tab_id)
+        try:
+            result = server._handle_worktree_action("discard", tab_id)
+        finally:
+            agent_state.unregister(state.task_id, state)
 
         assert result["success"] is False, (
             "BUG-72: discard must be refused while a worktree task "
@@ -217,25 +239,4 @@ class TestBug72WorktreeActionDuringRunningTask:
         )
         assert wt.wt_dir.exists(), (
             "BUG-72: wt_dir was removed by agent.discard() mid-write."
-        )
-
-
-class TestIsTaskActiveFlagExists:
-    """The fix relies on a new ``_RunningAgentState.is_task_active`` flag that
-    is cleared on construction and set True while a task is active.
-    """
-
-    def test_is_task_active_present_and_false_by_default(
-        self, tmp_path: Path,
-    ) -> None:
-        server = VSCodeServer()
-        server.work_dir = str(tmp_path)
-        tab = server._get_tab("tab-new")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        assert hasattr(tab, "is_task_active"), (
-            "_RunningAgentState must expose ``is_task_active`` (required by "
-            "the BUG-71 / BUG-72 fix)."
-        )
-        assert tab.is_task_active is False, (
-            "``is_task_active`` must default to False on a fresh tab."
         )

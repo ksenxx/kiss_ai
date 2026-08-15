@@ -100,6 +100,13 @@ let lastServerSock = null;
 function daemonReply(obj) {
   if (lastServerSock) lastServerSock.write(JSON.stringify(obj) + '\n');
 }
+// The scripted daemon mirrors the real one's shared tab registry: `run`
+// registers the tab, and every `ready` is answered with the canonical
+// `tabs_state` snapshot plus a replay (running `status` + `task_events`)
+// of each registered chat-bound tab. That is how a re-opened webview,
+// which persists no tabs of its own any more, relearns the running task.
+const registryTabs = new Map();
+let taskRunning = false;
 const server = net.createServer(sock => {
   lastServerSock = sock;
   let buf = '';
@@ -118,6 +125,8 @@ const server = net.createServer(sock => {
       daemonCmds.push(cmd);
       if (cmd.type === 'run') {
         const tabId = cmd.tabId;
+        registryTabs.set(tabId, {chatId: 'chat-1', title: 'do a long task'});
+        taskRunning = true;
         daemonReply({type: 'clear', chat_id: 'chat-1', tabId});
         daemonReply({
           type: 'status',
@@ -125,21 +134,35 @@ const server = net.createServer(sock => {
           tabId,
           startTs: Date.now(),
         });
-      } else if (cmd.type === 'resumeSession') {
-        const tabId = cmd.tabId;
+      } else if (cmd.type === 'ready') {
         daemonReply({
-          type: 'status',
-          running: true,
-          tabId,
-          startTs: Date.now(),
+          type: 'tabs_state',
+          tabId: '',
+          tabs: Array.from(registryTabs, ([tabId, e]) => ({
+            tabId,
+            chatId: e.chatId,
+            title: e.title,
+            workDir: '',
+          })),
         });
-        daemonReply({
-          type: 'task_events',
-          events: [],
-          task: 'do a long task',
-          tabId,
-          chat_id: 'chat-1',
-        });
+        for (const [tabId, e] of registryTabs) {
+          if (!e.chatId) continue;
+          if (taskRunning) {
+            daemonReply({
+              type: 'status',
+              running: true,
+              tabId,
+              startTs: Date.now(),
+            });
+          }
+          daemonReply({
+            type: 'task_events',
+            events: [],
+            task: e.title,
+            tabId,
+            chat_id: e.chatId,
+          });
+        }
       }
     }
   });

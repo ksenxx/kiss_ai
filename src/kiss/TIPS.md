@@ -53,7 +53,7 @@ If you have an **OPENAI_API_KEY**, with the __sorcar__ wake word, KISS Sorcar st
 Speak 'sorcar', your task ...
 ```
 
-Click the **mic** button below the chat input box if it is grey and wait for it to start pulsing blue. For Sorcar CLI, type /voice and enter to activate voice interaction. Speak 'sorcar' followed by your task, and KISS Sorcar will automatically run the task and tell you the results using its own voice. The voice interface distinguishes among different speakers.
+Click the **mic** button below the chat input box if it is grey and wait for it to start pulsing blue. Speak 'sorcar' followed by your task, and KISS Sorcar will automatically run the task and tell you the results using its own voice. The voice interface distinguishes among different speakers.
 
 You can also steer the agent's execution and ask for status when an agent is running using voice.
 
@@ -67,15 +67,21 @@ Open the URL in a browser on the mobile device and enter your remote password. Y
 
 # Tip
 
-## To Use the KISS Sorcar CLI REPL Interface
+## To Run Tasks from Python Scripts
 
-Just run:
+Any Python process can launch a task on the running KISS Sorcar daemon and block until it finishes:
 
-```bash
-sorcar
+```python
+from kiss.server import sorcar
+
+result = sorcar.run("Summarize README.md", work_dir="/path/to/repo")
+print(result.text, result.success, result.cost)
+
+# Continue the same chat with the prior task as context:
+sorcar.run("Now fix the typos you found", chat_id=result.chat_id)
 ```
 
-It has a powerful Claude Code-style interface. It supports skills, MCP, commands, etc. The trajectories are streamed, and the output scrolls while being syntax-highlighted.
+You can also pass a Python file of extra tools via `tools="/path/to/my_tools.py"`.
 
 # Tip
 
@@ -98,6 +104,14 @@ Just run:
 ```bash
 rsorcar username@ip_address
 ```
+
+It keeps this checkout and the server's in total sync through `origin`: every branch of both is mirrored, and uncommitted work is committed first so it can travel. Files git does not track (`.venv`, `tmp/`, build output) stay behind, and a branch whose two sides conflict is reported instead of being merged behind your back.
+
+The task history travels both ways too: after a deploy, the History panel here and on the server both list every task and every event either machine ever ran. Only the rows that are missing move, no row is ever deleted, and both web apps keep running while it happens.
+
+Your GitHub.com login travels as well: every account `gh` is logged in to here is logged in on the server too, the same one active, so the agent there can open pull requests, read your private repositories and push over https as you. A token the GitHub API no longer accepts is left behind rather than shipped, the accounts the server was already logged in to are kept in `~/.kiss/`, and `SORCAR_SKIP_GITHUB_AUTH=1 rsorcar username@ip_address` leaves your credentials on this machine.
+
+A deploy restarts the server's web app, which would kill a task running there mid-step, so it stops before it touches anything if it finds one. Wait for the task, or run `SORCAR_FORCE_RESTART=1 rsorcar username@ip_address` to go ahead anyway. Nothing else on the server is overwritten either: a file of its own that the copy of your `~/.ssh` would replace is kept in `~/.kiss/ssh-replaced-<time>/`, its `~/.bashrc` is copied before one block is added to it, and the settings in its `~/.kiss/config.json` other than the password and the work directory are left as they are.
 
 # Tip
 

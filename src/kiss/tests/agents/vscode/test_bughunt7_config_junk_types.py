@@ -39,9 +39,9 @@ import json
 import unittest
 from typing import Any
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.core import vscode_config
 from kiss.core.vscode_config import load_config
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -65,7 +65,8 @@ class _ConfigIsolationMixin(unittest.TestCase):
             self._cfg_path.unlink(missing_ok=True)
         else:
             self._cfg_path.write_bytes(self._saved)
-        _RunningAgentState.running_agent_states.clear()
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
 
     def _write_config(self, data: dict[str, Any]) -> None:
         self._cfg_path.parent.mkdir(parents=True, exist_ok=True)

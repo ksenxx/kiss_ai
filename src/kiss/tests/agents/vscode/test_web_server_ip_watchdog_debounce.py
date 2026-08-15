@@ -47,6 +47,7 @@ from unittest import IsolatedAsyncioTestCase
 import kiss.server.web_server as ws_mod
 from kiss.core.vscode_config import CONFIG_PATH, save_config
 from kiss.server.web_server import RemoteAccessServer
+from kiss.tests.agents.vscode._ntfy_emulator import unroutable_base_url
 
 
 def _find_free_port() -> int:
@@ -109,6 +110,7 @@ class _IpWatchdogTestBase(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
 

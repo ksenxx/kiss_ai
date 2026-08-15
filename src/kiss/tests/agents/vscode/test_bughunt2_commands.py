@@ -39,7 +39,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -165,7 +165,7 @@ class TestRunStartWindowPromptLoss(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.release.set()
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_second_submit_in_start_window_is_queued(self) -> None:
@@ -195,8 +195,9 @@ class TestRunStartWindowPromptLoss(unittest.TestCase):
         self.server._handle_command(second_cmd)
 
         with self.server._state_lock:
-            tab = _RunningAgentState.running_agent_states[tab_id]
-            queued = list(tab.pending_user_messages)
+            tab_state = agent_state.find_by_tab(tab_id)
+            assert tab_state is not None
+            queued = list(tab_state.pending_user_messages)
         with self._events_lock:
             echoes = [
                 e for e in self.events
@@ -207,7 +208,7 @@ class TestRunStartWindowPromptLoss(unittest.TestCase):
         t1.join(timeout=30)
         deadline = time.time() + 30
         while time.time() < deadline:
-            state = _RunningAgentState.running_agent_states.get(tab_id)
+            state = agent_state.find_by_tab(tab_id)
             if state is not None and state.task_thread is None:
                 break
             time.sleep(0.02)

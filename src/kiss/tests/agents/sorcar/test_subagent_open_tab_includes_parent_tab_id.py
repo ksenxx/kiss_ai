@@ -31,7 +31,7 @@ import threading
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
 
@@ -88,6 +88,20 @@ def _seed_subagent_row(
     return task_id
 
 
+def _register_parent_state(
+    *, task_id: str, tab_id: str, chat_id: str,
+) -> agent_state.AgentState:
+    state = agent_state.AgentState(
+        task_id,
+        tab_id=tab_id,
+        chat_id=chat_id,
+        server_owned=True,
+        is_task_active=True,
+    )
+    agent_state.register(state)
+    return state
+
+
 class TestOpenSubagentTabIncludesParentTabId:
     """``openSubagentTab`` must carry ``parent_tab_id`` so the frontend
     can chain parent → child for recursive tab closes."""
@@ -102,7 +116,8 @@ class TestOpenSubagentTabIncludesParentTabId:
             th._db_conn = None
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-        _RunningAgentState.running_agent_states.clear()
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
 
     def test_replay_subagent_broadcast_carries_parent_tab_id(self) -> None:
         chat_id = "chat-parent-pin"
@@ -114,11 +129,9 @@ class TestOpenSubagentTabIncludesParentTabId:
         )
         server, events = _make_server()
 
-        parent_state = _RunningAgentState("tab-parent", "test-model")
-        parent_state.chat_id = chat_id
-        parent_state.task_history_id = parent_id
-        parent_state.is_subagent = False
-        _RunningAgentState.running_agent_states["tab-parent"] = parent_state
+        _register_parent_state(
+            task_id=parent_id, tab_id="tab-parent", chat_id=chat_id,
+        )
 
         server._replay_session(
             chat_id=chat_id,
@@ -135,23 +148,17 @@ class TestOpenSubagentTabIncludesParentTabId:
             "can cascade-close the sub-agent tab when its parent is closed"
         )
 
-    def test_replay_subagent_uses_agent_last_task_id_while_parent_running(
+    def test_replay_subagent_resolves_parent_via_chat_id_match(
         self,
     ) -> None:
-        """During the active spawn window the parent's
-        ``_RunningAgentState.task_history_id`` is still ``None`` —
-        ``_run_task`` zeroes it at task start and only re-populates
-        it in the per-subtask ``finally`` block AFTER ``agent.run``
-        returns.  The parent's task row id is exposed on the live
-        agent as ``agent._last_task_id``.  The lookup must consult
-        ``_last_task_id`` (mirroring :meth:`_get_running_task_ids`)
-        so parent_tab_id resolves while the parent is still running
-        — this is the path the cascade-close bug travels."""
-
-        class _StubAgent:
-            def __init__(self, last_task_id: str) -> None:
-                self._last_task_id = last_task_id
-
+        """During the pre-allocation window the parent's state is still
+        registered under the server's minted uuid key (``_cmd_run``
+        pre-registers before the ``task_history`` row id exists), so a
+        task-id lookup misses.  Sub-agents inherit the parent's
+        ``chat_id``, and the resolver must fall back to the unique
+        chat-id match so ``parent_tab_id`` resolves while the parent is
+        still in that window — this is the path the cascade-close bug
+        travels."""
         chat_id = "chat-parent-live"
         parent_id, _ = th._add_task("parent task", chat_id=chat_id)
         sub_task_id = _seed_subagent_row(
@@ -161,12 +168,11 @@ class TestOpenSubagentTabIncludesParentTabId:
         )
         server, events = _make_server()
 
-        parent_state = _RunningAgentState("tab-parent-live", "test-model")
-        parent_state.chat_id = chat_id
-        parent_state.task_history_id = None
-        parent_state.agent = _StubAgent(parent_id)  # type: ignore[assignment]
-        parent_state.is_subagent = False
-        _RunningAgentState.running_agent_states["tab-parent-live"] = parent_state
+        _register_parent_state(
+            task_id="pre-allocated-uuid-key",
+            tab_id="tab-parent-live",
+            chat_id=chat_id,
+        )
 
         server._replay_session(
             chat_id=chat_id,
@@ -177,14 +183,15 @@ class TestOpenSubagentTabIncludesParentTabId:
         opens = [e for e in events if e.get("type") == "openSubagentTab"]
         assert len(opens) == 1, f"events={events}"
         assert opens[0]["parent_tab_id"] == "tab-parent-live", (
-            "parent_tab_id must resolve via agent._last_task_id while "
-            "the parent task is still running (task_history_id=None)"
+            "parent_tab_id must resolve via the unique chat_id match "
+            "while the parent's state is still keyed by the "
+            "pre-allocation uuid (no task-id match possible)"
         )
 
     def test_replay_subagent_parent_tab_empty_when_parent_not_running(
         self,
     ) -> None:
-        """If the parent task isn't live (no ``_RunningAgentState`` for
+        """If the parent task isn't live (no registered agent state for
         it), the broadcast still includes ``parent_tab_id`` as an empty
         string — the frontend tolerates an empty value and simply skips
         the parent linkage, leaving the cascade-close at this tab."""

@@ -73,7 +73,7 @@ def pytest_addoption(parser):
     )
 
 
-collect_ignore = ["test_openevolve.py", "run_all_models_test.py"]
+collect_ignore = ["run_all_models_test.py"]
 
 
 def join_orphan_sweeps() -> None:
@@ -178,46 +178,35 @@ def has_zai_api_key() -> bool:
 def has_moonshot_api_key() -> bool:
     return bool(os.environ.get("MOONSHOT_API_KEY"))
 
+
 def get_required_api_key_for_model(model_name: str) -> str | None:
-    if model_name.startswith("openrouter/"):
-        return "OPENROUTER_API_KEY"
-    elif model_name == "text-embedding-004":
-        return "GEMINI_API_KEY"
-    elif model_name.startswith(
-        ("gpt", "text-embedding", "o1", "o3", "o4", "codex", "computer-use")
-    ) and not model_name.startswith("openai/gpt-oss"):
-        return "OPENAI_API_KEY"
-    elif model_name.startswith(
-        (
-            "meta-llama/",
-            "Qwen/",
-            "mistralai/",
-            "deepseek-ai/",
-            "deepcogito/",
-            "google/gemma",
-            "moonshotai/",
-            "nvidia/",
-            "zai-org/",
-            "openai/gpt-oss",
-            "arcee-ai/",
-            "refuel-ai/",
-            "marin-community/",
-            "essentialai/",
-            "BAAI/",
-            "togethercomputer/",
-            "intfloat/",
-            "Alibaba-NLP/",
-        )
-    ):
-        return "TOGETHER_API_KEY"
-    elif model_name.startswith("claude-"):
-        return "ANTHROPIC_API_KEY"
-    elif model_name.startswith("gemini-"):
-        return "GEMINI_API_KEY"
-    elif model_name.startswith("glm-"):
-        return "ZAI_API_KEY"
-    elif model_name.startswith("kimi-") or model_name.startswith("moonshot-"):
-        return "MOONSHOT_API_KEY"
+    """Return the environment variable a model needs, or ``None`` if none.
+
+    Derived from the two routing tables in
+    :mod:`kiss.core.models.model_info` — the same ones the ``model()``
+    factory dispatches on — so a vendor added there is honoured here
+    without a second, hand-maintained copy of its prefixes drifting out
+    of sync.  ``None`` means the model needs no API key: either it is
+    routed to a subscription CLI (``cc/``, ``codex/``), whose credential
+    is a local executable, or nothing routes it at all.
+
+    Args:
+        model_name: A ``MODEL_INFO`` key.
+
+    Returns:
+        The environment variable name, or ``None``.
+    """
+    from kiss.core.models.model_info import (
+        _NATIVE_PROVIDERS,
+        _match_openai_compatible_provider,
+    )
+
+    provider = _match_openai_compatible_provider(model_name)
+    if provider is not None:
+        return provider.api_key_name
+    for prefix, _label, api_key_name in _NATIVE_PROVIDERS:
+        if model_name.startswith(prefix):
+            return api_key_name
     return None
 
 
@@ -256,6 +245,63 @@ requires_moonshot_api_key = pytest.mark.skipif(
     not has_moonshot_api_key(),
     reason="MOONSHOT_API_KEY environment variable not set",
 )
+@pytest.fixture(autouse=True)
+def _isolated_default_workdir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[None]:
+    """Point ``VSCodeServer``'s default ``work_dir`` away from this repo.
+
+    ``VSCodeServer.__init__`` falls back to ``os.getcwd()`` when
+    ``KISS_WORKDIR`` is unset, which is the *developer repository* when
+    pytest runs from the repo root.  Since the diff/merge review was
+    removed, ``_run_task_inner`` auto-commits a dirty working tree at
+    task end — so any test that drives ``_run_task`` on a server whose
+    ``work_dir`` was never overridden would commit the developer's
+    in-progress work.  Defaulting the variable to a per-test temporary
+    directory makes that path harmless.
+
+    The override is unconditional — it also replaces an ambient
+    ``KISS_WORKDIR`` — because developer machines commonly run the
+    daemon with the variable pointing at the repository itself, and
+    honoring that value would disable the guard exactly where it
+    matters.  Tests that need a specific work dir must set the
+    variable (or assign ``server.work_dir``) inside their own
+    setup/body, which runs after this fixture and therefore wins.
+    The directory lives OUTSIDE the test's own ``tmp_path`` so tests
+    that scan their ``tmp_path`` do not see an extra entry.
+
+    Yields:
+        None.
+    """
+    default_dir = tmp_path_factory.mktemp("kiss-default-workdir")
+    monkeypatch.setenv("KISS_WORKDIR", str(default_dir))
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _isolated_tab_registry() -> Iterator[None]:
+    """Start every test with an empty shared tab registry.
+
+    ``VSCodeServer`` persists the canonical tab registry to
+    ``KISS_HOME/tabs.json``.  The session-wide ``KISS_HOME`` above is
+    shared by every test in the run, so tabs registered by one test
+    (a ``ready`` merge, an ``openTab``, a ``run``) would otherwise leak
+    into the next test's registry — changing its ``ready`` replay
+    fan-out and defeating merge-if-empty expectations.  Tests that
+    redirect ``persistence._KISS_DIR`` themselves are unaffected.
+
+    Yields:
+        None.
+    """
+    for kiss_dir in {Path(_test_kiss_home), Path(_th._KISS_DIR)}:
+        try:
+            (kiss_dir / "tabs.json").unlink(missing_ok=True)
+        except OSError:
+            pass
+    yield
+
+
 @pytest.fixture
 def temp_dir(tmp_path):
     original_dir = os.getcwd()

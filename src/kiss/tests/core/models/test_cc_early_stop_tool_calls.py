@@ -46,6 +46,9 @@ class _FakeStdout:
         self._pos = len(self._lines)
         return rest
 
+    def close(self) -> None:
+        pass
+
 
 def _build_fake_popen_class(events: list[dict[str, Any]]) -> type:
     stream_data = "\n".join(json.dumps(e) for e in events) + "\n"
@@ -402,12 +405,20 @@ class TestEarlyStopOnToolCalls:
         assert "go_to_url" in names
 
     def test_usage_captured_after_early_stop(self) -> None:
-        """After early stop for tool_calls, usage data from result event is
-        captured so cost is not reported as $0."""
+        """After early stop for tool_calls, usage aggregated from the
+        per-message ``message_delta`` events is captured so cost is not
+        reported as $0.  The queued ``result`` event must NOT be consumed:
+        draining the now-agentic CLI would let it keep running tools."""
         tool_json = json.dumps(
             {"tool_calls": [{"name": "Bash", "arguments": {"command": "ls"}}]}
         )
         events = [
+            {"type": "stream_event", "event": {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"input_tokens": 1234, "output_tokens": 56,
+                          "cache_read_input_tokens": 0},
+            }},
             {"type": "stream_event", "event": {
                 "type": "content_block_start",
                 "content_block": {"type": "text", "text": ""},
@@ -422,7 +433,7 @@ class TestEarlyStopOnToolCalls:
             }},
             {"type": "stream_event", "event": {"type": "content_block_stop"}},
             {"type": "result", "result": tool_json + "\n\n(no output)",
-             "usage": {"input_tokens": 1234, "output_tokens": 56,
+             "usage": {"input_tokens": 999999, "output_tokens": 999999,
                        "cache_read_input_tokens": 0}},
         ]
 
@@ -436,8 +447,8 @@ class TestEarlyStopOnToolCalls:
         assert usage.get("output_tokens") == 56
 
     def test_usage_captured_with_simulated_agentic_loop(self) -> None:
-        """Same as test_simulated_agentic_loop_halted but includes the
-        result event with usage after the hallucinated content."""
+        """Same as test_simulated_agentic_loop_halted but usage arrives via
+        message_delta events (summed across messages) before the stop."""
         first_tool = json.dumps(
             {"tool_calls": [{"name": "Bash", "arguments": {
                 "command": "mkdir -p /tmp && echo 'hello'",
@@ -450,6 +461,22 @@ class TestEarlyStopOnToolCalls:
             }}]})
         )
         events = [
+            {"type": "stream_event", "event": {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use"},
+                "usage": {"input_tokens": 3000, "output_tokens": 700,
+                          "cache_read_input_tokens": 150,
+                          "cache_creation": {"ephemeral_5m_input_tokens": 100,
+                                             "ephemeral_1h_input_tokens": 0}},
+            }},
+            {"type": "stream_event", "event": {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"input_tokens": 2000, "output_tokens": 500,
+                          "cache_read_input_tokens": 50,
+                          "cache_creation": {"ephemeral_5m_input_tokens": 200,
+                                             "ephemeral_1h_input_tokens": 0}},
+            }},
             {"type": "stream_event", "event": {
                 "type": "content_block_start",
                 "content_block": {"type": "text", "text": ""},
@@ -465,9 +492,9 @@ class TestEarlyStopOnToolCalls:
             }},
             {"type": "stream_event", "event": {"type": "content_block_stop"}},
             {"type": "result", "result": "...",
-             "usage": {"input_tokens": 5000, "output_tokens": 1200,
-                       "cache_read_input_tokens": 200,
-                       "cache_creation": {"ephemeral_5m_input_tokens": 300,
+             "usage": {"input_tokens": 999999, "output_tokens": 999999,
+                       "cache_read_input_tokens": 999999,
+                       "cache_creation": {"ephemeral_5m_input_tokens": 999999,
                                           "ephemeral_1h_input_tokens": 0}}},
         ]
 

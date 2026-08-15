@@ -2,32 +2,21 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Bug-hunt round 2: ``restoredTabs`` escape the deferred-close protocol.
+"""Bug-hunt round 2 (rewritten): restored tabs persist across reloads.
 
-``RemoteAccessServer._ws_handler``'s ``finally`` block documents the
-deferred-disposal contract: it schedules a deferred ``closeTab`` "for
-every tab id this connection touched", so a browser that goes away
-for good cannot leak backend ``_RunningAgentState`` entries.  Tab ids
-are collected per-connection in ``tabs_seen`` by
-``_dispatch_client_command`` — but only from each command's own
-``tabId`` field.
-
-``_handle_ready`` *also* re-claims every entry of the ``ready``
-command's ``restoredTabs`` list: it cancels the tab's pending
-deferred close and dispatches a ``resumeSession`` for it.  Those tab
-ids are therefore very much "touched" by the connection, yet they are
-never recorded in ``tabs_seen``.  Consequence: after a page reload
-(connection A drops → deferred close armed; connection B reconnects
-and re-claims the tab via ``restoredTabs`` → pending close cancelled),
-connection B's own disconnect never re-arms the deferred close for
-the restored tab.  The backend state for that tab is then leaked
-forever — no ``closeTab`` is ever issued for it again.
+Tabs are global server state shared by all (mirror-copy) clients: no
+connection owns a tab, so neither the disconnect of the connection
+that claimed a tab via ``ready.tabId`` nor the disconnect of a
+later connection that re-claimed it via ``ready.restoredTabs`` may
+tear the tab's backend state down.  Teardown happens only through an
+explicit ``closeTab`` command.
 
 The test below drives a real :class:`RemoteAccessServer` over real
-``wss://`` connections (no mocks) and asserts that, after the
-reload-style reconnect sequence, dropping the second connection arms
-a deferred close for the restored tab exactly like it does for the
-tab the connection claimed via ``ready.tabId``.
+``wss://`` connections (no mocks) and asserts that, after a
+reload-style sequence (connection A claims the tab and drops;
+connection B restores it and drops too), the backend
+:class:`AgentState` for both the restored tab and the tab claimed via
+``ready.tabId`` simply persist.
 """
 
 from __future__ import annotations
@@ -38,7 +27,6 @@ import shutil
 import socket
 import ssl
 import tempfile
-import time
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
@@ -46,6 +34,7 @@ from websockets.asyncio.client import ClientConnection, connect
 
 import kiss.agents.sorcar.persistence as th
 import kiss.core.vscode_config as vc
+from kiss.server import agent_state
 from kiss.server.web_server import (
     RemoteAccessServer,
     _generate_self_signed_cert,
@@ -84,8 +73,8 @@ def _no_verify_ssl() -> ssl.SSLContext:
     return ctx
 
 
-class TestRestoredTabDeferredClose(IsolatedAsyncioTestCase):
-    """Restored tabs must re-enter the deferred-close protocol."""
+class TestRestoredTabPersistence(IsolatedAsyncioTestCase):
+    """Restored tabs persist across disconnects like any other tab."""
 
     async def asyncSetUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-bughunt-web2-")
@@ -120,6 +109,8 @@ class TestRestoredTabDeferredClose(IsolatedAsyncioTestCase):
             except Exception:
                 pass
         await self.server.stop_async()
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
         if th._db_conn is not None:
             th._db_conn.close()
         _restore_persistence(self.saved)
@@ -136,40 +127,33 @@ class TestRestoredTabDeferredClose(IsolatedAsyncioTestCase):
         self.assertEqual(resp["type"], "auth_ok")
         return ws
 
-    def _pending_tabs(self) -> set[str]:
-        """Snapshot the server's armed deferred-close tab ids."""
-        with self.server._pending_tab_closes_lock:
-            return set(self.server._pending_tab_closes)
-
-    async def _wait_pending(
-        self, tab_id: str, present: bool, timeout: float = 5.0,
-    ) -> bool:
-        """Poll until *tab_id*'s pending-close presence matches *present*."""
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if (tab_id in self._pending_tabs()) == present:
-                return True
-            await asyncio.sleep(0.05)
-        return False
-
-    async def test_restored_tab_close_rearmed_on_disconnect(self) -> None:
-        """A tab re-claimed via ``restoredTabs`` must be re-armed for close.
+    async def test_restored_tab_persists_across_disconnects(self) -> None:
+        """A tab claimed directly or via ``restoredTabs`` survives drops.
 
         Sequence (a page reload): connection A claims ``tab-x`` and
-        drops (deferred close armed); connection B reconnects with
-        ``ready.restoredTabs=[tab-x]`` (pending close cancelled) and
-        then drops too.  B touched ``tab-x``, so B's disconnect must
-        re-arm the deferred close — otherwise the backend state for
-        ``tab-x`` is never disposed.
+        drops; connection B reconnects with
+        ``ready.restoredTabs=[tab-x]`` (plus its own ``tab-other``)
+        and then drops too.  Neither disconnect may tear down either
+        tab's backend state: tabs are global server state and persist
+        until an explicit ``closeTab``.
         """
+        for tab_id in ("tab-x", "tab-other"):
+            agent_state.register(
+                agent_state.AgentState(
+                    f"task-{tab_id}", tab_id=tab_id, server_owned=True,
+                ),
+            )
+
         ws1 = await self._connect_ok()
         await ws1.send(json.dumps({"type": "ready", "tabId": "tab-x"}))
         await asyncio.sleep(0.5)
         await ws1.close()
-        self.assertTrue(
-            await self._wait_pending("tab-x", present=True),
-            "sanity: conn A's disconnect should arm a deferred close "
-            "for the tab it claimed via ready.tabId",
+        await asyncio.sleep(1.0)
+        state_x = agent_state.find_by_tab("tab-x")
+        self.assertIsNotNone(
+            state_x,
+            "conn A's disconnect must not tear down the tab it claimed "
+            "via ready.tabId",
         )
 
         ws2 = await self._connect_ok()
@@ -178,22 +162,21 @@ class TestRestoredTabDeferredClose(IsolatedAsyncioTestCase):
             "tabId": "tab-other",
             "restoredTabs": [{"tabId": "tab-x", "chatId": ""}],
         }))
-        self.assertTrue(
-            await self._wait_pending("tab-x", present=False),
-            "sanity: conn B's ready(restoredTabs=[tab-x]) should cancel "
-            "the pending deferred close for tab-x",
-        )
+        await asyncio.sleep(0.5)
         await ws2.close()
+        await asyncio.sleep(1.0)
 
-        self.assertTrue(
-            await self._wait_pending("tab-other", present=True),
-            "sanity: conn B's disconnect should arm a deferred close "
-            "for the tab it claimed via ready.tabId",
-        )
-        self.assertIn(
-            "tab-x",
-            self._pending_tabs(),
-            "BUG: conn B re-claimed tab-x via ready.restoredTabs but its "
-            "disconnect did not re-arm the deferred closeTab for tab-x — "
-            "the restored tab's backend state is leaked forever",
-        )
+        for tab_id in ("tab-x", "tab-other"):
+            state = agent_state.find_by_tab(tab_id)
+            self.assertIsNotNone(
+                state,
+                f"conn B's disconnect tore down {tab_id!r} — tabs are "
+                "global server state and must persist until an explicit "
+                "closeTab",
+            )
+            assert state is not None
+            self.assertFalse(
+                state.frontend_closed,
+                f"{tab_id!r} must not be flagged frontend_closed by a "
+                "mere disconnect",
+            )

@@ -32,7 +32,7 @@ class TestVSCodeServerStop(unittest.TestCase):
     @pytest.mark.slow
     def test_stop_command_interrupts_running_task(self) -> None:
         """Dispatch a run command, then a stop command, and verify the task stops."""
-        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+        from kiss.server import agent_state
         from kiss.server.server import VSCodeServer
 
         kiss_root = os.path.dirname(os.path.dirname(os.path.dirname(
@@ -95,9 +95,9 @@ class TestVSCodeServerStop(unittest.TestCase):
 
             server._handle_command({"type": "stop", "tabId": tab_id})
 
-            with _RunningAgentState._registry_lock:
-                tab = _RunningAgentState.running_agent_states.get(tab_id)
-                stop_event = tab.stop_event if tab is not None else None
+            with agent_state.STATE_LOCK:
+                state = agent_state.find_by_tab(tab_id)
+                stop_event = state.stop_event if state is not None else None
             assert stop_event is not None and stop_event.is_set(), (
                 "stop command did not set the tab's stop_event"
             )
@@ -116,12 +116,12 @@ class TestVSCodeServerStop(unittest.TestCase):
             )
         finally:
             server._stop_task(tab_id)
-            with _RunningAgentState._registry_lock:
-                tab = _RunningAgentState.running_agent_states.get(tab_id)
-                task_thread = tab.task_thread if tab is not None else None
+            with agent_state.STATE_LOCK:
+                state = agent_state.find_by_tab(tab_id)
+                task_thread = state.task_thread if state is not None else None
             if task_thread is not None:
                 task_thread.join(timeout=60)
-            _RunningAgentState.unregister(tab_id)
+            agent_state.agent_states.clear()
 
 
 class TestForceStopMechanism(unittest.TestCase):
@@ -129,6 +129,7 @@ class TestForceStopMechanism(unittest.TestCase):
 
     def test_status_running_false_after_force_stop(self) -> None:
         """After force-stop, the finally block still broadcasts status:running:false."""
+        from kiss.server import agent_state
         from kiss.server.server import VSCodeServer
 
         server = VSCodeServer()
@@ -153,15 +154,24 @@ class TestForceStopMechanism(unittest.TestCase):
                 server.printer.broadcast({"type": "status", "running": False})
 
         stop_event = threading.Event()
-        tab = server._get_tab(tab_id)
-        tab.stop_event = stop_event
         thread = threading.Thread(target=blocking_task, daemon=True)
-        tab.task_thread = thread
-        thread.start()
-        time.sleep(0.1)
+        state = agent_state.AgentState(
+            "force-stop-task",
+            tab_id=tab_id,
+            server_owned=True,
+            stop_event=stop_event,
+            task_thread=thread,
+            is_task_active=True,
+        )
+        agent_state.register(state)
+        try:
+            thread.start()
+            time.sleep(0.1)
 
-        server._stop_task(tab_id)
-        thread.join(timeout=10)
+            server._stop_task(tab_id)
+            thread.join(timeout=10)
+        finally:
+            agent_state.agent_states.clear()
 
         with lock:
             status_events = [e for e in events if e.get("type") == "status"]

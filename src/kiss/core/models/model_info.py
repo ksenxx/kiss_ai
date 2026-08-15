@@ -5,13 +5,15 @@
 
 """Model information: pricing and context lengths for supported LLM providers.
 
-FLAKY MODEL MARKERS:
-- fc=False: Model has unreliable function calling (use for non-agentic tasks only)
-- Models with comments like "FLAKY" have inconsistent behavior
-- Models with comments like "SLOW" may timeout on some requests
+``fc=False`` marks a model with unreliable function calling (use for
+non-agentic tasks only).
 """
 
 import json
+import logging
+import os
+import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +21,8 @@ from typing import Any
 from kiss.core import config as config_module
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import Model, ThinkingCallback, TokenCallback
+
+logger = logging.getLogger(__name__)
 
 
 class ModelInfo:
@@ -101,20 +105,59 @@ MY_MODELS_DEFAULT_CONTENT = json.dumps(
 ) + "\n"
 
 
+def _seed_file_atomically(path: Path, content: str) -> None:
+    """Create *path* holding *content*, if it does not exist yet.
+
+    The seed is **atomic and non-clobbering**: *content* is staged in a
+    sibling temp file and hard-linked into place, so a concurrent reader
+    never observes the empty file that a plain ``write_text`` exposes
+    between creating the target and writing to it.  If the target
+    appears between the existence check and the link (a concurrent
+    seeder, or a user edit), the existing file wins.
+
+    Same guarantee and same technique as
+    :func:`kiss.server.user_assets.ensure_user_asset_from_default`, which
+    documents the torn read a plain ``write_text`` seed caused there.
+
+    Args:
+        path: The file to create.
+        content: UTF-8 text written on first creation only.
+
+    Raises:
+        OSError: When the directory cannot be created or written.
+    """
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, staged = tempfile.mkstemp(prefix=f".{path.name}-", dir=str(path.parent))
+    try:
+        # A buffered file object (rather than a bare os.write, whose
+        # partial-write count would have to be handled) guarantees the
+        # whole payload is on disk before the link publishes it.
+        with os.fdopen(fd, "wb") as f:
+            f.write(content.encode("utf-8"))
+        os.link(staged, path)
+    except FileExistsError:
+        logger.debug("Exception caught", exc_info=True)
+    finally:
+        Path(staged).unlink(missing_ok=True)
+
+
 def _seed_my_models_file() -> None:
     """Create ``~/.kiss/MY_MODELS.json`` from the inline default if absent.
 
     Never overwrites an existing file — user edits survive every
     restart.  Silently swallows :class:`OSError` so a read-only HOME or
     missing parent does not break ``MODEL_INFO`` import.
+
+    A reader that caught the file mid-seed used to get ``""``, which
+    :func:`_read_my_models` turns into ``{}`` — every user-defined model
+    silently missing for the life of that process.
     """
     try:
-        if USER_MY_MODELS_PATH.exists():
-            return
-        USER_MY_MODELS_PATH.parent.mkdir(parents=True, exist_ok=True)
-        USER_MY_MODELS_PATH.write_text(MY_MODELS_DEFAULT_CONTENT, encoding="utf-8")
+        _seed_file_atomically(USER_MY_MODELS_PATH, MY_MODELS_DEFAULT_CONTENT)
     except OSError:
-        pass
+        logger.debug("Exception caught", exc_info=True)
 
 
 def _read_my_models() -> dict[str, dict[str, Any]]:
@@ -200,6 +243,53 @@ def _build_model_info_entry(entry: dict[str, Any]) -> ModelInfo:
     )
 
 
+_CATALOG_READ_ATTEMPTS = 5
+_CATALOG_RETRY_SECONDS = 0.05
+
+
+def _read_model_info_json(path: Path) -> dict[str, Any]:
+    """Read a ``MODEL_INFO.json`` catalog, tolerating a concurrent rewrite.
+
+    This runs at **import time** (``MODEL_INFO`` is a module-level
+    constant), so an unguarded ``json.loads`` turns any transient
+    unreadability into a raw ``JSONDecodeError`` traceback out of
+    ``import kiss.core.models.model_info`` — the subagent or CLI process
+    dies instead of running.  ``update_models.py`` now publishes the
+    catalog atomically, but an external tool (a checkout, an editor, an
+    older kiss) can still truncate it — or leave behind syntactically
+    valid JSON that is not a table at all — so the read retries briefly
+    and then fails with a message that names the file.
+
+    Args:
+        path: The catalog file to read.
+
+    Returns:
+        The decoded catalog object.
+
+    Raises:
+        KISSError: When the catalog is still unreadable, unparseable or
+            not a JSON object after :data:`_CATALOG_READ_ATTEMPTS`
+            attempts.
+    """
+    last: Exception | None = None
+    for attempt in range(_CATALOG_READ_ATTEMPTS):
+        try:
+            decoded = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(decoded, dict):
+                # `dict(None)` / `dict(42)` raise TypeError, which would
+                # escape this handler and reach the importer unclassified.
+                raise ValueError(
+                    f"expected a JSON object, got {type(decoded).__name__}"
+                )
+            return decoded
+        except (OSError, ValueError) as e:
+            logger.debug("Exception caught", exc_info=True)
+            last = e
+            if attempt + 1 < _CATALOG_READ_ATTEMPTS:
+                time.sleep(_CATALOG_RETRY_SECONDS)
+    raise KISSError(f"Could not read the model catalog at {path}: {last}") from last
+
+
 def _load_model_info() -> dict[str, ModelInfo]:
     """Load ``MODEL_INFO`` from JSON, applying cache-pricing defaults.
 
@@ -208,7 +298,7 @@ def _load_model_info() -> dict[str, ModelInfo]:
     first read) is then merged on top: matching keys override the
     bundled entry, and brand-new keys are added.
     """
-    raw = json.loads(PACKAGE_MODEL_INFO_PATH.read_text(encoding="utf-8"))
+    raw = _read_model_info_json(PACKAGE_MODEL_INFO_PATH)
     for name, entry in _read_my_models().items():
         raw[name] = entry
     return {name: _build_model_info_entry(entry) for name, entry in raw.items()}
@@ -247,6 +337,10 @@ class OpenAICompatibleProvider:
 
     Attributes:
         name: Short unique vendor id (e.g. ``"openrouter"``).
+        label: Human-readable provider name shown in the model picker and
+            the history badges (e.g. ``"OpenRouter"``).  Kept here so the
+            UI label is derived from the registry rather than restated in
+            a hand-written table next to it.
         host: Unique host substring used to look up capabilities from a
             model's ``base_url`` (substring match, so tests can point at a
             local capture server whose URL embeds the host as a path
@@ -272,6 +366,7 @@ class OpenAICompatibleProvider:
     """
 
     name: str
+    label: str
     host: str
     base_url: str
     prefixes: tuple[str, ...]
@@ -284,6 +379,7 @@ class OpenAICompatibleProvider:
 OPENAI_COMPATIBLE_PROVIDERS: tuple[OpenAICompatibleProvider, ...] = (
     OpenAICompatibleProvider(
         name="openrouter",
+        label="OpenRouter",
         host="openrouter.ai",
         base_url="https://openrouter.ai/api/v1",
         prefixes=("openrouter/",),
@@ -294,16 +390,18 @@ OPENAI_COMPATIBLE_PROVIDERS: tuple[OpenAICompatibleProvider, ...] = (
     ),
     OpenAICompatibleProvider(
         name="openai",
+        label="OpenAI",
         host="api.openai.com",
         base_url="https://api.openai.com/v1",
         prefixes=_OPENAI_PREFIXES,
-        excludes=("openai/gpt-oss", "text-embedding-004", "codex/"),
+        excludes=("openai/gpt-oss", "codex/"),
         api_key_name="OPENAI_API_KEY",
         tools_accept_reasoning_effort=False,
         delegate_tools_to_responses=True,
     ),
     OpenAICompatibleProvider(
         name="together",
+        label="Together",
         host="api.together.xyz",
         base_url="https://api.together.xyz/v1",
         prefixes=_TOGETHER_PREFIXES,
@@ -314,6 +412,7 @@ OPENAI_COMPATIBLE_PROVIDERS: tuple[OpenAICompatibleProvider, ...] = (
     ),
     OpenAICompatibleProvider(
         name="zai",
+        label="Z.AI",
         host="api.z.ai",
         base_url="https://api.z.ai/api/paas/v4",
         prefixes=("glm-",),
@@ -324,6 +423,7 @@ OPENAI_COMPATIBLE_PROVIDERS: tuple[OpenAICompatibleProvider, ...] = (
     ),
     OpenAICompatibleProvider(
         name="moonshot",
+        label="Moonshot",
         host="api.moonshot.ai",
         base_url="https://api.moonshot.ai/v1",
         prefixes=("kimi-", "moonshot-"),
@@ -358,6 +458,22 @@ def openai_compatible_provider_for_base_url(
     return None
 
 
+_NATIVE_PROVIDERS: tuple[tuple[str, str, str | None], ...] = (
+    ("cc/", "Claude Code CLI", None),
+    ("codex/", "Codex CLI", None),
+    ("claude-", "Anthropic", "ANTHROPIC_API_KEY"),
+    ("gemini-", "Gemini", "GEMINI_API_KEY"),
+)
+"""Providers that are not OpenAI-compatible, as ``(prefix, label, key)``.
+
+The counterpart of :data:`OPENAI_COMPATIBLE_PROVIDERS` for the four
+vendors the :func:`model` factory routes with their own SDK or CLI.  A
+``None`` key means the credential is a local executable rather than an
+API key.  Together the two tables are the complete routing table, and
+:func:`get_model_provider` is the only place either is consulted.
+"""
+
+
 def _match_openai_compatible_provider(
     model_name: str,
 ) -> OpenAICompatibleProvider | None:
@@ -381,6 +497,13 @@ def _match_openai_compatible_provider(
 def _load_model_class(class_name: str, error_message: str) -> Any:
     """Return a lazily-imported model class from :mod:`kiss.core.models`.
 
+    The underlying :class:`ImportError` is chained onto the
+    :class:`KISSError` and quoted in its message, because it is not
+    always "the SDK is absent": an ``ImportError`` raised from *inside*
+    an installed SDK (the missing-``brotli`` regression made ``urllib3``
+    do exactly that) would otherwise be reported as a package the user
+    has already installed, with the real traceback discarded.
+
     Args:
         class_name: Class attribute name (e.g. ``"GeminiModel"``).
         error_message: KISSError message raised when the class failed to import.
@@ -393,10 +516,10 @@ def _load_model_class(class_name: str, error_message: str) -> Any:
     """
     import kiss.core.models as models
 
-    cls = getattr(models, class_name)
-    if cls is None:  # pragma: no cover – all model SDKs are always installed
-        raise KISSError(error_message)
-    return cls
+    try:
+        return getattr(models, class_name)
+    except ImportError as e:
+        raise KISSError(f"{error_message} (import failed: {e})") from e
 
 
 def _openai_compatible(
@@ -552,6 +675,10 @@ def _openai_bare_name(name: str) -> str | None:
     open-weight ``gpt-oss`` models, and subscription ``codex/`` models are
     excluded (they have no per-token cache discount in this table).
 
+    ``openai/`` needs no exclusion here: no element of
+    :data:`_OPENAI_PREFIXES` is a prefix of it, so ``openai/gpt-oss-*``
+    never reaches the check in the first place (it is a Together name).
+
     Args:
         name: The MODEL_INFO key.
 
@@ -566,7 +693,7 @@ def _openai_bare_name(name: str) -> str | None:
             return None
         return bare
     if name.startswith(_OPENAI_PREFIXES) and not name.startswith(
-        ("text-embedding", "openai/", "codex/")
+        ("text-embedding", "codex/")
     ):
         return name
     return None
@@ -634,35 +761,6 @@ def _apply_cache_pricing(name: str, info: ModelInfo) -> None:
 
 for _name, _info in MODEL_INFO.items():
     _apply_cache_pricing(_name, _info)
-
-FLAKY_MODELS: dict[str, str] = {
-    "openrouter/baidu/ernie-4.5-21b-a3b": "Ignores function calling tools",
-}
-
-
-def is_model_flaky(model_name: str) -> bool:
-    """Check if a model is known to be flaky.
-
-    Args:
-        model_name: The name of the model to check.
-
-    Returns:
-        bool: True if the model is known to have reliability issues.
-    """
-    return model_name in FLAKY_MODELS
-
-
-def get_flaky_reason(model_name: str) -> str:
-    """Get the reason why a model is flaky.
-
-    Args:
-        model_name: The name of the model to check.
-
-    Returns:
-        str: The reason for flakiness, or empty string if not flaky.
-    """
-    return FLAKY_MODELS.get(model_name, "")
-
 
 def _strip_provider_prefix(model_name: str) -> str:
     """Strip harbor-style provider prefixes that duplicate KISS's own routing.
@@ -744,7 +842,7 @@ def model(
             token_callback,
             thinking_callback,
         )
-    if model_name.startswith("gemini-") or model_name == "text-embedding-004":
+    if model_name.startswith("gemini-"):
         cls = _load_model_class(
             "GeminiModel",
             "Google GenAI SDK not installed. Install 'google-genai' to use Gemini models.",
@@ -787,58 +885,55 @@ def get_available_models() -> list[str]:
         list[str]: Sorted list of model name strings that have a configured API key
             and support text generation.
     """
-    keys = config_module.DEFAULT_CONFIG
-    prefix_to_key = {
-        "openrouter/": keys.OPENROUTER_API_KEY,
-        "claude-": keys.ANTHROPIC_API_KEY,
-        "gemini-": keys.GEMINI_API_KEY,
-        "glm-": keys.ZAI_API_KEY,
-        "kimi-": keys.MOONSHOT_API_KEY,
-        "moonshot-": keys.MOONSHOT_API_KEY,
-    }
+    configured = _configured_providers()
+    return sorted(
+        name
+        for name, info in MODEL_INFO.items()
+        if info.is_generation_supported and configured.get(get_model_provider(name), False)
+    )
+
+
+def _configured_providers() -> dict[str, bool]:
+    """Return, per provider label, whether its credential is present.
+
+    Built from the same two routing tables :func:`get_model_provider` uses,
+    so a vendor added to :data:`OPENAI_COMPATIBLE_PROVIDERS` shows up in
+    the model picker without any further registration.
+
+    Returns:
+        Mapping of provider label to whether it is usable right now — an
+        API key for HTTP providers, the executable on ``PATH`` for the
+        subscription CLIs.
+    """
     import shutil
 
     from kiss.core.models.codex_model import find_codex_executable
 
-    has_claude_cli = shutil.which("claude") is not None
-    has_codex_cli = find_codex_executable() is not None
-    result = []
-    for name, info in MODEL_INFO.items():
-        if not info.is_generation_supported:
-            continue
-        if name.startswith("cc/"):
-            if has_claude_cli:
-                result.append(name)
-            continue
-        if name.startswith("codex/"):
-            if has_codex_cli:
-                result.append(name)
-            continue
-        api_key = ""
-        for prefix, key in prefix_to_key.items():
-            if name.startswith(prefix):
-                api_key = key
-                break
-        if not api_key:
-            if name == "text-embedding-004":  # pragma: no cover – embedding model filtered above
-                api_key = keys.GEMINI_API_KEY
-            elif name.startswith(_OPENAI_PREFIXES) and not name.startswith("openai/gpt-oss"):
-                api_key = keys.OPENAI_API_KEY
-            elif name.startswith(_TOGETHER_PREFIXES):
-                api_key = keys.TOGETHER_API_KEY
-        if api_key:
-            result.append(name)
-    return sorted(result)
+    keys = config_module.DEFAULT_CONFIG
+    configured = {
+        "Claude Code CLI": shutil.which("claude") is not None,
+        "Codex CLI": find_codex_executable() is not None,
+        "Unknown": False,
+    }
+    for provider in OPENAI_COMPATIBLE_PROVIDERS:
+        configured[provider.label] = bool(getattr(keys, provider.api_key_name, ""))
+    for _prefix, label, api_key_name in _NATIVE_PROVIDERS:
+        if api_key_name is not None:
+            configured[label] = bool(getattr(keys, api_key_name, ""))
+    return configured
 
 
 def get_model_provider(model_name: str) -> str:
     """Return the human-readable provider label that routes *model_name*.
 
-    The mapping mirrors the dispatch order in :func:`model`: subscription
-    CLIs first (``cc/`` → Claude Code, ``codex/`` → Codex), then the
-    prefix-routed HTTP providers (``openrouter/``, ``claude-``,
-    ``gemini-``, ``glm-`` for Z.AI, ``kimi-``/``moonshot-`` for Moonshot),
-    then the OpenAI and Together prefix sets.
+    This is the single routing lookup: the label comes from the
+    :data:`OPENAI_COMPATIBLE_PROVIDERS` registry and
+    :data:`_NATIVE_PROVIDERS` — the same tables :func:`model` dispatches
+    on — so a newly registered vendor is labelled correctly here, and in
+    every caller, without any further edit.  The order mirrors
+    :func:`model`: registered OpenAI-compatible vendors first (their
+    ``excludes`` are what keep ``codex/`` and ``openai/gpt-oss`` out),
+    then the native SDK/CLI providers.
 
     Args:
         model_name: A ``MODEL_INFO`` key.
@@ -847,110 +942,13 @@ def get_model_provider(model_name: str) -> str:
         str: The provider label (e.g. ``"OpenAI"``, ``"Anthropic"``,
             ``"OpenRouter"``), or ``"Unknown"`` if no route matches.
     """
-    if model_name.startswith("cc/"):
-        return "Claude Code CLI"
-    if model_name.startswith("codex/"):
-        return "Codex CLI"
-    if model_name.startswith("openrouter/"):
-        return "OpenRouter"
-    if model_name.startswith("claude-"):
-        return "Anthropic"
-    if model_name.startswith("gemini-") or model_name == "text-embedding-004":
-        return "Gemini"
-    if model_name.startswith("glm-"):
-        return "Z.AI"
-    if model_name.startswith("kimi-") or model_name.startswith("moonshot-"):
-        return "Moonshot"
-    if model_name.startswith(_OPENAI_PREFIXES) and not model_name.startswith("openai/gpt-oss"):
-        return "OpenAI"
-    if model_name.startswith(_TOGETHER_PREFIXES):
-        return "Together"
+    provider = _match_openai_compatible_provider(model_name)
+    if provider is not None:
+        return provider.label
+    for prefix, label, _api_key_name in _NATIVE_PROVIDERS:
+        if model_name.startswith(prefix):
+            return label
     return "Unknown"
-
-
-def get_generation_model_listing() -> list[tuple[str, str, bool]]:
-    """List every generation-capable model with provider and key status.
-
-    Walks ``MODEL_INFO`` (sorted by model name), skipping non-generation
-    (embedding/image-only) entries, and reports for each model the
-    provider that routes it and whether the credential needed to run it
-    is currently present — an API key for HTTP providers, or the local
-    executable for the ``Claude Code`` / ``Codex`` subscription CLIs.
-
-    Returns:
-        list[tuple[str, str, bool]]: ``(model_name, provider, configured)``
-            triples sorted alphabetically by model name.
-    """
-    import shutil
-
-    from kiss.core.models.codex_model import find_codex_executable
-
-    keys = config_module.DEFAULT_CONFIG
-    provider_configured = {
-        "Anthropic": bool(keys.ANTHROPIC_API_KEY),
-        "OpenAI": bool(keys.OPENAI_API_KEY),
-        "Gemini": bool(keys.GEMINI_API_KEY),
-        "OpenRouter": bool(keys.OPENROUTER_API_KEY),
-        "Together": bool(keys.TOGETHER_API_KEY),
-        "Z.AI": bool(keys.ZAI_API_KEY),
-        "Moonshot": bool(keys.MOONSHOT_API_KEY),
-        "Claude Code CLI": shutil.which("claude") is not None,
-        "Codex CLI": find_codex_executable() is not None,
-        "Unknown": False,
-    }
-    listing: list[tuple[str, str, bool]] = []
-    for name, info in sorted(MODEL_INFO.items()):
-        if not info.is_generation_supported:
-            continue
-        provider = get_model_provider(name)
-        listing.append((name, provider, provider_configured.get(provider, False)))
-    return listing
-
-
-def get_completion_model_names() -> list[str]:
-    """Return model names to offer for input fast-completion, best first.
-
-    Prefers models whose provider API key is configured (so every
-    suggestion is actually runnable), and falls back to every
-    generation-capable model in ``MODEL_INFO`` when no provider key is set
-    (e.g. completing in a fresh checkout) so the picker is never empty.
-
-    Returns:
-        list[str]: A sorted list of generation-capable model names.
-    """
-    available = get_available_models()
-    if available:
-        return available
-    return sorted(
-        name for name, info in MODEL_INFO.items() if info.is_generation_supported
-    )
-
-
-def rank_model_suggestions(query: str, names: list[str] | None = None) -> list[str]:
-    """Rank model names for fast-completion of *query*.
-
-    Case-insensitive prefix matches come first, then case-insensitive
-    substring matches; each group is sorted alphabetically. An empty query
-    returns all candidate names unchanged (already sorted).
-
-    Args:
-        query: The partial model name typed by the user.
-        names: Candidate model names. Defaults to
-            :func:`get_completion_model_names` when ``None``.
-
-    Returns:
-        list[str]: The matching model names, best first.
-    """
-    if names is None:
-        names = get_completion_model_names()
-    q = query.strip().lower()
-    if not q:
-        return list(names)
-    prefix = sorted(n for n in names if n.lower().startswith(q))
-    substring = sorted(
-        n for n in names if q in n.lower() and not n.lower().startswith(q)
-    )
-    return prefix + substring
 
 
 def _model_for_first_configured_provider(choices: dict[str, str]) -> str:
@@ -1026,19 +1024,6 @@ def get_default_model() -> str:
             "codex": "codex/default",
         }
     )
-
-
-def get_most_expensive_model(fc_only: bool = True) -> str:
-    best_name, best_price = "", -1.0
-    for name in get_available_models():
-        info = MODEL_INFO[name]
-        if fc_only and not info.is_function_calling_supported:
-            continue
-        price = info.input_price_per_1M + info.output_price_per_1M
-        if price > best_price:
-            best_price = price
-            best_name = name
-    return best_name
 
 
 def _openai_long_context_prices(

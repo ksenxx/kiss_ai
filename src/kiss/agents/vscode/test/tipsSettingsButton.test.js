@@ -129,32 +129,20 @@ const THREE_TIPS = [
   '### Third tip\n\n`code` here.',
 ];
 
-test('Tips button sits in the settings row directly left of Git Commit', () => {
+test('Tips button sits in the settings row', () => {
   withSandbox(({setTips}) => {
     setTips('# Tip\n\nHello.\n');
     const win = loadChatDom({tips: ['Hello.'], show: false});
     const doc = win.document;
     const tips = doc.getElementById('tips-btn');
-    const commit = doc.getElementById('autocommit-btn');
     assert.ok(tips, '#tips-btn must exist in the chat HTML');
-    assert.ok(commit, 'the Git Commit button must exist');
     assert.ok(
       tips.closest('#settings-panel'),
       'Tips button must live inside the settings panel',
     );
-    assert.strictEqual(
-      tips.parentElement,
-      commit.parentElement,
-      'Tips button must live in the same row as the Git Commit button',
-    );
     assert.ok(
       tips.parentElement.classList.contains('config-update-row'),
       'Tips button must live in the .config-update-row button row',
-    );
-    assert.strictEqual(
-      tips.nextElementSibling,
-      commit,
-      'Tips button must sit immediately to the left of Git Commit',
     );
   });
 });

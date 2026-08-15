@@ -6,7 +6,8 @@
 
 Reproduces and verifies fixes for:
 1. Blocking mode (no token_callback) not streaming — should always stream.
-2. Multiple assistant messages being accumulated — should stop at second.
+2. Multiple assistant messages (normal in agentic runs) — text accumulates
+   across all of them.
 3. Thinking blocks not emitted to the thoughts panel — should invoke thinking_callback.
 4. generate_and_process_with_tools must relay thinking tokens to the printer.
 """
@@ -40,8 +41,8 @@ class TestAlwaysStreaming:
         assert not hasattr(m, "_generate_blocking")
 
 
-class TestStopAtSecondAssistant:
-    """Verify that _generate_streaming stops when a second assistant message appears."""
+class TestMultipleAssistantMessages:
+    """Verify agentic multi-message streams accumulate text across messages."""
 
     def test_parse_single_assistant_event(self) -> None:
         """A single assistant event should be fully captured."""
@@ -58,24 +59,27 @@ class TestStopAtSecondAssistant:
         assert content == "Hello"
         assert result_json.get("result") == "Hello"
 
-    def test_stop_at_second_assistant_event(self) -> None:
-        """Content from the second assistant event should be excluded."""
+    def test_second_assistant_event_accumulates(self) -> None:
+        """Agentic runs emit several assistant messages; all text is kept.
+
+        The terminal ``result`` event carries only the LAST assistant
+        message, so it must not replace the accumulated stream text.
+        """
         m = ClaudeCodeModel("cc/haiku")
         m.initialize("test")
 
         events = [
             {"type": "assistant", "message": {"content": [{"type": "text", "text": "First"}]}},
             {"type": "assistant", "message": {"content": [{"type": "text", "text": "Second"}]}},
-            {"type": "result", "result": "First\nSecond",
+            {"type": "result", "result": "Second",
              "usage": {"input_tokens": 10, "output_tokens": 10}},
         ]
 
         content, result_json = m._parse_stream_events(iter(json.dumps(e) for e in events))
-        assert content == "First"
-        assert "Second" not in content
+        assert content == "FirstSecond"
 
-    def test_token_callback_not_called_for_second_assistant(self) -> None:
-        """Token callback should only be invoked for the first assistant message."""
+    def test_token_callback_called_for_every_assistant_message(self) -> None:
+        """Token callback fires for each assistant message's text."""
         tokens: list[str] = []
         m = ClaudeCodeModel("cc/haiku", token_callback=tokens.append)
         m.initialize("test")
@@ -87,8 +91,8 @@ class TestStopAtSecondAssistant:
         ]
 
         content, _ = m._parse_stream_events(iter(json.dumps(e) for e in events))
-        assert content == "A"
-        assert tokens == ["A"]
+        assert content == "AB"
+        assert tokens == ["A", "B"]
 
     def test_empty_stream(self) -> None:
         """An empty stream should return empty content."""
@@ -98,8 +102,8 @@ class TestStopAtSecondAssistant:
         assert content == ""
         assert result_json == {}
 
-    def test_result_before_second_assistant_is_used(self) -> None:
-        """If result comes before any second assistant, use result content."""
+    def test_result_is_fallback_only(self) -> None:
+        """Streamed text wins; the result event fills in only when empty."""
         m = ClaudeCodeModel("cc/haiku")
         m.initialize("test")
 
@@ -109,7 +113,15 @@ class TestStopAtSecondAssistant:
         ]
 
         content, result_json = m._parse_stream_events(iter(json.dumps(e) for e in events))
-        assert content == "Hi there"
+        assert content == "Hi"
+
+        m2 = ClaudeCodeModel("cc/haiku")
+        m2.initialize("test")
+        events2 = [
+            {"type": "result", "result": "Hi there", "usage": {}},
+        ]
+        content2, _ = m2._parse_stream_events(iter(json.dumps(e) for e in events2))
+        assert content2 == "Hi there"
 
     def test_malformed_json_lines_skipped(self) -> None:
         """Non-JSON lines should be silently skipped."""
@@ -526,6 +538,9 @@ class TestThinkingInToolMode:
 
             def read(self) -> str:
                 return "".join(self._lines[self._pos:])
+
+            def close(self) -> None:
+                pass
 
         subprocess.Popen = FakePopen  # type: ignore[assignment,misc]
         try:

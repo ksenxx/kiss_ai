@@ -4,17 +4,17 @@
 # add your name here
 """Test that autocommit events are persisted to the task history database.
 
-BUG: After a non-worktree task completes and the user auto-commits via
-the autocommit prompt, the ``autocommit_done`` event was not persisted
-to the task history.  When the user later replays the session ("the
-report"), the commit never shows up.
+BUG: After a non-worktree task completes and its changes are
+auto-committed, the ``autocommit_done`` event was not persisted to the
+task history.  When the user later replays the session ("the report"),
+the commit never shows up.
 
-Root cause: ``_handle_autocommit_action`` broadcasts the
-``autocommit_done`` event but does not call ``_append_chat_event`` to
-persist it.  By the time autocommit happens, the task's recording has
-already been stopped and the agent has been removed from
-``_persist_agents``, so the automatic persistence path in
-``broadcast()`` is also inactive.
+Root cause: ``_autocommit_changes`` broadcasts the ``autocommit_done``
+event but did not call ``_append_chat_event`` to persist it.  By the
+time autocommit happens, the task's recording has already been
+stopped, so the automatic persistence path in ``broadcast()`` is also
+inactive.  The fix resolves the task id from the tab's registered
+agent state and persists the event explicitly.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import kiss.agents.sorcar.persistence as th
 import kiss.server.merge_flow as _merge_flow_module
 from kiss.agents.sorcar.persistence import (
     _add_task,
@@ -33,6 +34,7 @@ from kiss.agents.sorcar.persistence import (
     _load_latest_chat_events_by_chat_id,
 )
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 from kiss.server.json_printer import _DISPLAY_EVENT_TYPES
 from kiss.server.server import VSCodeServer
 
@@ -60,6 +62,13 @@ class TestAutocommitPersistence(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         _init_repo(self.tmpdir)
+        self._db_tmpdir = tempfile.mkdtemp()
+        self._saved_db = (th._DB_PATH, th._db_conn, th._KISS_DIR)
+        kiss_dir = Path(self._db_tmpdir) / ".kiss"
+        kiss_dir.mkdir(parents=True, exist_ok=True)
+        th._KISS_DIR = kiss_dir
+        th._DB_PATH = kiss_dir / "sorcar.db"
+        th._db_conn = None
         self.server = VSCodeServer()
         self.server.work_dir = self.tmpdir
         self.events: list[dict] = []
@@ -82,15 +91,22 @@ class TestAutocommitPersistence(unittest.TestCase):
 
     def tearDown(self) -> None:
         _merge_flow_module.generate_commit_message_from_diff = self._orig_gen
+        agent_state.agent_states.clear()
+        th._close_db()
+        th._DB_PATH, th._db_conn, th._KISS_DIR = self._saved_db
+        shutil.rmtree(self._db_tmpdir, ignore_errors=True)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _create_task_for_tab(self, tab_id: str) -> tuple[str, str]:
-        """Create a task history entry and wire it to the tab's agent."""
+        """Create a task history entry and register the tab's agent state."""
         task_id, chat_id = _add_task("test task", "")
-        tab = self.server._get_tab(tab_id)
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.agent._last_task_id = task_id
-        tab.agent._chat_id = chat_id
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent._last_task_id = task_id
+        agent._chat_id = chat_id
+        state = agent_state.AgentState(
+            str(task_id), agent=agent, tab_id=tab_id, server_owned=True,
+        )
+        agent_state.register(state)
         return task_id, chat_id
 
     def _load_events_for_task(self, task_id: str) -> list[dict]:
@@ -106,14 +122,11 @@ class TestAutocommitPersistence(unittest.TestCase):
         """BUG REPRODUCTION: After a successful autocommit, the
         autocommit_done event must be persisted to the task history
         so it appears when the session is replayed."""
-        tab = self.server._get_tab("t1")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = False
         task_id, chat_id = self._create_task_for_tab("t1")
 
         Path(self.tmpdir, "seed.txt").write_text("modified content\n")
 
-        self.server._handle_autocommit_action("commit", "t1")
+        self.server._autocommit_changes("t1")
 
         status = _run_git(self.tmpdir, "status", "--porcelain").stdout.strip()
         assert status == "", f"Working tree should be clean after commit: {status}"
@@ -132,16 +145,12 @@ class TestAutocommitPersistence(unittest.TestCase):
         assert ac_events[0]["committed"] is True
         assert ac_events[0]["success"] is True
 
-    def test_autocommit_skip_not_persisted(self) -> None:
-        """Skipping autocommit (no commit made) should NOT persist
-        an autocommit_done event since no commit was created."""
-        tab = self.server._get_tab("t2")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = False
+    def test_autocommit_without_changes_not_persisted(self) -> None:
+        """A clean tree (no commit made) should NOT persist an
+        autocommit_done event since no commit was created."""
         task_id, chat_id = self._create_task_for_tab("t2")
 
-        Path(self.tmpdir, "seed.txt").write_text("dirty\n")
-        self.server._handle_autocommit_action("skip", "t2")
+        self.server._autocommit_changes("t2")
 
         done_events = [e for e in self.events if e.get("type") == "autocommit_done"]
         assert len(done_events) == 1
@@ -154,13 +163,10 @@ class TestAutocommitPersistence(unittest.TestCase):
     def test_autocommit_done_visible_in_session_replay(self) -> None:
         """When the session is replayed via _load_latest_chat_events_by_chat_id,
         the autocommit_done event must be included in the returned events."""
-        tab = self.server._get_tab("t3")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = False
         task_id, chat_id = self._create_task_for_tab("t3")
 
         Path(self.tmpdir, "seed.txt").write_text("changed for replay test\n")
-        self.server._handle_autocommit_action("commit", "t3")
+        self.server._autocommit_changes("t3")
 
         result = _load_latest_chat_events_by_chat_id(chat_id)
         assert result is not None, "Should find events for chat_id"
@@ -176,13 +182,15 @@ class TestAutocommitPersistence(unittest.TestCase):
     def test_autocommit_without_task_id_does_not_crash(self) -> None:
         """If there's no task_id on the agent (edge case), autocommit
         should still work but just not persist."""
-        tab = self.server._get_tab("t4")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = False
-        tab.agent._last_task_id = None
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent._last_task_id = None
+        state = agent_state.AgentState(
+            "", agent=agent, tab_id="t4", server_owned=True,
+        )
+        agent_state.register(state)
 
         Path(self.tmpdir, "seed.txt").write_text("no task id\n")
-        self.server._handle_autocommit_action("commit", "t4")
+        self.server._autocommit_changes("t4")
 
         done_events = [e for e in self.events if e.get("type") == "autocommit_done"]
         assert len(done_events) == 1

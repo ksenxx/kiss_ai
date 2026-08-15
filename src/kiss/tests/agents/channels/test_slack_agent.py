@@ -120,7 +120,6 @@ class TestWorkspaceSlackAgent:
         _save_token("xoxb-to-clear-ws", workspace=ws)
         _save_token("xoxb-keep-default")
         agent = SlackAgent(workspace=ws)
-        agent.web_use_tool = None
         tools = agent._get_tools()
         clear = next(t for t in tools if t.__name__ == "clear_slack_auth")
         clear()
@@ -316,7 +315,6 @@ class TestSlackAgent:
 
     def test_check_auth_unauthenticated(self) -> None:
         agent = SlackAgent()
-        agent.web_use_tool = None
         tools = agent._get_tools()
         check = next(t for t in tools if t.__name__ == "check_slack_auth")
         result = check()
@@ -326,7 +324,6 @@ class TestSlackAgent:
     def test_check_auth_with_invalid_token(self) -> None:
         _save_token("xoxb-invalid-token")
         agent = SlackAgent()
-        agent.web_use_tool = None
         tools = agent._get_tools()
         check = next(t for t in tools if t.__name__ == "check_slack_auth")
         result = json.loads(check())
@@ -334,7 +331,6 @@ class TestSlackAgent:
 
     def test_authenticate_invalid_token(self) -> None:
         agent = SlackAgent()
-        agent.web_use_tool = None
         tools = agent._get_tools()
         auth = next(t for t in tools if t.__name__ == "authenticate_slack")
         result = json.loads(auth(token="xoxb-invalid-test"))

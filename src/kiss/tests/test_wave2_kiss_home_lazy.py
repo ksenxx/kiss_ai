@@ -60,7 +60,13 @@ def test_persistence_resolves_lazily(fresh_home: Path) -> None:
 
 
 def test_channel_agent_utils_resolves_lazily(fresh_home: Path) -> None:
-    assert channel_utils._kiss_home() == fresh_home
+    """ChannelConfig paths under ~/.kiss are rebased onto $KISS_HOME lazily."""
+    cfg = channel_utils.ChannelConfig(
+        Path.home() / ".kiss" / "third_party_agents" / "lazytest", (),
+    )
+    assert cfg.path == (
+        fresh_home / "third_party_agents" / "lazytest" / "config.json"
+    )
 
 
 def test_vscode_config_resolves_lazily(fresh_home: Path) -> None:

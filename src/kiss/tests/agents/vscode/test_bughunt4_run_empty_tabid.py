@@ -5,16 +5,12 @@
 """Bug-hunt 4: ``_cmd_run`` with an empty/missing tabId mints a phantom task.
 
 ``_cmd_run`` did ``tab_id = cmd.get("tabId", "")`` and then
-unconditionally created and registered a ``_RunningAgentState`` keyed
-by the empty string, broadcast a ``clear`` event for it, and started a
-real task thread.  But every other code path treats an empty tab id as
-"no tab": ``_stop_task`` returns immediately for an empty id,
-``_cmd_close_tab`` guards ``if tab_id:``, and ``_dispose_if_closed``
-returns for an empty id — so the phantom ``""`` entry can never be
-stopped, closed, or disposed, and the spawned task is unstoppable.
-
-Iteration 3 fixed this class of bug for ``newChat`` and
-``selectModel``; ``run`` was left unguarded.
+unconditionally created and registered a running-agent state, broadcast
+a ``clear`` event for it, and started a real task thread.  But every
+other code path treats an empty tab id as "no tab" — so the phantom
+entry could never be stopped, closed, or disposed, and the spawned
+task was unstoppable.  A ``run`` command without a usable ``tabId``
+must be dropped before any state is registered.
 """
 
 from __future__ import annotations
@@ -27,8 +23,8 @@ from pathlib import Path
 from typing import Any, cast
 
 import kiss.server.server as _server_module
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -63,17 +59,34 @@ class TestRunEmptyTabId(unittest.TestCase):
     def tearDown(self) -> None:
         self._parent_class.run = self._original_run
         _server_module.generate_followup_text = self._orig_followup
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _run_cmd(self, cmd: dict[str, Any]) -> None:
         self.server._cmd_run(cmd)
         deadline = time.time() + 10
         while time.time() < deadline:
-            tab = _RunningAgentState.running_agent_states.get("")
-            if tab is None or tab.task_thread is None:
+            with agent_state.STATE_LOCK:
+                threads = [
+                    st.task_thread
+                    for st in agent_state.agent_states.values()
+                ]
+            if not any(t is not None and t.is_alive() for t in threads):
                 break
             time.sleep(0.02)
+
+    def _assert_dropped(self) -> None:
+        assert not agent_state.agent_states, (
+            "BUG: a run command without a tabId registered an AgentState; "
+            "empty tab ids are unaddressable, so this entry (and its "
+            f"task) can never be stopped or disposed: "
+            f"{agent_state.agent_states}"
+        )
+        clears = [e for e in self.events if e.get("type") == "clear"]
+        assert not clears, (
+            "BUG: a run command without a tabId broadcast a clear event "
+            "and started a task thread for a phantom tab"
+        )
 
     def test_missing_tab_id_is_dropped(self) -> None:
         work_dir = str(Path(self.tmpdir) / "plain")
@@ -86,18 +99,7 @@ class TestRunEmptyTabId(unittest.TestCase):
             "autoCommit": False,
             "model": "",
         })
-        assert "" not in _RunningAgentState.running_agent_states, (
-            "BUG: a run command without a tabId minted a phantom "
-            "_RunningAgentState keyed by the empty string; _stop_task, "
-            "_cmd_close_tab and _dispose_if_closed all ignore empty tab "
-            "ids, so this entry (and its task) can never be stopped or "
-            "disposed"
-        )
-        clears = [e for e in self.events if e.get("type") == "clear"]
-        assert not clears, (
-            "BUG: a run command without a tabId broadcast a clear event "
-            "and started a task thread for a phantom tab"
-        )
+        self._assert_dropped()
 
     def test_explicit_empty_tab_id_is_dropped(self) -> None:
         work_dir = str(Path(self.tmpdir) / "plain2")
@@ -111,8 +113,7 @@ class TestRunEmptyTabId(unittest.TestCase):
             "autoCommit": False,
             "model": "",
         })
-        assert "" not in _RunningAgentState.running_agent_states
-        assert not [e for e in self.events if e.get("type") == "clear"]
+        self._assert_dropped()
 
 
 if __name__ == "__main__":
