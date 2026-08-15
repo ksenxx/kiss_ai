@@ -336,7 +336,9 @@ class VSCodeServer(
         self._state_lock = agent_state.STATE_LOCK
         self._complete_seq: int = 0
         self._complete_seq_latest: dict[str, int] = {}
-        self._complete_queue: queue.Queue[tuple[str, int, str, str, str, str, str]] | None = None
+        self._complete_queue: (
+            queue.Queue[tuple[str, int, str, str | None, str, str, str]] | None
+        ) = None
         self._complete_worker: threading.Thread | None = None
         self._file_cache: dict[str, list[str]] = {}
         self._last_active_file: dict[str, str] = {}

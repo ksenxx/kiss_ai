@@ -230,7 +230,8 @@ class _CommandsMixin:
         _complete_seq: int
         _complete_seq_latest: dict[str, int]
         _complete_queue: (
-            queue.Queue[tuple[str, int, str, str, str, str, str]] | None
+            queue.Queue[tuple[str, int, str, str | None, str, str, str]]
+            | None
         )
         _last_active_file: dict[str, str]
         _last_active_content: dict[str, str]
@@ -898,11 +899,28 @@ class _CommandsMixin:
                 if not chat_id:
                     chat_id = self._tab_chat_views.get(tab_id, "")
             if active_file:
+                if (
+                    active_content is None
+                    and active_file != self._last_active_file.get(conn_id, "")
+                ):
+                    # The window reported a DIFFERENT editor file with
+                    # no buffer snapshot: the stored content belongs to
+                    # the previous file and must not be paired with the
+                    # new path (stale cross-file identifiers).
+                    self._last_active_content.pop(conn_id, None)
                 self._last_active_file[conn_id] = active_file
             if active_content is not None:
                 self._last_active_content[conn_id] = active_content
             snapshot_file = self._last_active_file.get(conn_id, "")
-            snapshot_content = self._last_active_content.get(conn_id, "")
+            # ``None`` (never reported) must stay ``None`` so
+            # ``_active_file_identifier_matches`` falls back to reading
+            # ``snapshot_file`` from disk; a ``""`` default would be
+            # honoured verbatim as an "open but empty buffer" and
+            # dead-code the documented on-disk fallback.  The VS Code
+            # client really does send ``activeFile`` without
+            # ``activeFileContent`` when the visible editor's document
+            # is not among ``vscode.workspace.textDocuments``.
+            snapshot_content = self._last_active_content.get(conn_id)
             self._complete_seq += 1
             seq = self._complete_seq
             self._complete_seq_latest[conn_id] = seq
@@ -1227,9 +1245,10 @@ class _CommandsMixin:
         though both of their ``setWorkDir`` commands also land here.
 
         Clears the calling connection's ``_last_active_file`` snapshot
-        (it refers to a file from that window's previous workspace) and,
-        when the daemon-wide fallback actually changes, invalidates the
-        autocomplete file cache.
+        (it refers to a file from that window's previous workspace),
+        invalidates the connection's in-flight autocomplete generation,
+        and, when the daemon-wide fallback actually changes, invalidates
+        the autocomplete file cache.
         """
         new_dir = cmd.get("workDir", "")
         if not new_dir:
@@ -1238,6 +1257,15 @@ class _CommandsMixin:
         with self._state_lock:
             self._last_active_file.pop(conn_id, None)
             self._last_active_content.pop(conn_id, None)
+            # Invalidate any in-flight completion for this connection:
+            # a request computed against the OLD workspace's active
+            # file would otherwise pass the worker's post-computation
+            # freshness check (its seq still matches) and emit stale
+            # old-workspace identifiers after the switch.  Removing
+            # the entry makes both freshness checks in ``_complete``
+            # fail (``seq != -1``); the next ``complete`` command
+            # re-creates the entry with a fresh sequence number.
+            self._complete_seq_latest.pop(conn_id, None)
             if self.work_dir == new_dir:
                 return
             self.work_dir = new_dir

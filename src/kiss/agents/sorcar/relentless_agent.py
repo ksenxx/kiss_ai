@@ -252,7 +252,6 @@ class RelentlessAgent(Base):
         all_tools: list[Callable[..., Any]] = [finish, *tools]
 
         progress_section = ""
-        summary = ""
         summaries: list[str] = []
         current_pid = str(os.getpid())
         important_instructions = IMPORTANT_INSTRUCTIONS.format(

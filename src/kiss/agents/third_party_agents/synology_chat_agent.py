@@ -185,7 +185,7 @@ class SynologyChatChannelBackend(ToolMethodBackend):
             with self._send_lock:
                 resp = requests.post(
                     self._webhook_url,
-                    params={"payload": json.dumps(payload)},
+                    data={"payload": json.dumps(payload)},
                     timeout=30,
                 )
             return json.dumps({"ok": resp.status_code == 200})
@@ -207,7 +207,7 @@ class SynologyChatChannelBackend(ToolMethodBackend):
             with self._send_lock:
                 resp = requests.post(
                     self._webhook_url,
-                    params={"payload": json.dumps(payload)},
+                    data={"payload": json.dumps(payload)},
                     timeout=30,
                 )
             return json.dumps({"ok": resp.status_code == 200})
