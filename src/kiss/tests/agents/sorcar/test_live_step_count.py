@@ -9,7 +9,7 @@ Verifies that ``_get_history()`` includes the in-progress executor's
 accumulated from completed sessions, which stays 0 during the first
 (and typically only) session.
 
-No mocks — uses real ``VSCodeServer`` / ``_RunningAgentState`` instances.
+No mocks — uses real ``VSCodeServer`` / ``AgentState`` instances.
 """
 
 from __future__ import annotations
@@ -23,6 +23,8 @@ from typing import Any
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.kiss_agent import KISSAgent
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
 
 
@@ -76,7 +78,6 @@ class TestLiveStepCountInHistory:
             )
 
             tab_id = "hist-tab"
-            tab = server._get_tab(tab_id)
             agent = WorktreeSorcarAgent("History Agent")
             agent._last_task_id = task_id
             agent._last_user_prompt = "test live history"
@@ -88,18 +89,23 @@ class TestLiveStepCountInHistory:
             executor.step_count = 5
             agent._current_executor = executor
 
-            tab.agent = agent
-            tab.chat_id = "chat-hist"
-            tab.task_history_id = task_id
-
             alive_event = threading.Event()
             def _stay_alive() -> None:
                 alive_event.wait(timeout=30)
 
-            tab.task_thread = threading.Thread(target=_stay_alive, daemon=True)
-            tab.task_thread.start()
-            tab.stop_event = threading.Event()
-            tab.is_task_active = True
+            task_thread = threading.Thread(target=_stay_alive, daemon=True)
+            task_thread.start()
+            state = AgentState(
+                str(task_id),
+                agent=agent,
+                chat_id="chat-hist",
+                tab_id=tab_id,
+                server_owned=True,
+                stop_event=threading.Event(),
+                task_thread=task_thread,
+                is_task_active=True,
+            )
+            agent_state.register(state)
 
             try:
                 server._get_history(None)
@@ -123,7 +129,8 @@ class TestLiveStepCountInHistory:
                 assert our_session["tokens"] == 200
             finally:
                 alive_event.set()
-                tab.task_thread.join(timeout=5)
+                task_thread.join(timeout=5)
+                agent_state.unregister(str(task_id), state)
         finally:
             _restore_db(saved)
             shutil.rmtree(tmpdir, ignore_errors=True)

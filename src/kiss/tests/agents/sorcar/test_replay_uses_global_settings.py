@@ -17,10 +17,7 @@ Spec
    worktree/parallel/auto-commit toggles in the toolbar — to a new
    configuration (``is_worktree=False``, etc.).  The toggle state
    in the webview is the source of truth for the next task's
-   ``useWorktree`` / ``useParallel`` / ``autoCommit`` flags
-   (see ``media/main.js`` ``submit`` handler around the
-   ``useWorktree: !!(worktreeToggleBtn && worktreeToggleBtn.checked)``
-   block).
+   ``useWorktree`` / ``useParallel`` / ``autoCommit`` flags.
 
 3. The user clicks the history row for T1.  The frontend issues
    ``newChat`` then ``resumeSession`` for chat X into a fresh tab Y.
@@ -41,7 +38,9 @@ Spec
    from the broadcast ``extra`` (see ``_extra_for_replay`` in
    ``kiss/server/server.py``).  The webview's live toggles
    stay at the user's current global settings, and the follow-up
-   ``submit`` in tab Y carries those settings to the next run.
+   ``submit`` in tab Y carries those settings to the next run.  The
+   server's per-tab model pick (``_tab_models``) is likewise never
+   rewritten by a history load.
 
 The test patches the underlying ``SorcarAgent.run`` so no real LLM
 call is made — only the orchestration is exercised end-to-end.
@@ -60,6 +59,7 @@ from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -167,7 +167,9 @@ def _run_and_wait(
         "useParallel": use_parallel,
         "autoCommit": auto_commit,
     })
-    t = server._get_tab(tab_id).task_thread
+    state = agent_state.find_by_tab(tab_id)
+    assert state is not None, f"no agent state registered for tab {tab_id}"
+    t = state.task_thread
     assert t is not None
     t.join(timeout=10)
     assert not t.is_alive()
@@ -179,6 +181,7 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
     loaded task's per-task snapshot."""
 
     def setUp(self) -> None:
+        agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect_db(self.tmpdir)
         _init_git_repo(self.tmpdir)
@@ -190,6 +193,7 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         _unpatch_parent_run(self.original_run)
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+        agent_state.agent_states.clear()
 
     def _persisted_extra_for(self, task_id: str) -> dict[str, object]:
         """Return the persisted ``task_history.extra`` JSON for *task_id*."""
@@ -293,12 +297,6 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
             "tabId": history_tab,
         })
 
-        loaded_tab = self.server._get_tab(history_tab)
-        assert not loaded_tab.use_worktree, (
-            "loading a chat must not stamp tab.use_worktree from the "
-            "loaded task's historical snapshot"
-        )
-
         _run_and_wait(
             self.server,
             tab_id=history_tab,
@@ -320,69 +318,13 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
         assert second_extra.get("auto_commit_mode") is False, second_extra
         assert second_extra.get("model") == "claude-sonnet-4-5", second_extra
 
+    def test_history_load_preserves_tab_model_pick(self) -> None:
+        """A history load must not rewrite the server's per-tab model
+        pick (``_tab_models``).
 
-    def test_history_load_preserves_use_parallel_and_auto_commit(self) -> None:
-        """A history load must leave the tab's toggles exactly as the
-        user set them.
-
-        The toolbar toggles are GLOBAL UI state owned by the frontend —
-        that is the whole premise of this file, whose sibling test
-        proves the backend strips the four global-setting keys from the
-        replayed ``extra`` so the live toggles win.  Resetting the
-        backend's copy therefore desynchronises the two, and clearing
-        ``auto_commit_mode`` in particular made
-        :meth:`_MergeFlowMixin._emit_pending_worktree` present a
-        diff/merge review to a user who had explicitly switched
-        auto-commit on.
-
-        Every ``run`` command carries ``useWorktree`` / ``useParallel``
-        / ``autoCommit`` explicitly (see ``_cmd_run``), so preserving
-        the flags cannot leak stale values into a follow-up task."""
-        first_tab = "tab-first-pa"
-        _run_and_wait(
-            self.server,
-            tab_id=first_tab,
-            prompt="task with parallel + auto-commit enabled",
-            work_dir=self.tmpdir,
-            model="claude-opus-4-6",
-            use_worktree=True,
-            use_parallel=True,
-            auto_commit=True,
-        )
-        first_row = th._load_history(limit=10)[0]
-        chat_id = str(first_row["chat_id"])
-        first_task_id = cast(str, first_row["id"])
-
-        history_tab = "tab-history-pa"
-        self.server._handle_command(
-            {"type": "newChat", "tabId": history_tab},
-        )
-        # The user flips the toolbar switches on before clicking the
-        # history row; the backend mirror must survive the click.
-        history_state = self.server._get_tab(history_tab)
-        history_state.use_worktree = True
-        history_state.use_parallel = True
-        history_state.auto_commit_mode = True
-        self.server._handle_command({
-            "type": "resumeSession",
-            "id": chat_id,
-            "taskId": first_task_id,
-            "tabId": history_tab,
-        })
-
-        loaded_tab = self.server._get_tab(history_tab)
-        assert loaded_tab.use_worktree, loaded_tab.use_worktree
-        assert loaded_tab.use_parallel, loaded_tab.use_parallel
-        assert loaded_tab.auto_commit_mode, loaded_tab.auto_commit_mode
-
-    def test_history_load_preserves_selected_model(self) -> None:
-        """A history load must not rewrite ``tab.selected_model``.
-
-        The model picker is global UI state like the toggles.  The
-        stale-sidebar concern that once justified a reset cannot arise:
-        ``_attach_live_session_metrics`` only reads ``selected_model``
-        for a tab whose ``_live_task_id`` matches a RUNNING task, and
-        such a tab was already exempt from the reset."""
+        The model picker is global UI state like the toggles: loading
+        an old task whose ``extra`` snapshot carries a different model
+        must leave the tab's current pick alone."""
         first_tab = "tab-first-model"
         _run_and_wait(
             self.server,
@@ -403,7 +345,7 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
             {"type": "newChat", "tabId": history_tab},
         )
         stale_model = "stale-test-model"
-        self.server._get_tab(history_tab).selected_model = stale_model
+        self.server._tab_models[history_tab] = stale_model
         self.server._handle_command({
             "type": "resumeSession",
             "id": chat_id,
@@ -411,143 +353,7 @@ class TestReplayUsesGlobalSettings(unittest.TestCase):
             "tabId": history_tab,
         })
 
-        loaded_tab = self.server._get_tab(history_tab)
-        assert loaded_tab.selected_model == stale_model, loaded_tab.selected_model
-
-    def test_history_load_preserves_state_during_merge_review(self) -> None:
-        """Regression for the round-2 gpt-5.5 review finding: the
-        ``tab_alive`` guard must cover the ``tab.is_merging`` flag
-        too.  Without it, a ``_replay_session`` re-entry on a tab
-        whose post-task worktree-merge prompt is still open (e.g.
-        VS Code window reload mid-merge) would clobber
-        ``tab.use_worktree=False``, causing ``_finish_merge`` /
-        ``_present_pending_worktree`` to short-circuit and leak
-        the worktree directory."""
-        tab_id = "tab-merging"
-        _run_and_wait(
-            self.server,
-            tab_id=tab_id,
-            prompt="seed task for merge guard",
-            work_dir=self.tmpdir,
-            model=self.server._default_model,
-            use_worktree=True,
-            use_parallel=True,
-            auto_commit=True,
-        )
-        row = th._load_history(limit=10)[0]
-        chat_id = str(row["chat_id"])
-        task_id = cast(str, row["id"])
-
-        tab = self.server._get_tab(tab_id)
-        tab.is_task_active = False
-        tab.is_merging = True
-        tab.use_worktree = True
-        tab.use_parallel = True
-        tab.auto_commit_mode = True
-        tab.selected_model = "stale-merge-model"
-
-        try:
-            self.server._replay_session(
-                chat_id=chat_id, tab_id=tab_id, task_id=task_id,
-            )
-            assert tab.use_worktree is True, tab.use_worktree
-            assert tab.use_parallel is True, tab.use_parallel
-            assert tab.auto_commit_mode is True, tab.auto_commit_mode
-            assert (
-                tab.selected_model == "stale-merge-model"
-            ), tab.selected_model
-        finally:
-            tab.is_merging = False
-
-    def test_history_load_preserves_state_when_thread_alive(self) -> None:
-        """A live worker thread does not change the answer either.
-
-        Replay preserves the toolbar toggles unconditionally, so a tab
-        whose worker thread is still alive must come out of a history
-        load exactly as it went in."""
-        tab_id = "tab-thread"
-        _run_and_wait(
-            self.server,
-            tab_id=tab_id,
-            prompt="seed task for thread guard",
-            work_dir=self.tmpdir,
-            model=self.server._default_model,
-            use_worktree=True,
-            use_parallel=False,
-            auto_commit=False,
-        )
-        row = th._load_history(limit=10)[0]
-        chat_id = str(row["chat_id"])
-        task_id = cast(str, row["id"])
-
-        tab = self.server._get_tab(tab_id)
-        stop_evt = threading.Event()
-        alive_thread = threading.Thread(target=stop_evt.wait, daemon=True)
-        alive_thread.start()
-        tab.is_task_active = False
-        tab.is_merging = False
-        tab.task_thread = alive_thread
-        tab.use_worktree = True
-        tab.use_parallel = True
-        tab.auto_commit_mode = True
-        tab.selected_model = "stale-thread-model"
-
-        try:
-            self.server._replay_session(
-                chat_id=chat_id, tab_id=tab_id, task_id=task_id,
-            )
-            assert tab.use_worktree is True
-            assert tab.use_parallel is True
-            assert tab.auto_commit_mode is True
-            assert tab.selected_model == "stale-thread-model"
-        finally:
-            stop_evt.set()
-            alive_thread.join(timeout=2)
-
-    def test_history_load_preserves_state_during_live_run(self) -> None:
-        """The strongest case for preservation: a live run.
-
-        When the loaded chat is re-rendered into the SAME tab that owns
-        a live run, the in-flight per-tab fields are the source of
-        truth for ``_get_history``'s sidebar metadata, so rewriting
-        them would make the sidebar describe the wrong task.
-        Reproduce by simulating an active task (set
-        ``is_task_active = True``) on the tab BEFORE calling
-        ``_replay_session``, then assert the fields are unchanged."""
-        tab_id = "tab-live"
-        _run_and_wait(
-            self.server,
-            tab_id=tab_id,
-            prompt="seed task to create chat",
-            work_dir=self.tmpdir,
-            model="claude-opus-4-6",
-            use_worktree=True,
-            use_parallel=True,
-            auto_commit=True,
-        )
-        row = th._load_history(limit=10)[0]
-        chat_id = str(row["chat_id"])
-        task_id = cast(str, row["id"])
-
-        tab = self.server._get_tab(tab_id)
-        tab.is_task_active = True
-        tab.use_worktree = True
-        tab.use_parallel = True
-        tab.auto_commit_mode = True
-        tab.selected_model = "claude-opus-4-6"
-
-        try:
-            self.server._replay_session(
-                chat_id=chat_id, tab_id=tab_id, task_id=task_id,
-            )
-            assert tab.use_worktree is True, tab.use_worktree
-            assert tab.use_parallel is True, tab.use_parallel
-            assert tab.auto_commit_mode is True, tab.auto_commit_mode
-            assert (
-                tab.selected_model == "claude-opus-4-6"
-            ), tab.selected_model
-        finally:
-            tab.is_task_active = False
+        assert self.server._tab_models.get(history_tab) == stale_model
 
 
 class TestExtraForReplayUnit(unittest.TestCase):
@@ -609,12 +415,14 @@ class TestSubagentReplayStripsGlobalSettings(unittest.TestCase):
     frontend's ``task_events`` handler in ``media/main.js``)."""
 
     def setUp(self) -> None:
+        agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect_db(self.tmpdir)
 
     def tearDown(self) -> None:
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+        agent_state.agent_states.clear()
 
     def test_persisted_subagent_extras_are_stripped(self) -> None:
         chat_id = "chat-subs"

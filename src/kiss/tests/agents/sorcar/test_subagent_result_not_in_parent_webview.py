@@ -408,6 +408,12 @@ class TestSubagentResultNotInParentWebview:
     ]:
         printer = _FakeWebPrinter()
         parent = ChatSorcarAgent("parent")
+
+        def _on_alloc(task_id: Any, chat_id: str) -> None:
+            # Mirror task_runner._on_run_task_id_allocated: attach the
+            # launching UI tab to the task (also subscribes the tab).
+            printer.register_task_ui(str(task_id), parent_tab_id)
+
         parent.run(
             prompt_template=(
                 "Use run_parallel to compute three arithmetic expressions."
@@ -417,7 +423,7 @@ class TestSubagentResultNotInParentWebview:
             work_dir=self.tmpdir,
             printer=printer,
             is_parallel=True,
-            _subscribe_tab_id=parent_tab_id,
+            _on_task_id_allocated=_on_alloc,
         )
         return printer, parent
 

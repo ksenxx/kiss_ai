@@ -117,7 +117,6 @@ class FakeSidebarView {
   generateCommitMessage() {
     return Promise.resolve();
   }
-  handleMergeCommand() {}
   onFirstResolve(cb) {
     calls.onFirstResolveCount += 1;
     this._firstResolveCb = cb;
@@ -145,7 +144,6 @@ function stubModule(filePath, exports) {
 
 stubModule(path.join(OUT_DIR, 'SorcarSidebarView.js'), {
   SorcarSidebarView: FakeSidebarView,
-  MERGE_ACTIONS: {accept: 'mergeAccept'},
 });
 stubModule(path.join(OUT_DIR, 'DependencyInstaller.js'), {
   ensureLocalBinInPath: () => {},

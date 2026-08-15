@@ -4,15 +4,16 @@
 # add your name here
 """Bug-hunt: adjacent-task navigation from a pure-viewer tab.
 
-``_replay_session`` (server.py) deliberately does NOT create a
-``_RunningAgentState`` registry entry for a pure-viewer tab (the
-C2/C3 fix) — it only records the tab in ``_tab_chat_views``.  But
-``_cmd_get_adjacent_task`` (commands.py) resolves the chat id via
-``self._get_tab(tab_id)``, which CREATES a fresh registry entry whose
-``chat_id`` is ``""``.  ``_get_adjacent_task_by_chat_id`` returns
-``None`` for an empty chat id, so arrow-key navigation in any tab
+``_replay_session`` (server.py) deliberately does NOT create an
+agent-state registry entry for a pure-viewer tab (the C2/C3 fix) —
+it only records the tab in ``_tab_chat_views``.
+``_cmd_get_adjacent_task`` (commands.py) must therefore resolve the
+chat id through ``_tab_chat_views`` rather than the registry (a
+viewer tab has no registered state, hence no ``chat_id``).
+``_get_adjacent_task_by_chat_id`` returns ``None`` for an empty chat
+id, so getting this wrong makes arrow-key navigation in any tab
 opened from the history sidebar (after a daemon restart, or any tab
-that never ran a task itself) always broadcasts an EMPTY
+that never ran a task itself) broadcast an EMPTY
 ``adjacent_task_events`` payload even though the chat has adjacent
 tasks.
 """
@@ -23,7 +24,7 @@ import time
 import unittest
 
 from kiss.agents.sorcar.persistence import _add_task
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
 
@@ -36,7 +37,7 @@ class TestAdjacentTaskFromViewerTab(unittest.TestCase):
         self.server = VSCodeServer(self.printer)
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def test_adjacent_prev_resolves_chat_of_viewer_tab(self) -> None:
         """A history-opened viewer tab can navigate to the previous task."""

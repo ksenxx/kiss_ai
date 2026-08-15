@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Slack Agent — SorcarAgent extension with Slack API tools.
+"""Slack Agent — channel agent with Slack API tools.
 
 Provides authenticated access to a Slack workspace via a bot token
 with multi-turn chat-session persistence.  Handles authentication
@@ -22,17 +22,16 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import sys
 import time
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
@@ -108,14 +107,11 @@ def _clear_token(workspace: str = "default") -> None:
     clear_json_config(_token_path(workspace))
 
 
-_REPLY_POLL_INTERVAL = 2.0
-
-
 class SlackChannelBackend(ToolMethodBackend):
     """Slack channel backend.
 
-    Provides channel monitoring, message sending, and reply waiting for
-    the channel poller and interactive agent.
+    Provides channel monitoring and message sending for the channel
+    poller and interactive agent.
     """
 
     def __init__(self, workspace: str = "default") -> None:
@@ -325,56 +321,6 @@ class SlackChannelBackend(ToolMethodBackend):
             kwargs["thread_ts"] = thread_ts
         self._client.chat_postMessage(**kwargs)
 
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Poll a Slack thread for a reply from a specific user.
-
-        Args:
-            channel_id: Channel ID containing the thread.
-            thread_ts: Timestamp of the parent message (thread root).
-            user_id: User ID to wait for a reply from.
-
-        Returns:
-            The text of the user's reply message, or ``None`` on timeout.
-        """
-        client = self._client
-        assert client is not None
-        seen_ts: set[str] = set()
-        try:
-            resp = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=100)
-            for msg in cast(list[dict[str, Any]], resp.get("messages", [])):
-                seen_ts.add(str(msg["ts"]))
-        except SlackApiError:
-            pass
-
-        def poll() -> list[dict[str, Any]]:
-            try:
-                resp = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=100)
-            except (SlackApiError, OSError):
-                logger.debug("Error polling thread replies", exc_info=True)
-                return []
-            replies: list[dict[str, Any]] = []
-            for reply in cast(list[dict[str, Any]], resp.get("messages", [])):
-                ts = str(reply["ts"])
-                if ts in seen_ts:
-                    continue
-                seen_ts.add(ts)
-                replies.append(reply)
-            return replies
-
-        return wait_for_matching_message(
-            poll=poll,
-            matches=lambda reply: reply.get("user") == user_id,
-            extract_text=lambda reply: str(reply.get("text", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=_REPLY_POLL_INTERVAL,
-        )
-
     def disconnect(self) -> None:
         """Release Slack backend state before stop or reconnect."""
         self._client = None
@@ -403,7 +349,6 @@ class SlackChannelBackend(ToolMethodBackend):
         if self._bot_user_id:
             return text.replace(f"<@{self._bot_user_id}>", "").strip()
         return text
-
 
     def list_third_party_agents(
         self, types: str = "public_channel", limit: int = 200, cursor: str = ""
@@ -846,11 +791,11 @@ class SlackChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class SlackAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with Slack workspace tools.
+class SlackAgent(BaseChannelAgent):
+    """Channel agent with Slack workspace tools.
 
-    Inherits all standard SorcarAgent capabilities (bash, file editing,
-    browser automation) and adds authenticated Slack API tools for
+    Tasks run on the kiss-web daemon's agent (which supplies bash,
+    file editing, and browser automation) with authenticated Slack API tools for
     messaging, channel management, user lookup, reactions, search,
     and file uploads.
 
@@ -875,8 +820,7 @@ class SlackAgent(BaseChannelAgent, SorcarAgent):
     )
 
     def __init__(self, workspace: str = "default") -> None:
-        super().__init__("Slack Agent")
-        self._workspace = workspace
+        super().__init__("Slack Agent", workspace=workspace)
         self._backend = SlackChannelBackend(workspace=workspace)
         token = _load_token(workspace)
         if token:
@@ -939,14 +883,14 @@ class SlackAgent(BaseChannelAgent, SorcarAgent):
             agent._backend._client = WebClient(token=token, retry_handlers=[])
             try:
                 resp = agent._backend._client.auth_test()
-                _save_token(token, workspace=agent._workspace)
+                _save_token(token, workspace=agent.workspace)
                 return json.dumps(
                     {
                         "ok": True,
                         "message": "Slack token saved and validated.",
                         "team": resp.get("team", ""),
                         "user": resp.get("user", ""),
-                        "workspace": agent._workspace,
+                        "workspace": agent.workspace,
                     }
                 )
             except SlackApiError as e:
@@ -959,7 +903,7 @@ class SlackAgent(BaseChannelAgent, SorcarAgent):
             Returns:
                 Status message.
             """
-            _clear_token(workspace=agent._workspace)
+            _clear_token(workspace=agent.workspace)
             agent._backend._client = None
             return "Slack authentication cleared."
 
@@ -977,14 +921,15 @@ class SlackAgent(BaseChannelAgent, SorcarAgent):
             Use ask_user_question() if you need user help with login or workspace-selection screens.
 
             Returns:
-                Page content of the Slack API portal to begin navigation.
+                Instructions for navigating the Slack API portal.
             """
-            if agent.web_use_tool is None:  # pragma: no branch
-                return (
-                    "Browser not available. Use authenticate_slack(token=...) "
-                    "with an xoxb- token from https://api.slack.com/apps."
-                )
-            return agent.web_use_tool.go_to_url("https://api.slack.com/apps")
+            return (
+                "Open https://api.slack.com/apps with your go_to_url browser "
+                "tool and complete the app creation steps described above. "
+                "If browser tools are unavailable, use "
+                "authenticate_slack(token=...) with an xoxb- token from "
+                "https://api.slack.com/apps."
+            )
 
         return [
             check_slack_auth,
@@ -1085,6 +1030,20 @@ def main() -> None:
         make_backend=_make_backend,
         extra_usage="[--list-workspaces] [--delete-workspace WS]",
     )
+
+
+def get_tools() -> list:
+    """Return the Slack channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the token
+    persisted under ``~/.kiss`` and returns its authentication and
+    backend tools.  The workspace comes from the
+    ``KISS_CHANNEL_WORKSPACE`` environment variable (set by the
+    launcher while the task runs), defaulting to ``"default"``.
+    """
+    workspace = os.environ.get("KISS_CHANNEL_WORKSPACE", "default") or "default"
+    return SlackAgent(workspace=workspace)._get_tools()
 
 
 if __name__ == "__main__":

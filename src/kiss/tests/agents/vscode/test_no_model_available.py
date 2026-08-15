@@ -20,6 +20,7 @@ from typing import Any
 from unittest import TestCase
 
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 
 
 def _make_server() -> Any:
@@ -27,6 +28,27 @@ def _make_server() -> Any:
     from kiss.server.server import VSCodeServer
 
     return VSCodeServer()
+
+
+def _register_tab_state(task_id: str, tab_id: str, agent: WorktreeSorcarAgent) -> Any:
+    """Register a server-owned AgentState for *tab_id* carrying *agent*."""
+    st = agent_state.AgentState(
+        task_id,
+        agent=agent,
+        tab_id=tab_id,
+        server_owned=True,
+        stop_event=threading.Event(),
+    )
+    st.user_answer_queue = queue.Queue()
+    agent_state.register(st)
+    return st
+
+
+def _unregister_state(st: Any) -> None:
+    """Remove *st* from the registry regardless of any mid-run re-keying."""
+    for tid, s in list(agent_state.iter_items()):
+        if s is st:
+            agent_state.unregister(tid, s)
 
 
 class TestNoModelAvailableResultEvent(TestCase):
@@ -77,8 +99,7 @@ class TestNoModelAvailableResultEvent(TestCase):
             server.printer.broadcast = capture  # type: ignore[assignment]
 
             tab_id = "no-model-test-1"
-            tab = server._get_tab(tab_id)
-            tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
+            agent = WorktreeSorcarAgent("Sorcar VS Code")
 
             run_called = False
 
@@ -86,20 +107,17 @@ class TestNoModelAvailableResultEvent(TestCase):
                 nonlocal run_called
                 run_called = True
 
-            tab.agent.run = fake_run  # type: ignore[assignment]
-
-            stop_event = threading.Event()
-            tab.stop_event = stop_event
-            tab.user_answer_queue = queue.Queue()
+            agent.run = fake_run  # type: ignore[method-assign, assignment]
+            st = _register_tab_state("no-model-task-1", tab_id, agent)
 
             task_thread = threading.Thread(
                 target=server._run_task,
                 args=({"type": "run", "prompt": "do something", "tabId": tab_id},),
                 daemon=True,
             )
-            tab.task_thread = task_thread
             task_thread.start()
             task_thread.join(timeout=10)
+            _unregister_state(st)
 
             with lock:
                 result_events = [e for e in events if e.get("type") == "result"]
@@ -149,17 +167,16 @@ class TestNoModelAvailableResultEvent(TestCase):
             server.printer.broadcast = capture  # type: ignore[assignment]
 
             tab_id = "model-ok-test-1"
-            tab = server._get_tab(tab_id)
-            tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
+            agent = WorktreeSorcarAgent("Sorcar VS Code")
 
             run_called = False
 
             def fake_run(**kwargs: Any) -> None:
                 nonlocal run_called
                 run_called = True
-                tab.agent.total_tokens_used = 100
-                tab.agent.budget_used = 0.01
-                tab.agent.step_count = 1
+                agent.total_tokens_used = 100
+                agent.budget_used = 0.01
+                agent.step_count = 1
                 printer = kwargs.get("printer", server.printer)
                 printer.print(
                     "success: true\nsummary: Done",
@@ -169,20 +186,17 @@ class TestNoModelAvailableResultEvent(TestCase):
                     step_count=1,
                 )
 
-            tab.agent.run = fake_run  # type: ignore[assignment]
-
-            stop_event = threading.Event()
-            tab.stop_event = stop_event
-            tab.user_answer_queue = queue.Queue()
+            agent.run = fake_run  # type: ignore[method-assign, assignment]
+            st = _register_tab_state("model-ok-task-1", tab_id, agent)
 
             task_thread = threading.Thread(
                 target=server._run_task,
                 args=({"type": "run", "prompt": "test task", "tabId": tab_id},),
                 daemon=True,
             )
-            tab.task_thread = task_thread
             task_thread.start()
             task_thread.join(timeout=10)
+            _unregister_state(st)
 
             assert run_called, "Agent's run() should be called when a model is available"
 

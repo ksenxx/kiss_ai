@@ -3,19 +3,31 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 
-"""Configuration Pydantic models for KISS agent settings with CLI support."""
+"""Configuration Pydantic models for KISS agent settings."""
 
 import os
 import random
 import threading
 import time
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel, Field
 
 _PROJECT_DIR = Path(__file__).resolve().parents[3]
 _ARTIFACTS_DIR_NAME = ".kiss.artifacts"
+
+DEFAULT_MAX_BUDGET = 100.0
+"""The product default spend cap, in USD, for one agent run.
+
+This is the single source of truth for that number.  It backs both
+:attr:`Config.max_budget` (the default for channel-agent command-line
+runs) and ``vscode_config.DEFAULTS['max_budget']`` (what the settings
+panel shows and what daemon-launched tasks read), which used to carry
+two different literals — 200.0 here and 100 there — so a fresh install
+disagreed with itself depending on which entry point the user reached
+first.
+"""
+
 _artifact_dir: str | None = None
 _artifact_dir_lock = threading.Lock()
 
@@ -26,27 +38,8 @@ def _artifact_root(base_dir: str | Path | None = None) -> Path:
     return root.resolve() / _ARTIFACTS_DIR_NAME
 
 
-def set_artifact_base_dir(base_dir: str | Path | None) -> str:
-    """Set the base directory used to resolve ``artifact_dir``.
-
-    Args:
-        base_dir: Directory whose ``.kiss.artifacts`` child should contain
-            generated job artifacts. ``None`` resets to the project root.
-
-    Returns:
-        The resolved artifact job directory.
-    """
-    global _artifact_dir
-    with _artifact_dir_lock:
-        _artifact_dir = _generate_artifact_dir(base_dir)
-        return _artifact_dir
-
-
-def _generate_artifact_dir(base_dir: str | Path | None = None) -> str:
-    """Generate a unique artifact job directory under the configured base directory.
-
-    Args:
-        base_dir: Optional base directory for the ``.kiss.artifacts`` root.
+def _generate_artifact_dir() -> str:
+    """Generate a unique artifact job directory under the project root.
 
     Returns:
         The absolute path to the newly created artifact directory.
@@ -54,7 +47,7 @@ def _generate_artifact_dir(base_dir: str | Path | None = None) -> str:
     artifact_subdir_name = (
         f"{time.strftime('job_%Y_%m_%d_%H_%M_%S')}_{random.randint(0, 1000000)}"
     )
-    artifact_path = _artifact_root(base_dir) / "jobs" / artifact_subdir_name
+    artifact_path = _artifact_root() / "jobs" / artifact_subdir_name
     artifact_path.mkdir(parents=True, exist_ok=True)
     return str(artifact_path)
 
@@ -88,7 +81,16 @@ def kiss_home() -> Path:
 
 
 def get_artifact_dir() -> str:
-    """Return the active artifact directory, creating it lazily if needed."""
+    """Return this process's artifact directory, creating it lazily if needed.
+
+    The directory is chosen once and never changes for the lifetime of
+    the process.  It used to be replaceable at runtime, but
+    ``Base.get_trajectory_path`` resolves it at *save* time rather than
+    at run start, so swapping it mid-flight sent a running agent's
+    trajectory to a different root than the one it started under — a
+    hazard no lock can close, because it straddles the agent's lifetime
+    rather than the assignment.
+    """
     global _artifact_dir
     if _artifact_dir is None:
         with _artifact_dir_lock:
@@ -144,15 +146,17 @@ class Config(BaseModel):
         description="Moonshot AI (Kimi) API key (can also be set via MOONSHOT_API_KEY env var)",
     )
     max_budget: float = Field(
-        default=200.0,
+        default=DEFAULT_MAX_BUDGET,
         description=(
-            "Maximum budget in USD for a single agent run. Only consumed as the "
-            "default for the Sorcar CLI's --max-budget option (and settable from "
-            "the VS Code settings); KISSAgent and RelentlessAgent do NOT consult "
-            "this field — they use their own defaults (10.0 and 200.0 USD "
-            "respectively) unless max_budget is passed to run() explicitly."
+            "Maximum budget in USD for a single agent run, defaulting to "
+            "DEFAULT_MAX_BUDGET. Only consumed as the "
+            "default for channel-agent command-line runs (and kept in sync from "
+            "the VS Code settings; daemon-launched tasks read max_budget from "
+            "the VS Code config directly); KISSAgent and RelentlessAgent do NOT "
+            "consult this field — they use their own defaults (10.0 and 200.0 "
+            "USD respectively) unless max_budget is passed to run() explicitly."
         ),
     )
 
 
-DEFAULT_CONFIG: Any = Config()
+DEFAULT_CONFIG = Config()

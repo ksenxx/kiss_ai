@@ -4,14 +4,19 @@
 # add your name here
 """Branch-coverage tests for :mod:`kiss.core.html_render`.
 
-The CLI renders finish()'s HTML summaries with ``html_to_rich`` /
-``html_to_text``; these tests exercise every element type the renderer
+The console printer renders finish()'s HTML summaries with
+``html_to_rich``; these tests exercise every element type the renderer
 supports against real HTML inputs.
 """
 
 from __future__ import annotations
 
-from kiss.core.html_render import html_to_rich, html_to_text
+from kiss.core.html_render import html_to_rich
+
+
+def html_to_text(html: str) -> str:
+    """Plain-text rendering of *html* via ``html_to_rich`` (test helper)."""
+    return html_to_rich(html).plain
 
 
 class TestBlocksAndHeadings:

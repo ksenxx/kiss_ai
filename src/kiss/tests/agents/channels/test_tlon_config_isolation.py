@@ -115,7 +115,6 @@ def test_check_auth_unauthenticated_survives_leftover_ephemeral_config() -> None
         _config.save({"ship_url": base, "code": "lidlut-tabwed", "ship": "~zod"})
 
         agent = TlonAgent()
-        agent.web_use_tool = None
         tools = {t.__name__: t for t in agent._get_tools()}
         assert json.loads(tools["check_tlon_auth"]())["ok"] is True
 
@@ -133,7 +132,6 @@ def test_clear_tlon_auth_resets_backend_and_config() -> None:
     try:
         _config.save({"ship_url": "http://127.0.0.1:1", "code": "c", "ship": "~zod"})
         agent = TlonAgent()
-        agent.web_use_tool = None
         assert agent._is_authenticated()
         tools = {t.__name__: t for t in agent._get_tools()}
         result = tools["clear_tlon_auth"]()

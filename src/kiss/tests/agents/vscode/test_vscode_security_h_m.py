@@ -9,6 +9,10 @@ that fails when the fix is reverted.
 TS-side fixes (DependencyInstaller, SorcarSidebarView, kissPaths,
 SorcarTab) are spot-checked via source-grep tests because the test
 harness has no TypeScript runtime.
+
+(M5 covered ``_save_untracked_base``/``_diff_files`` of the interactive
+diff/merge review workflow; that workflow was removed from the server,
+so those tests are gone.)
 """
 
 from __future__ import annotations
@@ -23,7 +27,6 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from typing import Any
 from unittest import mock
 
 
@@ -146,105 +149,64 @@ class TestH9AutocompleteNonBlocking(unittest.TestCase):
 
 
 class TestM1GitHasTimeout(unittest.TestCase):
-    """``_git`` must pass a ``timeout`` to ``subprocess.run``."""
+    """``_git`` must abort a hung git instead of blocking forever.
 
-    def test_git_invocation_carries_timeout(self) -> None:
+    Asserted through behaviour rather than through the shape of the
+    subprocess call: the helper now delegates to the single hardened
+    runner in ``git_worktree`` (which uses ``Popen`` + ``killpg``), so
+    a test that spied on ``subprocess.run``'s keyword arguments was
+    pinning an implementation that no longer exists.
+    """
+
+    def _install_hanging_git(self, tmp_path: Path) -> Path:
+        """Create a stub ``git`` that never returns, and return its dir."""
+        bin_dir = tmp_path / "stub-bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "git"
+        stub.write_text("#!/bin/sh\nsleep 60\n", encoding="utf-8")
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        return bin_dir
+
+    def test_hanging_git_is_abandoned_within_the_timeout(self) -> None:
+        """A hung git yields returncode 124 well before it exits."""
+        from kiss.agents.sorcar import git_worktree
         from kiss.server import diff_merge as dm
 
-        captured: dict = {}
-        real_run = subprocess.run
-
-        def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-            captured.update(kwargs)
-            return real_run(["true"], capture_output=True, text=True)
-
-        with mock.patch.object(subprocess, "run", fake_run):
-            dm._git("/tmp", "status")
-        self.assertIn("timeout", captured,
-                      "_git did not pass a timeout — could hang forever")
-        self.assertGreater(captured["timeout"], 0)
-        self.assertLessEqual(captured["timeout"], 300,
-                             "_git timeout should be modest (<= 300s)")
-
-    def test_git_timeout_returns_completed_process_on_expiry(self) -> None:
-        """A hanging git is reported as a normal (failed) CompletedProcess."""
-        from kiss.server import diff_merge as dm
-
-        with mock.patch.object(
-            subprocess, "run",
-            side_effect=subprocess.TimeoutExpired(cmd="git status", timeout=0.1),
-        ):
-            result = dm._git("/tmp", "status")
-        self.assertIsInstance(result, subprocess.CompletedProcess)
-        self.assertNotEqual(result.returncode, 0)
-
-
-
-class TestM5AtomicSaveAndDecodeError(unittest.TestCase):
-    """``_save_untracked_base`` is atomic; ``_diff_files`` swallows decode errors."""
-
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.work = Path(self._tmp.name)
-        (self.work / "a.txt").write_text("hello\nworld\n")
-        (self.work / "b.txt").write_text("foo\nbar\n")
-        from kiss.core import config as cfg
-
-        self._cfg_patch = mock.patch.object(
-            cfg, "_artifact_root", lambda: self.work / ".kiss-artifacts",
-        )
-        self._cfg_patch.start()
-
-    def tearDown(self) -> None:
-        self._cfg_patch.stop()
-        self._tmp.cleanup()
-
-    def test_save_untracked_base_is_atomic_against_crash(self) -> None:
-        """If copy fails partway, the OLD base copy must still be intact."""
-        from kiss.server import diff_merge as dm
-
-        dm._save_untracked_base(str(self.work), {"a.txt"}, tab_id="tab1")
-        base_dir = dm._untracked_base_dir("tab1")
-        self.assertTrue((base_dir / "a.txt").exists())
-
-        original_copy = shutil.copy2
-        call_count = {"n": 0}
-
-        def flaky_copy(src: str, dst: str, *args: object, **kwargs: object) -> None:
-            call_count["n"] += 1
-            if call_count["n"] == 1:
-                original_copy(src, dst)
-                return
-            raise OSError("disk full")
-
-        with mock.patch.object(shutil, "copy2", flaky_copy):
+        tmpdir = tempfile.mkdtemp(prefix="kiss-m1-timeout-")
+        try:
+            bin_dir = self._install_hanging_git(Path(tmpdir))
+            saved_path = os.environ["PATH"]
+            saved_timeout = git_worktree._GIT_TIMEOUT_SECONDS
+            os.environ["PATH"] = f"{bin_dir}{os.pathsep}{saved_path}"
+            git_worktree._GIT_TIMEOUT_SECONDS = 1.0
             try:
-                dm._save_untracked_base(
-                    str(self.work), {"a.txt", "b.txt"}, tab_id="tab1",
-                )
-            except OSError:
-                pass
+                start = time.monotonic()
+                result = dm._git(tmpdir, "status")
+                elapsed = time.monotonic() - start
+            finally:
+                os.environ["PATH"] = saved_path
+                git_worktree._GIT_TIMEOUT_SECONDS = saved_timeout
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
-        a_in_base = base_dir / "a.txt"
-        self.assertTrue(a_in_base.exists(),
-                        "Previous good base copy was destroyed by failed save")
-        self.assertEqual(a_in_base.read_text(), "hello\nworld\n")
+        self.assertIsInstance(result, subprocess.CompletedProcess)
+        self.assertEqual(result.returncode, 124,
+                         f"expected the timeout returncode: {result}")
+        self.assertLess(elapsed, 30,
+                        f"_git blocked for {elapsed:.1f}s despite a 1s budget")
 
-    def test_diff_files_handles_unicode_decode_error(self) -> None:
-        """Binary file should yield empty hunks, not raise UnicodeDecodeError."""
+    def test_normal_git_still_succeeds(self) -> None:
+        """The timeout protection does not disturb a healthy command."""
         from kiss.server import diff_merge as dm
 
-        bin_path = self.work / "binary.dat"
-        bin_path.write_bytes("hello world".encode("utf-16"))
-        text_path = self.work / "text.txt"
-        text_path.write_text("hello\n")
-
-        result = dm._diff_files(str(bin_path), str(text_path))
-        self.assertIsInstance(result, list)
-
-
-
-
+        tmpdir = tempfile.mkdtemp(prefix="kiss-m1-ok-")
+        try:
+            self.assertEqual(dm._git(tmpdir, "init", "-q").returncode, 0)
+            self.assertEqual(
+                dm._git(tmpdir, "status", "--porcelain").returncode, 0,
+            )
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 class TestM4AwaitUserResponseEmptyQueue(unittest.TestCase):
@@ -267,7 +229,6 @@ class TestM4AwaitUserResponseEmptyQueue(unittest.TestCase):
                 self.printer._thread_local.stop_event = threading.Event()
                 self.printer._thread_local.task_id = "ghost-tab"
                 self._state_lock = threading.RLock()
-                self._running_agent_states: dict[str, Any] = {}
 
         srv = FakeServer()
         t0 = time.time()

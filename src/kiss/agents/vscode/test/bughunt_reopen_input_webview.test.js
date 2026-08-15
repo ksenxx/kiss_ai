@@ -94,13 +94,21 @@ async function runTests() {
   assert.ok(ready2, 're-opened webview must post ready');
   assert.strictEqual(
     JSON.stringify(ready2.restoredTabs),
-    JSON.stringify([{tabId: TAB, chatId: 'chat-1'}]),
-    'BUG: re-opened webview must restore the running tab so the ' +
-      'extension can resumeSession it (got ' +
+    JSON.stringify([]),
+    'tabs are server-canonical: the re-opened webview announces no ' +
+      'locally persisted tabs (got ' +
       JSON.stringify(ready2.restoredTabs) +
       ')',
   );
 
+  // The daemon answers `ready` with the shared-registry snapshot (the
+  // running task's tab is still registered) and replays the session.
+  send(wv2.win, {
+    type: 'tabs_state',
+    tabs: [
+      {tabId: TAB, chatId: 'chat-1', title: 'do a long task', workDir: ''},
+    ],
+  });
   send(wv2.win, {
     type: 'status',
     running: true,

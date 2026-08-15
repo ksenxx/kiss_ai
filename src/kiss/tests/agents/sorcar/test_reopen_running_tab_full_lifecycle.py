@@ -36,7 +36,7 @@ import threading
 import time
 import unittest
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -59,9 +59,9 @@ class TestReopenRunningTabFullLifecycle(unittest.TestCase):
         self.runs: list[dict] = []
 
         def fake_inner(cmd: dict) -> None:
-            tab_id = cmd.get("tabId", "")
-            tab = _RunningAgentState.running_agent_states[tab_id]
-            tab.is_task_active = True
+            state = agent_state.get(cmd.get("_state_key", ""))
+            assert state is not None
+            state.is_task_active = True
             self.runs.append(cmd)
             self.started.set()
             self.release.wait(timeout=10)
@@ -70,11 +70,11 @@ class TestReopenRunningTabFullLifecycle(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.release.set()
-        for tab in list(_RunningAgentState.running_agent_states.values()):
-            th = tab.task_thread
+        for state in agent_state.snapshot():
+            th = state.task_thread
             if th is not None:
                 th.join(timeout=2)
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def _events_of(self, ev_type: str, tab_id: str | None = None) -> list[dict]:
         with self._evt_lock:
@@ -93,7 +93,8 @@ class TestReopenRunningTabFullLifecycle(unittest.TestCase):
             "tabId": tab_id,
         })
         assert self.started.wait(timeout=3), "task did not start"
-        tab = _RunningAgentState.running_agent_states[tab_id]
+        tab = agent_state.find_by_tab(tab_id)
+        assert tab is not None
         chat_id = tab.chat_id
         assert chat_id, "chat_id must be allocated"
 
@@ -186,14 +187,19 @@ class TestReopenRunningTabFullLifecycle(unittest.TestCase):
             "new task must broadcast a fresh ``clear`` event"
         )
 
+        # The fresh run registers a NEW state for the tab (the idle
+        # previous state is unregistered), so re-fetch it.
+        tab2 = agent_state.find_by_tab(tab_id)
+        assert tab2 is not None
+
         self.server._handle_command({
             "type": "appendUserMessage",
             "prompt": "tweak the result",
             "tabId": tab_id,
         })
-        assert "tweak the result" in tab.pending_user_messages, (
+        assert "tweak the result" in tab2.pending_user_messages, (
             "BUG: appendUserMessage during the second task must be queued; "
-            f"got pending={tab.pending_user_messages}"
+            f"got pending={tab2.pending_user_messages}"
         )
 
         self.release.set()

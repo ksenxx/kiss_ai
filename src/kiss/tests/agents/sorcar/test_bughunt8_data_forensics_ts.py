@@ -60,6 +60,18 @@ class _TempDbTestBase:
         db.commit()
 
 
+def _mark_owner_dead(task_id: str) -> None:
+    """Make *task_id* look like the leftover of a dead process.
+
+    ``_recover_orphaned_tasks`` only rewrites rows whose owning
+    process is gone; a row this live process just inserted is by
+    definition still running.
+    """
+    th._get_db().execute(
+        "UPDATE task_history SET owner = '' WHERE id = ?", (task_id,)
+    )
+
+
 class TestForensicsCorruptEventTimestamp(_TempDbTestBase):
     """_recover_orphaned_tasks must not crash on non-REAL timestamps."""
 
@@ -67,6 +79,7 @@ class TestForensicsCorruptEventTimestamp(_TempDbTestBase):
         """A TEXT ``events.timestamp`` must not abort the orphan sweep."""
         tid, _ = _add_task("orphan task killed mid-run")
         self._insert_event_with_timestamp(tid, "garbage-not-a-number")
+        _mark_owner_dead(tid)
 
         recovered = _recover_orphaned_tasks(set())
 
@@ -80,6 +93,7 @@ class TestForensicsCorruptEventTimestamp(_TempDbTestBase):
         """A BLOB ``events.timestamp`` must not abort the orphan sweep."""
         tid, _ = _add_task("another orphan task")
         self._insert_event_with_timestamp(tid, b"\x00\x01\x02")
+        _mark_owner_dead(tid)
 
         recovered = _recover_orphaned_tasks(set())
 
@@ -95,6 +109,8 @@ class TestForensicsCorruptEventTimestamp(_TempDbTestBase):
         self._insert_event_with_timestamp(good_tid, 1234.5)
         bad_tid, _ = _add_task("corrupt orphan")
         self._insert_event_with_timestamp(bad_tid, "NaN-ish text")
+        _mark_owner_dead(good_tid)
+        _mark_owner_dead(bad_tid)
 
         recovered = _recover_orphaned_tasks(set())
 

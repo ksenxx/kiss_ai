@@ -32,7 +32,7 @@ import unittest
 from typing import Any
 
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 
 
@@ -74,10 +74,10 @@ class TestSubagentDoneTabIdMatchesViewerTab(unittest.TestCase):
     the backend's internal ``sub_tab_id``."""
 
     def setUp(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def test_subagent_done_broadcasts_viewer_tab_ids(self) -> None:
         """When a frontend tab subscribes to a sub-agent's event stream
@@ -103,10 +103,6 @@ class TestSubagentDoneTabIdMatchesViewerTab(unittest.TestCase):
         agent._last_task_id = "10000000000000000000000000000000"
         agent.printer = printer  # type: ignore[assignment]
 
-        parent_tab_id = "parent-tab-xyz"
-        parent_state = _RunningAgentState(parent_tab_id, "test-model")
-        parent_state.agent = agent  # type: ignore[assignment]
-        _RunningAgentState.register(parent_tab_id, parent_state)
 
         original_run = ChatSorcarAgent.run
         ChatSorcarAgent.run = _patched_run  # type: ignore[assignment]
@@ -147,10 +143,6 @@ class TestSubagentDoneTabIdMatchesViewerTab(unittest.TestCase):
         agent._last_task_id = "20000000000000000000000000000000"
         agent.printer = printer  # type: ignore[assignment]
 
-        parent_tab_id = "parent-tab-def"
-        parent_state = _RunningAgentState(parent_tab_id, "test-model")
-        parent_state.agent = agent  # type: ignore[assignment]
-        _RunningAgentState.register(parent_tab_id, parent_state)
 
         original_run = ChatSorcarAgent.run
         ChatSorcarAgent.run = _patched_run  # type: ignore[assignment]
@@ -185,10 +177,6 @@ class TestSubagentDoneTabIdMatchesViewerTab(unittest.TestCase):
         agent._last_task_id = "30000000000000000000000000000000"
         agent.printer = printer  # type: ignore[assignment]
 
-        parent_tab_id = "parent-tab-ghi"
-        parent_state = _RunningAgentState(parent_tab_id, "test-model")
-        parent_state.agent = agent  # type: ignore[assignment]
-        _RunningAgentState.register(parent_tab_id, parent_state)
 
         def _run_no_subscribe(self_agent: ChatSorcarAgent, **kw: Any) -> str:
             """Mock run() that sets _last_task_id but does NOT subscribe

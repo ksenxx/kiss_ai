@@ -25,14 +25,13 @@ Spec
 
    a. Broadcasts ``openSubagentTab`` for the freshly allocated tab
       with ``description`` derived from the row's own ``task``
-      column and ``isDone`` derived from
-      :attr:`ChatSorcarAgent.running_agents` membership of the
-      sub-agent's own task id.
+      column and ``isDone`` derived from the agent-state registry's
+      knowledge of the sub-agent's own task id.
 
-   b. Does NOT invoke ``_reattach_running_chat`` — sub-agents share
+   b. Never steals the parent's running state — sub-agents share
       the parent's chat_id but run as threads inside the parent's
-      executor; rebinding the parent's ``_RunningAgentState`` would
-      steal it.
+      executor; the reattach logic must not rebind the parent's
+      ``AgentState`` to the sub-agent's tab.
 
    c. Still broadcasts ``task_events`` so persisted history shows.
 """
@@ -45,8 +44,8 @@ import threading
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
 
@@ -223,9 +222,9 @@ class TestReplaySessionOpensSubagentTab:
         self,
     ) -> None:
         """A sub-agent row must NOT rebind the parent's
-        ``_RunningAgentState``.  The parent's tab state holds the
-        running thread; rebinding it to the sub-agent's new tab
-        would steal the parent's tab.
+        ``AgentState``.  The parent's state holds the running
+        thread; rebinding it to the sub-agent's new tab would steal
+        the parent's tab.
         """
         chat_id = "chat-parent-3"
         parent_id, _ = th._add_task("parent task", chat_id=chat_id)
@@ -236,24 +235,34 @@ class TestReplaySessionOpensSubagentTab:
         )
         server, _events = _make_server()
 
-        parent_tab = server._get_tab("tab-parent")
-        parent_tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        parent_tab.agent._chat_id = chat_id
-        parent_tab.is_task_active = True
+        parent_agent = WorktreeSorcarAgent("Sorcar VS Code")
+        parent_agent._chat_id = chat_id
+        parent_state = agent_state.AgentState(
+            str(parent_id),
+            agent=parent_agent,
+            chat_id=chat_id,
+            tab_id="tab-parent",
+            server_owned=True,
+            is_task_active=True,
+        )
         parent_thread = threading.Thread(
             target=lambda: threading.Event().wait(0.01),
             daemon=True,
         )
-        parent_tab.task_thread = parent_thread
+        parent_state.task_thread = parent_thread
+        agent_state.register(parent_state)
         parent_thread.start()
 
-        server._replay_session(
-            chat_id=chat_id,
-            tab_id="tab-history-click",
-            task_id=task_id,
-        )
+        try:
+            server._replay_session(
+                chat_id=chat_id,
+                tab_id="tab-history-click",
+                task_id=task_id,
+            )
 
-        assert "tab-parent" in _RunningAgentState.running_agent_states
-        assert _RunningAgentState.running_agent_states["tab-parent"] is parent_tab
-        assert "tab-history-click" not in _RunningAgentState.running_agent_states
-        parent_thread.join(timeout=1)
+            assert agent_state.get(str(parent_id)) is parent_state
+            assert parent_state.tab_id == "tab-parent"
+            assert agent_state.find_by_tab("tab-history-click") is None
+            parent_thread.join(timeout=1)
+        finally:
+            agent_state.agent_states.clear()

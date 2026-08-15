@@ -7,7 +7,8 @@
 Verifies that userAnswer, error, stop, askUser, and merge events are
 correctly routed to the right tab when multiple tabs are active
 concurrently.  No mocks — uses real VSCodeServer instances with captured
-broadcast output.
+broadcast output.  Task state lives in the task-id-keyed
+:mod:`kiss.server.agent_state` registry.
 """
 
 import queue
@@ -15,7 +16,7 @@ import threading
 import time
 import unittest
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -55,18 +56,44 @@ def _make_server() -> tuple[VSCodeServer, list[dict]]:
     return server, events
 
 
-class TestUserAnswerRouting(unittest.TestCase):
-    """userAnswer commands are delivered to the correct tab's queue."""
+def _register_state(
+    task_id: str,
+    tab_id: str = "",
+    *,
+    with_queue: bool = False,
+) -> agent_state.AgentState:
+    """Register a server-owned AgentState for a test tab/task."""
+    state = agent_state.AgentState(
+        task_id,
+        tab_id=tab_id,
+        server_owned=True,
+    )
+    if with_queue:
+        state.user_answer_queue = queue.Queue(maxsize=1)
+    agent_state.register(state)
+    return state
+
+
+class _RegistryCleanupTestCase(unittest.TestCase):
+    """Base that guarantees the agent-state registry is left empty."""
+
+    def tearDown(self) -> None:
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
+
+
+class TestUserAnswerRouting(_RegistryCleanupTestCase):
+    """userAnswer commands are delivered to the correct task's queue."""
 
     def setUp(self) -> None:
         self.server, self.events = _make_server()
 
     def test_answer_reaches_correct_tab_queue(self) -> None:
-        """Answer with tabId=2 goes to tab 2's queue, not tab 1's."""
-        q1: queue.Queue[str] = queue.Queue(maxsize=1)
-        q2: queue.Queue[str] = queue.Queue(maxsize=1)
-        self.server._get_tab("1").user_answer_queue = q1
-        self.server._get_tab("2").user_answer_queue = q2
+        """Answer with tabId=2 goes to tab 2's task queue, not tab 1's."""
+        s1 = _register_state("task-1", "1", with_queue=True)
+        s2 = _register_state("task-2", "2", with_queue=True)
+        q1, q2 = s1.user_answer_queue, s2.user_answer_queue
+        assert q1 is not None and q2 is not None
 
         self.server._handle_command({"type": "userAnswer", "answer": "hello", "tabId": "2"})
 
@@ -75,39 +102,41 @@ class TestUserAnswerRouting(unittest.TestCase):
 
     def test_answer_without_tabid_is_dropped(self) -> None:
         """Answer with no tabId is dropped (no default queue)."""
-        q1: queue.Queue[str] = queue.Queue(maxsize=1)
-        self.server._get_tab("1").user_answer_queue = q1
+        s1 = _register_state("task-1", "1", with_queue=True)
+        q1 = s1.user_answer_queue
+        assert q1 is not None
 
         self.server._handle_command({"type": "userAnswer", "answer": "hi"})
 
         assert q1.empty()
 
     def test_answer_for_unknown_tab_is_dropped(self) -> None:
-        """Answer for a tab with no queue is dropped."""
+        """Answer for a tab with no live task/queue is dropped."""
         self.server._handle_command({"type": "userAnswer", "answer": "x", "tabId": "99"})
-
 
     def test_stale_answer_drained_before_new_one(self) -> None:
         """A stale answer in the queue is drained before the new answer is put."""
-        q: queue.Queue[str] = queue.Queue(maxsize=1)
+        s3 = _register_state("task-3", "3", with_queue=True)
+        q = s3.user_answer_queue
+        assert q is not None
         q.put("stale")
-        self.server._get_tab("3").user_answer_queue = q
 
         self.server._handle_command({"type": "userAnswer", "answer": "fresh", "tabId": "3"})
 
         assert q.get_nowait() == "fresh"
 
 
-class TestAwaitUserResponse(unittest.TestCase):
-    """_await_user_response blocks on the correct per-tab queue."""
+class TestAwaitUserResponse(_RegistryCleanupTestCase):
+    """_await_user_response blocks on the current task's queue."""
 
     def setUp(self) -> None:
         self.server, self.events = _make_server()
 
-    def test_reads_from_tab_queue(self) -> None:
-        """_await_user_response reads from the tab-specific queue."""
-        q: queue.Queue[str] = queue.Queue(maxsize=1)
-        self.server._get_tab("5").user_answer_queue = q
+    def test_reads_from_task_queue(self) -> None:
+        """_await_user_response reads from the task-specific queue."""
+        state = _register_state("5", "5", with_queue=True)
+        q = state.user_answer_queue
+        assert q is not None
         self.server.printer._thread_local.task_id = "5"
         self.server.printer.subscribe_tab("5", "5")
         stop = threading.Event()
@@ -123,8 +152,7 @@ class TestAwaitUserResponse(unittest.TestCase):
 
     def test_raises_on_stop_event(self) -> None:
         """_await_user_response raises KeyboardInterrupt when stop is set."""
-        q: queue.Queue[str] = queue.Queue(maxsize=1)
-        self.server._get_tab("6").user_answer_queue = q
+        _register_state("6", "6", with_queue=True)
         self.server.printer._thread_local.task_id = "6"
         self.server.printer.subscribe_tab("6", "6")
         stop = threading.Event()
@@ -138,17 +166,12 @@ class TestAwaitUserResponse(unittest.TestCase):
         with self.assertRaises(KeyboardInterrupt):
             self.server._await_user_response()
 
-    def test_no_tab_id_waits_until_stop(self) -> None:
-        """Without tab_id, _await_user_response waits until stop is set."""
+    def test_no_task_id_raises_keyboard_interrupt(self) -> None:
+        """Without a task_id there is no queue — KeyboardInterrupt."""
         self.server.printer._thread_local.task_id = None
         stop = threading.Event()
         self.server.printer._thread_local.stop_event = stop
 
-        def set_stop_later() -> None:
-            time.sleep(0.1)
-            stop.set()
-
-        threading.Thread(target=set_stop_later, daemon=True).start()
         with self.assertRaises(KeyboardInterrupt):
             self.server._await_user_response()
 
@@ -157,7 +180,7 @@ class TestTabIdInjection(unittest.TestCase):
     """Events broadcast from a task thread get tabId auto-injected."""
 
     def test_broadcast_injects_tabid_from_thread_local(self) -> None:
-        """When thread-local tab_id is set, broadcast adds tabId to events."""
+        """When thread-local task_id is set, broadcast adds tabId to events."""
         from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
 
         printer = MemoryPrinter()
@@ -183,19 +206,19 @@ class TestTabIdInjection(unittest.TestCase):
         assert printer.emitted[0]["tabId"] == "3"
 
 
-class TestStopRouting(unittest.TestCase):
+class TestStopRouting(_RegistryCleanupTestCase):
     """Stop commands target the correct tab(s)."""
 
     def setUp(self) -> None:
         self.server, self.events = _make_server()
 
     def test_stop_with_tabid_only_stops_that_tab(self) -> None:
-        """Stop with tabId=1 sets only tab 1's stop event."""
+        """Stop with tabId=1 sets only tab 1's task stop event."""
         ev1, ev2 = threading.Event(), threading.Event()
-        tab1 = self.server._get_tab("1")
-        tab2 = self.server._get_tab("2")
-        tab1.stop_event = ev1
-        tab2.stop_event = ev2
+        s1 = _register_state("task-1", "1")
+        s2 = _register_state("task-2", "2")
+        s1.stop_event = ev1
+        s2.stop_event = ev2
         t1 = threading.Thread(
             target=_sleep_swallowing_kbi, args=(5,), daemon=True,
         )
@@ -204,8 +227,8 @@ class TestStopRouting(unittest.TestCase):
         )
         t1.start()
         t2.start()
-        tab1.task_thread = t1
-        tab2.task_thread = t2
+        s1.task_thread = t1
+        s2.task_thread = t2
 
         self.server._handle_command({"type": "stop", "tabId": "1"})
         time.sleep(0.2)
@@ -216,21 +239,20 @@ class TestStopRouting(unittest.TestCase):
     def test_stop_without_tabid_is_noop(self) -> None:
         """Stop with no tabId is a no-op (C4 fix).
 
-        Previously, ``_stop_task(None)`` stopped every tab's task,
-        violating per-tab state isolation.  A missing tabId from the
-        frontend now silently does nothing.
+        A missing tabId from the frontend silently does nothing rather
+        than stopping every task.
         """
         ev1, ev2 = threading.Event(), threading.Event()
-        tab1 = self.server._get_tab("1")
-        tab2 = self.server._get_tab("2")
-        tab1.stop_event = ev1
-        tab2.stop_event = ev2
+        s1 = _register_state("task-1", "1")
+        s2 = _register_state("task-2", "2")
+        s1.stop_event = ev1
+        s2.stop_event = ev2
         t1 = threading.Thread(target=lambda: time.sleep(0.5), daemon=True)
         t2 = threading.Thread(target=lambda: time.sleep(0.5), daemon=True)
         t1.start()
         t2.start()
-        tab1.task_thread = t1
-        tab2.task_thread = t2
+        s1.task_thread = t1
+        s2.task_thread = t2
 
         self.server._handle_command({"type": "stop"})
         time.sleep(0.2)
@@ -239,7 +261,7 @@ class TestStopRouting(unittest.TestCase):
         assert not ev2.is_set()
 
 
-class TestConcurrentTabs(unittest.TestCase):
+class TestConcurrentTabs(_RegistryCleanupTestCase):
     """Two tasks on different tabs run concurrently without interference."""
 
     def setUp(self) -> None:
@@ -265,13 +287,9 @@ class TestConcurrentTabs(unittest.TestCase):
             "type": "run", "prompt": "task2", "model": "m", "tabId": "2",
         })
 
-        time.sleep(2)
-        threads = [
-            t.task_thread for t in _RunningAgentState.running_agent_states.values()
-            if t.task_thread is not None
-        ]
-        for t in threads:
-            t.join(timeout=5)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not (done[0] and done[1]):
+            time.sleep(0.05)
 
         assert done[0] and done[1], f"Both tasks should have run: {done}"
 
@@ -281,7 +299,7 @@ class TestConcurrentTabs(unittest.TestCase):
         """A second run on the same tab while the first is still running
         must NOT start a second task — but it must NOT silently discard
         the user's text either.  The prompt is injected into the running
-        agent's ``pending_user_messages`` (and echoed back as a ``prompt``
+        task's ``pending_user_messages`` (and echoed back as a ``prompt``
         event), exactly like an ``appendUserMessage``.
 
         This is the fix for "input ignored during the task" after a
@@ -297,9 +315,9 @@ class TestConcurrentTabs(unittest.TestCase):
 
         def slow_run(cmd: dict) -> None:
             call_count[0] += 1
-            _RunningAgentState.running_agent_states[
-                cmd.get("tabId", "")
-            ].is_task_active = True
+            state = agent_state.get(cmd.get("_state_key", ""))
+            assert state is not None
+            state.is_task_active = True
             started.set()
             release.wait(timeout=5)
 
@@ -318,8 +336,9 @@ class TestConcurrentTabs(unittest.TestCase):
         new_events = self.events[events_before:]
         assert all(e.get("type") != "error" for e in new_events)
         assert call_count[0] == 1
-        tab = _RunningAgentState.running_agent_states["1"]
-        assert tab.pending_user_messages == ["task2"]
+        state = agent_state.find_by_tab("1")
+        assert state is not None
+        assert state.pending_user_messages == ["task2"]
         echoes = [
             e
             for e in new_events
@@ -333,52 +352,7 @@ class TestConcurrentTabs(unittest.TestCase):
         time.sleep(0.5)
 
 
-class TestMergeTabIsolation(unittest.TestCase):
-    """Merge ownership is per-tab — other tabs are unaffected."""
-
-    def setUp(self) -> None:
-        self.server, self.events = _make_server()
-
-    def test_finish_merge_broadcasts_with_tabid(self) -> None:
-        """_finish_merge includes the tab's tabId in merge_ended."""
-        self.server._get_tab("42").is_merging = True
-        self.server._finish_merge("42")
-        ended = [e for e in self.events if e["type"] == "merge_ended"]
-        assert len(ended) == 1
-        assert ended[0]["tabId"] == "42"
-        assert self.server._get_tab("42").is_merging is False
-
-    def test_finish_merge_no_tab_is_noop(self) -> None:
-        """_finish_merge with no tab_id is a no-op (B8 fix).
-
-        Previously it cleared every tab's ``is_merging`` flag and
-        emitted an untagged ``merge_ended``, violating per-tab state
-        isolation.
-        """
-        self.server._get_tab("10").is_merging = True
-        self.server._finish_merge()
-        ended = [e for e in self.events if e["type"] == "merge_ended"]
-        assert ended == []
-        assert self.server._get_tab("10").is_merging is True
-
-    def test_merging_tabs_are_independent(self) -> None:
-        """Multiple tabs can be in merge state simultaneously."""
-        self.server._get_tab("1").is_merging = True
-        self.server._get_tab("2").is_merging = True
-        assert self.server._get_tab("1").is_merging is True
-        assert self.server._get_tab("2").is_merging is True
-        self.server._finish_merge("1")
-        assert self.server._get_tab("1").is_merging is False
-        assert self.server._get_tab("2").is_merging is True
-
-    def test_merge_guard_blocks_only_merging_tab(self) -> None:
-        """_run_task_inner rejects runs on merging tabs but allows others."""
-        self.server._get_tab("1").is_merging = True
-        assert self.server._get_tab("1").is_merging is True
-        assert self.server._get_tab("2").is_merging is False
-
-
-class TestRunTaskStatusBroadcast(unittest.TestCase):
+class TestRunTaskStatusBroadcast(_RegistryCleanupTestCase):
     """_run_task always brackets execution with status events."""
 
     def setUp(self) -> None:
@@ -417,20 +391,30 @@ class TestRunTaskStatusBroadcast(unittest.TestCase):
         assert status_events[-1]["running"] is False
 
     def test_run_task_cleans_up_thread_state(self) -> None:
-        """After _run_task, the tab's thread/stop/queue are cleared."""
+        """After _run_task, the task state's thread/stop/queue are cleared."""
         def noop_inner(cmd: dict) -> None:
             pass
 
         self.server._run_task_inner = noop_inner  # type: ignore[assignment]
-        self.server._run_task({"tabId": "3", "prompt": "x", "model": "m"})
+        state = _register_state("task-3", "3", with_queue=True)
+        state.stop_event = threading.Event()
+        state.task_thread = threading.current_thread()
+        state.is_task_active = True
 
-        tab = self.server._get_tab("3")
-        assert tab.task_thread is None
-        assert tab.stop_event is None
-        assert tab.user_answer_queue is None
+        self.server._run_task({
+            "tabId": "3",
+            "prompt": "x",
+            "model": "m",
+            "_state_key": "task-3",
+        })
+
+        assert state.task_thread is None
+        assert state.stop_event is None
+        assert state.user_answer_queue is None
+        assert state.is_task_active is False
 
 
-class TestAskUserQuestion(unittest.TestCase):
+class TestAskUserQuestion(_RegistryCleanupTestCase):
     """_ask_user_question broadcasts askUser and blocks for answer."""
 
     def setUp(self) -> None:
@@ -438,8 +422,9 @@ class TestAskUserQuestion(unittest.TestCase):
 
     def test_ask_user_broadcasts_question(self) -> None:
         """_ask_user_question broadcasts the question."""
-        q: queue.Queue[str] = queue.Queue(maxsize=1)
-        self.server._get_tab("8").user_answer_queue = q
+        state = _register_state("8", "8", with_queue=True)
+        q = state.user_answer_queue
+        assert q is not None
         self.server.printer._thread_local.task_id = "8"
         self.server.printer.subscribe_tab("8", "8")
         self.server.printer._thread_local.stop_event = threading.Event()
@@ -460,10 +445,6 @@ class TestAskUserQuestion(unittest.TestCase):
         assert len(asks) == 1
         assert asks[0]["question"] == "Continue?"
         assert result == "yes"
-
-
-
-
 
 
 class TestBashFlushTimerTabId(unittest.TestCase):
@@ -523,105 +504,40 @@ class TestRecordingIsolation(unittest.TestCase):
         assert key not in printer._recordings
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestSelectedModelIsolation(_RegistryCleanupTestCase):
+    """S7 fix: selected model is per-tab, not global."""
 
+    def setUp(self) -> None:
+        self.server, self.events = _make_server()
 
-class TestPerTabAgentIsolation(unittest.TestCase):
-    """Each tab gets its own agent instances — no cross-tab state leakage."""
-
-    def test_different_tabs_have_independent_chat_ids(self) -> None:
-        """Tabs hold their own chat_id (no shared per-tab agent)."""
-        server, _ = _make_server()
-        tab1 = server._get_tab("1")
-        tab2 = server._get_tab("2")
-        assert tab1 is not tab2
-        assert tab1.chat_id == ""
-        assert tab2.chat_id == ""
-
-    def test_new_chat_on_one_tab_does_not_affect_other(self) -> None:
-        """Resetting tab 1's chat_id does not change tab 2's chat_id."""
-        server, _ = _make_server()
-        tab1 = server._get_tab("1")
-        tab2 = server._get_tab("2")
-        tab2.chat_id = "42"
-        tab1.chat_id = ""
-        assert tab2.chat_id == "42"
-
-    def test_use_worktree_is_per_tab(self) -> None:
-        """Setting use_worktree on one tab does not affect others."""
-        server, _ = _make_server()
-        tab1 = server._get_tab("1")
-        tab2 = server._get_tab("2")
-        tab1.use_worktree = True
-        assert tab2.use_worktree is False
-
-    def test_use_parallel_is_per_tab(self) -> None:
-        """Setting use_parallel on one tab does not affect others."""
-        server, _ = _make_server()
-        tab1 = server._get_tab("1")
-        tab2 = server._get_tab("2")
-        tab1.use_parallel = False
-        assert tab2.use_parallel is True
-
-    def test_task_history_id_is_per_tab(self) -> None:
-        """task_history_id is independent per tab."""
-        server, _ = _make_server()
-        tab1 = server._get_tab("1")
-        tab2 = server._get_tab("2")
-        tab1.task_history_id = "42"
-        assert tab2.task_history_id is None
-
-    def test_get_tab_creates_on_demand(self) -> None:
-        """_get_tab creates a new _RunningAgentState if one doesn't exist."""
-        server, _ = _make_server()
-        assert "99" not in _RunningAgentState.running_agent_states
-        tab = server._get_tab("99")
-        assert "99" in _RunningAgentState.running_agent_states
-        assert tab is server._get_tab("99")
-
-    def test_agent_is_transient_per_task(self) -> None:
-        """tab.agent is replaced fresh per task — no state persists across tasks."""
-        server, _ = _make_server()
-        tab = server._get_tab("1")
-        first = tab.agent
-        assert first is not None
-        tab.agent = None
-        again = tab
-        again = server._get_tab("1")
-        assert again.agent is not None
-        assert again.agent is not first
-
-
-class TestSelectedModelIsolation(unittest.TestCase):
-    """S7 fix: selected_model is per-tab, not global."""
+    def tearDown(self) -> None:
+        super().tearDown()
+        self.server._tab_models.pop("1", None)
+        self.server._tab_models.pop("2", None)
 
     def test_select_model_on_one_tab_does_not_affect_other(self) -> None:
-        """Changing model on tab 1 leaves tab 2's model unchanged."""
-        server, events = _make_server()
-        tab1 = server._get_tab("1")
-        tab2 = server._get_tab("2")
-        original = tab2.selected_model
-
-        server._handle_command({
+        """Changing model on tab 1 leaves tab 2's pinned model unchanged."""
+        self.server._handle_command({
+            "type": "selectModel",
+            "model": "model-b",
+            "tabId": "2",
+        })
+        self.server._handle_command({
             "type": "selectModel",
             "model": "gpt-4o",
             "tabId": "1",
         })
-        assert tab1.selected_model == "gpt-4o"
-        assert tab2.selected_model == original
+        assert self.server._tab_model("1") == "gpt-4o"
+        assert self.server._tab_model("2") == "model-b"
 
     def test_select_model_updates_default_for_new_tabs(self) -> None:
         """selectModel also updates the default so new tabs inherit it."""
-        server, _ = _make_server()
-        server._handle_command({
+        self.server._handle_command({
             "type": "selectModel",
             "model": "gpt-4o",
             "tabId": "1",
         })
-        tab99 = server._get_tab("99")
-        assert tab99.selected_model == "gpt-4o"
-
+        assert self.server._tab_model("99") == "gpt-4o"
 
 
 class TestBashBufferIsolation(unittest.TestCase):
@@ -693,3 +609,7 @@ class TestClearChatDedup(unittest.TestCase):
             "clearChat handler must check welcome visibility to detect "
             "that the tab is still empty"
         )
+
+
+if __name__ == "__main__":
+    unittest.main()

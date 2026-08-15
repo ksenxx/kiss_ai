@@ -617,8 +617,6 @@
     '})();';
 
   const api = {
-    MENU_ID: MENU_ID,
-    MENU_CSS: MENU_CSS,
     SCRIPT_NONCE: SCRIPT_NONCE,
     buildMenuModel: buildMenuModel,
     selectAll: selectAll,

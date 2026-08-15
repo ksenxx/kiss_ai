@@ -135,8 +135,4 @@ async function restartLaunchAgent(opts) {
 module.exports = {
   restartLaunchAgent,
   probeService,
-  DEFAULT_DRAIN_TIMEOUT_MS,
-  DEFAULT_POLL_INTERVAL_MS,
-  DEFAULT_BOOTSTRAP_ATTEMPTS,
-  COMMAND_TIMEOUT_MS,
 };

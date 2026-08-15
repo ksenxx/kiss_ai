@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Gmail Agent — SorcarAgent extension with Gmail API tools.
+"""Gmail Agent — channel agent with Gmail API tools.
 
 Provides authenticated access to a Gmail account via OAuth2.
 Handles authentication (reading token from disk or prompting the user
@@ -31,17 +31,13 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.third_party_agents._backend_utils import (
-    is_headless_environment,
-    wait_for_matching_message,
-)
+from kiss.agents.third_party_agents._backend_utils import is_headless_environment
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
-    _kiss_home,
     channel_main,
 )
+from kiss.core.config import kiss_home
 
 _SCOPES = [
     "https://mail.google.com/",
@@ -55,7 +51,7 @@ def _gmail_dir() -> Path:
         Path to ``$KISS_HOME/third_party_agents/gmail`` (defaults to
         ``~/.kiss/third_party_agents/gmail``).
     """
-    return _kiss_home() / "third_party_agents" / "gmail"
+    return kiss_home() / "third_party_agents" / "gmail"
 
 
 def _token_path() -> Path:
@@ -233,8 +229,8 @@ def _extract_attachments(payload: dict) -> list[dict[str, Any]]:  # type: ignore
 class GmailChannelBackend(ToolMethodBackend):
     """Channel backend for Gmail.
 
-    Provides email monitoring, sending, and reply waiting for
-    the channel poller and interactive agent.
+    Provides email monitoring and sending for the channel poller
+    and interactive agent.
     """
 
     def __init__(self) -> None:
@@ -418,77 +414,6 @@ class GmailChannelBackend(ToolMethodBackend):
         if thread_ts:  # pragma: no branch
             body["threadId"] = thread_ts
         self._service.users().messages().send(userId="me", body=body).execute()
-
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Poll a Gmail thread for a reply from a specific user.
-
-        Args:
-            channel_id: Label ID (unused for Gmail).
-            thread_ts: Thread ID to poll.
-            user_id: Email address of expected sender.
-
-        Returns:
-            The text of the user's reply.
-        """
-        assert self._service is not None
-        seen: set[str] = set()
-        try:
-            existing = (
-                self._service.users()
-                .threads()
-                .get(userId="me", id=thread_ts, format="minimal")
-                .execute()
-            )
-            seen.update(m["id"] for m in existing.get("messages", []))
-        except Exception:
-            pass
-
-        def poll() -> list[dict[str, Any]]:
-            try:
-                thread = (
-                    self._service.users()
-                    .threads()
-                    .get(
-                        userId="me",
-                        id=thread_ts,
-                        format="metadata",
-                        metadataHeaders=["From"],
-                    )
-                    .execute()
-                )
-            except Exception:
-                return []
-            messages: list[dict[str, Any]] = []
-            for msg in thread.get("messages", []):  # pragma: no branch
-                msg_id = msg["id"]
-                if msg_id in seen:  # pragma: no branch
-                    continue
-                seen.add(msg_id)
-                messages.append(msg)
-            return messages
-
-        return wait_for_matching_message(
-            poll=poll,
-            matches=lambda msg: (
-                user_id.lower()
-                in {
-                    h["value"].lower()
-                    for h in msg.get("payload", {}).get("headers", [])
-                    if h.get("name") == "From"
-                }
-                or user_id.lower() in str(msg.get("payload", {})).lower()
-            ),
-            extract_text=lambda msg: str(msg.get("snippet", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=5.0,
-        )
-
 
     def get_profile(self) -> str:
         """Get the current user's Gmail profile.
@@ -1024,11 +949,11 @@ class GmailChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class GmailAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with Gmail API tools.
+class GmailAgent(BaseChannelAgent):
+    """Channel agent with Gmail API tools.
 
-    Inherits all standard SorcarAgent capabilities (bash, file editing,
-    browser automation) and adds authenticated Gmail API tools for
+    Tasks run on the kiss-web daemon's agent (which supplies bash,
+    file editing, and browser automation) with authenticated Gmail API tools for
     reading, sending, searching, labeling, and managing email.
 
     The agent checks for stored OAuth2 credentials on initialization.
@@ -1164,15 +1089,16 @@ class GmailAgent(BaseChannelAgent, SorcarAgent):
             Use ask_user_question() if you need user help with Google account login screens.
 
             Returns:
-                Page content of Google Cloud Console to begin navigation.
+                Instructions for navigating Google Cloud Console.
             """
-            if agent.web_use_tool is None:  # pragma: no branch
-                return (
-                    "Browser not available. Manually download credentials.json from "
-                    "https://console.cloud.google.com/apis/credentials and save it to "
-                    f"{_credentials_path()}, then call authenticate_gmail()."
-                )
-            return agent.web_use_tool.go_to_url("https://console.cloud.google.com/apis/credentials")
+            return (
+                "Open https://console.cloud.google.com/apis/credentials with "
+                "your go_to_url browser tool and complete the credential "
+                "setup steps described above. If browser tools are "
+                "unavailable, manually download credentials.json from "
+                "https://console.cloud.google.com/apis/credentials, save it "
+                f"to {_credentials_path()}, then call authenticate_gmail()."
+            )
 
         return [
             check_gmail_auth,
@@ -1185,6 +1111,17 @@ class GmailAgent(BaseChannelAgent, SorcarAgent):
 def main() -> None:
     """Run the GmailAgent from the command line with chat persistence."""
     channel_main(GmailAgent, "kiss-gmail")
+
+
+def get_tools() -> list:
+    """Return the Gmail channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return GmailAgent()._get_tools()
 
 
 if __name__ == "__main__":

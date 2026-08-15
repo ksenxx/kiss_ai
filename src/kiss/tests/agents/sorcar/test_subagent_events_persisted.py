@@ -5,14 +5,12 @@
 """Regression test: sub-agent events are persisted to the sub-agent's
 OWN ``task_history`` row (``has_events=1``), not silently dropped.
 
-Before this fix, ``ChatSorcarAgent._run_tasks_parallel`` set
-``printer._thread_local.task_id = sub_tab_id`` so each sub-agent's
-broadcast events were tagged with the ``sub_tab_id``, but it never
-registered the sub-agent in ``printer._persist_agents[sub_tab_id]``.
-``JsonPrinter._persist_event`` looks up the agent in
-``_persist_agents`` by the event's ``tabId`` to find the task_id under
-which to persist — when the lookup misses, the event is silently
-dropped.  Result: every sub-agent's ``task_history`` row had
+``JsonPrinter._persist_event`` resolves the agent state registered
+under the event's ``taskId`` in the task-keyed ``agent_state``
+registry to find the ``task_history`` row id under which to persist —
+when the lookup misses, the event is silently dropped.  If a
+sub-agent's run never registered itself (via
+``printer.agent_task_allocated``), every sub-agent's row had
 ``has_events=0``, so the history-sidebar click handler took the
 no-events branch (``setTaskText`` + leave input populated) instead of
 the ``resumeSession`` branch, which from the user's perspective looked
@@ -40,6 +38,7 @@ from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import (
     _load_chat_events_by_task_id,
 )
+from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 
 
@@ -79,37 +78,38 @@ class _StubAgent(ChatSorcarAgent):
         task_id, self._chat_id = _add_task(prompt_template, chat_id=self._chat_id)
         self._last_task_id = task_id
         task_key = str(task_id)
-        if printer is not None:
-            tl = getattr(printer, "_thread_local", None)
-            if tl is not None:
-                tl.task_id = task_key
-            persist_map = getattr(printer, "_persist_agents", None)
-            if persist_map is not None:
-                persist_map[task_key] = self
-        if printer is not None:
-            printer.broadcast({
-                "type": "text_delta",
-                "text": f"subagent-run-event-{prompt_template[:20]}",
-            })
-        from kiss.core._version import __version__
+        try:
+            if printer is not None:
+                tl = getattr(printer, "_thread_local", None)
+                if tl is not None:
+                    tl.task_id = task_key
+                printer.agent_task_allocated(self, task_id, self._chat_id)
+                printer.broadcast({
+                    "type": "text_delta",
+                    "text": f"subagent-run-event-{prompt_template[:20]}",
+                })
+            from kiss.core._version import __version__
 
-        extra_payload: dict[str, object] = {
-            "model": self.model_name,
-            "work_dir": self.work_dir,
-            "version": __version__,
-            "tokens": 0,
-            "cost": 0.0,
-            "is_parallel": False,
-            "is_worktree": False,
-        }
-        if self._subagent_info is not None:
-            extra_payload["subagent"] = self._subagent_info
-        _save_task_extra(extra_payload, task_id=task_id)
-        result: str = yaml.dump(
-            {"success": True, "summary": "stub"}, sort_keys=False,
-        )
-        _save_task_result(task_id=task_id, result="stub")
-        return result
+            extra_payload: dict[str, object] = {
+                "model": self.model_name,
+                "work_dir": self.work_dir,
+                "version": __version__,
+                "tokens": 0,
+                "cost": 0.0,
+                "is_parallel": False,
+                "is_worktree": False,
+            }
+            if self._subagent_info is not None:
+                extra_payload["subagent"] = self._subagent_info
+            _save_task_extra(extra_payload, task_id=task_id)
+            result: str = yaml.dump(
+                {"success": True, "summary": "stub"}, sort_keys=False,
+            )
+            _save_task_result(task_id=task_id, result="stub")
+            return result
+        finally:
+            if printer is not None:
+                printer.agent_task_finished(self, task_key)
 
 
 class _RecordingPrinter(JsonPrinter):
@@ -143,6 +143,8 @@ class TestSubagentEventsPersisted:
             th._db_conn = None
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
 
     def test_subagent_rows_have_persisted_events(self) -> None:
         import kiss.agents.sorcar.chat_sorcar_agent as csa_mod
@@ -158,7 +160,13 @@ class TestSubagentEventsPersisted:
             parent.work_dir = "/tmp"
             parent._chat_id = "chat-parent-shared"
             parent._last_task_id = "aaaaaaaabbbbccccddddeeeeffff0000"
-            printer._persist_agents["tab-parent"] = parent
+            parent_state = agent_state.AgentState(
+                parent._last_task_id,
+                agent=parent,  # type: ignore[arg-type]
+                tab_id="tab-parent",
+                is_task_active=True,
+            )
+            agent_state.register(parent_state)
 
             tasks = ["sub task A", "sub task B", "sub task C"]
             results = parent._run_tasks_parallel(tasks, max_workers=1)
@@ -194,8 +202,14 @@ class TestSubagentEventsPersisted:
                     for e in evs
                 ), f"events table for task {row_id} missing subagent event: {evs}"
 
-            assert "tab-parent__sub_0" not in printer._persist_agents
-            assert "tab-parent__sub_1" not in printer._persist_agents
-            assert "tab-parent__sub_2" not in printer._persist_agents
+            with agent_state.STATE_LOCK:
+                leaked = [
+                    tid for tid, st in agent_state.agent_states.items()
+                    if st is not parent_state
+                ]
+            assert leaked == [], (
+                "agent_task_finished must unregister every sub-agent's "
+                f"state after its run; leaked: {leaked}"
+            )
         finally:
             csa_mod.ChatSorcarAgent = real_cls  # type: ignore[misc]

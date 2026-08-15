@@ -2,39 +2,27 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Bug-hunt 2: ``_replay_session``'s no-persisted-row branch skips all
-tab-state bookkeeping.
+"""Bug-hunt 2: ``_replay_session``'s no-persisted-row branch must keep
+its tab-state bookkeeping symmetric with the row-found path.
 
 When ``resumeSession`` arrives before the task's ``task_history`` row
 has been written (the writer race the branch itself documents — a tab
 that started a task and is immediately closed+reopened, or a VS Code
 reload replaying restored tabs), ``_replay_session`` takes an early
 ``return`` after re-subscribing the tab to a live agent's stream.  That
-early branch omits the three state updates the normal (row-found) path
-performs:
+early branch must still perform the state updates the normal
+(row-found) path performs:
 
-1. ``self._tab_chat_views[tab_id] = chat_id`` is never recorded, even
-   though ``_cmd_run`` (commands.py) documents that the map "is
-   populated unconditionally, even when the per-tab state has not been
-   allocated yet" and relies on it both for chat continuation of a
-   follow-up run AND for ``_subscribe_chat_viewers`` fan-out.  A tab
-   resumed through the race window therefore never receives the live
-   event stream of the NEXT task started on the same chat from another
-   tab / window / the CLI.
+1. ``self._tab_chat_views[tab_id] = chat_id`` must be recorded so the
+   tab is fanned out to by ``_subscribe_chat_viewers`` when the NEXT
+   task starts on the same chat from another tab / window / the CLI.
 
-2. ``tab.frontend_closed`` is not cleared.  The normal path clears it
-   so "a pending deferred-dispose does not tear down the tab the user
-   is actively viewing" — a tab that was close-marked while busy and
-   then re-resumed through the race window is silently torn down
-   (subscriptions dropped, registry entry popped) the moment its task
-   ends, leaving the user staring at a dead webview.
+2. ``state.frontend_closed`` must be cleared so a pending
+   deferred-dispose does not tear down the tab the user is actively
+   viewing the moment its task ends.
 
-3. ``tab.chat_id`` is not re-associated on an existing registry entry.
-
-The fix mirrors the found-row path's bookkeeping at the end of the
-no-row branch (guarded on a non-empty ``chat_id`` and skipping the
-``_tab_chat_views`` registration for sub-agent view tabs, exactly like
-the normal path's ``subagent_info`` guard).
+3. The tab must be re-associated with the resumed chat in
+   ``_tab_chat_views`` even when it previously displayed another chat.
 """
 
 from __future__ import annotations
@@ -47,7 +35,8 @@ from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -79,19 +68,25 @@ class _ReplayNoRowBase(unittest.TestCase):
             th._db_conn.close()
             th._db_conn = None
         th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved  # type: ignore[assignment]
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _make_running_tab(
+    def _make_running_state(
         self, tab_id: str, chat_id: str, task_id: str,
-    ) -> _RunningAgentState:
+    ) -> agent_state.AgentState:
         """Register a live running task the way ``_cmd_run`` leaves it."""
-        tab = self.server._get_tab(tab_id)
-        tab.chat_id = chat_id
-        tab.is_task_active = True
-        assert tab.agent is not None
-        tab.agent._last_task_id = task_id
-        return tab
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent._last_task_id = task_id
+        state = agent_state.AgentState(
+            task_id,
+            agent=agent,
+            chat_id=chat_id,
+            tab_id=tab_id,
+            server_owned=True,
+            is_task_active=True,
+        )
+        agent_state.register(state)
+        return state
 
     def _events_for_tab(self, tab_id: str) -> list[dict[str, Any]]:
         with self._events_lock:
@@ -104,7 +99,7 @@ class TestNoRowReplayRegistersChatViewer(_ReplayNoRowBase):
 
     def test_viewer_receives_next_task_stream(self) -> None:
         chat_id = "chat-norow-viewer"
-        self._make_running_tab("launcher", chat_id, "task-1")
+        self._make_running_state("launcher", chat_id, "task-1")
 
         self.server._replay_session(chat_id=chat_id, tab_id="viewer")
 
@@ -136,18 +131,18 @@ class TestNoRowReplayClearsFrontendClosed(_ReplayNoRowBase):
 
     def test_resumed_tab_survives_task_end(self) -> None:
         chat_id = "chat-norow-reopen"
-        tab = self._make_running_tab("t1", chat_id, "task-9")
+        state = self._make_running_state("t1", chat_id, "task-9")
 
         self.server._close_tab("t1")
-        assert tab.frontend_closed is True
-        assert "t1" in _RunningAgentState.running_agent_states
+        assert state.frontend_closed is True
+        assert agent_state.get("task-9") is state
 
         self.server._replay_session(chat_id=chat_id, tab_id="t1")
 
-        tab.is_task_active = False
+        state.is_task_active = False
         self.server._dispose_if_closed("t1")
 
-        assert "t1" in _RunningAgentState.running_agent_states, (
+        assert agent_state.get("task-9") is state, (
             "BUG: the no-persisted-row resume branch did not clear "
             "frontend_closed, so the deferred disposal tore down the "
             "tab the user is actively viewing"
@@ -155,18 +150,17 @@ class TestNoRowReplayClearsFrontendClosed(_ReplayNoRowBase):
 
 
 class TestNoRowReplayAssociatesChatId(_ReplayNoRowBase):
-    """The no-row branch must re-associate ``tab.chat_id`` on an
-    existing registry entry, mirroring the found-row path, so a
+    """The no-row branch must re-associate the tab with the resumed
+    chat in ``_tab_chat_views``, mirroring the found-row path, so a
     follow-up run continues the resumed chat."""
 
     def test_chat_id_reassociated(self) -> None:
         chat_id = "chat-norow-continue"
-        tab = self.server._get_tab("t2")
-        tab.chat_id = "old-finished-chat"
+        self.server._tab_chat_views["t2"] = "old-finished-chat"
 
         self.server._replay_session(chat_id=chat_id, tab_id="t2")
 
-        assert tab.chat_id == chat_id, (
+        assert self.server._tab_chat_views.get("t2") == chat_id, (
             "BUG: no-persisted-row resume left the tab associated "
             "with the previously displayed chat; a follow-up run in "
             "this tab would append to the WRONG chat session"

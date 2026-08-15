@@ -66,7 +66,8 @@ def _extract_render_tab_bar(src: str) -> str:
 _NODE_HARNESS = r"""
 // Minimal DOM shim: just enough for renderTabBar's subagent branch
 // (createElement + className/textContent/title + appendChild +
-// addEventListener + dataset).
+// addEventListener + dataset + set/getAttribute for the ARIA tabs
+// pattern renderTabBar applies to the tab list and each tab).
 
 function _matches(el, selector) {
   // Tiny selector matcher: only ``.classA.classB`` (compound class).
@@ -111,6 +112,13 @@ function makeElement(tag) {
     style: {},
     children: [],
     _parent: null,
+    attributes: {},
+    setAttribute(name, value) {
+      this.attributes[name] = String(value);
+    },
+    getAttribute(name) {
+      return name in this.attributes ? this.attributes[name] : null;
+    },
     appendChild(child) {
       child._parent = this;
       this.children.push(child);

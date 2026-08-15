@@ -24,18 +24,41 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps, MergeResult
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
+
+
+@pytest.fixture(autouse=True)
+def _clean_agent_registry():
+    """Drop any agent states a test registered, pass or fail."""
+    yield
+    agent_state.agent_states.clear()
+
+
+def _register_wt_tab(tab_id: str, agent: WorktreeSorcarAgent) -> None:
+    """Register a server-owned worktree tab state for *agent*."""
+    state = agent_state.AgentState(
+        "task-" + tab_id, agent=agent, tab_id=tab_id, server_owned=True,
+    )
+    state.use_worktree = True
+    agent_state.register(state)
 
 
 def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
     """Create a bare-minimum git repo with one commit."""
     repo = tmp_path / name
     repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, capture_output=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
+        cwd=repo, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "commit.gpgsign", "false"],
         cwd=repo, capture_output=True,
     )
     subprocess.run(
@@ -430,10 +453,9 @@ class TestBug51DiffFailureSilentDiscard:
 
         server = VSCodeServer()
         server.work_dir = str(repo)
-        tab = server._get_tab("bug51a-tab")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        tab.agent._wt = GitWorktree(
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        _register_wt_tab("bug51a-tab", agent)
+        agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch="main",
@@ -459,10 +481,9 @@ class TestBug51DiffFailureSilentDiscard:
 
         server = VSCodeServer()
         server.work_dir = str(repo)
-        tab = server._get_tab("bug51b-tab")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        tab.agent._wt = GitWorktree(
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        _register_wt_tab("bug51b-tab", agent)
+        agent._wt = GitWorktree(
             repo_root=repo, branch=branch, original_branch="main",
             wt_dir=wt_dir, baseline_commit=baseline,
         )
@@ -480,10 +501,9 @@ class TestBug51DiffFailureSilentDiscard:
 
         server = VSCodeServer()
         server.work_dir = str(repo)
-        tab = server._get_tab("bug51c-tab")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        tab.agent._wt = GitWorktree(
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        _register_wt_tab("bug51c-tab", agent)
+        agent._wt = GitWorktree(
             repo_root=repo, branch=branch, original_branch="main",
             wt_dir=wt_dir, baseline_commit=baseline,
         )
@@ -514,10 +534,9 @@ class TestBug51DiffFailureSilentDiscard:
         bogus = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
         server = VSCodeServer()
         server.work_dir = str(repo)
-        tab = server._get_tab("bug51d-tab")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        tab.agent._wt = GitWorktree(
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        _register_wt_tab("bug51d-tab", agent)
+        agent._wt = GitWorktree(
             repo_root=repo, branch=branch, original_branch="main",
             wt_dir=wt_dir,
             baseline_commit=bogus,

@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>KISS Sorcar — Tell it what to do, in English. It picks the best LLM and ships the work.</title>
-  <meta name="description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 603 models. Works as a VS Code extension, a Claude-Code-style CLI, and a web app.">
+  <meta name="description" content="Open-source AI agent. Tell it what to do in English — it picks the best LLM, runs on your laptop, and ships the work. Apache 2.0, 603 models. Works as a VS Code extension, a web/mobile app, and a Python API.">
   <link rel="canonical" href="https://kisssorcar.github.io/">
   <link rel="alternate" type="text/markdown" href="https://kisssorcar.github.io/index.html.md" title="This page as Markdown">
   <link rel="llms-txt" type="text/plain" href="https://kisssorcar.github.io/llms.txt" title="LLM-friendly content index">
@@ -1960,8 +1960,8 @@
   <div class="hero" style="padding-top: 0; padding-bottom: 1.5rem;">
     <p class="lead lead--accent">
       <strong>KISS Sorcar</strong> is an open-source general-purpose AI agent for long-horizon tasks and AI discovery.
-      It is a simple, local-first, bring-your-own-key AI agent framework. It runs as a VS Code extension,
-      a Claude-Code-style CLI, and a browser/mobile web app. Your prompts and code are sent directly to
+      It is a simple, local-first, bring-your-own-key AI agent framework. It runs as a VS Code extension
+      and a browser/mobile web app, and offers a Python client API. Your prompts and code are sent directly to
       the model provider or local endpoint you configure &mdash; <em>not through our servers</em>. It supports
       multi-model workflows just via prompts. All agents run as daemons.  Complex AI systems/techniques
        can be replaced with a paragraph of prompt in KISS Sorcar.
@@ -2045,7 +2045,7 @@
           <tbody>
             <tr>
               <th class="cap">Interfaces</th>
-              <td class="kiss">CLI + VS Code extension + web/mobile app</td>
+              <td class="kiss">VS Code extension + web/mobile app + Python API</td>
               <td>CLI + mobile app</td>
               <td>Custom VS Code</td>
             </tr>
@@ -2514,8 +2514,8 @@ At each step, keep track of the best prompt, which has the maximum number of suc
         </div>
 
         <div class="inner-card" style="--i:1">
-          <h3>Python package / CLI install</h3>
-          <p style="margin-bottom:0.7rem;">For just the Python package and CLI entry points. KISS Sorcar requires <strong>Python 3.13+</strong>.</p>
+          <h3>Python package install</h3>
+          <p style="margin-bottom:0.7rem;">For just the Python package &mdash; the <code>kiss-web</code> daemon, the Python client API, and the messaging-agent entry points. KISS Sorcar requires <strong>Python 3.13+</strong>.</p>
           <div class="code-panel">
             <div class="code-line"><span class="prompt">$</span> <span class="green">pipx install kiss-agent-framework</span></div>
             <div class="code-line"><span class="x"># or</span></div>
@@ -2535,7 +2535,7 @@ At each step, keep track of the best prompt, which has the maximum number of suc
             <div class="code-line"><span class="c">export</span> <span class="f">MOONSHOT_API_KEY</span>=<span class="s">...</span></div>
             <div class="code-line"><span class="c">export</span> <span class="f">OPENROUTER_API_KEY</span>=<span class="s">...</span></div>
           </div>
-          <p style="margin-top:0.7rem;">Or configure a custom endpoint with <code>--endpoint</code> / <code>-e</code> and optional repeated <code>--header Key:Value</code> CLI flags.</p>
+          <p style="margin-top:0.7rem;">You can also set API keys, a custom model endpoint, and custom HTTP headers in the Settings panel of the VS Code extension or web app &mdash; or per task via the Python API&rsquo;s <code>model_config</code> option.</p>
         </div>
 
         <div class="inner-card" style="--i:3">
@@ -2548,33 +2548,35 @@ At each step, keep track of the best prompt, which has the maximum number of suc
   </section>
   </div>
 
-  <!-- ================ § 07 — CLI Interface (condensed) ================ -->
+  <!-- ================ § 07 — Python client API (condensed) ================ -->
   <div class="section-wrap">
   <section id="cli" class="section-card">
-    <span class="num">§ 07 — CLI in 30 seconds</span>
-    <h2>The <code style="background:var(--surface);padding:0.05rem 0.45rem;border-radius:6px;font-size:0.85em;color:var(--primary-dark);">sorcar</code> CLI.<a href="#cli" class="anchor">¶</a></h2>
+    <span class="num">§ 07 — Python API in 30 seconds</span>
+    <h2>The <code style="background:var(--surface);padding:0.05rem 0.45rem;border-radius:6px;font-size:0.85em;color:var(--primary-dark);">sorcar.run</code> Python API.<a href="#cli" class="anchor">¶</a></h2>
     <p class="sub">
-      Run <code>sorcar</code> alone for an interactive Claude-Code-style REPL with worktree-isolated tasks, slash commands, and chat history; pass <code>-t "…"</code> or <code>-f task.md</code> for a one-shot non-interactive run. Pick any model with <code>-m</code>, point at a self-hosted endpoint with <code>-e</code>, cap spend with <code>-b</code>, and add MCP servers with <code>sorcar mcp add</code>.
+      The <code>kiss-web</code> daemon serves every client — the VS Code sidebar, the remote web/mobile app, and your own Python scripts. Call <code>kiss.server.sorcar.run</code> to launch a task on the daemon and block until it finishes: pick any model with <code>model=</code>, cap spend with <code>max_budget=</code>, continue a chat with <code>chat_id=</code>, and hand the agent your own tools with <code>tools=</code>.
     </p>
 
     <div class="section-body">
       <div class="inner-card" style="--i:0;margin-bottom:1.1rem;">
-        <h3>Four invocations to get you started</h3>
+        <h3>Four calls to get you started</h3>
         <div class="code-panel">
-          <div class="code-line"><span class="x"># 1. Interactive REPL (recommended for first run)</span></div>
-          <div class="code-line"><span class="c">sorcar</span></div>
+          <div class="code-line"><span class="c">from kiss.server import sorcar</span></div>
           <div class="code-line spacer"></div>
-          <div class="code-line"><span class="x"># 2. One-shot task on any model, with a $2 cap</span></div>
-          <div class="code-line"><span class="c">sorcar</span> <span class="f">-m</span> <span class="s">"claude-sonnet-4-6"</span> <span class="f">-b</span> <span class="s">2.0</span> <span class="f">-t</span> <span class="s">"Refactor utils.py for clarity."</span></div>
+          <div class="code-line"><span class="x"># 1. Run a task and read the result</span></div>
+          <div class="code-line"><span class="c">result = sorcar.run(</span><span class="s">"Refactor utils.py for clarity."</span><span class="c">)</span></div>
           <div class="code-line spacer"></div>
-          <div class="code-line"><span class="x"># 3. Self-hosted or local model</span></div>
-          <div class="code-line"><span class="c">sorcar</span> <span class="f">-e</span> <span class="s">"http://localhost:8000/v1"</span> <span class="f">-t</span> <span class="s">"Summarise this codebase."</span></div>
+          <div class="code-line"><span class="x"># 2. Any model, with a $2 cap</span></div>
+          <div class="code-line"><span class="c">sorcar.run(</span><span class="s">"Summarise this codebase."</span><span class="c">, </span><span class="f">model=</span><span class="s">"claude-sonnet-4-6"</span><span class="c">, </span><span class="f">max_budget=</span><span class="c">2.0)</span></div>
+          <div class="code-line spacer"></div>
+          <div class="code-line"><span class="x"># 3. Continue the same chat — the agent sees the prior task</span></div>
+          <div class="code-line"><span class="c">sorcar.run(</span><span class="s">"Now fix the typos you found."</span><span class="c">, </span><span class="f">chat_id=</span><span class="c">result.chat_id)</span></div>
           <div class="code-line spacer"></div>
           <div class="code-line"><span class="x"># 4. Run a Slack/Gmail/SMS task via a third-party agent</span></div>
-          <div class="code-line"><span class="c">sorcar</span> <span class="f">-t</span> <span class="s">'Send "Hello from Sorcar!" to ksen via the desktop Slack app.'</span></div>
+          <div class="code-line"><span class="c">sorcar.run(</span><span class="s">'Send "Hello from Sorcar!" to ksen via the desktop Slack app.'</span><span class="c">)</span></div>
         </div>
         <p style="margin-top:1rem;font-size:0.95rem;color:var(--text-dim);">
-          Full reference (every flag, <code>sorcar mcp</code> subcommands, slash commands, skills, MCP discovery, and VS Code Tricks): <a href="https://github.com/ksenxx/kiss_ai/blob/main/README.md#cli-interface" target="_blank" rel="noopener"><strong>Full CLI reference →</strong></a>
+          Full reference (the <code>kiss-web</code> daemon, chat-client features, every <code>run()</code> option, skills, and MCP discovery): <a href="https://github.com/ksenxx/kiss_ai/blob/main/README.md#using-kiss-sorcar" target="_blank" rel="noopener"><strong>Full client reference →</strong></a>
         </p>
       </div>
     </div>

@@ -28,7 +28,12 @@ source "$RELEASE_SH"
 new_scenario() {
     local name="$1"
     git init -q -b main "$WORK/$name"
-    git init -q --bare "$WORK/$name-public.git"
+    # -b main also on the bare remote: without it, a host whose
+    # init.defaultBranch is unset (git default: master) leaves the bare
+    # repo's HEAD pointing at the nonexistent refs/heads/master, so the
+    # raced scenario's clone checks out an unborn master branch and its
+    # `push origin main` fails with "src refspec main does not match any".
+    git init -q -b main --bare "$WORK/$name-public.git"
     cd "$WORK/$name"
     git config user.email "test@test.com"
     git config user.name "Test"

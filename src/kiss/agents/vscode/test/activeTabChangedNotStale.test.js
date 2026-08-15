@@ -6,11 +6,11 @@
 // End-to-end test for the `activeTabChanged` notification the chat webview
 // sends to its host (the VS Code extension, or the remote web app server).
 //
-// The host keeps the last reported id in `_activeTabId` and uses it to decide
-// whether a merge belonging to some chat tab may yank an editor in front of
-// the user (SorcarSidebarView.ts: `mgr.openMerge(msg.data, mergeTabId ===
-// this._activeTabId)`).  So the invariant this file pins down is simple and
-// absolute:
+// The host keeps the last reported id in `_activeTabId` and uses it to
+// attribute tab-scoped requests to the chat tab the user is looking at —
+// e.g. routing ghost-text completions (SorcarSidebarView.ts:
+// `this._getApi().complete({..., tabId: message.tabId || this._activeTabId
+// ...})`).  So the invariant this file pins down is simple and absolute:
 //
 //   after ANY tab activation, the last `activeTabChanged` the host received
 //   must name the chat tab that is actually on screen, and that tab must

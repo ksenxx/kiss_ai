@@ -105,26 +105,24 @@ class TestModelRouting:
 
 
 class TestBuildCliArgs:
-    """Verify CLI argument construction — especially ``--tools ""``."""
+    """Verify CLI argument construction — agentic mode, like CodexModel."""
 
-    def test_tools_flag_disables_builtin_tools(self) -> None:
-        """``--tools ""`` must appear in CLI args to disable built-in tools.
+    def test_agentic_mode_enables_builtin_tools(self) -> None:
+        """Native tools stay enabled; permission prompts are bypassed.
 
-        Without the empty-string value, the CLI would run in agentic mode
-        (Bash/Edit/Read), causing the model to loop without producing the
-        JSON tool_calls that the text-based tool-calling parser expects.
+        Like ``codex exec --dangerously-bypass-approvals-and-sandbox``,
+        the ``claude`` CLI runs agentically (Bash/Edit/Read) with
+        ``--dangerously-skip-permissions``, so ``--tools`` must not
+        appear — an empty ``--tools ""`` would disable agentic mode.
         """
         m = ClaudeCodeModel("cc/opus")
         m.initialize("test")
         args = m._build_cli_args()
-        idx = args.index("--tools")
-        assert args[idx + 1] == "", (
-            f"Expected '--tools \"\"' but got '--tools {args[idx + 1]}'; "
-            "built-in tools would be active, breaking text-based tool calling"
-        )
+        assert "--tools" not in args
+        assert "--dangerously-skip-permissions" in args
 
-    def test_no_session_persistence_is_separate_flag(self) -> None:
-        """``--no-session-persistence`` must not be consumed by ``--tools``."""
+    def test_no_session_persistence_flag_present(self) -> None:
+        """``--no-session-persistence`` keeps each invocation self-contained."""
         m = ClaudeCodeModel("cc/opus")
         m.initialize("test")
         args = m._build_cli_args()

@@ -12,7 +12,7 @@
 #10 Sub-agent row filtering was SQL-side (``_HISTORY_NOT_SUBAGENT``)
     in some persistence readers but Python-side in
     ``_load_latest_chat_events_by_chat_id``, ``_load_chat_context``,
-    and ``_list_recent_chats``' inner tasks query.  All readers must
+    and the chat/history readers' inner tasks queries.  All readers must
     agree on the exact same result sets.
 
 All tests run against real SQLite databases in temp dirs;
@@ -25,7 +25,6 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
-from typing import cast
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
@@ -109,14 +108,6 @@ class TestSubagentFilteringConsistency(_TempDbTestBase):
         assert [e["task"] for e in ctx] == ["parent task text"]
         assert [e["result"] for e in ctx] == ["parent result text"]
 
-    def test_list_recent_chats_excludes_subagent_rows(self) -> None:
-        _, chat_id = self._seed_parent_and_subagents()
-        chats = th._list_recent_chats()
-        assert [c["chat_id"] for c in chats] == [chat_id]
-        tasks = cast("list[dict[str, object]]", chats[0]["tasks"])
-        assert [t["task"] for t in tasks] == ["parent task text"]
-        assert tasks[0]["parent_task_id"] == ""
-
     def test_subagent_only_chat_invisible_to_all_readers(self) -> None:
         """A chat holding ONLY sub-agent rows must vanish everywhere."""
         parent_id, _ = th._add_task("parent in its own chat")
@@ -128,4 +119,3 @@ class TestSubagentFilteringConsistency(_TempDbTestBase):
         )
         assert th._load_latest_chat_events_by_chat_id(sub_chat) is None
         assert th._load_chat_context(sub_chat) == []
-        assert sub_chat not in [c["chat_id"] for c in th._list_recent_chats()]

@@ -228,7 +228,6 @@ class TestTlonBackendBugs:
         from kiss.agents.third_party_agents.tlon_agent import TlonAgent
 
         agent = TlonAgent()
-        agent.web_use_tool = None
         tools = {t.__name__: t for t in agent._get_auth_tools()}
         result = json.loads(tools["authenticate_tlon"](ship_url=self.base + "/", code="code123"))
         assert result["ok"] is True

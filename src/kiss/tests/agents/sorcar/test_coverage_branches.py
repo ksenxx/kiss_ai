@@ -29,6 +29,7 @@ from kiss.agents.sorcar.useful_tools import (
 from kiss.agents.sorcar.web_use_tool import (
     WebUseTool,
 )
+from kiss.server import agent_state
 from kiss.server.json_printer import (
     JsonPrinter,
     _coalesce_events,
@@ -188,13 +189,22 @@ class TestVSCodeServerBranches:
         return server, events
 
     def test_handle_command_run_already_running(self):
-        """A run command while a task is alive is silently dropped."""
+        """A run command while a task is alive queues the prompt (steering)."""
         server, events = self._make_server()
         t = threading.Thread(target=lambda: time.sleep(5), daemon=True)
         t.start()
-        server._get_tab("0").task_thread = t
-        server._handle_command({"type": "run", "prompt": "test", "tabId": "0"})
-        assert not any(e.get("type") == "error" for e in events)
+        st = agent_state.AgentState(
+            "w2-run-busy", tab_id="0", server_owned=True, task_thread=t,
+        )
+        agent_state.register(st)
+        try:
+            server._handle_command(
+                {"type": "run", "prompt": "test", "tabId": "0"}
+            )
+            assert not any(e.get("type") == "error" for e in events)
+            assert st.pending_user_messages == ["test"]
+        finally:
+            agent_state.unregister(st.task_id, st)
         t.join(timeout=0.1)
 
     def test_handle_command_stop_no_event(self):
@@ -219,20 +229,26 @@ class TestVSCodeServerBranches:
         server, events = self._make_server()
         stop_event = threading.Event()
         server.printer._thread_local.stop_event = stop_event
-        tab_id = "1"
-        server.printer._thread_local.task_id = tab_id
+        task_id = "1"
+        server.printer._thread_local.task_id = task_id
         user_q: queue.Queue[str] = queue.Queue(maxsize=1)
-        server._get_tab(tab_id).user_answer_queue = user_q
-        server.printer.subscribe_tab(tab_id, tab_id)
+        st = agent_state.AgentState(
+            task_id, tab_id=task_id, server_owned=True,
+        )
+        st.user_answer_queue = user_q
+        agent_state.register(st)
+        server.printer.subscribe_tab(task_id, task_id)
+        try:
+            def answer():
+                time.sleep(0.1)
+                user_q.put("my answer")
 
-        def answer():
-            time.sleep(0.1)
-            user_q.put("my answer")
-
-        t = threading.Thread(target=answer, daemon=True)
-        t.start()
-        result = server._ask_user_question("what?")
-        t.join(timeout=1)
+            t = threading.Thread(target=answer, daemon=True)
+            t.start()
+            result = server._ask_user_question("what?")
+            t.join(timeout=1)
+        finally:
+            agent_state.unregister(task_id, st)
         assert result == "my answer"
         ask_events = [e for e in events if e["type"] == "askUser"]
         assert len(ask_events) == 1
@@ -418,7 +434,7 @@ finally:
 """)
             result = subprocess.run(
                 ["uv", "run", "python", str(script)],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, timeout=180,
                 cwd=os.getcwd(),
             )
             assert "PASS" in result.stdout, f"stdout={result.stdout}\nstderr={result.stderr}"

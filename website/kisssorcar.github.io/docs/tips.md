@@ -59,7 +59,7 @@ If you have an `OPENAI_API_KEY`, with the **sorcar** wake word, KISS Sorcar star
 Speak 'sorcar', your task ...
 ```
 
-Click the **mic** button below the chat input box if it is grey and wait for it to start pulsing blue. For the Sorcar CLI, type `/voice` and Enter to activate voice interaction. Speak "sorcar" followed by your task, and KISS Sorcar will run the task and tell you the results using its own voice. The voice interface distinguishes among different speakers.
+Click the mic button below the chat input box if it is grey and wait for it to start pulsing blue. Speak "sorcar" followed by your task; KISS Sorcar will run the task and tell you the results using its own voice. The voice interface distinguishes among different speakers.
 
 You can also **steer the agent's execution and ask for status** while an agent is running — using voice.
 
@@ -69,15 +69,24 @@ Go to the Settings panel and copy the URL at the top. This URL points to the lat
 
 Open the URL in a browser on the mobile device and enter your remote password. You will see a familiar Codex-like chat interface.
 
-## Use the KISS Sorcar CLI REPL Interface
+**Always write precise 1–6 sentence prompts.** Long prompts confuse models. **Do not plan ahead of time.** Let KISS Sorcar plan dynamically, which is always better than AI-written static plans.
 
-Just run:
+## Remote Web/Mobile App
 
-```bash
-sorcar
+Go to the Settings panel and copy the URL at the top (it points to the latest cloudflared URL for the KISS Sorcar webapp). Send it to your mobile device (SMS, Slack, or email), open it in a browser, and enter your remote password (also set on the Settings page).
+
+## Run Tasks from Python Scripts
+
+Any Python process can launch a task on the running KISS Sorcar daemon and block until it finishes:
+
+```python
+from kiss.server import sorcar
+
+result = sorcar.run("Summarize README.md", work_dir="/path/to/repo")
+print(result.text, result.success, result.cost)
 ```
 
-It has a powerful Claude-Code-style interface. It supports skills, MCP, commands, and more. Trajectories are streamed, and output scrolls while being syntax-highlighted.
+You can also pass a Python file of extra tools via `tools="/path/to/my_tools.py"`, and continue a chat with `chat_id=result.chat_id`.
 
 ## Run KISS Sorcar in a Docker Container
 

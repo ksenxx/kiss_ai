@@ -198,6 +198,9 @@ class TestModelInfoFactory:
 
         m = model("text-embedding-004")
         assert m.model_name == "text-embedding-004"
+        # Routed by the ``text-embedding`` prefix like every other name in
+        # that family; the exact-name Gemini diversion was dead (audit 01, F5).
+        assert type(m).__name__ == "OpenAICompatibleModel"
 
     def test_model_glm(self) -> None:
         from kiss.core.models.model_info import model
@@ -213,12 +216,6 @@ class TestModelInfoFactory:
 
 
 class TestGetAvailableModels:
-    def test_get_most_expensive_model(self) -> None:
-        from kiss.core.models.model_info import get_most_expensive_model
-
-        result = get_most_expensive_model()
-        assert isinstance(result, str)
-
     def test_get_default_model_priority(self) -> None:
         """Test that get_default_model picks the right model per API key priority."""
         import os
@@ -321,32 +318,6 @@ class TestRelentlessAgentDockerBash:
         )
         with pytest.raises(KISSError, match="Docker manager not initialized"):
             agent._docker_bash("echo hi", "test")
-
-
-class TestConfigBuilder:
-    def test_add_config_twice_preserves_first(self) -> None:
-        """Calling add_config twice preserves previous config fields."""
-        from pydantic import BaseModel as PydanticBaseModel
-
-        from kiss.core import config as config_module
-        from kiss.core.config_builder import add_config
-
-        original = config_module.DEFAULT_CONFIG
-
-        class Cfg1(PydanticBaseModel):
-            a: int = 1
-
-        class Cfg2(PydanticBaseModel):
-            b: int = 2
-
-        try:
-            add_config("cfg1", Cfg1)
-            add_config("cfg2", Cfg2)
-            cfg = config_module.DEFAULT_CONFIG
-            assert cfg.cfg1.a == 1  # type: ignore[attr-defined]
-            assert cfg.cfg2.b == 2  # type: ignore[attr-defined]
-        finally:
-            config_module.DEFAULT_CONFIG = original
 
 
 class TestPrintToConsole:

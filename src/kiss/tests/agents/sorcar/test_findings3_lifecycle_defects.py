@@ -6,41 +6,36 @@
 
 Each test reproduces a confirmed defect from the deep audit of
 ``src/kiss/server/{server,task_runner,commands}.py`` and passes only
-because the defect is fixed:
+because the defect is fixed (behavior preserved by the task-keyed
+``kiss.server.agent_state`` registry):
 
-S3-05  ``_cmd_run`` installed and started ``tab.task_thread`` before the
-       worker raised ``is_task_active``, so a second ``run`` (or an
-       ``appendUserMessage``) submitted during that startup window
-       failed the ``is_task_active or not thread.is_alive()`` predicate
-       and the typed prompt was silently dropped.  Input must now be
-       queued whenever a task thread is installed/alive.
+S3-05  A second ``run`` (or an ``appendUserMessage``) submitted during
+       the task startup window — worker thread installed and alive but
+       ``is_task_active`` not yet raised — must be queued on the
+       state's ``pending_user_messages``, not silently dropped.
 
-S3-07  Mandatory end-of-task cleanup (clearing ``is_task_active``,
-       ``task_history_id``, the printer persist-agent/recording and the
-       worker's thread-local task id) lived in the same broad ``try`` as
-       fallible persistence/broadcast/merge work, so a persistence error
-       left the tab permanently carrying its finished task's identity.
-       The mandatory cleanup must now run in its own ``finally``.
+S3-07  Mandatory end-of-task cleanup (clearing ``is_task_active`` /
+       ``is_running_non_wt`` and the printer's per-task recording)
+       must run in its own ``finally`` so a persistence crash cannot
+       leave the task permanently flagged active.
 
-S3-08  The follow-up suggestion thread was started BEFORE
-       ``printer.cleanup_task`` removed the task's persist-agent, so a
-       fast follow-up was persisted twice (once automatically by
-       ``JsonPrinter.broadcast`` while the persist-agent still existed,
-       once explicitly via ``_append_chat_event``) while a slow one was
-       persisted once.  ``cleanup_task`` now runs first, making the
-       explicit append the single scheduling-independent persistence
-       path.
+S3-08  The follow-up suggestion must persist exactly once: while the
+       run's agent is still resolvable through the registry (live
+       ``_last_task_id``) a broadcast double-persists; after the
+       production cleanup (``_last_task_id`` cleared +
+       ``cleanup_task``) the explicit append is the single
+       persistence path, and the lingering subscriber set still fans
+       the broadcast out to the tab.
 
-S3-09  ``_subagent_is_done`` consulted only
-       ``ChatSorcarAgent.running_agents`` (without its lock) while
-       ``_reattach_running_chat`` scanned live ``_RunningAgentState``
-       entries, so during the registration gaps replay could reattach a
-       task as running and simultaneously report it done.  Both sources
-       are now checked under their locks.
+S3-09  ``_subagent_is_done`` must agree with
+       ``_reattach_running_chat``: both consult the same live-state
+       predicate on the task-keyed registry, so replay can never
+       reattach a task as running while stamping its tab
+       ``isDone=True``.
 
-S3-14  (verification) ``JsonPrinter.cleanup_task`` now prunes the
-       task's subscriber set after a linger period instead of retaining
-       it for the tab's whole lifetime.
+S3-14  (verification) ``JsonPrinter.cleanup_task`` prunes the task's
+       subscriber set after a linger period instead of retaining it
+       for the tab's whole lifetime.
 
 The tests use real threads, a real ``VSCodeServer``, a real
 ``JsonPrinter``, and a real temporary SQLite database.  The only
@@ -64,9 +59,10 @@ from pathlib import Path
 from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
+import kiss.server.server as _server_module
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer, _subagent_is_done
 
 
@@ -108,12 +104,6 @@ def _init_git_repo(tmpdir: str) -> None:
     )
 
 
-def _pop_tab(tab_id: str) -> None:
-    """Remove *tab_id* from the global running-agent registry."""
-    with _RunningAgentState._registry_lock:
-        _RunningAgentState.running_agent_states.pop(tab_id, None)
-
-
 def _count_followup_rows(task_id: str) -> int:
     """Count persisted ``followup_suggestion`` event rows for *task_id*."""
     th._flush_chat_events()
@@ -132,9 +122,9 @@ def _count_followup_rows(task_id: str) -> int:
 class TestStartupWindowInput(unittest.TestCase):
     """S3-05: input typed during the task startup window must be queued.
 
-    ``_cmd_run`` installs and starts ``tab.task_thread`` and only later
-    (inside the worker) raises ``is_task_active``.  The tests recreate
-    exactly that window with a real alive worker thread whose
+    ``_cmd_run`` installs and starts ``state.task_thread`` and only
+    later (inside the worker) raises ``is_task_active``.  The tests
+    recreate exactly that window with a real alive worker thread whose
     ``is_task_active`` flag is still False.
     """
 
@@ -147,19 +137,23 @@ class TestStartupWindowInput(unittest.TestCase):
         worker = threading.Thread(target=self.release.wait, daemon=True)
         worker.start()
         with self.server._state_lock:
-            tab = _RunningAgentState(self.tab_id, self.server._default_model)
-            tab.task_thread = worker
-            tab.is_task_active = False  # startup window: thread alive, flag down
-            _RunningAgentState.running_agent_states[self.tab_id] = tab
-        self.tab = tab
+            state = agent_state.AgentState(
+                "s305-run-key",
+                tab_id=self.tab_id,
+                server_owned=True,
+                is_task_active=False,  # startup window: thread alive, flag down
+            )
+            state.task_thread = worker
+            agent_state.register(state)
+        self.state = state
         # Race tests: jitter the window a little before acting.
         time.sleep(random.uniform(0.001, 0.05))
 
     def tearDown(self) -> None:
         self.release.set()
-        if self.tab.task_thread is not None:
-            self.tab.task_thread.join(timeout=5)
-        _pop_tab(self.tab_id)
+        if self.state.task_thread is not None:
+            self.state.task_thread.join(timeout=5)
+        agent_state.agent_states.clear()
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -171,14 +165,14 @@ class TestStartupWindowInput(unittest.TestCase):
         })
         self.assertIn(
             "follow-up typed during startup window",
-            self.tab.pending_user_messages,
+            self.state.pending_user_messages,
             "a second `run` submitted while the worker thread was alive "
             "but is_task_active was still False must queue the prompt, "
             "not silently drop it",
         )
         self.assertIn(
             "follow-up typed during startup window",
-            self.tab.unattributed_prompt_echoes,
+            self.state.unattributed_prompt_echoes,
             "the queued prompt has no owning task id yet, so it must be "
             "recorded for late attribution",
         )
@@ -191,7 +185,7 @@ class TestStartupWindowInput(unittest.TestCase):
         })
         self.assertIn(
             "typed while the task was starting",
-            self.tab.pending_user_messages,
+            self.state.pending_user_messages,
             "appendUserMessage during the startup window must queue the "
             "prompt on the tab's own live task",
         )
@@ -199,8 +193,12 @@ class TestStartupWindowInput(unittest.TestCase):
     def test_truly_idle_tab_still_drops_append(self) -> None:
         idle_id = "s305-idle-tab"
         with self.server._state_lock:
-            idle = _RunningAgentState(idle_id, self.server._default_model)
-            _RunningAgentState.running_agent_states[idle_id] = idle
+            idle = agent_state.AgentState(
+                "s305-idle-key",
+                tab_id=idle_id,
+                server_owned=True,
+            )
+            agent_state.register(idle)
         try:
             self.server._handle_command({
                 "type": "appendUserMessage",
@@ -214,7 +212,7 @@ class TestStartupWindowInput(unittest.TestCase):
                 "reject queued input (nothing would ever drain it)",
             )
         finally:
-            _pop_tab(idle_id)
+            agent_state.unregister("s305-idle-key", idle)
 
 
 class TestSubagentDoneConsistency(unittest.TestCase):
@@ -224,47 +222,44 @@ class TestSubagentDoneConsistency(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect_db(self.tmpdir)
         self.server = VSCodeServer()
-        self.tab_id = "s309-sub-tab"
         self.task_id = "s309-task-row-id"
         self.release = threading.Event()
 
     def tearDown(self) -> None:
         self.release.set()
-        _pop_tab(self.tab_id)
+        agent_state.agent_states.clear()
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _install_tab(self, *, active: bool, thread_alive: bool) -> None:
+    def _install_state(self, *, active: bool, thread_alive: bool) -> None:
         with self.server._state_lock:
-            tab = _RunningAgentState(
-                self.tab_id,
-                self.server._default_model,
-                is_subagent=True,
+            state = agent_state.AgentState(
+                self.task_id,
+                chat_id="s309-chat",
+                tab_id="s309-sub-tab",
+                parent_task_id="s309-parent-id",
                 is_task_active=active,
             )
-            tab.task_history_id = self.task_id
             if thread_alive:
                 worker = threading.Thread(
                     target=self.release.wait, daemon=True,
                 )
                 worker.start()
-                tab.task_thread = worker
-            _RunningAgentState.running_agent_states[self.tab_id] = tab
+                state.task_thread = worker
+            agent_state.register(state)
 
-    def test_active_tab_missing_from_running_agents_is_not_done(self) -> None:
-        """Startup gap: DB row + live tab state exist, map entry not yet."""
-        self._install_tab(active=True, thread_alive=False)
+    def test_active_state_is_not_done(self) -> None:
+        """Startup gap: registry entry active, no thread installed yet."""
+        self._install_state(active=True, thread_alive=False)
         time.sleep(random.uniform(0.001, 0.05))
-        with ChatSorcarAgent._running_agents_lock:
-            self.assertNotIn(self.task_id, ChatSorcarAgent.running_agents)
         self.assertFalse(
             _subagent_is_done(self.task_id),
-            "a live tab state owning the task id means the sub-agent is "
-            "still running even before it registers in running_agents",
+            "a live registered state owning the task id means the "
+            "sub-agent is still running",
         )
 
     def test_alive_thread_without_active_flag_is_not_done(self) -> None:
-        self._install_tab(active=False, thread_alive=True)
+        self._install_state(active=False, thread_alive=True)
         self.assertFalse(
             _subagent_is_done(self.task_id),
             "an alive worker thread owning the task id means the "
@@ -273,7 +268,7 @@ class TestSubagentDoneConsistency(unittest.TestCase):
 
     def test_reattach_and_done_never_contradict(self) -> None:
         """The exact audit contradiction: reattached AND reported done."""
-        self._install_tab(active=True, thread_alive=False)
+        self._install_state(active=True, thread_alive=False)
         reattached = self.server._reattach_running_chat(
             "s309-chat",
             "s309-viewer-tab",
@@ -298,16 +293,18 @@ class TestFollowupSinglePersistence(unittest.TestCase):
 
     Reproduces both orderings of the race deterministically against a
     real ``JsonPrinter`` and a real SQLite DB, with the production
-    persist-agent wiring (a real ``ChatSorcarAgent`` registered in
-    ``printer._persist_agents``, exactly as ``ChatSorcarAgent.run``
-    registers itself):
+    persistence wiring (a real ``ChatSorcarAgent`` reachable through
+    the task-keyed registry, exactly as ``ChatSorcarAgent.run``
+    installs itself via ``printer.agent_task_allocated``):
 
-    * pre-fix order (broadcast while the persist-agent is still
-      registered, then the explicit append) → TWO rows;
-    * post-fix order (``cleanup_task`` first, as ``_run_task_inner``
-      now does, then the follow-up thread's broadcast + append) → ONE
-      row, and the lingering subscriber set still fans the broadcast
-      out to the tab.
+    * pre-fix order (broadcast while the agent's ``_last_task_id``
+      is still live in the registry, then the explicit append) →
+      TWO rows;
+    * post-fix order (production cleanup first — ``_last_task_id``
+      cleared and ``cleanup_task`` called, as ``ChatSorcarAgent.run``
+      / ``_run_task_inner`` now do — then the follow-up thread's
+      broadcast + append) → ONE row, and the lingering subscriber
+      set still fans the broadcast out to the tab.
     """
 
     def setUp(self) -> None:
@@ -320,12 +317,17 @@ class TestFollowupSinglePersistence(unittest.TestCase):
         self.agent = ChatSorcarAgent("s308-agent")
         with self.agent._task_id_lock:
             self.agent._last_task_id = task_id
-        with self.printer._lock:
-            self.printer._persist_agents[self.task_id] = self.agent
+        state = agent_state.AgentState(
+            self.task_id,
+            agent=cast(Any, self.agent),
+            is_task_active=True,
+        )
+        agent_state.register(state)
+        self.state = state
 
     def tearDown(self) -> None:
+        agent_state.agent_states.clear()
         with self.printer._lock:
-            self.printer._persist_agents.pop(self.task_id, None)
             self.printer._subscribers.pop(self.task_id, None)
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -352,28 +354,33 @@ class TestFollowupSinglePersistence(unittest.TestCase):
         self.assertFalse(worker.is_alive())
 
     def test_prefix_order_duplicates_and_fixed_order_does_not(self) -> None:
-        # Pre-fix ordering: persist-agent still registered while the
-        # follow-up thread broadcasts — the defect mechanism.
-        self._run_followup_thread("fast follow-up (persist-agent live)")
+        # Pre-fix ordering: the agent is still resolvable through the
+        # registry with a live _last_task_id while the follow-up thread
+        # broadcasts — the defect mechanism.
+        self._run_followup_thread("fast follow-up (persist wiring live)")
         self.assertEqual(
             _count_followup_rows(self.task_id),
             2,
-            "with the persist-agent still registered, broadcast + "
-            "explicit append must double-persist — this is the defect "
-            "mechanism the reorder eliminates",
+            "with the agent still registered and its _last_task_id "
+            "live, broadcast + explicit append must double-persist — "
+            "this is the defect mechanism the cleanup reorder "
+            "eliminates",
         )
 
-        # Post-fix ordering: _run_task_inner now calls cleanup_task
-        # BEFORE starting the follow-up thread.
+        # Post-fix ordering: production cleanup runs BEFORE the
+        # follow-up thread — ChatSorcarAgent.run clears _last_task_id
+        # and _run_task_inner calls cleanup_task first.
         self.printer.subscribe_tab(self.task_id, "s308-viewer-tab")
+        with self.agent._task_id_lock:
+            self.agent._last_task_id = None
         self.printer.cleanup_task(self.task_id)
         before = _count_followup_rows(self.task_id)
         self._run_followup_thread("follow-up after cleanup_task")
         self.assertEqual(
             _count_followup_rows(self.task_id) - before,
             1,
-            "after cleanup_task removed the persist-agent, the explicit "
-            "append must be the single persistence path",
+            "after cleanup the explicit append must be the single "
+            "persistence path",
         )
         with self.printer._lock:
             self.assertIn(
@@ -415,8 +422,8 @@ class TestCleanupExceptionSafety(unittest.TestCase):
     Drives a real task through ``_run_task``, then makes the
     persistence layer genuinely unusable (the DB path becomes a
     directory, so ``_get_db`` raises a real ``sqlite3.OperationalError``)
-    before the end-of-task cleanup runs.  The tab must still shed its
-    task identity and activity flags.
+    before the end-of-task cleanup runs.  The state must still shed its
+    activity flags and the printer its per-task recording.
     """
 
     def setUp(self) -> None:
@@ -426,20 +433,27 @@ class TestCleanupExceptionSafety(unittest.TestCase):
         self.server = VSCodeServer()
         self.blocker = _CompletingParentRun()
         self.original_run = self.blocker.install()
+        self._orig_followup = _server_module.generate_followup_text
+
+        def fake_followup(task: str, result: str, model: str) -> str:
+            return ""
+
+        _server_module.generate_followup_text = fake_followup  # type: ignore[assignment]
         self.tab_id = "s307-tab"
 
     def tearDown(self) -> None:
         self.blocker.release_event.set()
         with self.server._state_lock:
-            tab = _RunningAgentState.running_agent_states.get(self.tab_id)
-        if tab is not None and tab.task_thread is not None:
-            tab.task_thread.join(timeout=15)
+            state = agent_state.find_by_tab(self.tab_id)
+        if state is not None and state.task_thread is not None:
+            state.task_thread.join(timeout=15)
         cast(Any, SorcarAgent.__mro__[1]).run = self.original_run
-        _pop_tab(self.tab_id)
+        _server_module.generate_followup_text = self._orig_followup
+        agent_state.agent_states.clear()
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_tab_sheds_task_identity_when_persistence_crashes(self) -> None:
+    def test_state_sheds_activity_when_persistence_crashes(self) -> None:
         self.server._handle_command({
             "type": "run",
             "prompt": "task whose cleanup persistence crashes",
@@ -452,13 +466,13 @@ class TestCleanupExceptionSafety(unittest.TestCase):
             "the agent run never started",
         )
         with self.server._state_lock:
-            tab = _RunningAgentState.running_agent_states.get(self.tab_id)
-        self.assertIsNotNone(tab)
-        assert tab is not None
+            state = agent_state.find_by_tab(self.tab_id)
+        self.assertIsNotNone(state)
+        assert state is not None
 
         rows = th._load_history(limit=1)
         self.assertTrue(rows, "the task row must exist while running")
-        self.history_task_id = str(rows[0]["id"])
+        history_task_id = str(rows[0]["id"])
 
         # Sabotage the DB while the agent is still "running": close the
         # connection and turn the DB path into a directory, so every
@@ -472,31 +486,26 @@ class TestCleanupExceptionSafety(unittest.TestCase):
         time.sleep(random.uniform(0.001, 0.05))
 
         self.blocker.release_event.set()
-        assert tab.task_thread is not None
-        tab.task_thread.join(timeout=15)
-        self.assertFalse(tab.task_thread is not None and tab.task_thread.is_alive())
+        assert state.task_thread is not None
+        state.task_thread.join(timeout=15)
+        self.assertFalse(
+            state.task_thread is not None and state.task_thread.is_alive()
+        )
 
         self.assertFalse(
-            tab.is_task_active,
-            "the tab must not stay flagged active after cleanup crashed",
+            state.is_task_active,
+            "the state must not stay flagged active after cleanup crashed",
         )
         self.assertFalse(
-            tab.is_running_non_wt,
+            state.is_running_non_wt,
             "the non-worktree running flag must be lowered even when "
             "cleanup persistence crashed",
         )
-        self.assertIsNone(
-            tab.task_history_id,
-            "the tab must shed its finished task's identity even when "
-            "the persistence/broadcast section of cleanup raised — "
-            "pre-fix the broad except skipped this, leaving the tab "
-            "permanently bound to the dead task",
-        )
         with self.server.printer._lock:
             self.assertNotIn(
-                self.history_task_id,
-                self.server.printer._persist_agents,
-                "no persist-agent entry may outlive the crashed cleanup",
+                history_task_id,
+                self.server.printer._recordings,
+                "no per-task recording may outlive the crashed cleanup",
             )
 
 

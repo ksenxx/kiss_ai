@@ -4,8 +4,8 @@
 # add your name here
 """End-to-end regression tests for Wave3-Fixer-2's bug fixes.
 
-Covers findings A-F2, A-F3, A-F5 of ``tmp/w3-findings-A.md`` and C-2,
-C-4 of ``tmp/w3-findings-C.md``:
+Covers findings A-F2, A-F3, A-F5 of ``tmp/w3-findings-A.md`` and C-2
+of ``tmp/w3-findings-C.md``:
 
 * A-F2 — ``_stop_event_writer`` mutated ``_event_writer_thread`` /
   ``_event_writer_stop`` without ``_event_writer_lock``, racing
@@ -23,12 +23,10 @@ C-4 of ``tmp/w3-findings-C.md``:
 * C-2 — ``UsefulTools.Read`` validated ``start_line`` but not
   ``max_lines``: ``max_lines=0`` returned only a truncation marker and
   negative values produced wrong slices/counts.
-* C-4 — ``sorcar mcp add`` silently ignored extra tokens after the URL
-  for http/sse, ``--env`` for http/sse, and ``--header`` for stdio.
 
 No mocks, patches, or fakes: real SQLite databases and threads, a real
-headless Chromium via Playwright, a real (shut down) MCP manager event
-loop, and real CLI entry-point invocations are used throughout.
+headless Chromium via Playwright, and a real (shut down) MCP manager
+event loop are used throughout.
 """
 
 from __future__ import annotations
@@ -48,7 +46,6 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.mcp_servers import MCPManager, MCPServerConfig
 from kiss.agents.sorcar.useful_tools import UsefulTools
 from kiss.agents.sorcar.web_use_tool import WebUseTool
-from kiss.ui.cli.mcp_cli import run_mcp_cli
 
 
 def _redirect(tmpdir: str) -> tuple:
@@ -274,61 +271,3 @@ class TestReadMaxLinesValidation:
         out = tools.Read(path, max_lines=2)
         assert out.startswith("l1\nl2\n"), out
         assert "[truncated: 3 more lines]" in out
-
-
-
-class TestMcpAddRejectsIgnoredOptions:
-    """``mcp add`` errors out instead of silently dropping input."""
-
-    def test_extra_tokens_after_url_rejected(self, tmp_path: Path) -> None:
-        with pytest.raises(SystemExit) as exc:
-            run_mcp_cli(
-                [
-                    "add", "--transport", "http", "--scope", "project",
-                    "srv", "https://x.example", "extra", "tokens",
-                ],
-                str(tmp_path),
-            )
-        assert "extra" in str(exc.value).lower(), exc.value
-
-    def test_env_rejected_for_http(self, tmp_path: Path) -> None:
-        with pytest.raises(SystemExit) as exc:
-            run_mcp_cli(
-                [
-                    "add", "--transport", "http", "--scope", "project",
-                    "--env", "K=V", "srv", "https://x.example",
-                ],
-                str(tmp_path),
-            )
-        assert "--env" in str(exc.value), exc.value
-
-    def test_header_rejected_for_stdio(self, tmp_path: Path) -> None:
-        with pytest.raises(SystemExit) as exc:
-            run_mcp_cli(
-                [
-                    "add", "--scope", "project", "--header", "X: y",
-                    "srv", sys.executable, "-c", "pass",
-                ],
-                str(tmp_path),
-            )
-        assert "--header" in str(exc.value), exc.value
-
-    def test_valid_http_add_still_works(self, tmp_path: Path) -> None:
-        rc = run_mcp_cli(
-            [
-                "add", "--transport", "http", "--scope", "project",
-                "--header", "X-Key: abc", "srv", "https://x.example",
-            ],
-            str(tmp_path),
-        )
-        assert rc == 0
-
-    def test_valid_stdio_add_still_works(self, tmp_path: Path) -> None:
-        rc = run_mcp_cli(
-            [
-                "add", "--scope", "project", "--env", "K=V",
-                "srv2", sys.executable, "-c", "pass",
-            ],
-            str(tmp_path),
-        )
-        assert rc == 0

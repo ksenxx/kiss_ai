@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""MCP (Model Context Protocol) server support for the ``sorcar`` CLI.
+"""MCP (Model Context Protocol) server support for Sorcar.
 
 Implements MCP server management with Claude Code compatibility:
 
@@ -34,12 +34,11 @@ Implements MCP server management with Claude Code compatibility:
   never registered.
 
 * **OAuth** — remote (``http``/``sse``) servers authenticate through
-  the MCP SDK's OAuth 2.1 provider (dynamic client registration +
-  PKCE).  Tokens are persisted per server under ``~/.kiss/mcp_auth/``
-  by :class:`FileTokenStorage`; ``sorcar mcp auth <name>`` runs the
-  interactive browser flow (see :mod:`kiss.ui.cli.mcp_cli`),
-  while agent runs reuse the stored tokens and fail with a hint to
-  run the auth command when interactive login would be required.
+  the MCP SDK's OAuth 2.1 provider using tokens persisted per server
+  under ``~/.kiss/mcp_auth/`` by :class:`FileTokenStorage`.  Agent runs
+  reuse and refresh those tokens; there is deliberately no interactive
+  browser login (it would block a run on a human), so a server that
+  needs one fails with a hint to provision its tokens by hand.
 
 Connections are kept alive for the life of the process by a single
 :class:`MCPManager` running an asyncio loop on a daemon thread; each
@@ -58,18 +57,9 @@ import json
 import keyword
 import logging
 import os
+import sys
 import threading
 import time
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover — Windows has no fcntl
-    fcntl = None  # type: ignore[assignment]
-try:
-    import msvcrt  # type: ignore[import-not-found]
-except ImportError:  # POSIX has no msvcrt
-    msvcrt = None  # type: ignore[assignment]
-from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -77,12 +67,30 @@ from typing import Any
 
 from kiss.agents.sorcar.persistence import _default_kiss_dir
 from kiss.agents.sorcar.skills import load_permission_rules, skill_permission
+from kiss.agents.sorcar.useful_tools import _file_lock
 
 logger = logging.getLogger(__name__)
 
 CONNECT_TIMEOUT = 60.0
 _CONNECT_STRAGGLER_GRACE_S = 5.0
 CALL_TIMEOUT = 300.0
+
+#: How long a connection may sit unused before the next :meth:`connect`
+#: reaps it.  Nothing in the long-lived daemon ever disconnects servers
+#: between tasks, so without this every project x config revision would
+#: leak one stdio child process for the life of the process.
+IDLE_TIMEOUT = 600.0
+
+#: Hard cap on live connections, so a burst of distinct configurations
+#: cannot exhaust the machine's process/file-descriptor limits before the
+#: idle timeout comes round.  The least recently used one goes first.
+MAX_CONNECTIONS = 8
+
+#: How often an idle connection is pinged.  A server that died (OOM kill,
+#: crash, container restart) is otherwise never noticed: the connection
+#: task is parked on its stop event and every later tool call would block
+#: on a dead transport until ``CALL_TIMEOUT``.
+HEALTH_INTERVAL = 30.0
 
 _JSON_TO_PY: dict[str, type] = {
     "string": str,
@@ -344,54 +352,6 @@ def mcp_tool_permission(tool_name: str, rules: dict[str, str]) -> str:
     return skill_permission(tool_name, rules)
 
 
-@contextmanager
-def _file_lock(lock_path: Path) -> Any:
-    """Hold an exclusive advisory inter-process lock on *lock_path*.
-
-    Serializes read-modify-write cycles on shared JSON files (MCP
-    configs, OAuth token stores) across CLI processes, daemons, and
-    event loops.  The lock file itself is created mode ``0600``.
-
-    Cross-platform: ``fcntl.flock`` on POSIX, ``msvcrt.locking`` on
-    Windows (where ``fcntl`` does not exist — an unconditional import
-    would make every MCP feature unavailable there).  When neither
-    primitive exists the lock degrades to best-effort no-op rather
-    than breaking MCP entirely.
-    """
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        if fcntl is not None:
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
-        elif msvcrt is not None:  # pragma: no cover — Windows-only branch
-            os.lseek(descriptor, 0, os.SEEK_SET)
-            while True:
-                try:
-                    msvcrt.locking(  # pyright: ignore[reportAttributeAccessIssue]
-                        descriptor,
-                        msvcrt.LK_LOCK,  # pyright: ignore[reportAttributeAccessIssue]
-                        1,
-                    )
-                    break
-                except OSError:
-                    time.sleep(0.05)
-        yield
-    finally:
-        try:
-            if fcntl is not None:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-            elif msvcrt is not None:  # pragma: no cover — Windows-only branch
-                os.lseek(descriptor, 0, os.SEEK_SET)
-                with suppress(OSError):
-                    msvcrt.locking(  # pyright: ignore[reportAttributeAccessIssue]
-                        descriptor,
-                        msvcrt.LK_UNLCK,  # pyright: ignore[reportAttributeAccessIssue]
-                        1,
-                    )
-        finally:
-            os.close(descriptor)
-
-
 _RESERVED_BASENAMES = frozenset(
     {"con", "prn", "aux", "nul"}
     | {f"com{i}" for i in range(1, 10)}
@@ -480,12 +440,33 @@ class FileTokenStorage:
             logger.debug("invalid stored tokens in %s", self.path, exc_info=True)
             return None
 
-    async def set_tokens(self, tokens: Any) -> None:
-        """Persist *tokens* (an :class:`~mcp.shared.auth.OAuthToken`)."""
+    def _locked_update(self, key: str, value: Any) -> None:
+        """Replace *key* in the stored JSON under the inter-process lock.
+
+        Args:
+            key: Top-level key to set (``"tokens"``/``"client_info"``).
+            value: Its already-serialized JSON value.
+        """
         with _file_lock(self._lock_path):
             data = self._read()
-            data["tokens"] = tokens.model_dump(mode="json", exclude_none=True)
+            data[key] = value
             self._write(data)
+
+    async def set_tokens(self, tokens: Any) -> None:
+        """Persist *tokens* (an :class:`~mcp.shared.auth.OAuthToken`).
+
+        The read-modify-write runs on a worker thread: it blocks on an
+        inter-process lock that another kiss process can hold for
+        minutes (an interactive OAuth login waits on a human), and this
+        coroutine runs on the manager's single shared event loop, which
+        also carries every other server's transport and every in-flight
+        tool call.
+        """
+        await asyncio.to_thread(
+            self._locked_update,
+            "tokens",
+            tokens.model_dump(mode="json", exclude_none=True),
+        )
 
     async def get_client_info(self) -> Any:
         """Return the stored OAuth client registration, if any."""
@@ -501,16 +482,20 @@ class FileTokenStorage:
             return None
 
     async def set_client_info(self, client_info: Any) -> None:
-        """Persist the dynamically registered OAuth client information."""
-        with _file_lock(self._lock_path):
-            data = self._read()
-            data["client_info"] = client_info.model_dump(
-                mode="json", exclude_none=True
-            )
-            self._write(data)
+        """Persist the dynamically registered OAuth client information.
+
+        Runs on a worker thread for the same reason as
+        :meth:`set_tokens`: the lock is inter-process and the caller's
+        event loop is shared by every MCP connection.
+        """
+        await asyncio.to_thread(
+            self._locked_update,
+            "client_info",
+            client_info.model_dump(mode="json", exclude_none=True),
+        )
 
     def clear(self) -> bool:
-        """Delete the token file (``sorcar mcp logout``).
+        """Delete the stored token file for this server.
 
         Returns:
             ``True`` when a file was deleted, ``False`` when absent.
@@ -525,40 +510,31 @@ class FileTokenStorage:
 async def _noninteractive_redirect(url: str) -> None:
     """Refuse to start a browser OAuth flow during an agent run."""
     raise RuntimeError(
-        "MCP server requires interactive OAuth login; run "
-        "`sorcar mcp auth <name>` first."
+        "MCP server requires interactive OAuth login; provision its "
+        "tokens under ~/.kiss/mcp_auth/ (or use a server that "
+        "authenticates via --header) first."
     )
 
 
 async def _noninteractive_callback() -> tuple[str, str | None]:
     """Refuse to wait for an OAuth callback during an agent run."""
     raise RuntimeError(
-        "MCP server requires interactive OAuth login; run "
-        "`sorcar mcp auth <name>` first."
+        "MCP server requires interactive OAuth login; provision its "
+        "tokens under ~/.kiss/mcp_auth/ (or use a server that "
+        "authenticates via --header) first."
     )
 
 
-def build_oauth_provider(
-    cfg: MCPServerConfig,
-    redirect_handler: Any = None,
-    callback_handler: Any = None,
-    redirect_port: int = 0,
-) -> Any:
+def build_oauth_provider(cfg: MCPServerConfig) -> Any:
     """Build the OAuth provider used to authenticate to a remote server.
 
-    The provider performs OAuth 2.1 with dynamic client registration
-    and PKCE on demand (i.e. when the server responds 401) and reuses
-    or refreshes tokens stored by :class:`FileTokenStorage`.
+    The provider refreshes and reuses the tokens stored by
+    :class:`FileTokenStorage`.  It never starts an interactive login:
+    an agent run must not block waiting for a human at a browser, so
+    both handlers refuse and point at manual token provisioning.
 
     Args:
         cfg: The remote server configuration.
-        redirect_handler: Async callable opening the authorization URL
-            in a browser; defaults to a non-interactive refusal so
-            agent runs never block waiting for a human.
-        callback_handler: Async callable returning ``(code, state)``
-            from the OAuth redirect; defaults to the same refusal.
-        redirect_port: Local callback port registered in the client
-            metadata (only meaningful for the interactive flow).
 
     Returns:
         An ``httpx.Auth`` instance (``OAuthClientProvider``).
@@ -568,7 +544,7 @@ def build_oauth_provider(
 
     metadata = OAuthClientMetadata.model_validate({
         "client_name": "KISS Sorcar",
-        "redirect_uris": [f"http://localhost:{redirect_port}/callback"],
+        "redirect_uris": ["http://localhost:0/callback"],
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "token_endpoint_auth_method": "client_secret_post",
@@ -577,8 +553,8 @@ def build_oauth_provider(
         server_url=cfg.url,
         client_metadata=metadata,
         storage=FileTokenStorage(cfg.name),
-        redirect_handler=redirect_handler or _noninteractive_redirect,
-        callback_handler=callback_handler or _noninteractive_callback,
+        redirect_handler=_noninteractive_redirect,
+        callback_handler=_noninteractive_callback,
     )
 
 
@@ -594,6 +570,28 @@ class _Connection:
     error: str = ""
     task: Any = None
     finished: threading.Event = field(default_factory=threading.Event)
+    last_used: float = field(default_factory=time.monotonic)
+    #: Tool calls currently executing on this connection.  Guarded by
+    #: the manager's lock; a connection is never evicted while it is
+    #: non-zero (see :meth:`MCPManager._evict_surplus`).
+    in_flight: int = 0
+
+
+def _child_errlog() -> Any:
+    """Return a writable stream to use as an MCP child's stderr.
+
+    Resolved fresh on every spawn.  Falls back to the process's real
+    stderr file descriptor when ``sys.stderr`` is absent (pythonw) or has
+    already been closed, and to ``os.devnull`` when even that fails, so a
+    server can always be started.
+    """
+    stream = getattr(sys, "stderr", None)
+    if stream is not None and not getattr(stream, "closed", False):
+        return stream
+    try:
+        return open(os.dup(2), "w", closefd=True)  # noqa: SIM115
+    except OSError:
+        return open(os.devnull, "w")  # noqa: SIM115
 
 
 async def _enter_transport(stack: Any, config: MCPServerConfig, auth: Any) -> tuple:
@@ -608,7 +606,18 @@ async def _enter_transport(stack: Any, config: MCPServerConfig, auth: Any) -> tu
             args=list(config.args),
             env={**os.environ, **dict(config.env)},
         )
-        read, write = await stack.enter_async_context(stdio_client(params))
+        # ``stdio_client``'s ``errlog`` default is a *default argument*, so
+        # the SDK binds whatever ``sys.stderr`` was at import time and hands
+        # that object to the child as its stderr for the rest of the
+        # process's life.  Anything that rebinds or closes ``sys.stderr``
+        # afterwards (a log redirect in the daemon, pytest's per-test
+        # capture) then makes the very next spawn die with
+        # ``ValueError: I/O operation on closed file``.  Resolve it at call
+        # time instead, and fall back to the real fd when the current
+        # ``sys.stderr`` is missing or already closed.
+        read, write = await stack.enter_async_context(
+            stdio_client(params, errlog=_child_errlog())
+        )
         return read, write
     if config.transport == "sse":
         from mcp.client.sse import sse_client
@@ -639,12 +648,47 @@ def _cancel_if_not_done(task: Any) -> None:
         task.cancel()
 
 
-async def _maintain_connection(conn: _Connection, auth: Any) -> None:
+async def _park_until_stopped(
+    conn: _Connection, session: Any, health_interval: float,
+) -> None:
+    """Park until *conn* is stopped, failing fast if the server dies.
+
+    A plain ``await conn.stop.wait()`` never notices a server that was
+    killed, crashed, or restarted: the task stays parked, ``session``
+    stays set, and every later tool call blocks on the dead transport
+    until ``CALL_TIMEOUT``.  Pinging while idle turns that into a prompt
+    error, which the manager turns into a reconnect.
+
+    Args:
+        conn: The connection being maintained.
+        session: Its live MCP client session.
+        health_interval: Seconds between pings (also the ping timeout).
+
+    Raises:
+        Exception: Whatever the failed ping raises, so the caller can
+            record the error and unwind the transport.
+    """
+    while True:
+        try:
+            await asyncio.wait_for(conn.stop.wait(), timeout=health_interval)
+            return
+        except TimeoutError:
+            await asyncio.wait_for(session.send_ping(), timeout=health_interval)
+
+
+async def _maintain_connection(
+    conn: _Connection, auth: Any, health_interval: float = HEALTH_INTERVAL,
+) -> None:
     """Own one server connection for its whole lifetime in a single task.
 
     anyio cancel scopes must be entered and exited by the same task, so
     the transport and session contexts are opened here, the task then
     parks on the ``stop`` event, and the contexts unwind here too.
+
+    Args:
+        conn: The connection record to fill in and own.
+        auth: Optional ``httpx.Auth`` for remote transports.
+        health_interval: Seconds between idle health pings.
     """
     from contextlib import AsyncExitStack
 
@@ -659,7 +703,7 @@ async def _maintain_connection(conn: _Connection, auth: Any) -> None:
             conn.session = session
             conn.tools = list(listed.tools)
             conn.ready.set()
-            await conn.stop.wait()
+            await _park_until_stopped(conn, session, health_interval)
     except BaseException as exc:
         conn.error = f"{type(exc).__name__}: {exc}"
         logger.debug("MCP connection %s failed", conn.config.name, exc_info=True)
@@ -675,22 +719,42 @@ class MCPManager:
     Runs a private asyncio event loop on a daemon thread; every server
     gets one long-lived task that owns its transport + session.  The
     synchronous facade (:meth:`get_tools`, :meth:`call_tool`) is what
-    agent tool wrappers and the CLI use.
+    the agent tool wrappers use.
     """
 
     _instance: MCPManager | None = None
     _instance_lock = threading.Lock()
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        idle_timeout_s: float = IDLE_TIMEOUT,
+        max_connections: int = MAX_CONNECTIONS,
+        health_interval_s: float = HEALTH_INTERVAL,
+    ) -> None:
+        """Start the manager's loop thread.
+
+        Args:
+            idle_timeout_s: Seconds a connection may sit unused before
+                the next :meth:`connect` reaps it.
+            max_connections: Hard cap on live connections; the least
+                recently used one is evicted when the cap is exceeded.
+            health_interval_s: Seconds between idle health pings.
+        """
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
             target=self._loop.run_forever, name="mcp-manager", daemon=True,
         )
         self._thread.start()
         self._connections: dict[str, _Connection] = {}
+        # Every configuration ever connected, so a connection dropped by
+        # eviction or a server crash can be rebuilt on demand.
+        self._configs: dict[str, MCPServerConfig] = {}
         self._orphans: list[_Connection] = []
         self._lock = threading.Lock()
         self._shut_down = False
+        self._idle_timeout_s = idle_timeout_s
+        self._max_connections = max_connections
+        self._health_interval_s = health_interval_s
         atexit.register(self.shutdown)
 
     @classmethod
@@ -722,9 +786,11 @@ class MCPManager:
                 conn.error = "manager shut down"
                 conn.ready.set()
                 return conn
+            self._configs[key] = config
             existing = self._connections.get(key)
             if existing is not None and existing.error == "":
                 conn = existing
+                conn.last_used = time.monotonic()
             else:
                 if existing is not None:
                     self._loop.call_soon_threadsafe(existing.stop.set)
@@ -733,8 +799,10 @@ class MCPManager:
                 conn = _Connection(config=config)
                 self._connections[key] = conn
                 conn.task = asyncio.run_coroutine_threadsafe(
-                    _maintain_connection(conn, auth), self._loop,
+                    _maintain_connection(conn, auth, self._health_interval_s),
+                    self._loop,
                 )
+        self._evict_surplus(key)
         if not conn.ready.wait(CONNECT_TIMEOUT):
             with self._lock:
                 if self._connections.get(key) is conn:
@@ -745,6 +813,52 @@ class MCPManager:
             self._loop.call_soon_threadsafe(conn.stop.set)
             self._reap_straggler(conn)
         return conn
+
+    def _evict_surplus(self, keep: str) -> None:
+        """Tear down connections that are idle or beyond the pool cap.
+
+        Nothing else ever disconnects a server: ``shutdown`` runs only at
+        interpreter exit, so in the ``kiss-web`` daemon a connection —
+        and its stdio child process — would otherwise live forever.  A
+        connection is only ever *dropped*, never invalidated: a later
+        tool call rebuilds it from :attr:`_configs`, so eviction costs a
+        reconnect at worst and never an error.
+
+        A connection with a tool call in flight is never a candidate,
+        however old it is: dropping it makes ``_maintain_connection``
+        leave the session context underneath a live
+        ``session.call_tool``, which strands that call until the
+        five-minute call timeout expires.  Tool calls block for as long
+        as the tool runs, so the busiest connection is regularly also
+        the least recently *started* one.  Such a connection becomes an
+        ordinary candidate again the moment its last call returns, so
+        the cap still holds — it is enforced a little later.
+
+        Args:
+            keep: The connection key just connected, never evicted.
+        """
+        now = time.monotonic()
+        with self._lock:
+            evictable = {
+                key for key, conn in self._connections.items()
+                if key != keep and conn.in_flight == 0
+            }
+            doomed = {
+                key for key in evictable
+                if now - self._connections[key].last_used > self._idle_timeout_s
+            }
+            survivors = [key for key in self._connections if key not in doomed]
+            surplus = len(survivors) - self._max_connections
+            if surplus > 0:
+                oldest = sorted(
+                    (key for key in survivors if key in evictable),
+                    key=lambda key: self._connections[key].last_used,
+                )
+                doomed.update(oldest[:surplus])
+            conns = [self._connections.pop(key) for key in doomed]
+        for conn in conns:
+            conn.error = conn.error or "evicted: idle or over the connection cap"
+            self._loop.call_soon_threadsafe(conn.stop.set)
 
     def _reap_straggler(self, conn: _Connection) -> None:
         """Arrange teardown of a connection evicted by a connect() timeout.
@@ -781,6 +895,35 @@ class MCPManager:
             except ValueError:
                 pass
 
+    def _lease(self, server: str) -> tuple[_Connection | None, Any]:
+        """Atomically look up *server*'s connection and lease it.
+
+        The lookup and the ``in_flight`` increment happen under one
+        acquisition of the manager lock: incrementing after releasing
+        the lookup's lock left a window in which a concurrent
+        :meth:`connect`'s :meth:`_evict_surplus` saw ``in_flight == 0``,
+        evicted the connection, and tore down the session underneath
+        the call about to run on it.  The session is captured under the
+        same lock so the caller always uses exactly the session it
+        leased.
+
+        Args:
+            server: A connection key, or a bare server name when it is
+                unambiguous.
+
+        Returns:
+            ``(conn, session)`` — *session* is non-``None`` only when
+            the connection is live and was leased (the caller must
+            release the lease by decrementing ``in_flight``).
+        """
+        with self._lock:
+            conn = _pick(self._connections, server)
+            session = conn.session if conn is not None else None
+            if conn is not None and session is not None:
+                conn.in_flight += 1
+                conn.last_used = time.monotonic()
+            return conn, session
+
     def call_tool(self, server: str, tool: str, arguments: dict[str, Any]) -> str:
         """Call *tool* on *server* and return the textual result.
 
@@ -804,17 +947,16 @@ class MCPManager:
                     f"Error: MCP server {display!r} is not connected "
                     f"(manager shut down)"
                 )
-            conn = self._connections.get(server)
-            if conn is None:
-                named = [
-                    c for k, c in self._connections.items()
-                    if _key_display_name(k) == server
-                ]
-                if len(named) == 1:
-                    conn = named[0]
-        session = conn.session if conn is not None else None
+        conn, session = self._lease(server)
+        if session is None:
+            # Evicted from the pool, or the server died mid-task: rebuild
+            # it rather than failing every remaining call of the run.
+            fresh = self._reconnect(server)
+            if fresh is not None:
+                leased, session = self._lease(server)
+                conn = leased or fresh
         if conn is None or session is None:
-            why = conn.error if conn else "never connected"
+            why = (conn.error if conn is not None else "") or "never connected"
             return f"Error: MCP server {display!r} is not connected ({why})"
         future = asyncio.run_coroutine_threadsafe(
             session.call_tool(
@@ -828,7 +970,30 @@ class MCPManager:
         except Exception as exc:
             future.cancel()
             return f"Error: MCP tool call failed: {exc}"
+        finally:
+            with self._lock:
+                conn.in_flight -= 1
+                conn.last_used = time.monotonic()
         return _result_text(result)
+
+    def _reconnect(self, server: str) -> _Connection | None:
+        """Rebuild the connection for *server* from its remembered config.
+
+        Args:
+            server: A connection key, or a bare server name when it is
+                unambiguous.
+
+        Returns:
+            The fresh connection, or ``None`` when the server was never
+            configured (nothing to rebuild from).  A shut-down manager
+            needs no special case: :meth:`connect` answers with an
+            already-failed connection.
+        """
+        with self._lock:
+            config = _pick(self._configs, server)
+        if config is None:
+            return None
+        return self.connect(config)
 
     def disconnect_all(self) -> None:
         """Close every connection (their tasks unwind their contexts).
@@ -944,6 +1109,24 @@ def _key_display_name(server: str) -> str:
     if sep and len(tail) == 16 and all(c in "0123456789abcdef" for c in tail):
         return base
     return server
+
+
+def _pick[T](registry: dict[str, T], server: str) -> T | None:
+    """Look up *server* in a key-indexed registry, tolerating a bare name.
+
+    Args:
+        registry: A mapping keyed by :func:`_connection_key`.
+        server: A connection key, or a configured server name (matched
+            only when exactly one key carries it).
+
+    Returns:
+        The matching entry, or ``None`` when absent or ambiguous.
+    """
+    entry = registry.get(server)
+    if entry is not None:
+        return entry
+    named = [v for k, v in registry.items() if _key_display_name(k) == server]
+    return named[0] if len(named) == 1 else None
 
 
 def _json_schema_to_annotation(prop: Any) -> type:
@@ -1080,7 +1263,7 @@ _RESERVED_TOOL_NAMES = frozenset({
     "go_to_url", "click", "type_text", "press_key", "scroll",
     "screenshot", "get_page_content", "show_browser", "close_browser",
     "skill", "ask_user_question", "talk", "set_model",
-    "run_parallel", "number_of_cores", "summary", "web_search",
+    "run_parallel", "number_of_cores", "summary",
 })
 
 
@@ -1143,48 +1326,3 @@ def make_mcp_tools(work_dir: str) -> list[Any]:
                 continue
             tools.append(wrapper)
     return tools
-
-
-def format_mcp_listing(work_dir: str, connect: bool = False) -> str:
-    """Format the configured servers as the listing printed by ``/mcp``.
-
-    Args:
-        work_dir: The project directory whose servers to list.
-        connect: When ``True``, connect to each server and append its
-            live status (✓ + tool count, or ✗ + error).
-
-    Returns:
-        A printable multi-line listing, or a configuration hint when
-        no servers are configured.
-    """
-    servers = load_mcp_servers(work_dir)
-    if not servers:
-        return (
-            "No MCP servers configured.\n"
-            "Add one with: sorcar mcp add <name> <command> [args...]\n"
-            f"Config files: {user_mcp_config_path()} (user), "
-            f"{project_mcp_config_path(work_dir)} (project), "
-            f"{claude_project_mcp_config_path(work_dir)} (Claude-compatible)."
-        )
-    rules = load_mcp_permissions()
-    width = max(len(n) for n in servers)
-    lines = []
-    for name in sorted(servers):
-        cfg = servers[name]
-        target = cfg.command + (" " + " ".join(cfg.args) if cfg.args else "") \
-            if cfg.transport == "stdio" else cfg.url
-        line = f"  {name:<{width}}  ({cfg.source}, {cfg.transport}) {target}"
-        if connect:
-            conn = MCPManager.instance().connect(cfg)
-            if conn.session is not None:
-                allowed = [
-                    t for t in conn.tools
-                    if not rules or mcp_tool_permission(
-                        f"{_sanitize(name)}_{_sanitize(str(t.name))}", rules,
-                    ) == "allow"
-                ]
-                line += f" — ✓ connected, {len(allowed)}/{len(conn.tools)} tools allowed"
-            else:
-                line += f" — ✗ {conn.error or 'connection failed'}"
-        lines.append(line)
-    return "\n".join(lines)

@@ -31,8 +31,8 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar.git_worktree import GitWorktree
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -79,15 +79,29 @@ class TestDoubleMergeClick(unittest.TestCase):
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _register_tab_state(
+        self, tab_id: str, agent: WorktreeSorcarAgent,
+    ) -> agent_state.AgentState:
+        """Register a server-owned worktree state for *tab_id*."""
+        with self.server._state_lock:
+            state = agent_state.AgentState(
+                f"task-for-{tab_id}",
+                tab_id=tab_id,
+                server_owned=True,
+                agent=agent,
+            )
+            state.use_worktree = True
+            agent_state.register(state)
+        return state
 
     def test_second_concurrent_merge_click_is_refused(self) -> None:
         tab_id = "wt-tab"
         agent = _BlockingMergeAgent(Path(self.tmpdir))
-        tab = self.server._get_tab(tab_id)
-        tab.use_worktree = True
-        tab.agent = agent
+        self._register_tab_state(tab_id, agent)
 
         results: dict[str, dict[str, Any]] = {}
 
@@ -136,11 +150,9 @@ class TestDoubleMergeClick(unittest.TestCase):
         state under the open review."""
         tab_id = "wt-tab-2"
         agent = _BlockingMergeAgent(Path(self.tmpdir))
-        tab = self.server._get_tab(tab_id)
-        tab.use_worktree = True
-        tab.agent = agent
+        state = self._register_tab_state(tab_id, agent)
         with self.server._state_lock:
-            tab.is_merging = True
+            state.is_merging = True
 
         result = self.server._handle_worktree_action("merge", tab_id)
 

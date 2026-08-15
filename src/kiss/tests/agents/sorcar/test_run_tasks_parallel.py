@@ -48,10 +48,19 @@ class TestRunTasksParallel:
         tool_names = [getattr(t, "__name__", "") for t in tools]
         assert "run_parallel" in tool_names
 
-    def test_run_parallel_tool_excluded_by_default(self) -> None:
-        """The run_parallel tool is excluded when is_parallel is False (default)."""
+    def test_run_parallel_tool_included_by_default(self) -> None:
+        """The run_parallel tool is included by default (is_parallel=True)."""
         agent = SorcarAgent("test")
         agent._use_web_tools = False
+        tools = agent._get_tools()
+        tool_names = [getattr(t, "__name__", "") for t in tools]
+        assert "run_parallel" in tool_names
+
+    def test_run_parallel_tool_excluded_when_disabled(self) -> None:
+        """The run_parallel tool is excluded when is_parallel is False."""
+        agent = SorcarAgent("test")
+        agent._use_web_tools = False
+        agent._is_parallel = False
         tools = agent._get_tools()
         tool_names = [getattr(t, "__name__", "") for t in tools]
         assert "run_parallel" not in tool_names

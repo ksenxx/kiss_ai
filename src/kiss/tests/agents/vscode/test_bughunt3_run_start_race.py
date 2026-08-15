@@ -4,16 +4,12 @@
 # add your name here
 """Bug-hunt 3: concurrent ``_cmd_run`` start race on one tab (BUG-C).
 
-``_cmd_run``'s busy guard was ``task_thread is not None and
-task_thread.is_alive()`` — but the winning submit assigns
-``tab.task_thread`` under ``_state_lock`` and calls ``thread.start()``
-only AFTER releasing the lock and broadcasting the ``clear`` event
-(network I/O — a wide window).  A created-but-unstarted thread has
-``is_alive() == False``, so a concurrent second submit for the same
-tab passed the guard, clobbered ``stop_event`` /
-``user_answer_queue`` / ``task_thread``, and two tasks ran
-concurrently on one tab (the first becoming unstoppable, its state
-then nulled by whichever finally ran first).
+The winning submit installs ``state.task_thread`` under
+``_state_lock`` and calls ``thread.start()`` only AFTER releasing the
+lock and broadcasting the ``clear`` event (network I/O — a wide
+window).  A second concurrent submit for the same tab arriving in
+that window must NOT start a second task: it must observe the
+installed ``task_thread`` and queue its prompt as steering instead.
 
 The test makes the race deterministic by blocking the printer's
 ``broadcast`` on the first ``clear`` event until a second
@@ -31,8 +27,8 @@ from pathlib import Path
 from typing import Any, cast
 
 import kiss.server.server as _server_module
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -80,7 +76,7 @@ class TestRunStartRace(unittest.TestCase):
         self.release.set()
         self._parent_class.run = self._original_run
         _server_module.generate_followup_text = self._orig_followup
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_concurrent_second_submit_is_dropped(self) -> None:
@@ -109,8 +105,8 @@ class TestRunStartRace(unittest.TestCase):
 
         deadline = time.time() + 30
         while time.time() < deadline:
-            tab = _RunningAgentState.running_agent_states.get(tab_id)
-            if tab is not None and tab.task_thread is None:
+            st = agent_state.find_by_tab(tab_id)
+            if st is None or st.task_thread is None or not st.task_thread.is_alive():
                 break
             time.sleep(0.02)
 

@@ -5,19 +5,20 @@
 """Bug-hunt 4: ``_replay_session`` clobbers ``use_worktree`` mid-flight.
 
 Loading a chat from history into a tab is a VIEW operation, yet
-``_replay_session`` unconditionally overwrote the tab's
+``_replay_session`` once overwrote the running task's
 ``use_worktree`` flag with the loaded chat's persisted
 ``is_worktree`` value — even while a worktree task was still RUNNING
 on that tab, or while a finished worktree run was awaiting the
 user's merge/discard decision (``agent._wt_pending``).
 
 Consequence: the end-of-task cleanup in ``_TaskRunnerMixin._run_task``
-keeps the agent alive only when ``tab.use_worktree and
-tab.agent._wt_pending`` — after viewing a non-worktree chat in the
-same tab the flag is ``False``, so the agent holding the pending
-worktree state is disposed and the user's subsequent merge/discard
-fails (and the worktree branch leaks).  The merge-busy guard
-(``t.is_merging and t.use_worktree``) is broken the same way.
+keeps the agent alive only when ``state.use_worktree and
+state.agent._wt_pending`` — after viewing a non-worktree chat in the
+same tab the flag would be ``False``, so the agent holding the pending
+worktree state would be disposed and the user's subsequent
+merge/discard would fail (and the worktree branch would leak).  The
+merge-busy guard (``t.is_merging and t.use_worktree``) would be broken
+the same way.
 """
 
 from __future__ import annotations
@@ -29,7 +30,8 @@ import unittest
 from typing import Any
 
 import kiss.server.server as _server_module
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
 
 
@@ -60,15 +62,20 @@ class TestReplayPreservesWorktreeFlag(unittest.TestCase):
 
     def tearDown(self) -> None:
         _server_module._load_latest_chat_events_by_chat_id = self._orig_loader
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_resume_into_running_worktree_tab_keeps_flag(self) -> None:
         tab_id = "wt-busy-tab"
-        tab = self.server._get_tab(tab_id)
-        tab.chat_id = "chat-running"
-        tab.use_worktree = True
-        tab.is_task_active = True
+        state = AgentState(
+            "task-wt-busy",
+            tab_id=tab_id,
+            chat_id="chat-running",
+            server_owned=True,
+        )
+        state.use_worktree = True
+        state.is_task_active = True
+        agent_state.register(state)
 
         _server_module._load_latest_chat_events_by_chat_id = _fake_loader({})
 
@@ -78,7 +85,7 @@ class TestReplayPreservesWorktreeFlag(unittest.TestCase):
             "tabId": tab_id,
         })
 
-        assert tab.use_worktree is True, (
+        assert state.use_worktree is True, (
             "BUG: _replay_session overwrote use_worktree=False while a "
             "worktree task was still running on the tab — the end-of-task "
             "cleanup will now dispose the agent despite _wt_pending, "

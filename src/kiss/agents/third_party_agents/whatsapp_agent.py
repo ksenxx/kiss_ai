@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""WhatsApp Agent — SorcarAgent extension with WhatsApp Business Cloud API tools.
+"""WhatsApp Agent — channel agent with WhatsApp Business Cloud API tools.
 
 Provides authenticated access to WhatsApp via the Meta Graph API.
 Handles authentication (reading config from disk or prompting the user
@@ -29,12 +29,10 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._backend_utils import (
     ThreadedHTTPServer,
     drain_queue_messages,
     stop_http_server,
-    wait_for_matching_message,
 )
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
@@ -91,8 +89,8 @@ def _api_request(
 class WhatsAppChannelBackend(ToolMethodBackend):
     """Channel backend for WhatsApp Business Cloud API.
 
-    Provides channel monitoring via webhook queue, message sending,
-    and reply waiting for the channel poller and interactive agent.
+    Provides channel monitoring via webhook queue and message sending
+    for the channel poller and interactive agent.
 
     For message polling, uses a webhook queue pattern: an embedded HTTP
     server receives POST events from the WhatsApp platform and buffers
@@ -279,48 +277,11 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         if "error" in result:
             raise RuntimeError(f"WhatsApp send failed: {result['error']}")
 
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Block until a message from a specific user is received.
-
-        Args:
-            channel_id: Unused for WhatsApp.
-            thread_ts: Unused for WhatsApp.
-            user_id: Phone number to wait for.
-
-        Returns:
-            The text of the user's reply.
-
-        Note:
-            Messages from other senders drained while waiting are discarded.
-        """
-
-        def poll() -> list[dict[str, Any]]:
-            return drain_queue_messages(
-                self._message_queue,
-                limit=50,
-                keep=lambda raw: raw.get("from") == user_id,
-            )
-
-        return wait_for_matching_message(
-            poll=poll,
-            matches=lambda raw: raw.get("from") == user_id,
-            extract_text=lambda raw: str(raw.get("text", {}).get("body", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=2.0,
-        )
-
     def disconnect(self) -> None:
         """Stop the embedded webhook server and release backend resources."""
         self._webhook_server, self._webhook_thread = stop_http_server(
             self._webhook_server, self._webhook_thread
         )
-
 
     def send_text_message(self, to: str, body: str, preview_url: bool = False) -> str:
         """Send a text message to a WhatsApp number.
@@ -335,7 +296,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status and message_id.
         """
-        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
         try:
             result = _api_request(
                 "POST",
@@ -379,7 +340,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status and message_id.
         """
-        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
         try:
             template: dict[str, Any] = {
                 "name": template_name,
@@ -431,7 +392,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status and message_id.
         """
-        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
         try:
             media_obj: dict[str, Any] = {}
             if media_id:
@@ -472,7 +433,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status and message_id.
         """
-        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
         try:
             result = _api_request(
                 "POST",
@@ -513,7 +474,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status and message_id.
         """
-        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
         try:
             location: dict[str, Any] = {
                 "latitude": latitude,
@@ -552,7 +513,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status and message_id.
         """
-        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
         try:
             result = _api_request(
                 "POST",
@@ -583,7 +544,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status and message_id.
         """
-        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
         try:
             result = _api_request(
                 "POST",
@@ -613,7 +574,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status.
         """
-        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
         try:
             result = _api_request(
                 "POST",
@@ -641,7 +602,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             description, email, websites, profile_picture_url).
         """
         url = (
-            f"{_GRAPH_API_BASE}/{self._phone_number_id}/whatsapp_business_profile"
+            f"{self._graph_api_base}/{self._phone_number_id}/whatsapp_business_profile"
             "?fields=about,address,description,email,websites,profile_picture_url,vertical"
         )
         try:
@@ -676,7 +637,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status.
         """
-        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/whatsapp_business_profile"
+        url = f"{self._graph_api_base}/{self._phone_number_id}/whatsapp_business_profile"
         try:
             body: dict[str, Any] = {"messaging_product": "whatsapp"}
             if about:
@@ -712,7 +673,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             JSON string with ok status and media_id (use in
             send_media_message).
         """
-        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/media"
+        url = f"{self._graph_api_base}/{self._phone_number_id}/media"
         try:
             with open(file_path, "rb") as f:
                 result = _api_request(
@@ -741,7 +702,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status, url, mime_type, and file_size.
         """
-        url = f"{_GRAPH_API_BASE}/{media_id}"
+        url = f"{self._graph_api_base}/{media_id}"
         try:
             result = _api_request("GET", url, self._access_token)
             if "error" in result:
@@ -766,7 +727,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status.
         """
-        url = f"{_GRAPH_API_BASE}/{media_id}"
+        url = f"{self._graph_api_base}/{media_id}"
         try:
             result = _api_request("DELETE", url, self._access_token)
             if "error" in result:
@@ -801,7 +762,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         params = f"?limit={limit}"
         if status:
             params += f"&status={status}"
-        url = f"{_GRAPH_API_BASE}/{self._waba_id}/message_templates{params}"
+        url = f"{self._graph_api_base}/{self._waba_id}/message_templates{params}"
         try:
             result = _api_request("GET", url, self._access_token)
             if "error" in result:
@@ -822,11 +783,11 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class WhatsAppAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with WhatsApp Business Cloud API tools.
+class WhatsAppAgent(BaseChannelAgent):
+    """Channel agent with WhatsApp Business Cloud API tools.
 
-    Inherits all standard SorcarAgent capabilities (bash, file editing,
-    browser automation) and adds authenticated WhatsApp API tools for
+    Tasks run on the kiss-web daemon's agent (which supplies bash,
+    file editing, and browser automation) with authenticated WhatsApp API tools for
     sending messages, media, templates, reactions, interactive messages,
     location/contact sharing, and business profile management.
 
@@ -882,7 +843,7 @@ class WhatsAppAgent(BaseChannelAgent, SorcarAgent):
                     "phone_number_id='...')"
                 )
             url = (
-                f"{_GRAPH_API_BASE}/{agent._backend._phone_number_id}"
+                f"{agent._backend._graph_api_base}/{agent._backend._phone_number_id}"
                 "?fields=verified_name,display_phone_number"
             )
             result = _api_request("GET", url, agent._backend._access_token)
@@ -923,7 +884,10 @@ class WhatsAppAgent(BaseChannelAgent, SorcarAgent):
             phone_number_id = phone_number_id.strip()
             if not access_token or not phone_number_id:
                 return "Both access_token and phone_number_id are required."
-            url = f"{_GRAPH_API_BASE}/{phone_number_id}?fields=verified_name,display_phone_number"
+            url = (
+                f"{agent._backend._graph_api_base}/{phone_number_id}"
+                "?fields=verified_name,display_phone_number"
+            )
             result = _api_request("GET", url, access_token)
             if "error" in result:
                 return json.dumps(
@@ -972,6 +936,17 @@ class WhatsAppAgent(BaseChannelAgent, SorcarAgent):
 def main() -> None:  # pragma: no cover – CLI entry point requires API
     """Run the WhatsAppAgent from the command line with chat persistence."""
     channel_main(WhatsAppAgent, "kiss-whatsapp")
+
+
+def get_tools() -> list:
+    """Return the WhatsApp channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return WhatsAppAgent()._get_tools()
 
 
 if __name__ == "__main__":

@@ -14,8 +14,8 @@ an in-progress KISS Sorcar extension update.  The graceful-shutdown path
 persisted as ``"Task stopped by user"`` (event ``task_stopped``) — so the
 post-mortem analysis wrongly told the user that *they* stopped the task.
 
-The fix marks the tab with
-:attr:`_RunningAgentState.interrupted_by_shutdown` before the shutdown
+The fix marks the task's state with
+:attr:`AgentState.interrupted_by_shutdown` before the shutdown
 helper injects the interrupt; the task-runner's ``except KeyboardInterrupt``
 handler then persists ``"Task interrupted by server restart/shutdown"``
 (event ``task_interrupted``) for the shutdown path while leaving the
@@ -41,18 +41,18 @@ from unittest import TestCase
 
 from kiss.agents.sorcar import persistence as _persistence
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 
 
 def _make_remote_server() -> Any:
     """Build a :class:`RemoteAccessServer` with no tunnel / sockets bound.
 
-    Constructing the remote server also constructs its owned
-    :class:`VSCodeServer`, whose ``__init__`` *clears* the process-global
-    ``_RunningAgentState.running_agent_states`` registry.  Tests must
-    therefore build the remote server FIRST and then run their task
+    Tests must build the remote server FIRST and then run their task
     through ``remote._vscode_server`` so the worker registers into the
-    same registry the shutdown helper later scans — exactly as in
-    production where a single server owns both.
+    same process-global ``agent_state`` registry the shutdown helper
+    later scans — exactly as in production where a single server owns
+    both.
     """
     os.environ.setdefault("KISS_WORKDIR", "/tmp")
     from kiss.server.web_server import RemoteAccessServer
@@ -81,10 +81,16 @@ def _start_blocked_worker(vscode: Any, tab_id: str) -> tuple[Any, str]:
         ``(worker_thread, task_id)`` once the worker is inside the agent
         run and ``is_task_active`` has been set.
     """
-    tab = vscode._get_tab(tab_id)
     agent = WorktreeSorcarAgent("Sorcar VS Code")
-    tab.agent = agent
-    tab.chat_id = ""
+    state = AgentState(
+        f"pre-{tab_id}",
+        agent=agent,
+        tab_id=tab_id,
+        server_owned=True,
+        stop_event=threading.Event(),
+    )
+    state.user_answer_queue = queue.Queue()
+    agent_state.register(state)
 
     captured: dict[str, str] = {}
     entered = threading.Event()
@@ -112,10 +118,7 @@ def _start_blocked_worker(vscode: Any, tab_id: str) -> tuple[Any, str]:
         while time.monotonic() < deadline:
             time.sleep(0.05)
 
-    agent.run = fake_run  # type: ignore[assignment]
-
-    tab.stop_event = threading.Event()
-    tab.user_answer_queue = queue.Queue()
+    agent.run = fake_run  # type: ignore[method-assign, assignment]
 
     worker = threading.Thread(
         target=vscode._run_task,
@@ -127,18 +130,19 @@ def _start_blocked_worker(vscode: Any, tab_id: str) -> tuple[Any, str]:
             "useParallel": False,
             "useWorktree": False,
             "autoCommit": False,
+            "_state_key": state.task_id,
         },),
         daemon=True,
     )
-    tab.task_thread = worker
+    state.task_thread = worker
     worker.start()
 
     assert entered.wait(timeout=10), "worker never entered agent.run"
     for _ in range(100):
-        if tab.is_task_active:
+        if state.is_task_active:
             break
         time.sleep(0.02)
-    assert tab.is_task_active, "is_task_active was never set on the tab"
+    assert state.is_task_active, "is_task_active was never set on the state"
     return worker, captured["id"]
 
 
@@ -172,6 +176,9 @@ def _persisted_result_and_event(task_id: str) -> tuple[str, list[str]]:
 
 class TestTaskInterruptedVsStopped(TestCase):
     """SIGTERM-shutdown cancellation and a user "Stop" must be distinct."""
+
+    def tearDown(self) -> None:
+        agent_state.agent_states.clear()
 
     def test_shutdown_persists_task_interrupted_label(self) -> None:
         """The shutdown path persists the restart/shutdown-specific outcome.

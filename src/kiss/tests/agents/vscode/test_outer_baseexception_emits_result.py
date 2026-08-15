@@ -51,8 +51,9 @@ from typing import Any
 from unittest import TestCase
 
 from kiss.agents.sorcar import persistence as _persistence
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 
 
 class _CustomBaseException(BaseException):
@@ -94,10 +95,16 @@ def _drive_run_task_with_base_exception(
 
     server.printer.broadcast = capture  # type: ignore[assignment]
 
-    tab = server._get_tab(tab_id)
     agent = WorktreeSorcarAgent("Sorcar VS Code")
-    tab.agent = agent
-    tab.chat_id = ""
+    state = AgentState(
+        f"state-{tab_id}",
+        agent=agent,
+        tab_id=tab_id,
+        server_owned=True,
+        stop_event=threading.Event(),
+    )
+    state.user_answer_queue = queue.Queue()
+    agent_state.register(state)
 
     def fake_run(**kwargs: Any) -> None:
         agent.total_tokens_used = 4242
@@ -120,9 +127,6 @@ def _drive_run_task_with_base_exception(
 
     agent.run = fake_run  # type: ignore[assignment]
 
-    tab.stop_event = threading.Event()
-    tab.user_answer_queue = queue.Queue()
-
     task_thread = threading.Thread(
         target=server._run_task,
         args=({
@@ -133,10 +137,11 @@ def _drive_run_task_with_base_exception(
             "useParallel": False,
             "useWorktree": False,
             "autoCommit": False,
+            "_state_key": state.task_id,
         },),
         daemon=True,
     )
-    tab.task_thread = task_thread
+    state.task_thread = task_thread
     task_thread.start()
     task_thread.join(timeout=15)
     assert not task_thread.is_alive(), "task thread did not finish"
@@ -154,7 +159,7 @@ class TestOuterBaseExceptionEmitsResult(TestCase):
         Path(self._work_dir).mkdir()
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_custom_baseexception_emits_result_event(self) -> None:
