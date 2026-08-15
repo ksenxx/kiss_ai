@@ -28,6 +28,18 @@ hookwrapper's ``finally``: for unittest-style tests pytest runs
 ``finally`` would only fire long after ``tearDown`` already closed the
 connection.  The ``finally`` is still used as a backstop for sweeps
 started by non-unittest tests.
+
+``IsolatedAsyncioTestCase`` needs the same guard on ``asyncTearDown``:
+CPython's ``_callTearDown`` awaits ``asyncTearDown`` **before** it runs
+the sync ``tearDown``, and the ~60 async server test files close
+``persistence._db_conn`` inside ``asyncTearDown`` — so wrapping only
+the sync ``tearDown`` joins the sweep *after* the connection is already
+closed, leaving the exact SIGSEGV this guard exists to prevent (seen as
+the order-dependent crash in large ``tests/agents/vscode`` runs, e.g.
+``test_per_window_reply_isolation.py`` closing the connection while an
+``orphan-task-sweep`` thread was inside ``_recover_orphaned_tasks``).
+``asyncTearDown`` is therefore wrapped too, joining sweeps before its
+body runs.
 """
 
 import functools
@@ -35,7 +47,7 @@ import os
 import tempfile
 import threading
 import unittest
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -103,6 +115,27 @@ def _tear_down_after_orphan_sweeps(tear_down: Callable[[], None]) -> None:
     tear_down()
 
 
+async def _async_tear_down_after_orphan_sweeps(
+    tear_down: Callable[[], Awaitable[None]],
+) -> None:
+    """Join lingering orphan sweeps, then run the async teardown body.
+
+    ``IsolatedAsyncioTestCase._callTearDown`` awaits ``asyncTearDown``
+    BEFORE the sync ``tearDown``, so this is the last moment at which
+    ``persistence._db_conn`` — which many async server fixtures close
+    inside ``asyncTearDown`` — is still guaranteed valid for a sweep.
+
+    Args:
+        tear_down: The ``asyncTearDown`` bound coroutine method this
+            call replaces.
+
+    Returns:
+        None.
+    """
+    join_orphan_sweeps()
+    await tear_down()
+
+
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_call(item: pytest.Item) -> Iterator[None]:
     """Guard every test's teardown against the orphan-sweep race.
@@ -117,8 +150,9 @@ def pytest_runtest_call(item: pytest.Item) -> Iterator[None]:
 
     Args:
         item: The test about to run. For ``unittest.TestCase`` items its
-            ``tearDown`` is wrapped so sweeps are joined before the
-            teardown body closes the database.
+            ``tearDown`` — and for ``IsolatedAsyncioTestCase`` items its
+            ``asyncTearDown``, which runs first — is wrapped so sweeps
+            are joined before the teardown body closes the database.
 
     Returns:
         Generator required by the pytest hookwrapper protocol.
@@ -127,6 +161,12 @@ def pytest_runtest_call(item: pytest.Item) -> Iterator[None]:
     if isinstance(instance, unittest.TestCase):
         instance.tearDown = functools.partial(  # type: ignore[method-assign]
             _tear_down_after_orphan_sweeps, instance.tearDown,
+        )
+    if isinstance(instance, unittest.IsolatedAsyncioTestCase):
+        # functools.partial of a coroutine function still satisfies
+        # the inspect.iscoroutinefunction assert in _callAsync.
+        instance.asyncTearDown = functools.partial(  # type: ignore[method-assign]
+            _async_tear_down_after_orphan_sweeps, instance.asyncTearDown,
         )
     try:
         yield
