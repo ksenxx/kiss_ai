@@ -155,7 +155,7 @@ Skip this planning step for simple single-file modifications.
 
 ## File Browsing
 
-When exploring unfamiliar code, collect information and code snippets in ./tmp/file-information-{unique_id}.md as you go, relevant for the task, then review the collected material and think deeply before acting.
+When exploring unfamiliar code, collect information and code snippets in ./tmp/file-information-{unique_id}.md as you go, relevant for the task, then review the collected material and think deeply before acting. When fixing a localized bug, locate the code with grep first and Read only the implicated regions and their direct call sites; widen the reading only when a concrete question requires it.
 
 ## Desktop Apps
 
@@ -167,11 +167,12 @@ Interact with desktop applications using the available screenshot, keyboard, and
 
 ## Testing
 
-- Lint and typecheck ONCE per task, at the end, and only if you created or modified code files (.py, .ts, .js, .css, .tsx, .jsx): run uv run check --full (or the project’s equivalent) as part of Pre-Finish Verification, and fix all errors it reports, including pre-existing ones (re-run it only to verify those fixes). Do not run lint/typecheck during development.
+- Lint and typecheck ONCE per task, at the end, and only if you created or modified code files (.py, .ts, .js, .css, .tsx, .jsx): run uv run check --full (or the project’s equivalent) as part of Pre-Finish Verification, and fix every error in files you created or modified in this session (re-run it only to verify those fixes). Leave pre-existing failures in files you did not touch alone: list them in the final summary instead of fixing them, unless the user asked for repo-wide cleanup or your changes caused them. Do not run lint/typecheck during development.
 - Achieve 100% branch coverage on new and modified code with end-to-end tests wherever a branch is reachable without test doubles. If a branch is unreachable without mocks (e.g., network failure, disk full), document why in the test file instead of mocking.
 - Write end-to-end tests only. Do not use mocks, patches, fakes, or test doubles. Each test must be independent and verify actual behavior.
 - DO NOT write structural tests which assert on the source code.
-- After modifications, run only the impacted tests: the tests that import or exercise the modified modules. Run the full suite only when the user asks for it or when changes span module boundaries.
+- After modifications, run only the impacted tests: the tests that import or exercise the modified modules. Run the full suite only when the user asks for it or when changes span module boundaries, and schedule it after all planned and review-driven code changes so it normally runs at most once; rerun it only if it failed and the fix needs suite-wide validation, or if a later broad change could invalidate it and the impacted tests cannot give equivalent confidence.
+- Do not repeat a verification (test run, lint, coverage gate, full check) that already passed unless an intervening change could have invalidated it.
 - To confirm a suspected race condition: temporarily add a random sleep (\<0.1s) before the suspected racing statements; remove the sleeps once the race is confirmed and fixed.
 - MANDATORY (MUST FOLLOW): Reproduce any issue by writing real end-to-end tests with 100% branch coverage of the code under test (subject to the unreachable-branch exception above). Then fix the issue. You can use screenshots to validate the implementation. You MUST do the same for any feature implementation.
 - MANDATORY (MUST FOLLOW): Before running all tests or tests in a folder, split the set of tests equally by the number of test methods into min(number of test methods, max(1, cores - 2)) splits and run all splits in parallel using the run_parallel tool.
@@ -185,7 +186,7 @@ Interact with desktop applications using the available screenshot, keyboard, and
 Before calling finish(success=True):
 
 1. Re-read and verify every modified file.
-1. If you created or modified ANY .py, .ts, .js, .css, .tsx, or .jsx file in this session: you MUST run uv run check --full — here at the end of the task, its only scheduled run — and fix all errors it reports, including pre-existing ones; re-run it only to verify those fixes. Do NOT call finish without running this command first. If the project doesn’t use uv, run the equivalent lint/typecheck command.
+1. If you created or modified ANY .py, .ts, .js, .css, .tsx, or .jsx file in this session: you MUST run uv run check --full — here at the end of the task, its only scheduled run, after ALL code changes are complete (including fixes prompted by review or debugging sub-tasks) — and fix every error in files you created or modified in this session; re-run it only to verify those fixes. List pre-existing failures in untouched files in the final summary instead of fixing them (unless the user asked for repo-wide cleanup or your changes caused them). Do NOT call finish without running this command first. If the project doesn’t use uv, run the equivalent lint/typecheck command.
 1. Check each user requirement against what was delivered.
 1. If any check fails, keep working.
 1. After 3 failed retries of the same fix approach, step back and rethink from scratch.
