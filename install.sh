@@ -897,9 +897,10 @@ update_repo() {
     # pop them back via the EXIT trap once the install finishes.
     #
     # KISS_SKIP_UPDATE exists for callers that deliberately install a checkout
-    # they already control, byte for byte — ``sorcar-cloud`` ships the laptop's
-    # working directory (uncommitted edits included) to a remote host, and a
-    # pull would swap that code for whatever is on origin/main instead.
+    # they already control, commit for commit — ``sorcar-cloud`` has just put
+    # the remote checkout on the branch it deploys (the laptop's uncommitted
+    # edits committed and synced through origin first), and a pull would drag
+    # it to whatever is on origin/main instead.
     if [ -n "${KISS_SKIP_UPDATE:-}" ]; then
         echo "   KISS_SKIP_UPDATE set — installing this checkout as-is, no pull."
         return 0
@@ -966,7 +967,17 @@ update_repo() {
 # both the user's terminal AND the log file.  ``-a`` appends so a
 # previous install's log is preserved when this run is itself a retry
 # after an interrupted attempt.
-exec > >(tee -a "$LOG_FILE") 2>&1
+#
+# The ``trap '' INT TERM`` INSIDE the process substitution is load-
+# bearing too: VS Code's terminal teardown signals the whole foreground
+# process GROUP, so the same stray SIGINT that the outer trap absorbs
+# also reaches the tee child.  With default disposition tee died, and
+# the outer shell's very next write (the trap's own diagnostic!) hit a
+# dead pipe — SIGPIPE, script killed with rc=141 and an empty log,
+# defeating the trap fix above.  Ignored dispositions survive exec, so
+# tee inherits SIG_IGN and keeps draining until bash exits and closes
+# the pipe.
+exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
 
 {
     echo "=== KISS Sorcar Source Install ==="

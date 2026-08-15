@@ -7,7 +7,7 @@
 Two complementary bugs delayed (or dropped) the user's answer reaching
 the agent thread after the user clicked "Submit":
 
-1. ``_TaskRunnerMixin._await_user_response`` polled the per-tab
+1. ``_TaskRunnerMixin._await_user_response`` polled the task's
    ``user_answer_queue`` with ``q.get(timeout=0.5)``.  Even though
    ``Queue.put`` notifies a waiting consumer immediately, the loop's
    stop-event branch meant any failure to notify (e.g. the answer
@@ -18,15 +18,15 @@ the agent thread after the user clicked "Submit":
 2. ``_CommandsMixin._cmd_user_answer`` only looked up the queue under
    the answer's exact ``tabId``.  When the askUser broadcast was
    fan-stamped per subscriber, a viewer tab that submitted the
-   answer carried its own tab id — but only the task-owner tab held
-   a live ``user_answer_queue``.  The answer was silently dropped
-   and the agent thread waited until the task was eventually
+   answer carried its own tab id — but only the task's own agent
+   state held a live ``user_answer_queue``.  The answer was silently
+   dropped and the agent thread waited until the task was eventually
    cancelled, surfacing as "the user's response is sometimes not
    responded to immediately".
 
 These tests exercise the post-fix behaviour: a put always wakes the
 waiter promptly, and a userAnswer from a co-subscriber tab still
-reaches the owner's queue.
+reaches the task's queue.
 """
 
 from __future__ import annotations
@@ -36,17 +36,23 @@ import threading
 import time
 import unittest
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
-class _StubPrinter:
-    """Minimal printer stand-in exposing the surface the SUT uses."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._subscribers: dict[str, set[str]] = {}
-        self._thread_local = threading.local()
+def _register_task_state(
+    task_id: str, tab_id: str, q: queue.Queue[str] | None,
+) -> agent_state.AgentState:
+    """Register a server-owned running-task state carrying *q*."""
+    state = agent_state.AgentState(
+        task_id,
+        tab_id=tab_id,
+        server_owned=True,
+        is_task_active=True,
+    )
+    state.user_answer_queue = q
+    agent_state.register(state)
+    return state
 
 
 class TestAwaitUserResponseImmediacy(unittest.TestCase):
@@ -56,8 +62,7 @@ class TestAwaitUserResponseImmediacy(unittest.TestCase):
         self.server = VSCodeServer()
 
     def tearDown(self) -> None:
-        with _RunningAgentState._registry_lock:
-            _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def test_get_returns_within_50ms_of_put(self) -> None:
         """A ``put`` from another thread wakes the waiter promptly.
@@ -68,7 +73,7 @@ class TestAwaitUserResponseImmediacy(unittest.TestCase):
         in the order of milliseconds.
         """
         q: queue.Queue[str] = queue.Queue(maxsize=1)
-        self.server._get_tab("tab-A").user_answer_queue = q
+        _register_task_state("task-A", "tab-A", q)
         self.server.printer.subscribe_tab("task-A", "tab-A")
         stop = threading.Event()
 
@@ -105,7 +110,7 @@ class TestAwaitUserResponseImmediacy(unittest.TestCase):
     def test_stop_event_unblocks_waiter(self) -> None:
         """Setting the stop event wakes the waiter via the sentinel."""
         q: queue.Queue[str] = queue.Queue(maxsize=1)
-        self.server._get_tab("tab-B").user_answer_queue = q
+        _register_task_state("task-B", "tab-B", q)
         self.server.printer.subscribe_tab("task-B", "tab-B")
         stop = threading.Event()
 
@@ -143,8 +148,7 @@ class TestEndToEndAskUserLatency(unittest.TestCase):
         self.server = VSCodeServer()
 
     def tearDown(self) -> None:
-        with _RunningAgentState._registry_lock:
-            _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def test_handle_command_user_answer_unblocks_await_within_50ms(self) -> None:
         """The full dispatch path delivers the answer in <50 ms.
@@ -157,7 +161,7 @@ class TestEndToEndAskUserLatency(unittest.TestCase):
         peers); the waiter must wake immediately.
         """
         q: queue.Queue[str] = queue.Queue(maxsize=1)
-        self.server._get_tab("tab-E").user_answer_queue = q
+        _register_task_state("task-E", "tab-E", q)
         self.server.printer.subscribe_tab("task-E", "tab-E")
         stop = threading.Event()
 
@@ -196,14 +200,13 @@ class TestEndToEndAskUserLatency(unittest.TestCase):
     def test_handle_command_viewer_user_answer_unblocks_within_50ms(self) -> None:
         """Viewer-tab answer reaches owner waiter end-to-end in <50 ms.
 
-        Multi-viewer case: the viewer tab carries no
-        ``user_answer_queue``; the owner does.  The full dispatch
+        Multi-viewer case: the viewer tab owns no agent state of its
+        own; the task's state holds the queue.  The full dispatch
         path must still resolve the queue via the subscriber
         fallback and wake the waiter immediately.
         """
         owner_q: queue.Queue[str] = queue.Queue(maxsize=1)
-        self.server._get_tab("owner-V").user_answer_queue = owner_q
-        self.server._get_tab("viewer-V")
+        _register_task_state("task-V", "owner-V", owner_q)
         self.server.printer.subscribe_tab("task-V", "owner-V")
         self.server.printer.subscribe_tab("task-V", "viewer-V")
         stop = threading.Event()
@@ -242,28 +245,27 @@ class TestEndToEndAskUserLatency(unittest.TestCase):
 
 
 class TestUserAnswerSubscriberFallback(unittest.TestCase):
-    """``_cmd_user_answer`` routes to the owner queue via subscriber graph."""
+    """``_cmd_user_answer`` routes to the task's queue via subscriber graph."""
 
     def setUp(self) -> None:
         self.server = VSCodeServer()
 
     def tearDown(self) -> None:
-        with _RunningAgentState._registry_lock:
-            _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def test_viewer_tab_answer_reaches_owner_queue(self) -> None:
-        """An answer carrying a viewer tab id reaches the owner's queue.
+        """An answer carrying a viewer tab id reaches the task's queue.
 
-        Owner tab ``owner`` runs the task and holds the queue.  Viewer
-        tab ``viewer`` is subscribed to the same task — the askUser
-        broadcast was stamped with ``viewer`` and the frontend posts
-        the userAnswer back with ``tabId="viewer"``.  Pre-fix the
-        answer was dropped (viewer's ``user_answer_queue`` is None);
-        post-fix it lands on the owner's queue.
+        The task launched from tab ``owner`` holds the queue on its
+        agent state.  Viewer tab ``viewer`` is subscribed to the same
+        task — the askUser broadcast was stamped with ``viewer`` and
+        the frontend posts the userAnswer back with
+        ``tabId="viewer"``.  Pre-fix the answer was dropped (the
+        viewer owns no agent state); post-fix it lands on the task's
+        queue.
         """
         owner_q: queue.Queue[str] = queue.Queue(maxsize=1)
-        self.server._get_tab("owner").user_answer_queue = owner_q
-        self.server._get_tab("viewer")
+        _register_task_state("task-X", "owner", owner_q)
         self.server.printer.subscribe_tab("task-X", "owner")
         self.server.printer.subscribe_tab("task-X", "viewer")
 
@@ -272,13 +274,12 @@ class TestUserAnswerSubscriberFallback(unittest.TestCase):
 
     def test_unknown_tab_with_no_co_subscriber_is_dropped(self) -> None:
         """An answer from an unrelated tab id is dropped silently."""
-        self.server._get_tab("stranger")
         self.server._cmd_user_answer({"tabId": "stranger", "answer": "noop"})
 
     def test_owner_tab_self_routing_still_works(self) -> None:
         """The common single-window case still uses the direct queue."""
         owner_q: queue.Queue[str] = queue.Queue(maxsize=1)
-        self.server._get_tab("solo").user_answer_queue = owner_q
+        _register_task_state("task-Y", "solo", owner_q)
         self.server.printer.subscribe_tab("task-Y", "solo")
         self.server._cmd_user_answer({"tabId": "solo", "answer": "direct"})
         self.assertEqual(owner_q.get_nowait(), "direct")

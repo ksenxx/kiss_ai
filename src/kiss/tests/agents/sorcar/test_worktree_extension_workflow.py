@@ -25,20 +25,15 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps, _git
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
 def _agent(server: VSCodeServer, tab_id: str = "0") -> WorktreeSorcarAgent:
-    """Return the per-tab agent, asserting it is not ``None`` for mypy.
-
-    ``VSCodeServer._get_tab`` lazy-allocates the per-tab agent slot so
-    callers from inside tests always see a non-``None`` instance even
-    though the static type is ``WorktreeSorcarAgent | None`` to model
-    the transient-between-tasks behaviour.
-    """
-    tab = server._get_tab(tab_id)
-    assert tab.agent is not None
-    return tab.agent
+    """Return the tab's registered agent, asserting it exists for mypy."""
+    state = agent_state.find_by_tab(tab_id)
+    assert state is not None and state.agent is not None
+    return state.agent
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -131,8 +126,15 @@ def _file_in_repo(repo: Path, filename: str) -> bool:
 
 def _make_server(repo: Path) -> tuple[VSCodeServer, list[dict]]:
     server = VSCodeServer()
-    server._get_tab("0").use_worktree = True
     server.work_dir = str(repo)
+    state = agent_state.AgentState(
+        "task-0",
+        agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        tab_id="0",
+        server_owned=True,
+    )
+    state.use_worktree = True
+    agent_state.register(state)
     events: list[dict] = []
 
     def capture(event: dict) -> None:
@@ -361,6 +363,7 @@ class TestServerWorktreeWorkflow:
         _unpatch_super_run(self.original_run)
         _restore_db(self.db_saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+        agent_state.agent_states.clear()
 
     def _setup_pending_worktree(
         self, server: VSCodeServer, *, with_changes: bool = True,
@@ -724,14 +727,13 @@ class TestServerWorktreeWorkflow:
         wt_events = [e for e in events if e["type"] == "worktree_done"]
         assert wt_events == []
 
-    def test_worktree_merge_review_shown_on_failure_with_changes(self) -> None:
-        """Merge/diff review UI is shown when agent fails after making changes.
+    def test_worktree_done_shown_on_failure_with_changes(self) -> None:
+        """Merge/Discard buttons are shown when agent fails after making changes.
 
-        Regression: previously the merge/diff + worktree action UI was
-        only shown on success, leaving the user with no way to merge or
-        discard after a failure.  Now the merge review (merge_data +
-        merge_started) is emitted in the finally block so the user can
-        still review and accept/reject changes.
+        Regression: previously the worktree action UI was only shown on
+        success, leaving the user with no way to merge or discard after
+        a failure.  Now ``worktree_done`` is broadcast in the finally
+        block so the user can still merge or discard the changes.
         """
         _unpatch_super_run(self.original_run)
         parent_class = cast(Any, SorcarAgent.__mro__[1])
@@ -759,24 +761,17 @@ class TestServerWorktreeWorkflow:
             "model": "",
         })
 
-        merge_events = [e for e in events if e["type"] == "merge_data"]
-        assert len(merge_events) == 1
-        merge_started = [e for e in events if e["type"] == "merge_started"]
-        assert len(merge_started) == 1
-        assert _agent(server)._wt_pending
-
-        server._finish_merge("0")
         wt_done = [e for e in events if e["type"] == "worktree_done"]
         assert len(wt_done) == 1
         assert len(wt_done[0].get("changedFiles", [])) > 0
+        assert _agent(server)._wt_pending
 
-        tab = server._get_tab("0")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        if tab.agent._wt_pending:
-            tab.agent.discard()
+        agent = _agent(server)
+        if agent._wt_pending:
+            agent.discard()
 
-    def test_worktree_merge_review_shown_on_stop_with_changes(self) -> None:
-        """Merge/diff review UI is shown when user stops after agent made changes.
+    def test_worktree_done_shown_on_stop_with_changes(self) -> None:
+        """Merge/Discard buttons are shown when user stops after agent made changes.
 
         Same as the failure test but with KeyboardInterrupt (user stop).
         """
@@ -806,12 +801,12 @@ class TestServerWorktreeWorkflow:
             "model": "",
         })
 
-        merge_events = [e for e in events if e["type"] == "merge_data"]
-        assert len(merge_events) == 1
+        wt_done = [e for e in events if e["type"] == "worktree_done"]
+        assert len(wt_done) == 1
+        assert len(wt_done[0].get("changedFiles", [])) > 0
         stopped = [e for e in events if e["type"] == "task_stopped"]
         assert len(stopped) == 1
 
-        tab = server._get_tab("0")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        if tab.agent._wt_pending:
-            tab.agent.discard()
+        agent = _agent(server)
+        if agent._wt_pending:
+            agent.discard()

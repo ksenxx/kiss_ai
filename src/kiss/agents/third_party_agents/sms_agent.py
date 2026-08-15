@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""SMS Agent — SorcarAgent extension with Twilio SMS tools.
+"""SMS Agent — channel agent with Twilio SMS tools.
 
 Provides SMS sending/receiving via Twilio. Stores config in
 ``~/.kiss/third_party_agents/sms/config.json``.
@@ -17,12 +17,9 @@ from __future__ import annotations
 
 import json
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -113,29 +110,6 @@ class SMSChannelBackend(ToolMethodBackend):
         """Send an SMS."""
         if self._client:  # pragma: no branch
             self._client.messages.create(to=channel_id, from_=self._from_number, body=text)
-
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Poll for a reply from a specific number."""
-        oldest = str(time.time())
-
-        def poll() -> list[dict[str, Any]]:
-            nonlocal oldest
-            msgs, oldest = self.poll_messages(channel_id, oldest)
-            return msgs
-
-        return wait_for_matching_message(
-            poll=poll,
-            matches=lambda msg: msg.get("user") == user_id,
-            extract_text=lambda msg: str(msg.get("text", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=5.0,
-        )
 
     def is_from_bot(self, msg: dict[str, Any]) -> bool:
         """Check if message is from the bot's number."""
@@ -410,8 +384,8 @@ class SMSChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class SMSAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with Twilio SMS tools."""
+class SMSAgent(BaseChannelAgent):
+    """Channel agent with Twilio SMS tools."""
 
     def __init__(self) -> None:
         super().__init__("SMS Agent")
@@ -532,6 +506,17 @@ def main() -> None:
         channel_name="SMS",
         make_backend=_make_backend,
     )
+
+
+def get_tools() -> list:
+    """Return the SMS channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return SMSAgent()._get_tools()
 
 
 if __name__ == "__main__":

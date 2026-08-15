@@ -159,7 +159,6 @@ class TestWhatsAppAgent:
 
     def test_check_auth_unauthenticated(self) -> None:
         agent = WhatsAppAgent()
-        agent.web_use_tool = None
         tools = agent._get_tools()
         check = next(t for t in tools if t.__name__ == "check_whatsapp_auth")
         result = check()
@@ -169,7 +168,6 @@ class TestWhatsAppAgent:
     def test_check_auth_with_invalid_config(self) -> None:
         _config.save({"access_token": "invalid-token", "phone_number_id": "invalid-phone-id"})
         agent = WhatsAppAgent()
-        agent.web_use_tool = None
         tools = agent._get_tools()
         check = next(t for t in tools if t.__name__ == "check_whatsapp_auth")
         result = json.loads(check())
@@ -177,7 +175,6 @@ class TestWhatsAppAgent:
 
     def test_authenticate_invalid_token(self) -> None:
         agent = WhatsAppAgent()
-        agent.web_use_tool = None
         tools = agent._get_tools()
         auth = next(t for t in tools if t.__name__ == "authenticate_whatsapp")
         result = json.loads(auth(access_token="bad-token", phone_number_id="123"))
@@ -187,7 +184,6 @@ class TestWhatsAppAgent:
     def test_clear_auth(self) -> None:
         _config.save({"access_token": "token", "phone_number_id": "12345"})
         agent = WhatsAppAgent()
-        agent.web_use_tool = None
         tools = agent._get_tools()
         clear = next(t for t in tools if t.__name__ == "clear_whatsapp_auth")
         result = clear()

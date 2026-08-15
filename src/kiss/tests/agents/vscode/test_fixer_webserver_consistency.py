@@ -4,24 +4,15 @@
 # add your name here
 """E2e regression tests for the web_server consistency fixer wave.
 
-Covers three behavior changes:
+Covers two behavior changes:
 
-1. ``_fanout_cli_status`` now stamps ``taskId`` into the ``status``
-   event it fans out to subscribed tabs (previously the hand-rolled
-   fanout omitted it, unlike every other task-scoped status
-   broadcast).  Driven end-to-end over a real UDS transport: a CLI
-   connection announces ``cliTaskStart``, a viewer tab subscribes via
-   the production history-click path (``_replay_session``), and the
-   CLI's ``cliTaskEnd`` must deliver ``status:running=false`` carrying
-   BOTH the viewer's ``tabId`` and the task's ``taskId``.
-
-2. ``_MAX_PROMPT_BYTES`` is now enforced in UTF-8 **bytes** (matching
+1. ``_MAX_PROMPT_BYTES`` is now enforced in UTF-8 **bytes** (matching
    its name), not characters.  A 400k-character ``€`` prompt is
    1.2 MB on the wire — under the old character-based check it passed
    untruncated; now it must be truncated to <= 1 MB without ever
    splitting inside a multibyte character.
 
-3. ``_version_tuple`` is now strict digits-only per component
+2. ``_version_tuple`` is now strict digits-only per component
    (``/^\\d+$/`` like the extension's ``UpdateChecker.js`` twin), so
    ``"+1"`` / ``"1_0"`` / unicode digits no longer parse, and
    ``_parse_version_py`` uses the exact JS regex (accepting indented
@@ -41,7 +32,6 @@ from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar import persistence as th
-from kiss.agents.sorcar.persistence import _add_task, _append_chat_event
 from kiss.server.web_server import (
     _MAX_LINE_BYTES,
     _MAX_PROMPT_BYTES,
@@ -55,8 +45,7 @@ from kiss.server.web_server import (
 class _UdsHarness(unittest.TestCase):
     """Shared UDS harness: RemoteAccessServer on a temp unix socket.
 
-    Mirrors the production wiring used by
-    ``test_cli_history_click_resumes_live_stream.py``: a background
+    A background
     event loop runs the server's ``_uds_handler`` on a temp socket and
     persistence is pointed at a temp sqlite DB so nothing pollutes the
     user's real ``~/.kiss``.
@@ -176,72 +165,6 @@ class _UdsHarness(unittest.TestCase):
                 return
             time.sleep(0.02)
         raise AssertionError(message)
-
-
-class TestFanoutCliStatusCarriesTaskId(_UdsHarness):
-    """``cliTaskEnd`` fanout must stamp ``taskId`` like every other
-    task-scoped status broadcast."""
-
-    def test_cli_task_end_status_carries_task_id(self) -> None:
-        """Viewer subscribed to a CLI task gets status with taskId."""
-        task_id, chat_id = _add_task(task="fanout taskId task", chat_id="")
-        _append_chat_event(
-            {"type": "prompt", "text": "fanout taskId task"},
-            task_id=task_id,
-        )
-        task_id_str = str(task_id)
-
-        cli_writer, _cli_received, _cli_got = self._open_conn()
-        self._send_line(
-            cli_writer, {"type": "cliTaskStart", "taskId": task_id_str},
-        )
-        self._wait_for(
-            lambda: self.server._is_cli_task_running(task_id_str),
-            "cliTaskStart never registered the task as running",
-        )
-
-        _viewer_writer, received, got = self._open_conn()
-        viewer_tab = "fanout-taskid-tab"
-        self.server._vscode_server._replay_session(
-            chat_id=chat_id, tab_id=viewer_tab, task_id=task_id,
-        )
-        self._wait_for(
-            lambda: viewer_tab in self.server._printer._subscribers.get(
-                task_id_str, set(),
-            ),
-            "viewer tab never subscribed to the CLI task",
-        )
-        time.sleep(0.2)
-        received.clear()
-        got.clear()
-
-        self._send_line(
-            cli_writer, {"type": "cliTaskEnd", "taskId": task_id_str},
-        )
-
-        def _got_status_end() -> bool:
-            return any(
-                d.get("type") == "status" and d.get("running") is False
-                and d.get("tabId") == viewer_tab
-                for d in self._decoded(received)
-            )
-
-        self._wait_for(
-            _got_status_end,
-            f"viewer never received status:running=false; got {received}",
-        )
-        status_evs = [
-            d for d in self._decoded(received)
-            if d.get("type") == "status" and d.get("running") is False
-            and d.get("tabId") == viewer_tab
-        ]
-        for ev in status_evs:
-            self.assertEqual(
-                ev.get("taskId"), task_id_str,
-                "status:running=false fanned out by cliTaskEnd must "
-                f"carry the taskId like every other status broadcast; "
-                f"got {ev}",
-            )
 
 
 class TestPromptTruncationIsByteBased(_UdsHarness):

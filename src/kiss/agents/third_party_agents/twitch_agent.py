@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Twitch Agent — SorcarAgent extension with Twitch Helix API + Chat tools.
+"""Twitch Agent — channel agent with Twitch Helix API + Chat tools.
 
 Provides authenticated access to Twitch via OAuth2 tokens. Uses requests
 for Helix API and twitchio for chat. Stores config in
@@ -22,7 +22,6 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -114,16 +113,6 @@ class TwitchChannelBackend(ToolMethodBackend):
         )
         if result.get("ok") is False:  # pragma: no branch
             raise RuntimeError(f"Twitch send_message failed: {result}")
-
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Reply waiting is not currently supported for Twitch."""
-        return None
 
     def get_stream_info(self, broadcaster_login: str) -> str:
         """Get live stream information for a Twitch channel.
@@ -325,8 +314,8 @@ class TwitchChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class TwitchAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with Twitch Helix API tools."""
+class TwitchAgent(BaseChannelAgent):
+    """Channel agent with Twitch Helix API tools."""
 
     def __init__(self) -> None:
         super().__init__("Twitch Agent")
@@ -432,6 +421,17 @@ class TwitchAgent(BaseChannelAgent, SorcarAgent):
 def main() -> None:
     """Run the TwitchAgent from the command line with chat persistence."""
     channel_main(TwitchAgent, "kiss-twitch")
+
+
+def get_tools() -> list:
+    """Return the Twitch channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return TwitchAgent()._get_tools()
 
 
 if __name__ == "__main__":

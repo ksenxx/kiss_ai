@@ -47,8 +47,9 @@ from pathlib import Path
 
 import kiss.agents.sorcar.commit_message as _commit_message_module
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.tests.agents.sorcar.test_worktree_no_autocommit_branch import (
     _init_repo,
     _list_kiss_wt_branches,
@@ -100,11 +101,16 @@ class _RepoAwareGuardBase(_WorktreeNoAutocommitBase):
         resolved repo root of its ``work_dir`` (``None`` when the task
         is not inside any git repository).
         """
-        tab = self.server._get_tab(_OTHER_TAB)
         with self.server._state_lock:
-            tab.is_task_active = True
-            tab.is_running_non_wt = True
-            tab.non_wt_repo_root = repo_root.resolve() if repo_root else None
+            state = agent_state.find_by_tab(_OTHER_TAB)
+            if state is None:
+                state = AgentState(
+                    "other-task-key", tab_id=_OTHER_TAB, server_owned=True,
+                )
+                agent_state.register(state)
+            state.is_task_active = True
+            state.is_running_non_wt = True
+            state.non_wt_repo_root = repo_root.resolve() if repo_root else None
 
     def _run_worktree_task_with_changes(self) -> None:
         """Run one worktree task (autoCommit on) that creates a file."""
@@ -185,7 +191,8 @@ class TestMergeNotBlockedByUnrelatedTasks(_RepoAwareGuardBase):
         # legitimately refuses the post-task auto-merge.
         self._mark_non_wt_task(Path(self.repo))
         self._run_worktree_task_with_changes()
-        agent = self.server._get_tab(_WT_TAB).agent
+        wt_state = agent_state.find_by_tab(_WT_TAB)
+        agent = wt_state.agent if wt_state is not None else None
         assert agent is not None and agent._wt_pending, (
             "precondition: the worktree must still be pending"
         )
@@ -220,7 +227,8 @@ class TestMergeBlockedByTaskInsideOwnWorktree(_RepoAwareGuardBase):
         # legitimately refuses the post-task auto-merge).
         self._mark_non_wt_task(Path(self.repo))
         self._run_worktree_task_with_changes()
-        agent = self.server._get_tab(_WT_TAB).agent
+        wt_state = agent_state.find_by_tab(_WT_TAB)
+        agent = wt_state.agent if wt_state is not None else None
         assert agent is not None and agent._wt_pending, (
             "precondition: the worktree must still be pending"
         )
@@ -247,7 +255,8 @@ class TestMergeBlockedByTaskInsideOwnWorktree(_RepoAwareGuardBase):
     ) -> None:
         self._mark_non_wt_task(Path(self.repo))
         self._run_worktree_task_with_changes()
-        agent = self.server._get_tab(_WT_TAB).agent
+        wt_state = agent_state.find_by_tab(_WT_TAB)
+        agent = wt_state.agent if wt_state is not None else None
         assert agent is not None and agent._wt_pending
         wt_dir = agent._wt_dir
         assert wt_dir is not None and wt_dir.exists()
@@ -270,7 +279,8 @@ class TestMergeBlockedByTaskInsideOwnWorktree(_RepoAwareGuardBase):
         same occupancy guard."""
         self._mark_non_wt_task(Path(self.repo))
         self._run_worktree_task_with_changes()
-        agent = self.server._get_tab(_WT_TAB).agent
+        wt_state = agent_state.find_by_tab(_WT_TAB)
+        agent = wt_state.agent if wt_state is not None else None
         assert agent is not None and agent._wt_pending
         wt_dir = agent._wt_dir
         assert wt_dir is not None and wt_dir.exists()
@@ -315,7 +325,13 @@ class TestNonWorktreeTaskAdmission(_RepoAwareGuardBase):
 
     def _mark_wt_merge_in_progress(self, repo_root: str) -> None:
         """Register a tab mid-way through a worktree merge on *repo_root*."""
-        tab = self.server._get_tab(_OTHER_TAB)
+        with self.server._state_lock:
+            tab = agent_state.find_by_tab(_OTHER_TAB)
+            if tab is None:
+                tab = AgentState(
+                    "other-task-key", tab_id=_OTHER_TAB, server_owned=True,
+                )
+                agent_state.register(tab)
         agent = WorktreeSorcarAgent("merge-holder")
         agent._wt = GitWorktree(
             repo_root=Path(repo_root),
@@ -368,7 +384,13 @@ class TestNonWorktreeTaskAdmission(_RepoAwareGuardBase):
             "precondition: a real linked worktree must exist"
         )
 
-        tab = self.server._get_tab(_OTHER_TAB)
+        with self.server._state_lock:
+            tab = agent_state.find_by_tab(_OTHER_TAB)
+            if tab is None:
+                tab = AgentState(
+                    "other-task-key", tab_id=_OTHER_TAB, server_owned=True,
+                )
+                agent_state.register(tab)
         agent = WorktreeSorcarAgent("merge-holder")
         agent._wt = GitWorktree(
             repo_root=repo,
@@ -422,7 +444,8 @@ class TestNonWtRepoRootRecording(_RepoAwareGuardBase):
         self._original_run = original
 
         def probing_run(self_agent: object, **kwargs: object) -> str:
-            tab = _RunningAgentState.running_agent_states[_WT_TAB]
+            tab = agent_state.find_by_tab(_WT_TAB)
+            assert tab is not None
             with server._state_lock:
                 observed["flag"] = tab.is_running_non_wt
                 observed["root"] = tab.non_wt_repo_root
@@ -450,7 +473,8 @@ class TestNonWtRepoRootRecording(_RepoAwareGuardBase):
         assert observed["busy_other"] is False, (
             "the guard must NOT see it from an unrelated repo"
         )
-        tab = _RunningAgentState.running_agent_states[_WT_TAB]
+        tab = agent_state.find_by_tab(_WT_TAB)
+        assert tab is not None
         assert tab.is_running_non_wt is False
         assert tab.non_wt_repo_root is None
 

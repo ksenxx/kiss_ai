@@ -7,10 +7,8 @@
 Targets only the five bug sites fixed in this change:
   1. ``_handle_command`` unknown-command error — carries ``tabId`` from cmd.
   2. ``run()`` generic-exception error — carries ``tabId`` from parsed cmd.
-  3. ``_start_merge_session`` — ``merge_data`` and ``merge_started`` carry tab.
-  4. ``worktree_done`` event (inlined in ``_present_pending_worktree``) — carries tab.
-  5. ``_handle_worktree_action`` — ``worktree_progress`` carries tab.
-  6. ``_get_adjacent_task`` — ``adjacent_task_events`` carries tab.
+  3. ``_handle_worktree_action`` — ``worktree_progress`` carries tab.
+  4. ``_get_adjacent_task`` — ``adjacent_task_events`` carries tab.
 
 No mocks: uses a real ``VSCodeServer`` with its ``printer.broadcast``
 replaced by a capture-list helper.
@@ -18,14 +16,12 @@ replaced by a capture-list helper.
 
 from __future__ import annotations
 
-import json
-import tempfile
 import threading
 import unittest
-from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -60,44 +56,6 @@ class TestUnknownCommandErrorRouted(unittest.TestCase):
         assert "tabId" not in err[0]
 
 
-class TestStartMergeSessionRouted(unittest.TestCase):
-    def _write_merge_json(self, path: Path) -> None:
-        payload = {
-            "files": [{"path": "a.py", "hunks": [{"lines": ["+x"]}]}],
-        }
-        path.write_text(json.dumps(payload))
-
-    def test_merge_data_and_merge_started_carry_tab_id(self) -> None:
-        server, events = _make_server()
-        with tempfile.TemporaryDirectory() as td:
-            merge_path = Path(td) / "pending-merge.json"
-            self._write_merge_json(merge_path)
-            started = server._start_merge_session(str(merge_path), tab_id="t-9")
-            assert started is True
-
-        md = [e for e in events if e.get("type") == "merge_data"]
-        ms = [e for e in events if e.get("type") == "merge_started"]
-        assert len(md) == 1 and md[0].get("tabId") == "t-9"
-        assert len(ms) == 1 and ms[0].get("tabId") == "t-9"
-
-    def test_no_tab_id_omits_field(self) -> None:
-        server, events = _make_server()
-        if hasattr(server.printer._thread_local, "tab_id"):
-            delattr(server.printer._thread_local, "tab_id")
-        with tempfile.TemporaryDirectory() as td:
-            merge_path = Path(td) / "pending-merge.json"
-            self._write_merge_json(merge_path)
-            started = server._start_merge_session(str(merge_path), tab_id="")
-            assert started is True
-
-        md = [e for e in events if e.get("type") == "merge_data"]
-        ms = [e for e in events if e.get("type") == "merge_started"]
-        assert len(md) == 1 and "tabId" not in md[0]
-        assert len(ms) == 1 and "tabId" not in ms[0]
-
-
-
-
 class TestWorktreeProgressRouted(unittest.TestCase):
     def test_worktree_progress_carries_tab_id(self) -> None:
         import tempfile
@@ -106,26 +64,32 @@ class TestWorktreeProgressRouted(unittest.TestCase):
         from kiss.agents.sorcar.git_worktree import GitWorktree
 
         server, events = _make_server()
-        tab = server._get_tab("t-13")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        with tempfile.TemporaryDirectory() as td:
-            tab.agent._wt = GitWorktree(
-                repo_root=_Path(td),
-                branch="kiss/wt-x",
-                original_branch="main",
-                wt_dir=_Path(td) / ".kiss-worktrees" / "kiss_wt-x",
-            )
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        state = agent_state.AgentState(
+            "routing-t13", agent=agent, tab_id="t-13", server_owned=True,
+        )
+        state.use_worktree = True
+        agent_state.register(state)
+        try:
+            with tempfile.TemporaryDirectory() as td:
+                agent._wt = GitWorktree(
+                    repo_root=_Path(td),
+                    branch="kiss/wt-x",
+                    original_branch="main",
+                    wt_dir=_Path(td) / ".kiss-worktrees" / "kiss_wt-x",
+                )
 
-            def fake_merge() -> str:
-                return "Successfully merged"
+                def fake_merge() -> str:
+                    return "Successfully merged"
 
-            tab.agent.merge = fake_merge  # type: ignore[assignment]
+                agent.merge = fake_merge  # type: ignore[assignment]
 
-            result = server._handle_worktree_action(
-                "merge", tab_id="t-13",
-            )
-            assert result["success"] is True
+                result = server._handle_worktree_action(
+                    "merge", tab_id="t-13",
+                )
+                assert result["success"] is True
+        finally:
+            agent_state.agent_states.clear()
 
         wp = [e for e in events if e.get("type") == "worktree_progress"]
         assert len(wp) == 1
@@ -148,7 +112,6 @@ class TestAdjacentTaskRouted(unittest.TestCase):
     def test_cmd_handler_propagates_tab_id(self) -> None:
         """`_cmd_get_adjacent_task` forwards cmd.tabId into the event."""
         server, events = _make_server()
-        server._get_tab("t-19")
         server._cmd_get_adjacent_task({
             "type": "getAdjacentTask",
             "tabId": "t-19",

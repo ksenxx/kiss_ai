@@ -180,6 +180,13 @@ def test_recover_orphaned_tasks_string_ids(fresh_kiss_db):
     P = fresh_kiss_db
     t1, _ = P._add_task("t1")
     t2, _ = P._add_task("t2")
+    # The sweep only rewrites rows whose OWNING PROCESS is gone (a row
+    # created by a live process is still running, whatever this
+    # process believes).  Clearing ``owner`` is what a row left behind
+    # by a prior, now-dead process looks like.
+    P._get_db().execute(
+        "UPDATE task_history SET owner = '' WHERE id = ?", (t2,)
+    )
     n = P._recover_orphaned_tasks({t1})
     assert n == 1
     db = P._get_db()

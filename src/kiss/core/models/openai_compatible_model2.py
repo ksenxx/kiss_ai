@@ -26,22 +26,26 @@ from collections.abc import Callable
 from typing import Any
 
 from openai import OpenAI
+from openai.resources.responses import Responses
+from openai.types.responses import response_create_params
 
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.model import (
+    FRAMEWORK_ONLY_CONFIG_KEYS,
     Attachment,
     ThinkingCallback,
     TokenCallback,
     _build_text_based_tools_prompt,
     _parse_text_based_tool_calls,
-    _tool_result_to_string,
-    parse_binary_attachments,
+    accepted_request_params,
 )
 from kiss.core.models.model import Model as Model
 from kiss.core.models.openai_compatible_model import (
     DEEPSEEK_REASONING_MODELS as DEEPSEEK_REASONING_MODELS,
 )
 from kiss.core.models.openai_compatible_model import (
+    OPENAI_INPUT_AUDIO_FORMATS,
+    OPENAI_INPUT_IMAGE_MIME_TYPES,
     OpenAICompatibleBase,
     OpenAICompatibleModel,
     _audio_mime_to_format,
@@ -51,16 +55,15 @@ from kiss.core.models.openai_compatible_model import (
 )
 from kiss.core.models.stream_abort import stop_aware_events
 
-_RESPONSES_INPUT_AUDIO_FORMATS = {"mp3", "wav"}
-_RESPONSES_INPUT_IMAGE_MIME_TYPES = {
-    "image/png",
-    "image/jpeg",
-    "image/jpg",
-    "image/webp",
-    "image/gif",
-}
-
 logger = logging.getLogger(__name__)
+
+# The request parameters a Responses call accepts, taken from the SDK's own
+# signature (keyword-only, no **kwargs), and the sub-keys its
+# ``stream_options`` declares (the Chat Completions shape differs).
+_RESPONSES_REQUEST_PARAMS = accepted_request_params(Responses.create)
+_RESPONSES_STREAM_OPTION_KEYS = frozenset(
+    response_create_params.StreamOptions.__annotations__
+)
 
 
 class OpenAICompatibleModel2(OpenAICompatibleBase):
@@ -145,17 +148,9 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             attachments: Optional list of image / PDF / audio attachments
                 to attach to the initial user message.
         """
-        extra_headers = self.model_config.get("extra_headers") or {}
-        self.client = OpenAI(
-            base_url=self.base_url,
-            api_key=self.api_key,
-            timeout=1800.0,
-            default_headers=extra_headers,
-        )
+        self._ensure_client()
         self.conversation = []
-        self._pending_function_calls = []
-        self._last_stream_item_indexes = {}
-        self._last_stream_message_output_index = None
+        self._reset_turn_state()
         if attachments:
             parts = self._attachments_to_content_parts(attachments)
             parts.append({"type": "input_text", "text": prompt})
@@ -167,6 +162,75 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                     "content": [{"type": "input_text", "text": prompt}],
                 }
             )
+
+    def _ensure_client(self) -> None:
+        """Build the SDK client once, so its connection pool is reused.
+
+        ``initialize()`` used to be the only place a client was built,
+        and the delegated tool-calling transport called it before every
+        single agent step — a 100-step run therefore built 100 ``OpenAI``
+        clients and 100 httpx connection pools, each paying a fresh TLS
+        handshake while the previous pool waited on the garbage
+        collector.
+        """
+        if self.client is not None:
+            return
+        extra_headers = self.model_config.get("extra_headers") or {}
+        self.client = OpenAI(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            timeout=1800.0,
+            default_headers=extra_headers,
+        )
+
+    def _reset_stream_indexes(self) -> None:
+        """Forget the item ordering learned from the previous streamed turn."""
+        self._last_stream_item_indexes = {}
+        self._last_stream_message_output_index = None
+
+    def _reset_turn_state(self) -> None:
+        """Drop every scrap of per-turn state left by the previous turn."""
+        self._pending_function_calls = []
+        self._reset_stream_indexes()
+
+    def reset_conversation(self) -> None:
+        """Reset the conversation together with all per-turn state.
+
+        The base implementation clears only the conversation.  Leaving
+        ``_pending_function_calls`` behind would then reject the next
+        generation on a *fresh, empty* conversation — a permanently
+        unusable model object — and leaving the stream indexes behind
+        would order a later non-streamed turn's assistant message using
+        the previous streamed turn's indexes.
+        """
+        super().reset_conversation()
+        self._reset_turn_state()
+
+    def _request_response(
+        self, kwargs: dict[str, Any]
+    ) -> tuple[str, list[dict[str, str]], Any]:
+        """Issue one Responses request, streaming iff a token callback is set.
+
+        The single place the transport talks to ``responses.create``, so
+        the per-turn stream bookkeeping is reset for *every* turn — a
+        non-streamed turn must never be ordered using the indexes of the
+        streamed turn before it.
+
+        Args:
+            kwargs: The request kwargs; ``stream`` is set here when
+                streaming.
+
+        Returns:
+            ``(content, tool_calls, response)``.
+        """
+        self._reset_stream_indexes()
+        if self.token_callback is not None:
+            kwargs["stream"] = True
+            return self._consume_stream(self.client.responses.create(**kwargs))
+        response = self.client.responses.create(**kwargs)
+        self._raise_for_failed_response(response)
+        content, tool_calls = self._parse_non_streaming(response)
+        return content, tool_calls, response
 
     @staticmethod
     def _get_attr_or_key(obj: Any, key: str, default: Any = None) -> Any:
@@ -203,7 +267,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             the Responses API (e.g. video).
         """
         if att.mime_type.startswith("image/"):
-            if att.mime_type not in _RESPONSES_INPUT_IMAGE_MIME_TYPES:
+            if att.mime_type not in OPENAI_INPUT_IMAGE_MIME_TYPES:
                 logger.warning(
                     "OpenAI Responses API does not support %s image "
                     "attachments; dropping.",
@@ -223,12 +287,12 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             }
         if att.mime_type.startswith("audio/"):
             fmt = _audio_mime_to_format(att.mime_type)
-            if fmt not in _RESPONSES_INPUT_AUDIO_FORMATS:
+            if fmt not in OPENAI_INPUT_AUDIO_FORMATS:
                 logger.warning(
                     "OpenAI Responses API does not accept %s audio "
                     "(supported: %s); skipping attachment.",
                     att.mime_type,
-                    sorted(_RESPONSES_INPUT_AUDIO_FORMATS),
+                    sorted(OPENAI_INPUT_AUDIO_FORMATS),
                 )
                 return None
             return {
@@ -854,29 +918,13 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         Raises:
             KISSError: When the conversation is empty after normalisation.
         """
-        kwargs = dict(self.model_config)
-        system_instruction = kwargs.pop("system_instruction", None)
+        kwargs = {
+            key: value
+            for key, value in self.model_config.items()
+            if key not in FRAMEWORK_ONLY_CONFIG_KEYS
+        }
+        system_instruction = self.model_config.get("system_instruction")
         reasoning_effort = kwargs.pop("reasoning_effort", None)
-        kwargs.pop("enable_cache", None)
-        kwargs.pop("use_responses_api", None)
-        kwargs.pop("stream_stall_timeout", None)
-        for key in (
-            "stream_options",
-            "stream",
-            "stop",
-            "n",
-            "functions",
-            "function_call",
-            "logit_bias",
-            "logprobs",
-            "top_logprobs",
-            "seed",
-            "presence_penalty",
-            "frequency_penalty",
-            "modalities",
-            "audio",
-        ):
-            kwargs.pop(key, None)
 
         max_tokens = kwargs.pop("max_tokens", None)
         max_completion_tokens = kwargs.pop("max_completion_tokens", None)
@@ -936,6 +984,12 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             if parallel_tool_calls is not None:
                 kwargs["parallel_tool_calls"] = parallel_tool_calls
 
+        kwargs = self._keep_supported_request_params(
+            kwargs,
+            _RESPONSES_REQUEST_PARAMS,
+            "OpenAI Responses",
+        )
+        self._sanitize_stream_options(kwargs)
         self._apply_cache_control_for_openrouter_anthropic(kwargs)
         return kwargs
 
@@ -1121,6 +1175,32 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
                 f"are still pending for call_ids/names: {pending or outstanding!r}"
             )
 
+    def _sanitize_stream_options(self, kwargs: dict[str, Any]) -> None:
+        """Keep only the ``stream_options`` sub-keys the Responses API declares.
+
+        ``stream_options`` exists on both transports but with different
+        shapes: Chat Completions accepts ``include_usage`` (a config written
+        for it would carry that), while the Responses API declares only
+        ``include_obfuscation`` and reports the totals in its terminal
+        ``response.completed`` event instead.  The same reporting rule as
+        for top-level parameters applies to the nested dict, so a
+        legitimate ``include_obfuscation`` survives and anything else is
+        named in a warning.
+
+        Args:
+            kwargs: The request kwargs; mutated in place.
+        """
+        options = kwargs.get("stream_options")
+        if not isinstance(options, dict):
+            return
+        kept = self._keep_supported_request_params(
+            options, _RESPONSES_STREAM_OPTION_KEYS, "OpenAI Responses stream_options"
+        )
+        if kept:
+            kwargs["stream_options"] = kept
+        else:
+            kwargs.pop("stream_options")
+
     def _build_request_kwargs(
         self, *, tools: list[dict[str, Any]] | None
     ) -> dict[str, Any]:
@@ -1224,6 +1304,44 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         self,
         stream: Any,
     ) -> tuple[str, list[dict[str, str]], Any]:
+        """Consume a Responses stream under an abort watchdog.
+
+        ``stop_aware_events`` aborts the request the moment the user
+        presses Stop or the provider goes silent for
+        ``stream_stall_timeout`` seconds; a bare ``for event in stream``
+        would hold the agent inside ``recv()`` until the client's own
+        30-minute timeout expires
+        (``reports/stop_button_delay_2026-08-05.html``).
+
+        Closing the generator explicitly is what makes that safe:
+        :meth:`_consume_stream_events` raises from *inside* the loop on
+        ``response.failed`` / ``response.incomplete``, and an abandoned
+        generator runs its cleanup only whenever the traceback holding
+        its frame is released — until then a daemon watchdog thread stays
+        alive and armed over a connection that never returns to the pool.
+
+        Args:
+            stream: The streaming iterator returned by the SDK.
+
+        Returns:
+            ``(content, tool_calls, response)`` — see
+            :meth:`_consume_stream_events`.
+        """
+        events = stop_aware_events(
+            stream,
+            stall_timeout=self._stream_stall_timeout,
+            on_abort=self._close_thinking_if_open,
+            name="openai-responses-stream-abort-watchdog",
+        )
+        try:
+            return self._consume_stream_events(events)
+        finally:
+            events.close()
+
+    def _consume_stream_events(
+        self,
+        events: Any,
+    ) -> tuple[str, list[dict[str, str]], Any]:
         """Drive callbacks from streaming events and collect final state.
 
         Walks every SSE event from the Responses streaming API:
@@ -1241,7 +1359,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         * ``response.completed`` — captures the final response object.
 
         Args:
-            stream: The streaming iterator returned by the SDK.
+            events: The stop/stall-aware iterator over the SDK stream.
 
         Returns:
             ``(content, tool_calls, response)`` where ``tool_calls`` is a
@@ -1268,15 +1386,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         self._last_stream_item_indexes = item_output_indexes
         self._last_stream_message_output_index = None
 
-        # stop_aware_events aborts the request the moment the user
-        # presses Stop; a bare `for event in stream` would hold the agent
-        # inside recv() until the client's own timeout expires
-        # (reports/stop_button_delay_2026-08-05.html).
-        for event in stop_aware_events(
-            stream,
-            on_abort=self._close_thinking_if_open,
-            name="openai-responses-stream-abort-watchdog",
-        ):
+        for event in events:
             etype = self._event_type(event)
             ev_item_id = str(getattr(event, "item_id", "") or "")
             if not ev_item_id:
@@ -1947,14 +2057,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         """
         self.conversation = self._foreign_items_to_native_input(self.conversation)
         kwargs = self._build_request_kwargs(tools=None)
-        if self.token_callback is not None:
-            kwargs["stream"] = True
-            stream = self.client.responses.create(**kwargs)
-            content, _tc, response = self._consume_stream(stream)
-        else:
-            response = self.client.responses.create(**kwargs)
-            self._raise_for_failed_response(response)
-            content, _tc = self._parse_non_streaming(response)
+        content, _tc, response = self._request_response(kwargs)
 
         if self._is_deepseek_reasoning_model():
             _, content = _extract_deepseek_reasoning(content)
@@ -2005,14 +2108,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         responses_tools = self._flatten_tools_schema(chat_tools)
         kwargs = self._build_request_kwargs(tools=responses_tools)
 
-        if self.token_callback is not None:
-            kwargs["stream"] = True
-            stream = self.client.responses.create(**kwargs)
-            content, raw_tool_calls, response = self._consume_stream(stream)
-        else:
-            response = self.client.responses.create(**kwargs)
-            self._raise_for_failed_response(response)
-            content, raw_tool_calls = self._parse_non_streaming(response)
+        content, raw_tool_calls, response = self._request_response(kwargs)
 
         for tc in raw_tool_calls:
             if not tc.get("id"):
@@ -2228,14 +2324,7 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
         self._ensure_no_pending_function_calls()
         kwargs = self._shape_responses_kwargs(input_items=modified, tools=None)
 
-        if self.token_callback is not None:
-            kwargs["stream"] = True
-            stream = self.client.responses.create(**kwargs)
-            content, _tc, response = self._consume_stream(stream)
-        else:
-            response = self.client.responses.create(**kwargs)
-            self._raise_for_failed_response(response)
-            content, _tc = self._parse_non_streaming(response)
+        content, _tc, response = self._request_response(kwargs)
 
         _, content_clean = _extract_deepseek_reasoning(content)
         function_calls = _parse_text_based_tool_calls(content_clean)
@@ -2295,15 +2384,17 @@ class OpenAICompatibleModel2(OpenAICompatibleBase):
             else None
         )
         for i, (func_name, result_dict) in enumerate(function_results):
-            result_content = _tool_result_to_string(result_dict)
-            result_content, attachments = parse_binary_attachments(result_content)
-            if self.usage_info_for_messages:
-                result_content = (
-                    f"{result_content}\n\n{self.usage_info_for_messages}"
-                )
-            call_id = self._consume_pending_call_id(
+            result_content, attachments = self.tool_result_text_and_attachments(
+                result_dict
+            )
+            # The pending call is consumed either way, so the bookkeeping
+            # that guards the next turn stays correct even when the caller
+            # names the id itself.
+            matched_call_id = self._consume_pending_call_id(
                 func_name, i, trailing, fallback_unanswered
             )
+            explicit_call_id = result_dict.get("tool_use_id")
+            call_id = str(explicit_call_id) if explicit_call_id else matched_call_id
             self.conversation.append(
                 {
                     "type": "function_call_output",

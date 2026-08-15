@@ -20,22 +20,22 @@ Reproduces this bug in ``VSCodeServer._cmd_complete``:
    replays this as a ``resumeSession`` command to the freshly-started
    daemon.
 4. ``_replay_session`` handles ``resumeSession`` by recording
-   ``_tab_chat_views[T] = X``.  Because no ``_RunningAgentState[T]``
-   entry exists after a cold daemon restart (per the C2/C3 rule:
-   loading a chat into a tab is a view operation and must not
-   allocate a runtime state slot), the tab's chat association lives
-   ONLY in ``_tab_chat_views``.
+   ``_tab_chat_views[T] = X``.  Because no task-keyed
+   ``kiss.server.agent_state.AgentState`` for tab ``T`` exists after a
+   cold daemon restart (per the C2/C3 rule: loading a chat into a tab
+   is a view operation and must not allocate a runtime state slot),
+   the tab's chat association lives ONLY in ``_tab_chat_views``.
 5. User types ``zephyr`` into the chat input.  The webview posts a
    ``complete`` command to the daemon.  Before the fix,
-   ``_cmd_complete`` reads ``tab.chat_id`` from
-   ``_RunningAgentState.running_agent_states.get(tab_id)`` — which
-   returns ``None`` for a viewer-only tab — and passes ``chat_id=""``
-   to the autocomplete pipeline.  The pipeline's
-   ``_load_chat_context_text("")`` short-circuits to ``""`` and the
-   ``zephyrIdentifierMarker`` from the prior task is NEVER offered as
-   a completion candidate.  Autocomplete quality silently degrades
-   until the user starts a new task on the tab (which finally mints
-   a ``_RunningAgentState`` and populates ``tab.chat_id``).
+   ``_cmd_complete`` reads the chat id from the running-agent registry
+   (``agent_state.find_by_tab(tab_id)``) — which yields nothing for a
+   viewer-only tab — and passes ``chat_id=""`` to the autocomplete
+   pipeline.  The pipeline's ``_load_chat_context_text("")``
+   short-circuits to ``""`` and the ``zephyrIdentifierMarker`` from
+   the prior task is NEVER offered as a completion candidate.
+   Autocomplete quality silently degrades until the user starts a new
+   task on the tab (which finally registers an ``AgentState`` carrying
+   the tab's ``chat_id``).
 
 Under the fix ``_cmd_complete`` consults ``_tab_chat_views`` as a
 fallback when the tab has no runtime state (or ``tab.chat_id`` is
@@ -68,7 +68,7 @@ from kiss.agents.sorcar.persistence import (
     _load_chat_context,
     _save_task_result,
 )
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 _MARKER = "zephyrIdentifierMarker"
@@ -118,7 +118,7 @@ class TestRelaunchPreservesAutocompleteChatContext(unittest.TestCase):
         self._saved_kiss_home = os.environ.get("KISS_HOME")
         os.environ["KISS_HOME"] = str(Path(self._tmpdir) / ".kiss")
         self._saved_persistence = _redirect_persistence(self._tmpdir)
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def tearDown(self) -> None:
         _restore_persistence(self._saved_persistence)
@@ -172,9 +172,9 @@ class TestRelaunchPreservesAutocompleteChatContext(unittest.TestCase):
             },
         )
         self.assertIsNone(
-            _RunningAgentState.running_agent_states.get(tab_id),
-            "resumeSession must not allocate a runtime tab state "
-            "(C2/C3): pure viewers are tracked only in _tab_chat_views",
+            agent_state.find_by_tab(tab_id),
+            "resumeSession must not allocate a runtime tab state: "
+            "pure viewers are tracked only in _tab_chat_views",
         )
         self.assertEqual(
             server._tab_chat_views.get(tab_id), prior_chat_id,

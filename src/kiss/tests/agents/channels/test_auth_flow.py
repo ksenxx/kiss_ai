@@ -278,7 +278,6 @@ def _get_agent(info: dict[str, Any]) -> Any:
     mod = importlib.import_module(info["module"])
     cls = getattr(mod, info["class"])
     agent = cls()
-    agent.web_use_tool = None
     return agent
 
 
@@ -372,10 +371,11 @@ _BROWSER_IDS = [a["class"] for a in _BROWSER_AUTH_AGENTS]
 
 
 @pytest.mark.parametrize("info", _BROWSER_AUTH_AGENTS, ids=_BROWSER_IDS)
-def test_browser_auth_fallback_no_browser(info: dict[str, Any]) -> None:
-    """start_*_browser_auth() returns fallback instructions when browser unavailable."""
+def test_browser_auth_returns_navigation_instructions(
+    info: dict[str, Any],
+) -> None:
+    """start_*_browser_auth() returns go_to_url navigation instructions."""
     agent = _get_agent(info)
-    agent.web_use_tool = None
     tools = _get_tools(agent)
     browser_fn = tools[info["browser_auth"]]
     result = browser_fn()

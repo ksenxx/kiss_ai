@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Google Chat Agent — SorcarAgent extension with Google Chat API tools.
+"""Google Chat Agent — channel agent with Google Chat API tools.
 
 Provides authenticated access to Google Chat via Service Account or OAuth2.
 Stores credentials in ``~/.kiss/third_party_agents/googlechat/``.
@@ -20,17 +20,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.third_party_agents._backend_utils import (
-    is_headless_environment,
-    wait_for_matching_message,
-)
+from kiss.agents.third_party_agents._backend_utils import is_headless_environment
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ToolMethodBackend,
-    _kiss_home,
     channel_main,
 )
+from kiss.core.config import kiss_home
 
 _SCOPES = [
     "https://www.googleapis.com/auth/chat.messages",
@@ -46,7 +42,7 @@ def _gchat_dir() -> Path:
         Path to ``$KISS_HOME/third_party_agents/googlechat`` (defaults to
         ``~/.kiss/third_party_agents/googlechat``).
     """
-    return _kiss_home() / "third_party_agents" / "googlechat"
+    return kiss_home() / "third_party_agents" / "googlechat"
 
 
 def _token_path() -> Path:
@@ -220,30 +216,6 @@ class GoogleChatChannelBackend(ToolMethodBackend):
         if thread_ts:  # pragma: no branch
             body["thread"] = {"name": thread_ts}
         self._service.spaces().messages().create(parent=channel_id, body=body).execute()
-
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Poll for a reply from a specific user."""
-        oldest = ""
-
-        def poll() -> list[dict[str, Any]]:
-            nonlocal oldest
-            msgs, oldest = self.poll_messages(channel_id, oldest)
-            return msgs
-
-        return wait_for_matching_message(
-            poll=poll,
-            matches=lambda msg: msg.get("user") == user_id,
-            extract_text=lambda msg: str(msg.get("text", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=3.0,
-        )
-
 
     def list_spaces(self, page_size: int = 20, page_token: str = "") -> str:
         """List Google Chat spaces (rooms and DMs).
@@ -477,8 +449,8 @@ class GoogleChatChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class GoogleChatAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with Google Chat API tools.
+class GoogleChatAgent(BaseChannelAgent):
+    """Channel agent with Google Chat API tools.
 
     Example::
 
@@ -599,6 +571,17 @@ def main() -> None:
         channel_name="Google Chat",
         make_backend=_make_backend,
     )
+
+
+def get_tools() -> list:
+    """Return the Google Chat channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return GoogleChatAgent()._get_tools()
 
 
 if __name__ == "__main__":

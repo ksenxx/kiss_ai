@@ -9,11 +9,8 @@ double-quote, backslash, or control character — in ``diff --git``
 headers, ``--name-only`` output, ``ls-files --others`` output, and
 ``status --porcelain`` output.  Reproduces real bugs:
 
-* ``diff_merge._parse_diff_hunks``: the quoted header line matched
-  neither regex, so ``current_file`` stayed at the PREVIOUS file and
-  the quoted file's hunks were misattributed to it (or dropped).
 * ``diff_merge._capture_untracked``: returned the quoted string, which
-  does not exist on disk, making the file invisible to the merge view.
+  does not exist on disk, making the file invisible to callers.
 * ``merge_flow._main_dirty_files``: ``.strip('"')`` removed the quotes
   but never unescaped ``\\"`` / ``\\\\``.
 * ``merge_flow._get_worktree_changed_files`` and
@@ -33,9 +30,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.server.diff_merge import _capture_untracked, _parse_diff_hunks
+from kiss.server import agent_state
+from kiss.server.diff_merge import _capture_untracked
 from kiss.server.server import VSCodeServer
 
 QUOTED_NAME = 'qu"ote.txt'
@@ -73,19 +70,6 @@ class TestQuotedPathParsing(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def test_parse_diff_hunks_quoted_name_not_misattributed(self) -> None:
-        """Hunks of a quoted-name file must not leak into the previous file."""
-        Path(self.repo, "a.txt").write_text("one\nTWO\nthree\n")
-        Path(self.repo, QUOTED_NAME).write_text("alpha\nBRAVO\ncharlie\n")
-        hunks = _parse_diff_hunks(self.repo)
-        self.assertIn(QUOTED_NAME, hunks, f"quoted file missing: {hunks}")
-        self.assertEqual(
-            len(hunks["a.txt"]), 1,
-            "quoted file's hunks were misattributed to the previous "
-            f"file in the diff: {hunks}",
-        )
-        self.assertEqual(hunks[QUOTED_NAME], [(2, 1, 2, 1)])
-
     def test_capture_untracked_unquotes(self) -> None:
         """Untracked files with quotes in the name must be reported as-is."""
         Path(self.repo, 'new"file.txt').write_text("x\n")
@@ -118,10 +102,15 @@ class TestWorktreeQuotedPaths(unittest.TestCase):
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment]
 
         self.tab_id = "t-wt-quoted"
-        self.tab = self.server._get_tab(self.tab_id)
-        self.tab.use_worktree = True
         self.agent = WorktreeSorcarAgent("wt-quoted-test")
-        self.tab.agent = self.agent
+        self.state = agent_state.AgentState(
+            "task-wt-quoted",
+            agent=self.agent,
+            tab_id=self.tab_id,
+            server_owned=True,
+        )
+        self.state.use_worktree = True
+        agent_state.register(self.state)
         wt_work_dir = self.agent._try_setup_worktree(Path(self.repo), self.repo)
         assert wt_work_dir is not None
         assert self.agent._wt is not None
@@ -133,7 +122,7 @@ class TestWorktreeQuotedPaths(unittest.TestCase):
                 self.agent.discard()
         except Exception:
             pass
-        _RunningAgentState.running_agent_states.pop(self.tab_id, None)
+        agent_state.unregister(self.state.task_id, self.state)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_changed_files_lists_real_name(self) -> None:

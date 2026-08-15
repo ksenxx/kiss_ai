@@ -22,7 +22,6 @@ from pathlib import Path
 
 import pytest
 
-from kiss.core.kiss_error import KISSError
 from kiss.core.models.claude_code_model import ClaudeCodeModel
 
 _FAKE_CLAUDE = """#!/bin/bash
@@ -44,12 +43,12 @@ def _install_fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 def test_generate_times_out_on_stalled_stream(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A stalled claude CLI must abort with KISSError within the timeout."""
+    """A stalled claude CLI must abort with a retryable TimeoutError."""
     _install_fake_claude(tmp_path, monkeypatch)
     model = ClaudeCodeModel("cc/opus", model_config={"timeout": 2})
     model.initialize("hello")
     start = time.monotonic()
-    with pytest.raises(KISSError, match="timed out"):
+    with pytest.raises(TimeoutError, match="timed out"):
         model.generate()
     elapsed = time.monotonic() - start
     assert elapsed < 15, f"generate() blocked for {elapsed:.1f}s despite timeout=2"
@@ -72,7 +71,7 @@ def test_generate_with_tools_times_out_on_stalled_stream(
         return result
 
     start = time.monotonic()
-    with pytest.raises(KISSError, match="timed out"):
+    with pytest.raises(TimeoutError, match="timed out"):
         model.generate_and_process_with_tools({"finish": finish})
     elapsed = time.monotonic() - start
     assert elapsed < 15, f"tool call path blocked for {elapsed:.1f}s despite timeout=2"

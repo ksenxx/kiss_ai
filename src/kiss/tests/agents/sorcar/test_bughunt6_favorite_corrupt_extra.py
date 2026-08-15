@@ -28,7 +28,6 @@ from pathlib import Path
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.persistence import (
     _add_task,
-    _list_recent_chats,
     _load_history,
     _search_history,
     _set_task_favorite,
@@ -97,12 +96,6 @@ class TestFavoriteDoesNotFlipClassification(_TempDbTestBase):
         ]
         assert not self._row(task_id)["parent_task_id"]
         assert self._is_favorite(task_id)
-
-    def test_star_row_keeps_chat_in_recent_chats(self) -> None:
-        task_id, chat_id = _add_task("plain row")
-        assert _set_task_favorite(task_id, True)
-        chats = _list_recent_chats(limit=10)
-        assert chat_id in [c["chat_id"] for c in chats]
 
     def test_unstar_row_stays_visible_and_clears_flag(self) -> None:
         task_id, chat_id = _add_task("plain row")

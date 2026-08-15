@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from kiss.agents.sorcar.commit_message import (  # noqa: F401 — re-exported
     _append_task_result,
@@ -17,56 +16,8 @@ from kiss.agents.sorcar.commit_message import (  # noqa: F401 — re-exported
     generate_commit_message_from_diff,
 )
 from kiss.core.models.model_info import _OPENAI_PREFIXES
-from kiss.server.json_printer import JsonPrinter
 
 logger = logging.getLogger(__name__)
-
-
-def tab_busy_with_other_task(tab: Any, task_key: str) -> bool:
-    """Return whether *tab* is actively running a task other than *task_key*.
-
-    ``JsonPrinter.cleanup_task`` intentionally preserves the subscriber
-    sets of FINISHED tasks so post-task events still reach every viewer.
-    A tab that co-subscribed to an old task may therefore have moved on
-    and be running a brand-new, unrelated one — anything derived from
-    the shared subscription (its answer queue, its merge/auto-commit
-    UI) belongs to THAT task now and must not be reused for
-    *task_key*.
-
-    Args:
-        tab: The ``_RunningAgentState`` to inspect.
-        task_key: The coerced task id being served.
-
-    Returns:
-        True when the tab has moved on to a different live task.
-    """
-    agent = getattr(tab, "agent", None)
-    agent_task = (
-        JsonPrinter._coerce_task_id(getattr(agent, "_last_task_id", None))
-        if agent is not None
-        else ""
-    )
-    return bool(tab.is_task_active and agent_task and agent_task != task_key)
-
-
-def tab_owns_answer_queue(tab: Any, task_key: str) -> bool:
-    """Return whether *tab*'s live answer queue belongs to *task_key*.
-
-    Task-ownership filter (BUG-TR2-2) shared by
-    ``commands._resolve_user_answer_queue`` and
-    ``task_runner._resolve_task_answer_queue``: a tab that has moved on
-    to an unrelated task holds a live ``user_answer_queue`` belonging
-    to THAT task, and delivering a stale answer there would answer the
-    wrong question and dismiss the wrong task's askUser modal.
-
-    Args:
-        tab: The ``_RunningAgentState`` whose queue is a candidate.
-        task_key: The coerced task id the answer/question belongs to.
-
-    Returns:
-        True when the tab's queue may serve *task_key*.
-    """
-    return not tab_busy_with_other_task(tab, task_key)
 
 
 def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
@@ -74,9 +25,8 @@ def clip_autocomplete_suggestion(query: str, suggestion: str) -> str:
 
     *suggestion* is always a continuation **suffix** (a prefix-matched
     history task minus the query, or an identifier candidate minus the
-    typed partial) — both call sites (``_AutocompleteMixin._complete``
-    and ``CliCompleter._active_file_suffix``) strip the query before
-    calling.  It must therefore NOT be prefix-stripped again here: a
+    typed partial) — the call site (``_AutocompleteMixin._complete``)
+    strips the query before calling.  It must therefore NOT be prefix-stripped again here: a
     legitimate suffix can itself begin with the query text (active file
     holds ``quxqux_token``, user typed ``qux`` → suffix ``qux_token``),
     and re-stripping would corrupt the accepted completion (``qux`` +

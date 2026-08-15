@@ -76,7 +76,9 @@ def _install_capturing_run(
       * ``nested_tasks`` — if provided, the stub assigns
         ``self.printer`` and recursively calls
         ``self._run_tasks_parallel(nested_tasks)`` so nested
-        propagation can be observed.
+        propagation can be observed.  A task that is itself one of
+        *nested_tasks* does not fan out again, bounding the
+        recursion at two levels.
       * ``set_stop_inside`` — when True the stub sets the captured
         ``stop_event`` (if any) before returning.  Useful for
         asserting that a stop initiated mid-flight reaches every
@@ -103,7 +105,14 @@ def _install_capturing_run(
         }
         if call_check_stop:
             printer._check_stop()
-        if nested_tasks:
+        if nested_tasks and task_key not in nested_tasks:
+            # Only a task that is NOT itself one of *nested_tasks* fans
+            # out.  The stub is installed class-wide, so without this
+            # guard the "nested" child would re-enter
+            # ``_run_tasks_parallel(nested_tasks)`` and recurse without
+            # bound (each level spawns a fresh thread pool + usage
+            # monitor; observed as a multi-thousand-thread hang).  The
+            # test's intent is exactly two levels: parent → sub → nested.
             self._run_tasks_parallel(nested_tasks)
         if set_stop_inside and stop_event is not None:
             stop_event.set()

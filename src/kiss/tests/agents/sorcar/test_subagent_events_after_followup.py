@@ -26,7 +26,22 @@ from typing import Any
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
+
+
+def _subscribe_on_alloc(printer: JsonPrinter, tab_id: str) -> Any:
+    """Return an ``_on_task_id_allocated`` callback subscribing *tab_id*.
+
+    Mirrors the server's ``task_runner._on_run_task_id_allocated``,
+    which attaches the launching UI tab to the freshly persisted task
+    via ``printer.register_task_ui``.
+    """
+
+    def _cb(task_id: Any, chat_id: str) -> None:
+        printer.register_task_ui(task_id, tab_id)
+
+    return _cb
 
 
 def _run_parallel_response() -> dict:
@@ -196,6 +211,24 @@ class _FanoutCapturePrinter(JsonPrinter):
         self.per_tab_events: dict[str, list[dict[str, Any]]] = {}
         self._cap_lock = threading.Lock()
 
+    def agent_task_allocated(
+        self,
+        agent: Any,
+        task_id: Any,
+        chat_id: str = "",
+    ) -> None:
+        """Register the run and subscribe a sub-agent's tab to its task.
+
+        Simulates the server's ``new_tab`` handling, which subscribes
+        the sub-agent's freshly created frontend tab to the sub-agent's
+        own event stream.
+        """
+        super().agent_task_allocated(agent, task_id, chat_id)
+        if getattr(agent, "_subagent_info", None) is not None:
+            tab_id = str(getattr(agent, "_tab_id", "") or "")
+            if tab_id:
+                self.subscribe_tab(task_id, tab_id)
+
     def broadcast(self, event: dict[str, Any]) -> None:
         """Record, persist, and simulate fan-out."""
         if "tabId" in event:
@@ -249,6 +282,8 @@ class TestSubagentEventsAfterFollowup:
         self.srv, self.url = _start_server()
 
     def teardown_method(self) -> None:
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
         self.srv.shutdown()
         if th._db_conn is not None:
             th._db_conn.close()
@@ -271,7 +306,7 @@ class TestSubagentEventsAfterFollowup:
             work_dir=self.tmpdir,
             printer=printer,
             is_parallel=True,
-            _subscribe_tab_id=parent_tab_id,
+            _on_task_id_allocated=_subscribe_on_alloc(printer, parent_tab_id),
         )
 
         parent_task_key = str(parent._last_task_id)
@@ -306,7 +341,7 @@ class TestSubagentEventsAfterFollowup:
             work_dir=self.tmpdir,
             printer=printer,
             is_parallel=True,
-            _subscribe_tab_id=parent_tab_id,
+            _on_task_id_allocated=_subscribe_on_alloc(printer, parent_tab_id),
         )
 
         parent_task_key = str(parent._last_task_id)
@@ -343,7 +378,7 @@ class TestSubagentEventsAfterFollowup:
             work_dir=self.tmpdir,
             printer=printer,
             is_parallel=True,
-            _subscribe_tab_id=parent_tab_id,
+            _on_task_id_allocated=_subscribe_on_alloc(printer, parent_tab_id),
         )
 
         parent_task_key = str(parent._last_task_id)

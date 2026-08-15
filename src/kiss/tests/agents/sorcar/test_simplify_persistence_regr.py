@@ -4,16 +4,14 @@
 # add your name here
 """End-to-end regression tests locking behavior before simplification.
 
-Covers the exact code paths simplified in ``persistence.py`` and
-``cli_steering.py``:
+Covers the exact code paths simplified in ``persistence.py``:
 
 * legacy-schema migration (index creation, parent remap, flag coercion,
   orphan-event dropping),
 * safe numeric coercers (``_safe_int`` / ``_safe_float``),
 * ``_add_task`` / ``_save_task_extra`` parent-id shapes and error paths,
 * ``_shutdown_persist_in_flight_results`` sentinel rewrite,
-* prefix matching helpers,
-* ``cli_steering`` box-geometry helpers.
+* prefix matching helpers.
 
 Runs against a real SQLite database redirected to a temp dir.
 No mocks, patches, fakes, or test doubles.
@@ -21,24 +19,15 @@ No mocks, patches, fakes, or test doubles.
 
 from __future__ import annotations
 
-import os
 import shutil
 import sqlite3
-import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 import kiss.agents.sorcar.persistence as th
-from kiss.ui.cli.cli_steering import (
-    _box_body_h,
-    _box_h_for,
-    _box_top_row,
-    _partial_suffix_len,
-)
 
 
 class _TempDbTestBase:
@@ -239,6 +228,12 @@ class TestShutdownPersist(_TempDbTestBase):
     def test_recover_orphaned_tasks(self) -> None:
         t1, _ = th._add_task("t1")
         t2, _ = th._add_task("t2")
+        # A row whose owning process is still alive is not an orphan;
+        # clearing ``owner`` makes t1 look like the leftover of a
+        # prior, now-dead process, which is what the sweep is for.
+        th._get_db().execute(
+            "UPDATE task_history SET owner = '' WHERE id = ?", (t1,)
+        )
         assert th._recover_orphaned_tasks({t2}) == 1
         results = {e["id"]: e["result"] for e in th._load_history()}
         assert results[t1] == "Task terminated unexpectedly (process killed)"
@@ -280,188 +275,7 @@ class TestChatContextCache(_TempDbTestBase):
         )
 
 
-class TestBoxGeometry:
-    """cli_steering geometry helpers used by the anchored input box."""
-
-    def test_box_body_h(self) -> None:
-        assert _box_body_h("") == 3
-        assert _box_body_h("one line") == 3
-        assert _box_body_h("a\nb\nc\nd") == 4
-
-    def test_box_h_for(self) -> None:
-        assert _box_h_for("") == 5
-        assert _box_h_for("a\nb\nc\nd\ne") == 7
-
-    def test_box_top_row(self) -> None:
-        assert _box_top_row(40) == 36
-        assert _box_top_row(40, 10) == 31
-        assert _box_top_row(3, 10) == 2
-
-    def test_partial_suffix_len(self) -> None:
-        assert _partial_suffix_len("abc\x1b[20", "\x1b[201~") == 4
-        assert _partial_suffix_len("abc", "\x1b[201~") == 0
-        assert _partial_suffix_len("x\x1b", "\x1b[201~") == 1
-
-
 def test_nan_never_reaches_json(tmp_path: Path) -> None:
     """_dumps_extra sanitises non-finite floats to null."""
     out = th._dumps_extra({"cost": float("nan"), "n": [float("inf"), 1]})
     assert out == '{"cost": null, "n": [null, 1]}'
-
-
-class _PipeStdin:
-    """Real pipe-backed stdin replacement (no mocks) for input loops."""
-
-    def __enter__(self) -> _PipeStdin:
-        self._r, self._w = os.pipe()
-        self._saved_stdin = sys.stdin
-        self._file = os.fdopen(self._r, "rb", buffering=0)
-        sys.stdin = self._file  # type: ignore[assignment]
-        return self
-
-    def write(self, data: bytes) -> None:
-        os.write(self._w, data)
-
-    def __exit__(self, *exc: object) -> None:
-        sys.stdin = self._saved_stdin
-        try:
-            self._file.close()
-        except OSError:
-            pass
-        try:
-            os.close(self._w)
-        except OSError:
-            pass
-
-
-class TestAnchoredReplLoops:
-    """End-to-end stdin pump loops driven through a real pipe."""
-
-    def test_read_idle_line_submit(self) -> None:
-        from kiss.ui.cli.cli_steering import AnchoredRepl
-        with _PipeStdin() as stdin:
-            repl = AnchoredRepl()
-            stdin.write(b"hello world\r")
-            line = repl.read_idle_line()
-        assert line == "hello world"
-        assert repl.box.history[-1] == "hello world"
-
-    def test_read_idle_line_eof(self) -> None:
-        from kiss.ui.cli.cli_steering import AnchoredRepl
-        with _PipeStdin() as stdin:
-            repl = AnchoredRepl()
-            stdin.write(b"\x04")
-            line = repl.read_idle_line()
-        assert line is None
-
-    def test_read_idle_line_stdin_closed(self) -> None:
-        from kiss.ui.cli.cli_steering import AnchoredRepl
-        with _PipeStdin() as stdin:
-            repl = AnchoredRepl()
-            os.close(stdin._w)
-            line = repl.read_idle_line()
-            stdin._w = -1
-        assert line is None
-
-    def test_run_steering_loop_submit_and_done(self) -> None:
-        from kiss.ui.cli.cli_steering import AnchoredRepl
-        submitted: list[str] = []
-        idle_calls: list[int] = []
-
-        def on_submit(line: str) -> None:
-            submitted.append(line)
-
-        def on_abort() -> None:
-            pass
-
-        def is_done() -> bool:
-            return bool(submitted)
-
-        def on_idle() -> None:
-            idle_calls.append(1)
-
-        with _PipeStdin() as stdin:
-            repl = AnchoredRepl()
-            stdin.write(b"steer me\r")
-            repl.run_steering_loop(on_submit, on_abort, is_done, on_idle)
-        assert submitted == ["steer me"]
-
-
-class TestEventDispatcherRender:
-    """Dispatcher renders real events through a real ConsolePrinter."""
-
-    def _make(self) -> Any:
-        from kiss.core.print_to_console import ConsolePrinter
-        from kiss.ui.cli.cli_client import _EventDispatcher
-        return _EventDispatcher(ConsolePrinter(), tab_id="tab1")
-
-    def test_text_and_thinking_deltas(self, capsys: pytest.CaptureFixture[str]) -> None:
-        d = self._make()
-        d.dispatch({"type": "text_delta", "text": "alpha "})
-        d.dispatch({"type": "thinking_delta", "text": "beta"})
-        d.dispatch({"type": "text_end"})
-        out = capsys.readouterr().out  # type: ignore[union-attr]
-        assert "alpha" in out
-        assert "beta" in out
-
-    def test_thinking_start_end_no_crash(self) -> None:
-        d = self._make()
-        d.dispatch({"type": "thinking_start"})
-        d.dispatch({"type": "thinking_end"})
-
-    def test_foreign_tab_events_dropped(self, capsys: pytest.CaptureFixture[str]) -> None:
-        d = self._make()
-        d.dispatch({"type": "text_delta", "text": "SECRET",
-                    "tabId": "other"})
-        out = capsys.readouterr().out  # type: ignore[union-attr]
-        assert "SECRET" not in out
-
-    def test_tool_call_input_reconstruction(self, capsys: pytest.CaptureFixture[str]) -> None:
-        d = self._make()
-        d.dispatch({
-            "type": "tool_call", "name": "Edit", "path": "/tmp/f.py",
-            "description": "desc-here", "old_string": "aaa",
-            "new_string": "bbb", "extras": {"k1": "v1"},
-        })
-        out = capsys.readouterr().out  # type: ignore[union-attr]
-        assert "Edit" in out
-
-    def test_status_taskid_filter(self) -> None:
-        d = self._make()
-        d.current_task_id = "task-A"  # type: ignore[attr-defined]
-        d.dispatch({"type": "status", "running": True, "taskId": "task-B"})
-        assert not d.task_active.is_set()  # type: ignore[attr-defined]
-        d.dispatch({"type": "status", "running": True, "taskId": "task-A"})
-        assert d.task_active.is_set()  # type: ignore[attr-defined]
-
-
-class TestClientDisconnectPaths:
-    """Early-bail behavior when the daemon connection is gone."""
-
-    def _client(self) -> Any:
-        from kiss.core.print_to_console import ConsolePrinter
-        from kiss.ui.cli.cli_client import CliClient
-        c = CliClient(Path("/nonexistent.sock"), "/tmp", "tabX",
-                      ConsolePrinter())
-        c._closed.set()
-        return c
-
-    def test_request_cli_info_disconnected(self) -> None:
-        from kiss.ui.cli.cli_client import _request_cli_info
-        reply = _request_cli_info(self._client(), "help")  # type: ignore[arg-type]
-        assert reply["error"] is True
-        assert "Daemon connection lost" in reply["errorMessage"]
-        assert reply["subtype"] == "help"
-
-    def test_request_models_disconnected(self) -> None:
-        from kiss.ui.cli.cli_client import _request_models
-        assert _request_models(self._client()) == []  # type: ignore[arg-type]
-
-    def test_submit_task_disconnected(self, capsys: pytest.CaptureFixture[str]) -> None:
-        from kiss.ui.cli.cli_client import _submit_task
-        client = self._client()
-        _submit_task(client, "do it")  # type: ignore[arg-type]
-        out = capsys.readouterr().out  # type: ignore[union-attr]
-        assert "Daemon connection lost" in out
-        assert "Time:" in out
-        assert client.dispatcher.current_task_id == ""  # type: ignore[attr-defined]

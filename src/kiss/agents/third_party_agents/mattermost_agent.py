@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Mattermost Agent — SorcarAgent extension with Mattermost REST API tools.
+"""Mattermost Agent — channel agent with Mattermost REST API tools.
 
 Provides authenticated access to Mattermost via a personal access token.
 Stores config in ``~/.kiss/third_party_agents/mattermost/config.json``.
@@ -21,8 +21,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -116,29 +114,6 @@ class MattermostChannelBackend(ToolMethodBackend):
         if thread_ts:  # pragma: no branch
             post["root_id"] = thread_ts
         self._driver.posts.create_post(options=post)
-
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Poll for a reply from a specific user."""
-        oldest = str(self._last_post_time)
-
-        def poll() -> list[dict[str, Any]]:
-            nonlocal oldest
-            msgs, oldest = self.poll_messages(channel_id, oldest)
-            return msgs
-
-        return wait_for_matching_message(
-            poll=poll,
-            matches=lambda msg: msg.get("user") == user_id,
-            extract_text=lambda msg: str(msg.get("text", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=2.0,
-        )
 
     def list_teams(self) -> str:
         """List Mattermost teams.
@@ -380,8 +355,8 @@ class MattermostChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class MattermostAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with Mattermost REST API tools."""
+class MattermostAgent(BaseChannelAgent):
+    """Channel agent with Mattermost REST API tools."""
 
     def __init__(self) -> None:
         super().__init__("Mattermost Agent")
@@ -526,6 +501,17 @@ def main() -> None:
         channel_name="Mattermost",
         make_backend=_make_backend,
     )
+
+
+def get_tools() -> list:
+    """Return the Mattermost channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return MattermostAgent()._get_tools()
 
 
 if __name__ == "__main__":

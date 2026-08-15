@@ -32,7 +32,6 @@ from pathlib import Path
 from typing import Any, cast
 
 from kiss.agents.sorcar import persistence as _persistence
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core import vscode_config
 from kiss.server import sorcar
@@ -112,13 +111,15 @@ class SorcarRunApiTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._parent_class.run = self._original_run
-        for tab in list(_RunningAgentState.running_agent_states.values()):
-            if tab.agent is not None and tab.agent._wt_pending:
+        from kiss.server import agent_state
+
+        for state in agent_state.snapshot():
+            if state.agent is not None and state.agent._wt_pending:
                 try:
-                    tab.agent.discard()
+                    state.agent.discard()
                 except Exception:  # pragma: no cover — best-effort cleanup
                     pass
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
         async def _shutdown() -> None:
             with self.server._printer._ws_lock:
@@ -315,7 +316,8 @@ class SorcarRunApiTest(unittest.TestCase):
         self,
         tools_file: Any,
         extra_cmd: dict[str, Any] | None = None,
-    ) -> None:
+        events_out: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
         """Drive one raw ``run`` command over the UDS and wait for the end.
 
         Bypasses :func:`kiss.server.sorcar.run` so malformed
@@ -328,6 +330,12 @@ class SorcarRunApiTest(unittest.TestCase):
                 ``toolsFile`` field.
             extra_cmd: Additional raw fields merged into the ``run``
                 command.
+            events_out: Optional list that receives every event the
+                daemon broadcast for this run's tab, in order.
+
+        Returns:
+            The task's last ``result`` event, or ``None`` when the
+            task produced none.
         """
         tab_id = f"raw-{uuid.uuid4().hex}"
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -347,14 +355,25 @@ class SorcarRunApiTest(unittest.TestCase):
             sock.sendall(json.dumps(cmd).encode() + b"\n")
             reader = sock.makefile("rb")
             started = False
+            result_event: dict[str, Any] | None = None
             while True:
                 event = json.loads(reader.readline())
+                if events_out is not None and event.get("tabId") == tab_id:
+                    events_out.append(event)
+                if event.get("type") == "result":
+                    # Each test runs its task alone on a private
+                    # daemon, so any result event seen here belongs to
+                    # this run (a failure before the agent publishes a
+                    # task-history row is keyed by tabId, a success by
+                    # taskId).
+                    result_event = event
+                    continue
                 if event.get("tabId") != tab_id or event.get("type") != "status":
                     continue
                 if event.get("running"):
                     started = True
                 elif started:
-                    return
+                    return result_event
         finally:
             sock.close()
 
@@ -373,15 +392,15 @@ class SorcarRunApiTest(unittest.TestCase):
         return str(path)
 
     def test_tools_file_functions_become_agent_tools(self) -> None:
-        """Top-level public functions of the tools file become agent tools.
+        """The tools returned by ``get_tools()`` become agent tools.
 
         The daemon must import the client-supplied Python file itself
-        (no serialization by the client) and hand every top-level
-        public function to the agent AS-IS: original object identity
-        semantics (docstring, exact signature including keyword-only
-        markers and the return annotation), native return values (an
-        ``int`` stays an ``int`` — no string round trip), and
-        execution in the daemon's task thread.
+        (no serialization by the client), call its ``get_tools()``,
+        and hand every returned function to the agent AS-IS: original
+        object identity semantics (docstring, exact signature
+        including keyword-only markers and the return annotation),
+        native return values (an ``int`` stays an ``int`` — no string
+        round trip), and execution in the daemon's task thread.
         """
         tools_path = self._write_tools_file(
             "my_tools.py",
@@ -389,9 +408,6 @@ class SorcarRunApiTest(unittest.TestCase):
             """Example tools module."""
 
             import threading
-            from os.path import join  # imported: must NOT become a tool
-
-            GREETING = "hello"  # not a function
 
 
             def get_temperature(city: str, unit: str = "C", *, note: str = "") -> str:
@@ -420,12 +436,9 @@ class SorcarRunApiTest(unittest.TestCase):
                 return threading.current_thread().name
 
 
-            def _private_helper(x: str) -> str:
-                return x
-
-
-            class NotATool:
-                """Classes are not tools."""
+            def get_tools():
+                """Return the tools the agent may call."""
+                return [get_temperature, magic_number, which_thread]
             ''',
         )
         seen: dict[str, Any] = {}
@@ -476,12 +489,18 @@ class SorcarRunApiTest(unittest.TestCase):
         assert seen["r3"] == 40
         assert seen["thread"] != threading.current_thread().name
 
-    def test_tools_file_skips_unsuitable_functions(self) -> None:
-        """Functions unsuitable as tools are skipped, the rest are kept."""
+    def test_get_tools_selects_exactly_the_returned_functions(self) -> None:
+        """``get_tools()`` alone decides which functions become tools.
+
+        The daemon must not scan the module: functions the file
+        defines but ``get_tools()`` does not return (helpers, private
+        functions) never become tools, and the returned list's order
+        is preserved.
+        """
         tools_path = self._write_tools_file(
-            "mixed_tools.py",
+            "selected_tools.py",
             '''
-            """Mixed suitability tools module."""
+            """Selection tools module."""
 
 
             def good(x: str = "a") -> str:
@@ -493,29 +512,23 @@ class SorcarRunApiTest(unittest.TestCase):
                 return x
 
 
-            def star_args(*args: str) -> str:
-                """Unsupported: *args."""
-                return ""
+            def also_good(y: int) -> int:
+                """Identity.
+
+                Args:
+                    y: Value to return.
+                """
+                return y
 
 
-            def kw_args(**kwargs: str) -> str:
-                """Unsupported: **kwargs."""
-                return ""
-
-
-            def pos_only(x: str, /) -> str:
-                """Unsupported: positional-only parameter."""
+            def helper_not_a_tool(x: str) -> str:
+                """Defined at top level but NOT returned by get_tools."""
                 return x
 
 
-            async def async_tool(x: str) -> str:
-                """Unsupported: coroutine function."""
-                return x
-
-
-            def gen_tool(x: str):
-                """Unsupported: generator function."""
-                yield x
+            def get_tools():
+                """Return only the selected tools, in this order."""
+                return [also_good, good]
             ''',
         )
         seen: dict[str, Any] = {}
@@ -533,14 +546,14 @@ class SorcarRunApiTest(unittest.TestCase):
 
         self._parent_class.run = stub_run
         result = sorcar.run(
-            "use the suitable tools",
+            "use the selected tools",
             work_dir=self.repo,
             tools=tools_path,
             sock_path=self.sock_path,
             timeout=60,
         )
         assert result.success is True
-        assert seen["names"] == ["good"]
+        assert seen["names"] == ["also_good", "good"]
 
     def test_tools_file_relative_path_and_pathlib(self) -> None:
         """A relative ``Path`` is resolved by the CLIENT before sending.
@@ -561,6 +574,11 @@ class SorcarRunApiTest(unittest.TestCase):
                     name: Who to greet.
                 """
                 return f"hi {name}"
+
+
+            def get_tools():
+                """Return the tools the agent may call."""
+                return [greet]
             ''',
         )
         seen: dict[str, Any] = {}
@@ -645,6 +663,11 @@ class SorcarRunApiTest(unittest.TestCase):
             def version() -> str:
                 """Report the tools file version."""
                 return "ONE"
+
+
+            def get_tools():
+                """Return the tools the agent may call."""
+                return [version]
             ''',
         )
         seen: dict[str, Any] = {}
@@ -657,6 +680,11 @@ class SorcarRunApiTest(unittest.TestCase):
             def version() -> str:
                 """Report the tools file version."""
                 return "TWO"
+
+
+            def get_tools():
+                """Return the tools the agent may call."""
+                return [version]
             ''',
         )
         self._run_with_tools_file(tools_path, seen)
@@ -664,74 +692,86 @@ class SorcarRunApiTest(unittest.TestCase):
         assert v2() == "TWO"
         assert not (Path(self.tmpdir) / "__pycache__").exists()
 
-    def test_lambdas_aliases_and_broken_functions_are_skipped(self) -> None:
-        """Only genuine ``def`` bindings with sane metadata become tools.
+    def test_missing_or_misbehaving_get_tools_fails_task(self) -> None:
+        """A tools file with a bad ``get_tools()`` fails the task loudly.
 
-        A lambda binding (``__name__ == "<lambda>"`` would break the
-        tool schema), an alias of another top-level function (would
-        register the same tool twice and crash ``_add_functions``), a
-        re-exported nested function, and functions whose signature
-        introspection raises (corrupted ``__signature__``,
-        self-referential ``__wrapped__``) must all be skipped — while
-        the well-formed functions are kept and callable.
+        The contract requires a top-level callable ``get_tools()``
+        returning a list/tuple of callables.  A module that lacks it,
+        binds it to a non-callable, raises inside it, or returns a
+        non-sequence or non-callable entries must stop the task with a
+        ``ToolsFileError`` diagnostic — never invoke the agent.
         """
-        tools_path = self._write_tools_file(
-            "tricky_tools.py",
+        no_get_tools = self._write_tools_file(
+            "no_get_tools.py",
             '''
-            """Tricky bindings tools module."""
-
-            shout = lambda x: x.upper()  # noqa: E731
-
-
-            def good(x: str) -> str:
-                """Echo.
+            def orphan(x: str) -> str:
+                """Never exposed.
 
                 Args:
                     x: Value to echo.
                 """
                 return x
-
-
-            alias = good
-
-
-            def _outer():
-                def nested(x: str) -> str:
-                    return x
-                return nested
-
-
-            exported = _outer()
-
-
-            def bad_signature(x: str) -> str:
-                """Corrupted ``__signature__``."""
-                return x
-
-
-            bad_signature.__signature__ = "not a signature"
-
-
-            def wrapper_loop(x: str) -> str:
-                """Self-referential ``__wrapped__``."""
-                return x
-
-
-            wrapper_loop.__wrapped__ = wrapper_loop
+            ''',
+        )
+        not_callable = self._write_tools_file(
+            "not_callable_get_tools.py",
+            "get_tools = 42\n",
+        )
+        raising_get_tools = self._write_tools_file(
+            "raising_get_tools.py",
+            '''
+            def get_tools():
+                """Raise instead of returning tools."""
+                raise RuntimeError("boom in get_tools")
+            ''',
+        )
+        bad_return = self._write_tools_file(
+            "bad_return_get_tools.py",
+            '''
+            def get_tools():
+                """Return a non-sequence."""
+                return "not a list"
+            ''',
+        )
+        non_callable_entry = self._write_tools_file(
+            "non_callable_entry_get_tools.py",
+            '''
+            def get_tools():
+                """Return a list with a non-callable entry."""
+                return [42]
             ''',
         )
         seen: dict[str, Any] = {}
-        self._run_with_tools_file(tools_path, seen)
-        assert seen["tool_lists"][-1] == ["good"]
-        (good,) = seen["tools"]
-        assert good(x="hi") == "hi"
 
-    def test_sys_exit_in_tools_file_is_contained(self) -> None:
-        """A tools file calling ``sys.exit()`` cannot kill the task.
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            seen.setdefault("tool_lists", []).append(
+                [t.__name__ for t in kwargs.get("tools") or []],
+            )
+            raise AssertionError("agent must not run with a broken tools file")
+
+        self._parent_class.run = stub_run
+        for tools_file, diagnostic in (
+            (no_get_tools, "must define a top-level get_tools()"),
+            (not_callable, "must define a top-level get_tools()"),
+            (raising_get_tools, "RuntimeError: boom in get_tools"),
+            (bad_return, "must return a list or tuple"),
+            (non_callable_entry, "non-callable entry"),
+        ):
+            result_event = self._raw_daemon_run(tools_file)
+            assert result_event is not None, f"no result for {tools_file!r}"
+            assert result_event["success"] is False, f"for {tools_file!r}"
+            assert "ToolsFileError" in result_event["text"], f"for {tools_file!r}"
+            assert diagnostic in result_event["text"], f"for {tools_file!r}"
+        assert "tool_lists" not in seen
+
+    def test_sys_exit_in_tools_file_fails_task_with_diagnostic(self) -> None:
+        """A tools file calling ``sys.exit()`` fails the task loudly.
 
         ``SystemExit`` is not an ``Exception`` subclass; the loader
-        must contain it (mirroring ``KISSAgent._execute_tool``) so the
-        task still runs — with no extra tools.
+        must convert it into ``ToolsFileError`` (letting it escape
+        unwrapped would kill the task thread) so the task stops with a
+        diagnostic result instead of silently running without the
+        requested tools — and without ever invoking the agent.
         """
         tools_path = self._write_tools_file(
             "exiting_tools.py",
@@ -747,16 +787,37 @@ class SorcarRunApiTest(unittest.TestCase):
             ''',
         )
         seen: dict[str, Any] = {}
-        self._run_with_tools_file(tools_path, seen)
-        assert seen["tool_lists"] == [[]]
 
-    def test_malformed_tools_file_ignored_by_daemon(self) -> None:
-        """A malformed ``toolsFile`` field never kills the task thread.
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            seen.setdefault("tool_lists", []).append(
+                [t.__name__ for t in kwargs.get("tools") or []],
+            )
+            raise AssertionError("agent must not run with a broken tools file")
+
+        self._parent_class.run = stub_run
+        result = sorcar.run(
+            "use the broken tools file",
+            work_dir=self.repo,
+            tools=tools_path,
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert result.success is False
+        assert "ToolsFileError" in result.text
+        assert "SystemExit" in result.text
+        assert tools_path in result.text
+        assert "tool_lists" not in seen
+
+    def test_broken_tools_file_stops_task_with_diagnostic(self) -> None:
+        """A broken ``toolsFile`` fails the task with a diagnostic error.
 
         A hand-crafted client can send anything: a non-string value, a
         missing path, a directory, a non-``.py`` file, a module that
         raises at import time, or one with a syntax error.  The daemon
-        must log, run the task with NO extra tools, and stay alive.
+        must stop the task with a failed result whose text carries the
+        loader's diagnostic — never invoke the agent — and stay alive
+        for later tasks.  An absent tools file (``None``) still runs
+        the task normally with no extra tools.
         """
         raising = self._write_tools_file(
             "raising_tools.py",
@@ -781,17 +842,24 @@ class SorcarRunApiTest(unittest.TestCase):
             return raw
 
         self._parent_class.run = stub_run
-        for tools_file in (
-            42,
-            str(Path(self.tmpdir) / "nowhere.py"),
-            self.tmpdir,
-            not_py,
-            raising,
-            broken,
-            None,
+        for tools_file, diagnostic in (
+            (42, "path string"),
+            (str(Path(self.tmpdir) / "nowhere.py"), "not an existing"),
+            (self.tmpdir, "not an existing"),
+            (not_py, "not an existing"),
+            (raising, "RuntimeError: boom at import"),
+            (broken, "SyntaxError"),
         ):
-            self._raw_daemon_run(tools_file)
-        assert seen["tool_lists"] == [[]] * 7
+            result_event = self._raw_daemon_run(tools_file)
+            assert result_event is not None, f"no result for {tools_file!r}"
+            assert result_event["success"] is False, f"for {tools_file!r}"
+            assert "ToolsFileError" in result_event["text"], f"for {tools_file!r}"
+            assert diagnostic in result_event["text"], f"for {tools_file!r}"
+        assert "tool_lists" not in seen
+        result_event = self._raw_daemon_run(None)
+        assert result_event is not None
+        assert result_event["success"] is True
+        assert seen["tool_lists"] == [[]]
         result = sorcar.run(
             "still alive?",
             work_dir=self.repo,
@@ -904,6 +972,251 @@ class SorcarRunApiTest(unittest.TestCase):
         ), "malformed modelConfig must not reach the agent"
         assert seen["model_config"] != "junk"
         assert seen["web_tools"] is True, "config default web tools apply"
+
+    def test_custom_system_prompt_replaces_default(self) -> None:
+        """A non-empty ``system_prompt`` replaces the SYSTEM.md prompt.
+
+        The custom prompt must become the BASE of the composed system
+        instructions the agent runs with (the default ``SYSTEM_PROMPT``
+        must not appear anywhere in them), and it must be stored on the
+        agent so the ``run_parallel`` fan-out forwards it to
+        sub-agents.
+        """
+        from kiss.core.base import SYSTEM_PROMPT
+
+        custom = (
+            "You are a terse haiku-only assistant.\n"
+            "Answer every request with a single haiku."
+        )
+        seen: dict[str, Any] = {}
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            seen["system_prompt"] = kwargs.get("system_prompt")
+            seen["base_system_prompt"] = getattr(
+                self_agent, "_base_system_prompt", None,
+            )
+            raw = "success: true\nis_continue: false\nsummary: ok\n"
+            printer = kwargs.get("printer")
+            if printer is not None:
+                printer.print(
+                    raw, type="result", step_count=1,
+                    total_tokens=1, cost="$0.0001",
+                )
+            return raw
+
+        self._parent_class.run = stub_run
+        result = sorcar.run(
+            "say hi",
+            work_dir=self.repo,
+            sock_path=self.sock_path,
+            timeout=60,
+            system_prompt=custom,
+        )
+        assert result.success is True
+        composed = seen["system_prompt"]
+        assert isinstance(composed, str)
+        assert composed.startswith(custom), (
+            "custom system prompt must be the base of the composed "
+            "system instructions"
+        )
+        assert SYSTEM_PROMPT not in composed, (
+            "the default SYSTEM.md prompt must be replaced, not kept"
+        )
+        assert seen["base_system_prompt"] == custom, (
+            "the override must be stored on the agent for sub-agent "
+            "fan-out"
+        )
+
+    def test_empty_system_prompt_runs_as_usual(self) -> None:
+        """An empty ``system_prompt`` keeps the default SYSTEM.md prompt."""
+        from kiss.core.base import SYSTEM_PROMPT
+
+        seen: dict[str, Any] = {}
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            seen["system_prompt"] = kwargs.get("system_prompt")
+            seen["base_system_prompt"] = getattr(
+                self_agent, "_base_system_prompt", None,
+            )
+            raw = "success: true\nis_continue: false\nsummary: ok\n"
+            printer = kwargs.get("printer")
+            if printer is not None:
+                printer.print(
+                    raw, type="result", step_count=1,
+                    total_tokens=1, cost="$0.0001",
+                )
+            return raw
+
+        self._parent_class.run = stub_run
+        result = sorcar.run(
+            "say hi",
+            work_dir=self.repo,
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert result.success is True
+        composed = seen["system_prompt"]
+        assert isinstance(composed, str)
+        assert composed.startswith(SYSTEM_PROMPT)
+        assert seen["base_system_prompt"] == ""
+
+    def test_malformed_or_blank_system_prompt_uses_default(self) -> None:
+        """Non-string or whitespace-only ``systemPrompt`` wire fields
+        fall back to the default system prompt instead of crashing."""
+        from kiss.core.base import SYSTEM_PROMPT
+
+        for bad in (42, ["x"], {"a": 1}, None, "   \n\t"):
+            seen: dict[str, Any] = {}
+
+            def stub_run(self_agent: Any, **kwargs: Any) -> str:
+                seen["system_prompt"] = kwargs.get("system_prompt")
+                return "success: true\nis_continue: false\nsummary: ok\n"
+
+            self._parent_class.run = stub_run
+            self._raw_daemon_run(None, extra_cmd={"systemPrompt": bad})
+            composed = seen.get("system_prompt")
+            assert isinstance(composed, str), (
+                f"task must still run for systemPrompt={bad!r}"
+            )
+            assert composed.startswith(SYSTEM_PROMPT), (
+                f"systemPrompt={bad!r} must fall back to the default"
+            )
+
+    def test_custom_system_prompt_shown_in_early_panel(self) -> None:
+        """The early ``system_prompt`` UI event shows the override text."""
+        custom = "Custom base prompt for the early panel."
+        events: list[dict[str, Any]] = []
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            return "success: true\nis_continue: false\nsummary: ok\n"
+
+        self._parent_class.run = stub_run
+        self._raw_daemon_run(
+            None,
+            extra_cmd={"systemPrompt": custom},
+            events_out=events,
+        )
+        early = [
+            e for e in events
+            if e.get("type") == "system_prompt" and e.get("early")
+        ]
+        assert early, "an early system_prompt event must be broadcast"
+        assert early[0].get("text", "").startswith(custom), (
+            "the early panel must show the caller-supplied system prompt"
+        )
+
+    def test_custom_system_prompt_reaches_subagents(self) -> None:
+        """The fan-out engine passes the override to every sub-agent.
+
+        Covers both halves of the sub-agent wiring: the engine's
+        ``base_system_prompt`` parameter (called directly) and the
+        parent-agent forwarding of its stored ``_base_system_prompt``
+        (``SorcarAgent._run_tasks_parallel``).
+        """
+        import threading as _threading
+
+        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+        from kiss.agents.sorcar.sorcar_agent import run_tasks_parallel
+        from kiss.core.base import SYSTEM_PROMPT
+
+        custom = "You are a security-review sub-agent. Be paranoid."
+        lock = _threading.Lock()
+        composed_prompts: list[str] = []
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            with lock:
+                composed_prompts.append(str(kwargs.get("system_prompt")))
+            return "success: true\nis_continue: false\nsummary: ok\n"
+
+        self._parent_class.run = stub_run
+
+        # Half 1: the engine parameter, as forwarded by a parent.
+        results = run_tasks_parallel(
+            ["child task one", "child task two"],
+            work_dir=self.repo,
+            base_system_prompt=custom,
+        )
+        assert len(results) == 2
+        assert len(composed_prompts) == 2
+        for composed in composed_prompts:
+            assert composed.startswith(custom)
+            assert SYSTEM_PROMPT not in composed
+
+        # Half 2: a parent agent that ran with the override stores it
+        # and forwards it through its own fan-out.
+        composed_prompts.clear()
+        parent = ChatSorcarAgent("system-prompt-parent")
+        parent._base_system_prompt = custom
+        results = parent._run_tasks_parallel(["nested child task"])
+        assert len(results) == 1
+        assert len(composed_prompts) == 1
+        assert composed_prompts[0].startswith(custom)
+        assert SYSTEM_PROMPT not in composed_prompts[0]
+
+        # A parent WITHOUT an override spawns default-prompt children.
+        composed_prompts.clear()
+        plain_parent = ChatSorcarAgent("default-prompt-parent")
+        plain_parent._run_tasks_parallel(["plain child task"])
+        assert len(composed_prompts) == 1
+        assert composed_prompts[0].startswith(SYSTEM_PROMPT)
+
+    def test_api_tab_state_disposed_after_run(self) -> None:
+        """``run()`` explicitly closes its synthetic tab; no state leaks.
+
+        A client disconnect no longer tears tabs down (tabs are global
+        state shared by every client), so the API client itself sends
+        the daemon a ``closeTab`` for its ``api-…`` tab on exit.
+        Without it the ``server_owned`` ``AgentState`` and per-tab chat
+        view of every ``run()`` call would accumulate in the daemon
+        forever, one leaked entry per fresh ``api-{uuid}`` tab.
+        """
+        import time as _time
+
+        def stub_run(self_agent: Any, **kwargs: Any) -> str:
+            self_agent.total_tokens_used = 1
+            self_agent.budget_used = 0.0
+            self_agent.total_steps = 1
+            raw = "success: true\nis_continue: false\nsummary: ok\n"
+            printer = kwargs.get("printer") or getattr(
+                self_agent, "printer", None,
+            )
+            if printer is not None:
+                printer.print(raw, type="result", step_count=1)
+            return raw
+
+        self._parent_class.run = stub_run
+        result = sorcar.run(
+            "say hi",
+            work_dir=self.repo,
+            sock_path=self.sock_path,
+            timeout=60,
+        )
+        assert result.success is True
+
+        from kiss.server import agent_state
+
+        # The closeTab is dispatched asynchronously after run() returns.
+        api_states: list[Any] = []
+        api_views: list[str] = []
+        deadline = _time.monotonic() + 10.0
+        while _time.monotonic() < deadline:
+            api_states = [
+                state for state in agent_state.snapshot()
+                if state.tab_id.startswith("api-")
+            ]
+            with self.server._vscode_server._state_lock:
+                api_views = [
+                    tab for tab in self.server._vscode_server._tab_chat_views
+                    if tab.startswith("api-")
+                ]
+            if not api_states and not api_views:
+                break
+            _time.sleep(0.05)
+        assert api_states == [], (
+            "api tab AgentState leaked after run(): the client must "
+            "send an explicit closeTab on exit"
+        )
+        assert api_views == [], "api tab chat view leaked after run()"
 
     def test_no_daemon_raises_connection_error(self) -> None:
         """A missing daemon socket raises a helpful ConnectionError."""

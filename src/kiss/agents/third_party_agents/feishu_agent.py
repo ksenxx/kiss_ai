@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Feishu/Lark Agent — SorcarAgent extension with Feishu Open Platform tools.
+"""Feishu/Lark Agent — channel agent with Feishu Open Platform tools.
 
 Provides authenticated access to Feishu/Lark via app_id and app_secret.
 Stores config in ``~/.kiss/third_party_agents/feishu/config.json``.
@@ -17,12 +17,9 @@ from __future__ import annotations
 
 import json
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -124,38 +121,19 @@ class FeishuChannelBackend(ToolMethodBackend):
         body = (
             CreateMessageRequestBody.builder()
             .receive_id(channel_id)
-            .receive_id_type("chat_id")
             .msg_type("text")
             .content(json.dumps({"text": text}))
             .build()
         )
-        req = CreateMessageRequest.builder().request_body(body).build()
+        req = (
+            CreateMessageRequest.builder()
+            .receive_id_type("chat_id")
+            .request_body(body)
+            .build()
+        )
         resp = self._client.im.v1.message.create(req)
         if not resp.success():
             raise RuntimeError(resp.msg)
-
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Poll for a reply from a specific user."""
-        oldest = str(int(time.time() * 1000))
-
-        def poll() -> list[dict[str, Any]]:
-            nonlocal oldest
-            msgs, oldest = self.poll_messages(channel_id, oldest)
-            return msgs
-
-        return wait_for_matching_message(
-            poll=poll,
-            matches=lambda msg: msg.get("user") == user_id,
-            extract_text=lambda msg: str(msg.get("text", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=3.0,
-        )
 
     def send_text_message(
         self, receive_id: str, text: str, receive_id_type: str = "chat_id"
@@ -178,12 +156,16 @@ class FeishuChannelBackend(ToolMethodBackend):
             body = (
                 CreateMessageRequestBody.builder()
                 .receive_id(receive_id)
-                .receive_id_type(receive_id_type)
                 .msg_type("text")
                 .content(json.dumps({"text": text}))
                 .build()
             )
-            req = CreateMessageRequest.builder().request_body(body).build()
+            req = (
+                CreateMessageRequest.builder()
+                .receive_id_type(receive_id_type)
+                .request_body(body)
+                .build()
+            )
             resp = self._client.im.v1.message.create(req)
             if not resp.success():  # pragma: no branch
                 return json.dumps({"ok": False, "error": resp.msg})
@@ -387,8 +369,8 @@ class FeishuChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class FeishuAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with Feishu/Lark Open Platform tools."""
+class FeishuAgent(BaseChannelAgent):
+    """Channel agent with Feishu/Lark Open Platform tools."""
 
     def __init__(self) -> None:
         super().__init__("Feishu Agent")
@@ -502,6 +484,17 @@ def main() -> None:
         channel_name="Feishu",
         make_backend=_make_backend,
     )
+
+
+def get_tools() -> list:
+    """Return the Feishu/Lark channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return FeishuAgent()._get_tools()
 
 
 if __name__ == "__main__":

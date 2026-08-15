@@ -12,23 +12,9 @@ from typing import Any, cast
 
 from kiss.agents.third_party_agents.irc_agent import IRCChannelBackend
 from kiss.agents.third_party_agents.line_agent import LineChannelBackend
-from kiss.agents.third_party_agents.slack_agent import SlackChannelBackend
 from kiss.agents.third_party_agents.synology_chat_agent import SynologyChatChannelBackend
 from kiss.agents.third_party_agents.whatsapp_agent import WhatsAppChannelBackend
 from kiss.agents.third_party_agents.zalo_agent import ZaloChannelBackend
-
-
-class _FakeSlackClient:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def conversations_replies(self, *, channel: str, ts: str, limit: int) -> dict:
-        self.calls += 1
-        if self.calls == 1:
-            return {"messages": [{"ts": "1", "user": "other", "text": "old"}]}
-        if self.calls == 2:
-            return {"messages": [{"ts": "1", "user": "other", "text": "old"}]}
-        return {"messages": [{"ts": "2", "user": "u1", "text": "reply"}]}
 
 
 class _FakeSocket:
@@ -48,18 +34,6 @@ class _FakeSocket:
 
     def close(self) -> None:
         self.closed = True
-
-
-def test_slack_wait_for_reply_honors_timeout() -> None:
-    backend = SlackChannelBackend()
-    backend._client = cast(Any, _FakeSlackClient())
-    assert backend.wait_for_reply("c", "t", "missing", timeout_seconds=0.01) is None
-
-
-def test_slack_wait_for_reply_returns_new_matching_message() -> None:
-    backend = SlackChannelBackend()
-    backend._client = cast(Any, _FakeSlackClient())
-    assert backend.wait_for_reply("c", "t", "u1", timeout_seconds=0.1) == "reply"
 
 
 def _free_port() -> int:

@@ -52,7 +52,7 @@ class TestTokenizer:
         with pytest.raises(ValueError, match="unexpected character"):
             tokenize("6 * 7")
         with pytest.raises(ValueError, match="unexpected character"):
-            tokenize("8 / 2")
+            tokenize("8/2")
 
 
 class TestEvaluator:
@@ -62,8 +62,12 @@ class TestEvaluator:
     def test_subtraction(self):
         assert evaluate("10 - 4") == 6
 
+    def test_left_associativity(self):
+        assert evaluate("10 - 4 - 3") == 3
+
     def test_chained_operations(self):
         assert evaluate("1 + 2 + 3 + 4") == 10
+        assert evaluate("20 - 5 - 5 - 5") == 5
 
     def test_parentheses(self):
         assert evaluate("2 - (3 + 4)") == -5
@@ -115,11 +119,12 @@ class TestCLI:
         captured = capsys.readouterr()
         assert "Error" in captured.err
 
-    def test_removed_operator(self, capsys):
-        ret = main(["8 / 2"])
-        assert ret == 1
-        captured = capsys.readouterr()
-        assert "Error" in captured.err
+    def test_removed_operators_rejected(self, capsys):
+        for expr in ("6 * 7", "8 / 2"):
+            ret = main([expr])
+            assert ret == 1
+            captured = capsys.readouterr()
+            assert "Error" in captured.err
 
     def test_subprocess_integration(self):
         result = subprocess.run(

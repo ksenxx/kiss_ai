@@ -43,7 +43,7 @@ from typing import Any
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 
 
@@ -156,8 +156,7 @@ class TestNewTabStaleTaskId:
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect(self.tmpdir)
         self.srv, self.url = _start_server()
-        _RunningAgentState.running_agent_states.clear()
-        ChatSorcarAgent.running_agents.clear()
+        agent_state.agent_states.clear()
 
     def teardown_method(self) -> None:
         self.srv.shutdown()
@@ -166,8 +165,7 @@ class TestNewTabStaleTaskId:
             th._db_conn = None
         _restore(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
-        _RunningAgentState.running_agent_states.clear()
-        ChatSorcarAgent.running_agents.clear()
+        agent_state.agent_states.clear()
 
     def test_new_tab_taskid_matches_subagent_not_previous(self) -> None:
         """Each ``new_tab`` event's injected ``taskId`` must be its own task id.

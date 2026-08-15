@@ -27,7 +27,7 @@ I optimized SQLite 3. The optimized build achieves a verified geometric-mean spe
 
 All 1,032,940 cases in the full SQLite test suite pass, and every benchmark run produces checksum-verified identical results. For context: the SQLite team has spent nearly 20 years tuning this code; their own measurements show ~3.5x total CPU improvement since 2008, earned a few percent at a time. Tested so far on standard Linux provided by GCP.
 
-An agent called KISS Sorcar did it in under 8 hours for under $150 in API cost. I wrote no code: 3 short prompts plus a couple of steering prompts.
+An agent called KISS Sorcar did it in under 8 hours for under $150 in API cost. I wrote no code: 1 main short prompts plus a couple of steering prompts.
 
 Why I trust the results:
 
@@ -37,4 +37,7 @@ Why I trust the results:
 
 1. Security hardening and independent review. Two hardening rounds with kimi-k3 as the model: in-tree fuzzers (fuzzcheck over all 8 corpora, sessionfuzz) came back clean; 14 hostile-WAL corruption scenarios - no crashes; OOM injection and page-size sweeps; one real bug found and fixed.
 
-1.59x is what an agent can honestly find in one of the most heavily optimized codebases in the world - in an afternoon.
+1.59x is what an agent can honestly find in one of the most heavily optimized codebases in the world overnight.
+
+Optimized SQLite Repository: https://github.com/ksenxx/sqlite-optimized/
+Blog: https://kisssorcar.github.io/blog/sqlite-optimization-blog.html

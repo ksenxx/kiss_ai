@@ -48,6 +48,9 @@ class _FakeStdout:
         self._pos = len(self._lines)
         return rest
 
+    def close(self) -> None:
+        pass
+
 
 def _build_fake_popen_class(events: list[dict[str, Any]]) -> type:
     stream_data = "\n".join(json.dumps(e) for e in events) + "\n"
@@ -103,6 +106,12 @@ class TestAgenticCost:
         )
         events = [
             {"type": "stream_event", "event": {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"input_tokens": 10000, "output_tokens": 500,
+                          "cache_read_input_tokens": 0},
+            }},
+            {"type": "stream_event", "event": {
                 "type": "content_block_start",
                 "content_block": {"type": "text", "text": ""},
             }},
@@ -116,7 +125,7 @@ class TestAgenticCost:
             }},
             {"type": "stream_event", "event": {"type": "content_block_stop"}},
             {"type": "result", "result": tool_json + "\n\n(no output)",
-             "usage": {"input_tokens": 10000, "output_tokens": 500,
+             "usage": {"input_tokens": 999999, "output_tokens": 999999,
                        "cache_read_input_tokens": 0}},
         ]
 
@@ -153,6 +162,22 @@ class TestAgenticCost:
         )
         events = [
             {"type": "stream_event", "event": {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use"},
+                "usage": {"input_tokens": 30000, "output_tokens": 1500,
+                          "cache_read_input_tokens": 4000,
+                          "cache_creation": {"ephemeral_5m_input_tokens": 3000,
+                                             "ephemeral_1h_input_tokens": 2000}},
+            }},
+            {"type": "stream_event", "event": {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"input_tokens": 20000, "output_tokens": 500,
+                          "cache_read_input_tokens": 6000,
+                          "cache_creation": {"ephemeral_5m_input_tokens": 2000,
+                                             "ephemeral_1h_input_tokens": 0}},
+            }},
+            {"type": "stream_event", "event": {
                 "type": "content_block_start",
                 "content_block": {"type": "text", "text": ""},
             }},
@@ -167,10 +192,10 @@ class TestAgenticCost:
             }},
             {"type": "stream_event", "event": {"type": "content_block_stop"}},
             {"type": "result", "result": "...",
-             "usage": {"input_tokens": 50000, "output_tokens": 2000,
-                       "cache_read_input_tokens": 10000,
-                       "cache_creation": {"ephemeral_5m_input_tokens": 5000,
-                                          "ephemeral_1h_input_tokens": 2000}}},
+             "usage": {"input_tokens": 999999, "output_tokens": 999999,
+                       "cache_read_input_tokens": 999999,
+                       "cache_creation": {"ephemeral_5m_input_tokens": 999999,
+                                          "ephemeral_1h_input_tokens": 999999}}},
         ]
 
         _, _, response, m = _run_with_events(events)

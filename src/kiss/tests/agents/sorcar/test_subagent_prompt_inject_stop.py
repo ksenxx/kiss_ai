@@ -23,12 +23,13 @@ Reproduces two user-reported bugs:
 
 The tests replicate the exact production wiring: real
 :class:`ChatSorcarAgent` instances, real ``task_history`` rows
-allocated via ``_add_task``, real :class:`_RunningAgentState`
-registrations mirroring ``ChatSorcarAgent._run_tasks_parallel``'s
-``_run_single`` (synthetic ``task-{parent}__sub_{idx}`` tab ids,
-``_SubagentStopEvent`` chained to the parent's), a real
-:class:`WebPrinter` and a real :class:`VSCodeServer` dispatching the
-same commands the webview posts.  No mocks, patches, or test doubles.
+allocated via ``_add_task``, real task-keyed
+:class:`kiss.server.agent_state.AgentState` registrations mirroring
+``ChatSorcarAgent._run_tasks_parallel``'s ``_run_single`` (synthetic
+``task-{parent}__sub_{idx}`` tab ids, ``_SubagentStopEvent`` chained
+to the parent's), a real :class:`WebPrinter` and a real
+:class:`VSCodeServer` dispatching the same commands the webview
+posts.  No mocks, patches, or test doubles.
 """
 
 from __future__ import annotations
@@ -41,10 +42,11 @@ from typing import Any
 import pytest
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent, _SubagentStopEvent
+from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _add_task
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.agents.sorcar.sorcar_agent import _SubagentStopEvent
 from kiss.core.models.anthropic_model import AnthropicModel
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 from kiss.server.web_server import WebPrinter
 
@@ -59,6 +61,7 @@ def isolated_db(tmp_path: Path):
     th._DB_PATH = kiss_dir / "sorcar.db"
     th._db_conn = None
     yield
+    agent_state.agent_states.clear()
     th._DB_PATH, th._db_conn, th._KISS_DIR = saved
 
 
@@ -74,15 +77,16 @@ class _Harness:
         self.parent._last_task_id = parent_task_id
         self.parent._chat_id = chat_id
         self.parent_stop = threading.Event()
-        self.parent_state = _RunningAgentState(
-            "tab-parent",
-            "test-model",
+        self.parent_state = agent_state.AgentState(
+            str(parent_task_id),
             agent=self.parent,  # type: ignore[arg-type]
             chat_id=chat_id,
-            is_task_active=True,
+            tab_id="tab-parent",
+            server_owned=True,
             stop_event=self.parent_stop,
+            is_task_active=True,
         )
-        _RunningAgentState.register("tab-parent", self.parent_state)
+        agent_state.register(self.parent_state)
         self.printer.subscribe_tab(parent_task_id, "tab-parent")
 
         self.sub = ChatSorcarAgent("Parallel-sub")
@@ -98,23 +102,18 @@ class _Harness:
         self.sub_tab_id = f"task-{parent_task_id}__sub_0"
         self.sub._tab_id = self.sub_tab_id  # type: ignore[attr-defined]
         self.sub_stop = _SubagentStopEvent(self.parent_stop)
-        self.sub_state = _RunningAgentState(
-            self.sub_tab_id,
-            "test-model",
+        self.sub_state = agent_state.AgentState(
+            self.sub_task_id,
             agent=self.sub,  # type: ignore[arg-type]
             chat_id=chat_id,
-            is_subagent=True,
+            tab_id=self.sub_tab_id,
             parent_task_id=str(parent_task_id),
-            is_task_active=True,
             stop_event=self.sub_stop,
+            is_task_active=True,
         )
-        _RunningAgentState.register(self.sub_tab_id, self.sub_state)
+        agent_state.register(self.sub_state)
 
-        for key, agent in (
-            (self.parent_task_id, self.parent),
-            (self.sub_task_id, self.sub),
-        ):
-            self.printer._persist_agents[key] = agent
+        for key in (self.parent_task_id, self.sub_task_id):
             self.printer._thread_local.task_id = key
             self.printer.start_recording()
         self.printer._thread_local.task_id = ""
@@ -283,33 +282,6 @@ class TestSubagentPromptInjection:
         })
         assert h.sub_state.pending_user_messages == []
         assert h.recording(h.sub_task_id) == []
-
-    def test_drain_without_printer_drops_deferred_echo_silently(
-        self, isolated_db,
-    ) -> None:
-        """A printer-less agent drains deferred echoes without crashing."""
-        h = _Harness()
-        h.parent._last_task_id = None
-        h.server._handle_command({
-            "type": "appendUserMessage",
-            "prompt": "SILENT DEFER",
-            "tabId": "tab-parent",
-        })
-        assert h.parent_state.unattributed_prompt_echoes == ["SILENT DEFER"]
-        h.parent._last_task_id = h.parent_task_id
-        h.parent.printer = None
-        h.parent._tab_id = "tab-parent"  # type: ignore[attr-defined]
-        model = AnthropicModel(
-            "claude-haiku-4-5",
-            os.environ.get("ANTHROPIC_API_KEY", "test-key"),
-        )
-        h.parent._drain_pending_user_messages(model)
-        assert [
-            m for m in model.conversation
-            if m.get("role") == "user" and "SILENT DEFER" in str(m.get("content"))
-        ]
-        assert h.parent_state.unattributed_prompt_echoes == []
-        assert h.recording(h.parent_task_id) == []
 
     def test_drain_with_attributed_prompt_emits_no_duplicate_echo(
         self, isolated_db,
@@ -644,17 +616,16 @@ class TestSubagentStop:
         sib_tab_id = f"task-{h.parent_task_id}__sub_1"
         sib._tab_id = sib_tab_id  # type: ignore[attr-defined]
         sib_stop = _SubagentStopEvent(h.parent_stop)
-        sib_state = _RunningAgentState(
-            sib_tab_id,
-            "test-model",
+        sib_state = agent_state.AgentState(
+            str(sib_task_id),
             agent=sib,  # type: ignore[arg-type]
             chat_id=h.parent._chat_id,
-            is_subagent=True,
+            tab_id=sib_tab_id,
             parent_task_id=h.parent_task_id,
-            is_task_active=True,
             stop_event=sib_stop,
+            is_task_active=True,
         )
-        _RunningAgentState.register(sib_tab_id, sib_state)
+        agent_state.register(sib_state)
         h.printer.subscribe_tab(sib_task_id, "tab-sib-viewer")
 
         h.server._handle_command({"type": "stop", "tabId": "tab-sib-viewer"})

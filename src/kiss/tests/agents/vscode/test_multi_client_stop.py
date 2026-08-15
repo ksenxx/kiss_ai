@@ -5,15 +5,15 @@
 """Integration test: stop button from a subscriber (multi-viewer) tab.
 
 When a second browser/client opens a running task from history,
-``_replay_session`` subscribes the new tab to the source tab's event
-stream via ``printer.subscribe_tab(source_tab_id, viewer_tab_id)``.
+``_replay_session`` subscribes the new tab to the running task's event
+stream via ``printer.subscribe_tab(task_id, viewer_tab_id)``.
 
 If the viewer tab clicks "Stop", ``_stop_task(viewer_tab_id)`` must
-resolve through the subscriber mapping to find the source tab's
-``stop_event`` and ``task_thread``, set the event, and force-stop the
-thread — otherwise the stop is silently ignored (the viewer's own
-``_RunningAgentState`` has ``stop_event=None`` / ``task_thread=None``)
-and the result panel is never shown to the viewer.
+resolve through the printer's per-task subscriber mapping to find the
+task's ``stop_event`` and ``task_thread``, set the event, and
+force-stop the thread — otherwise the stop is silently ignored (the
+viewer tab owns no running ``AgentState``) and the result panel is
+never shown to the viewer.
 """
 
 from __future__ import annotations
@@ -25,8 +25,8 @@ import time
 import unittest
 from typing import Any
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
 
 
 def _make_server() -> Any:
@@ -36,16 +36,75 @@ def _make_server() -> Any:
     return VSCodeServer()
 
 
+def _start_source_task(
+    server: Any,
+    task_id: str,
+    tab_id: str,
+    *,
+    tokens: int,
+    cost: float,
+    steps: int,
+) -> tuple[agent_state.AgentState, threading.Thread, threading.Event]:
+    """Register a server-owned state and run a blocking task on it.
+
+    The agent's ``run`` is a deterministic stub that reports the given
+    token/cost/step figures, then blocks until the state's
+    ``stop_event`` is set and raises ``KeyboardInterrupt`` — the same
+    observable behavior as a real agent interrupted by Stop.
+
+    Returns the registered state, the started task thread, and an
+    event set once the stubbed run is executing.
+    """
+    agent = WorktreeSorcarAgent("Sorcar VS Code")
+    state = agent_state.AgentState(
+        task_id,
+        agent=agent,
+        tab_id=tab_id,
+        server_owned=True,
+        stop_event=threading.Event(),
+    )
+    state.user_answer_queue = queue.Queue()
+    stop_event = state.stop_event
+    assert stop_event is not None
+    task_started = threading.Event()
+
+    def blocking_run(**kwargs: Any) -> None:
+        agent.total_tokens_used = tokens
+        agent.budget_used = cost
+        agent.step_count = steps
+        task_started.set()
+        while not stop_event.is_set():
+            time.sleep(0.01)
+        raise KeyboardInterrupt("Stopped by user")
+
+    agent.run = blocking_run  # type: ignore[assignment]
+    agent_state.register(state)
+
+    task_thread = threading.Thread(
+        target=server._run_task,
+        args=({"type": "run", "prompt": "long task", "tabId": tab_id},),
+        daemon=True,
+    )
+    state.task_thread = task_thread
+    task_thread.start()
+    return state, task_thread, task_started
+
+
 class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
-    """Clicking Stop on a subscriber tab must stop the source tab's task."""
+    """Clicking Stop on a subscriber tab must stop the source task."""
+
+    def tearDown(self) -> None:
+        agent_state.agent_states.clear()
 
     def test_stop_from_viewer_tab_stops_source_task(self) -> None:
         """A subscriber tab's stop command must reach the source task.
 
         Setup:
-          - source_tab runs a task (has stop_event, task_thread)
-          - viewer_tab is subscribed to source_tab via printer.subscribe_tab
-          - viewer_tab has its own _RunningAgentState but no stop_event
+          - a task runs on source-tab (registered AgentState with
+            stop_event and task_thread)
+          - viewer-tab is subscribed to the task via
+            printer.subscribe_tab(task_id, viewer_tab_id) and owns no
+            state of its own
 
         Action:
           - _stop_task(viewer_tab_id) is called
@@ -69,44 +128,19 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
 
         server.printer.broadcast = capture  # type: ignore[assignment]
 
+        task_id = "mcs-task-1"
         source_tab_id = "source-tab"
         viewer_tab_id = "viewer-tab"
 
-        source_tab = server._get_tab(source_tab_id)
-        source_tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-
-        task_started = threading.Event()
-
-        def blocking_run(**kwargs: Any) -> None:
-            source_tab.agent.total_tokens_used = 999
-            source_tab.agent.budget_used = 0.03
-            source_tab.agent.step_count = 5
-            task_started.set()
-            while not source_tab.stop_event.is_set():
-                time.sleep(0.01)
-            raise KeyboardInterrupt("Stopped by user")
-
-        source_tab.agent.run = blocking_run  # type: ignore[assignment]
-
-        source_tab.stop_event = threading.Event()
-        source_tab.user_answer_queue = queue.Queue()
-
-        task_thread = threading.Thread(
-            target=server._run_task,
-            args=({"type": "run", "prompt": "long task", "tabId": source_tab_id},),
-            daemon=True,
+        _state, task_thread, task_started = _start_source_task(
+            server, task_id, source_tab_id, tokens=999, cost=0.03, steps=5,
         )
-        source_tab.task_thread = task_thread
-        task_thread.start()
-
         assert task_started.wait(timeout=5), "Task did not start in time"
 
-        viewer_tab = server._get_tab(viewer_tab_id)
-        assert viewer_tab.stop_event is None
-        assert viewer_tab.task_thread is None
+        assert agent_state.find_by_tab(viewer_tab_id) is None
 
-        server.printer.subscribe_tab(source_tab_id, source_tab_id)
-        server.printer.subscribe_tab(source_tab_id, viewer_tab_id)
+        server.printer.subscribe_tab(task_id, source_tab_id)
+        server.printer.subscribe_tab(task_id, viewer_tab_id)
 
         server._stop_task(viewer_tab_id)
 
@@ -158,39 +192,17 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
 
         server.printer.broadcast = capture  # type: ignore[assignment]
 
+        task_id = "mcs-task-2"
         source_tab_id = "src-2"
         viewer_tab_id = "view-2"
 
-        source_tab = server._get_tab(source_tab_id)
-        source_tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-
-        task_started = threading.Event()
-
-        def blocking_run(**kwargs: Any) -> None:
-            source_tab.agent.total_tokens_used = 4200
-            source_tab.agent.budget_used = 0.15
-            source_tab.agent.step_count = 12
-            task_started.set()
-            while not source_tab.stop_event.is_set():
-                time.sleep(0.01)
-            raise KeyboardInterrupt("Stopped")
-
-        source_tab.agent.run = blocking_run  # type: ignore[assignment]
-        source_tab.stop_event = threading.Event()
-        source_tab.user_answer_queue = queue.Queue()
-
-        task_thread = threading.Thread(
-            target=server._run_task,
-            args=({"type": "run", "prompt": "test", "tabId": source_tab_id},),
-            daemon=True,
+        _state, task_thread, task_started = _start_source_task(
+            server, task_id, source_tab_id, tokens=4200, cost=0.15, steps=12,
         )
-        source_tab.task_thread = task_thread
-        task_thread.start()
         assert task_started.wait(timeout=5)
 
-        server._get_tab(viewer_tab_id)
-        server.printer.subscribe_tab(source_tab_id, source_tab_id)
-        server.printer.subscribe_tab(source_tab_id, viewer_tab_id)
+        server.printer.subscribe_tab(task_id, source_tab_id)
+        server.printer.subscribe_tab(task_id, viewer_tab_id)
 
         server._stop_task(viewer_tab_id)
         task_thread.join(timeout=10)
@@ -209,32 +221,12 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
         as before — no regression from the subscriber-resolution logic."""
         server = _make_server()
 
+        task_id = "mcs-task-3"
         tab_id = "direct-tab"
-        tab = server._get_tab(tab_id)
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
 
-        task_started = threading.Event()
-
-        def blocking_run(**kwargs: Any) -> None:
-            tab.agent.total_tokens_used = 100
-            tab.agent.budget_used = 0.01
-            tab.agent.step_count = 2
-            task_started.set()
-            while not tab.stop_event.is_set():
-                time.sleep(0.01)
-            raise KeyboardInterrupt("Stopped")
-
-        tab.agent.run = blocking_run  # type: ignore[assignment]
-        tab.stop_event = threading.Event()
-        tab.user_answer_queue = queue.Queue()
-
-        task_thread = threading.Thread(
-            target=server._run_task,
-            args=({"type": "run", "prompt": "test", "tabId": tab_id},),
-            daemon=True,
+        _state, task_thread, task_started = _start_source_task(
+            server, task_id, tab_id, tokens=100, cost=0.01, steps=2,
         )
-        tab.task_thread = task_thread
-        task_thread.start()
         assert task_started.wait(timeout=5)
 
         server._stop_task(tab_id)
@@ -242,11 +234,10 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
         assert not task_thread.is_alive(), "Direct tab stop should still work"
 
     def test_stop_from_viewer_when_no_subscription_is_noop(self) -> None:
-        """If a tab with no stop_event and no subscription sends stop,
-        nothing crashes — it's a graceful no-op."""
+        """If a tab with no running state and no subscription sends
+        stop, nothing crashes — it's a graceful no-op."""
         server = _make_server()
-        orphan_tab = server._get_tab("orphan")
-        assert orphan_tab.stop_event is None
+        assert agent_state.find_by_tab("orphan") is None
 
         server._stop_task("orphan")
 
@@ -262,29 +253,23 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
         gracefully handles the orphaned state without errors.
 
         End-to-end flow:
-          - source_tab runs a task; viewer_tab subscribes via printer.
-          - Source tab's frontend is closed while task is running →
+          - a task runs on source_tab; viewer_tab subscribes via printer.
+          - Source tab's frontend is closed while the task is running →
             ``_close_tab`` marks ``frontend_closed=True`` but keeps the
-            ``_RunningAgentState`` alive so the running agent can finish
-            (per the "Closing a chat tab does NOT stop a running agent"
+            ``AgentState`` alive so the running agent can finish (per
+            the "Closing a chat tab does NOT stop a running agent"
             invariant).
           - The viewer clicks Stop → the subscriber-resolution path
-            finds the still-present source state and stops the task.
+            finds the still-registered task state and stops the task.
           - The task ends; ``_run_task``'s finally block invokes
-            ``_dispose_if_closed`` which pops the source state and
-            calls ``printer.cleanup_tab(source)`` — and the latter
-            erases the ``_subscribers[source]`` entry.
+            ``_dispose_if_closed`` which unregisters the state because
+            ``frontend_closed=True``.
           - The viewer (still open in the frontend) clicks Stop a
-            second time — now both the source ``_RunningAgentState``
-            AND the subscription entry are gone.  This MUST be a
-            graceful no-op: no KeyError, no AttributeError, no extra
-            broadcasts, no thread spawn.
-
-        This test exists because the natural "user pressed stop on
-        viewer after closing source" sequence creates the exact
-        orphan condition (subscription mapping referenced a popped
-        source) where a naive implementation would crash on attribute
-        access of the missing ``_RunningAgentState``.
+            second time — the task's ``AgentState`` is gone and the
+            lingering subscription resolves to nothing.  This MUST be
+            a graceful no-op: no KeyError, no AttributeError, no
+            thread spawn — but it is NOT silent: the tab is told its
+            click found nothing to stop.
         """
         server = _make_server()
         events: list[dict[str, Any]] = []
@@ -299,46 +284,24 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
 
         server.printer.broadcast = capture  # type: ignore[assignment]
 
+        task_id = "mcs-task-close"
         source_tab_id = "src-close"
         viewer_tab_id = "view-close"
 
-        source_tab = server._get_tab(source_tab_id)
-        source_tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-
-        task_started = threading.Event()
-
-        def blocking_run(**kwargs: Any) -> None:
-            source_tab.agent.total_tokens_used = 50
-            source_tab.agent.budget_used = 0.005
-            source_tab.agent.step_count = 1
-            task_started.set()
-            while not source_tab.stop_event.is_set():
-                time.sleep(0.01)
-            raise KeyboardInterrupt("Stopped")
-
-        source_tab.agent.run = blocking_run  # type: ignore[assignment]
-        source_tab.stop_event = threading.Event()
-        source_tab.user_answer_queue = queue.Queue()
-
-        task_thread = threading.Thread(
-            target=server._run_task,
-            args=({"type": "run", "prompt": "long task", "tabId": source_tab_id},),
-            daemon=True,
+        state, task_thread, task_started = _start_source_task(
+            server, task_id, source_tab_id, tokens=50, cost=0.005, steps=1,
         )
-        source_tab.task_thread = task_thread
-        task_thread.start()
         assert task_started.wait(timeout=5), "Task did not start in time"
 
-        server._get_tab(viewer_tab_id)
-        server.printer.subscribe_tab(source_tab_id, source_tab_id)
-        server.printer.subscribe_tab(source_tab_id, viewer_tab_id)
-        assert viewer_tab_id in server.printer._subscribers[source_tab_id]
-        assert source_tab_id in server.printer._subscribers[source_tab_id]
+        server.printer.subscribe_tab(task_id, source_tab_id)
+        server.printer.subscribe_tab(task_id, viewer_tab_id)
+        assert viewer_tab_id in server.printer._subscribers[task_id]
+        assert source_tab_id in server.printer._subscribers[task_id]
 
         server._close_tab(source_tab_id)
-        assert source_tab_id in _RunningAgentState.running_agent_states
-        assert _RunningAgentState.running_agent_states[source_tab_id].frontend_closed is True
-        assert viewer_tab_id in server.printer._subscribers[source_tab_id]
+        assert agent_state.get(task_id) is state
+        assert state.frontend_closed is True
+        assert viewer_tab_id in server.printer._subscribers[task_id]
 
         server._stop_task(viewer_tab_id)
         task_thread.join(timeout=10)
@@ -348,15 +311,12 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
         )
 
         deadline = time.time() + 5.0
-        while time.time() < deadline and source_tab_id in _RunningAgentState.running_agent_states:
+        while time.time() < deadline and agent_state.get(task_id) is not None:
             time.sleep(0.01)
-        assert source_tab_id not in _RunningAgentState.running_agent_states, (
-            "Source _RunningAgentState should be disposed after task end "
+        assert agent_state.get(task_id) is None, (
+            "Source AgentState should be disposed after task end "
             "because frontend_closed=True"
         )
-        assert source_tab_id not in server.printer._subscribers.get(
-            source_tab_id, set(),
-        ), "Source tab should be removed from its task subscriber set"
 
         events_before = len(events)
         server._stop_task(viewer_tab_id)
@@ -373,23 +333,22 @@ class TestMultiClientStopResolvesSubscriber(unittest.TestCase):
     def test_stop_with_orphan_subscription_pointing_to_missing_source(
         self,
     ) -> None:
-        """Forced-orphan test: a subscription entry points at a source
-        tab id that has no ``_RunningAgentState``.
+        """Forced-orphan test: a subscription entry points at a task id
+        that has no registered ``AgentState``.
 
-        ``_find_source_tab_for_viewer`` returns the orphan source id,
-        but the subsequent ``running_agent_states.get(source_id)``
-        returns ``None``.  ``_stop_task`` MUST treat this as a no-op
-        rather than dereferencing the missing state.
+        ``_find_viewer_task_states`` sees the subscription, but
+        ``agent_state.get(task_id)`` returns ``None``.  ``_stop_task``
+        MUST treat this as a no-op rather than dereferencing the
+        missing state.
         """
         server = _make_server()
 
         viewer_tab_id = "lonely-viewer"
-        server._get_tab(viewer_tab_id)
-        server.printer.subscribe_tab("ghost-source-id", viewer_tab_id)
+        server.printer.subscribe_tab("ghost-task-id", viewer_tab_id)
 
-        assert "ghost-source-id" not in _RunningAgentState.running_agent_states
+        assert agent_state.get("ghost-task-id") is None
         assert viewer_tab_id in server.printer._subscribers.get(
-            "ghost-source-id", set(),
+            "ghost-task-id", set(),
         )
 
         server._stop_task(viewer_tab_id)

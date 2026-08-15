@@ -4,14 +4,12 @@
 # add your name here
 """Bug-hunt 3: autocomplete must not echo-strip suffix suggestions.
 
-The ghost-text pipeline is purely local now: both call sites of
-:func:`kiss.server.helpers.clip_autocomplete_suggestion` pass a
-suggestion that is ALREADY the continuation suffix (never an LLM echo
-of the query):
-
-* ``_AutocompleteMixin._complete`` passes ``match[len(query):]`` or an
-  identifier suffix from ``_active_file_identifier_matches``;
-* ``CliCompleter._active_file_suffix`` passes ``cand[len(partial):]``.
+The ghost-text pipeline is purely local now: the call site of
+:func:`kiss.server.helpers.clip_autocomplete_suggestion`
+(``_AutocompleteMixin._complete``) passes a suggestion that is
+ALREADY the continuation suffix (never an LLM echo of the query) —
+``match[len(query):]`` or an identifier suffix from
+``_active_file_identifier_matches``.
 
 ``clip_autocomplete_suggestion`` nevertheless kept a vestigial
 "strip the query prefix if the LLM echoed it" step::
@@ -26,10 +24,8 @@ is ``qux_token`` (accepting the ghost yields ``quxqux_token``), but the
 echo-strip clipped it to ``_token`` so accepting produced the
 non-existent identifier ``qux_token``.
 
-These are end-to-end reproductions through the two real pipelines:
-
-* the daemon's UDS ``complete`` command -> ``ghost`` event, and
-* the CLI REPL's readline completer with a real file on disk.
+These are end-to-end reproductions through the real pipeline:
+the daemon's UDS ``complete`` command -> ``ghost`` event.
 """
 
 from __future__ import annotations
@@ -41,11 +37,10 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
-from unittest import IsolatedAsyncioTestCase, TestCase
+from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
 from kiss.server.web_server import RemoteAccessServer
-from kiss.ui.cli.cli_repl import CliCompleter
 
 
 def _redirect_persistence(tmpdir: str) -> tuple[Any, Any, Any]:
@@ -171,28 +166,4 @@ class TestGhostSuffixNotEchoStripped(IsolatedAsyncioTestCase):
         self.assertEqual(
             ghost.get("suggestion"), "ab.cd",
             "chain continuation beginning with the query was echo-stripped",
-        )
-
-
-class TestCliCompleterSuffixNotEchoStripped(TestCase):
-    """CLI REPL identifier completion from a real active file on disk."""
-
-    def setUp(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.saved = _redirect_persistence(self.tmpdir)
-        self.active = Path(self.tmpdir) / "active.py"
-        self.active.write_text("value = quxqux_token + 1\n")
-
-    def tearDown(self) -> None:
-        if th._db_conn is not None:
-            th._db_conn.close()
-        _restore_persistence(self.saved)
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def test_predictive_match_completes_full_identifier(self) -> None:
-        completer = CliCompleter(self.tmpdir, active_file=str(self.active))
-        matches = completer._predictive_matches("qux")
-        self.assertEqual(
-            matches, ["quxqux_token"],
-            "echo-strip corrupted the completed line",
         )

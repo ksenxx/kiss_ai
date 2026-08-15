@@ -43,6 +43,7 @@ import yaml
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import get_available_models
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 _SLOW_SETUP_S = 1.5
@@ -161,6 +162,7 @@ class TestPromptPanelsEarly(unittest.TestCase):
         self.original_run = _patch_grandparent_run()
 
     def tearDown(self) -> None:
+        agent_state.agent_states.clear()
         _unpatch_grandparent_run(self.original_run)
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -178,7 +180,9 @@ class TestPromptPanelsEarly(unittest.TestCase):
         })
 
     def _join_task(self, tab_id: str) -> None:
-        t = self.server._get_tab(tab_id).task_thread
+        state = agent_state.find_by_tab(tab_id)
+        assert state is not None
+        t = state.task_thread
         assert t is not None
         t.join(timeout=60)
         assert not t.is_alive()

@@ -54,7 +54,7 @@ from typing import Any
 
 import kiss.agents.sorcar.persistence as ps
 import kiss.core.vscode_config as vc
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 from kiss.server.web_server import WebPrinter
 
@@ -300,6 +300,19 @@ def _restore_config(saved: tuple) -> None:
     vc.CONFIG_DIR, vc.CONFIG_PATH = saved
 
 
+def _tab_task_thread(tab_id: str) -> threading.Thread | None:
+    """Return the task thread of the state launched from *tab_id*.
+
+    ``_cmd_run`` registers a server-owned :class:`AgentState` (with its
+    ``task_thread`` installed) before returning, so the thread is
+    available immediately after the command dispatch.  Returns ``None``
+    when the task already finished and cleared its thread.
+    """
+    with agent_state.STATE_LOCK:
+        state = agent_state.find_by_tab(tab_id)
+        return state.task_thread if state is not None else None
+
+
 class _TwoTabFixture(unittest.TestCase):
     """Common setup/teardown for the two-tab interference tests.
 
@@ -358,8 +371,8 @@ class _TwoTabFixture(unittest.TestCase):
             ps._db_conn = None
         _restore_persistence(self.saved_persistence)
         _restore_config(self.saved_config)
-        with _RunningAgentState._registry_lock:
-            _RunningAgentState.running_agent_states.clear()
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
         if self._saved_openai_key is None:
             os.environ.pop("OPENAI_API_KEY", None)
         else:
@@ -371,7 +384,7 @@ class _TwoTabFixture(unittest.TestCase):
         *,
         prompt_a: str = "tab A prompt",
         prompt_b: str = "tab B prompt",
-    ) -> tuple[threading.Thread, threading.Thread]:
+    ) -> None:
         """Submit two ``run`` commands concurrently and return the threads.
 
         Uses ``_cmd_run`` (production entry point) so the full
@@ -402,15 +415,14 @@ class _TwoTabFixture(unittest.TestCase):
         time.sleep(random.uniform(0.0, 0.02))
         self.server._cmd_run(cmd_b)
 
-        ta = _RunningAgentState.running_agent_states["tabA"].task_thread
-        tb = _RunningAgentState.running_agent_states["tabB"].task_thread
-        assert ta is not None
-        assert tb is not None
-        ta.join(timeout=30)
-        tb.join(timeout=30)
-        assert not ta.is_alive(), "tab A task hung"
-        assert not tb.is_alive(), "tab B task hung"
-        return ta, tb
+        ta = _tab_task_thread("tabA")
+        tb = _tab_task_thread("tabB")
+        if ta is not None:
+            ta.join(timeout=30)
+            assert not ta.is_alive(), "tab A task hung"
+        if tb is not None:
+            tb.join(timeout=30)
+            assert not tb.is_alive(), "tab B task hung"
 
     def _events_for_tab(self, tab_id: str) -> list[dict[str, Any]]:
         """Return every captured payload tagged with *tab_id*."""
@@ -627,8 +639,8 @@ class TestTwoTabRealLLMAskUserAnswerRouting(unittest.TestCase):
             ps._db_conn = None
         _restore_persistence(self.saved_persistence)
         _restore_config(self.saved_config)
-        with _RunningAgentState._registry_lock:
-            _RunningAgentState.running_agent_states.clear()
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
         if self._saved_openai_key is None:
             os.environ.pop("OPENAI_API_KEY", None)
         else:
@@ -697,13 +709,14 @@ class TestTwoTabRealLLMAskUserAnswerRouting(unittest.TestCase):
         time.sleep(random.uniform(0.0, 0.02))
         self.server._cmd_user_answer({"tabId": "tabB", "answer": "ANSWER_B"})
 
-        ta = _RunningAgentState.running_agent_states["tabA"].task_thread
-        tb = _RunningAgentState.running_agent_states["tabB"].task_thread
-        assert ta is not None and tb is not None
-        ta.join(timeout=30)
-        tb.join(timeout=30)
-        self.assertFalse(ta.is_alive(), "tabA task hung after answering")
-        self.assertFalse(tb.is_alive(), "tabB task hung after answering")
+        ta = _tab_task_thread("tabA")
+        tb = _tab_task_thread("tabB")
+        if ta is not None:
+            ta.join(timeout=30)
+            self.assertFalse(ta.is_alive(), "tabA task hung after answering")
+        if tb is not None:
+            tb.join(timeout=30)
+            self.assertFalse(tb.is_alive(), "tabB task hung after answering")
 
         done_a = [
             e for e in self.printer.sent

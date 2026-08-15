@@ -18,7 +18,7 @@ import time
 import unittest
 from dataclasses import dataclass
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
 
@@ -40,8 +40,8 @@ class TestAskUserBroadcastLifecycle(unittest.TestCase):
         self.server = VSCodeServer(printer=self.printer)
 
     def tearDown(self) -> None:
-        with _RunningAgentState._registry_lock:
-            _RunningAgentState.running_agent_states.clear()
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
 
     def test_question_fans_out_and_answer_clears_every_subscriber(self) -> None:
         """Answering in one subscribed tab clears every subscribed modal.
@@ -102,8 +102,14 @@ class TestAskUserBroadcastLifecycle(unittest.TestCase):
     ) -> _AskResult:
         """Run one real ask-user lifecycle through the backend."""
         owner_q: queue.Queue[str] = queue.Queue(maxsize=1)
-        self.server._get_tab(owner_tab).user_answer_queue = owner_q
-        self.server._get_tab(answer_tab)
+        state = agent_state.AgentState(
+            task_id,
+            tab_id=owner_tab,
+            server_owned=True,
+            is_task_active=True,
+        )
+        state.user_answer_queue = owner_q
+        agent_state.register(state)
         self.server.printer.subscribe_tab(task_id, owner_tab)
         self.server.printer.subscribe_tab(task_id, answer_tab)
         stop = threading.Event()

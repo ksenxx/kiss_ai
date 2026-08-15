@@ -5,6 +5,7 @@
 """Console output formatting for KISS agents."""
 
 import sys
+import threading
 from typing import Any
 
 from rich.console import Console, Group
@@ -29,16 +30,93 @@ _NOTIFICATION_STYLES = {
 }
 
 
-class ConsolePrinter(Printer):
-    def __init__(self, file: Any = None) -> None:
-        self._console = Console(highlight=False, file=file)
-        self._explicit_file: Any = file
-        self._mid_line = False
-        self._bash_streamed = False
-        self._current_block_type = ""
+class _PrinterThreadState(threading.local):
+    """Per-thread streaming state for :class:`ConsolePrinter`.
+
+    ``bash_streamed`` (is a bash RESULT rule currently open?),
+    ``block_type`` (thinking vs normal text) and the three usage offsets
+    (what the printing agent has already spent in earlier sub-sessions)
+    describe the *agent* that is printing, not the terminal.  Parallel
+    sub-agents each run on their own thread and share one printer, so
+    keeping these per thread is what stops one sub-agent from closing
+    another's bash block, restyling another's tokens, or contributing
+    its own totals to another's result panel.  ``threading.local`` runs
+    ``__init__`` once per thread, so every thread starts from the same
+    defaults.
+    """
+
+    def __init__(self) -> None:
+        self.bash_streamed = False
+        self.block_type = ""
         self.tokens_offset = 0
         self.budget_offset = 0.0
         self.steps_offset = 0
+
+
+class ConsolePrinter(Printer):
+    """Rich-formatted console printer, safe to share across agent threads.
+
+    ``run_tasks_parallel`` forwards one printer object verbatim to every
+    parallel sub-agent, and the live usage monitor prints from a third
+    daemon thread, so this class faces the same fan-out ``JsonPrinter``
+    does.  It is protected the same way: state that belongs to the
+    printing agent is thread-local, the shared cursor position
+    (``_mid_line``, a property of the one output stream) stays shared,
+    and every public entry point holds ``_lock`` for its whole body so a
+    panel and its rules are emitted as one uninterrupted unit.
+    """
+
+    def __init__(self, file: Any = None) -> None:
+        self._console = Console(highlight=False, file=file)
+        self._explicit_file: Any = file
+        self._lock = threading.RLock()
+        self._thread_state = _PrinterThreadState()
+        self._mid_line = False
+
+    @property
+    def tokens_offset(self) -> int:
+        """Tokens *this thread's* agent spent before its current session."""
+        return self._thread_state.tokens_offset
+
+    @tokens_offset.setter
+    def tokens_offset(self, value: int) -> None:
+        self._thread_state.tokens_offset = value
+
+    @property
+    def budget_offset(self) -> float:
+        """Dollars *this thread's* agent spent before its current session."""
+        return self._thread_state.budget_offset
+
+    @budget_offset.setter
+    def budget_offset(self, value: float) -> None:
+        self._thread_state.budget_offset = value
+
+    @property
+    def steps_offset(self) -> int:
+        """Steps *this thread's* agent took before its current session."""
+        return self._thread_state.steps_offset
+
+    @steps_offset.setter
+    def steps_offset(self, value: int) -> None:
+        self._thread_state.steps_offset = value
+
+    @property
+    def _bash_streamed(self) -> bool:
+        """Whether *this thread* has an open streamed-bash RESULT rule."""
+        return self._thread_state.bash_streamed
+
+    @_bash_streamed.setter
+    def _bash_streamed(self, value: bool) -> None:
+        self._thread_state.bash_streamed = value
+
+    @property
+    def _current_block_type(self) -> str:
+        """The block (``"thinking"`` or ``""``) *this thread* is streaming."""
+        return self._thread_state.block_type
+
+    @_current_block_type.setter
+    def _current_block_type(self, value: str) -> None:
+        self._thread_state.block_type = value
 
     @property
     def _file(self) -> Any:
@@ -53,9 +131,10 @@ class ConsolePrinter(Printer):
 
     def reset(self) -> None:
         """Reset internal streaming state for a new turn."""
-        self._mid_line = False
-        self._bash_streamed = False
-        self._current_block_type = ""
+        with self._lock:
+            self._mid_line = False
+            self._bash_streamed = False
+            self._current_block_type = ""
 
     def _apply_budget_offset(self, cost: Any) -> Any:
         """Add the accumulated budget offset to a ``$x.xxxx`` cost string.
@@ -99,17 +178,6 @@ class ConsolePrinter(Printer):
             self._file.flush()
             self._mid_line = False
 
-    def flush_newline(self) -> None:
-        """Public wrapper around :meth:`_flush_newline`.
-
-        External callers (e.g. the sorcar CLI client driving streamed
-        ``text_delta`` events from the daemon) need to terminate any
-        partially-written line before the next Rich panel renders.
-        Exposed as a stable name so they don't reach into ``_mid_line``
-        directly.
-        """
-        self._flush_newline()
-
     def _stream_delta(self, text: str, **kwargs: Any) -> None:
         self._console.print(text, end="", highlight=False, markup=False, **kwargs)
         if text:
@@ -117,6 +185,11 @@ class ConsolePrinter(Printer):
 
     def print(self, content: Any, type: str = "text", **kwargs: Any) -> str:
         """Render content to the console using Rich formatting.
+
+        The whole render is serialized on ``_lock`` so that an event made
+        of several writes (a rule, a panel, a raw body, a closing rule)
+        reaches the terminal as one unit even when parallel sub-agents
+        share this printer.
 
         Args:
             content: The content to display.
@@ -128,6 +201,11 @@ class ConsolePrinter(Printer):
         Returns:
             str: Always the empty string.
         """
+        with self._lock:
+            return self._render(content, type, **kwargs)
+
+    def _render(self, content: Any, type: str, **kwargs: Any) -> str:
+        """Render one event; the caller must hold ``_lock``."""
         if type == "text":
             if not str(content).strip():
                 return ""
@@ -243,10 +321,11 @@ class ConsolePrinter(Printer):
         Args:
             token: The text token to display.
         """
-        if self._current_block_type == "thinking":
-            self._stream_delta(token, style="dim cyan italic")
-        else:
-            self._stream_delta(token)
+        with self._lock:
+            if self._current_block_type == "thinking":
+                self._stream_delta(token, style="dim cyan italic")
+            else:
+                self._stream_delta(token)
 
     def thinking_callback(self, is_start: bool) -> None:
         """Handle thinking-block boundary events.
@@ -257,14 +336,15 @@ class ConsolePrinter(Printer):
         Args:
             is_start: ``True`` when a thinking block starts, ``False`` when it ends.
         """
-        self._flush_newline()
-        if is_start:
-            self._current_block_type = "thinking"
-            self._console.rule("Thinking", style="dim cyan", align="center")
-        else:
-            self._current_block_type = ""
-            self._console.rule(style="dim cyan")
-        self._console.print()
+        with self._lock:
+            self._flush_newline()
+            if is_start:
+                self._current_block_type = "thinking"
+                self._console.rule("Thinking", style="dim cyan", align="center")
+            else:
+                self._current_block_type = ""
+                self._console.rule(style="dim cyan")
+            self._console.print()
 
     def _format_tool_call(self, name: str, tool_input: dict[str, Any]) -> None:
         file_path, lang = extract_path_and_lang(tool_input)
@@ -312,9 +392,9 @@ class ConsolePrinter(Printer):
         """Return True iff a ``Read`` tool_result should be syntax-highlighted.
 
         The output of the ``Read`` tool is the textual content of the
-        file the model asked to read.  The sorcar CLI interactive
-        terminal MUST render that content with syntax highlighting
-        derived from the file extension (matching the language picker
+        file the model asked to read.  The console renders that
+        content with syntax highlighting derived from the file
+        extension (matching the language picker
         used by ``_format_tool_call`` for the inverse direction —
         ``Write`` / ``Edit`` inputs).  Non-content results (errors,
         the ``(file is empty)`` sentinel, the binary-attachment
@@ -391,9 +471,7 @@ class ConsolePrinter(Printer):
         elif hasattr(message, "result"):
             budget_used = kwargs.get("budget_used", 0.0)
             total_tokens_used = kwargs.get("total_tokens_used", 0) + self.tokens_offset
-            cost_str = self._apply_budget_offset(
-                f"${budget_used:.4f}" if budget_used else "N/A"
-            )
+            cost_str = self._apply_budget_offset(f"${budget_used:.4f}" if budget_used else "N/A")
             self._print_result_panel(
                 message.result, f"tokens={total_tokens_used:,}  cost={cost_str}"
             )

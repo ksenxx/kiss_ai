@@ -154,11 +154,14 @@ class TestGeminiStreamPartsThinkingCallback:
         )
         assert "The result is X." in text_content
 
-    def test_end_thinking_stream_closes_open_block(self) -> None:
-        """_end_thinking_stream must close an open thinking block.
+    def test_close_thinking_if_open_closes_open_block(self) -> None:
+        """_close_thinking_if_open must close an open thinking block.
 
         After a streaming loop ends, if the last chunk was a thinking part,
-        the thinking block must still be closed.
+        the thinking block must still be closed.  GeminiModel used to track
+        this on a private ``_in_thinking_stream`` duplicate of the base
+        ``_thinking_open`` flag; it now uses the base one, so the closing
+        helper is the base ``_close_thinking_if_open``.
         """
         thinking_events: list[bool] = []
 
@@ -170,14 +173,14 @@ class TestGeminiStreamPartsThinkingCallback:
         )
 
         m._stream_parts([types.Part(text="Only thinking.", thought=True)])
-        m._end_thinking_stream()
+        m._close_thinking_if_open()
 
         assert thinking_events == [True, False], (
             f"Expected [True, False] but got {thinking_events}"
         )
 
-    def test_end_thinking_stream_noop_when_not_thinking(self) -> None:
-        """_end_thinking_stream must be a no-op when no thinking block is open."""
+    def test_close_thinking_if_open_noop_when_not_thinking(self) -> None:
+        """_close_thinking_if_open must be a no-op when no block is open."""
         thinking_events: list[bool] = []
 
         m = GeminiModel(
@@ -188,7 +191,7 @@ class TestGeminiStreamPartsThinkingCallback:
         )
 
         m._stream_parts([types.Part(text="Regular text.")])
-        m._end_thinking_stream()
+        m._close_thinking_if_open()
 
         assert thinking_events == [], (
             f"thinking_callback fired unexpectedly: {thinking_events}"

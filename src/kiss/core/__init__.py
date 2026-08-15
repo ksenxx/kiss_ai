@@ -20,8 +20,8 @@ __all__ = [
 def __getattr__(name: str) -> Any:
     """Return the live ``DEFAULT_CONFIG`` from :mod:`kiss.core.config`.
 
-    ``config_builder`` (and the VS Code settings panel) rebind
-    ``kiss.core.config.DEFAULT_CONFIG`` at runtime; a static
+    The VS Code settings panel (via :mod:`kiss.core.vscode_config`)
+    rebinds ``kiss.core.config.DEFAULT_CONFIG`` at runtime; a static
     ``from ... import`` here would freeze a stale snapshot, so the
     package-attribute lookup is deferred and never cached.  A caller using
     ``from kiss.core import DEFAULT_CONFIG`` still creates a normal Python

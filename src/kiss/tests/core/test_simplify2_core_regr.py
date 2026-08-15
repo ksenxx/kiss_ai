@@ -11,9 +11,8 @@ Locks down behavior that must be identical before and after:
    ``_is_deepseek_reasoning_model``, ``_is_openrouter_anthropic`` and
    ``_apply_cache_control_for_openrouter_anthropic`` must behave
    identically on both classes.
-2. The established ``model_info`` API, including flaky-model metadata
-   and the expensive-model picker.  These importable public symbols must
-   remain available even when there are no in-tree production callers.
+2. The established ``model_info`` API (catalog, context lengths and
+   cost calculation).
 3. The stateless-CLI transport behavior shared by ``ClaudeCodeModel`` and
    ``CodexModel``: ``initialize``, single-turn and multi-turn prompt
    flattening (``_build_prompt``), and the always-raising
@@ -35,14 +34,10 @@ from kiss.core.models.claude_code_model import ClaudeCodeModel
 from kiss.core.models.codex_model import CodexModel
 from kiss.core.models.model import Attachment
 from kiss.core.models.model_info import (
-    FLAKY_MODELS,
     MODEL_INFO,
     calculate_cost,
     get_fallback_model,
-    get_flaky_reason,
     get_max_context_length,
-    get_most_expensive_model,
-    is_model_flaky,
     model,
 )
 from kiss.core.models.openai_compatible_model import OpenAICompatibleModel
@@ -125,15 +120,6 @@ def test_model_factory_routes_base_url_override_to_v1() -> None:
 
 
 def test_model_info_public_surface_is_preserved() -> None:
-    flaky = "openrouter/baidu/ernie-4.5-21b-a3b"
-    assert FLAKY_MODELS[flaky] == "Ignores function calling tools"
-    assert is_model_flaky(flaky)
-    assert get_flaky_reason(flaky) == "Ignores function calling tools"
-    assert not is_model_flaky("unknown-model-xyz")
-    assert get_flaky_reason("unknown-model-xyz") == ""
-    assert isinstance(get_most_expensive_model(), str)
-    assert isinstance(get_most_expensive_model(fc_only=False), str)
-
     assert "claude-fable-5" in MODEL_INFO
     assert get_max_context_length("claude-fable-5") > 0
     assert calculate_cost("claude-sonnet-5", 1_000_000, 0) > 0.0

@@ -23,9 +23,9 @@ stops its spinner and flips its input box out of "queue follow-up"
 mode while B's agent is still working.
 
 Both tests use the real ``VSCodeServer``, real ``JsonPrinter``
-subscription state and real ``_RunningAgentState`` registry entries;
-events are captured by replacing ``printer.broadcast`` with a recorder
-(the established pattern of the earlier bug-hunt tests).
+subscription state and real ``kiss.server.agent_state`` registry
+entries; events are captured by replacing ``printer.broadcast`` with a
+recorder (the established pattern of the earlier bug-hunt tests).
 """
 
 from __future__ import annotations
@@ -34,7 +34,8 @@ import threading
 import unittest
 from typing import Any
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
 
 
@@ -54,16 +55,25 @@ class _EventRecorder:
             return [e for e in self.events if e.get("tabId") == tab_id]
 
 
+def _register_busy_viewer(tab_id: str, task_id: str) -> AgentState:
+    """Register a server-owned state for a tab running its own task."""
+    state = AgentState(
+        task_id, tab_id=tab_id, server_owned=True, is_task_active=True,
+    )
+    agent_state.register(state)
+    return state
+
+
 class TestSubscribeChatViewersSkipsBusyViewer(unittest.TestCase):
     """BUG-TR8-2: a viewer running its own task must not be cleared."""
 
     def setUp(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         self.server = VSCodeServer()
         self.recorder = _EventRecorder()
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def test_busy_viewer_not_cleared_or_flipped(self) -> None:
         launcher = "bh8c-chat-launcher"
@@ -71,18 +81,12 @@ class TestSubscribeChatViewersSkipsBusyViewer(unittest.TestCase):
         idle_viewer = "bh8c-chat-idle"
         chat_id = "bh8c-chat-c"
 
-        self.server._get_tab(launcher)
-        busy_state = self.server._get_tab(busy_viewer)
-        self.server._get_tab(idle_viewer)
+        _register_busy_viewer(busy_viewer, "7999")
 
         with self.server._state_lock:
             self.server._tab_chat_views[launcher] = chat_id
             self.server._tab_chat_views[busy_viewer] = chat_id
             self.server._tab_chat_views[idle_viewer] = chat_id
-
-        assert busy_state.agent is not None
-        busy_state.agent._last_task_id = "7999"
-        busy_state.is_task_active = True
 
         self.server.printer.broadcast = self.recorder  # type: ignore[assignment]
         self.server._subscribe_chat_viewers(
@@ -106,28 +110,23 @@ class TestStatusEndSkipsBusyViewer(unittest.TestCase):
     """BUG-TR8-3: running=False must not reach a still-busy viewer."""
 
     def setUp(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         self.server = VSCodeServer()
         self.recorder = _EventRecorder()
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def test_busy_viewer_spinner_not_stopped(self) -> None:
         launcher = "bh8c-end-launcher"
         busy_viewer = "bh8c-end-busy"
         idle_viewer = "bh8c-end-idle"
 
-        self.server._get_tab(launcher)
-        busy_state = self.server._get_tab(busy_viewer)
-        self.server._get_tab(idle_viewer)
+        _register_busy_viewer(busy_viewer, "7999")
 
         self.server.printer.subscribe_tab("7301", launcher)
         self.server.printer.subscribe_tab("7301", busy_viewer)
         self.server.printer.subscribe_tab("7301", idle_viewer)
-        assert busy_state.agent is not None
-        busy_state.agent._last_task_id = "7999"
-        busy_state.is_task_active = True
 
         self.server.printer.broadcast = self.recorder  # type: ignore[assignment]
         self.server._broadcast_status_end_to_viewers("7301", launcher)

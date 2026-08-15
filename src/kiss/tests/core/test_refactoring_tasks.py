@@ -18,7 +18,6 @@ from kiss.agents.third_party_agents._channel_agent_utils import ChannelConfig
 from kiss.core.config import (
     _ArtifactDirProxy,
     get_artifact_dir,
-    set_artifact_base_dir,
 )
 from kiss.core.models.anthropic_model import AnthropicModel
 from kiss.core.models.model import (
@@ -186,11 +185,14 @@ class TestArtifactDirProxy:
         proxy = _ArtifactDirProxy()
         assert hash(proxy) == hash(str(proxy))
 
-    def test_set_artifact_base_dir(self, tmp_path: Path) -> None:
-        original = get_artifact_dir()
-        try:
-            set_artifact_base_dir(str(tmp_path))
-            new_dir = get_artifact_dir()
-            assert str(tmp_path) in new_dir
-        finally:
-            set_artifact_base_dir(str(Path(original).parent))
+    def test_artifact_dir_is_stable_for_the_process(self) -> None:
+        """The artifact directory is resolved once and never changes.
+
+        Replaced ``test_set_artifact_base_dir``: the runtime setter it
+        covered was removed because it had no production caller and was
+        the only way to make a running agent's trajectory land under a
+        different root than the one it started under.
+        """
+        assert get_artifact_dir() == get_artifact_dir()
+        assert Path(get_artifact_dir()).is_dir()
+        assert str(_ArtifactDirProxy()) == get_artifact_dir()

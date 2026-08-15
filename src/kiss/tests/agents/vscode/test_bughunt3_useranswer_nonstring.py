@@ -4,7 +4,7 @@
 # add your name here
 """Bug-hunt 3: non-string userAnswer leaks through Queue[str] (BUG-F).
 
-``_cmd_user_answer`` put ``cmd.get("answer", "")`` on the tab's
+``_cmd_user_answer`` put ``cmd.get("answer", "")`` on the task's
 ``queue.Queue[str]`` verbatim, so a malformed client payload with
 ``"answer": null`` (or a number) made ``_await_user_response`` — and
 therefore the agent's ``ask_user_question`` callback — return ``None``
@@ -18,7 +18,7 @@ import queue
 import unittest
 from typing import Any
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -34,15 +34,18 @@ class TestUserAnswerNonString(unittest.TestCase):
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def _deliver(self, answer: Any) -> str:
-        tab = self.server._get_tab("ua-tab")
-        tab.user_answer_queue = queue.Queue(maxsize=1)
+        state = agent_state.AgentState(
+            "ua-task", tab_id="ua-tab", server_owned=True, is_task_active=True,
+        )
+        state.user_answer_queue = queue.Queue(maxsize=1)
+        agent_state.register(state)
         self.server._cmd_user_answer({
             "type": "userAnswer", "tabId": "ua-tab", "answer": answer,
         })
-        return tab.user_answer_queue.get_nowait()
+        return state.user_answer_queue.get_nowait()
 
     def test_none_answer_is_delivered_as_empty_string(self) -> None:
         item = self._deliver(None)

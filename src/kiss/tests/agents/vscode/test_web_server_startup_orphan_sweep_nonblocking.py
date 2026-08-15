@@ -67,6 +67,21 @@ def _find_free_port() -> int:
         return port
 
 
+def _disown(task_id: str) -> None:
+    """Make *task_id* look like a row left behind by a dead daemon.
+
+    ``_add_task`` stamps every row with the creating process's owner
+    token, and :func:`kiss.agents.sorcar.persistence._recover_orphaned_tasks`
+    deliberately never rewrites a row whose owning process is still
+    alive.  These tests seed their "orphan" from the live pytest
+    process, so the token has to be cleared for the row to represent
+    what a SIGKILLed previous daemon actually leaves behind.
+    """
+    _persistence._get_db().execute(
+        "UPDATE task_history SET owner = '' WHERE id = ?", (task_id,)
+    )
+
+
 def _row_result(db_path: Path, task_id: str) -> str:
     """Read ``task_history.result`` for *task_id* via a fresh connection."""
     conn = sqlite3.connect(str(db_path))
@@ -137,6 +152,7 @@ class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
             "orphan left by daemon killed during install.sh",
             chat_id="install-restart-chat",
         )
+        _disown(orphan_id)
         assert _row_result(self.db_path, orphan_id) == _SENTINEL
         _persistence._close_db()
 
@@ -198,6 +214,7 @@ class StartupNotBlockedByLockedDbTest(IsolatedAsyncioTestCase):
             "orphan recovered on uncontended boot",
             chat_id="install-restart-chat-2",
         )
+        _disown(orphan_id)
         _persistence._close_db()
 
         started = time.monotonic()

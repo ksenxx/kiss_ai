@@ -180,9 +180,18 @@ def test_get_models_conn_id_stamping() -> None:
 def test_replay_session_missing_chat_cleans_tab() -> None:
     server, printer = _make_server()
     printer.events.clear()
-    server._replay_session("no-such-chat-" + uuid.uuid4().hex, tab_id="tabX")
+    chat_id = "no-such-chat-" + uuid.uuid4().hex
+    server._replay_session(chat_id, tab_id="tabX")
     assert printer.cleaned_tabs == ["tabX"]
-    assert printer.events == []
+    # No transcript exists, so nothing is replayed -- but the tab the
+    # client resumed into is still real, so the shared tab registry
+    # binds it and mirrors the canonical snapshot to every client.
+    assert [e["type"] for e in printer.events] == ["tabs_state"]
+    (snapshot,) = printer.events
+    assert {"tabId": "tabX", "chatId": chat_id}.items() <= {
+        k: t[k] for t in snapshot["tabs"] for k in ("tabId", "chatId")
+        if t["tabId"] == "tabX"
+    }.items()
 
 
 def test_replay_session_empty_tab_id_is_noop() -> None:
@@ -211,7 +220,8 @@ def test_replay_session_with_plain_printer_lacking_cleanup_tab() -> None:
     server = VSCodeServer(printer=printer)
     printer.events.clear()
     server._replay_session("no-such-chat-" + uuid.uuid4().hex, tab_id="tabZ")
-    assert printer.events == []
+    # Only the registry snapshot (see the missing-chat test above).
+    assert [e["type"] for e in printer.events] == ["tabs_state"]
 
 
 

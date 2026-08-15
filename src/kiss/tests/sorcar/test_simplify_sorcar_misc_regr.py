@@ -14,8 +14,7 @@ Covers the exact code paths touched by the sorcar-misc simplification:
   no-LLM paths (clean worktree, or ``auto_commit_enabled=False``).
 * ``WorktreeSorcarAgent.merge`` / ``discard`` / ``_release_worktree``
   happy paths.
-* ``_manual_merge_cmd`` / ``_merge_fix_steps`` /
-  ``_reject_interactive_only_flags`` pure helpers.
+* ``_manual_merge_cmd`` / ``_merge_fix_steps`` pure helpers.
 
 No mocks, patches, or fakes: every test drives real git repositories
 created under ``tmp_path``.
@@ -37,7 +36,6 @@ from kiss.agents.sorcar.worktree_sorcar_agent import (
     WorktreeSorcarAgent,
     _manual_merge_cmd,
     _merge_fix_steps,
-    _reject_interactive_only_flags,
 )
 
 
@@ -344,20 +342,6 @@ class TestPureHelpers:
             "    git commit\n"
             "    git branch -D kiss/wt-x"
         )
-
-    def test_reject_interactive_only_flags_ok(self) -> None:
-        _reject_interactive_only_flags(["sorcar", "-t", "do stuff"])
-
-    def test_reject_interactive_only_flags_exits(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        with pytest.raises(SystemExit) as exc_info:
-            _reject_interactive_only_flags(
-                ["sorcar", "--worktree", "-t", "x", "--worktree", "--auto-commit"]
-            )
-        assert exc_info.value.code == 2
-        err = capsys.readouterr().err
-        assert "--worktree, --auto-commit" in err
 
     def test_strip_worktree_suffix(self) -> None:
         assert strip_worktree_suffix(

@@ -57,20 +57,16 @@ dependencies = [
     "google-api-python-client>=2.100.0",
     "google-auth-oauthlib>=1.2.0",
     "requests>=2.28.0",
+    # The repository has a top-level ``brotli`` gitlink.  Without the real
+    # codec installed, Python exposes that directory as a namespace package;
+    # urllib3 mistakes it for Brotli support and crashes while importing.
+    "brotli>=1.2.0",
     "harbor>=0.3.0",
     "websockets>=15.0",
     "cryptography>=44.0.0",
     # Official MCP SDK: client transports + OAuth used by the
-    # ``sorcar mcp`` subcommand and the MCP tool integration.
+    # the MCP tool integration.
     "mcp>=1.20.0",
-    # GNU readline for the sorcar CLI: enables Tab/Shift-Tab completion
-    # cycling (menu-complete) on macOS, whose stock Python otherwise
-    # links readline against libedit, which cannot cycle candidates.
-    "gnureadline>=8.0.0; sys_platform == 'darwin'",
-    # Interactive input line for the sorcar CLI: pops the @-mention
-    # file/folder picker as you type, navigable with Up/Down and
-    # selectable with Tab/Enter (readline cannot render such a menu).
-    "prompt_toolkit>=3.0.0",
     # Static-analysis scanners wired into SWEDefend's taint/dataflow
     # provenance layer (swedefend.defense.provenance): the harness invokes
     # ./.venv/bin/bandit and ./.venv/bin/semgrep to flag dangerous sinks.
@@ -163,8 +159,6 @@ server = [
     "vosk==0.3.44",
     "sounddevice>=0.5.0",
     "flask>=3.0.0",               # needed: web_server.py top-level-imports kiss.viz_trajectory.server
-    "prompt_toolkit>=3.0.0",      # lazy: web_server.py/commands.py import kiss.ui.cli
-    "gnureadline>=8.0.0; sys_platform == 'darwin'",
 ]
 
 docker = [
@@ -363,7 +357,6 @@ Repository = "https://github.com/ksen/kiss"
 [project.scripts]
 check = "kiss.scripts.check:main"
 generate-api-docs = "kiss.scripts.generate_api_docs:main"
-sorcar = "kiss.ui.cli.sorcar_cli:main"
 kiss-slack = "kiss.agents.third_party_agents.slack_agent:main"
 kiss-gmail = "kiss.agents.third_party_agents.gmail_agent:main"
 kiss-whatsapp = "kiss.agents.third_party_agents.whatsapp_agent:main"

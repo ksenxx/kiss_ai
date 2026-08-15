@@ -26,7 +26,7 @@ Spec
       agent's event stream via
       :meth:`JsonPrinter.subscribe_tab` so every subsequent
       broadcast is duplicated with ``tabId=new_id``.  The source
-      ``_RunningAgentState`` is NOT moved — both the original tab id and the
+      ``AgentState`` is NOT moved — both the original tab id and the
       new tab id receive the stream, supporting multiple concurrent
       viewers of the same running task.
 
@@ -45,8 +45,9 @@ import threading
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
 
@@ -106,22 +107,25 @@ def _start_fake_running_task(
     Returns:
         ``(started_event, release_event, thread)``
     """
-    tab = server._get_tab(tab_id)
-    tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-    tab.agent._chat_id = chat_id
-    if task_id is not None:
-        tab.agent._last_task_id = task_id
-        tab.task_history_id = task_id
-    tab.chat_id = chat_id
-    tab.is_task_active = True
-    tab.stop_event = threading.Event()
+    task_key = str(task_id) if task_id is not None else tab_id
+    state = AgentState(
+        task_key,
+        agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        chat_id=chat_id,
+        tab_id=tab_id,
+        server_owned=True,
+        stop_event=threading.Event(),
+        is_task_active=True,
+    )
+    assert state.agent is not None
+    state.agent._chat_id = chat_id
+    agent_state.register(state)
 
     started_event = threading.Event()
     release_event = threading.Event()
     pre_release_emitted = threading.Event()
     post_release_emitted = threading.Event()
 
-    task_key = str(task_id) if task_id is not None else tab_id
     server.printer.subscribe_tab(task_key, tab_id)
 
     def fake_run() -> None:
@@ -133,11 +137,11 @@ def _start_fake_running_task(
         server.printer.broadcast({"type": "text_delta", "text": "post"})
         post_release_emitted.set()
         with server._state_lock:
-            tab.is_task_active = False
-            tab.task_thread = None
+            state.is_task_active = False
+            state.task_thread = None
 
     thread = threading.Thread(target=fake_run, daemon=True)
-    tab.task_thread = thread
+    state.task_thread = thread
     thread.start()
     started_event.wait(timeout=5)
     setattr(server, "_pre_emitted", pre_release_emitted)
@@ -153,6 +157,7 @@ class TestCloseTabDoesNotStopRunningTask:
         self.saved = _redirect(self.tmpdir)
 
     def teardown_method(self) -> None:
+        agent_state.agent_states.clear()
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
@@ -171,7 +176,7 @@ class TestCloseTabDoesNotStopRunningTask:
 
         server._handle_command({"type": "closeTab", "tabId": tab_id_a})
 
-        assert tab_id_a in _RunningAgentState.running_agent_states
+        assert agent_state.find_by_tab(tab_id_a) is not None
         assert thread.is_alive(), (
             "Agent thread must continue to run after closeTab"
         )
@@ -198,6 +203,7 @@ class TestResumeRunningTaskReattachesLiveEvents:
         self.saved = _redirect(self.tmpdir)
 
     def teardown_method(self) -> None:
+        agent_state.agent_states.clear()
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
@@ -222,7 +228,7 @@ class TestResumeRunningTaskReattachesLiveEvents:
         )
 
         server._handle_command({"type": "closeTab", "tabId": tab_id_a})
-        assert tab_id_a in _RunningAgentState.running_agent_states
+        assert agent_state.find_by_tab(tab_id_a) is not None
 
         server._handle_command({
             "type": "resumeSession",
@@ -231,9 +237,10 @@ class TestResumeRunningTaskReattachesLiveEvents:
             "tabId": tab_id_b,
         })
 
-        assert tab_id_a in _RunningAgentState.running_agent_states
-        assert tab_id_b not in _RunningAgentState.running_agent_states
-        assert _RunningAgentState.running_agent_states[tab_id_a].task_thread is thread
+        state_a = agent_state.find_by_tab(tab_id_a)
+        assert state_a is not None
+        assert agent_state.find_by_tab(tab_id_b) is None
+        assert state_a.task_thread is thread
 
         replays = [e for e in events if e.get("type") == "task_events"]
         assert len(replays) == 1

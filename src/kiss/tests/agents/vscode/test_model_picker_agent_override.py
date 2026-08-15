@@ -33,11 +33,11 @@ from typing import Any
 import kiss.agents.sorcar.persistence as th
 import kiss.core.vscode_config as vscode_config
 from kiss.agents.sorcar.persistence import _load_last_model
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import _broadcast_subagent_done
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import get_available_models
 from kiss.core.models.model_info import model as model_factory
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 from kiss.tests.agents.vscode._memory_printer import MemoryPrinter
 
@@ -302,7 +302,7 @@ class _ServerTestCase(unittest.TestCase):
         # The agent switches to a genuinely different, genuinely
         # available model, so `set_model` runs its real swap path.
         self.agent_target = models[1] if len(models) > 1 else ""
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-modelpick-")
         kiss_dir = Path(self.tmpdir) / ".kiss"
         kiss_dir.mkdir(parents=True, exist_ok=True)
@@ -330,7 +330,7 @@ class _ServerTestCase(unittest.TestCase):
         self.server.printer.broadcast = capture  # type: ignore[assignment]
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         if th._db_conn is not None:
             th._db_conn.close()
         (th._DB_PATH, th._db_conn, th._KISS_DIR) = self._saved_db
@@ -366,16 +366,21 @@ class TestAgentOverrideAndRestore(_ServerTestCase):
         self, tab_id: str, agent: WorktreeSorcarAgent,
     ) -> threading.Thread:
         """Start a real task for *agent* in *tab_id* and return its worker."""
-        state = self.server._get_tab(tab_id)
-        state.agent = agent
-        state.stop_event = threading.Event()
+        state = agent_state.AgentState(
+            f"pretask-{tab_id}",
+            agent=agent,
+            tab_id=tab_id,
+            server_owned=True,
+            stop_event=threading.Event(),
+        )
         state.user_answer_queue = queue.Queue(maxsize=1)
+        agent_state.register(state)
         worker = threading.Thread(
             target=self.server._run_task,
             args=({
                 "type": "run",
                 "prompt": "switch your model",
-                "model": state.selected_model,
+                "model": self.server._tab_model(tab_id),
                 "workDir": self.tmpdir,
                 "tabId": tab_id,
             },),
@@ -462,7 +467,7 @@ class TestAgentOverrideAndRestore(_ServerTestCase):
 
         self.assertEqual(_load_last_model(), self.model)
         self.assertEqual(
-            self.server._get_tab("tab-run").selected_model,
+            self.server._tab_model("tab-run"),
             self.model,
             "the tab must still be set to run the user's model next time",
         )
@@ -483,7 +488,6 @@ class TestAgentOverrideAndRestore(_ServerTestCase):
     ) -> None:
         """A viewer whose tab state is already gone must still be handed
         back a model rather than left on the agent's."""
-        self.server._get_tab("tab-run")
         self.server.printer._model_override_tabs.add("tab-gone")
 
         self.server._restore_user_model_pick("tab-gone")

@@ -27,7 +27,13 @@ from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
+
+
+def _tab_task_thread(tab_id: str) -> threading.Thread | None:
+    state = agent_state.find_by_tab(tab_id)
+    return state.task_thread if state is not None else None
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -93,6 +99,7 @@ class TestTaskEndEventOrdering(unittest.TestCase):
 
     def tearDown(self) -> None:
         _unpatch_run(self.original_run)
+        agent_state.agent_states.clear()
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -105,9 +112,9 @@ class TestTaskEndEventOrdering(unittest.TestCase):
         self.server._handle_command({
             "type": "run", "prompt": prompt,
             "model": "claude-opus-4-6", "workDir": self.tmpdir,
-            "tabId": "0",
+            "tabId": "0", "useWorktree": False, "autoCommit": True,
         })
-        t = self.server._get_tab("0").task_thread
+        t = _tab_task_thread("0")
         if t is not None:
             t.join(timeout=10)
             assert not t.is_alive()
@@ -152,6 +159,7 @@ class TestTaskEndEventPersistence(unittest.TestCase):
 
     def tearDown(self) -> None:
         _unpatch_run(self.original_run)
+        agent_state.agent_states.clear()
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -171,7 +179,7 @@ class TestTaskEndEventPersistence(unittest.TestCase):
                 "model": "claude-opus-4-6", "workDir": self.tmpdir,
                 "tabId": "0",
             })
-            t = self.server._get_tab("0").task_thread
+            t = _tab_task_thread("0")
             assert t is not None
             t.join(timeout=10)
         finally:
@@ -206,6 +214,7 @@ class TestPeriodicEventFlush(unittest.TestCase):
     def tearDown(self) -> None:
         import sys
         sys.stdout = self._real_stdout
+        agent_state.agent_states.clear()
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
@@ -257,7 +266,7 @@ class TestPeriodicEventFlush(unittest.TestCase):
             assert entry["result"] == "Agent Failed Abruptly"
 
             resume.set()
-            t = self.server._get_tab("0").task_thread
+            t = _tab_task_thread("0")
             assert t is not None
             t.join(timeout=10)
         finally:

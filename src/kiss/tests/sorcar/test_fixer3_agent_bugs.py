@@ -41,7 +41,6 @@ from typing import Any, cast
 import yaml
 
 import kiss.agents.sorcar.persistence as _persistence
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent, run_tasks_parallel
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.server.json_printer import JsonPrinter
@@ -95,12 +94,10 @@ class _Base(unittest.TestCase):
     def tearDown(self) -> None:
         _PARENT_CLASS.run = self._original_parent_run
 
-        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+        from kiss.server import agent_state
 
-        with _RunningAgentState._registry_lock:
-            _RunningAgentState.running_agent_states.clear()
-        with ChatSorcarAgent._running_agents_lock:
-            ChatSorcarAgent.running_agents.clear()
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
 
         if _persistence._db_conn is not None:
             try:
@@ -158,10 +155,17 @@ class TestSubagentDoneTabIdFormat(_Base):
         )
 
 
-class TestSubagentSentinelConvention(_Base):
-    """F1 regression guard: base path uses the ``""`` sentinel shape."""
+class TestSubagentParentIdConvention(_Base):
+    """The base fan-out nests its children, whoever the parent is.
 
-    def test_base_parallel_subagent_info_matches_chat_convention(self) -> None:
+    A bare functional ``run_tasks_parallel`` has no parent agent and no
+    parent row, but its children are real chat runs that DO create
+    rows.  They must still be stored as sub-agents: a blank
+    ``parent_task_id`` is what the history query reads as "top-level
+    task", which would add one bogus root entry per child.
+    """
+
+    def test_base_parallel_children_share_one_non_blank_parent_id(self) -> None:
         _PARENT_CLASS.run = _raising_run
         printer = JsonPrinter()
         events: list[dict[str, Any]] = []
@@ -183,8 +187,10 @@ class TestSubagentSentinelConvention(_Base):
             "SELECT parent_task_id FROM task_history"
         ).fetchall()
         self.assertTrue(rows)
-        for row in rows:
-            self.assertEqual(row[0], "")
+        parents = {row[0] for row in rows}
+        self.assertNotIn("", parents, "a sub-agent became a root history row")
+        self.assertEqual(len(parents), 1, f"one parent id per fan-out: {parents}")
+        self.assertEqual(_persistence._load_history(), [])
 
 
 class TestWorktreeFallbackExceptionContract(_Base):
@@ -225,20 +231,28 @@ class TestWorktreeFallbackExceptionContract(_Base):
 
 
 class TestMergeNoAutoCommitMessage(_Base):
-    """F9: don't blame a pre-commit hook under ``--no-auto-commit``."""
+    """F9: don't blame a pre-commit hook when Auto-commit is off."""
 
-    def test_merge_reports_auto_commit_disabled(self) -> None:
+    def test_explicit_merge_commits_even_when_auto_commit_is_off(
+        self,
+    ) -> None:
+        """Clicking merge IS consent to commit, so it must not refuse.
+
+        Auto-commit off governs the AUTOMATIC paths only (see
+        ``test_release_worktree_warning_reports_auto_commit_disabled``
+        below); refusing the user's own merge click would strand the
+        work with no way to publish it from the UI.
+        """
         agent = self._setup_worktree_agent()
         wt = agent._wt
         assert wt is not None
 
         msg = agent.merge()
 
-        self.assertIn("auto-commit is disabled", msg)
+        self.assertIn("Successfully merged", msg)
         self.assertNotIn("pre-commit hook", msg)
-        self.assertTrue(wt.wt_dir.exists())
-        self.assertIn("uncommitted.txt", self._porcelain(wt.wt_dir))
-        agent.discard()
+        self.assertFalse(wt.wt_dir.exists())
+        self.assertTrue(Path(self.repo, "uncommitted.txt").exists())
 
     def test_release_worktree_warning_reports_auto_commit_disabled(
         self,
@@ -251,7 +265,7 @@ class TestMergeNoAutoCommitMessage(_Base):
 
         self.assertIsNone(released)
         warning = agent._merge_conflict_warning or ""
-        self.assertIn("Auto-commit is disabled", warning)
+        self.assertIn("Auto-commit is turned off", warning)
         self.assertNotIn("pre-commit hook", warning)
         self.assertTrue(wt.wt_dir.exists())
         self.assertIn("uncommitted.txt", self._porcelain(wt.wt_dir))

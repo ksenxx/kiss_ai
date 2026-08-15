@@ -14,12 +14,12 @@ BUG-40 / INC-4: `_do_merge` now returns `(MergeResult.CHECKOUT_FAILED, "")`
     `result == MergeResult.CHECKOUT_FAILED` instead of `result is None`,
     so the checkout error is never misattributed to `_stash_pop_warning`.
 
-BUG-41 / RED-6: `_start_merge_session` now accepts a `tab_id` parameter.
-    All callers pass it explicitly.  `is_merging` is always set correctly,
-    even on the session-replay path.
+BUG-41 / RED-6 (obsolete): covered `_start_merge_session`, removed
+    together with the interactive diff/merge review workflow.
 
-BUG-42 / INC-5: Auto-discard in both `_run_task_inner` and `_finish_merge`
-    now checks `_any_non_wt_running()` before calling `discard()`.
+BUG-42 / INC-5: Auto-discard of an empty pending worktree is safe and
+    runs even while a non-worktree task is active (it touches neither
+    the main tree's files nor its HEAD).
 
 BUG-43: Manual merge instructions now use `git cherry-pick --no-commit
     baseline..branch` when a baseline commit exists, matching what the
@@ -35,13 +35,10 @@ INC-6: `_check_merge_conflict` now checks both unstaged AND staged
 
 RED-5: The two consecutive `if not tab.use_worktree:` blocks in
     `_run_task_inner`'s finally are now a single block.
-
-RED-6: See BUG-41.
 """
 
 from __future__ import annotations
 
-import json
 import subprocess
 from pathlib import Path
 
@@ -53,6 +50,7 @@ from kiss.agents.sorcar.worktree_sorcar_agent import (
     WorktreeSorcarAgent,
     _manual_merge_cmd,
 )
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -60,7 +58,7 @@ def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
     """Create a bare-minimum git repo with one commit."""
     repo = tmp_path / name
     repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, capture_output=True)
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, capture_output=True)
     subprocess.run(
         ["git", "config", "user.email", "test@test.com"],
         cwd=repo, capture_output=True,
@@ -121,42 +119,6 @@ class TestBug40Inc4Fix:
         GitWorktreeOps.prune(repo)
         if GitWorktreeOps.branch_exists(repo, branch):
             GitWorktreeOps.delete_branch(repo, branch)
-
-
-class TestBug41Red6Fix:
-    """BUG-41/RED-6 FIX: _start_merge_session accepts tab_id parameter
-    and all callers pass it."""
-
-
-
-
-    def test_is_merging_set_with_explicit_tab_id(self, tmp_path):
-        """When tab_id is passed explicitly, is_merging is set correctly
-        even if thread-local tab_id is None (replay path)."""
-        server = VSCodeServer()
-        tab = server._get_tab("replay-tab")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        assert not tab.is_merging
-
-        merge_dir = tmp_path / "merge"
-        merge_dir.mkdir()
-        merge_json = merge_dir / "pending-merge.json"
-        merge_json.write_text(json.dumps({
-            "files": [{
-                "path": "test.txt",
-                "hunks": [{"old_start": 1, "new_start": 1}],
-            }],
-        }))
-
-        result = server._start_merge_session(
-            str(merge_json), tab_id="replay-tab",
-        )
-        assert result is True
-        assert tab.is_merging, (
-            "is_merging must be True when tab_id is passed explicitly"
-        )
-
-
 
 
 class TestBug43Fix:
@@ -274,20 +236,28 @@ class TestInc6Fix:
 
         server = VSCodeServer()
         server.work_dir = str(repo)
-        tab = server._get_tab("inc6-tab")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        tab.agent._wt = GitWorktree(
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch="main",
             wt_dir=wt_dir,
         )
-
-        has_conflict = server._check_merge_conflict("inc6-tab")
-        assert has_conflict, (
-            "INC-6 fix: staged file overlap must be detected"
+        st = agent_state.AgentState(
+            "task-inc6",
+            agent=agent,
+            tab_id="inc6-tab",
+            server_owned=True,
         )
+        st.use_worktree = True
+        agent_state.register(st)
+        try:
+            has_conflict = server._check_merge_conflict("inc6-tab")
+            assert has_conflict, (
+                "INC-6 fix: staged file overlap must be detected"
+            )
+        finally:
+            agent_state.unregister("task-inc6", st)
 
         subprocess.run(["git", "reset", "HEAD", "init.txt"], cwd=repo, capture_output=True)
         subprocess.run(["git", "checkout", "--", "init.txt"], cwd=repo, capture_output=True)
