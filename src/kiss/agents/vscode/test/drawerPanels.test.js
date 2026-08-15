@@ -667,16 +667,20 @@ function testMobileRemoteFollowsRunningState() {
   win.close();
 }
 
-// A running task reported by the launch snapshot counts too.
+// A running task restored by the launch replay counts too: the registry
+// snapshot opens the tab and the replayed `status` reports it running.
 function testMobileRemoteRunningSnapshotFoldsComposer() {
   persistedState = undefined;
   const {win} = makeWebview({remote: true, userAgent: UA_ANDROID});
   assertInputDrawer(win, false, 'nothing running yet');
   send(win, {
-    type: 'openRunningTasks',
-    tasks: [{chatId: 'chat-live', taskId: 'task-live', startTs: 1000}],
+    type: 'tabs_state',
+    tabs: [
+      {tabId: 'tab-live', chatId: 'chat-live', title: 'live', workDir: ''},
+    ],
   });
-  assertInputDrawer(win, true, 'the launch snapshot says a task is running');
+  send(win, {type: 'status', running: true, tabId: 'tab-live', startTs: 1000});
+  assertInputDrawer(win, true, 'the launch replay says a task is running');
   win.close();
 }
 

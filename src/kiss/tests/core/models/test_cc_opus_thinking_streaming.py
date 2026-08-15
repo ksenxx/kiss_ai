@@ -57,6 +57,9 @@ class _FakeStdout:
         self._pos = len(self._lines)
         return rest
 
+    def close(self) -> None:
+        pass
+
 
 def _make_stream_events_with_text_deltas() -> list[dict[str, Any]]:
     """Build a realistic cc/opus stream: no thinking_delta, multiple text_delta chunks."""

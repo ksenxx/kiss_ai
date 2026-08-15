@@ -48,6 +48,7 @@ from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -145,7 +146,9 @@ def _run_and_wait(server: VSCodeServer, tab_id: str, prompt: str,
         "model": "claude-opus-4-6", "workDir": work_dir,
         "tabId": tab_id, "autoCommit": True,
     })
-    t = server._get_tab(tab_id).task_thread
+    st = agent_state.find_by_tab(tab_id)
+    assert st is not None
+    t = st.task_thread
     assert t is not None
     t.join(timeout=60)
     assert not t.is_alive()
@@ -170,6 +173,7 @@ class TestResultSummaryFromYaml(unittest.TestCase):
 
     def tearDown(self) -> None:
         _unpatch_parent_run(self.original_run)
+        agent_state.agent_states.clear()
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 

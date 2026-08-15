@@ -80,7 +80,6 @@ VSCODE_VARS = {
     "--vscode-terminal-ansiRed": "#f44747",
     "--vscode-terminal-ansiGreen": "#6a9955",
     "--vscode-terminal-ansiYellow": "#d7ba7d",
-    "--vscode-terminal-ansiBlue": "#569cd6",
     "--vscode-terminal-ansiMagenta": "#c586c0",
     "--vscode-terminal-ansiCyan": "#4ec9b0",
 }

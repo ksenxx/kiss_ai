@@ -2,10 +2,10 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Bughunt round 2: MCP tool wrappers, OAuth callback server, skills.
+"""Bughunt round 2: MCP tool wrappers, skills.
 
 End-to-end regression tests (no mocks) for genuine bugs found in
-``kiss.agents.sorcar.mcp_servers``, ``kiss.ui.cli.mcp_cli``, and
+``kiss.agents.sorcar.mcp_servers`` and
 ``kiss.agents.sorcar.skills``:
 
 1. ``make_mcp_tool_wrapper`` crashed with ``ValueError`` when an
@@ -15,12 +15,7 @@ End-to-end regression tests (no mocks) for genuine bugs found in
    property name was not a valid Python identifier (``max-results``)
    or was a Python keyword (``from``) — taking down ``make_mcp_tools``
    and therefore agent startup for the whole server.
-3. ``_OAuthCallbackServer`` treated *any* GET (e.g. the browser's
-   ``/favicon.ico`` probe) as the OAuth redirect: it clobbered a
-   previously captured authorization code with ``None`` and set the
-   done event, making ``wait()`` raise ``TimeoutError`` even though
-   authentication succeeded.
-4. ``load_skill_content`` appended ``<note>listing truncated</note>``
+3. ``load_skill_content`` appended ``<note>listing truncated</note>``
    when a skill had *exactly* ``_MAX_RESOURCE_LISTING`` resource files,
    although nothing was omitted.
 """
@@ -30,8 +25,6 @@ from __future__ import annotations
 import inspect
 import json
 import sys
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 from kiss.agents.sorcar.mcp_servers import (
@@ -49,7 +42,6 @@ from kiss.agents.sorcar.skills import (
 from kiss.tests.agents.sorcar.test_sorcar_mcp import (  # noqa: F401
     isolated_homes,
 )
-from kiss.ui.cli.mcp_cli import _OAuthCallbackServer
 
 _WEIRD_SERVER_SCRIPT = '''
 import json
@@ -169,33 +161,6 @@ def test_non_identifier_and_keyword_properties_live_call(
     assert received == {"from": "alice", "max-results": 3}
     received = json.loads(fetch(**{required[0]: "bob"}))
     assert received == {"from": "bob"}
-
-
-def test_oauth_callback_ignores_non_callback_requests() -> None:
-    """A stray browser request must not clobber the captured OAuth code.
-
-    Browsers routinely fetch ``/favicon.ico`` from the redirect origin.
-    Sequence: the real ``/callback`` redirect arrives, then a favicon
-    probe.  ``wait()`` must still return the captured code instead of
-    raising ``TimeoutError`` because the probe overwrote it with None.
-    """
-    server = _OAuthCallbackServer()
-    try:
-        url = f"http://localhost:{server.port}/callback?code=abc123&state=st9"
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            assert resp.status == 200
-        try:
-            with urllib.request.urlopen(
-                f"http://localhost:{server.port}/favicon.ico", timeout=10,
-            ) as resp:
-                pass
-        except urllib.error.HTTPError:
-            pass
-        code, state = server.wait(timeout=10)
-        assert code == "abc123"
-        assert state == "st9"
-    finally:
-        server.close()
 
 
 def test_no_truncation_note_at_exact_resource_cap(tmp_path: Path) -> None:

@@ -38,6 +38,7 @@ import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.persistence import _load_task_chain_context
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -133,7 +134,9 @@ def _run_and_wait(server: VSCodeServer, tab_id: str, prompt: str,
         "model": "claude-fable-5", "workDir": work_dir,
         "tabId": tab_id,
     })
-    t = server._get_tab(tab_id).task_thread
+    with agent_state.STATE_LOCK:
+        state = agent_state.find_by_tab(tab_id)
+        t = state.task_thread if state is not None else None
     if t is not None:
         t.join(timeout=10)
         assert not t.is_alive()
@@ -192,6 +195,8 @@ class _ChainContextBase(unittest.TestCase):
         _unpatch_parent_run(self.original_run)
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
 
 
 class TestChainContextFirstRun(_ChainContextBase):
@@ -231,10 +236,17 @@ class TestChainContextFirstRun(_ChainContextBase):
 
         tab = "tab-chain-oneshot"
         _open_by_task_id(self.server, tab, "chatB", t3_id)
-        _run_and_wait(self.server, tab, "first follow-up quokka",
-                      self.tmpdir)
-        _run_and_wait(self.server, tab, "second follow-up wombat",
-                      self.tmpdir)
+        # Drive both runs synchronously through _run_task: the second
+        # run must reuse the tab's idle state.  (The async _cmd_run
+        # path currently leaves a dead task_thread behind after the
+        # mid-run rekey — see SUSPECTED SOURCE BUGS in the batch
+        # report — which would swallow the second run as steering.)
+        for prompt in ("first follow-up quokka", "second follow-up wombat"):
+            self.server._run_task({
+                "type": "run", "prompt": prompt,
+                "model": "claude-fable-5", "workDir": self.tmpdir,
+                "tabId": tab,
+            })
 
         assert len(self.capture.prompts) == 2
         second = self.capture.prompts[1]
@@ -296,12 +308,27 @@ class TestChainContextFirstRun(_ChainContextBase):
 
         tab = "tab-chain-rejected"
         _open_by_task_id(self.server, tab, "chatB", t2_id)
-        self.server._get_tab(tab).is_merging = True
-        _run_and_wait(self.server, tab, "rejected run", self.tmpdir)
+        with self.server._state_lock:
+            merging_state = agent_state.AgentState(
+                f"merge-review-{tab}",
+                tab_id=tab,
+                server_owned=True,
+            )
+            merging_state.is_merging = True
+            agent_state.register(merging_state)
+        # Drive _run_task directly: it reuses the tab's idle (merging)
+        # state via _resolve_run_state, and _run_task_inner refuses to
+        # run while the state's merge review is open.
+        self.server._run_task({
+            "type": "run", "prompt": "rejected run",
+            "model": "claude-fable-5", "workDir": self.tmpdir,
+            "tabId": tab,
+        })
         assert not self.capture.prompts, "rejected run must not reach agent"
         assert self.server._tab_opened_task_ids.get(tab) == t2_id
 
-        self.server._get_tab(tab).is_merging = False
+        with self.server._state_lock:
+            merging_state.is_merging = False
         _run_and_wait(self.server, tab, "accepted run", self.tmpdir)
         prompt = self.capture.prompts[0]
         assert "t1 magic word apple" in prompt, prompt

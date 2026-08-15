@@ -43,8 +43,8 @@ from typing import Any, cast
 import kiss.agents.sorcar.persistence as _persistence
 import kiss.server.merge_flow as _merge_flow_module
 import kiss.server.server as _server_module
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -102,7 +102,8 @@ class _BugHuntBase(unittest.TestCase):
         self._parent_class.run = self._original_run
         _merge_flow_module.generate_commit_message_from_diff = self._orig_gen
         _server_module.generate_followup_text = self._orig_followup
-        _RunningAgentState.running_agent_states.clear()
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
@@ -134,7 +135,7 @@ class TestResumeRunningStartTs(_BugHuntBase):
             task_id: str | None = None
             deadline = time.time() + 30
             while time.time() < deadline:
-                tab = _RunningAgentState.running_agent_states.get(src_tab)
+                tab = agent_state.find_by_tab(src_tab)
                 if (
                     tab is not None
                     and tab.agent is not None
@@ -175,7 +176,7 @@ class TestResumeRunningStartTs(_BugHuntBase):
             )
         finally:
             release.set()
-            tab = _RunningAgentState.running_agent_states.get(src_tab)
+            tab = agent_state.find_by_tab(src_tab)
             if tab is not None and tab.task_thread is not None:
                 tab.task_thread.join(timeout=30)
 
@@ -219,12 +220,15 @@ class TestAutocommitDonePersistedToCurrentTask(_BugHuntBase):
             "model": "",
         }
         self.server._run_task(dict(cmd))
-        tab = _RunningAgentState.running_agent_states[tab_id]
-        task1_id = tab.last_task_id
+        tab = agent_state.find_by_tab(tab_id)
+        assert tab is not None, "no agent state registered for the tab"
+        task1_id = tab.task_id
         assert task1_id is not None, "first task id missing"
 
         self.server._run_task(dict(cmd))
-        task2_id = tab.last_task_id
+        tab = agent_state.find_by_tab(tab_id)
+        assert tab is not None, "no agent state registered for the tab"
+        task2_id = tab.task_id
         assert task2_id is not None and task2_id != task1_id, (
             f"second run did not allocate a new task row "
             f"(task1={task1_id}, task2={task2_id})"

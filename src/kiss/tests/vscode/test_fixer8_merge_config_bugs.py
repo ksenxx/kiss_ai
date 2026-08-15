@@ -13,9 +13,8 @@ F5  The porcelain fallback of ``_get_worktree_changed_files`` (extracted
     as ``merge_flow._porcelain_paths``) must not strip paths and must
     split rename entries ``old -> new`` instead of emitting the joined
     string as one bogus file.
-F8  ``diff_merge._write_base_copy`` no longer takes the ignored
-    ``binary`` parameter; committed bytes are preserved exactly for both
-    text (CRLF) and binary content.
+F8  (obsolete) ``diff_merge._write_base_copy`` was removed together
+    with the interactive diff/merge review workflow.
 F9  ``autocomplete._ghost_suffix`` behaviour for the three completion
     kinds actually produced by ``_complete_many`` (guards the removal of
     the unreachable ``else`` arm).
@@ -229,59 +228,6 @@ class TestPorcelainPathsFallbackParser:
         files = _porcelain_paths(status.stdout)
 
         assert 'we"ird.txt' in files
-
-
-
-class TestWriteBaseCopyNoBinaryParam:
-    def test_crlf_text_bytes_preserved(self, tmp_path: Path) -> None:
-        from kiss.server.diff_merge import _write_base_copy
-
-        repo = tmp_path / "repo"
-        repo.mkdir()
-        _run_git(repo, "init")
-        committed = b"alpha\r\nbeta\r\n"
-        (repo / "crlf.txt").write_bytes(committed)
-        _run_git(repo, "add", "crlf.txt")
-        _run_git(repo, "commit", "-m", "crlf")
-
-        base = _write_base_copy(
-            str(repo), tmp_path / "merge", tmp_path / "ub", "crlf.txt",
-            "HEAD",
-        )
-        assert base.read_bytes() == committed
-
-    def test_binary_bytes_preserved(self, tmp_path: Path) -> None:
-        from kiss.server.diff_merge import _write_base_copy
-
-        repo = tmp_path / "repo"
-        repo.mkdir()
-        _run_git(repo, "init")
-        committed = b"\x00\x01\xffPNG\r\n\x00"
-        (repo / "blob.bin").write_bytes(committed)
-        _run_git(repo, "add", "blob.bin")
-        _run_git(repo, "commit", "-m", "bin")
-
-        base = _write_base_copy(
-            str(repo), tmp_path / "merge", tmp_path / "ub", "blob.bin",
-            "HEAD",
-        )
-        assert base.read_bytes() == committed
-
-    def test_missing_blob_writes_empty_base(self, tmp_path: Path) -> None:
-        from kiss.server.diff_merge import _write_base_copy
-
-        repo = tmp_path / "repo"
-        repo.mkdir()
-        _run_git(repo, "init")
-        (repo / "a.txt").write_text("x\n")
-        _run_git(repo, "add", "a.txt")
-        _run_git(repo, "commit", "-m", "a")
-
-        base = _write_base_copy(
-            str(repo), tmp_path / "merge", tmp_path / "ub", "brand-new.txt",
-            "HEAD",
-        )
-        assert base.read_bytes() == b""
 
 
 

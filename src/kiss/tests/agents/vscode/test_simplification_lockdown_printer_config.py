@@ -375,8 +375,16 @@ class TestConfigRoundTrip(_ConfigDirTestCase):
         cfg = load_config()
         assert cfg == dict(DEFAULTS), cfg
 
-    def test_save_preserves_unknown_disk_keys_and_drops_unknown_input(self) -> None:
-        """Non-DEFAULTS keys on disk survive; non-DEFAULTS input keys don't."""
+    def test_save_preserves_disk_keys_and_writes_extension_keys(self) -> None:
+        """Untouched keys on disk survive; keys passed in are written.
+
+        This used to assert that non-DEFAULTS *input* keys were dropped.
+        That was a defect, not a guarantee: ``tunnel_token``,
+        ``skill_permissions``, ``mcp_permissions`` and ``email`` are all
+        read at runtime, so accepting them silently and discarding them
+        lost the value until the next daemon restart.  Only API keys are
+        excluded, and only retired keys are purged.
+        """
         import kiss.core.vscode_config as vc
         from kiss.core.vscode_config import load_config, save_config
 
@@ -384,15 +392,23 @@ class TestConfigRoundTrip(_ConfigDirTestCase):
             json.dumps({"email": "a@b.c", "max_budget": 3}), encoding="utf-8",
         )
 
-        save_config({"max_budget": 7, "bogus_key": 1})
+        save_config({
+            "max_budget": 7,
+            "tunnel_token": "tok-1",
+            "ANTHROPIC_API_KEY": "sk-nope",
+            "demo_mode": True,
+        })
 
         stored = json.loads(vc.CONFIG_PATH.read_text(encoding="utf-8"))
         assert stored["email"] == "a@b.c", stored
         assert stored["max_budget"] == 7, stored
-        assert "bogus_key" not in stored, stored
+        assert stored["tunnel_token"] == "tok-1", stored
+        assert "ANTHROPIC_API_KEY" not in stored, stored
+        assert "demo_mode" not in stored, stored
         cfg = load_config()
         assert cfg["email"] == "a@b.c"
         assert cfg["max_budget"] == 7
+        assert cfg["tunnel_token"] == "tok-1"
 
 
 if __name__ == "__main__":

@@ -439,13 +439,16 @@ class TestEndpointSelection:
             base_url=capture_server,
             api_key="test-key",
         )
-        _ADAPTIVE_TOOL_EFFORT_VERDICTS.pop(capture_server, None)
+        # Keyed by (base_url, api_model_name); "gpt-5.5-xhigh" goes on
+        # the wire as "gpt-5.5".
+        verdict_key = (capture_server, "gpt-5.5")
+        _ADAPTIVE_TOOL_EFFORT_VERDICTS.pop(verdict_key, None)
         m.initialize("hi")
         m.generate_and_process_with_tools({"echo": echo})
         req = _last_request()
         assert req["path"].endswith("/chat/completions")
         assert req["body"]["reasoning_effort"] == "xhigh"
-        assert _ADAPTIVE_TOOL_EFFORT_VERDICTS.pop(capture_server) is True
+        assert _ADAPTIVE_TOOL_EFFORT_VERDICTS.pop(verdict_key) is True
 
     def test_openrouter_endpoint_preserves_reasoning_effort_with_tools(
         self, capture_server: str

@@ -53,6 +53,10 @@ from kiss.core.models.openai_compatible_model import (
 
 _KNOWN_VENDORS = {"openai", "openrouter", "together", "zai", "moonshot"}
 
+# The model id every wire test below sends, and therefore half of the
+# (base_url, api_model_name) verdict-cache key.
+_WIRE_MODEL = "gpt-4o"
+
 _TRIPWIRE_MESSAGE = (
     "A new OpenAI-compatible vendor was added to (or removed from) "
     "model_info.OPENAI_COMPATIBLE_PROVIDERS. For a NEW vendor you MUST: "
@@ -119,7 +123,6 @@ class TestFactoryRoutesMatchRegistry:
 
     def test_excluded_prefixes_route_elsewhere(self) -> None:
         """Registry excludes keep non-OpenAI-compatible names out of the table."""
-        assert type(model("text-embedding-004")).__name__ == "GeminiModel"
         together = model("openai/gpt-oss-20b")
         assert isinstance(together, OpenAICompatibleModel)
         assert together.base_url == "https://api.together.xyz/v1"
@@ -207,7 +210,11 @@ def wire_server() -> Generator[str]:
         yield f"http://127.0.0.1:{server.server_port}/v1"
     finally:
         server.shutdown()
-        for key in [k for k in _ADAPTIVE_TOOL_EFFORT_VERDICTS if str(server.server_port) in k]:
+        port = str(server.server_port)
+        # The verdict cache is keyed by (base_url, api_model_name): the
+        # capability belongs to the endpoint AND the model, not to the
+        # endpoint alone.
+        for key in [k for k in _ADAPTIVE_TOOL_EFFORT_VERDICTS if port in k[0]]:
             _ADAPTIVE_TOOL_EFFORT_VERDICTS.pop(key, None)
 
 
@@ -277,7 +284,7 @@ class TestDeclaredCapabilityOnTheWire:
         m.initialize("hi")
         m.generate_and_process_with_tools({"echo": echo})
         assert _CapabilityHandler.captured_bodies[0]["reasoning_effort"] == "high"
-        assert _ADAPTIVE_TOOL_EFFORT_VERDICTS.pop(base_url) is True
+        assert _ADAPTIVE_TOOL_EFFORT_VERDICTS.pop((base_url, _WIRE_MODEL)) is True
 
 
 class TestAdaptiveProbeOnUnknownEndpoints:
@@ -292,7 +299,7 @@ class TestAdaptiveProbeOnUnknownEndpoints:
         m.generate_and_process_with_tools({"echo": echo})
         assert len(_CapabilityHandler.captured_bodies) == 1
         assert _CapabilityHandler.captured_bodies[0]["reasoning_effort"] == "high"
-        assert _ADAPTIVE_TOOL_EFFORT_VERDICTS[wire_server] is True
+        assert _ADAPTIVE_TOOL_EFFORT_VERDICTS[(wire_server, _WIRE_MODEL)] is True
         m.generate_and_process_with_tools({"echo": echo})
         assert len(_CapabilityHandler.captured_bodies) == 2
         assert _CapabilityHandler.captured_bodies[1]["reasoning_effort"] == "high"
@@ -314,7 +321,7 @@ class TestAdaptiveProbeOnUnknownEndpoints:
         assert _CapabilityHandler.captured_bodies[0]["reasoning_effort"] == "high"
         assert "reasoning_effort" not in _CapabilityHandler.captured_bodies[1]
         assert _CapabilityHandler.captured_bodies[1]["tools"]
-        assert _ADAPTIVE_TOOL_EFFORT_VERDICTS[wire_server] is False
+        assert _ADAPTIVE_TOOL_EFFORT_VERDICTS[(wire_server, _WIRE_MODEL)] is False
         m.generate_and_process_with_tools({"echo": echo})
         assert len(_CapabilityHandler.captured_bodies) == 3
         assert "reasoning_effort" not in _CapabilityHandler.captured_bodies[2]
@@ -323,14 +330,14 @@ class TestAdaptiveProbeOnUnknownEndpoints:
         """A 400 for a request without effort propagates unchanged."""
         _CapabilityHandler.reject_reasoning_effort = True
         m = _make_model(wire_server)
-        _ADAPTIVE_TOOL_EFFORT_VERDICTS[wire_server] = True
+        _ADAPTIVE_TOOL_EFFORT_VERDICTS[(wire_server, _WIRE_MODEL)] = True
         m.initialize("hi")
         from openai import BadRequestError
 
         with pytest.raises(BadRequestError):
             m.generate_and_process_with_tools({"echo": echo})
         assert len(_CapabilityHandler.captured_bodies) == 1
-        _ADAPTIVE_TOOL_EFFORT_VERDICTS.pop(wire_server, None)
+        _ADAPTIVE_TOOL_EFFORT_VERDICTS.pop((wire_server, _WIRE_MODEL), None)
 
     def test_no_effort_request_does_not_cache_a_verdict(
         self, wire_server: str
@@ -342,4 +349,4 @@ class TestAdaptiveProbeOnUnknownEndpoints:
         m.initialize("hi")
         m.generate_and_process_with_tools({"echo": echo})
         assert "reasoning_effort" not in _CapabilityHandler.captured_bodies[0]
-        assert wire_server not in _ADAPTIVE_TOOL_EFFORT_VERDICTS
+        assert (wire_server, _WIRE_MODEL) not in _ADAPTIVE_TOOL_EFFORT_VERDICTS

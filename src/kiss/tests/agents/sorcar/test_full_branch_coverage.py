@@ -21,6 +21,7 @@ import pytest
 
 from kiss.agents.sorcar import persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -60,15 +61,24 @@ class TestUserAnswerDrain:
     """Cover drain-stale-answers path in userAnswer handler (lines 169-170)."""
 
     def test_user_answer_drains_stale(self) -> None:
-        """Pre-filling a tab queue before userAnswer should drain stale item."""
+        """Pre-filling a task queue before userAnswer should drain stale item."""
         import queue as queue_mod
 
         server = VSCodeServer()
         q: queue_mod.Queue[str] = queue_mod.Queue(maxsize=1)
         q.put("stale")
-        server._get_tab("7").user_answer_queue = q
-        server._handle_command({"type": "userAnswer", "answer": "new", "tabId": "7"})
-        answer = q.get_nowait()
+        state = agent_state.AgentState(
+            "task-7", tab_id="7", server_owned=True, is_task_active=True,
+        )
+        state.user_answer_queue = q
+        agent_state.register(state)
+        try:
+            server._handle_command(
+                {"type": "userAnswer", "answer": "new", "tabId": "7"}
+            )
+            answer = q.get_nowait()
+        finally:
+            agent_state.unregister(state.task_id, state)
         assert answer == "new"
 
 
@@ -151,7 +161,11 @@ class TestAwaitUserResponseLoop:
         server.printer._thread_local.stop_event = stop_event
         server.printer._thread_local.task_id = "42"
         q: queue_mod.Queue[str] = queue_mod.Queue(maxsize=1)
-        server._get_tab("42").user_answer_queue = q
+        state = agent_state.AgentState(
+            "42", tab_id="42", server_owned=True, is_task_active=True,
+        )
+        state.user_answer_queue = q
+        agent_state.register(state)
         server.printer.subscribe_tab("42", "42")
 
         def delayed_answer() -> None:
@@ -160,7 +174,11 @@ class TestAwaitUserResponseLoop:
 
         t = threading.Thread(target=delayed_answer, daemon=True)
         t.start()
-        result = server._await_user_response()
+        try:
+            result = server._await_user_response()
+        finally:
+            agent_state.unregister(state.task_id, state)
+            server.printer._thread_local.task_id = ""
         assert result == "delayed"
         t.join(timeout=2)
 
@@ -183,18 +201,29 @@ class TestRunTaskDrain:
         tab_id = "1"
         stale_q: queue.Queue[str] = queue.Queue(maxsize=1)
         stale_q.put("stale-answer")
-        server._get_tab(tab_id).user_answer_queue = stale_q
+        prev = agent_state.AgentState(
+            "task-stale", tab_id=tab_id, server_owned=True,
+        )
+        prev.user_answer_queue = stale_q
+        agent_state.register(prev)
 
-        server._handle_command({
-            "type": "run",
-            "prompt": "test drain",
-            "model": "nonexistent-model",
-            "tabId": tab_id,
-        })
+        try:
+            server._handle_command({
+                "type": "run",
+                "prompt": "test drain",
+                "model": "nonexistent-model",
+                "tabId": tab_id,
+            })
 
-        thread = server._get_tab(tab_id).task_thread
-        if thread:
-            thread.join(timeout=30)
+            state = agent_state.find_by_tab(tab_id)
+            thread = state.task_thread if state is not None else None
+            if thread:
+                thread.join(timeout=30)
+        finally:
+            with agent_state.STATE_LOCK:
+                for st in agent_state.snapshot():
+                    if st.tab_id == tab_id:
+                        agent_state.unregister(st.task_id, st)
 
         status_events = [
             e for e in captured

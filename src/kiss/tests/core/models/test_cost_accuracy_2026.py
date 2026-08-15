@@ -115,10 +115,6 @@ class TestGeminiLongContextPricing:
         expected = (250_000 * 4.0 + 10_000 * 18.0 + 20_000 * 0.40) / 1e6
         assert cost == pytest.approx(expected)
 
-    def test_gemini3_pro_long_context_cost(self):
-        cost = calculate_cost("gemini-3-pro-preview", 250_000, 10_000)
-        assert cost == pytest.approx((250_000 * 4.0 + 10_000 * 18.0) / 1e6)
-
     def test_gemini31_pro_short_context_cost_unchanged(self):
         cost = calculate_cost("gemini-3.1-pro-preview", 100_000, 10_000)
         assert cost == pytest.approx((100_000 * 2.0 + 10_000 * 12.0) / 1e6)

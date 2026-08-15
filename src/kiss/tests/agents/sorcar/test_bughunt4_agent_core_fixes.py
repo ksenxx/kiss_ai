@@ -6,7 +6,8 @@
 
 End-to-end reproductions for the confirmed findings in
 ``sorcar_agent.py``, ``worktree_sorcar_agent.py``,
-``chat_sorcar_agent.py`` and ``running_agent_state.py``:
+``chat_sorcar_agent.py`` and the server's task-keyed registry
+(``kiss.server.agent_state``):
 
 * F-01: ``finish`` accepted while a queued user follow-up is undrained.
 * F-02: a raising ``broadcast`` in the pending-message drain loses the
@@ -29,9 +30,9 @@ End-to-end reproductions for the confirmed findings in
   leaking the task branch.
 * F-13: manual recovery command blocks are not shell-quoted.
 * F-14: an exception in post-registration setup of
-  ``ChatSorcarAgent.run`` leaks both running-agent registries.
-* F-15: key-only ``unregister`` deletes a replacement state registered
-  under the same tab id (ABA).
+  ``ChatSorcarAgent.run`` leaks the running-agent registry.
+* F-15: identity-checked ``unregister`` must not delete a replacement
+  state registered under the same task id (ABA).
 
 All tests use real objects (real git repos, real SQLite persistence,
 real printers, real model adapters) — no mocks, patches, fakes, or
@@ -55,7 +56,6 @@ import pytest
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
 from kiss.agents.sorcar.git_worktree import GitWorktree, MergeResult
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import (
     SorcarAgent,
     _LiveUsageMonitor,
@@ -67,6 +67,7 @@ from kiss.agents.sorcar.worktree_sorcar_agent import (
     _merge_fix_steps,
 )
 from kiss.core.models.model_info import model as _model_factory
+from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 
 
@@ -104,19 +105,15 @@ class _TempDbTestBase:
         th._DB_PATH = kiss_dir / "sorcar.db"
         th._db_conn = None
         th._invalidate_chat_context_cache("")
-        self._saved_states = dict(_RunningAgentState.running_agent_states)
-        _RunningAgentState.running_agent_states.clear()
-        self._saved_running = dict(ChatSorcarAgent.running_agents)
-        ChatSorcarAgent.running_agents.clear()
+        self._saved_states = dict(agent_state.agent_states)
+        agent_state.agent_states.clear()
 
     def teardown_method(self) -> None:
         th._close_db()
         th._invalidate_chat_context_cache("")
         th._DB_PATH, th._db_conn, th._KISS_DIR = self.saved
-        _RunningAgentState.running_agent_states.clear()
-        _RunningAgentState.running_agent_states.update(self._saved_states)
-        ChatSorcarAgent.running_agents.clear()
-        ChatSorcarAgent.running_agents.update(self._saved_running)
+        agent_state.agent_states.clear()
+        agent_state.agent_states.update(self._saved_states)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
@@ -161,40 +158,69 @@ def _fresh_openai_model(api_key: str, config: dict[str, object] | None = None) -
 class TestF01FinishGuard(_TempDbTestBase):
     """finish must be rejected while a queued user follow-up is undrained."""
 
-    def test_finish_blocked_until_drain(self) -> None:
+    def test_finish_allowed_without_pending_bridge(self) -> None:
         agent: Any = SorcarAgent("f01")
-        agent._tab_id = "tab-f01"
-        state = _RunningAgentState("tab-f01", "gpt-4o")
-        state.pending_user_messages.append("also update the docs")
-        _RunningAgentState.register("tab-f01", state)
 
-        blocked = agent._block_finish_when_user_message_pending("finish", {})
-        assert blocked is not None
-        assert "new message" in blocked
-
-        # Non-finish tools are never blocked.
+        # Without a printer bridge there is no queued steering, so
+        # finish is allowed and non-finish tools are never blocked.
+        assert (
+            agent._block_finish_when_user_message_pending("finish", {}) is None
+        )
         assert (
             agent._block_finish_when_user_message_pending("Bash", {}) is None
         )
 
-        # Once the queue is drained, finish is allowed again.
-        state.pending_user_messages.clear()
-        assert (
-            agent._block_finish_when_user_message_pending("finish", {}) is None
-        )
+    def test_finish_blocked_via_printer_bridge(self) -> None:
+        """Server-queued steering (registry state) must also block finish."""
+        agent: Any = SorcarAgent("f01-bridge")
+        printer = JsonPrinter()
+        printer._thread_local.task_id = "task-f01"
+        agent.printer = printer
+        state = agent_state.AgentState("task-f01")
+        state.pending_user_messages.append("also update the docs")
+        agent_state.register(state)
+        try:
+            blocked = agent._block_finish_when_user_message_pending(
+                "finish", {},
+            )
+            assert blocked is not None and "new message" in blocked
+
+            state.pending_user_messages.clear()
+            assert (
+                agent._block_finish_when_user_message_pending("finish", {})
+                is None
+            )
+        finally:
+            agent_state.unregister("task-f01", state)
 
     def test_guard_wired_through_chat_agent_property(self) -> None:
         """ChatSorcarAgent's guard property must delegate to the F-01 guard."""
         agent: Any = ChatSorcarAgent("f01-wire")
-        agent._tab_id = "tab-f01w"
-        state = _RunningAgentState("tab-f01w", "gpt-4o")
+        printer = JsonPrinter()
+        printer._thread_local.task_id = "task-f01-wire"
+        agent.printer = printer
+        state = agent_state.AgentState("task-f01-wire")
         state.pending_user_messages.append("stop, do X instead")
-        _RunningAgentState.register("tab-f01w", state)
+        agent_state.register(state)
+        try:
+            # Same assignment SorcarAgent.perform_task performs.
+            agent.tool_call_guard = agent._block_finish_when_user_message_pending
+            blocked = agent.tool_call_guard("finish", {})
+            assert blocked is not None and "new message" in blocked
+        finally:
+            agent_state.unregister("task-f01-wire", state)
 
-        # Same assignment SorcarAgent.perform_task performs.
-        agent.tool_call_guard = agent._block_finish_when_user_message_pending
-        blocked = agent.tool_call_guard("finish", {})
-        assert blocked is not None and "new message" in blocked
+
+class _BrokenBroadcastJsonPrinter(JsonPrinter):
+    """Real JsonPrinter whose event pipe is broken: ``broadcast`` raises."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts = 0
+
+    def broadcast(self, event: dict[str, Any], **kwargs: Any) -> None:
+        self.attempts += 1
+        raise RuntimeError("broadcast pipe closed")
 
 
 class TestF02DrainRobustness(_TempDbTestBase):
@@ -202,55 +228,33 @@ class TestF02DrainRobustness(_TempDbTestBase):
 
     def test_steering_survives_broken_broadcast(self) -> None:
         agent: Any = SorcarAgent("f02")
-        agent._tab_id = "tab-f02"
-        broken_printer = _BrokenBroadcastPrinter()
+        broken_printer = _BrokenBroadcastJsonPrinter()
+        broken_printer._thread_local.task_id = "task-f02"
         agent.printer = broken_printer
-        state = _RunningAgentState("tab-f02", "gpt-4o")
+        state = agent_state.AgentState("task-f02")
         state.pending_user_messages.append("use tabs not spaces")
         state.unattributed_prompt_echoes.append("use tabs not spaces")
-        _RunningAgentState.register("tab-f02", state)
+        agent_state.register(state)
 
         model = _fresh_openai_model("test-key")
         model.initialize("original task")
 
-        agent._drain_pending_user_messages(model)  # must not raise
+        try:
+            agent._drain_pending_user_messages(model)  # must not raise
 
-        assert state.pending_user_messages == []
-        # The durable echo is REQUEUED after the failed broadcast so a
-        # later drain can retry it (review-1 issue 3).
-        assert state.unattributed_prompt_echoes == ["use tabs not spaces"]
-        user_texts = [
-            m["content"]
-            for m in model.conversation
-            if isinstance(m, dict) and m.get("role") == "user"
-        ]
-        assert any("use tabs not spaces" in str(t) for t in user_texts)
-        assert broken_printer.attempts >= 1
-
-    def test_drain_and_guard_skip_foreign_owner(self) -> None:
-        """A stale agent must never consume a replacement's queued input."""
-        stale: Any = SorcarAgent("f02-stale")
-        stale._tab_id = "tab-f02b"
-        owner: Any = SorcarAgent("f02-owner")
-        state = _RunningAgentState("tab-f02b", "gpt-4o", agent=owner)
-        state.pending_user_messages.append("for the owner only")
-        _RunningAgentState.register("tab-f02b", state)
-
-        model = _fresh_openai_model("test-key")
-        model.initialize("original task")
-        stale._drain_pending_user_messages(model)
-
-        # The replacement's queue is untouched and nothing was injected.
-        assert state.pending_user_messages == ["for the owner only"]
-        assert all(
-            "for the owner only" not in str(m.get("content", ""))
-            for m in model.conversation
-            if isinstance(m, dict)
-        )
-        # The stale agent's finish is not blocked by the foreign queue.
-        assert (
-            stale._block_finish_when_user_message_pending("finish", {}) is None
-        )
+            assert state.pending_user_messages == []
+            # The durable echo is REQUEUED after the failed broadcast so a
+            # later drain can retry it (review-1 issue 3).
+            assert state.unattributed_prompt_echoes == ["use tabs not spaces"]
+            user_texts = [
+                m["content"]
+                for m in model.conversation
+                if isinstance(m, dict) and m.get("role") == "user"
+            ]
+            assert any("use tabs not spaces" in str(t) for t in user_texts)
+            assert broken_printer.attempts >= 1
+        finally:
+            agent_state.unregister("task-f02", state)
 
 
 class TestF03InterruptUsageAccounting(_TempDbTestBase):
@@ -280,8 +284,7 @@ class TestF03InterruptUsageAccounting(_TempDbTestBase):
         }
         # No sub-agent registry entry may leak either.
         assert all(
-            not state.is_subagent
-            for state in _RunningAgentState.running_agent_states.values()
+            not state.is_subagent for state in agent_state.snapshot()
         )
 
 
@@ -568,40 +571,30 @@ class TestF13ShellQuoting(_TempDbTestBase):
         assert "git branch -D kiss/wt-1" in block
 
 
+class _ExplodingRecordingPrinter(JsonPrinter):
+    """Real JsonPrinter whose ``start_recording`` (post-registration
+    setup) always raises."""
+
+    def start_recording(self) -> None:
+        raise RuntimeError("recording backend down")
+
+
 class TestF14SetupFailureCleansRegistries(_TempDbTestBase):
-    """A setup failure after task allocation must clean both registries."""
+    """A setup failure after task allocation must clean the registry."""
 
-    class _ExplodingSubscribePrinter:
-        def __init__(self) -> None:
-            self._thread_local = threading.local()
-            self._lock = threading.Lock()
-            self._persist_agents: dict[str, object] = {}
-
-        def subscribe_tab(self, task_id: object, tab_id: str) -> None:
-            raise RuntimeError("subscription backend down")
-
-    def test_subscribe_failure_does_not_leak_running_entries(self) -> None:
+    def test_setup_failure_does_not_leak_running_entries(self) -> None:
         agent = ChatSorcarAgent("f14")
-        printer = self._ExplodingSubscribePrinter()
+        printer = _ExplodingRecordingPrinter()
 
-        with pytest.raises(RuntimeError, match="subscription backend down"):
-            agent.run(
-                prompt_template="do something",
-                printer=printer,
-                _subscribe_tab_id="tab-f14",
-            )
+        with pytest.raises(RuntimeError, match="recording backend down"):
+            agent.run(prompt_template="do something", printer=printer)
 
-        # Before the fix both registries kept their entries forever,
-        # leaving a permanently "running" task with no stop route.
-        assert ChatSorcarAgent.running_agents == {}
+        # Before the fix the registry kept its entry forever, leaving a
+        # permanently "running" task with no stop route.
+        assert agent_state.find_by_agent(agent) is None
         assert all(
-            state.agent is not agent
-            for state in _RunningAgentState.running_agent_states.values()
+            state.agent is not agent for state in agent_state.snapshot()
         )
-        # The printer's persist-agent registration is removed too
-        # (review-1 issue 12: a setup failure must not leave a stale
-        # strong reference in a long-lived printer).
-        assert printer._persist_agents == {}
         # The failure is still recorded in task history.
         history = th._load_history()
         assert len(history) == 1
@@ -612,20 +605,21 @@ class TestF15AbaUnregister(_TempDbTestBase):
     """Identity-checked unregister must not delete a replacement state."""
 
     def test_stale_owner_cannot_remove_replacement(self) -> None:
-        state_a = _RunningAgentState("tab-x", "gpt-4o", chat_id="chat-a")
-        state_b = _RunningAgentState("tab-x", "gpt-4o", chat_id="chat-b")
-        _RunningAgentState.register("tab-x", state_a)
-        _RunningAgentState.register("tab-x", state_b)
+        state_a = agent_state.AgentState("task-x", chat_id="chat-a")
+        state_b = agent_state.AgentState("task-x", chat_id="chat-b")
+        agent_state.register(state_a)
+        agent_state.register(state_b)
 
         # Stale owner A unwinds: B must survive.
-        _RunningAgentState.unregister("tab-x", state_a)
-        assert _RunningAgentState.running_agent_states.get("tab-x") is state_b
+        agent_state.unregister("task-x", state_a)
+        assert agent_state.get("task-x") is state_b
 
         # The real owner removes its own entry.
-        _RunningAgentState.unregister("tab-x", state_b)
-        assert "tab-x" not in _RunningAgentState.running_agent_states
+        agent_state.unregister("task-x", state_b)
+        assert agent_state.get("task-x") is None
 
-        # Key-only unregister keeps working for legacy callers.
-        _RunningAgentState.register("tab-y", state_a)
-        _RunningAgentState.unregister("tab-y")
-        assert "tab-y" not in _RunningAgentState.running_agent_states
+        # Key-only unregister keeps working for callers without the
+        # state object in hand.
+        agent_state.register(state_a)
+        agent_state.unregister("task-x")
+        assert agent_state.get("task-x") is None

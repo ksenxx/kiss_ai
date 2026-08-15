@@ -2,14 +2,15 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Verify the sorcar CLI defaults ``work_dir`` to the launch directory.
+"""Verify channel-agent CLIs default ``work_dir`` to the launch directory.
 
-The installed ``sorcar`` wrapper runs ``uv run --directory
-<kiss_project> sorcar ...``; uv's ``--directory`` flag changes the
-process cwd to the bundled project before the CLI starts, so
-``Path.cwd()`` no longer reflects the user's shell directory.  The
-wrapper records the original ``$PWD`` in ``KISS_WORKDIR`` and the CLI
-must honor it when defaulting the task ``work_dir``.
+Installed wrapper scripts for the channel-agent entry points
+(``kiss-slack`` / ``kiss-gmail``) run ``uv run --directory
+<kiss_project> ...``; uv's ``--directory`` flag changes the process
+cwd to the bundled project before the entry point starts, so
+``Path.cwd()`` no longer reflects the user's shell directory.  Such a
+wrapper records the original ``$PWD`` in ``KISS_WORKDIR`` and the
+argument parser must honor it when defaulting the task ``work_dir``.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from kiss.agents.sorcar.cli_helpers import (
+from kiss.agents.third_party_agents._channel_cli import (
     _build_arg_parser,
     _build_run_kwargs,
     _launch_work_dir,

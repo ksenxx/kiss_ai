@@ -37,8 +37,9 @@ from pathlib import Path
 from typing import Any
 
 import kiss.server.server as _server_module
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import get_available_models
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -64,7 +65,7 @@ class TestFailureBannerMetricsAreDeltas(unittest.TestCase):
 
     def tearDown(self) -> None:
         _server_module.generate_followup_text = self._orig_followup
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _result_events(self) -> list[dict[str, Any]]:
@@ -77,9 +78,17 @@ class TestFailureBannerMetricsAreDeltas(unittest.TestCase):
         work_dir = str(Path(self.tmpdir) / "plain")
         Path(work_dir).mkdir()
 
-        tab = self.server._get_tab("metrics-tab")
-        agent = tab.agent
-        assert agent is not None
+        # Simulate the preserved-agent reuse: the tab's previous task
+        # ended with a pending worktree, so its agent (and cumulative
+        # counters) carry over into the next run's state.
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        state = agent_state.AgentState(
+            "task-metrics-tab",
+            agent=agent,
+            tab_id="metrics-tab",
+            server_owned=True,
+        )
+        agent_state.register(state)
         agent.total_tokens_used = 1000
         agent.budget_used = 1.0
         agent.total_steps = 50

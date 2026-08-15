@@ -13,22 +13,21 @@ tabs in the VS Code webview.
 
 Root cause
 ----------
-``ChatSorcarAgent._run_tasks_parallel`` resolves ``parent_tab_id`` by
-scanning ``_RunningAgentState.running_agent_states`` for the entry
-whose ``state.agent is self``.  For a TOP-LEVEL parent that registry
-key is the real frontend tab id (set by the VS Code server), so the
-child's ``new_tab`` broadcast passes the frontend guard::
+``ChatSorcarAgent._run_tasks_parallel`` resolves ``parent_tab_id``
+from ``self._tab_id``.  For a TOP-LEVEL parent that is the real
+frontend tab id (set by the VS Code server), so the child's
+``new_tab`` broadcast passes the frontend guard::
 
     if (ev.parent_tab_id && !tabs.find(t => t.id === ev.parent_tab_id))
       break;
 
-But a NESTED parent (a sub-agent that calls ``run_parallel``) is
-registered under the BACKEND synthetic key
-``task-{grandparent_task_id}__sub_{idx}`` — while its frontend viewer
-tab was created by ``createBackgroundSubagentTab`` with a RANDOM
-frontend id.  The nested children's ``new_tab`` broadcasts therefore
-carry a ``parent_tab_id`` that no frontend tab has, every webview
-drops them, and no tabs open.
+But a NESTED parent (a sub-agent that calls ``run_parallel``) carries
+the BACKEND synthetic tab id ``task-{grandparent_task_id}__sub_{idx}``
+— while its frontend viewer tab was created by
+``createBackgroundSubagentTab`` with a RANDOM frontend id.  The
+nested children's ``new_tab`` broadcasts would therefore carry a
+``parent_tab_id`` that no frontend tab has, every webview would drop
+them, and no tabs would open.
 
 Fix
 ---
@@ -36,7 +35,7 @@ When the parent is itself a sub-agent (``self._subagent_info is not
 None``), resolve the FRONTEND viewer tab id from the printer's
 subscriber map (``_fanout_targets(self._last_task_id)``) — populated
 when the frontend posted ``resumeSession`` for this sub-agent's tab —
-and use it as ``parent_tab_id``, falling back to the registry key.
+and use it as ``parent_tab_id``, falling back to the synthetic tab id.
 
 Test harness
 ------------
@@ -62,8 +61,8 @@ from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.server import agent_state
 from kiss.server.json_printer import JsonPrinter
 
 ROOT_TAB_ID = "frontend-root-tab"
@@ -169,8 +168,8 @@ class TestNestedRunParallelOpensTabs:
         th._KISS_DIR = kiss_dir
         th._DB_PATH = kiss_dir / "sorcar.db"
         th._db_conn = None
-        self.saved_states = dict(_RunningAgentState.running_agent_states)
-        _RunningAgentState.running_agent_states.clear()
+        self.saved_states = dict(agent_state.agent_states)
+        agent_state.agent_states.clear()
         self.saved_run = SorcarAgent.run
         SorcarAgent.run = cast(  # type: ignore[method-assign]
             Any, _scripted_base_run,
@@ -178,8 +177,8 @@ class TestNestedRunParallelOpensTabs:
 
     def teardown_method(self) -> None:
         SorcarAgent.run = self.saved_run  # type: ignore[method-assign]
-        _RunningAgentState.running_agent_states.clear()
-        _RunningAgentState.running_agent_states.update(self.saved_states)
+        agent_state.agent_states.clear()
+        agent_state.agent_states.update(self.saved_states)
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
@@ -194,19 +193,14 @@ class TestNestedRunParallelOpensTabs:
 
         parent = ChatSorcarAgent("nested-tabs-parent")
         parent.printer = printer  # type: ignore[assignment]
-        parent_state = _RunningAgentState(ROOT_TAB_ID, "test-model")
-        parent_state.agent = parent  # type: ignore[assignment]
-        _RunningAgentState.register(ROOT_TAB_ID, parent_state)
-        try:
-            result = parent.run(
-                prompt_template="LEVEL0 root task",
-                model_name="test-model",
-                work_dir=self.tmpdir,
-                printer=printer,
-                is_parallel=True,
-            )
-        finally:
-            _RunningAgentState.unregister(ROOT_TAB_ID)
+        parent._tab_id = ROOT_TAB_ID  # type: ignore[attr-defined]
+        result = parent.run(
+            prompt_template="LEVEL0 root task",
+            model_name="test-model",
+            work_dir=self.tmpdir,
+            printer=printer,
+            is_parallel=True,
+        )
 
         assert "success" in result
 
@@ -245,19 +239,14 @@ class TestNestedRunParallelOpensTabs:
 
         parent = ChatSorcarAgent("nested-tabs-parent-2")
         parent.printer = printer  # type: ignore[assignment]
-        parent_state = _RunningAgentState(ROOT_TAB_ID, "test-model")
-        parent_state.agent = parent  # type: ignore[assignment]
-        _RunningAgentState.register(ROOT_TAB_ID, parent_state)
-        try:
-            parent.run(
-                prompt_template="LEVEL0 root task",
-                model_name="test-model",
-                work_dir=self.tmpdir,
-                printer=printer,
-                is_parallel=True,
-            )
-        finally:
-            _RunningAgentState.unregister(ROOT_TAB_ID)
+        parent._tab_id = ROOT_TAB_ID  # type: ignore[attr-defined]
+        parent.run(
+            prompt_template="LEVEL0 root task",
+            model_name="test-model",
+            work_dir=self.tmpdir,
+            printer=printer,
+            is_parallel=True,
+        )
 
         new_tab_events = [
             e for e in printer.events if e.get("type") == "new_tab"

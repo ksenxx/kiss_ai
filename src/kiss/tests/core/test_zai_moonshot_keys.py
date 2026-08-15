@@ -99,10 +99,13 @@ def test_get_model_provider_no_minimax_branch() -> None:
         assert model_info.get_model_provider(name) != "MiniMax"
 
 
-def test_model_listing_advertises_new_providers() -> None:
-    """The model listing reports the new providers' configuration status."""
-    listing = model_info.get_generation_model_listing()
-    providers = {entry[1] for entry in listing}
+def test_model_routing_advertises_new_providers() -> None:
+    """The generation catalog routes to the new providers, not MiniMax."""
+    providers = {
+        model_info.get_model_provider(name)
+        for name, info in model_info.MODEL_INFO.items()
+        if info.is_generation_supported
+    }
     assert "Z.AI" in providers
     assert "Moonshot" in providers
     assert "MiniMax" not in providers

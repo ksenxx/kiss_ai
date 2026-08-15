@@ -6,17 +6,114 @@
 """Utility functions for the KISS core module."""
 
 import html as html_module
+import logging
+import os
 import re
-from typing import Any, cast
+import tempfile
+from pathlib import Path
+from typing import IO, Any, cast
 
 import yaml
+from yaml.nodes import ScalarNode
 
 from kiss.core import config as config_module
 
+logger = logging.getLogger(__name__)
 
-def substitute_prompt_args(
-    template: str, arguments: dict[str, str] | None
-) -> str:
+
+class _KissDumper(yaml.Dumper):
+    """PyYAML dumper carrying KISS's formatting, and only KISS's.
+
+    Registering a representer on ``yaml.Dumper`` (what
+    ``yaml.add_representer`` does by default) mutates PyYAML for the
+    whole process, so every unrelated ``yaml.dump`` in the interpreter —
+    including an embedding application's own — silently changes shape
+    the moment anything imports KISS.  Subclassing keeps the change
+    where it belongs.
+    """
+
+
+def _str_presenter(dumper: yaml.Dumper, data: str) -> ScalarNode:
+    """Represent genuinely multi-line strings as literal blocks.
+
+    Trajectories and agent results are read by humans, so a prompt or a
+    tool result is far more legible as a ``|`` block than as one long
+    escaped line.  Single-line values (and every mapping key) keep the
+    default style: forcing a block scalar on them adds two lines of
+    noise per key for no benefit.
+    """
+    style = "|" if "\n" in data else None
+    return dumper.represent_scalar(  # type: ignore[reportUnknownMemberType]
+        "tag:yaml.org,2002:str",
+        data,
+        style=style,
+    )
+
+
+_KissDumper.add_representer(str, _str_presenter)
+
+
+def dump_yaml(data: Any, stream: IO[str] | None = None, **kwargs: Any) -> Any:
+    """Serialize *data* to YAML with KISS's human-readable string style.
+
+    Args:
+        data: The object to serialize.
+        stream: Optional destination stream; when ``None`` the YAML is
+            returned as a string.
+        **kwargs: Extra options forwarded to :func:`yaml.dump` (e.g.
+            ``indent``, ``sort_keys``).
+
+    Returns:
+        The YAML string when *stream* is ``None``, otherwise ``None``.
+    """
+    return yaml.dump(data, stream, Dumper=_KissDumper, **kwargs)
+
+
+def atomic_write_text(target: Path, content: str, mode: int | None = None) -> None:
+    """Write *content* to *target* so readers never see a partial file.
+
+    The content is staged in a sibling temp file and then
+    ``os.replace``-d into position, which is atomic on every supported
+    platform.  A plain ``open(path, "w")`` truncates immediately and
+    then fills the file incrementally, so a concurrent reader — the
+    trajectory visualizer, another daemon, the VS Code extension — can
+    observe an empty or half-written document.
+
+    Args:
+        target: Destination path; its parent directory is created.
+        content: The full text to write.
+        mode: Optional permission bits to force on the result (e.g.
+            ``0o600`` for files holding secrets).  Best effort: a
+            filesystem that refuses ``chmod`` is not treated as a write
+            failure.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=f".{target.name}-", dir=str(target.parent))
+    try:
+        # A buffered file object rather than a bare os.write, whose
+        # POSIX-legal short return count would otherwise be ignored and
+        # then published as a permanently truncated file.
+        with os.fdopen(fd, "wb") as staged:
+            staged.write(content.encode("utf-8"))
+        if mode is not None:
+            _try_chmod(tmp, mode)
+        os.replace(tmp, target)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    if mode is not None:
+        _try_chmod(str(target), mode)
+
+
+def _try_chmod(path: str, mode: int) -> None:
+    """Apply *mode* to *path*, ignoring filesystems that refuse it."""
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        logger.debug("chmod %o failed on %s", mode, path, exc_info=True)
+
+
+def substitute_prompt_args(template: str, arguments: dict[str, str] | None) -> str:
     """Substitute ``{key}`` placeholders in *template* in a single pass.
 
     Unlike ``str.format()``, literal braces in the template (JSON, code,
@@ -37,12 +134,8 @@ def substitute_prompt_args(
     """
     if not arguments:
         return template
-    pattern = re.compile(
-        "|".join(re.escape("{" + key + "}") for key in arguments)
-    )
-    return pattern.sub(
-        lambda m: str(arguments[m.group(0)[1:-1]]), template
-    )
+    pattern = re.compile("|".join(re.escape("{" + key + "}") for key in arguments))
+    return pattern.sub(lambda m: str(arguments[m.group(0)[1:-1]]), template)
 
 
 def config_to_dict() -> dict[Any, Any]:
@@ -160,9 +253,7 @@ def ensure_html(text: str) -> str:
         escaped = html_module.escape(text).replace("\n", "<br/>")
         return f"<p>{escaped}</p>"
 
-    rendered: str = (
-        MarkdownIt("commonmark", {"breaks": False}).enable("table").render(text)
-    )
+    rendered: str = MarkdownIt("commonmark", {"breaks": False}).enable("table").render(text)
     return rendered.strip()
 
 
@@ -183,7 +274,7 @@ def finish(success: bool, is_continue: bool = False, summary_in_html: str = "") 
         A YAML string with 'success', 'is_continue' and 'summary' keys, where
         'summary' always holds HTML.
     """
-    dumped: str = yaml.dump(
+    dumped: str = dump_yaml(
         {
             "success": _coerce_bool(success),
             "is_continue": _coerce_bool(is_continue),

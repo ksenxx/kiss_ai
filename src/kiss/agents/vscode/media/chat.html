@@ -30,7 +30,10 @@
 
     <div id="task-panel"><div id="task-panel-text"></div><button id="task-panel-drawer-btn" type="button" aria-expanded="true" aria-controls="task-panel-text" aria-label="Collapse task panel"><svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="18 15 12 9 6 15"/></svg></button><button id="task-panel-copy" type="button" aria-label="Copy task to clipboard"><svg class="icon-copy" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg><svg class="icon-check" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none;"><polyline points="20 6 9 17 4 12"/></svg></button></div>
 
-    <div id="output">
+    <!-- The one shared chat surface: every chat tab swaps its content
+         into this element, so it is the single tabpanel that all tabs
+         reference via aria-controls="output". -->
+    <div id="output" role="tabpanel" aria-label="Chat">
       <div id="welcome">
         <h2>Welcome to KISS Sorcar</h2>
         <p>Your AI assistant. Ask me anything!</p>
@@ -111,7 +114,7 @@
           <button class="search-clear-btn" id="history-search-clear" style="display:none;">&times;</button>
         </div>
         <div id="history-filters-panel" class="history-filters-panel">
-          <button type="button" id="history-filters-toggle" class="history-filters-toggle" aria-expanded="false" aria-controls="history-filters-body"><svg class="history-filters-chevron" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span class="history-filters-title">Filters</span></button>
+          <button type="button" id="history-filters-toggle" class="history-filters-toggle" aria-expanded="false" aria-controls="history-filters-body"><svg class="history-filters-chevron" width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg><span>Filters</span></button>
           <div id="history-filters-body" class="history-filters-body" hidden>
         <div class="history-filter-bar">
           <div class="history-filter-chips" role="group" aria-label="Filter tasks by status">
@@ -124,7 +127,7 @@
             <label class="hf-chip hf-chip-succeeded" title="Show successfully completed tasks">
               <input type="checkbox" id="hf-completed" checked><span class="hf-chip-dot" aria-hidden="true"></span><span class="hf-chip-label">Succeeded</span>
             </label>
-            <label class="hf-chip hf-chip-workspace" title="Show only tasks whose work_dir matches the configured workspace">
+            <label class="hf-chip" title="Show only tasks whose work_dir matches the configured workspace">
               <input type="checkbox" id="hf-workspace"><svg class="hf-chip-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M1.5 4a1 1 0 0 1 1-1h3l1.5 1.8h6.5a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1V4z"/></svg><span class="hf-chip-label">Workspace</span>
             </label>
             <label class="hf-chip hf-chip-favorite" title="Show only tasks marked as favourite">
@@ -189,7 +192,7 @@
             <input type="text" id="cfg-work-dir" placeholder="/path/to/project">
           </label>
           <label class="config-label">Max budget per task ($)
-            <input type="number" id="cfg-max-budget" min="0" step="1" value="100">
+            <input type="number" id="cfg-max-budget" min="0" step="1">
           </label>
           <label class="config-label config-checkbox">
             <input type="checkbox" id="cfg-auto-commit" checked>

@@ -113,6 +113,15 @@ class TestCreateNewTabDoesNotBlockInput(unittest.TestCase):
             function closeModelDD() {}
             // Opening a chat ends the launch tab switch; irrelevant here.
             function closeLaunchSwitch() {}
+            // The real one announces the tab to the daemon's shared tab
+            // registry; keep the announce observable via api.openTab.
+            function registerTab(tab) {
+                api.openTab({
+                    tabId: tab.id,
+                    title: tab.title || 'new chat',
+                    workDir: tab.workDir || '',
+                });
+            }
             function startTimer() {}
             function stopTimer() {}
             function removeSpinner() {}

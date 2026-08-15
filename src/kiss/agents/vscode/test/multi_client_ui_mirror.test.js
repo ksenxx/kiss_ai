@@ -5,11 +5,11 @@
 
 // Two clients (two browser windows / VS Code webviews) showing the same
 // chat must show the same blocking UI.  Tab ids are minted per client,
-// so the daemon mirrors every ask-user / merge-review / auto-commit
-// event: the owner tab gets the original and each other tab gets a copy
-// stamped with ITS OWN tab id plus `mirrorOf`.  These tests feed two
-// independent webviews exactly that pair of copies and check both
-// windows open — and close — the UI together.
+// so the daemon mirrors every ask-user event: the owner tab gets the
+// original and each other tab gets a copy stamped with ITS OWN tab id
+// plus `mirrorOf`.  These tests feed two independent webviews exactly
+// that pair of copies and check both windows open — and close — the UI
+// together.
 
 'use strict';
 
@@ -73,10 +73,6 @@ function mirror(event, clients) {
   });
 }
 
-function mergeToolbar(client) {
-  return client.win.document.getElementById('merge-toolbar');
-}
-
 function actionBarLabel(client) {
   const bar = client.win.document.querySelector('#input-area .wt-bar');
   return bar ? bar.querySelector('.wt-label').textContent : '';
@@ -88,26 +84,6 @@ function askText(client) {
   return modal.textContent || '';
 }
 
-function mergeDataEvent() {
-  return {
-    type: 'merge_data',
-    hunk_count: 1,
-    data: {
-      work_dir: '/repo',
-      files: [
-        {
-          name: 'README.md',
-          base: '/tmp/base/README.md',
-          current: '/repo/README.md',
-          base_text: 'old\n',
-          current_text: 'new\n',
-          hunks: [{baseStart: 1, baseCount: 1, curStart: 1, curCount: 1}],
-        },
-      ],
-    },
-  };
-}
-
 function withTwoClients(body) {
   const clients = [makeWebview(), makeWebview()];
   try {
@@ -117,63 +93,8 @@ function withTwoClients(body) {
   }
 }
 
-function testMergeReviewOpensAndClosesOnBothClients() {
+function testAutocommitDoneAppendsResultOnBothClients() {
   withTwoClients(clients => {
-    mirror(mergeDataEvent(), clients);
-    mirror({type: 'merge_started'}, clients);
-
-    clients.forEach((client, i) => {
-      assert.ok(
-        mergeToolbar(client),
-        `client ${i} must show the merge toolbar`,
-      );
-    });
-
-    mirror({type: 'merge_ended'}, clients);
-    clients.forEach((client, i) => {
-      assert.strictEqual(
-        mergeToolbar(client),
-        null,
-        `client ${i} must hide the merge toolbar when the review ends`,
-      );
-    });
-  });
-  console.log('  ok - merge review opens and closes on every client');
-}
-
-function testMergeActionFromTheMirroringClientIsAddressedToItself() {
-  withTwoClients(clients => {
-    mirror(mergeDataEvent(), clients);
-    mirror({type: 'merge_started'}, clients);
-
-    const viewer = clients[1];
-    mergeToolbar(viewer).querySelector('#merge-accept-all-btn').click();
-
-    const action = viewer.posted.find(msg => msg.type === 'mergeAction');
-    assert.ok(action, 'the mirroring client must be able to act');
-    assert.strictEqual(
-      action.tabId,
-      viewer.tabId,
-      'the client addresses its own tab; the daemon maps it to the owner',
-    );
-  });
-  console.log('  ok - a mirroring client can drive the review');
-}
-
-function testAutocommitPromptOpensAndClosesOnBothClients() {
-  withTwoClients(clients => {
-    mirror(
-      {type: 'autocommit_prompt', changedFiles: ['README.md']},
-      clients,
-    );
-    clients.forEach((client, i) => {
-      assert.strictEqual(
-        actionBarLabel(client),
-        '1 uncommitted change on main. Auto commit?',
-        `client ${i} must show the auto-commit prompt`,
-      );
-    });
-
     mirror(
       {
         type: 'autocommit_done',
@@ -187,11 +108,18 @@ function testAutocommitPromptOpensAndClosesOnBothClients() {
       assert.strictEqual(
         actionBarLabel(client),
         '',
-        `client ${i} must drop the auto-commit prompt once answered`,
+        `client ${i} must not show any blocking auto-commit UI`,
+      );
+      const results = client.win.document.querySelectorAll('.wt-result-ok');
+      assert.ok(
+        Array.from(results).some(el =>
+          (el.textContent || '').includes('Committed: chore'),
+        ),
+        `client ${i} must append the auto-commit result`,
       );
     });
   });
-  console.log('  ok - auto-commit prompt opens and closes on every client');
+  console.log('  ok - auto-commit result is appended on every client');
 }
 
 function testAskUserOpensAndClosesOnBothClients() {
@@ -217,15 +145,13 @@ function testAskUserOpensAndClosesOnBothClients() {
 }
 
 function runTests() {
-  testMergeReviewOpensAndClosesOnBothClients();
-  testMergeActionFromTheMirroringClientIsAddressedToItself();
-  testAutocommitPromptOpensAndClosesOnBothClients();
+  testAutocommitDoneAppendsResultOnBothClients();
   testAskUserOpensAndClosesOnBothClients();
 }
 
 try {
   runTests();
-  console.log('4 passed, 0 failed');
+  console.log('2 passed, 0 failed');
 } catch (err) {
   console.error(err && err.stack ? err.stack : String(err));
   console.error('failed');

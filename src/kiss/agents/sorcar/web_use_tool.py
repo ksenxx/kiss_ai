@@ -25,11 +25,17 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
 from kiss.agents.sorcar.persistence import _default_kiss_dir
-from kiss.agents.sorcar.useful_tools import _absolutize, _active_worktree_remap
+from kiss.agents.sorcar.useful_tools import (
+    _absolutize,
+    _active_worktree_remap,
+    _file_lock,
+    _stale_worktree_fallback,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -718,10 +724,34 @@ class WebUseTool:
                 return candidate
         return None  # pragma: no cover — 100 concurrent instances is unlikely
 
+    def _profile_lock(self) -> Any:
+        """Return a machine-wide lock over this tool's profile family.
+
+        The profile directory (and its ``_N`` escalation variants) is
+        shared by every kiss process on the machine, so the
+        check-then-use sequence in :meth:`_launch_browser` must be
+        atomic across *processes*: otherwise two of them both see a
+        lock-free profile, the second deletes the first's live
+        ``SingletonLock``, and Chromium either opens one profile twice
+        (corrupting the stored logins) or aborts with "Failed to create
+        a ProcessSingleton for your profile directory".
+
+        One lock file sits beside the base profile and therefore covers
+        every escalation variant derived from it.
+
+        Returns:
+            A context manager holding the lock, or a no-op context
+            manager when this tool uses no persistent profile.
+        """
+        if not self.user_data_dir:
+            return nullcontext()
+        return _file_lock(Path(f"{self.user_data_dir}.lock"))
+
     def _launch_browser(self, launcher: Any, kwargs: dict[str, Any]) -> None:
-        with _LAUNCH_LOCK:
+        with _LAUNCH_LOCK, self._profile_lock():
             self._cleanup_stale_escalation_dirs()
             effective_dir = self._resolve_user_data_dir()
+            self.effective_user_data_dir = effective_dir
             if effective_dir:
                 Path(effective_dir).mkdir(parents=True, exist_ok=True)
                 self._clean_singleton_locks(effective_dir)
@@ -1019,6 +1049,15 @@ class WebUseTool:
             remapped = _active_worktree_remap(path, self.work_dir)
             if remapped is not None:
                 path = remapped
+            else:
+                # Same contract as UsefulTools.Write: a path under a
+                # worktree the framework already merged and removed must
+                # fall back to the parent repo, or mkdir() would
+                # resurrect a zombie worktree whose contents are never
+                # merged and are deleted by the next prune.
+                fallback = _stale_worktree_fallback(path)
+                if fallback is not None:
+                    path = fallback
             path.parent.mkdir(parents=True, exist_ok=True)
             self._page.screenshot(path=str(path), full_page=False)
             return f"Screenshot saved to {path}"

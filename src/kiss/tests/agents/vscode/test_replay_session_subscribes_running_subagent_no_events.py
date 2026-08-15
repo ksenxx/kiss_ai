@@ -18,8 +18,8 @@ sub-agent's ``run`` broadcasts a ``new_tab`` event carrying its own
 
 The backend's ``_cmd_resume_session`` forwards to
 ``_replay_session(chat_id, new_tab_id, task_id=sub_task_id)`` which
-loads events for the task and — under the old behaviour — returns
-early when the events table is empty.  But sub-agent events are
+loads events for the task and — under the old behaviour — returned
+early when the events table was empty.  But sub-agent events are
 persisted asynchronously by a background writer thread; at the moment
 the round-trip ``resumeSession`` arrives, the events table for the
 freshly-allocated sub-agent row is almost always empty.
@@ -36,8 +36,8 @@ completed before any flush hit the DB.
 This test exercises the production code path with a real
 :class:`VSCodeServer` and a real :class:`JsonPrinter`, no
 mocks/patches/fakes.  It asserts that the new tab is subscribed to
-the sub-agent's ``task_history_id`` regardless of whether any events
-have been persisted yet.
+the sub-agent's own task id regardless of whether any events have
+been persisted yet.
 """
 
 from __future__ import annotations
@@ -48,8 +48,8 @@ from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.server.json_printer import JsonPrinter
 from kiss.server.server import VSCodeServer
 
@@ -79,14 +79,14 @@ class _SubscribeCapturingPrinter(JsonPrinter):
     def __init__(self) -> None:
         super().__init__()
         self.events: list[dict[str, Any]] = []
-        self.subscribe_calls: list[tuple[Any, str]] = []
+        self.subscribe_calls: list[tuple[str, str]] = []
 
     def broadcast(self, event: dict[str, Any]) -> None:
         self.events.append(event)
         super().broadcast(event)
 
     def subscribe_tab(self, task_id: Any, tab_id: str) -> None:
-        self.subscribe_calls.append((task_id, tab_id))
+        self.subscribe_calls.append((str(task_id), tab_id))
         super().subscribe_tab(task_id, tab_id)
 
 
@@ -97,12 +97,10 @@ class TestReplaySessionRunningSubagentNoEvents:
     def setup_method(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
         self.saved = _redirect(self.tmpdir)
-        _RunningAgentState.running_agent_states.clear()
-        ChatSorcarAgent.running_agents.clear()
+        agent_state.agent_states.clear()
 
     def teardown_method(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
-        ChatSorcarAgent.running_agents.clear()
+        agent_state.agent_states.clear()
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
@@ -115,9 +113,9 @@ class TestReplaySessionRunningSubagentNoEvents:
         """Reproduces the bug: sub-agent broadcasts ``new_tab`` → frontend
         opens a new tab and posts ``resumeSession`` → backend's
         ``_replay_session`` must subscribe the new tab to the live
-        sub-agent's ``task_history_id`` even when the events table is
-        empty (the sub-agent has just started and hasn't flushed any
-        events yet).
+        sub-agent's own task id even when the events table is empty
+        (the sub-agent has just started and hasn't flushed any events
+        yet).
         """
         chat_id = "chat-parallel-A"
         parent_id, _ = th._add_task("parent", chat_id=chat_id)
@@ -139,32 +137,35 @@ class TestReplaySessionRunningSubagentNoEvents:
         printer = _SubscribeCapturingPrinter()
         server = VSCodeServer(printer=printer)
 
-        parent_state = _RunningAgentState("tab-parent", "test-model")
-        parent_state.chat_id = chat_id
-        parent_state.task_history_id = parent_id
-        parent_state.is_task_active = True
-        _RunningAgentState.running_agent_states["tab-parent"] = parent_state
-
-        sub_state = _RunningAgentState("tab-parent__sub_0", "test-model")
-        sub_state.chat_id = chat_id
-        sub_state.task_history_id = sub_id
-        sub_state.is_subagent = True
-        sub_state.parent_task_id = parent_id
-        sub_state.is_task_active = True
-        _RunningAgentState.running_agent_states["tab-parent__sub_0"] = (
-            sub_state
+        parent_state = AgentState(
+            str(parent_id),
+            chat_id=chat_id,
+            tab_id="tab-parent",
+            server_owned=True,
+            is_task_active=True,
         )
+        agent_state.register(parent_state)
+
+        sub_state = AgentState(
+            str(sub_id),
+            chat_id=chat_id,
+            tab_id="tab-parent__sub_0",
+            parent_task_id=str(parent_id),
+            is_task_active=True,
+        )
+        assert sub_state.is_subagent
+        agent_state.register(sub_state)
 
         new_tab_id = "tab-fresh-from-new_tab"
         server._replay_session(
-            chat_id=chat_id, tab_id=new_tab_id, task_id=sub_id,
+            chat_id=chat_id, tab_id=new_tab_id, task_id=str(sub_id),
         )
 
-        assert (sub_id, new_tab_id) in printer.subscribe_calls, (
+        assert (str(sub_id), new_tab_id) in printer.subscribe_calls, (
             f"subscribe_tab was not called for the live sub-agent; "
             f"got {printer.subscribe_calls!r}"
         )
-        assert (parent_id, new_tab_id) not in printer.subscribe_calls, (
+        assert (str(parent_id), new_tab_id) not in printer.subscribe_calls, (
             "new tab must not be subscribed to the parent's stream"
         )
 

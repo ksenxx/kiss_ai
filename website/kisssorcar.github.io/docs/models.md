@@ -38,11 +38,7 @@ export OPENROUTER_API_KEY=...
 export GEMINI_API_KEY=...
 ```
 
-Or point at any OpenAI-compatible local/self-hosted endpoint:
-
-```bash
-sorcar -e "http://localhost:8000/v1" --header "Authorization:Bearer xxx" -t "..."
-```
+Or point at any OpenAI-compatible local/self-hosted endpoint by setting a custom model endpoint and headers in the Settings panel of the VS Code extension or web app (e.g. `http://localhost:8000/v1` with an `Authorization: Bearer xxx` header).
 
 ## Model Namespaces
 
@@ -65,6 +61,6 @@ A running agent can also switch its own model mid-task with the `set_model` tool
 
 ## Choosing a Default
 
-When `-m/--model_name` is omitted, `sorcar` defaults to the best available model for the API keys you have configured.
+When no model is selected, KISS Sorcar defaults to the best available model for the API keys you have configured.
 
 The full per-model list (all 603 entries) is in the [project README](https://github.com/ksenxx/kiss_ai#-models-supported).

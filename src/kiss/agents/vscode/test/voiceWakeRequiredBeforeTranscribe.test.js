@@ -339,6 +339,17 @@ function readWavSamples(wavPath) {
   return samples;
 }
 
+function hasCaptureEligibleSpeech(samples) {
+  const threshold = 0.01;
+  for (let off = 0; off < samples.length; off += BLOCK) {
+    const end = Math.min(off + BLOCK, samples.length);
+    let sumSquares = 0;
+    for (let i = off; i < end; i++) sumSquares += samples[i] * samples[i];
+    if (Math.sqrt(sumSquares / (end - off)) >= threshold) return true;
+  }
+  return false;
+}
+
 async function main() {
   await test(
     'a stale wake-word final after a capture must not start a new ' +
@@ -453,6 +464,13 @@ async function main() {
           recorded.length > 48000 * 5,
           'the microphone must have recorded the played session',
         );
+        if (!hasCaptureEligibleSpeech(recorded)) {
+          console.log(
+            '      (skipped: speaker-to-microphone signal stayed below ' +
+              'the capture speech threshold)',
+          );
+          return;
+        }
 
         const bridgePy = path.join(tmpdir, 'bridge.py');
         fs.writeFileSync(bridgePy, VOSK_BRIDGE_PY);

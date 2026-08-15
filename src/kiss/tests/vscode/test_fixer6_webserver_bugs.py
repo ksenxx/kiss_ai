@@ -16,9 +16,8 @@ Covers, over REAL objects (no mocks, patches, or fakes):
   failure is recorded.
 * F7: a ``ready`` command carrying non-str ``tabId`` values (top
   level or inside ``restoredTabs``) must not abort ready handling —
-  an unhashable id used to raise ``TypeError`` inside
-  ``_cancel_pending_tab_close`` and skip the remaining restored-tab
-  resumes and merge replays.
+  an unhashable id used to raise ``TypeError`` while processing the
+  restored-tab list and skip the remaining restored-tab resumes.
 * F11: ``VSCodeServer._teardown_tab_resources`` must survive a
   duck-typed printer without ``cleanup_tab`` (same getattr-guarded
   contract as every sibling cleanup path).
@@ -43,7 +42,7 @@ from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as th
 import kiss.server.web_server as ws_mod
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 from kiss.server.web_server import RemoteAccessServer
 
@@ -66,7 +65,7 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
     """E2E tests over a real running RemoteAccessServer (UDS)."""
 
     async def asyncSetUp(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-fixer6-live-")
         self.saved = _redirect_persistence(self.tmpdir)
         self.uds_path = Path(self.tmpdir) / "sorcar.sock"
@@ -83,7 +82,7 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
         if th._db_conn is not None:
             th._db_conn.close()
         _restore_persistence(self.saved)
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def _connect_uds(
@@ -213,11 +212,21 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
     async def test_ready_malformed_restored_entry_does_not_abort_loop(
         self,
     ) -> None:
-        """Entries after a malformed restoredTabs entry are still processed."""
+        """Entries after a malformed restoredTabs entry are still processed.
+
+        The session resume of the LATER (valid) restored tab must
+        still be dispatched to the backend — a malformed entry before
+        it must not abort the restored-tab loop.
+        """
+        dispatched: list[dict[str, Any]] = []
+        orig_run_cmd = self.server._run_cmd
+
+        async def recording_run_cmd(cmd: dict[str, Any]) -> None:
+            dispatched.append(dict(cmd))
+            await orig_run_cmd(cmd)
+
+        self.server._run_cmd = recording_run_cmd  # type: ignore[method-assign]
         reader, writer = await self._connect_uds()
-        self.server._schedule_tab_close("rt-later")
-        with self.server._pending_tab_closes_lock:
-            self.assertIn("rt-later", self.server._pending_tab_closes)
         await self._send(
             writer,
             {
@@ -225,21 +234,26 @@ class TestFixer6LiveServer(unittest.IsolatedAsyncioTestCase):
                 "tabId": "t-main",
                 "restoredTabs": [
                     {"tabId": ["evil"], "chatId": {"also": "bad"}},
-                    {"tabId": "rt-later", "chatId": ""},
+                    {"tabId": "rt-later", "chatId": "chat-rt-later"},
                 ],
             },
         )
         await self._drain_until(reader, "focusInput")
-        for _ in range(200):
-            with self.server._pending_tab_closes_lock:
-                if "rt-later" not in self.server._pending_tab_closes:
-                    break
-            await asyncio.sleep(0.01)
-        with self.server._pending_tab_closes_lock:
-            self.assertNotIn(
-                "rt-later", self.server._pending_tab_closes,
-                "restored tab after malformed entry was not re-claimed",
-            )
+        resumes: list[dict[str, Any]] = []
+        for _ in range(100):
+            resumes = [
+                c for c in dispatched if c.get("type") == "resumeSession"
+            ]
+            if resumes:
+                break
+            await asyncio.sleep(0.05)
+        self.assertEqual(
+            len(resumes), 1,
+            "the resume of the restored tab after the malformed entry "
+            "was not dispatched — the restored-tab loop aborted",
+        )
+        self.assertEqual(resumes[0].get("tabId"), "rt-later")
+        self.assertEqual(resumes[0].get("chatId"), "chat-rt-later")
 
 
 class TestAuthFailureBookkeeping(unittest.TestCase):

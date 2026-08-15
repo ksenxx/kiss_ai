@@ -8,11 +8,11 @@ Bug: when a task runs in worktree mode in a git repo and does not modify
 any files, a subsequent ``worktreeAction`` (merge or discard) was
 returning ``{"success": False, "message": "Not a git repository"}``.
 
-Root cause: ``_run_task``'s finally block set ``tab.agent = None``,
-destroying the in-memory worktree state.  A later ``worktreeAction``
-created a fresh ``WorktreeSorcarAgent`` via ``_get_tab``'s lazy
-instantiation — that agent had ``_wt = None`` and ``_repo_root = None``,
-leading to the misleading error.
+Root cause (historical, pre task-keyed registry): ``_run_task``'s finally
+block cleared the state's ``agent``, destroying the in-memory worktree
+state.  A later ``worktreeAction`` lazily created a fresh
+``WorktreeSorcarAgent`` — that agent had ``_wt = None`` and
+``_repo_root = None``, leading to the misleading error.
 
 Fix:
 - Preserve the agent when a worktree branch is pending (so merge/discard
@@ -31,8 +31,8 @@ from pathlib import Path
 from typing import Any, cast
 
 import kiss.agents.sorcar.persistence as _persistence
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -91,13 +91,13 @@ class TestNoGitRepoErrorOnEmptyWorktree(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._parent_class.run = self._original_run
-        for tab in list(_RunningAgentState.running_agent_states.values()):
-            if tab.agent is not None and tab.agent._wt_pending:
+        for state in agent_state.snapshot():
+            if state.agent is not None and state.agent._wt_pending:
                 try:
-                    tab.agent.discard()
+                    state.agent.discard()
                 except Exception:
                     pass
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
         if _persistence._db_conn is not None:
             _persistence._db_conn.close()
@@ -171,12 +171,12 @@ class TestNoGitRepoErrorOnEmptyWorktree(unittest.TestCase):
             "model": "",
         })
 
-        tab = _RunningAgentState.running_agent_states.get(tab_id)
-        assert tab is not None
-        assert tab.agent is not None, "Agent should be preserved when worktree has changes"
-        assert tab.agent._wt_pending, "Worktree should still be pending"
-
-        self.server._finish_merge(tab_id)
+        state = agent_state.find_by_tab(tab_id)
+        assert state is not None
+        assert state.agent is not None, (
+            "Agent should be preserved when worktree has changes"
+        )
+        assert state.agent._wt_pending, "Worktree should still be pending"
 
         result = self.server._handle_worktree_action("discard", tab_id)
         assert result["success"], f"Discard should succeed: {result}"

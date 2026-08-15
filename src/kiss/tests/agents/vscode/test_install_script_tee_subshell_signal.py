@@ -29,8 +29,11 @@ a bare ``^C``, leaving kiss-web alive on the old code path and the
 
 Fix
 ===
-1. Replace the ``{ ... } | tee`` wrapper with ``exec > >(tee -a "$LOG_FILE") 2>&1``
-   so the install body runs in the OUTER (trap-handled) shell.
+1. Replace the ``{ ... } | tee`` wrapper with
+   ``exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1`` so the
+   install body runs in the OUTER (trap-handled) shell and the tee child
+   ignores the process-group SIGINT/SIGTERM (otherwise tee dies with the
+   group signal and the outer shell's next write is killed by SIGPIPE).
 2. Add ``handle_hup`` + ``trap handle_hup HUP`` to re-route stdout/stderr
    to the log file when the controlling terminal closes — so PTY closure
    no longer kills bash mid-step.
@@ -72,13 +75,18 @@ def test_install_sh_uses_exec_tee_not_pipeline_subshell() -> None:
     ``\\x03`` from VS Code's terminal teardown kill the script.
     """
     src = _read_install_sh()
-    exec_pattern = r'exec\s*>\s*>\(\s*tee\s+-a\s+"?\$LOG_FILE"?\s*\)\s*2>&1'
+    exec_pattern = (
+        r"exec\s*>\s*>\(\s*trap\s+''\s+INT\s+TERM\s*;\s*"
+        r'exec\s+tee\s+-a\s+"?\$LOG_FILE"?\s*\)\s*2>&1'
+    )
     assert re.search(exec_pattern, src), (
-        "install.sh must use `exec > >(tee -a \"$LOG_FILE\") 2>&1` so the "
-        "install body runs in the outer trap-handled shell instead of a "
-        "pipeline subshell.  Without this fix the script's SIGINT trap is "
-        "reset by bash inside the subshell and a stray ^C from VS Code's "
-        "terminal teardown silently aborts the update."
+        "install.sh must use `exec > >(trap '' INT TERM; exec tee -a "
+        "\"$LOG_FILE\") 2>&1` so the install body runs in the outer "
+        "trap-handled shell instead of a pipeline subshell, AND the tee "
+        "child ignores the process-group SIGINT/SIGTERM that VS Code's "
+        "terminal teardown delivers.  Without the inner trap guard tee "
+        "dies with the group signal and the outer shell's next write "
+        "(the trap diagnostic itself) is killed by SIGPIPE."
     )
     code_only = "\n".join(
         line
@@ -199,7 +207,7 @@ def _outer_trap_harness(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
             }}
             trap handle_interrupt INT TERM
             trap handle_hup HUP
-            exec > >(tee -a "$LOG_FILE") 2>&1
+            exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
             : > "{ready}"
             # Mimic install.sh's body — a long-running step that must
             # survive a stray PTY-injected signal.
@@ -219,12 +227,14 @@ def _outer_trap_harness(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
 def test_install_sh_outer_trap_survives_sigint(tmp_path: Path) -> None:
     """SIGINT to the install body must fire the trap and keep going.
 
-    Reproduces the post-fix invariant: with ``exec > >(tee -a $LOG_FILE) 2>&1``
-    instead of ``{ ... } | tee``, the install body runs in the outer
-    shell whose ``trap handle_interrupt INT TERM`` is still active.  A
-    single stray SIGINT (the kind VS Code injects when disposing the
-    integrated terminal) prints the trap diagnostic and the script keeps
-    going to write the post-signal marker.
+    Reproduces the post-fix invariant: with
+    ``exec > >(trap '' INT TERM; exec tee -a $LOG_FILE) 2>&1`` instead of
+    ``{ ... } | tee``, the install body runs in the outer shell whose
+    ``trap handle_interrupt INT TERM`` is still active, and the tee child
+    ignores the group signal so the trap's diagnostic write cannot die on
+    a broken pipe.  A single stray SIGINT (the kind VS Code injects when
+    disposing the integrated terminal) prints the trap diagnostic and the
+    script keeps going to write the post-signal marker.
 
     Before the fix this same harness — but with ``{ ... } | tee`` — would
     die instantly with a bare ``^C`` and the marker would never appear.

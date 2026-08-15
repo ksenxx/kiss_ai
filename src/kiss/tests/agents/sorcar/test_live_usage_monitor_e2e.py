@@ -7,8 +7,9 @@ agent AND all of its parallel sub-agents at every turn.
 
 Reproduces the issue where, while ``run_parallel`` blocks the parent's
 turn, nothing emits ``usage_info`` on the PARENT task — so the header
-(chat webview top bar, sorcar CLI interactive) shows a stale figure that
-excludes all live sub-agent spend until every sub-agent finishes.
+(the chat webview's top bar in the VS Code extension and the remote
+web client) shows a stale figure that excludes all live sub-agent
+spend until every sub-agent finishes.
 
 The fix is ``_LiveUsageMonitor`` (``sorcar_agent.py``): while parallel
 sub-agents run it polls their live spend and broadcasts parent-task
@@ -235,6 +236,28 @@ class TestLiveUsageMonitor:
         for e in printer.usage_events("stop-task"):
             assert e["cost"] == "$0.2500"
 
+    def test_stop_emits_latest_usage_before_returning(self) -> None:
+        """A fast sub-agent that finishes between polling ticks must still
+        update the parent header before the monitor stops."""
+        printer = _RecordingPrinter()
+        parent = _parent_with_task(printer, "fast-stop-task")
+        monitor = _LiveUsageMonitor(parent, printer, interval=60.0)
+        sub: Any = KISSAgent("fast-sub")
+        monitor.track(sub)
+        monitor.start()
+
+        sub.budget_used = 0.25
+        sub.total_tokens_used = 1000
+        sub.total_steps = 4
+        monitor.stop()
+
+        assert any(
+            e.get("cost") == "$0.2500"
+            and e.get("total_tokens") == 1000
+            and e.get("total_steps") == 4
+            for e in printer.usage_events("fast-stop-task")
+        ), "stop() lost the final spend before the next polling tick"
+
     def test_monitor_survives_a_misbehaving_agent(self) -> None:
         """An exception while polling one agent must neither kill the
         monitor nor blind the header to the OTHER sub-agents' spend."""
@@ -300,4 +323,10 @@ class TestRunTasksParallelLiveUsage:
         assert printer.budget_offset == pytest.approx(parent.budget_used)
         assert printer.tokens_offset == parent.total_tokens_used
         assert printer.steps_offset == parent.total_steps
-        assert max(costs) <= parent.budget_used + 1e-9
+        # ``cost`` is the broadcast display string, quantised to four
+        # decimals, so compare against the same quantisation: a true spend of
+        # $0.0187905 is broadcast as "$0.0188".  A tighter bound would fail
+        # or pass purely on how the last cent rounded.  Over-attribution of a
+        # sub-agent's spend is still caught: it would exceed the parent's
+        # total by far more than half of the last displayed digit.
+        assert max(costs) <= round(parent.budget_used, 4) + 1e-9

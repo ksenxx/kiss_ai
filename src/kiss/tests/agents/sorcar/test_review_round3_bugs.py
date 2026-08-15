@@ -18,7 +18,6 @@ import sqlite3
 import uuid
 from collections.abc import Generator
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -160,7 +159,7 @@ def test_recover_orphaned_tasks_uses_placeholders() -> None:
         "src/kiss/agents/sorcar/persistence.py"
     ).read_text()
     assert "'\" + str(t).replace(\"'\", \"''\") + \"'\"" not in src
-    assert "AND id NOT IN ({placeholders})" in src
+    assert "WHERE rowid IN ({placeholders}) AND result = ?" in src
 
 
 def test_shutdown_persist_in_flight_works_with_uuid_str(
@@ -208,100 +207,6 @@ def test_migration_drop_table_inside_transaction() -> None:
     assert drop_idx > begin_idx, (
         "DROP TABLE preamble must occur AFTER BEGIN IMMEDIATE"
     )
-
-
-
-def test_cli_printer_lowercases_event_taskid_before_super(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from kiss.server.json_printer import JsonPrinter
-    from kiss.ui.cli import cli_daemon_bridge, cli_printer
-
-    monkeypatch.setattr(
-        cli_daemon_bridge, "send_event", lambda ev: None,
-    )
-    monkeypatch.setattr(
-        cli_daemon_bridge, "send_cli_task_start", lambda _t: None,
-    )
-    monkeypatch.setattr(
-        cli_daemon_bridge, "send_cli_task_end", lambda _t: None,
-    )
-    captured: list[dict[str, Any]] = []
-
-    def _spy_super_broadcast(self: Any, event: dict[str, Any]) -> None:
-        captured.append(dict(event))
-
-    monkeypatch.setattr(
-        JsonPrinter, "broadcast", _spy_super_broadcast,
-    )
-    upper = uuid.uuid4().hex.upper()
-    printer = cli_printer.RecordingConsolePrinter()
-    printer.broadcast({"type": "step", "taskId": upper})
-    assert captured, "super().broadcast must run"
-    assert captured[0]["taskId"] == upper.lower()
-
-
-
-def test_cli_printer_releases_lock_before_daemon_send(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from kiss.ui.cli import cli_daemon_bridge, cli_printer
-
-    printer = cli_printer.RecordingConsolePrinter()
-
-    held_during_send: list[bool] = []
-
-    def _start_spy(_t: str) -> None:
-        acquired = printer._cli_task_lock.acquire(blocking=False)
-        held_during_send.append(not acquired)
-        if acquired:
-            printer._cli_task_lock.release()
-
-    monkeypatch.setattr(
-        cli_daemon_bridge, "send_event", lambda ev: None,
-    )
-    monkeypatch.setattr(
-        cli_daemon_bridge, "send_cli_task_start", _start_spy,
-    )
-    monkeypatch.setattr(
-        cli_daemon_bridge, "send_cli_task_end",
-        lambda _t: _start_spy(_t),
-    )
-
-    tid = uuid.uuid4().hex
-    printer._inject_task_id = lambda event: {**event, "taskId": tid}  # type: ignore[method-assign]
-    printer.broadcast({"type": "step"})
-    printer.broadcast({"type": "result"})
-    assert held_during_send == [False, False], (
-        f"Daemon-send must occur OUTSIDE _cli_task_lock; held={held_during_send}"
-    )
-
-
-
-def test_cli_printer_imports_is_task_history_id_at_module_level() -> None:
-    from kiss.ui.cli import cli_printer
-
-    src = Path(str(cli_printer.__file__)).read_text()
-    assert (
-        "from kiss.agents.sorcar.persistence import is_task_history_id" in src
-    )
-    broadcast_idx = src.find("def broadcast(")
-    assert broadcast_idx != -1
-    after_broadcast = src[broadcast_idx:]
-    next_def = after_broadcast.find("\n    def ", 1)
-    if next_def == -1:
-        next_def = len(after_broadcast)
-    method_body = after_broadcast[:next_def]
-    assert "from kiss.agents.sorcar.persistence import" not in method_body
-
-
-
-def test_cli_printer_running_task_ids_docstring_updated() -> None:
-    from kiss.ui.cli import cli_printer
-
-    src = Path(str(cli_printer.__file__)).read_text()
-    assert "Set of int" not in src
-    assert "32-char lowercase-hex" in src
 
 
 

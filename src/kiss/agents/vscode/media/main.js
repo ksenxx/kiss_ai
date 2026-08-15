@@ -530,10 +530,7 @@
       attachments: [],
       attachErrors: [],
       inputValue: '',
-      isMerging: false,
       worktreeBarEl: null,
-      autocommitBarEl: null,
-      mergeToolbarEl: null,
       t0: null,
       endTs: 0,
       workDir: '',
@@ -542,12 +539,23 @@
       streamLlmPanelState: null,
       streamLastToolName: '',
       streamPendingPanel: false,
+      streamStepCount: 0,
+      // A content tab shows a file instead of a conversation: it keeps
+      // its own detached view and never owns task output.
+      isContentTab: false,
+      contentPath: '',
+      contentViewEl: null,
+      contentEditor: null,
+      // Set on a sub-agent tab opened by a run_parallel fan-out, naming
+      // the conversation that started it.
+      isSubagentTab: false,
+      parentTabId: null,
+      isDone: false,
       lastTaskFailed: false,
       hasRunTask: false,
       askPendingQuestion: null,
       askQuestionEl: null,
       askInputEl: null,
-      askSubmitEl: null,
     };
   }
 
@@ -720,7 +728,6 @@
     tab.attachments = attachments;
     tab.attachErrors = attachErrors;
     tab.inputValue = inp.value;
-    tab.isMerging = isMerging;
     tab.isRunning = isActiveTabRunning();
     tab.t0 = t0;
     tab.endTs = endTs;
@@ -737,20 +744,6 @@
       tab.worktreeBarEl = null;
     }
     worktreeBar = null;
-    if (autocommitBar && autocommitBar.parentNode) {
-      tab.autocommitBarEl = autocommitBar;
-      autocommitBar.parentNode.removeChild(autocommitBar);
-    } else {
-      tab.autocommitBarEl = null;
-    }
-    autocommitBar = null;
-    const mergeBar = document.getElementById('merge-toolbar');
-    if (mergeBar && mergeBar.parentNode) {
-      tab.mergeToolbarEl = mergeBar;
-      mergeBar.parentNode.removeChild(mergeBar);
-    } else {
-      tab.mergeToolbarEl = null;
-    }
     if (inputContainer) inputContainer.style.display = '';
     persistTabState();
   }
@@ -851,7 +844,6 @@
     syncClearBtn();
     inp.style.height = 'auto';
     inp.style.height = inp.scrollHeight + 'px';
-    isMerging = tab.isMerging || false;
     t0 = tab.t0 || null;
     endTs = tab.endTs || 0;
     state = tab.streamState || mkS();
@@ -869,34 +861,16 @@
       const area = document.getElementById('input-area');
       area.insertBefore(worktreeBar, area.firstChild);
     }
-    if (autocommitBar && autocommitBar.parentNode)
-      autocommitBar.parentNode.removeChild(autocommitBar);
-    autocommitBar = null;
-    if (tab.autocommitBarEl) {
-      autocommitBar = tab.autocommitBarEl;
-      tab.autocommitBarEl = null;
-      const acArea = document.getElementById('input-area');
-      acArea.insertBefore(autocommitBar, acArea.firstChild);
-    }
-    const existingMerge = document.getElementById('merge-toolbar');
-    if (existingMerge) existingMerge.remove();
-    if (tab.mergeToolbarEl) {
-      document.getElementById('input-area').appendChild(tab.mergeToolbarEl);
-      tab.mergeToolbarEl = null;
-    } else if (isMerging) {
-      showMergeToolbar(tab.id);
-    }
-    const hideInput =
-      worktreeBar ||
-      autocommitBar ||
-      document.getElementById('merge-toolbar') ||
-      (tab.isSubagentTab && !tab.isRunning);
+    const hideInput = worktreeBar || (tab.isSubagentTab && !tab.isRunning);
     if (hideInput) {
       if (inputContainer) inputContainer.style.display = 'none';
     } else {
       if (inputContainer) inputContainer.style.display = '';
     }
     updateInputDisabled();
+    // A tab that ran while hidden comes back looking like one that ran
+    // on screen: everything but its latest panel collapsed.
+    collapseOlderPanels(O, tab.id);
     resetAdjacentState();
     syncAskModalToActiveTab();
     // visibletask-coverage:start
@@ -964,6 +938,34 @@
     applyRemoteTheme(next);
   }
 
+  // Arrow-key navigation for the tablist (WAI-ARIA tabs pattern,
+  // manual activation): ArrowLeft/ArrowRight move focus to the
+  // previous/next tab with wrap-around, Home/End jump to the
+  // first/last tab, and the roving Tab stop follows the focus so the
+  // user can Tab away and come back to where they were.  Focus
+  // movement alone never activates; Enter/Space do.  The per-tab close
+  // '×' controls keep tabindex=0 (they are separate buttons, not tabs,
+  // and this keeps them directly Tab-reachable -- the simplest correct
+  // option under the pattern).
+  function moveTabFocus(fromEl, key) {
+    const tabList = document.getElementById('tab-list');
+    if (!tabList) return;
+    const els = Array.from(tabList.querySelectorAll('[role="tab"]'));
+    if (els.length === 0) return;
+    let target;
+    if (key === 'Home') {
+      target = els[0];
+    } else if (key === 'End') {
+      target = els[els.length - 1];
+    } else {
+      const i = els.indexOf(fromEl);
+      const d = key === 'ArrowLeft' ? -1 : 1;
+      target = i < 0 ? els[0] : els[(i + d + els.length) % els.length];
+    }
+    els.forEach(t => t.setAttribute('tabindex', t === target ? '0' : '-1'));
+    target.focus();
+  }
+
   function renderTabBar() {
     const tabList = document.getElementById('tab-list');
     const tabBar = document.getElementById('tab-bar');
@@ -971,7 +973,23 @@
 
     tabBar.style.display = '';
 
+    // Chat tabs are proper a11y tabs: keyboard users reach them with
+    // Tab, screen readers announce "<title>, tab, selected", and
+    // Enter/Space activates them exactly like a click.
+    tabList.setAttribute('role', 'tablist');
+    tabList.setAttribute('aria-label', 'Chat tabs');
+
     tabList.innerHTML = '';
+    // Roving tabindex (WAI-ARIA tabs pattern, manual activation): only
+    // the active tab is a Tab stop; the arrow keys move focus between
+    // tabs (see moveTabFocus) and Enter/Space activate.  If the active
+    // tab is somehow not in the list, the first tab is the stop so the
+    // tablist never becomes keyboard-unreachable.
+    const rovingStopId = tabs.some(t => t.id === activeTabId)
+      ? activeTabId
+      : tabs.length > 0
+        ? tabs[0].id
+        : null;
     tabs.forEach(tab => {
       const el = document.createElement('div');
       el.className =
@@ -980,6 +998,16 @@
         (tab.isSubagentTab ? ' subagent-tab' : '') +
         (tab.isContentTab ? ' content-tab' : '');
       el.dataset.tabId = tab.id;
+      el.setAttribute('role', 'tab');
+      el.setAttribute('tabindex', tab.id === rovingStopId ? '0' : '-1');
+      el.setAttribute(
+        'aria-selected',
+        tab.id === activeTabId ? 'true' : 'false',
+      );
+      el.setAttribute('aria-label', tab.title);
+      // All chat tabs swap the one shared chat surface (#output), so a
+      // single shared tabpanel is the correct association.
+      el.setAttribute('aria-controls', 'output');
 
       if (tab.isContentTab) {
         const fileIcon = document.createElement('span');
@@ -1025,14 +1053,38 @@
       const closeBtn = document.createElement('span');
       closeBtn.className = 'chat-tab-close';
       closeBtn.textContent = '\u00d7';
+      closeBtn.setAttribute('role', 'button');
+      closeBtn.setAttribute('tabindex', '0');
+      closeBtn.setAttribute('aria-label', 'Close tab');
       closeBtn.addEventListener('click', e => {
         e.stopPropagation();
         closeTab(tab.id);
+      });
+      closeBtn.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          e.stopPropagation();
+          closeTab(tab.id);
+        }
       });
       el.appendChild(closeBtn);
 
       el.addEventListener('click', () => {
         switchToTab(tab.id);
+      });
+      el.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          switchToTab(tab.id);
+        } else if (
+          e.key === 'ArrowLeft' ||
+          e.key === 'ArrowRight' ||
+          e.key === 'Home' ||
+          e.key === 'End'
+        ) {
+          e.preventDefault();
+          moveTabFocus(el, e.key);
+        }
       });
       el.addEventListener('contextmenu', e => {
         e.preventDefault();
@@ -1048,8 +1100,17 @@
       addBtn.className = 'chat-tab chat-tab-add';
       addBtn.textContent = '+';
       addBtn.title = 'New chat';
+      addBtn.setAttribute('role', 'button');
+      addBtn.setAttribute('tabindex', '0');
+      addBtn.setAttribute('aria-label', 'New chat');
       addBtn.addEventListener('click', () => {
         createNewTab();
+      });
+      addBtn.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          createNewTab();
+        }
       });
       tabBar.appendChild(addBtn);
     }
@@ -1078,10 +1139,19 @@
       const settingsBtn = document.createElement('div');
       settingsBtn.className = 'chat-tab chat-tab-settings';
       settingsBtn.title = 'Settings';
+      settingsBtn.setAttribute('role', 'button');
+      settingsBtn.setAttribute('tabindex', '0');
+      settingsBtn.setAttribute('aria-label', 'Settings');
       settingsBtn.innerHTML =
         '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>';
       settingsBtn.addEventListener('click', () => {
         openSettingsPanel();
+      });
+      settingsBtn.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          openSettingsPanel();
+        }
       });
       tabBar.appendChild(settingsBtn);
     }
@@ -1141,7 +1211,10 @@
 
   // agentInitiated marks a close the agent performed by itself rather
   // than one the user asked for; see pickSuccessorTab.
-  function closeTab(tabId, agentInitiated) {
+  // fromServer marks a close applied FROM a daemon broadcast (e.g.
+  // `closeSubagentTab`): it must not be echoed back as a `closeTab`
+  // command, or two clients would bounce the close between each other.
+  function closeTab(tabId, agentInitiated, fromServer) {
     const origIdx = tabs.findIndex(t => {
       return t.id === tabId;
     });
@@ -1166,10 +1239,11 @@
     for (const id of toClose) {
       const i = tabs.findIndex(t => t.id === id);
       if (i >= 0) tabs.splice(i, 1);
+      forgetPendingFileLinks(id);
       // report-coverage:start
       discardReadyReports(id);
       // report-coverage:end
-      api.closeTab({tabId: id});
+      if (!fromServer) api.closeTab({tabId: id});
     }
     rpAfterTabsClosed(toClose);
     if (activeWasClosed) {
@@ -1755,29 +1829,6 @@
     return subTab;
   }
 
-  // A regular chat tab that is created without being switched to. Used to
-  // restore tasks that are still running when a client (re)connects: they
-  // must be reachable, but must not take the user off the tab they are on.
-  function createBackgroundChatTab(title) {
-    const tab = makeTab(title);
-    tabs.push(tab);
-    renderTabBar();
-    persistTabState();
-    return tab;
-  }
-
-  function setTabTitle(tab, title) {
-    if (!tab) return;
-    const t = (title || '').trim();
-    tab.title = t
-      ? t.length > 30
-        ? t.substring(0, 30) + '\u2026'
-        : t
-      : 'new chat';
-    renderTabBar();
-    persistTabState();
-  }
-
   function createNewTab() {
     // Opening a chat is the user taking over: the launch is over, and no
     // backend event may move them off the tab they just asked for.
@@ -1797,6 +1848,7 @@
       stopTimer();
       removeSpinner();
     }
+    registerTab(tab);
     api.newChat({tabId: tab.id});
     api.getWelcomeSuggestions();
     focusInputWithRetry();
@@ -1815,32 +1867,12 @@
     persistTabState();
   }
 
+  // The tab SET is server-canonical (the daemon's shared tab registry,
+  // mirrored to every client via `tabs_state`), so the only webview
+  // state persisted locally is what stays client-local by design: the
+  // selected tab and the drawer preferences.
   function persistTabState() {
-    const persistable = tabs.filter(t => {
-      return !t.isSubagentTab && !t.isContentTab;
-    });
-    const serialized = persistable.map(t => {
-      return {
-        title: t.title,
-        chatId: t.id,
-        backendChatId: t.backendChatId || '',
-        parentTabId: t.parentTabId || '',
-        workDir: t.workDir || '',
-      };
-    });
-    let activeIdx = persistable.findIndex(t => {
-      return t.id === activeTabId;
-    });
-    if (activeIdx < 0) {
-      const active = getTab(activeTabId);
-      const parentId = active && active.parentTabId ? active.parentTabId : '';
-      activeIdx = persistable.findIndex(t => {
-        return t.id === parentId;
-      });
-    }
     vscode.setState({
-      tabs: serialized,
-      activeTabIndex: activeIdx,
       chatId: activeTabId,
       taskDrawerCollapsed: taskDrawerCollapsed,
       inputDrawerCollapsed: inputDrawerCollapsed,
@@ -1849,6 +1881,169 @@
       drawersVersion: DRAWERS_VERSION,
     });
   }
+
+  // tabmirror-coverage:start
+  // Tab ids announced to the daemon in an `openTab` whose `tabs_state`
+  // echo has not arrived yet, mapped to how many snapshots have since
+  // arrived WITHOUT the id. A snapshot broadcast inside that window
+  // predates the registration and must not remove the brand-new tab —
+  // but an id no snapshot ever confirms (e.g. the daemon rejected or
+  // dropped the open) must not stay snapshot-immune forever, so it
+  // expires after PENDING_OPEN_MAX_MISSES missed snapshots.
+  const pendingOpenTabs = new Map();
+  const PENDING_OPEN_MAX_MISSES = 3;
+
+  // Announce a locally created chat tab to the daemon's shared tab
+  // registry so every other client opens the same tab.
+  function registerTab(tab) {
+    pendingOpenTabs.set(tab.id, 0);
+    api.openTab({
+      tabId: tab.id,
+      title: tab.title || 'new chat',
+      workDir: tab.workDir || '',
+    });
+  }
+
+  function clipTabTitle(title) {
+    const t = (title || '').trim();
+    if (!t) return 'new chat';
+    return t.length > 30 ? t.substring(0, 30) + '\u2026' : t;
+  }
+
+  // Reconcile the local tab bar against the canonical `tabs_state`
+  // snapshot: adopt tabs other clients opened, drop tabs they closed,
+  // and follow the registry's titles, order and chat bindings.
+  //
+  // Client-local state survives untouched: the active-tab selection,
+  // and each tab's own composer draft, model pick and task panel
+  // (mirroring covers the tab SET and transcript CONTENTS, not what
+  // the user is typing). Two kinds of tabs stay client-local by
+  // design and are never removed here: sub-agent tabs (derived state,
+  // rebuilt on every client from `openSubagentTab` broadcasts and
+  // replays; they re-anchor after their parent) and content tabs
+  // (the remote web app's stand-in for the VS Code editor — editors
+  // are per-user surfaces on every client, so file views are not
+  // mirrored).
+  function reconcileTabs(list) {
+    const byId = new Map(
+      tabs.map(t => {
+        return [t.id, t];
+      }),
+    );
+    const inSnapshot = new Set();
+    const next = [];
+    // One tab per chat: the daemon's registry enforces the invariant,
+    // and this backstop drops any duplicate chat binding a legacy or
+    // buggy snapshot might still carry (keep-first, deterministic on
+    // every client).
+    const seenChats = new Set();
+    list.forEach(e => {
+      if (!e || !e.tabId || inSnapshot.has(e.tabId)) return;
+      // The daemon listed the id, so its `openTab` is confirmed —
+      // clear the pending shield even when the entry is dropped as a
+      // duplicate below, or the local duplicate tab would survive
+      // reconciliation until the shield expires.
+      pendingOpenTabs.delete(e.tabId);
+      if (e.chatId) {
+        if (seenChats.has(String(e.chatId))) return;
+        seenChats.add(String(e.chatId));
+      }
+      inSnapshot.add(e.tabId);
+      let tab = byId.get(e.tabId);
+      if (!tab) {
+        tab = makeTab(clipTabTitle(e.title));
+        tab.id = e.tabId;
+        if (e.chatId) tab.hasRunTask = true;
+      } else if (!tab.isSubagentTab && e.title) {
+        tab.title = clipTabTitle(e.title);
+      }
+      // Once the registry has listed a tab, its removal from a later
+      // snapshot means another client closed it.
+      tab.inRegistry = true;
+      if (e.chatId && String(tab.backendChatId || '') !== String(e.chatId)) {
+        tab.backendChatId = String(e.chatId);
+      }
+      if (e.workDir && !tab.workDir) tab.workDir = e.workDir;
+      next.push(tab);
+    });
+
+    // Expire pending opens the daemon never confirmed: after a few
+    // snapshots without the id, the open is considered lost/rejected
+    // and the id stops shielding its local tab from reconciliation.
+    pendingOpenTabs.forEach((misses, id) => {
+      if (inSnapshot.has(id)) return;
+      if (misses + 1 >= PENDING_OPEN_MAX_MISSES) pendingOpenTabs.delete(id);
+      else pendingOpenTabs.set(id, misses + 1);
+    });
+
+    // A removed registry tab takes its local sub-agent descendants
+    // with it, exactly like a local close would. An EMPTY snapshot
+    // spares tabs the registry never listed (the boot placeholder):
+    // there is nothing to mirror, so destroying and recreating the
+    // placeholder would only lose its identity and composer draft.
+    const removedIds = new Set();
+    const snapshotEmpty = inSnapshot.size === 0;
+    tabs.forEach(t => {
+      if (
+        !inSnapshot.has(t.id) &&
+        !t.isSubagentTab &&
+        !t.isContentTab &&
+        !pendingOpenTabs.has(t.id) &&
+        !(snapshotEmpty && !t.inRegistry)
+      ) {
+        removedIds.add(t.id);
+      }
+    });
+    let grew = removedIds.size > 0;
+    while (grew) {
+      grew = false;
+      tabs.forEach(t => {
+        if (
+          t.parentTabId &&
+          removedIds.has(t.parentTabId) &&
+          !removedIds.has(t.id)
+        ) {
+          removedIds.add(t.id);
+          grew = true;
+        }
+      });
+    }
+    tabs.forEach(t => {
+      if (inSnapshot.has(t.id) || removedIds.has(t.id)) return;
+      next.push(t);
+    });
+    removedIds.forEach(id => {
+      const doomed = byId.get(id);
+      if (doomed && doomed.isContentTab) disposeTabContentView(doomed);
+      forgetPendingFileLinks(id);
+      // report-coverage:start
+      discardReadyReports(id);
+      // report-coverage:end
+    });
+    tabs = next;
+    if (removedIds.size > 0) rpAfterTabsClosed(removedIds);
+    tabs.forEach(t => {
+      if (t.isSubagentTab && t.parentTabId) {
+        placeSubagentTabAfterParent(t, t.parentTabId);
+      }
+    });
+
+    if (tabs.length === 0) {
+      // Empty registry: keep one local, unregistered placeholder so
+      // the composer always exists. The daemon adopts it the moment
+      // it runs a task; until then it is a welcome screen only.
+      tabs.push(makeTab('new chat'));
+    }
+    if (!getTab(activeTabId)) {
+      const saved = savedActiveTabId ? getTab(savedActiveTabId) : null;
+      activateAdjacentTab(saved || tabs[0]);
+    }
+    savedActiveTabId = '';
+    reportSurvivingChatTab();
+    renderTabBar();
+    persistTabState();
+  }
+  // tabmirror-coverage:end
 
   // drawer-coverage:start
   function isMobileRemoteWebApp() {
@@ -1904,45 +2099,36 @@
     }
   }
 
+  // Tabs come from the server's shared registry (`tabs_state`), never
+  // from local storage. The boot placeholder below is replaced by the
+  // first snapshot; `savedActiveTabId` restores this client's own tab
+  // selection (selection stays client-local) once that snapshot lands.
+  // `legacyRestoredTabs` carries a pre-registry client's locally
+  // persisted tab set into `ready` exactly once, so the first daemon
+  // with an empty registry can adopt it (one-time migration).
+  let savedActiveTabId = '';
+  const legacyRestoredTabs = [];
   (function () {
     const saved = vscode.getState();
     if (saved && saved.tabs && saved.tabs.length > 0) {
-      tabs = [];
-      const restoredBackendChatIds = new Set();
+      const seenChatIds = new Set();
       saved.tabs.forEach(st => {
-        if (st.isSubagentTab) return;
-        const persistedBackendChatId = st.backendChatId
-          ? String(st.backendChatId)
-          : '';
-        if (
-          persistedBackendChatId &&
-          restoredBackendChatIds.has(persistedBackendChatId)
-        ) {
-          return;
-        }
-        const tab = makeTab(st.title);
-        if (st.chatId) tab.id = st.chatId;
-        if (persistedBackendChatId) {
-          tab.backendChatId = persistedBackendChatId;
-          restoredBackendChatIds.add(persistedBackendChatId);
-        }
-        if (st.parentTabId) tab.parentTabId = st.parentTabId;
-        if (st.workDir) tab.workDir = st.workDir;
-        tabs.push(tab);
+        if (!st || st.isSubagentTab) return;
+        const chatId = st.backendChatId ? String(st.backendChatId) : '';
+        if (!st.chatId || !chatId || seenChatIds.has(chatId)) return;
+        seenChatIds.add(chatId);
+        legacyRestoredTabs.push({
+          tabId: String(st.chatId),
+          chatId: chatId,
+          title: st.title || '',
+          workDir: st.workDir || '',
+        });
       });
     }
-    if (tabs.length > 0) {
-      const idx = (saved && saved.activeTabIndex) || 0;
-      if (idx >= 0 && idx < tabs.length) {
-        activeTabId = tabs[idx].id;
-      } else {
-        activeTabId = tabs[0].id;
-      }
-    } else {
-      const initial = makeTab('new chat');
-      tabs.push(initial);
-      activeTabId = initial.id;
-    }
+    if (saved && saved.chatId) savedActiveTabId = String(saved.chatId);
+    const initial = makeTab('new chat');
+    tabs.push(initial);
+    activeTabId = initial.id;
   })();
 
   const O = document.getElementById('output');
@@ -1957,7 +2143,6 @@
   const modelSearch = document.getElementById('model-search');
   const modelList = document.getElementById('model-list');
   const modelName = document.getElementById('model-name');
-  if (modelName && modelName.textContent) selectedModel = modelName.textContent;
   const fileChips = document.getElementById('file-chips');
 
   const statusText = document.getElementById('status-text');
@@ -1986,12 +2171,12 @@
   const tricksPanelClose = document.getElementById('tricks-panel-close');
   const tricksBtn = document.getElementById('tricks-btn');
   const tricksList = document.getElementById('tricks-list');
-  const autocommitBtn = document.getElementById('autocommit-btn');
   const waitSpinner = document.getElementById('wait-spinner');
   const ghostOverlay = document.getElementById('ghost-overlay');
   const inputContainer = document.getElementById('input-container');
   const inputClearBtn = document.getElementById('input-clear-btn');
   const worktreeToggleBtn = document.getElementById('cfg-use-worktree');
+  const autocommitBtn = document.getElementById('autocommit-btn');
   const updateBtn = document.getElementById('cfg-update-btn');
   const serverResetBtn = document.getElementById('cfg-server-reset-btn');
   const serverResetConfirmModal = document.getElementById(
@@ -2161,10 +2346,10 @@
 
   // launchswitch-coverage:start
   // A chat window is often opened while agents are still working: the
-  // extension host replays a `status` for every tab it restored and the
-  // remote web app is handed an `openRunningTasks` snapshot. What the user
-  // wants to see then is the task that started last, not whichever tab
-  // happened to be active when the window was last closed.
+  // daemon replays every chat-bound tab of the shared registry after
+  // `ready`, including a `status` for each one that is still running.
+  // What the user wants to see then is the task that started last, not
+  // whichever tab happened to be active when the window was last closed.
   //
   // The window this permission lives in closes at the first real gesture --
   // a tap or a keystroke -- so a snapshot that arrives while the user is
@@ -2175,12 +2360,6 @@
   let launchStartedAt = 0;
   let launchSwitchDone = false;
   let launchNewsSeen = false;
-
-  // Start timestamp, keyed by backend chat id, of every task the backend
-  // reported as running in the launch snapshot. The snapshot is only used to
-  // choose the launch tab -- a tab's own running state always comes from its
-  // event replay.
-  const launchRunningStartTs = new Map();
 
   // A launch begins when the backend becomes live, which is not the moment the
   // page loads: until then the chat is hidden behind the "KISS Sorcar Server
@@ -2209,8 +2388,6 @@
     // taking over the chat -- the chat is not even on screen yet.
     if (!launchStartedAt) return;
     launchSwitchDone = true;
-    // Launch-only data: from here on a tab's own replayed state is the truth.
-    launchRunningStartTs.clear();
   }
 
   function launchSwitchAllowed() {
@@ -2222,18 +2399,11 @@
     return true;
   }
 
-  function launchStartTsFor(tab) {
-    const snapshot = tab.backendChatId
-      ? launchRunningStartTs.get(tab.backendChatId)
-      : 0;
-    const own = tab.isRunning ? Number(tab.t0) || 0 : 0;
-    return Math.max(Number(snapshot) || 0, own);
-  }
-
+  // A tab counts for the launch only while its own replayed `status`
+  // says it is running; sub-agent and content tabs are implementation
+  // details of some chat tab, never launch targets themselves.
   function isLaunchRunning(tab) {
-    if (tab.isContentTab || tab.isSubagentTab) return false;
-    if (tab.isRunning) return true;
-    return !!tab.backendChatId && launchRunningStartTs.has(tab.backendChatId);
+    return !tab.isContentTab && !tab.isSubagentTab && !!tab.isRunning;
   }
 
   // Ties -- two tasks whose start timestamp is missing, so both read 0 --
@@ -2247,7 +2417,7 @@
     for (let i = 0; i < tabs.length; i++) {
       const tab = tabs[i];
       if (!isLaunchRunning(tab)) continue;
-      const ts = launchStartTsFor(tab);
+      const ts = Number(tab.t0) || 0;
       if (ts >= bestTs) {
         bestTs = ts;
         best = tab;
@@ -2305,8 +2475,6 @@
   function syncClearBtn() {
     if (inputClearBtn) inputClearBtn.style.display = inp.value ? '' : 'none';
   }
-
-  let isMerging = false;
 
   let state = mkS();
   let lastToolName = '';
@@ -2487,6 +2655,7 @@
 
   function clearOutput() {
     if (welcome && welcome.parentNode === O) O.removeChild(welcome);
+    forgetPendingFileLinks(activeTabId);
     O.innerHTML = '';
     // autoscroll-coverage:start
     // The output was rebuilt from scratch (a new task's `clear`, a
@@ -2677,6 +2846,18 @@
   // always the active tab: background fragments are linkified too.
   function linkifyFilePaths(root, workDir, ownerTabId) {
     if (!root || root.nodeType !== 1) return;
+    // Stamp the root with the workDir/tab it is linkified under so the
+    // links can be re-created after hljs.highlightElement() rewrites a
+    // code block inside it (see highlightBlockPreservingLinks).
+    if (root.dataset) {
+      root.dataset.linkWd =
+        typeof workDir === 'string'
+          ? workDir
+          : workDirForTab(activeTabId) || '';
+      root.dataset.linkTab = String(
+        ownerTabId === undefined ? activeTabId : ownerTabId,
+      );
+    }
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
         let p = node.parentNode;
@@ -2852,13 +3033,115 @@
     }
   }
 
+  /**
+   * Release the file-link bookkeeping of a transcript that is going away.
+   *
+   * The spans of a closed or cleared tab are detached DOM that no reply
+   * will ever promote, and the registry would keep them -- and the work
+   * of walking them on every later reply -- alive for the rest of the
+   * session. Their in-flight keys go with them, so the same paths are
+   * checked afresh if the tab's transcript is rebuilt.
+   *
+   * @param {string} tabId The tab whose transcript is being discarded.
+   */
+  function forgetPendingFileLinks(tabId) {
+    const owner = String(tabId);
+    for (const span of Array.from(_pendingFileLinkSpans)) {
+      if ((span.getAttribute('data-path-tab') || '') === owner) {
+        _pendingFileLinkSpans.delete(span);
+      }
+    }
+    const prefix = owner + '\u0000';
+    for (const key of Array.from(_pendingPathChecks)) {
+      if (key.indexOf(prefix) === 0) _pendingPathChecks.delete(key);
+    }
+  }
+
+  /**
+   * Forget which checks are in flight after losing the daemon.
+   *
+   * Nothing can answer a request that was on the wire when the socket
+   * died, so leaving its key in the dedup set would suppress every later
+   * check of that path and the links would stay inert for the rest of
+   * the session. The spans themselves are kept: they are still on
+   * screen, and the re-issued check promotes them.
+   */
+  function forgetInFlightPathChecks() {
+    _pendingPathChecks.clear();
+  }
+
+  /**
+   * Re-ask about the candidate spans whose reply the outage swallowed.
+   *
+   * forgetInFlightPathChecks() drops the keys of checks that can never
+   * be answered, but the spans themselves stay on screen -- grey and
+   * unclickable. A finished task renders no further panels, so unless
+   * some later output happened to mention the very same path, nothing
+   * would ever ask about them again and those links would stay dead for
+   * the rest of the session. Reconnecting is their last chance.
+   *
+   * Each span carries the tab and the workDir it was checked under, and
+   * a reply only resolves spans stamped with the same pair, so the
+   * reissue is grouped by both. Spans already covered by a live check
+   * are skipped, and a reconnect with nothing outstanding sends
+   * nothing: every open window reconnects at once after a daemon
+   * restart.
+   */
+  function reissueFileLinkChecks() {
+    const groups = new Map();
+    for (const span of _pendingFileLinkSpans) {
+      const raw = span.getAttribute('data-path-candidate');
+      if (!raw) continue;
+      const owner = span.getAttribute('data-path-tab') || '';
+      const wd = span.getAttribute('data-path-wd') || '';
+      const p = _stripLineSuffix(raw);
+      const key = _fileLinkCacheKey(owner, wd, p);
+      if (_pendingPathChecks.has(key)) continue;
+      _pendingPathChecks.add(key);
+      const groupKey = owner + '\u0000' + wd;
+      let group = groups.get(groupKey);
+      if (!group) {
+        group = {type: 'checkPaths', paths: [], workDir: wd, tabId: owner};
+        groups.set(groupKey, group);
+      }
+      group.paths.push(p);
+    }
+    for (const group of groups.values()) api.send(group);
+  }
+
+  /**
+   * Highlight *bl* without permanently destroying its file links.
+   *
+   * hljs.highlightElement() rewrites the block's innerHTML from its
+   * text, wiping the [data-path]/[data-path-candidate] spans that
+   * linkifyFilePaths() put there (deferred highlighting runs AFTER the
+   * panel was linkified).  Unwrap the spans first — so hljs sees plain
+   * text and stale spans are dropped from the pending registry — then
+   * re-linkify the block under the workDir/tab stamped on the panel
+   * root that was linkified originally.
+   */
+  function highlightBlockPreservingLinks(bl) {
+    const spans = bl.querySelectorAll(
+      '[data-path], [data-path-candidate], [data-path-missing]',
+    );
+    for (const span of spans) {
+      _pendingFileLinkSpans.delete(span);
+      span.replaceWith(span.ownerDocument.createTextNode(span.textContent));
+    }
+    hljs.highlightElement(bl);
+    const holder = bl.closest('[data-link-wd]');
+    if (holder) {
+      linkifyFilePaths(bl, holder.dataset.linkWd, holder.dataset.linkTab);
+    }
+  }
+
   function hlBlock(el) {
     if (typeof hljs === 'undefined') return;
     el.querySelectorAll('pre code').forEach(bl => {
       if (_deferHighlight) {
         bl.classList.add('needs-hl');
       } else {
-        hljs.highlightElement(bl);
+        highlightBlockPreservingLinks(bl);
       }
     });
   }
@@ -2867,7 +3150,7 @@
     if (typeof hljs === 'undefined' || !root) return;
     root.querySelectorAll('code.needs-hl').forEach(bl => {
       bl.classList.remove('needs-hl');
-      hljs.highlightElement(bl);
+      highlightBlockPreservingLinks(bl);
     });
   }
 
@@ -3424,15 +3707,49 @@
     }
   }
 
-  function collapseOlderPanels() {
-    if (!isRunning) return;
-    const panels = O.querySelectorAll(':scope > .collapsible');
+  /**
+   * True while the task of *tabId* is running.
+   *
+   * The visible tab's flag is the module-level `isRunning` that
+   * setRunningState keeps in step with it; a tab that is not on screen
+   * carries the flag on itself. Reading it per tab is what lets a
+   * background transcript collapse its panels exactly like a visible
+   * one -- it used to consult the visible tab's flag and so never
+   * collapsed anything.
+   *
+   * @param {string} tabId The tab that owns a transcript.
+   * @returns {boolean} Whether that tab's task is running.
+   */
+  function streamTabIsRunning(tabId) {
+    if (tabId === activeTabId) return isRunning;
+    const tab = getTab(tabId);
+    return !!(tab && tab.isRunning);
+  }
+
+  /**
+   * Collapse every top-level panel of a running transcript but the last.
+   *
+   * @param {Element|DocumentFragment} container The transcript.
+   * @param {string} tabId The tab that owns it.
+   */
+  function collapseOlderPanels(container, tabId) {
+    // Only an attached transcript is collapsed as it streams.  A
+    // background tab's fragment is collapsed once, when it is restored
+    // (see restoreTab): collapsing a run_parallel panel adopts its open
+    // sub-agent tabs into the newest fan-out call, and mid-stream that
+    // call does not exist yet, so a live sub-agent tab would be closed
+    // by the very panel it is about to move out of.
+    if (!container || container.nodeType !== 1) return;
+    if (!streamTabIsRunning(tabId)) return;
+    const panels = Array.from(container.children).filter(
+      el => el.classList && el.classList.contains('collapsible'),
+    );
     for (let i = 0; i < panels.length - 1; i++) {
       const p = panels[i];
       if (p.classList.contains('rc') || p.classList.contains('user-pinned'))
         continue;
       if (p.classList.contains('tc-run-parallel'))
-        rpAdoptOpenSubagents(p, activeTabId);
+        rpAdoptOpenSubagents(p, tabId);
       if (rpPanelHasOpenTabs(p) && !p._rpDone) continue;
       p.classList.add('collapsed');
       collapsePreview(p);
@@ -3489,6 +3806,7 @@
     titleOverride,
     showStatus,
     workDir,
+    ownerTabId,
   ) {
     const rc = mkEl('div', 'ev rc');
     let rb = '';
@@ -3536,7 +3854,7 @@
     addCopyButton(rc);
     addPanelTimestamp(rc, ev.ts);
     const rcBody = rc.querySelector('.rc-body');
-    if (rcBody) linkifyFilePaths(rcBody, workDir);
+    if (rcBody) linkifyFilePaths(rcBody, workDir, ownerTabId);
     return rc;
   }
 
@@ -3932,7 +4250,7 @@
           c.appendChild(sd);
         } else {
           c.appendChild(tcBody);
-          verifyFileLinkCandidates(tcBody, evWorkDir);
+          verifyFileLinkCandidates(tcBody, evWorkDir, evOwnerTab);
         }
         addCollapse(c, hdr, ev.ts);
         target.appendChild(c);
@@ -4066,6 +4384,7 @@
               'Previous Sessions',
               false,
               evWorkDir,
+              evOwnerTab,
             ),
           );
           target.appendChild(
@@ -4075,11 +4394,19 @@
               'Result',
               true,
               evWorkDir,
+              evOwnerTab,
             ),
           );
         } else {
           target.appendChild(
-            createResultPanel(ev, undefined, 'Result', true, evWorkDir),
+            createResultPanel(
+              ev,
+              undefined,
+              'Result',
+              true,
+              evWorkDir,
+              evOwnerTab,
+            ),
           );
         }
         if (statusTokens && ev.total_tokens)
@@ -4145,7 +4472,16 @@
         }
         break;
       }
+      case 'autocommit_progress':
+      case 'worktree_progress': {
+        renderActionProgress(target, ev.message || ev.text || '');
+        break;
+      }
       case 'autocommit_done': {
+        clearActionProgress(target);
+        // A successful manual Git Commit is reported by a toast
+        // notification instead; only failures earn transcript text.
+        if (ev && ev.manual && ev.success) break;
         const cls2 = ev && ev.success ? 'wt-result-ok' : 'wt-result-err';
         const acDiv = mkEl('div', 'ev ' + cls2);
         acDiv.textContent = (ev && ev.message) || '';
@@ -4180,58 +4516,201 @@
     if (statusSteps) statusSteps.textContent = 'Steps: ' + count;
   }
 
+  // "Steps: 7/100" -- the daemon writes its step count into the usage
+  // line as well as into the numeric fields beside it.
+  const STEPS_TEXT_RE = /Steps:\s*(\d+)\/\d+/;
+
+  /**
+   * The step count the daemon itself reports in *ev*, or 0.
+   *
+   * ``usage_info`` carries it as ``total_steps``, and -- for a payload
+   * without the numeric fields -- inside its ``Steps: N/M`` text, which
+   * is the same pair of forms the renderer reads.
+   *
+   * @param {object} ev A usage_info event.
+   * @returns {number} The reported count, or 0 when it reports none.
+   */
+  function reportedStepCount(ev) {
+    if (ev.total_steps != null) return ev.total_steps;
+    const m = STEPS_TEXT_RE.exec(ev.text || '');
+    return m ? parseInt(m[1], 10) : 0;
+  }
+
+  /**
+   * The mutable state of ONE transcript's event stream.
+   *
+   * Three transcripts run the same state machine: the visible tab, a
+   * background tab's detached fragment, and a replay. Holding that state
+   * in one shape -- and the machine itself in one place (streamBegin /
+   * streamEnd) -- is what stops the three from drifting apart.
+   *
+   * @param {Element|DocumentFragment} container Where panels are added.
+   * @param {string} tabId The tab that owns the transcript.
+   * @returns {object} A fresh stream context.
+   */
+  function mkStreamCtx(container, tabId) {
+    return {
+      container: container,
+      tabId: tabId,
+      // Renderer state for events that land in the transcript itself.
+      state: mkS(),
+      lastToolName: '',
+      llmPanel: null,
+      llmPanelState: mkS(),
+      pendingPanel: false,
+      stepCount: 0,
+      // Called with the new count whenever a step is counted.
+      onStep: null,
+    };
+  }
+
+  function streamCountStep(ctx) {
+    ctx.stepCount += 1;
+    if (ctx.onStep) ctx.onStep(ctx.stepCount);
+  }
+
+  function streamOpenThoughts(ctx, ts, provisional) {
+    const panel = mkThoughtsPanel(ts);
+    if (provisional) panel._provisional = true;
+    ctx.llmPanel = panel;
+    ctx.container.appendChild(panel);
+    collapseOlderPanels(ctx.container, ctx.tabId);
+    ctx.llmPanelState = mkS();
+    ctx.pendingPanel = false;
+  }
+
+  const STREAM_PANEL_TYPES = new Set([
+    'thinking_start',
+    'thinking_delta',
+    'thinking_end',
+    'text_delta',
+    'text_end',
+  ]);
+
+  /**
+   * Apply the panel transitions an event triggers before it is rendered.
+   *
+   * A tool_call ends the current thoughts panel, a tool_result arms the
+   * next one, and the first thinking_start or text_delta after that
+   * opens it and counts a step.
+   *
+   * @param {object} ctx The transcript's stream context.
+   * @param {object} ev The event about to be rendered.
+   * @returns {{target: (Element|DocumentFragment), state: object}} Where
+   *   the event must be rendered, and the renderer state to use.
+   */
+  function streamBegin(ctx, ev) {
+    const t = ev.type;
+    if (t === 'tool_call') {
+      ctx.lastToolName = ev.name || '';
+      if (ctx.llmPanel && ctx.llmPanel._provisional)
+        discardProvisionalPanel(ctx.llmPanel);
+      else if (ctx.llmPanel) finalizePanelTime(ctx.llmPanel);
+      ctx.llmPanel = null;
+      ctx.llmPanelState = mkS();
+      ctx.pendingPanel = true;
+    }
+    if (t === 'tool_result' && ctx.lastToolName !== 'finish') {
+      ctx.pendingPanel = true;
+    }
+    const opensPanel = t === 'thinking_start' || t === 'text_delta';
+    if (ctx.llmPanel && ctx.llmPanel._provisional && opensPanel) {
+      streamCountStep(ctx);
+      ctx.llmPanel._provisional = false;
+    } else if ((ctx.pendingPanel || ctx.stepCount === 0) && opensPanel) {
+      streamCountStep(ctx);
+      streamOpenThoughts(ctx, ev.ts, false);
+    }
+    if (ctx.llmPanel && STREAM_PANEL_TYPES.has(t)) {
+      return {target: ctx.llmPanel, state: ctx.llmPanelState};
+    }
+    return {target: ctx.container, state: ctx.state};
+  }
+
+  /**
+   * Apply the panel transitions that follow an event being rendered.
+   *
+   * @param {object} ctx The transcript's stream context.
+   * @param {object} ev The event that was just rendered.
+   * @param {Element|DocumentFragment} target Where it was rendered.
+   */
+  function streamEnd(ctx, ev, target) {
+    const t = ev.type;
+    if (target === ctx.container) {
+      collapseOlderPanels(ctx.container, ctx.tabId);
+    }
+    if (t === 'tool_result' && ctx.lastToolName !== 'finish' && !ctx.llmPanel) {
+      // The agent is thinking again; the panel its words will land in is
+      // opened now so the transcript does not sit empty, and withdrawn
+      // again if nothing is ever said into it.
+      streamOpenThoughts(ctx, ev.ts, true);
+    }
+    if (t === 'usage_info' && ctx.stepCount > 0) {
+      // The daemon's own count outranks the panel counting, which only
+      // estimates the steps between two of its reports -- a run_parallel
+      // fan-out reports the sub-agents' steps too, so the estimate is
+      // far behind. Adopted only once this transcript has counted a step
+      // of its own: until then stepCount === 0 is also what tells
+      // streamBegin the first thoughts panel is still to be opened, and
+      // the daemon reports a step in progress before its first token.
+      const reported = reportedStepCount(ev);
+      if (reported) ctx.stepCount = reported;
+    }
+    if (t === 'result') {
+      if (ctx.llmPanel && ctx.llmPanel._provisional)
+        discardProvisionalPanel(ctx.llmPanel);
+      else if (ctx.llmPanel) finalizePanelTime(ctx.llmPanel);
+      ctx.llmPanel = null;
+      // The daemon's own count is the authoritative one.
+      if (ev.step_count) ctx.stepCount = ev.step_count;
+      collapseAllExceptResult(ctx.container, ctx.tabId);
+      if (ev.success === false && !ev.is_continue) {
+        const rTab = getTab(ctx.tabId);
+        if (rTab) rTab.lastTaskFailed = true;
+      }
+      ctx.pendingPanel = true;
+    }
+  }
+
+  // The visible transcript's stream state lives in module globals
+  // because a tab switch saves and restores them; they are lent to the
+  // shared machine for the length of one event.
+  function liveStreamCtx() {
+    return {
+      container: O,
+      tabId: activeTabId,
+      state: state,
+      lastToolName: lastToolName,
+      llmPanel: llmPanel,
+      llmPanelState: llmPanelState,
+      pendingPanel: pendingPanel,
+      stepCount: stepCount,
+      onStep: updateStepCount,
+    };
+  }
+
+  function saveLiveStreamCtx(ctx) {
+    lastToolName = ctx.lastToolName;
+    llmPanel = ctx.llmPanel;
+    llmPanelState = ctx.llmPanelState;
+    pendingPanel = ctx.pendingPanel;
+    stepCount = ctx.stepCount;
+  }
+
   function processOutputEvent(ev) {
     normalizeEventTs(ev);
     // visibletask-coverage:start
     // A live event reads and rewrites the status row, so the row must be
     // showing the live task's own numbers while it is handled — the
     // reader may have left it on a neighbouring task. updateVisibleTask()
-    // at the end of this function hands it back.
+    // at the end hands it back.
     showLiveMetrics();
     // visibletask-coverage:end
+    const ctx = liveStreamCtx();
     const t = ev.type;
-    if (t === 'tool_call') {
-      lastToolName = ev.name || '';
-      if (llmPanel && llmPanel._provisional) discardProvisionalPanel(llmPanel);
-      else if (llmPanel) finalizePanelTime(llmPanel);
-      llmPanel = null;
-      llmPanelState = mkS();
-      pendingPanel = true;
-    }
-    if (t === 'tool_result' && lastToolName !== 'finish') {
-      pendingPanel = true;
-    }
-    if (
-      llmPanel &&
-      llmPanel._provisional &&
-      (t === 'thinking_start' || t === 'text_delta')
-    ) {
-      updateStepCount(stepCount + 1);
-      llmPanel._provisional = false;
-    } else if (
-      (pendingPanel || stepCount === 0) &&
-      (t === 'thinking_start' || t === 'text_delta')
-    ) {
-      updateStepCount(stepCount + 1);
-      llmPanel = mkThoughtsPanel(ev.ts);
-      O.appendChild(llmPanel);
-      collapseOlderPanels();
-      llmPanelState = mkS();
-      pendingPanel = false;
-    }
-    let target = O,
-      tState = state;
-    if (
-      llmPanel &&
-      (t === 'thinking_start' ||
-        t === 'thinking_delta' ||
-        t === 'thinking_end' ||
-        t === 'text_delta' ||
-        t === 'text_end')
-    ) {
-      target = llmPanel;
-      tState = llmPanelState;
-    }
+    const where = streamBegin(ctx, ev);
+    const target = where.target;
+    const tState = where.state;
     handleOutputEvent(ev, target, tState);
     // autoscroll-coverage:start
     // Capture the latest event panel now: right below, a provisional
@@ -4242,29 +4721,12 @@
         ? target
         : (t === 'tool_result' && tState.lastToolCallEl) || O.lastElementChild;
     // autoscroll-coverage:end
-    if (target === O) collapseOlderPanels();
-    if (t === 'tool_result' && lastToolName !== 'finish' && !llmPanel) {
-      llmPanel = mkThoughtsPanel(ev.ts);
-      llmPanel._provisional = true;
-      O.appendChild(llmPanel);
-      collapseOlderPanels();
-      llmPanelState = mkS();
-      pendingPanel = false;
-    }
+    streamEnd(ctx, ev, target);
+    saveLiveStreamCtx(ctx);
     if (t === 'result' || t === 'usage_info') {
       currentTaskMetrics.tokens = statusTokens ? statusTokens.textContent : '';
       currentTaskMetrics.budget = statusBudget ? statusBudget.textContent : '';
       currentTaskMetrics.steps = statusSteps ? statusSteps.textContent : '';
-    }
-    if (t === 'result') {
-      if (llmPanel) finalizePanelTime(llmPanel);
-      llmPanel = null;
-      collapseAllExceptResult(O, activeTabId);
-      if (ev.success === false && !ev.is_continue) {
-        const rTab = getTab(activeTabId);
-        if (rTab) rTab.lastTaskFailed = true;
-      }
-      pendingPanel = true;
     }
     // autoscroll-coverage:start
     autoScrollLatestEventPanel(autoScrollPanel);
@@ -4280,136 +4742,78 @@
 
   function processOutputEventForBgTab(ev, tab) {
     normalizeEventTs(ev);
-    const t = ev.type;
-
     if (!tab.outputFragment)
       tab.outputFragment = document.createDocumentFragment();
 
-    let bgLastToolName = tab.streamLastToolName || '';
-    let bgLlmPanel = tab.streamLlmPanel || null;
-    let bgLlmPanelState = tab.streamLlmPanelState || mkS();
-    let bgPendingPanel = tab.streamPendingPanel || false;
-    let bgStepCount = tab.streamStepCount || 0;
-    const bgState = tab.streamState || mkS();
+    const ctx = mkStreamCtx(tab.outputFragment, tab.id);
+    ctx.state = tab.streamState || mkS();
+    ctx.lastToolName = tab.streamLastToolName || '';
+    ctx.llmPanel = tab.streamLlmPanel || null;
+    ctx.llmPanelState = tab.streamLlmPanelState || mkS();
+    ctx.pendingPanel = tab.streamPendingPanel || false;
+    ctx.stepCount = tab.streamStepCount || 0;
+    ctx.onStep = count => {
+      tab.statusStepsText = 'Steps: ' + count;
+    };
 
-    if (t === 'tool_call') {
-      bgLastToolName = ev.name || '';
-      if (bgLlmPanel && bgLlmPanel._provisional)
-        discardProvisionalPanel(bgLlmPanel);
-      else if (bgLlmPanel) finalizePanelTime(bgLlmPanel);
-      bgLlmPanel = null;
-      bgLlmPanelState = mkS();
-      bgPendingPanel = true;
-    }
-    if (t === 'tool_result' && bgLastToolName !== 'finish') {
-      bgPendingPanel = true;
-    }
+    const where = streamBegin(ctx, ev);
+    const target = where.target;
 
-    if (
-      bgLlmPanel &&
-      bgLlmPanel._provisional &&
-      (t === 'thinking_start' || t === 'text_delta')
-    ) {
-      bgStepCount++;
-      tab.statusStepsText = 'Steps: ' + bgStepCount;
-      bgLlmPanel._provisional = false;
-    } else if (
-      (bgPendingPanel || bgStepCount === 0) &&
-      (t === 'thinking_start' || t === 'text_delta')
-    ) {
-      bgStepCount++;
-      tab.statusStepsText = 'Steps: ' + bgStepCount;
-      bgLlmPanel = mkThoughtsPanel(ev.ts);
-      tab.outputFragment.appendChild(bgLlmPanel);
-      bgLlmPanelState = mkS();
-      bgPendingPanel = false;
-    }
+    // The window owns ONE status row, so the hidden tab's numbers are
+    // lent to it for the length of this event and taken back after. That
+    // is what lets a background tab go through exactly the same
+    // renderers as a visible one — usage_info in both its numeric and
+    // its text form included.
+    const prevStepCount = stepCount;
+    const prevTokensText = statusTokens ? statusTokens.textContent : '';
+    const prevBudgetText = statusBudget ? statusBudget.textContent : '';
+    const prevStepsText = statusSteps ? statusSteps.textContent : '';
+    // visibletask-coverage:start
+    // A hidden tab's event runs through the same renderers, so it also
+    // moves the visible tab's remembered numbers unless they are put
+    // back with the status row below.
+    const prevMetrics = currentTaskMetrics;
+    const prevVisibleTab = activeTabId;
+    currentTaskMetrics = {tokens: '', budget: '', steps: ''};
+    // visibletask-coverage:end
+    if (statusTokens) statusTokens.textContent = tab.statusTokensText || '';
+    if (statusBudget) statusBudget.textContent = tab.statusBudgetText || '';
+    if (statusSteps) statusSteps.textContent = tab.statusStepsText || '';
 
-    if (t === 'usage_info') {
-      if (ev.total_tokens != null && ev.cost != null) {
-        tab.statusTokensText = 'Tokens: ' + fmtN(ev.total_tokens);
-        if (ev.cost !== 'N/A') tab.statusBudgetText = 'Cost: ' + ev.cost;
-        if (ev.total_steps != null)
-          tab.statusStepsText = 'Steps: ' + ev.total_steps;
-      }
-    } else {
-      let target = tab.outputFragment;
-      let tState = bgState;
-      if (
-        bgLlmPanel &&
-        (t === 'thinking_start' ||
-          t === 'thinking_delta' ||
-          t === 'thinking_end' ||
-          t === 'text_delta' ||
-          t === 'text_end')
-      ) {
-        target = bgLlmPanel;
-        tState = bgLlmPanelState;
-      }
+    handleOutputEvent(
+      ev,
+      target,
+      where.state,
+      tab.workDir || configWorkDir || '',
+      tab.id,
+    );
 
-      const prevStepCount = stepCount;
-      const prevTokensText = statusTokens ? statusTokens.textContent : '';
-      const prevBudgetText = statusBudget ? statusBudget.textContent : '';
-      const prevStepsText = statusSteps ? statusSteps.textContent : '';
-      // visibletask-coverage:start
-      // A hidden tab's event runs through the same renderers, so it also
-      // moves the visible tab's remembered numbers unless they are put
-      // back with the status row below.
-      const prevMetrics = currentTaskMetrics;
-      const prevVisibleTab = activeTabId;
-      currentTaskMetrics = {tokens: '', budget: '', steps: ''};
-      // visibletask-coverage:end
+    if (statusTokens) tab.statusTokensText = statusTokens.textContent;
+    if (statusBudget) tab.statusBudgetText = statusBudget.textContent;
+    if (statusSteps) tab.statusStepsText = statusSteps.textContent;
 
-      handleOutputEvent(
-        ev,
-        target,
-        tState,
-        tab.workDir || configWorkDir || '',
-        tab.id,
-      );
+    stepCount = prevStepCount;
+    if (statusTokens) statusTokens.textContent = prevTokensText;
+    if (statusBudget) statusBudget.textContent = prevBudgetText;
+    if (statusSteps) statusSteps.textContent = prevStepsText;
+    // visibletask-coverage:start
+    // Collapsing a finished run_parallel panel closes its sub-agent
+    // tabs, so this event may have swapped the tab on screen; the
+    // borrowed numbers only go back to the tab they came from.
+    if (activeTabId === prevVisibleTab) currentTaskMetrics = prevMetrics;
+    // visibletask-coverage:end
 
-      stepCount = prevStepCount;
-      if (statusTokens) statusTokens.textContent = prevTokensText;
-      if (statusBudget) statusBudget.textContent = prevBudgetText;
-      if (statusSteps) statusSteps.textContent = prevStepsText;
-      // visibletask-coverage:start
-      // Collapsing a finished run_parallel panel closes its sub-agent
-      // tabs, so this event may have swapped the tab on screen; the
-      // borrowed numbers only go back to the tab they came from.
-      if (activeTabId === prevVisibleTab) currentTaskMetrics = prevMetrics;
-      // visibletask-coverage:end
-
-      if (t === 'tool_result' && bgLastToolName !== 'finish' && !bgLlmPanel) {
-        bgLlmPanel = mkThoughtsPanel(ev.ts);
-        bgLlmPanel._provisional = true;
-        tab.outputFragment.appendChild(bgLlmPanel);
-        bgLlmPanelState = mkS();
-        bgPendingPanel = false;
-      }
-
-      if (t === 'result') {
-        if (bgLlmPanel) finalizePanelTime(bgLlmPanel);
-        bgLlmPanel = null;
-        if (ev.step_count) {
-          bgStepCount = ev.step_count;
-          tab.statusStepsText = 'Steps: ' + ev.step_count;
-        }
-        if (ev.total_tokens)
-          tab.statusTokensText = 'Tokens: ' + fmtN(ev.total_tokens);
-        if (ev.cost && ev.cost !== 'N/A')
-          tab.statusBudgetText = 'Cost: ' + ev.cost;
-        collapseAllExceptResult(tab.outputFragment, tab.id);
-        if (ev.success === false && !ev.is_continue) tab.lastTaskFailed = true;
-        bgPendingPanel = true;
-      }
+    streamEnd(ctx, ev, target);
+    if (ev.type === 'result' && ev.step_count) {
+      tab.statusStepsText = 'Steps: ' + ev.step_count;
     }
 
-    tab.streamState = bgState;
-    tab.streamLlmPanel = bgLlmPanel;
-    tab.streamLlmPanelState = bgLlmPanelState;
-    tab.streamLastToolName = bgLastToolName;
-    tab.streamPendingPanel = bgPendingPanel;
-    tab.streamStepCount = bgStepCount;
+    tab.streamState = ctx.state;
+    tab.streamLlmPanel = ctx.llmPanel;
+    tab.streamLlmPanelState = ctx.llmPanelState;
+    tab.streamLastToolName = ctx.lastToolName;
+    tab.streamPendingPanel = ctx.pendingPanel;
+    tab.streamStepCount = ctx.stepCount;
     tab.welcomeVisible = false;
   }
 
@@ -4688,6 +5092,51 @@
     updateVisibleTask();
   }
 
+  // taskwheel-coverage:end
+  /**
+   * Scroll the transcript so the task with `taskId` sits at the top of
+   * the viewport.  `scrollTaskRegionToTop` pins the region and re-derives
+   * the static task panel, so the clicked task is what the panel names.
+   *
+   * Returns true when the task is shown by this tab — a region in the
+   * transcript, either the tab's own task (`currentTaskId`) or a
+   * spliced-in neighbour (`.adjacent-task[data-task-id]`), or the tab's
+   * own task with no rendered region (nothing was output yet).  Returns
+   * false when the task's events are not loaded, so the caller can
+   * fetch them instead.
+   */
+  function scrollChatToTask(taskId) {
+    if (taskId === undefined || taskId === null || taskId === '') return false;
+    const idStr = String(taskId);
+    const ownIdStr =
+      currentTaskId === undefined || currentTaskId === null
+        ? ''
+        : String(currentTaskId);
+    const regions = getTaskRegions();
+    for (let i = 0; i < regions.length; i++) {
+      const region = regions[i];
+      const neighbour = regionNeighbour(region);
+      const regionId = neighbour ? neighbour.dataset.taskId || '' : ownIdStr;
+      if (regionId === idStr) {
+        scrollTaskRegionToTop(region);
+        return true;
+      }
+    }
+    // The tab's own task may have no rendered region at all (nothing
+    // was output yet), so there is nothing to scroll to and nothing to
+    // fetch.  The panel and the status row may still be lent to a
+    // spliced-in neighbour the reader scrolled into; reclaim them so
+    // the clicked task is what the panel names.
+    if (ownIdStr === '' || idStr !== ownIdStr) return false;
+    if (O.querySelector('.adjacent-task[data-task]')) {
+      taskWheelLastTarget = null;
+      setTaskText(currentTaskName);
+      showLiveMetrics();
+    }
+    return true;
+  }
+  // taskwheel-coverage:start
+
   function stepTaskFromPanel(dir) {
     const tab = getTab(activeTabId);
     if (tab && tab.isSubagentTab) return;
@@ -4784,7 +5233,7 @@
       text.match(/Context:\s*([\d,]+)\/[\d,]+/) ||
       text.match(/Tokens:\s*([\d,]+)\/[\d,]+/);
     const bm = text.match(/Budget:\s*(\$[0-9.]+)\/\$[0-9.]+/);
-    const sm = text.match(/Steps:\s*(\d+)\/\d+/);
+    const sm = STEPS_TEXT_RE.exec(text);
     if (tm) statusTokens.textContent = 'Tokens: ' + tm[1];
     if (bm) statusBudget.textContent = 'Cost: ' + bm[1];
     if (sm) updateStepCount(parseInt(sm[1], 10));
@@ -5080,16 +5529,34 @@
   };
   // tableak-coverage:end
 
+  // Raised while the daemon is unreachable so the reconnect can
+  // re-announce `ready` (tab-registry sync + transcript replay).
+  let daemonWasDown = false;
+
   function handleEvent(ev) {
     const t = ev.type;
     switch (t) {
       case 'daemonStatus':
         setServerLoading(!ev.connected);
+        if (!ev.connected) {
+          forgetInFlightPathChecks();
+          daemonWasDown = true;
+        }
         if (ev.connected) {
           // The backend is live, so this window's `ready` is on its way and
           // the running-task news it triggers is about to arrive: the launch
           // starts here (see beginLaunch).
           beginLaunch();
+          // A daemon that went away and came back is a fresh daemon as
+          // far as this client is concerned (it may have restarted):
+          // re-announce `ready` so it re-syncs the shared tab registry
+          // and replays the transcripts this window shows. The remote
+          // web app reloads the whole page on reconnect instead, so
+          // only the VS Code webview takes this path in practice.
+          if (daemonWasDown) {
+            daemonWasDown = false;
+            sendReady();
+          }
           // modelpick-coverage:start
           // While the daemon was away this window may have missed both a
           // task ending and its picker hand-back, so no agent override
@@ -5098,6 +5565,9 @@
           // to any tab that re-joins its task.
           tabs.forEach(t => clearAgentModel(t.id));
           // modelpick-coverage:end
+          // The checks the outage swallowed have to be asked again, or
+          // the file links they were for stay grey for ever.
+          reissueFileLinkChecks();
           refreshHistory();
         }
         return;
@@ -5105,7 +5575,18 @@
         // tableak-coverage:start
         // An untagged toast is window-level (install progress, updates);
         // a tagged one belongs to a task and must stay with its tab.
-        if (ev.tabId !== undefined && !isForActiveTab(ev)) break;
+        // The chat tab this window currently REPRESENTS also counts:
+        // when a content tab is on screen, actions taken on its
+        // behalf (the settings panel's Git Commit targets
+        // reportedChatTabId then) must still toast here — the toast
+        // container is window-level, not transcript-bound, so nothing
+        // can leak into another conversation's transcript.
+        if (
+          ev.tabId !== undefined &&
+          ev.tabId !== reportedChatTabId &&
+          !isForActiveTab(ev)
+        )
+          break;
         // tableak-coverage:end
         updateNotification(ev);
         break;
@@ -5155,9 +5636,6 @@
               inputContainer.style.display = 'none';
           }
           if (ev.running) applyChevronState(currentTaskName);
-        }
-        if (!ev.running && evTab && evTab.backendChatId) {
-          launchRunningStartTs.delete(evTab.backendChatId);
         }
         renderTabBar();
         refreshHistory();
@@ -5233,7 +5711,15 @@
         const askTabId = ev.tabId !== undefined ? ev.tabId : activeTabId;
         const askTab = getTab(askTabId);
         if (!askTab) break;
-        askTab.askPendingQuestion = ev.question || '';
+        const askQuestion = ev.question || '';
+        // Duplicate delivery of the SAME pending question (the server
+        // re-emits it on every session replay so clients that connect
+        // mid-question also show the modal). Re-initializing would
+        // wipe the answer the user is typing here just because
+        // another client reloaded; a genuinely new question always
+        // follows an askUserDone, which resets the state to null.
+        if (askTab.askPendingQuestion === askQuestion) break;
+        askTab.askPendingQuestion = askQuestion;
         showAskForTab(askTab);
         renderTabBar();
         break;
@@ -5328,6 +5814,7 @@
           showSpinner();
         } else if (clearTab) {
           collapseNestedRunParallel(clearTab.outputFragment);
+          forgetPendingFileLinks(clearTab.id);
           clearTab.outputFragment = null;
           clearTab.streamState = null;
           clearTab.streamLlmPanel = null;
@@ -5366,6 +5853,7 @@
             showWelcomeScreen();
           } else {
             collapseNestedRunParallel(swTab.outputFragment);
+            forgetPendingFileLinks(swTabId);
             swTab.outputFragment = null;
             swTab.welcomeVisible = true;
           }
@@ -5485,8 +5973,9 @@
           const teVisibleTab = activeTabId;
           currentTaskMetrics = {tokens: '', budget: '', steps: ''};
           // visibletask-coverage:end
+          let bgSteps = 0;
           try {
-            replayEventsInto(frag, ev.events || [], {
+            bgSteps = replayEventsInto(frag, ev.events || [], {
               ownerTabId: teTabId,
               onFollowupClick: function (text) {
                 inp.value = text;
@@ -5514,7 +6003,6 @@
             // visibletask-coverage:end
           }
           teTab.welcomeVisible = false;
-          const bgSteps = countReplayedSteps(ev.events || []);
           if (bgSteps > 0) teTab.statusStepsText = 'Steps: ' + bgSteps;
           break;
         }
@@ -5600,32 +6088,11 @@
         }
         break;
       }
-      case 'openRunningTasks': {
-        const runningTasks = Array.isArray(ev.tasks) ? ev.tasks : [];
-        runningTasks.forEach(rt => {
-          if (!rt || !rt.chatId) return;
-          const rtChatId = String(rt.chatId);
-          launchRunningStartTs.set(rtChatId, Number(rt.startTs) || 0);
-          if (getTabByBackendChatId(rtChatId)) return;
-          // Every running task gets a tab of its own, opened in the
-          // background. Which of them the user lands on is decided once, by
-          // switchToLatestRunningTab, after the whole snapshot is in.
-          const rtTab = createBackgroundChatTab('new chat');
-          rtTab.backendChatId = rtChatId;
-          setTabTitle(rtTab, String(rt.title || ''));
-          api.resumeSession({
-            id: rtChatId,
-            taskId: rt.taskId || '',
-            tabId: rtTab.id,
-          });
-        });
-        persistTabState();
-        if (runningTasks.length > 0) {
-          syncMobileInputDrawer();
-          switchToLatestRunningTab();
-        }
+      case 'tabs_state':
+        // A snapshot without a well-formed tab list is junk, not an
+        // empty registry: ignore it rather than close every tab.
+        if (Array.isArray(ev.tabs)) reconcileTabs(ev.tabs);
         break;
-      }
 
       case 'triggerStop':
         markStopping(activeTabId, true);
@@ -5685,76 +6152,6 @@
         break;
       }
 
-      case 'merge_data': {
-        const mdEl = renderMergeData(ev);
-        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
-          const bgMdTab = getTab(ev.tabId);
-          if (bgMdTab && bgMdTab.outputFragment) {
-            bgMdTab.outputFragment.appendChild(mdEl);
-          }
-          break;
-        }
-        O.appendChild(mdEl);
-        setCurrentMergeHunk(mdEl, 0, 0);
-        scrollHunkIntoView(mdEl, 0, 0);
-        collapseOlderPanels();
-        break;
-      }
-      case 'merge_started':
-        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
-          const bgMergeTab = getTab(ev.tabId);
-          if (bgMergeTab) bgMergeTab.isMerging = true;
-          break;
-        }
-        isMerging = true;
-        showMergeToolbar((ev && ev.tabId) || activeTabId);
-        updateInputDisabled();
-        break;
-      case 'merge_ended':
-        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
-          const mrt2 = getTab(ev.tabId);
-          if (mrt2) {
-            mrt2.isMerging = false;
-            mrt2.mergeToolbarEl = null;
-          }
-          break;
-        }
-        isMerging = false;
-        hideMergeToolbar();
-        updateInputDisabled();
-        break;
-      case 'merge_nav': {
-        const navTabId = ev.tabId || activeTabId;
-        const navHost =
-          navTabId === activeTabId
-            ? O
-            : (getTab(navTabId) || {}).outputFragment;
-        if (!navHost) break;
-        if (navTabId === activeTabId) {
-          const mergeTitle = document.querySelector('.merge-toolbar-title');
-          if (mergeTitle && ev.remaining !== undefined) {
-            mergeTitle.textContent =
-              'Review Changes (' +
-              ev.remaining +
-              '/' +
-              ev.total +
-              ' remaining)';
-          }
-        }
-        const mergePanels = navHost.querySelectorAll('.merge-info');
-        const mergePanel = mergePanels[mergePanels.length - 1];
-        if (!mergePanel) break;
-        applyMergeResolutions(mergePanel, ev.resolved || []);
-        if (ev.cur && ev.cur.fi !== undefined && ev.cur.hi !== undefined) {
-          setCurrentMergeHunk(mergePanel, ev.cur.fi, ev.cur.hi);
-          scrollHunkIntoView(mergePanel, ev.cur.fi, ev.cur.hi);
-        } else {
-          mergePanel.querySelectorAll('.merge-hunk.current').forEach(el => {
-            el.classList.remove('current');
-          });
-        }
-        break;
-      }
       case 'commitMessage':
         break;
       case 'droppedPaths':
@@ -5796,6 +6193,7 @@
           const bgWrTab = getTab(ev.tabId);
           if (bgWrTab) {
             bgWrTab.worktreeBarEl = null;
+            clearActionProgress(bgWrTab.outputFragment);
             if (bgWrTab.outputFragment && !isSilentDiscardMessage(ev)) {
               const cls = ev.success ? 'wt-result-ok' : 'wt-result-err';
               const div = mkEl('div', 'ev ' + cls);
@@ -5807,22 +6205,18 @@
         }
         handleWorktreeResult(ev);
         break;
-      case 'autocommit_prompt':
-        if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
-          const bgAcTab = getTab(ev.tabId);
-          if (bgAcTab) {
-            bgAcTab.autocommitBarEl = createAutocommitBar(ev);
-          }
-          break;
-        }
-        showAutocommitActions(ev);
-        break;
       case 'autocommit_done':
+        // Terminal for any manual Git Commit in flight (the daemon
+        // broadcasts one per request, including refusals), so the
+        // settings button re-arms no matter which tab was targeted.
+        setAutocommitInFlight(false);
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgAdTab = getTab(ev.tabId);
           if (bgAdTab) {
-            bgAdTab.autocommitBarEl = null;
-            if (bgAdTab.outputFragment) {
+            clearActionProgress(bgAdTab.outputFragment);
+            // A successful manual Git Commit is reported by a toast
+            // notification instead; only failures earn transcript text.
+            if (bgAdTab.outputFragment && !(ev && ev.manual && ev.success)) {
               const cls = ev && ev.success ? 'wt-result-ok' : 'wt-result-err';
               const div = mkEl('div', 'ev ' + cls);
               div.textContent = (ev && ev.message) || '';
@@ -5846,6 +6240,7 @@
         const el = Math.max(0, Math.floor(ms / 1000));
         const em = Math.floor(el / 60);
         markTabDone(ev.tabId, ev.success === false);
+        clearActionProgressForTab(ev.tabId);
         setReady(
           'Done (' + (em > 0 ? em + 'm ' : '') + (el % 60) + 's)',
           ev.tabId,
@@ -5862,6 +6257,7 @@
       case 'task_interrupted':
       case 'task_stopped': {
         markTabDone(ev.tabId, true);
+        clearActionProgressForTab(ev.tabId);
         if (ev.tabId === undefined || ev.tabId === activeTabId) {
           if (llmPanel && llmPanel._provisional)
             discardProvisionalPanel(llmPanel);
@@ -6035,6 +6431,35 @@
         persistTabState();
         break;
       }
+      case 'closeSubagentTab': {
+        // Another client closed this sub-agent tab; mirror the close.
+        // Applied without echoing `closeTab` back to the daemon (the
+        // origin client already sent it) — see closeTab(fromServer).
+        if (getTab(ev.tab_id)) closeTab(ev.tab_id, true, true);
+        break;
+      }
+      case 'openTabRejected': {
+        // The daemon refused to register this tab (registry cap): it
+        // will never appear in a snapshot, so drop the local copy —
+        // unless it is the only tab, which stays as the same local,
+        // unregistered placeholder an empty registry gets. No
+        // re-registration happens either way, so a full registry
+        // cannot start an openTab/reject loop.
+        pendingOpenTabs.delete(ev.tabId);
+        const rejTab = getTab(ev.tabId);
+        if (rejTab && !rejTab.isSubagentTab && !rejTab.isContentTab) {
+          const chatTabs = tabs.filter(t => !t.isContentTab);
+          if (chatTabs.length > 1) closeTab(ev.tabId, true, true);
+        }
+        if (ev.text) {
+          showNotification({
+            id: 'open-tab-rejected',
+            severity: 'warning',
+            message: ev.text,
+          });
+        }
+        break;
+      }
       case 'subagentDone': {
         const doneTab = getTab(ev.tab_id);
         if (doneTab) {
@@ -6121,15 +6546,10 @@
   }
 
   function updateInputDisabled() {
-    const blocked = isMerging;
-    inp.disabled = blocked;
+    inp.disabled = false;
     // A photo still being converted must not be raced by a send: block the
     // button until every attachment slot holds real bytes.
-    sendBtn.disabled = blocked || hasPendingAttachments();
-    if (blocked) {
-      clearGhost();
-      hideAC();
-    }
+    sendBtn.disabled = hasPendingAttachments();
   }
 
   /**
@@ -6447,35 +6867,32 @@
    * @param {Element|DocumentFragment} container Where to render.
    * @param {Array<object>} events The transcript to replay.
    * @param {object} [opts] ownerTabId / onFollowupClick.
+   * @returns {number} The number of steps the transcript records.
    */
   function replayEventsInto(container, events, opts) {
     if (_rpDeferredCloses !== null) {
-      renderReplayedEvents(container, events, opts);
-      return;
+      return renderReplayedEvents(container, events, opts);
     }
     _rpDeferredCloses = [];
+    let steps;
     try {
-      renderReplayedEvents(container, events, opts);
+      steps = renderReplayedEvents(container, events, opts);
     } catch (e) {
       _rpDeferredCloses = null;
       throw e;
     }
     rpFlushDeferredCloses();
+    return steps;
   }
 
   function renderReplayedEvents(container, events, opts) {
+    const ownerTabId = opts ? opts.ownerTabId : undefined;
     const rWorkDir =
-      opts && opts.ownerTabId !== undefined
-        ? workDirForTab(opts.ownerTabId) || ''
-        : undefined;
-    const rState = mkS();
+      ownerTabId !== undefined ? workDirForTab(ownerTabId) || '' : undefined;
+    const ctx = mkStreamCtx(container, ownerTabId);
     // report-coverage:start
-    rState.suppressReportOpen = true;
+    ctx.state.suppressReportOpen = true;
     // report-coverage:end
-    let rLlmPanel = null;
-    let rLlmPanelState = mkS();
-    let rLastToolName = '';
-    let rPendingPanel = true;
     const prevDefer = _deferHighlight;
     _deferHighlight = true;
     try {
@@ -6505,83 +6922,30 @@
           container.appendChild(fu);
           return;
         }
-        if (t === 'tool_call') {
-          rLastToolName = ev.name || '';
-          rLlmPanel = null;
-          rLlmPanelState = mkS();
-          rPendingPanel = true;
-        }
-        if (t === 'tool_result' && rLastToolName !== 'finish') {
-          rPendingPanel = true;
-        }
-        if (rPendingPanel && (t === 'thinking_start' || t === 'text_delta')) {
-          rLlmPanel = mkThoughtsPanel(ev.ts);
-          container.appendChild(rLlmPanel);
-          rLlmPanelState = mkS();
-          rPendingPanel = false;
-        }
-        let target = container,
-          tState = rState;
-        if (
-          rLlmPanel &&
-          (t === 'thinking_start' ||
-            t === 'thinking_delta' ||
-            t === 'thinking_end' ||
-            t === 'text_delta' ||
-            t === 'text_end')
-        ) {
-          target = rLlmPanel;
-          tState = rLlmPanelState;
-        }
-        handleOutputEvent(
-          ev,
-          target,
-          tState,
-          rWorkDir,
-          opts ? opts.ownerTabId : undefined,
-        );
+        const where = streamBegin(ctx, ev);
+        handleOutputEvent(ev, where.target, where.state, rWorkDir, ownerTabId);
+        streamEnd(ctx, ev, where.target);
       });
     } finally {
       _deferHighlight = prevDefer;
     }
-    collapseAllExceptResult(container, opts && opts.ownerTabId);
+    collapseAllExceptResult(container, ownerTabId);
     if (typeof hljs !== 'undefined') {
       container.querySelectorAll('code.needs-hl').forEach(bl => {
         if (!bl.closest('.collapsible.collapsed')) {
           bl.classList.remove('needs-hl');
-          hljs.highlightElement(bl);
+          highlightBlockPreservingLinks(bl);
         }
       });
     }
-  }
-
-  function countReplayedSteps(events) {
-    let steps = 0,
-      pending = false,
-      lastTool = '';
-    (events || []).forEach(ev => {
-      const t = ev.type;
-      if (t === 'tool_call') {
-        lastTool = ev.name || '';
-        pending = true;
-      }
-      if (t === 'tool_result' && lastTool !== 'finish') pending = true;
-      if (steps === 0 && (t === 'thinking_start' || t === 'text_delta'))
-        steps = 1;
-      if (pending && (t === 'thinking_start' || t === 'text_delta')) {
-        steps++;
-        pending = false;
-      }
-      if (t === 'result' && ev.step_count) steps = ev.step_count;
-    });
-    return steps;
+    return ctx.stepCount;
   }
 
   function replayTaskEvents(events) {
     clearOutput();
     resetOutputState();
     clearUsageMetrics();
-    replayEventsInto(O, events, {
+    const rSteps = replayEventsInto(O, events, {
       ownerTabId: activeTabId,
       onFollowupClick: function (text) {
         inp.value = text;
@@ -6589,7 +6953,6 @@
         inp.focus();
       },
     });
-    const rSteps = countReplayedSteps(events);
     if (rSteps > 0) updateStepCount(rSteps);
     // autoscroll-coverage:start
     // clearOutput() above released any user scroll lock: the replayed
@@ -6650,6 +7013,70 @@
     // autoscroll-coverage:end
   }
 
+  /**
+   * Show the daemon's live progress line for a commit or merge flow.
+   *
+   * `autocommit_progress` and `worktree_progress` are the steps of ONE
+   * operation ("Staging changes…" → "Generating commit message…" →
+   * "Committing…"), so they share a single line that is replaced in
+   * place and removed again by the terminal event. Rendering them here
+   * is what gives the remote web client the feedback the VS Code host
+   * gets from its native progress toast.
+   *
+   * @param {Element|DocumentFragment} target Transcript to render into.
+   * @param {string} message The user-facing progress text.
+   */
+  function renderActionProgress(target, message) {
+    if (!target) return;
+    let el = target.querySelector('.ev.wt-progress');
+    if (!el) {
+      el = mkEl('div', 'ev wt-progress');
+      target.appendChild(el);
+    }
+    el.textContent = message || '';
+  }
+
+  /**
+   * Remove the live progress line, if any, from *target*.
+   *
+   * @param {Element|DocumentFragment} target Transcript to clean up.
+   */
+  function clearActionProgress(target) {
+    const el = target ? target.querySelector('.ev.wt-progress') : null;
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+  }
+
+  /**
+   * Drop the live progress line owned by *tabId*, wherever it lives.
+   *
+   * `autocommit_done` and `worktree_result` are the intended way for
+   * the line to go, but neither is guaranteed: the daemon runs both
+   * flows on its post-task path inside a swallow-all handler
+   * (`task_runner._run_task_inner`), and the progress events are
+   * broadcast from inside the call it wraps. Anything raised after the
+   * first message -- a git binary that dies, an LLM call that throws
+   * while writing the commit message, a stopped task unwinding through
+   * the merge -- is logged and dropped, and the terminal event is never
+   * sent. The line then reads as if the operation were still running,
+   * forever.
+   *
+   * The task-end event that follows immediately is the last thing the
+   * flow is bracketed by, so it is where the line is taken down. In the
+   * normal case the terminal event has already removed it and this is a
+   * no-op.
+   *
+   * @param {string|undefined} tabId Tab whose task ended. `undefined`
+   *   means the visible tab, as everywhere else in the dispatcher.
+   */
+  function clearActionProgressForTab(tabId) {
+    if (tabId === undefined || tabId === activeTabId) {
+      clearActionProgress(O);
+      return;
+    }
+    const tab = getTab(tabId);
+    if (tab) clearActionProgress(tab.outputFragment);
+  }
+
   let worktreeBar = null;
 
   function clearWorktreeBar() {
@@ -6694,257 +7121,88 @@
 
   function handleWorktreeResult(ev) {
     clearWorktreeBar();
+    clearActionProgress(O);
     if (isSilentDiscardMessage(ev)) {
       return;
     }
     appendActionResult(ev);
   }
 
-  let autocommitBar = null;
-
-  function clearAutocommitBar() {
-    detachActionBar(autocommitBar);
-    autocommitBar = null;
-  }
-
-  function createAutocommitBar(ev) {
-    const ownerTabId = (ev && ev.tabId) || activeTabId;
-    const n = (ev && ev.changedFiles && ev.changedFiles.length) || 0;
-    const labelText =
-      n === 1
-        ? '1 uncommitted change on main. Auto commit?'
-        : n + ' uncommitted changes on main. Auto commit?';
-    const msgFor = action => () => ({
-      type: 'autocommitAction',
-      action: action,
-      tabId: ownerTabId,
-      workDir: workDirForTab(ownerTabId),
-    });
-    return createActionBar(labelText, [
-      {cls: 'wt-merge', text: 'Auto commit', msg: msgFor('commit')},
-      {cls: 'wt-discard', text: 'Do nothing', msg: msgFor('skip')},
-    ]);
-  }
-
-  function showAutocommitActions(ev) {
-    clearAutocommitBar();
-    autocommitBar = createAutocommitBar(ev);
-    attachActionBar(autocommitBar);
-  }
-
   function handleAutocommitResult(ev) {
-    clearAutocommitBar();
-    appendActionResult(ev);
+    clearActionProgress(O);
+    // A successful manual Git Commit is reported by a toast
+    // notification instead; only failures earn transcript text.
+    if (!(ev && ev.manual && ev.success)) appendActionResult(ev);
     focusInputWithRetry();
   }
 
-  function renderMergeData(ev) {
-    const mdEl = mkEl('div', 'ev merge-info');
-    const hdr = mkEl('div', 'merge-info-hdr');
-    hdr.textContent = '✱ Reviewing ' + (ev.hunk_count || 0) + ' change(s)';
-    mdEl.appendChild(hdr);
+  // The settings panel's Git Commit button is disabled while its
+  // manual autocommit is in flight (the daemon silently drops
+  // duplicate requests, so a still-enabled button would look dead).
+  // The timer is a failsafe: if the daemon dies mid-commit and the
+  // terminal autocommit_done never arrives, the button re-arms on its
+  // own instead of staying wedged forever.
+  let autocommitRearmTimer = null;
 
-    const body = mkEl('div', 'merge-info-body');
-    body.textContent =
-      'Red = old lines, Green = new lines. Use the merge toolbar to ' +
-      'navigate and accept or reject changes.';
-    mdEl.appendChild(body);
-
-    const mergeFiles = (ev.data && ev.data.files) || [];
-    for (let mfi = 0; mfi < mergeFiles.length; mfi++) {
-      const mf = mergeFiles[mfi];
-      if (mf.base_text === undefined || mf.current_text === undefined) continue;
-      const fileEl = mkEl('div', 'merge-file-diff');
-      fileEl.dataset.fi = String(mfi);
-      const fileName = mkEl('div', 'merge-file-name');
-      fileName.textContent = mf.name || 'unknown';
-      fileEl.appendChild(fileName);
-
-      const baseLines = (mf.base_text || '').split('\n');
-      const curLines = (mf.current_text || '').split('\n');
-      const hunks = mf.hunks || [];
-      let curIdx = 0;
-      for (let mhi = 0; mhi < hunks.length; mhi++) {
-        const h = hunks[mhi];
-        if (curIdx < h.cs) {
-          const ctxBefore = mkEl('pre', 'merge-ctx');
-          let ctxText = '';
-          while (curIdx < h.cs) {
-            ctxText += ' ' + (curLines[curIdx] || '') + '\n';
-            curIdx++;
-          }
-          ctxBefore.textContent = ctxText;
-          fileEl.appendChild(ctxBefore);
-        }
-        const hunkEl = mkEl('pre', 'merge-hunk');
-        hunkEl.dataset.fi = String(mfi);
-        hunkEl.dataset.hi = String(mhi);
-        const hunkHdr = mkEl('span', 'merge-hunk-label');
-        hunkHdr.textContent =
-          'Hunk ' + (mhi + 1) + ' / ' + hunks.length + ' @ line ' + (h.cs + 1);
-        hunkEl.appendChild(hunkHdr);
-        for (let bi = h.bs; bi < h.bs + h.bc; bi++) {
-          const oldLine = mkEl('span', 'diff-del');
-          oldLine.textContent = '-' + (baseLines[bi] || '') + '\n';
-          hunkEl.appendChild(oldLine);
-        }
-        for (let ci = h.cs; ci < h.cs + h.cc; ci++) {
-          const newLine = mkEl('span', 'diff-add');
-          newLine.textContent = '+' + (curLines[ci] || '') + '\n';
-          hunkEl.appendChild(newLine);
-        }
-        fileEl.appendChild(hunkEl);
-        curIdx = h.cs + h.cc;
-      }
-      if (curIdx < curLines.length) {
-        const ctxAfter = mkEl('pre', 'merge-ctx');
-        let ctxText = '';
-        while (curIdx < curLines.length) {
-          ctxText += ' ' + (curLines[curIdx] || '') + '\n';
-          curIdx++;
-        }
-        ctxAfter.textContent = ctxText;
-        fileEl.appendChild(ctxAfter);
-      }
-      mdEl.appendChild(fileEl);
+  function setAutocommitInFlight(pending) {
+    if (autocommitRearmTimer) {
+      clearTimeout(autocommitRearmTimer);
+      autocommitRearmTimer = null;
     }
-    addCollapse(mdEl, hdr);
-    return mdEl;
-  }
-
-  function setCurrentMergeHunk(mergePanel, fi, hi) {
-    mergePanel.querySelectorAll('.merge-hunk.current').forEach(el => {
-      el.classList.remove('current');
-    });
-    const hunk = mergePanel.querySelector(
-      '.merge-hunk[data-fi="' + fi + '"][data-hi="' + hi + '"]',
-    );
-    if (hunk) hunk.classList.add('current');
-  }
-
-  function scrollHunkIntoView(mergePanel, fi, hi) {
-    const hunk = mergePanel.querySelector(
-      '.merge-hunk[data-fi="' + fi + '"][data-hi="' + hi + '"]',
-    );
-    if (!hunk) return;
-    let container = hunk.parentElement;
-    while (container && container !== document.body) {
-      const style = window.getComputedStyle(container);
-      const oy = style.overflowY;
-      if (
-        (oy === 'auto' || oy === 'scroll') &&
-        container.scrollHeight > container.clientHeight
-      ) {
-        break;
-      }
-      container = container.parentElement;
-    }
-    if (!container || container === document.body) {
-      if (typeof hunk.scrollIntoView === 'function') {
-        hunk.scrollIntoView({block: 'center', behavior: 'smooth'});
-      }
-      return;
-    }
-    const containerRect = container.getBoundingClientRect();
-    const hunkRect = hunk.getBoundingClientRect();
-    const target =
-      container.scrollTop +
-      (hunkRect.top - containerRect.top) -
-      Math.max(0, (container.clientHeight - hunkRect.height) / 2);
-    const top = Math.max(
-      0,
-      Math.min(target, container.scrollHeight - container.clientHeight),
-    );
-    if (typeof container.scrollTo === 'function') {
-      container.scrollTo({top: top, behavior: 'smooth'});
-    } else {
-      container.scrollTop = top;
+    if (autocommitBtn) autocommitBtn.disabled = pending;
+    if (pending) {
+      autocommitRearmTimer = setTimeout(() => {
+        setAutocommitInFlight(false);
+      }, 120000);
     }
   }
 
-  function applyMergeResolutions(mergePanel, resolutions) {
-    mergePanel
-      .querySelectorAll('.merge-hunk.accepted, .merge-hunk.rejected')
-      .forEach(el => {
-        el.classList.remove('accepted');
-        el.classList.remove('rejected');
+  // Content tabs (opened HTML files, subagent viewers…) have no
+  // transcript of their own — a result addressed to one would render
+  // into the hidden shared output and be destroyed on the next tab
+  // switch.  Commit on behalf of the chat tab the host currently
+  // considers active instead.
+  function autocommitTargetTabId() {
+    const active = getTab(activeTabId);
+    if (active && !active.isContentTab) return activeTabId;
+    return reportedChatTabId || activeTabId;
+  }
+
+  // The `ready` announcement: hands the daemon this client's legacy
+  // locally-persisted tabs exactly once (adopted only into an empty
+  // registry) — or, on a re-`ready` after a daemon restart, the tabs
+  // currently on screen, so a daemon whose registry file was wiped
+  // re-adopts them. The daemon answers with the canonical `tabs_state`
+  // snapshot and replays every chat-bound tab.
+  function collectRestoredTabs() {
+    const current = tabs
+      .filter(t => {
+        return !t.isSubagentTab && !t.isContentTab && t.backendChatId;
+      })
+      .map(t => {
+        return {
+          tabId: t.id,
+          chatId: t.backendChatId,
+          title: t.title || '',
+          workDir: t.workDir || '',
+        };
       });
-    for (let i = 0; i < resolutions.length; i++) {
-      const r = resolutions[i];
-      if (!r || r.fi === undefined || r.hi === undefined) continue;
-      const hunk = mergePanel.querySelector(
-        '.merge-hunk[data-fi="' + r.fi + '"][data-hi="' + r.hi + '"]',
-      );
-      if (hunk)
-        hunk.classList.add(r.status === 'rejected' ? 'rejected' : 'accepted');
-    }
+    return current.length > 0 ? current : legacyRestoredTabs;
   }
 
-  function showMergeToolbar(ownerTabId) {
-    if (document.getElementById('merge-toolbar')) return;
-    const capturedTabId = ownerTabId || activeTabId;
-    inputContainer.style.display = 'none';
-    const bar = mkEl('div', 'merge-toolbar-card');
-    bar.id = 'merge-toolbar';
-    bar.innerHTML =
-      '<div class="merge-toolbar-header">' +
-      '<span class="merge-toolbar-title">Review Changes</span>' +
-      '<span class="merge-toolbar-hint">Red = old \u00b7 Green = new</span>' +
-      '</div>' +
-      '<div class="merge-toolbar-actions">' +
-      '<div class="merge-toolbar-row">' +
-      '<button class="merge-btn merge-nav" id="merge-prev-btn">Prev</button>' +
-      '<button class="merge-btn merge-nav" id="merge-next-btn">Next</button>' +
-      '<button class="merge-btn merge-accept" id="merge-accept-btn">Accept</button>' +
-      '<button class="merge-btn merge-reject" id="merge-reject-btn">Reject</button>' +
-      '</div>' +
-      '<div class="merge-toolbar-row">' +
-      '<button class="merge-btn merge-accept" id="merge-accept-file-btn">Accept File</button>' +
-      '<button class="merge-btn merge-reject" id="merge-reject-file-btn">Reject File</button>' +
-      '<button class="merge-btn merge-accept" id="merge-accept-all-btn">Accept Rest</button>' +
-      '<button class="merge-btn merge-reject" id="merge-reject-all-btn">Reject Rest</button>' +
-      '</div>' +
-      '</div>';
-    document.getElementById('input-area').appendChild(bar);
-    const mergeActions = {
-      'merge-accept-btn': 'accept',
-      'merge-reject-btn': 'reject',
-      'merge-prev-btn': 'prev',
-      'merge-next-btn': 'next',
-      'merge-accept-file-btn': 'accept-file',
-      'merge-reject-file-btn': 'reject-file',
-      'merge-accept-all-btn': 'accept-all',
-      'merge-reject-all-btn': 'reject-all',
-    };
-    Object.keys(mergeActions).forEach(id => {
-      document.getElementById(id).addEventListener('click', () => {
-        api.mergeAction({action: mergeActions[id], tabId: capturedTabId});
-      });
-    });
-  }
-
-  function hideMergeToolbar() {
-    const bar = document.getElementById('merge-toolbar');
-    if (bar) bar.remove();
-    inputContainer.style.display = '';
+  function sendReady() {
+    // `ready` seeds the host's active chat tab exactly like an
+    // `activeTabChanged` would, so the local mirror has to start out
+    // agreeing with it — otherwise the first real change looks like a
+    // no-op and is never sent.
+    api.ready({tabId: activeTabId, restoredTabs: collectRestoredTabs()});
+    reportedChatTabId = activeTabId;
   }
 
   function init() {
     setupEventListeners();
     renderTabBar();
-    const restoredTabs = tabs
-      .filter(t => {
-        return t.backendChatId;
-      })
-      .map(t => {
-        return {tabId: t.id, chatId: t.backendChatId};
-      });
-    // `ready` seeds the host's active chat tab exactly like an
-    // `activeTabChanged` would, so the local mirror has to start out
-    // agreeing with it — otherwise the first real change looks like a
-    // no-op and is never sent.
-    api.ready({tabId: activeTabId, restoredTabs: restoredTabs});
-    reportedChatTabId = activeTabId;
+    sendReady();
     api.getConfig();
   }
 
@@ -7102,6 +7360,10 @@
     if (welcomePwInp && settingsPwInp) {
       welcomePwInp.addEventListener('input', () => {
         settingsPwInp.value = welcomePwInp.value;
+        // Assigning .value fires no input event, so the mirrored field
+        // has to be marked by hand or the very first password a user
+        // sets from the welcome screen is dropped.
+        markSettingsFieldEdited('cfg-remote-password');
       });
       settingsPwInp.addEventListener('input', () => {
         welcomePwInp.value = settingsPwInp.value;
@@ -7125,6 +7387,24 @@
           _flushPw();
           settingsPwInp.blur();
         }
+      });
+    }
+
+    if (autocommitBtn) {
+      autocommitBtn.addEventListener('click', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (autocommitBtn.disabled) return;
+        const commitTabId = autocommitTargetTabId();
+        setAutocommitInFlight(true);
+        // Close the drawer so the transcript's autocommit_progress /
+        // autocommit_done lines are visible instead of hidden behind
+        // the opaque settings sheet.
+        closeSettingsPanel();
+        api.autocommitAction({
+          tabId: commitTabId,
+          workDir: workDirForTab(commitTabId),
+        });
       });
     }
 
@@ -7195,18 +7475,6 @@
           e.stopPropagation();
           closeServerResetConfirm();
         }
-      });
-    }
-
-    if (autocommitBtn) {
-      autocommitBtn.addEventListener('click', e => {
-        e.preventDefault();
-        e.stopPropagation();
-        api.autocommitAction({
-          action: 'commit',
-          tabId: activeTabId,
-          workDir: workDirForTab(activeTabId),
-        });
       });
     }
 
@@ -7467,6 +7735,13 @@
     }
     if (settingsOverlay) {
       settingsOverlay.addEventListener('click', closeSettingsPanel);
+    }
+    if (settingsPanel) {
+      const noteSettingsEdit = e => {
+        if (e.target && e.target.id) markSettingsFieldEdited(e.target.id);
+      };
+      settingsPanel.addEventListener('input', noteSettingsEdit);
+      settingsPanel.addEventListener('change', noteSettingsEdit);
     }
     historySearch.addEventListener('input', () => {
       resetHistoryPagination();
@@ -8109,8 +8384,6 @@
     row.appendChild(m);
     tab.askQuestionEl = q;
     tab.askInputEl = i;
-    tab.askSubmitEl = s;
-    tab.askMicEl = m;
     tab.askActionsEl = row;
   }
 
@@ -8713,6 +8986,23 @@
         const existingChatTab = getTabByBackendChatId(s.id);
         if (existingChatTab) {
           switchToTab(existingChatTab.id);
+          // The tab may be parked on a different task of the same chat.
+          // Scroll the clicked task's region into view so the static
+          // task panel names it; when its events are not spliced into
+          // the transcript yet, replay the tab at that task instead.
+          if (
+            !existingChatTab.isContentTab &&
+            !scrollChatToTask(s.task_id) &&
+            s.task_id !== undefined &&
+            s.task_id !== null &&
+            s.task_id !== ''
+          ) {
+            api.resumeSession({
+              id: s.id,
+              taskId: s.task_id,
+              tabId: existingChatTab.id,
+            });
+          }
         } else if (s.id && (s.has_events || s.is_running)) {
           // A running task is resumable even before its first event is
           // persisted: the server reattaches the live chat on replay.
@@ -8770,7 +9060,11 @@
     const existing = document.getElementById('kiss-datepicker-pop');
     if (existing) {
       const sameInput = existing._kissInput === input;
-      existing.remove();
+      // Close through the picker's own teardown so the document-level
+      // mousedown/keydown/resize listeners it registered are removed too;
+      // a bare remove() would leave them behind on every toggle.
+      if (typeof existing._kissClose === 'function') existing._kissClose();
+      else existing.remove();
       if (sameInput) return;
     }
     const MONTHS = [
@@ -8879,12 +9173,16 @@
       closePicker();
     }
 
+    let pickerClosed = false;
+
     function closePicker() {
+      pickerClosed = true;
       document.removeEventListener('mousedown', onDocClick, true);
       document.removeEventListener('keydown', onKey, true);
       window.removeEventListener('resize', position);
       if (pop.parentNode) pop.parentNode.removeChild(pop);
     }
+    pop._kissClose = closePicker;
 
     function onDocClick(e) {
       if (pop.contains(e.target)) return;
@@ -8935,6 +9233,7 @@
     document.body.appendChild(pop);
     position();
     setTimeout(() => {
+      if (pickerClosed) return;
       document.addEventListener('mousedown', onDocClick, true);
       document.addEventListener('keydown', onKey, true);
       window.addEventListener('resize', position);
@@ -9042,17 +9341,27 @@
     }
   }
 
+  /**
+   * Flush the settings form if there is anything to flush.
+   *
+   * A form the reply never reached is not empty of intent: whatever the
+   * user typed into it must still be saved, so those fields alone are
+   * sent. A form nobody touched and nobody populated has nothing to say
+   * and stays silent.
+   */
   function saveSettingsIfPopulated() {
-    if (configFormPopulated) {
-      const data = collectConfigForm();
-      api.saveConfig({...data});
-      if (
-        document.body.classList.contains('remote-chat') &&
-        typeof data.config.work_dir === 'string' &&
-        data.config.work_dir
-      ) {
-        api.setWorkDir({workDir: data.config.work_dir});
-      }
+    const edited = settingsEditedFields;
+    if (!configFormPopulated && edited.size === 0) return;
+    const data = configFormPopulated
+      ? collectConfigForm()
+      : collectConfigForm(edited);
+    api.saveConfig({...data});
+    if (
+      document.body.classList.contains('remote-chat') &&
+      typeof data.config.work_dir === 'string' &&
+      data.config.work_dir
+    ) {
+      api.setWorkDir({workDir: data.config.work_dir});
     }
   }
 
@@ -9074,11 +9383,13 @@
     if (!settingsPanel) return;
     setPanelOpen(settingsPanel, settingsOverlay, true);
     configFormPopulated = false;
+    settingsEditedFields.clear();
     api.getConfig();
   }
 
   function closeSettingsPanel() {
     saveSettingsIfPopulated();
+    settingsEditedFields.clear();
     setPanelOpen(settingsPanel, settingsOverlay, false);
   }
 
@@ -9247,8 +9558,34 @@
   }
 
   let configFormPopulated = false;
+  // Ids of the settings fields the user has edited since the panel was
+  // opened.  `configData` is not a one-shot reply: the host re-pushes it
+  // from a 2-second poll of ~/.kiss/config.json and on every daemon
+  // reconnect, so a field that is being typed into is never repainted --
+  // and a panel closed before any reply arrived still saves what was
+  // touched instead of dropping it.
+  const settingsEditedFields = new Set();
+
+  /**
+   * Remember that a settings field now holds the user's own value.
+   *
+   * @param {string} id The element id of the edited field.
+   */
+  function markSettingsFieldEdited(id) {
+    if (id) settingsEditedFields.add(id);
+  }
+
   function populateConfigForm(cfg, apiKeys) {
     const el = id => document.getElementById(id);
+    const setValue = (id, value) => {
+      const node = el(id);
+      if (!node || settingsEditedFields.has(id)) return;
+      node.value = value;
+    };
+    const setChecked = (node, checked) => {
+      if (!node || settingsEditedFields.has(node.id)) return;
+      node.checked = checked;
+    };
     const prevConfigWorkDir = configWorkDir;
     configWorkDir = cfg.work_dir || '';
     if (prevConfigWorkDir !== configWorkDir) {
@@ -9258,7 +9595,7 @@
     }
     const wdInp = el('cfg-work-dir');
     if (wdInp) {
-      wdInp.value = cfg.work_dir || '';
+      setValue('cfg-work-dir', cfg.work_dir || '');
       if (!document.body.classList.contains('remote-chat')) {
         wdInp.readOnly = true;
         wdInp.title = 'Set by the workspace folder open in this window';
@@ -9269,20 +9606,35 @@
           pinned = sessionStorage.getItem('sorcar-work-dir') || '';
         } catch (_e) {}
         if (pinned) {
-          wdInp.value = pinned;
+          setValue('cfg-work-dir', pinned);
           configWorkDir = pinned;
         } else if (cfg.work_dir) {
           api.setWorkDir({workDir: cfg.work_dir});
         }
       }
     }
-    el('cfg-max-budget').value = cfg.max_budget != null ? cfg.max_budget : 100;
-    el('cfg-custom-endpoint').value = cfg.custom_endpoint || '';
-    el('cfg-custom-api-key').value = cfg.custom_api_key || '';
-    el('cfg-custom-headers').value = cfg.custom_headers || '';
-    el('cfg-remote-password').value = cfg.remote_password || '';
-    const welcomePw = el('welcome-cfg-remote-password');
-    if (welcomePw) welcomePw.value = cfg.remote_password || '';
+    // The budget default belongs to Python (`config.DEFAULT_MAX_BUDGET`,
+    // read by `vscode_config.DEFAULTS`), and `load_config()` seeds every
+    // reply from it, so an effective value is always in `configData`.
+    // A copy of the number here could only ever drift away from it, so
+    // the box shows what the daemon sent and nothing when it sent none.
+    if (cfg.max_budget != null) setValue('cfg-max-budget', cfg.max_budget);
+    // Initialize the run toggles from the persisted config instead of
+    // leaving whatever hardcoded `checked` state chat.html shipped with,
+    // so a fresh session (VS Code webview or remote web client) reflects
+    // the user's saved preference.  Missing keys default to true, the
+    // same defaults as vscode_config.DEFAULTS.
+    setChecked(autocommitToggleBtn, cfg.auto_commit_mode !== false);
+    setChecked(worktreeToggleBtn, cfg.is_worktree !== false);
+    setValue('cfg-custom-endpoint', cfg.custom_endpoint || '');
+    setValue('cfg-custom-api-key', cfg.custom_api_key || '');
+    setValue('cfg-custom-headers', cfg.custom_headers || '');
+    setValue('cfg-remote-password', cfg.remote_password || '');
+    // The welcome screen's password box mirrors the settings one, so it
+    // follows the same edited mark.
+    if (!settingsEditedFields.has('cfg-remote-password')) {
+      setValue('welcome-cfg-remote-password', cfg.remote_password || '');
+    }
     configFormPopulated = true;
     const keyIds = [
       'GEMINI_API_KEY',
@@ -9294,20 +9646,57 @@
       'MOONSHOT_API_KEY',
     ];
     keyIds.forEach(k => {
-      el('cfg-key-' + k).value = (apiKeys && apiKeys[k]) || '';
+      setValue('cfg-key-' + k, (apiKeys && apiKeys[k]) || '');
     });
   }
-  function collectConfigForm() {
+  /**
+   * Read the settings form into a `saveConfig` payload.
+   *
+   * @param {Set<string>} [onlyIds] When given, only these field ids are
+   *   read. The daemon MERGES what it is sent (see
+   *   ``vscode_config.save_config``), so a partial payload updates just
+   *   those fields and leaves the rest of config.json alone -- which is
+   *   what lets a panel closed before its `configData` reply arrived
+   *   save the edit instead of flushing a form full of blanks over the
+   *   stored settings.
+   * @returns {{config: object, apiKeys: object}} The payload.
+   */
+  function collectConfigForm(onlyIds) {
     const el = id => document.getElementById(id);
-    const cfg = {
-      max_budget: parseFloat(el('cfg-max-budget').value) || 100,
-      custom_endpoint: el('cfg-custom-endpoint').value.trim(),
-      custom_api_key: el('cfg-custom-api-key').value.trim(),
-      custom_headers: el('cfg-custom-headers').value.trim(),
-      remote_password: el('cfg-remote-password').value.trim(),
-    };
+    const want = id => !onlyIds || onlyIds.has(id);
+    const cfg = {};
+    if (want('cfg-max-budget')) {
+      // An unparseable box -- cleared by the user, or never filled
+      // because no `configData` arrived -- means the client has no
+      // budget to report, NOT that it should supply one: the daemon
+      // merges this payload, so leaving the key out keeps whatever is
+      // stored. Writing a locally invented default here is how a user
+      // on a 250 budget silently ended up back on 100.
+      const budget = parseFloat(el('cfg-max-budget').value);
+      if (Number.isFinite(budget)) cfg.max_budget = budget;
+    }
+    if (want('cfg-auto-commit')) {
+      cfg.auto_commit_mode = !!(
+        autocommitToggleBtn && autocommitToggleBtn.checked
+      );
+    }
+    if (want('cfg-use-worktree')) {
+      cfg.is_worktree = !!(worktreeToggleBtn && worktreeToggleBtn.checked);
+    }
+    if (want('cfg-custom-endpoint')) {
+      cfg.custom_endpoint = el('cfg-custom-endpoint').value.trim();
+    }
+    if (want('cfg-custom-api-key')) {
+      cfg.custom_api_key = el('cfg-custom-api-key').value.trim();
+    }
+    if (want('cfg-custom-headers')) {
+      cfg.custom_headers = el('cfg-custom-headers').value.trim();
+    }
+    if (want('cfg-remote-password')) {
+      cfg.remote_password = el('cfg-remote-password').value.trim();
+    }
     const wdInp = el('cfg-work-dir');
-    if (wdInp && !wdInp.readOnly) {
+    if (wdInp && !wdInp.readOnly && want('cfg-work-dir')) {
       cfg.work_dir = wdInp.value.trim();
     }
     const apiKeys = {};
@@ -9321,6 +9710,7 @@
       'MOONSHOT_API_KEY',
     ];
     keyIds.forEach(k => {
+      if (!want('cfg-key-' + k)) return;
       const v = el('cfg-key-' + k).value.trim();
       if (v) apiKeys[k] = v;
     });
@@ -9551,6 +9941,14 @@
         welcome.style.display = 'none';
         refreshWelcomeLayout();
       }
+    },
+    // How much file-link work is still being retained. Both numbers must
+    // come back down; see forgetPendingFileLinks().
+    pendingFileLinkCounts: function () {
+      return {
+        spans: _pendingFileLinkSpans.size,
+        checks: _pendingPathChecks.size,
+      };
     },
   };
 

@@ -17,9 +17,23 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
+try:
+    import fcntl
+except ImportError:  # pragma: no cover — Windows has no fcntl
+    fcntl = None  # type: ignore[assignment]
+try:
+    import msvcrt  # type: ignore[import-not-found]
+except ImportError:  # POSIX has no msvcrt
+    msvcrt = None  # type: ignore[assignment]
+
+from kiss.agents.sorcar.git_worktree import (
+    _WORKTREE_SLUG_PREFIX,
+    _WORKTREE_SUBDIR,
+)
 from kiss.core.models.model import (
     READ_TOOL_BINARY_MIME_TYPES,
     encode_binary_attachment,
@@ -28,6 +42,88 @@ from kiss.core.models.model import (
 logger = logging.getLogger(__name__)
 
 _MAX_BINARY_READ_BYTES = 20 * 1024 * 1024
+
+
+@contextmanager
+def _file_lock(lock_path: Path) -> Any:
+    """Hold an exclusive advisory inter-process lock on *lock_path*.
+
+    Serializes check-then-use sequences on resources shared by every
+    kiss process on the machine — MCP configs and OAuth token stores,
+    and the Chromium profile directory — across daemons, CLI runs,
+    channel-agent processes, and event loops.  A ``threading`` lock
+    cannot do this: the resources live on disk, not in one process.
+    The lock file itself is created mode ``0600``.
+
+    Cross-platform: ``fcntl.flock`` on POSIX, ``msvcrt.locking`` on
+    Windows (where ``fcntl`` does not exist — an unconditional import
+    would make every dependent feature unavailable there).  When
+    neither primitive exists the lock degrades to a best-effort no-op
+    rather than breaking the caller entirely.
+
+    Args:
+        lock_path: The lock file to hold; parent directories are created.
+    """
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if fcntl is not None:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        elif msvcrt is not None:  # pragma: no cover — Windows-only branch
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            while True:
+                try:
+                    msvcrt.locking(  # pyright: ignore[reportAttributeAccessIssue]
+                        descriptor,
+                        msvcrt.LK_LOCK,  # pyright: ignore[reportAttributeAccessIssue]
+                        1,
+                    )
+                    break
+                except OSError:
+                    time.sleep(0.05)
+        yield
+    finally:
+        try:
+            if fcntl is not None:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            elif msvcrt is not None:  # pragma: no cover — Windows-only branch
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                with suppress(OSError):
+                    msvcrt.locking(  # pyright: ignore[reportAttributeAccessIssue]
+                        descriptor,
+                        msvcrt.LK_UNLCK,  # pyright: ignore[reportAttributeAccessIssue]
+                        1,
+                    )
+        finally:
+            os.close(descriptor)
+
+
+def _worktree_index(parts: tuple[str, ...]) -> int | None:
+    """Return the index of the worktree marker segment in *parts*.
+
+    The kiss worktree layout is ``<repo>/<subdir>/<prefix><slug>/...``
+    (see ``git_worktree``, which owns both constants and creates the
+    directories).  Every path guard in this module needs the same scan,
+    so it lives here once: duplicating the literals would let a rename
+    in ``git_worktree`` silently turn all of them into dead code, and
+    the agent would write straight into the user's main checkout.
+
+    Args:
+        parts: ``Path.parts`` of the path (or work dir) to inspect.
+
+    Returns:
+        The index ``i`` such that ``parts[i]`` is the worktree subdir
+        and ``parts[i + 1]`` is a worktree slug, or ``None`` when
+        *parts* does not run through a worktree.
+    """
+    for i, part in enumerate(parts):
+        if (
+            part == _WORKTREE_SUBDIR
+            and i + 1 < len(parts)
+            and parts[i + 1].startswith(_WORKTREE_SLUG_PREFIX)
+        ):
+            return i
+    return None
 
 
 def _stale_worktree_fallback(resolved: Path) -> Path | None:
@@ -46,16 +142,12 @@ def _stale_worktree_fallback(resolved: Path) -> Path | None:
     no fallback applies and ``None`` is returned.
     """
     parts = resolved.parts
-    for i, part in enumerate(parts):
-        if (
-            part == ".kiss-worktrees"
-            and i + 1 < len(parts)
-            and parts[i + 1].startswith("kiss_wt-")
-        ):
-            if Path(*parts[: i + 2]).is_dir():
-                return None
-            return Path(*parts[:i], *parts[i + 2 :])
-    return None
+    i = _worktree_index(parts)
+    if i is None:
+        return None
+    if Path(*parts[: i + 2]).is_dir():
+        return None
+    return Path(*parts[:i], *parts[i + 2 :])
 
 
 def _active_worktree_remap(resolved: Path, work_dir: str | None) -> Path | None:
@@ -102,26 +194,23 @@ def _active_worktree_remap(resolved: Path, work_dir: str | None) -> Path | None:
     if not work_dir:
         return None
     work_parts = Path(work_dir).resolve().parts
-    for i in range(len(work_parts) - 1):
-        if (
-            work_parts[i] == ".kiss-worktrees"
-            and work_parts[i + 1].startswith("kiss_wt-")
-        ):
-            main_repo_parts = work_parts[:i]
-            wt_root_parts = work_parts[: i + 2]
-            if not Path(*wt_root_parts).is_dir():
-                return None
-            res_parts = resolved.parts
-            if (
-                len(res_parts) <= len(main_repo_parts)
-                or res_parts[: len(main_repo_parts)] != main_repo_parts
-            ):
-                return None
-            tail = res_parts[len(main_repo_parts):]
-            if tail and tail[0] == ".kiss-worktrees":
-                return None
-            return Path(*wt_root_parts, *tail)
-    return None
+    i = _worktree_index(work_parts)
+    if i is None:
+        return None
+    main_repo_parts = work_parts[:i]
+    wt_root_parts = work_parts[: i + 2]
+    if not Path(*wt_root_parts).is_dir():
+        return None
+    res_parts = resolved.parts
+    if (
+        len(res_parts) <= len(main_repo_parts)
+        or res_parts[: len(main_repo_parts)] != main_repo_parts
+    ):
+        return None
+    tail = res_parts[len(main_repo_parts):]
+    if tail and tail[0] == _WORKTREE_SUBDIR:
+        return None
+    return Path(*wt_root_parts, *tail)
 
 
 def _absolutize(file_path: str, work_dir: str | None) -> str:
@@ -213,33 +302,30 @@ def _parent_repo_guard_for_parts(
     Returns:
         The refusal message, or ``None`` when the command is allowed.
     """
-    for i in range(len(wd_parts) - 1):
-        if (
-            wd_parts[i] == ".kiss-worktrees"
-            and wd_parts[i + 1].startswith("kiss_wt-")
-        ):
-            main_repo = str(Path(*wd_parts[:i]))
-            wt_root = str(Path(*wd_parts[: i + 2]))
-            if not os.path.isdir(wt_root):
-                return None
-            pattern = re.escape(main_repo) + r"(?=/|[\s'\";|&<>()`]|$)"
-            for m in re.finditer(pattern, command):
-                tail_start = m.start()
-                end = tail_start + len(main_repo)
-                while end < len(command) and command[end] not in " \t\n'\";|&<>()`":
-                    end += 1
-                hit = command[tail_start:end]
-                if hit == wt_root or hit.startswith(wt_root + os.sep):
-                    continue
-                return (
-                    f"Error: command references the parent-repo path "
-                    f"{hit!r}, which is outside the active worktree "
-                    f"{wt_root!r}.  Rewrite the command to use the "
-                    f"worktree path (or a path relative to it) so the "
-                    f"change is captured by the framework's auto-commit "
-                    f"and does not mutate the user's main checkout."
-                )
-            return None
+    i = _worktree_index(wd_parts)
+    if i is None:
+        return None
+    main_repo = str(Path(*wd_parts[:i]))
+    wt_root = str(Path(*wd_parts[: i + 2]))
+    if not os.path.isdir(wt_root):
+        return None
+    pattern = re.escape(main_repo) + r"(?=/|[\s'\";|&<>()`]|$)"
+    for m in re.finditer(pattern, command):
+        tail_start = m.start()
+        end = tail_start + len(main_repo)
+        while end < len(command) and command[end] not in " \t\n'\";|&<>()`":
+            end += 1
+        hit = command[tail_start:end]
+        if hit == wt_root or hit.startswith(wt_root + os.sep):
+            continue
+        return (
+            f"Error: command references the parent-repo path "
+            f"{hit!r}, which is outside the active worktree "
+            f"{wt_root!r}.  Rewrite the command to use the "
+            f"worktree path (or a path relative to it) so the "
+            f"change is captured by the framework's auto-commit "
+            f"and does not mutate the user's main checkout."
+        )
     return None
 
 

@@ -51,6 +51,9 @@ class _FakeStdout:
         self._pos = len(self._lines)
         return rest
 
+    def close(self) -> None:
+        pass
+
 
 def _build_fake_popen_class(events: list[dict[str, Any]]) -> type:
     """Build a FakePopen class that returns the given events as stdout."""

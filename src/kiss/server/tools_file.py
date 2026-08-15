@@ -9,14 +9,17 @@ tools as a *file path* to a Python module rather than as live callables
 — the client never serializes Python functions.  The client validates
 and resolves the path (:func:`resolve_tools_file`) and sends it on the
 ``run`` command's ``toolsFile`` field; the daemon imports the file and
-hands every top-level public function that is suitable as a tool
-directly to the agent (:func:`load_tools_file`).  The tools therefore
-execute in the daemon process, exactly like native agent tools.
+calls its required top-level ``get_tools()`` function, which returns
+the callables the agent may invoke (:func:`load_tools_file`).  The
+tools therefore execute in the daemon process, exactly like native
+agent tools.  A broken tools file (malformed field, missing file,
+import failure, missing or misbehaving ``get_tools()``) raises
+:exc:`ToolsFileError` so the task stops with a diagnostic error
+instead of silently running without the requested tools.
 """
 
 from __future__ import annotations
 
-import inspect
 import logging
 import sys
 import types
@@ -27,10 +30,42 @@ from typing import Any
 
 logger = logging.getLogger("kiss-vscode")
 
-_SUPPORTED_KINDS = (
-    inspect.Parameter.POSITIONAL_OR_KEYWORD,
-    inspect.Parameter.KEYWORD_ONLY,
-)
+
+def _safe_message(exc: BaseException) -> str:
+    """Format an untrusted exception without running its raising code.
+
+    ``str(exc)`` runs the exception's ``__str__``, which — for an
+    exception minted by an untrusted tools file — may itself raise
+    anything.  A diagnostic built here must never leak such a
+    secondary raise, so the string conversion is guarded and falls
+    back to the (trusted) type name alone.
+
+    Args:
+        exc: The exception raised by untrusted tools-file code.
+
+    Returns:
+        ``"TypeName: message"`` when the message renders, otherwise
+        ``"TypeName"``.
+    """
+    name = type(exc).__name__
+    try:
+        return f"{name}: {exc}"
+    except BaseException:  # noqa: BLE001 — untrusted __str__ may raise anything
+        return name
+
+
+class ToolsFileError(Exception):
+    """A ``run`` command's tools file is broken and the task must stop.
+
+    Raised by :func:`load_tools_file` when the ``toolsFile`` wire field
+    is malformed, names a missing or non-``.py`` path, names a file
+    that raises at import time, or names a module whose ``get_tools()``
+    is missing, raises, or returns anything but callables.  The task
+    runner's generic task-error handling turns the raise into a failed
+    task result whose text carries this exception's diagnostic message,
+    so a broken tools file stops the task loudly instead of silently
+    running it without the tools the client asked for.
+    """
 
 
 def resolve_tools_file(tools: str | Path | None) -> str:
@@ -42,8 +77,8 @@ def resolve_tools_file(tools: str | Path | None) -> str:
     fast, before any daemon connection is made.
 
     Args:
-        tools: Path to a Python file whose top-level public functions
-            should become agent tools, or ``None`` for no extra tools.
+        tools: Path to a Python file whose ``get_tools()`` function
+            supplies the agent tools, or ``None`` for no extra tools.
 
     Returns:
         The absolute path as a string, or ``""`` when *tools* is
@@ -68,27 +103,25 @@ def resolve_tools_file(tools: str | Path | None) -> str:
 
 
 def load_tools_file(raw_path: Any) -> list[Callable[..., Any]]:
-    """Import a tools file and return its top-level public tool functions.
+    """Import a tools file and return the tools its ``get_tools()`` picks.
 
     Daemon-side counterpart of :func:`resolve_tools_file`: imports the
     Python file named by a ``run`` command's ``toolsFile`` field and
-    collects every function that is
-
-    * genuinely defined at the module's top level via ``def`` (merely
-      *imported* functions, lambdas, aliases of other functions, and
-      re-exported nested functions are excluded — the bound name must
-      equal the function's own ``__name__``),
-    * public (name does not start with ``_``), and
-    * suitable as an agent tool (see :func:`_is_suitable_tool`).
+    calls the module's top-level ``get_tools()`` function, which must
+    return the callables the agent may invoke.  The file's author —
+    not the daemon — decides which of the module's functions become
+    tools, so no scanning or suitability filtering happens here.
 
     The source is compiled and executed directly (no ``__pycache__``
     read or write), so every run observes the file's CURRENT contents
     and the caller's directory is never littered with bytecode.
 
-    The field comes from outside the daemon process, so it is treated
-    as untrusted input: a malformed value, a missing file, or a module
-    that fails to import is logged and yields no tools rather than
-    killing the task thread.
+    A broken tools file stops the task: a malformed field value, a
+    missing file, a module that fails to import, a missing or raising
+    ``get_tools()``, or a ``get_tools()`` return value that is not a
+    list/tuple of callables raises :exc:`ToolsFileError` with a
+    diagnostic message instead of silently running the task without
+    the requested tools.
 
     Args:
         raw_path: The ``toolsFile`` field of a ``run`` command —
@@ -96,20 +129,38 @@ def load_tools_file(raw_path: Any) -> list[Callable[..., Any]]:
             :func:`resolve_tools_file`, but treated as untrusted.
 
     Returns:
-        The tool callables, in module definition order.
+        The tool callables returned by the module's ``get_tools()``.
+
+    Raises:
+        ToolsFileError: When *raw_path* is not a string, is not the
+            path of an existing ``.py`` file, names a module that
+            raises at import time, or names a module whose
+            ``get_tools()`` is missing, raises, or returns anything
+            but a list/tuple of callables.
     """
-    if raw_path is None or raw_path == "":
+    # Type-check FIRST: comparing or repr-ing an untrusted non-string
+    # object could run arbitrary code (raising ``__eq__``/``__repr__``),
+    # so nothing touches *raw_path* beyond isinstance until it is known
+    # to be a plain string.
+    if raw_path is None:
         return []
     if not isinstance(raw_path, str):
-        logger.warning(
-            "Ignoring malformed toolsFile field of type %s",
-            type(raw_path).__name__,
+        raise ToolsFileError(
+            f"tools file field must be a path string, got "
+            f"{type(raw_path).__name__}"
         )
+    if raw_path == "":
         return []
     path = Path(raw_path)
-    if path.suffix != ".py" or not path.is_file():
-        logger.warning("Ignoring toolsFile %r: not an existing .py file", raw_path)
-        return []
+    try:
+        is_py_file = path.suffix == ".py" and path.is_file()
+    except (OSError, ValueError):
+        # e.g. an embedded NUL byte makes ``is_file`` raise ValueError.
+        is_py_file = False
+    if not is_py_file:
+        raise ToolsFileError(
+            f"tools file {raw_path!r} is not an existing Python (.py) file"
+        )
     module_name = f"_kiss_tools_file_{uuid.uuid4().hex}"
     module = types.ModuleType(module_name)
     module.__file__ = str(path)
@@ -118,82 +169,66 @@ def load_tools_file(raw_path: Any) -> list[Callable[..., Any]]:
         source = path.read_text(encoding="utf-8")
         code = compile(source, str(path), "exec", dont_inherit=True)
         exec(code, module.__dict__)  # noqa: S102
-    except BaseException:  # noqa: BLE001 — untrusted module code may raise anything
+    except BaseException as exc:  # noqa: BLE001 — untrusted module code may raise anything
         # BaseException (not just Exception/SystemExit): a tools file
-        # that raises e.g. KeyboardInterrupt at import time must
-        # degrade to "no extra tools" like any other bad module — the
-        # task runner treats an escaping KeyboardInterrupt as a task
-        # cancellation, so letting it propagate would cancel the whole
-        # agent task because of a broken tools file.
+        # raising e.g. KeyboardInterrupt or SystemExit at import time
+        # is converted into ToolsFileError like any other bad module —
+        # the task runner treats an escaping KeyboardInterrupt as a
+        # task CANCELLATION, so letting it propagate unwrapped would
+        # report a broken tools file as "task cancelled" instead of a
+        # task error with a diagnostic.
         logger.warning("Failed to import toolsFile %r", raw_path, exc_info=True)
-        return []
+        raise ToolsFileError(
+            f"tools file {raw_path!r} failed to import: "
+            f"{_safe_message(exc)}"
+        ) from exc
     finally:
         sys.modules.pop(module_name, None)
-    tools: list[Callable[..., Any]] = []
-    for name, obj in vars(module).items():
-        if name.startswith("_") or not inspect.isfunction(obj):
-            continue
-        if obj.__module__ != module_name:
-            continue
-        if name != obj.__name__:
-            logger.warning(
-                "Skipping tools-file binding %r: not a top-level "
-                "function definition (function __name__ is %r)",
-                name,
-                obj.__name__,
-            )
-            continue
-        if _is_suitable_tool(obj):
-            tools.append(obj)
-    return tools
-
-
-def _is_suitable_tool(func: Callable[..., Any]) -> bool:
-    """Whether a top-level public function can be registered as a tool.
-
-    The agent invokes tools synchronously by keyword
-    (``func(**function_args)``), so a suitable tool must be a plain
-    synchronous function whose every parameter is keyword-bindable.
-    Coroutine / (async) generator functions and signatures with
-    ``*args``, ``**kwargs``, or positional-only parameters are skipped
-    with a warning.
-
-    Args:
-        func: A function defined at the tools module's top level.
-
-    Returns:
-        ``True`` when *func* should be handed to the agent as a tool.
-    """
-    if (
-        inspect.iscoroutinefunction(func)
-        or inspect.isgeneratorfunction(func)
-        or inspect.isasyncgenfunction(func)
-    ):
-        logger.warning(
-            "Skipping tools-file function %r: coroutine/generator "
-            "functions are not supported as tools",
-            func.__name__,
+    get_tools = module.__dict__.get("get_tools")
+    if not callable(get_tools):
+        raise ToolsFileError(
+            f"tools file {raw_path!r} must define a top-level "
+            f"get_tools() function returning the tool callables"
         )
-        return False
     try:
-        signature = inspect.signature(func)
-    except (TypeError, ValueError):
+        returned = get_tools()
+    except BaseException as exc:  # noqa: BLE001 — untrusted module code may raise anything
         logger.warning(
-            "Skipping tools-file function %r: signature introspection "
-            "failed",
-            func.__name__,
+            "get_tools() of toolsFile %r raised", raw_path, exc_info=True
+        )
+        raise ToolsFileError(
+            f"get_tools() of tools file {raw_path!r} raised: "
+            f"{_safe_message(exc)}"
+        ) from exc
+    if not isinstance(returned, (list, tuple)):
+        raise ToolsFileError(
+            f"get_tools() of tools file {raw_path!r} must return a list "
+            f"or tuple of callables, got {type(returned).__name__}"
+        )
+    # Validate inside a BaseException guard: the returned value is
+    # untrusted module data, so even iterating it (a list subclass
+    # overriding ``__iter__``) may raise anything — such a raise must
+    # become a ToolsFileError diagnostic, not a task cancellation.
+    # Diagnostics use type names, never ``repr`` (which is user code).
+    try:
+        tools = list(returned)
+        for index, tool in enumerate(tools):
+            if not callable(tool):
+                raise ToolsFileError(
+                    f"get_tools() of tools file {raw_path!r} returned a "
+                    f"non-callable entry at index {index} "
+                    f"(type {type(tool).__name__})"
+                )
+    except ToolsFileError:
+        raise
+    except BaseException as exc:  # noqa: BLE001 — untrusted module data may raise anything
+        logger.warning(
+            "Validating get_tools() result of toolsFile %r raised",
+            raw_path,
             exc_info=True,
         )
-        return False
-    for param in signature.parameters.values():
-        if param.kind not in _SUPPORTED_KINDS:
-            logger.warning(
-                "Skipping tools-file function %r: parameter %r has "
-                "unsupported kind %r; only plain (keyword-bindable) "
-                "parameters are supported",
-                func.__name__,
-                param.name,
-                param.kind.description,
-            )
-            return False
-    return True
+        raise ToolsFileError(
+            f"get_tools() of tools file {raw_path!r} returned a broken "
+            f"value: {_safe_message(exc)}"
+        ) from exc
+    return tools

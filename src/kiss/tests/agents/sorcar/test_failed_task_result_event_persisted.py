@@ -40,8 +40,9 @@ from pathlib import Path
 from typing import Any
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.server.web_server import WebPrinter
 
 
@@ -56,13 +57,6 @@ class _CapturingWebPrinter(WebPrinter):
     def _send_to_ws_clients(self, data: str) -> None:
         with self._wire_lock:
             self.wire.append(json.loads(data))
-
-
-class _AgentStub:
-    """Minimal stand-in carrying the ``_last_task_id`` persistence key."""
-
-    def __init__(self, task_id: str) -> None:
-        self._last_task_id = task_id
 
 
 def _redirect(tmpdir: str):
@@ -88,6 +82,7 @@ class TestFailedTaskResultEventPersisted:
         self.printer = _CapturingWebPrinter()
 
     def teardown_method(self):
+        agent_state.agent_states.clear()
         th._flush_chat_events()
         if th._db_conn is not None:
             th._db_conn.close()
@@ -96,11 +91,12 @@ class TestFailedTaskResultEventPersisted:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _register_task(self, task: str) -> str:
-        """Create a task row and register its agent with the printer."""
+        """Create a task row and register its agent in the state registry."""
         task_id, _ = th._add_task(task, chat_id="chat-1")
         th._flush_chat_events()
-        with self.printer._lock:
-            self.printer._persist_agents[str(task_id)] = _AgentStub(task_id)
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent._last_task_id = task_id
+        agent_state.register(AgentState(str(task_id), agent=agent))
         return str(task_id)
 
     def _persisted_events(self, task_id: str) -> list:
@@ -223,7 +219,7 @@ class TestTaskRunnerFailureResultPersistedE2E:
         self.wire = printer.wire
 
     def teardown_method(self):
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         th._flush_chat_events()
         if th._db_conn is not None:
             th._db_conn.close()
@@ -242,12 +238,19 @@ class TestTaskRunnerFailureResultPersistedE2E:
 
         When *allocate_row* is set the stub mirrors
         ``ChatSorcarAgent.run``'s allocation-time wiring (task row,
-        ``_last_task_id``, persist-agent registration, launcher-tab
-        subscription) before raising.
+        ``_last_task_id``, printer-bridge registration, launcher-tab
+        subscription via ``_on_task_id_allocated``) before raising.
         """
-        tab = self.server._get_tab(tab_id)
         agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.agent = agent
+        state = AgentState(
+            f"pre-{tab_id}",
+            agent=agent,
+            tab_id=tab_id,
+            server_owned=True,
+            stop_event=threading.Event(),
+        )
+        state.user_answer_queue = queue.Queue()
+        agent_state.register(state)
         printer = self.server.printer
         allocated: list[str] = []
 
@@ -256,16 +259,14 @@ class TestTaskRunnerFailureResultPersistedE2E:
                 task_id, _ = th._add_task("failing task", chat_id="chat-e2e")
                 allocated.append(str(task_id))
                 agent._last_task_id = task_id
-                with printer._lock:
-                    printer._persist_agents[str(task_id)] = agent
-                printer.subscribe_tab(
-                    task_id, kwargs.get("_subscribe_tab_id") or tab_id,
-                )
+                printer._thread_local.task_id = str(task_id)
+                printer.agent_task_allocated(agent, task_id, "chat-e2e")
+                on_allocated = kwargs.get("_on_task_id_allocated")
+                if on_allocated is not None:
+                    on_allocated(task_id, "chat-e2e")
             raise exc
 
-        tab.agent.run = fake_run  # type: ignore[method-assign]
-        tab.stop_event = threading.Event()
-        tab.user_answer_queue = queue.Queue()
+        agent.run = fake_run  # type: ignore[method-assign, assignment]
         self.server._run_task_inner({
             "type": "run",
             "prompt": "failing task",

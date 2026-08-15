@@ -10,11 +10,9 @@ No mocks, test doubles, or fakes.
 from __future__ import annotations
 
 import queue
-from argparse import ArgumentParser
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
 
 
 class TestEscapeInvalidTemplateFieldNames:
@@ -28,22 +26,6 @@ class TestEscapeInvalidTemplateFieldNames:
 
         result = escape_invalid_template_field_names("{bad!r:>10}", set())
         assert "{{bad!r:>10}}" in result
-
-
-class TestConfigBuilderBoolNoDash:
-    """Cover the else branch of 'if arg_name_dashes != arg_name' for bool fields."""
-
-    def test_bool_field_without_underscores(self) -> None:
-        """A bool field with no underscores makes arg_name_dashes == arg_name."""
-        from kiss.core.config_builder import _add_model_arguments
-
-        class TestModel(BaseModel):
-            verbose: bool = False
-
-        parser = ArgumentParser()
-        _add_model_arguments(parser, TestModel)
-        args = parser.parse_args(["--no-verbose"])
-        assert args.verbose is False
 
 
 class TestLazyImportNotInMap:

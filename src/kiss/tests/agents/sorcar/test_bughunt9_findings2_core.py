@@ -3,7 +3,7 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 """Bug-hunt 9 (findings-2 audit): persistence, git_worktree, skills,
-custom_commands, cli_helpers regressions.
+and channel-CLI helper regressions.
 
 Covers, end-to-end with real files/processes/DBs (no mocks/patches):
 
@@ -15,11 +15,7 @@ Covers, end-to-end with real files/processes/DBs (no mocks/patches):
 * S2-05 — ``copy_dirty_state`` must raise on a failing ``git status``
   instead of silently omitting the user's dirty state.
 * S2-30 — ``copy_dirty_state`` must mirror dirty submodule content.
-* S2-07 — one invalid-UTF-8 SKILL.md/command file must not abort
-  discovery, and activation reports a readable error.
-* S2-08 — a timed-out shell injection must kill descendant processes.
-* S2-09 — binary shell-injection output must not raise.
-* S2-29 — an invalid-UTF-8 ``@{file}`` injects the error marker.
+* S2-07 — one invalid-UTF-8 SKILL.md file must not abort discovery.
 * S2-22 — ``--max_budget`` rejects nan/inf/zero/negative values.
 """
 
@@ -36,13 +32,11 @@ from pathlib import Path
 
 import pytest
 
-import kiss.agents.sorcar.custom_commands as cc
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.cli_helpers import _parse_budget_value
-from kiss.agents.sorcar.custom_commands import CustomCommand, expand_command
 from kiss.agents.sorcar.git_worktree import GitWorktreeOps
 from kiss.agents.sorcar.persistence import _add_task, _prefix_match_tasks
 from kiss.agents.sorcar.skills import parse_frontmatter
+from kiss.agents.third_party_agents._channel_cli import _parse_budget_value
 
 
 def _run_git(*args: str, cwd: Path) -> None:
@@ -165,7 +159,7 @@ class TestCopyDirtySubmodule:
 
 
 class TestUnicodeRobustness:
-    """S2-07 / S2-09 / S2-29: invalid UTF-8 must not abort parsing."""
+    """S2-07: invalid UTF-8 must not abort parsing."""
 
     def setup_method(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
@@ -177,59 +171,6 @@ class TestUnicodeRobustness:
         bad = self.tmp / "SKILL.md"
         bad.write_bytes(b"---\nname: x\n---\n\xff\xfe body")
         assert parse_frontmatter(bad) is None  # skipped, not raised
-
-    def test_shell_injection_binary_output_does_not_raise(self) -> None:
-        cmd = CustomCommand(
-            name="c", description="", argument_hint="",
-            template="out: !`printf 'a\\377b'`", source="user", path="c.md",
-        )
-        expanded = expand_command(cmd, "", str(self.tmp))
-        assert expanded.startswith("out: a")
-        assert expanded.endswith("b")
-
-    def test_file_injection_invalid_utf8_injects_marker(self) -> None:
-        (self.tmp / "blob.bin").write_bytes(b"\xff\xfe\x00")
-        cmd = CustomCommand(
-            name="c", description="", argument_hint="",
-            template="data: @{blob.bin}", source="user", path="c.md",
-        )
-        expanded = expand_command(cmd, "", str(self.tmp))
-        assert expanded == "data: [could not read file: blob.bin]"
-
-
-class TestShellInjectionTimeoutKillsChildren:
-    """S2-08: a timed-out injection must not orphan descendant processes."""
-
-    def setup_method(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp())
-        self.saved_timeout = cc._SHELL_TIMEOUT_SECONDS
-        cc._SHELL_TIMEOUT_SECONDS = 0.3
-
-    def teardown_method(self) -> None:
-        cc._SHELL_TIMEOUT_SECONDS = self.saved_timeout
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def test_background_child_is_killed_on_timeout(self) -> None:
-        pid_file = self.tmp / "child.pid"
-        cmd = CustomCommand(
-            name="c", description="", argument_hint="",
-            template=f"!`sleep 30 & echo $! > {pid_file}; wait`",
-            source="user", path="c.md",
-        )
-        expanded = expand_command(cmd, "", str(self.tmp))
-        assert "[shell command timed out:" in expanded
-        child_pid = int(pid_file.read_text().strip())
-        # Give the SIGKILL a moment to be delivered and reaped.
-        deadline = time.monotonic() + 3.0
-        while time.monotonic() < deadline:
-            try:
-                os.kill(child_pid, 0)
-            except ProcessLookupError:
-                break
-            time.sleep(0.05)
-        else:
-            os.kill(child_pid, 9)
-            pytest.fail(f"background child {child_pid} survived the timeout")
 
 
 class TestBudgetValidation:

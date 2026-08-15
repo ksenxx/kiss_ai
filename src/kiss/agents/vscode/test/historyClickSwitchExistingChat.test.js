@@ -178,17 +178,18 @@ function testRestoreDropsDuplicatePersistedChatIds() {
 
   assert.strictEqual(
     chatTabs(win).length,
-    2,
-    'startup restore must drop duplicate persisted tabs with the same backend chat id',
+    1,
+    'legacy persisted tabs are not restored locally: the daemon adopts ' +
+      'them into the shared registry and answers with tabs_state',
   );
   const ready = posted.find(msg => msg && msg.type === 'ready');
   assert.strictEqual(
     JSON.stringify(ready.restoredTabs),
     JSON.stringify([
-      {tabId: 'frontend-a', chatId: 'chat-dup'},
-      {tabId: 'frontend-c', chatId: 'chat-other'},
+      {tabId: 'frontend-a', chatId: 'chat-dup', title: 'A', workDir: ''},
+      {tabId: 'frontend-c', chatId: 'chat-other', title: 'C', workDir: ''},
     ]),
-    'ready must resume each backend chat id at most once',
+    'ready must announce each backend chat id at most once',
   );
 
   win.close();

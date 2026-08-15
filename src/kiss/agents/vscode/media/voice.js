@@ -388,8 +388,9 @@
   // with the wrong utterance.
   function insertSpeech(text, keepFlash, speaker, language, owner) {
     if (!keepFlash) flash(null);
-    let translated = String(typeof text === 'string' ? text : '').trim();
-    if (!translated) return;
+    const spoken = String(typeof text === 'string' ? text : '').trim();
+    if (!spoken) return;
+    let translated = spoken;
     if (
       typeof speaker === 'number' &&
       isFinite(speaker) &&
@@ -403,8 +404,8 @@
           ' says in the language ' +
           lang +
           ' that: ' +
-          translated
-        : 'Speaker #' + speaker + ' says that: ' + translated;
+          spoken
+        : 'Speaker #' + speaker + ' says that: ' + spoken;
     }
     // tableak-coverage:start
     // The user switched tasks while speaking: the words belong to the
@@ -437,8 +438,11 @@
       speakWorkingOnIt();
       return;
     }
+    // Non-auto mode drafts into the input for the user to edit, so insert
+    // the exact spoken words: the speaker/language prefix is only useful to
+    // the agent, and would just be noise the user has to delete by hand.
     if (!autoSubmit) {
-      insertAtCursor(translated);
+      insertAtCursor(spoken);
       return;
     }
     if (!inp.value) {

@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""BlueBubbles Agent — SorcarAgent extension with BlueBubbles REST API tools.
+"""BlueBubbles Agent — channel agent with BlueBubbles REST API tools.
 
 Provides access to iMessage via the BlueBubbles server running on a local Mac.
 macOS only. Stores config in ``~/.kiss/third_party_agents/bluebubbles/config.json``.
@@ -23,8 +23,6 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -162,22 +160,6 @@ class BlueBubblesChannelBackend(ToolMethodBackend):
         data = resp.json()
         if resp.status_code >= 400 or data.get("status") != 200:
             raise RuntimeError(f"BlueBubbles send failed: {data}")
-
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Poll for a reply from a specific user."""
-        return wait_for_matching_message(
-            poll=lambda: self.poll_messages(channel_id, "")[0],
-            matches=lambda msg: msg.get("user") == user_id,
-            extract_text=lambda msg: str(msg.get("text", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=3.0,
-        )
 
     def list_chats(self, limit: int = 25, offset: int = 0) -> str:
         """List recent iMessage conversations.
@@ -328,8 +310,8 @@ class BlueBubblesChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class BlueBubblesAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with BlueBubbles REST API tools (macOS only)."""
+class BlueBubblesAgent(BaseChannelAgent):
+    """Channel agent with BlueBubbles REST API tools (macOS only)."""
 
     def __init__(self) -> None:
         super().__init__("BlueBubbles Agent")
@@ -431,6 +413,17 @@ def main() -> None:
         channel_name="BlueBubbles",
         make_backend=_make_backend,
     )
+
+
+def get_tools() -> list:
+    """Return the BlueBubbles channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return BlueBubblesAgent()._get_tools()
 
 
 if __name__ == "__main__":

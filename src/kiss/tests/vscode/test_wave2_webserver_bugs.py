@@ -61,7 +61,8 @@ from websockets.http11 import Request
 
 import kiss.agents.sorcar.persistence as th
 import kiss.server.web_server as ws_mod
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
 from kiss.server.web_server import RemoteAccessServer
 
@@ -214,29 +215,42 @@ class TestF13SecondServerInitPreservesLiveTasks(unittest.TestCase):
     """F13: second ``VSCodeServer.__init__`` must not orphan live tasks."""
 
     def setUp(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-w2f5-init-")
         self.saved = _redirect_persistence(self.tmpdir)
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         _restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_running_task_row_is_not_marked_process_killed(self) -> None:
         live_id, _ = th._add_task("live task")
         dead_id, _ = th._add_task("dead task")
+        # ``_add_task`` stamps every row with THIS process's owner token,
+        # and the sweep never rewrites a row whose owning process is
+        # still alive.  A row genuinely left behind by a killed daemon
+        # has no live owner, so clear the token on the row that is
+        # playing that part.  ``live_id`` keeps its owner, which is what
+        # makes the assertion below a real test of the F13 invariant.
+        th._get_db().execute(
+            "UPDATE task_history SET owner = '' WHERE id = ?", (dead_id,)
+        )
         self.assertEqual(_task_result(live_id), "Agent Failed Abruptly")
         self.assertEqual(_task_result(dead_id), "Agent Failed Abruptly")
 
         stop = threading.Event()
         worker = threading.Thread(target=stop.wait, daemon=True)
         worker.start()
-        state = _RunningAgentState("tab-live", "model", is_task_active=True)
-        state.task_history_id = live_id
-        state.task_thread = worker
-        state.stop_event = stop
-        _RunningAgentState.register("tab-live", state)
+        state = AgentState(
+            live_id,
+            tab_id="tab-live",
+            server_owned=True,
+            stop_event=stop,
+            task_thread=worker,
+            is_task_active=True,
+        )
+        agent_state.register(state)
         try:
             server = VSCodeServer()
             sweep = server._orphan_sweep_thread
@@ -257,10 +271,10 @@ class TestF14SnapshotActiveTabsConcurrent(unittest.TestCase):
     """F14: registry hammering must never break the snapshot helper."""
 
     def setUp(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
 
     def test_snapshot_never_raises_under_concurrent_mutation(self) -> None:
         stop = threading.Event()
@@ -269,14 +283,16 @@ class TestF14SnapshotActiveTabsConcurrent(unittest.TestCase):
             i = 0
             while not stop.is_set():
                 i += 1
-                tab_id = f"tab-{i % 64}"
-                state = _RunningAgentState(
-                    tab_id, "model", is_task_active=bool(i % 2)
+                task_id = f"task-{i % 64}"
+                state = AgentState(
+                    task_id,
+                    tab_id=f"tab-{i % 64}",
+                    server_owned=True,
+                    is_task_active=bool(i % 2),
                 )
-                state.task_history_id = str(i)
-                _RunningAgentState.register(tab_id, state)
+                agent_state.register(state)
                 if i % 3 == 0:
-                    _RunningAgentState.unregister(tab_id)
+                    agent_state.unregister(task_id)
                 time.sleep(random.uniform(0.0, 0.0002))
 
         threads = [
@@ -345,7 +361,7 @@ class TestF5AndF10LiveServer(unittest.IsolatedAsyncioTestCase):
     """E2E tests over a real running RemoteAccessServer."""
 
     async def asyncSetUp(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         self.tmpdir = tempfile.mkdtemp(prefix="kiss-w2f5-live-")
         self.saved = _redirect_persistence(self.tmpdir)
         self.uds_path = Path(self.tmpdir) / "sorcar.sock"
@@ -366,7 +382,7 @@ class TestF5AndF10LiveServer(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         await self._stop_server()
         _restore_persistence(self.saved)
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def test_f5_media_and_voice_model_served_correctly(self) -> None:
@@ -427,10 +443,15 @@ class TestF5AndF10LiveServer(unittest.IsolatedAsyncioTestCase):
 
         thread = threading.Thread(target=worker, daemon=True)
         thread.start()
-        state = _RunningAgentState("tab-w2f5", "model", is_task_active=True)
-        state.task_thread = thread
-        state.stop_event = stop_event
-        _RunningAgentState.register("tab-w2f5", state)
+        state = AgentState(
+            "task-w2f5",
+            tab_id="tab-w2f5",
+            server_owned=True,
+            stop_event=stop_event,
+            task_thread=thread,
+            is_task_active=True,
+        )
+        agent_state.register(state)
         try:
             await self._stop_server()
             self.assertTrue(

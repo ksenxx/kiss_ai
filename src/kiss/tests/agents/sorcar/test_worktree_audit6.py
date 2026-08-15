@@ -17,11 +17,8 @@ BUG-26: merge() calls delete_branch and sets self._wt = None OUTSIDE
         inside the lock.  Creates a window for concurrent operations on
         the same repo.
 
-BUG-28: _start_merge_session reads tab_id from thread-local storage
-        to set is_merging.  When called from the main thread (session
-        replay via _emit_pending_worktree → _start_worktree_merge_review)
-        the thread-local is unset, so is_merging is never set and a
-        task can be started during an active merge review.
+BUG-28 (obsolete): covered _start_merge_session, removed together
+        with the interactive diff/merge review workflow.
 
 BUG-29: _release_worktree pops the user stash after a merge conflict
         (cherry-pick --abort / reset --hard), restoring the dirty
@@ -32,8 +29,6 @@ BUG-29: _release_worktree pops the user stash after a merge conflict
 
 from __future__ import annotations
 
-import inspect
-import json
 import shutil
 import subprocess
 import tempfile
@@ -48,7 +43,6 @@ from kiss.agents.sorcar.git_worktree import (
 )
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.server.server import VSCodeServer
 
 
 def _redirect_db(tmpdir: str) -> tuple:
@@ -178,68 +172,6 @@ class TestBug25ReleaseBranchOrphanedOnNoneOriginal:
         assert agent._wt is None, "_wt should be cleared"
 
 
-
-
-
-class TestBug28StartMergeSessionThreadLocal:
-    """BUG-28: _start_merge_session gets tab_id from
-    printer._thread_local.task_id.  When called from the main thread
-    (e.g. session replay → _emit_pending_worktree →
-    _start_worktree_merge_review), the thread-local is not set,
-    so is_merging is never set for the tab.
-
-    This allows a new task to be started while a merge review is
-    active (the is_merging guard in _run_task_inner is bypassed).
-    """
-
-    def test_start_merge_session_accepts_tab_id(self) -> None:
-        """BUG-28 FIXED: _start_merge_session now accepts tab_id."""
-        sig = inspect.signature(VSCodeServer._start_merge_session)
-        assert "tab_id" in sig.parameters, (
-            "BUG-28 fix: _start_merge_session must accept tab_id"
-        )
-
-    def test_is_merging_not_set_without_thread_local(self) -> None:
-        """BUG-28: is_merging stays False when thread-local tab_id is unset."""
-        tmpdir = tempfile.mkdtemp()
-        saved = _redirect_db(tmpdir)
-        try:
-            repo = _make_repo(Path(tmpdir) / "repo")
-
-            server = VSCodeServer()
-            server.work_dir = str(repo)
-
-            tab_id = "t28"
-            tab = server._get_tab(tab_id)
-            tab.use_worktree = True
-
-            if hasattr(server.printer._thread_local, "tab_id"):
-                delattr(server.printer._thread_local, "tab_id")
-
-            merge_dir = Path(tmpdir) / "merge"
-            merge_dir.mkdir(parents=True, exist_ok=True)
-            merge_json = merge_dir / "pending-merge.json"
-            merge_json.write_text(json.dumps({
-                "branch": "HEAD",
-                "files": [{
-                    "name": "test.py",
-                    "base": str(repo / "README.md"),
-                    "current": str(repo / "README.md"),
-                    "hunks": [{"bs": 0, "bc": 0, "cs": 0, "cc": 1}],
-                }],
-            }))
-
-            started = server._start_merge_session(str(merge_json))
-            assert started, "Merge session should start"
-
-            assert tab.is_merging is False, (
-                "BUG-28 appears fixed: is_merging is now set without "
-                "thread-local tab_id"
-            )
-
-        finally:
-            _restore_db(saved)
-            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 

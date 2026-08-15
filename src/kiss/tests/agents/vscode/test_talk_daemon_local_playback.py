@@ -37,8 +37,8 @@ from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
 import kiss.agents.sorcar.persistence as th
+from kiss.server import talk_player
 from kiss.server.web_server import RemoteAccessServer
-from kiss.ui.cli import cli_talk
 
 MP3_BYTES = b"ID3\x03\x00fake-mp3-frames-" + bytes(range(64))
 MP3_B64 = base64.b64encode(MP3_BYTES).decode("ascii")
@@ -111,7 +111,7 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
         os.environ["KISS_SORCAR_PLAY_CMD"] = (
             f"{shlex.quote(sys.executable)} {shlex.quote(str(player))}"
         )
-        cli_talk.reset_shared_player_for_tests()
+        talk_player.reset_shared_player_for_tests()
         certfile = Path(self.tmpdir) / "cert.pem"
         keyfile = Path(self.tmpdir) / "key.pem"
         from kiss.server.web_server import _generate_self_signed_cert
@@ -135,16 +135,16 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
             os.environ.pop("KISS_SORCAR_PLAY_CMD", None)
         else:
             os.environ["KISS_SORCAR_PLAY_CMD"] = self.saved_play_cmd
-        cli_talk.reset_shared_player_for_tests()
+        talk_player.reset_shared_player_for_tests()
         if th._db_conn is not None:
             th._db_conn.close()
         _restore_persistence(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     async def _connect(
-        self, tab_id: str, *, cli: bool = False
+        self, tab_id: str
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-        """Open one UDS client, announce ``ready`` (and ``cliTabHello``)."""
+        """Open one UDS client and announce ``ready``."""
         reader, writer = await asyncio.open_unix_connection(
             str(self.uds_path), limit=16 * 1024 * 1024
         )
@@ -153,9 +153,6 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
             {"type": "ready", "tabId": tab_id, "workDir": self.tmpdir},
         ):
             writer.write((json.dumps(cmd) + "\n").encode("utf-8"))
-        if cli:
-            hello = {"type": "cliTabHello", "tabId": tab_id}
-            writer.write((json.dumps(hello) + "\n").encode("utf-8"))
         await writer.drain()
         return reader, writer
 
@@ -230,35 +227,6 @@ class TestTalkDaemonLocalPlayback(IsolatedAsyncioTestCase):
         played = base64.b64decode(markers[0]["audio_b64"])
         self.assertEqual(played, MP3_BYTES, "clip bytes were corrupted")
         web_writer.close()
-
-    async def test_daemon_playback_mutes_local_cli_tab_too(self) -> None:
-        """The CLI tab on the daemon machine must not double-play."""
-        web_tab = "webtab-" + uuid.uuid4().hex[:8]
-        cli_tab = "clitab-" + uuid.uuid4().hex[:8]
-        web_reader, web_writer = await self._connect(web_tab)
-        cli_reader, cli_writer = await self._connect(cli_tab, cli=True)
-        self.server._printer.subscribe_tab(self.task_id, web_tab)
-        self.server._printer.subscribe_tab(self.task_id, cli_tab)
-        await asyncio.sleep(0.05)
-
-        self.server._printer.broadcast(
-            _talk_event(self.task_id, "talk-daemon-2", with_clip=True)
-        )
-
-        talks = await self._collect_talks(web_reader, 2)
-        by_tab = {t["tabId"]: t for t in talks}
-        self.assertIn(web_tab, by_tab)
-        self.assertIn(cli_tab, by_tab)
-        self.assertTrue(by_tab[web_tab].get("muted"))
-        self.assertTrue(
-            by_tab[cli_tab].get("muted"),
-            "the CLI tab's copy must be muted while the daemon plays — "
-            "both are on the same machine",
-        )
-        markers = await asyncio.to_thread(self._wait_markers, 1)
-        self.assertEqual(len(markers), 1, "expected exactly one playback")
-        for w in (web_writer, cli_writer):
-            w.close()
 
     async def test_remote_web_tab_keeps_playable_copy(self) -> None:
         """A remote WSS tab is another device; its copy stays playable."""

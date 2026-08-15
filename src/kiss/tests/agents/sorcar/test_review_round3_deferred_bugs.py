@@ -3,25 +3,22 @@
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
 # ruff: noqa: N812, E501
-"""End-to-end reproducing tests for the 3 deferred ROUND-3 sorcar-other HIGH bugs.
+"""End-to-end test for the ROUND-3 sorcar-other H5 TOCTOU bug.
 
-See ``tmp/review_sorcar_other_r3.md`` for the full review.  These three
-fixes were deferred out of session 15 because they required an invasive
-ordering refactor of ``ChatSorcarAgent.run`` and ``_run_tasks_parallel``:
+See ``tmp/review_sorcar_other_r3.md`` for the original review.
 
-  * **H1** — ``_register_running_state()`` runs before ``_add_task``; a
-    raise in ``_add_task`` would otherwise leave a stale entry wedged
-    inside ``_RunningAgentState.running_agent_states`` forever.
-  * **H2** — ``_RunningAgentState`` for sub-agents must be fully
-    populated by its constructor; peer threads must never observe a
-    half-built state under ``_registry_lock``.
   * **H5** — ``_run_tasks_parallel`` re-snapshots ``self._last_task_id``
-    at the start of each ``_run_single`` worker (TOCTOU defeat).
+    at the start of each ``_run_single`` worker (TOCTOU defeat), so a
+    sub-agent launched after the parent's task row is persisted picks
+    up the real parent task id instead of a stale pre-persist snapshot.
+
+(The former H1/H2 tests verified the deleted per-tab
+``_RunningAgentState`` self-registration mechanics and were removed
+with that registry.)
 """
 
 from __future__ import annotations
 
-import threading
 import uuid
 from pathlib import Path
 from typing import cast
@@ -30,7 +27,7 @@ import pytest
 
 from kiss.agents.sorcar import persistence
 from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 
 
 @pytest.fixture(autouse=True)
@@ -38,120 +35,12 @@ def _isolate_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     db_path = tmp_path / "sorcar.db"
     monkeypatch.setattr(persistence, "_DB_PATH", db_path)
     persistence._close_db()
-    with _RunningAgentState._registry_lock:
-        _RunningAgentState.running_agent_states.clear()
-    with ChatSorcarAgent._running_agents_lock:
-        ChatSorcarAgent.running_agents.clear()
+    with agent_state.STATE_LOCK:
+        agent_state.agent_states.clear()
     yield
-    with _RunningAgentState._registry_lock:
-        _RunningAgentState.running_agent_states.clear()
-    with ChatSorcarAgent._running_agents_lock:
-        ChatSorcarAgent.running_agents.clear()
+    with agent_state.STATE_LOCK:
+        agent_state.agent_states.clear()
     persistence._close_db()
-
-
-
-def test_register_unregisters_when_add_task_raises(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """If ``_add_task`` raises mid-``run``, the registered state is removed."""
-    agent = ChatSorcarAgent("h1-leak-probe")
-    from kiss.agents.sorcar import chat_sorcar_agent as csa
-
-    def _boom(*_args: object, **_kwargs: object) -> tuple[str, str]:
-        raise RuntimeError("simulated DB write failure")
-
-    monkeypatch.setattr(csa, "_add_task", _boom)
-    monkeypatch.setattr(
-        ChatSorcarAgent, "build_chat_prompt",
-        lambda self, p: p,  # type: ignore[arg-type]
-    )
-
-    pre_keys = set(_RunningAgentState.running_agent_states)
-    with pytest.raises(RuntimeError, match="simulated DB write failure"):
-        agent.run(prompt_template="hello")
-    post_keys = set(_RunningAgentState.running_agent_states)
-    assert post_keys == pre_keys, (
-        "register_running_state leaked a stale entry after _add_task raised. "
-        f"new keys: {post_keys - pre_keys}"
-    )
-
-
-
-def test_running_agent_state_subagent_kwargs_populate_in_constructor() -> None:
-    """The constructor sets all subagent-related fields in one shot."""
-    fake_agent = object()
-    parent_uuid = uuid.uuid4().hex
-    state = _RunningAgentState(
-        "sub-tab-001",
-        "gpt-x",
-        agent=fake_agent,  # type: ignore[arg-type]
-        chat_id="chat-xyz",
-        is_subagent=True,
-        parent_task_id=parent_uuid,
-        is_task_active=True,
-    )
-    assert state.chat_id == "chat-xyz"
-    assert state.is_subagent is True
-    assert state.parent_task_id == parent_uuid
-    assert state.is_task_active is True
-    assert state.selected_model == "gpt-x"
-    assert state.agent is fake_agent
-
-
-def test_run_tasks_parallel_constructs_subagent_state_atomically(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Peer-thread observation under ``_registry_lock`` finds a fully-built state.
-
-    A peer thread snapshots ``running_agent_states`` for every key
-    matching ``sub-tab-*`` and asserts that the state already has
-    ``is_subagent=True``, a non-empty ``chat_id``, and
-    ``is_task_active=True``.  Pre-H2 (post-construct attribute writes
-    between ``__init__`` and ``register``), a peer could observe
-    ``is_subagent=False`` because the writes happened lock-free
-    after ``register`` had already published the entry.
-    """
-    parent = ChatSorcarAgent("h2-parent")
-    parent._chat_id = uuid.uuid4().hex  # noqa: SLF001
-    parent._last_task_id = uuid.uuid4().hex  # noqa: SLF001
-
-    observations: list[tuple[str, bool, str, bool]] = []
-    stop = threading.Event()
-
-    def _peer_observer() -> None:
-        while not stop.is_set():
-            with _RunningAgentState._registry_lock:
-                for k, st in _RunningAgentState.running_agent_states.items():
-                    if k.startswith("task-") and "__sub_" in k:
-                        observations.append(
-                            (k, st.is_subagent, st.chat_id, st.is_task_active),
-                        )
-
-    def _fake_run(self: ChatSorcarAgent, **_kwargs: object) -> str:
-        import time
-        time.sleep(0.005)
-        return "summary: done"
-
-    monkeypatch.setattr(ChatSorcarAgent, "run", _fake_run)
-
-    observer = threading.Thread(target=_peer_observer, daemon=True)
-    observer.start()
-    try:
-        parent._run_tasks_parallel(  # noqa: SLF001
-            ["task A", "task B", "task C"], max_workers=3,
-        )
-    finally:
-        stop.set()
-        observer.join(timeout=2.0)
-
-    assert observations, "peer thread never observed any sub-agent state"
-    bad = [o for o in observations if not (o[1] and o[2] and o[3])]
-    assert not bad, (
-        "peer thread observed half-built sub-agent state(s): "
-        f"{bad[:3]}"
-    )
-
 
 
 def test_run_single_resnapshots_parent_task_id_at_worker_start(
@@ -162,9 +51,10 @@ def test_run_single_resnapshots_parent_task_id_at_worker_start(
     With ``max_workers=1`` the executor runs task 1, then task 2.  We
     intentionally update ``parent._last_task_id`` from inside task 1's
     ``run()`` so that the snapshot taken inside ``_run_single`` BEFORE
-    task 2's ``run()`` must observe the updated value.  Pre-H5 (no
-    re-snapshot inside the closure), task 2 would inherit task 1's
-    captured value — empty.
+    task 2's ``run()`` must observe the updated value.  Without the
+    re-snapshot inside the closure, task 2 would inherit task 1's
+    captured value — the fan-out's synthetic placeholder, which names
+    no history row.
     """
     parent = ChatSorcarAgent("h5-toctou-probe")
     parent._chat_id = uuid.uuid4().hex  # noqa: SLF001
@@ -186,8 +76,10 @@ def test_run_single_resnapshots_parent_task_id_at_worker_start(
 
     parent._run_tasks_parallel(["task 1", "task 2"], max_workers=1)  # noqa: SLF001
 
-    assert captured[0] == "", (
-        f"task 1's snapshot should be empty (parent had no id yet); got {captured[0]!r}"
+    assert captured[0] and captured[0] != real_parent_tid, (
+        "task 1 ran before the parent had a row, so it must carry the "
+        "fan-out's synthetic parent id — never a blank one (which would "
+        f"make it a top-level history row); got {captured[0]!r}"
     )
     assert captured[1] == real_parent_tid, (
         "H5 re-snapshot failed: task 2 should have observed the parent's "

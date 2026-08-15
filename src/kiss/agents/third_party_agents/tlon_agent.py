@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Tlon/Urbit Agent — SorcarAgent extension with Tlon/Urbit Eyre HTTP tools.
+"""Tlon/Urbit Agent — channel agent with Tlon/Urbit Eyre HTTP tools.
 
 Provides access to Urbit/Tlon via the Eyre HTTP server. Stores config
 in ``~/.kiss/third_party_agents/tlon/config.json``.
@@ -25,8 +25,6 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -89,22 +87,6 @@ class TlonChannelBackend(ToolMethodBackend):
         if len(parts) >= 3:  # pragma: no branch
             group_path, channel_name = "/".join(parts[:2]), parts[2]
             self.post_message(group_path, channel_name, text)
-
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Poll for a reply from a specific user."""
-        return wait_for_matching_message(
-            poll=lambda: self.poll_messages(channel_id, "")[0],
-            matches=lambda msg: msg.get("user") == user_id,
-            extract_text=lambda msg: str(msg.get("text", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=3.0,
-        )
 
     def list_groups(self) -> str:
         """List Urbit groups.
@@ -266,8 +248,8 @@ class TlonChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class TlonAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with Tlon/Urbit Eyre HTTP tools."""
+class TlonAgent(BaseChannelAgent):
+    """Channel agent with Tlon/Urbit Eyre HTTP tools."""
 
     def __init__(self) -> None:
         super().__init__("Tlon Agent")
@@ -353,6 +335,17 @@ class TlonAgent(BaseChannelAgent, SorcarAgent):
 def main() -> None:
     """Run the TlonAgent from the command line with chat persistence."""
     channel_main(TlonAgent, "kiss-tlon")
+
+
+def get_tools() -> list:
+    """Return the Tlon/Urbit channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return TlonAgent()._get_tools()
 
 
 if __name__ == "__main__":

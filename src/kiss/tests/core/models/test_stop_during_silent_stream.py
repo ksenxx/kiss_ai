@@ -192,12 +192,35 @@ def _make_model(
     return model
 
 
+def _unwound_after_stop(worker: threading.Thread, pressed: threading.Event) -> bool:
+    """Whether *worker* finished within :data:`_DEADLINE` of the Stop click.
+
+    The deadline has to start when Stop is pressed, which is what the
+    assertions claim to measure.  Joining from the worker's *start*
+    instead silently spends part of the budget on whatever the local
+    server took to accept the request, so a correct unwind fails on a
+    loaded machine.
+
+    Args:
+        worker: The thread running the model turn.
+        pressed: Set by the presser the moment Stop is requested.
+
+    Returns:
+        ``True`` when the turn unwound in time.
+    """
+    if not pressed.wait(timeout=_DEADLINE):
+        return False
+    worker.join(_DEADLINE)
+    return not worker.is_alive()
+
+
 def _call_with_stop(
     model: AnthropicModel,
     stop_event: threading.Event,
     stop_after: float = 0.5,
 ) -> tuple[BaseException | None, float]:
     """Run one model turn, requesting a stop while the stream is silent.
+
 
     Binds *stop_event* the way ``task_runner`` binds it — by assigning
     ``JsonPrinter._thread_local.stop_event`` on the calling thread — then
@@ -216,6 +239,7 @@ def _call_with_stop(
     printer = JsonPrinter()
     outcome: dict[str, Any] = {}
     stopped_at: dict[str, float] = {}
+    pressed = threading.Event()
 
     def target() -> None:
         printer._thread_local.stop_event = stop_event
@@ -233,12 +257,12 @@ def _call_with_stop(
         time.sleep(stop_after)
         stopped_at["t"] = time.monotonic()
         stop_event.set()
+        pressed.set()
 
     worker = threading.Thread(target=target, daemon=True)
     worker.start()
     threading.Thread(target=presser, daemon=True).start()
-    worker.join(_DEADLINE)
-    if worker.is_alive():
+    if not _unwound_after_stop(worker, pressed):
         pytest.fail(
             f"model call still running {_DEADLINE}s after Stop — the stop "
             f"event is not reaching the stream (pre-fix behaviour)"
@@ -416,16 +440,18 @@ class TestStopAbortsSilentOpenAIStream:
             finally:
                 printer._thread_local.stop_event = None
 
+        pressed = threading.Event()
+
         def presser() -> None:
             _STATE.serving.wait(timeout=_DEADLINE)
             time.sleep(0.5)
             stop_event.set()
+            pressed.set()
 
         worker = threading.Thread(target=target, daemon=True)
         worker.start()
         threading.Thread(target=presser, daemon=True).start()
-        worker.join(_DEADLINE)
-        if worker.is_alive():
+        if not _unwound_after_stop(worker, pressed):
             pytest.fail(
                 f"tool-calling turn still running {_DEADLINE}s after Stop — "
                 f"the 1800s client timeout is holding the agent"

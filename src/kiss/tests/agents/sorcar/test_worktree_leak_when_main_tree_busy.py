@@ -48,7 +48,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.tests.agents.sorcar.test_worktree_no_autocommit_branch import (
     _list_kiss_wt_branches,
     _patch_parent_run_create_file,
@@ -106,19 +106,24 @@ class _MainTreeBusyBase(_WorktreeNoAutocommitBase):
     def _mark_main_tree_busy(self, busy: bool) -> None:
         """Flip the "another tab owns the main working tree" state.
 
-        Registered exactly the way production does it — ``_get_tab``
-        creates and registers the :class:`_RunningAgentState`, and
-        ``_run_task_inner`` sets ``is_running_non_wt = True`` on it for
-        the whole duration of a non-worktree task (see
-        ``task_runner.py``: ``tab.is_running_non_wt = True`` right
-        before ``_capture_pre_snapshot``).  Setting the flag here is
-        the faithful steady-state equivalent of that other task being
-        mid-flight.
+        Registered exactly the way production does it — the server
+        registers a server-owned :class:`agent_state.AgentState` for
+        the tab, and ``_run_task_inner`` sets ``is_running_non_wt =
+        True`` on it for the whole duration of a non-worktree task.
+        Setting the flag here is the faithful steady-state equivalent
+        of that other task being mid-flight.
         """
-        tab = self.server._get_tab(_BUSY_TAB)
         with self.server._state_lock:
-            tab.is_task_active = busy
-            tab.is_running_non_wt = busy
+            state = agent_state.find_by_tab(_BUSY_TAB)
+            if state is None:
+                state = agent_state.AgentState(
+                    "task-" + _BUSY_TAB,
+                    tab_id=_BUSY_TAB,
+                    server_owned=True,
+                )
+                agent_state.register(state)
+            state.is_task_active = busy
+            state.is_running_non_wt = busy
         assert self.server._any_non_wt_running() is busy
 
     def _run_no_change_worktree_task(self, count: int = 1) -> None:
@@ -236,7 +241,7 @@ class TestWorktreeLeakWhenMainTreeBusy(_MainTreeBusyBase):
         """
         self._run_no_change_worktree_task(count=2)
 
-        tab = _RunningAgentState.running_agent_states.get(_WT_TAB)
+        tab = agent_state.find_by_tab(_WT_TAB)
         handle = None if tab is None or tab.agent is None else tab.agent._wt
         branches = _list_kiss_wt_branches(self.repo)
         dirs = _worktree_dirs(self.repo)

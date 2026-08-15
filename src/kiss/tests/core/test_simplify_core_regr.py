@@ -5,26 +5,22 @@
 
 """End-to-end regression tests locking in behavior of core misc modules.
 
-Covers code paths in config_builder, utils, base, print_to_console,
+Covers code paths in utils, base, print_to_console,
 kiss_agent and relentless_agent that are touched by the simplification
 pass, using only real objects (no mocks/patches/fakes).
 """
 
 import io
-import sys
 import unittest
 from typing import Any, cast
 
 import yaml
-from pydantic import BaseModel
 
 from kiss.agents.obsolete.gepa.template_utils import escape_invalid_template_field_names
 from kiss.agents.sorcar.relentless_agent import RelentlessAgent, _str_to_bool
 from kiss.agents.sorcar.relentless_agent import finish as relentless_finish
 from kiss.core import config as config_module
 from kiss.core.base import Base
-from kiss.core.config import Config, set_artifact_base_dir
-from kiss.core.config_builder import add_config, build_config
 from kiss.core.kiss_agent import KISSAgent
 from kiss.core.print_to_console import ConsolePrinter
 from kiss.core.printer import parse_result_yaml
@@ -34,60 +30,6 @@ from kiss.core.utils import (
 from kiss.core.utils import (
     finish as utils_finish,
 )
-
-
-class ConfigBuilderRegression(unittest.TestCase):
-    def setUp(self) -> None:
-        self._argv = sys.argv
-        self._default_config = config_module.DEFAULT_CONFIG
-
-    def tearDown(self) -> None:
-        sys.argv = self._argv
-        config_module.DEFAULT_CONFIG = self._default_config
-
-    def test_build_config_no_args_keeps_defaults(self) -> None:
-        sys.argv = ["prog"]
-        config_module.DEFAULT_CONFIG = Config()
-        build_config()
-        self.assertEqual(config_module.DEFAULT_CONFIG.max_budget, 200.0)
-
-    def test_build_config_cli_override(self) -> None:
-        sys.argv = ["prog", "--max-budget", "333.5"]
-        config_module.DEFAULT_CONFIG = Config()
-        build_config()
-        self.assertEqual(config_module.DEFAULT_CONFIG.max_budget, 333.5)
-
-    def test_add_config_defaults_and_cli_override(self) -> None:
-        class MyCfg(BaseModel):
-            foo: str = "bar"
-            num_val: int = 5
-            flag: bool = False
-
-        config_module.DEFAULT_CONFIG = Config()
-        sys.argv = ["prog", "--my.num-val", "7", "--my.flag"]
-        add_config("my", MyCfg)
-        cfg: Any = config_module.DEFAULT_CONFIG
-        self.assertEqual(cfg.my.num_val, 7)
-        self.assertEqual(cfg.my.foo, "bar")
-        self.assertTrue(cfg.my.flag)
-
-    def test_add_config_accumulates_previous_configs(self) -> None:
-        class FirstCfg(BaseModel):
-            alpha: str = "a"
-
-        class SecondCfg(BaseModel):
-            beta: float = 1.5
-
-        config_module.DEFAULT_CONFIG = Config()
-        sys.argv = ["prog"]
-        add_config("first", FirstCfg)
-        cfg_first: Any = config_module.DEFAULT_CONFIG
-        cfg_first.first.alpha = "changed"
-        add_config("second", SecondCfg)
-        cfg: Any = config_module.DEFAULT_CONFIG
-        self.assertEqual(cfg.first.alpha, "changed")
-        self.assertEqual(cfg.second.beta, 1.5)
-        self.assertEqual(cfg.max_budget, 200.0)
 
 
 class UtilsRegression(unittest.TestCase):
@@ -150,7 +92,11 @@ class BaseSaveRegression(unittest.TestCase):
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
-            set_artifact_base_dir(tmp)
+            # The runtime artifact-base setter was removed (it had no
+            # production caller and could misroute a running agent's
+            # trajectory), so redirect the process-wide directory here.
+            original = config_module._artifact_dir
+            config_module._artifact_dir = tmp
             try:
                 agent = Base("regr agent/save")
                 agent._add_message("user", "hello")
@@ -163,7 +109,7 @@ class BaseSaveRegression(unittest.TestCase):
                 self.assertEqual(data["max_tokens"], None)
                 self.assertIn("trajectory_regr_agent_save_", path.name)
             finally:
-                set_artifact_base_dir(None)
+                config_module._artifact_dir = original
 
     def test_get_trajectory_json(self) -> None:
         agent = Base("regr json")
@@ -407,16 +353,21 @@ class KISSAgentToolRegression(unittest.TestCase):
         self.assertIn("FAILED", buf.getvalue())
 
     def test_check_limits(self) -> None:
+        """The budget bound is enforced here; the step bound is not.
+
+        The second half used to assert that ``step_count > max_steps``
+        also raised from here.  That branch was unreachable — the
+        agentic loop stops first — and it worded the same condition
+        differently, so it was removed and the step bound now lives
+        solely in ``_run_agentic_loop`` (covered end to end by
+        ``test_artifact_dir_and_step_limit.py``).
+        """
         from kiss.core.kiss_error import KISSError
 
         agent = self._agent()
         agent.max_budget = 1.0
         agent.max_steps = 5
         agent.budget_used = 2.0
-        agent.step_count = 1
-        with self.assertRaises(KISSError):
-            agent._check_limits()
-        agent.budget_used = 0.0
         agent.step_count = 6
         with self.assertRaises(KISSError):
             agent._check_limits()

@@ -36,7 +36,6 @@ from kiss.server.web_server import (
     TUNNEL_CHECK_INTERVAL,
     RemoteAccessServer,
     WebPrinter,
-    _augment_merge_data,
     _build_html,
     _create_ssl_context,
     _discover_tunnel_url_from_metrics,
@@ -46,13 +45,11 @@ from kiss.server.web_server import (
     _print_url,
     _probe_tunnel_ready,
     _read_version,
-    _reject_all_hunks_in_file,
-    _reject_hunk_in_file,
     _remove_url_file,
     _save_url_file,
     _translate_webview_command,
-    _WebMergeState,
 )
+from kiss.tests.agents.vscode._ntfy_emulator import unroutable_base_url
 
 
 class TestBuildHtml(unittest.TestCase):
@@ -979,38 +976,6 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
             resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             self.assertEqual(resp["type"], "models")
 
-    async def test_ws_merge_action_all_done(self) -> None:
-        """mergeAction with all-done does not crash."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
-            await ws.send(json.dumps({"type": "auth", "password": ""}))
-            await asyncio.wait_for(ws.recv(), timeout=5)
-
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "mergeAction",
-                        "action": "all-done",
-                        "tabId": "merge-tab",
-                    }
-                )
-            )
-            await ws.send(json.dumps({"type": "getModels"}))
-            events: list[dict[str, Any]] = []
-            deadline = asyncio.get_event_loop().time() + 5
-            while asyncio.get_event_loop().time() < deadline:
-                try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=2)
-                    ev = json.loads(raw)
-                    events.append(ev)
-                    if ev.get("type") == "models":
-                        break
-                except TimeoutError:
-                    break
-            self.assertTrue(
-                any(e["type"] == "models" for e in events),
-                f"Expected models response, got: {[e['type'] for e in events]}",
-            )
-
     async def test_ws_record_file_usage(self) -> None:
         """recordFileUsage command does not produce an error."""
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
@@ -1250,39 +1215,8 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 if ev.get("type") == "error":
                     self.assertNotIn("Unknown command", ev.get("text", ""))
 
-    async def test_ws_autocommit_action(self) -> None:
-        """autocommitAction command does not produce Unknown command error."""
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
-            await ws.send(json.dumps({"type": "auth", "password": ""}))
-            await asyncio.wait_for(ws.recv(), timeout=5)
-
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "autocommitAction",
-                        "action": "skip",
-                        "tabId": "ac-tab",
-                    }
-                )
-            )
-            await ws.send(json.dumps({"type": "getModels"}))
-            events: list[dict[str, Any]] = []
-            deadline = asyncio.get_event_loop().time() + 5
-            while asyncio.get_event_loop().time() < deadline:
-                try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=2)
-                    ev = json.loads(raw)
-                    events.append(ev)
-                    if ev.get("type") == "models":
-                        break
-                except TimeoutError:
-                    break
-            for ev in events:
-                if ev.get("type") == "error":
-                    self.assertNotIn("Unknown command", ev.get("text", ""))
-
     async def test_ws_all_webview_commands_no_unknown_error(self) -> None:
-        """All 30 FromWebviewMessage types produce no 'Unknown command' error."""
+        """All FromWebviewMessage types produce no 'Unknown command' error."""
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
             await ws.send(json.dumps({"type": "auth", "password": ""}))
             await asyncio.wait_for(ws.recv(), timeout=5)
@@ -1311,10 +1245,15 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 {"type": "stop", "tabId": "t"},
                 {"type": "complete", "query": "test"},
                 {"type": "recordFileUsage", "path": "/tmp/x"},
-                {"type": "mergeAction", "action": "all-done", "tabId": "t"},
                 {"type": "generateCommitMessage"},
                 {"type": "worktreeAction", "action": "discard", "tabId": "t"},
-                {"type": "autocommitAction", "action": "skip", "tabId": "t"},
+                # A non-repo workDir keeps the manual Git Commit a
+                # side-effect-free "Not a git repository." refusal.
+                {
+                    "type": "autocommitAction",
+                    "tabId": "t",
+                    "workDir": "/tmp/kiss-ws-not-a-repo",
+                },
                 {"type": "saveConfig", "config": {}, "apiKeys": {}},
                 {"type": "openFile", "path": "/tmp/x"},
                 {"type": "checkPaths", "paths": ["/tmp/x"]},
@@ -1650,385 +1589,6 @@ class _FakeModelServer:
             self._httpd.shutdown()
 
 
-class TestRemoteAccessServerMerge(IsolatedAsyncioTestCase):
-    """Test merge/diff button functionality in the web server.
-
-    Sets up a git repo with a modified file and starts a merge session
-    to verify that merge toolbar buttons work correctly.
-    """
-
-    async def asyncSetUp(self) -> None:
-        import os
-        import subprocess
-
-        self.port = _find_free_port()
-        self._orig_config = None
-        if CONFIG_PATH.exists():
-            self._orig_config = CONFIG_PATH.read_text()
-        save_config({"remote_password": ""})
-
-        self._tmpdir = tempfile.mkdtemp()
-        subprocess.run(
-            ["git", "init", self._tmpdir],
-            capture_output=True,
-            check=True,
-        )
-        subprocess.run(
-            ["git", "-C", self._tmpdir, "config", "user.email", "t@t.com"],
-            capture_output=True,
-            check=True,
-        )
-        subprocess.run(
-            ["git", "-C", self._tmpdir, "config", "user.name", "T"],
-            capture_output=True,
-            check=True,
-        )
-        self._test_file = os.path.join(self._tmpdir, "test.py")
-        with open(self._test_file, "w") as f:
-            f.write("line1\nline2\nline3\n")
-        subprocess.run(
-            ["git", "-C", self._tmpdir, "add", "-A"],
-            capture_output=True,
-            check=True,
-        )
-        subprocess.run(
-            ["git", "-C", self._tmpdir, "commit", "-m", "initial"],
-            capture_output=True,
-            check=True,
-        )
-        with open(self._test_file, "w") as f:
-            f.write("line1\nmodified_line2\nline3\nnew_line4\n")
-
-        self.server = RemoteAccessServer(
-            host="127.0.0.1",
-            port=self.port,
-            work_dir=self._tmpdir,
-        )
-        await self.server.start_async()
-
-    async def asyncTearDown(self) -> None:
-        await self.server.stop_async()
-        if self._orig_config is not None:
-            CONFIG_PATH.write_text(self._orig_config)
-        elif CONFIG_PATH.exists():
-            CONFIG_PATH.unlink()
-
-    async def _auth(self, ws: Any) -> None:
-        """Authenticate a WebSocket connection."""
-        await ws.send(json.dumps({"type": "auth", "password": ""}))
-        resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
-        assert resp["type"] == "auth_ok"
-
-    async def _trigger_merge(self, tab_id: str) -> None:
-        """Start a merge session for the test git repo."""
-        loop = asyncio.get_event_loop()
-        started = await loop.run_in_executor(
-            None,
-            lambda: self.server._vscode_server._prepare_and_start_merge(
-                self._tmpdir,
-                tab_id=tab_id,
-            ),
-        )
-        assert started, "Merge session must start (there are uncommitted changes)"
-
-    async def _collect_until(
-        self,
-        ws: Any,
-        target_type: str,
-        timeout: float = 5,
-    ) -> list[dict[str, Any]]:
-        """Collect WS events until one with the target type arrives."""
-        events: list[dict[str, Any]] = []
-        deadline = asyncio.get_event_loop().time() + timeout
-        while asyncio.get_event_loop().time() < deadline:
-            try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=2)
-                ev = json.loads(raw)
-                events.append(ev)
-                if ev.get("type") == target_type:
-                    break
-            except TimeoutError:
-                break
-        return events
-
-    async def test_merge_accept_all_completes_merge(self) -> None:
-        """mergeAction accept-all should complete the merge and broadcast merge_ended."""
-        tab_id = "merge-accept-tab"
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
-            await self._auth(ws)
-            await self._trigger_merge(tab_id)
-
-            events = await self._collect_until(ws, "merge_started")
-            types = [e["type"] for e in events]
-            self.assertIn("merge_data", types)
-            self.assertIn("merge_started", types)
-
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "mergeAction",
-                        "action": "accept-all",
-                        "tabId": tab_id,
-                    }
-                )
-            )
-
-            events = await self._collect_until(ws, "merge_ended", timeout=5)
-            ended = [e for e in events if e.get("type") == "merge_ended"]
-            self.assertTrue(
-                len(ended) > 0,
-                "merge_ended should be broadcast after accept-all",
-            )
-
-    async def test_merge_reject_all_reverts_files(self) -> None:
-        """mergeAction reject-all should revert files to base and complete merge."""
-        tab_id = "merge-reject-tab"
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
-            await self._auth(ws)
-            await self._trigger_merge(tab_id)
-            events = await self._collect_until(ws, "merge_started")
-
-
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "mergeAction",
-                        "action": "reject-all",
-                        "tabId": tab_id,
-                    }
-                )
-            )
-
-            events = await self._collect_until(ws, "merge_ended", timeout=5)
-            ended = [e for e in events if e.get("type") == "merge_ended"]
-            self.assertTrue(len(ended) > 0, "merge_ended should be broadcast")
-
-            with open(self._test_file) as f:
-                content = f.read()
-            self.assertEqual(content, "line1\nline2\nline3\n")
-
-    async def test_merge_data_includes_file_contents(self) -> None:
-        """merge_data event should include base_text and current_text for web clients."""
-        tab_id = "merge-contents-tab"
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
-            await self._auth(ws)
-            await self._trigger_merge(tab_id)
-
-            events = await self._collect_until(ws, "merge_started")
-            md_events = [e for e in events if e.get("type") == "merge_data"]
-            self.assertTrue(len(md_events) > 0)
-
-            md = md_events[0]
-            files = md["data"]["files"]
-            self.assertTrue(len(files) > 0)
-            for f in files:
-                self.assertIn("base_text", f, "merge_data files must include base_text")
-                self.assertIn("current_text", f, "merge_data files must include current_text")
-
-    async def test_merge_accept_individual_hunk(self) -> None:
-        """mergeAction accept should mark one hunk and eventually complete."""
-        tab_id = "merge-single-accept-tab"
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
-            await self._auth(ws)
-            await self._trigger_merge(tab_id)
-            events = await self._collect_until(ws, "merge_started")
-
-            md_events = [e for e in events if e.get("type") == "merge_data"]
-            total_hunks = md_events[0]["hunk_count"]
-
-            for _ in range(total_hunks):
-                await ws.send(
-                    json.dumps(
-                        {
-                            "type": "mergeAction",
-                            "action": "accept",
-                            "tabId": tab_id,
-                        }
-                    )
-                )
-
-            events = await self._collect_until(ws, "merge_ended", timeout=5)
-            ended = [e for e in events if e.get("type") == "merge_ended"]
-            self.assertTrue(len(ended) > 0, "merge should complete after all hunks accepted")
-
-            with open(self._test_file) as f:
-                content = f.read()
-            self.assertEqual(content, "line1\nmodified_line2\nline3\nnew_line4\n")
-
-    async def test_merge_nav_payload_includes_cur_and_resolved(self) -> None:
-        """merge_nav events should include cur={fi,hi} and resolved list.
-
-        The browser webview needs these fields to scroll Prev/Next into
-        view and to render accepted/rejected hunks differently.
-        """
-        tab_id = "merge-nav-payload-tab"
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
-            await self._auth(ws)
-            await self._trigger_merge(tab_id)
-            await self._collect_until(ws, "merge_started")
-
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "mergeAction",
-                        "action": "next",
-                        "tabId": tab_id,
-                    }
-                )
-            )
-            events = await self._collect_until(ws, "merge_nav", timeout=5)
-            navs = [e for e in events if e.get("type") == "merge_nav"]
-            self.assertTrue(len(navs) > 0)
-            nav = navs[-1]
-            self.assertIn("cur", nav)
-            self.assertIn("resolved", nav)
-            self.assertIsNotNone(nav["cur"])
-            self.assertIn("fi", nav["cur"])
-            self.assertIn("hi", nav["cur"])
-            self.assertEqual(nav["resolved"], [])
-
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "mergeAction",
-                        "action": "accept",
-                        "tabId": tab_id,
-                    }
-                )
-            )
-            events = await self._collect_until(ws, "merge_nav", timeout=5)
-            navs = [e for e in events if e.get("type") == "merge_nav"]
-            self.assertTrue(len(navs) > 0)
-            nav = navs[-1]
-            self.assertEqual(len(nav["resolved"]), 1)
-            self.assertEqual(nav["resolved"][0]["status"], "accepted")
-
-    async def test_merge_nav_reject_status_in_resolved(self) -> None:
-        """rejected hunks should appear in resolved with status='rejected'."""
-        tab_id = "merge-nav-reject-tab"
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
-            await self._auth(ws)
-            await self._trigger_merge(tab_id)
-            await self._collect_until(ws, "merge_started")
-
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "mergeAction",
-                        "action": "reject",
-                        "tabId": tab_id,
-                    }
-                )
-            )
-            events = await self._collect_until(ws, "merge_nav", timeout=5)
-            navs = [e for e in events if e.get("type") == "merge_nav"]
-            self.assertTrue(len(navs) > 0)
-            nav = navs[-1]
-            self.assertEqual(len(nav["resolved"]), 1)
-            self.assertEqual(nav["resolved"][0]["status"], "rejected")
-
-    async def test_merge_reject_individual_hunk(self) -> None:
-        """mergeAction reject should revert hunks one by one."""
-        tab_id = "merge-single-reject-tab"
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
-            await self._auth(ws)
-            await self._trigger_merge(tab_id)
-            events = await self._collect_until(ws, "merge_started")
-
-            md_events = [e for e in events if e.get("type") == "merge_data"]
-            total_hunks = md_events[0]["hunk_count"]
-
-            for _ in range(total_hunks):
-                await ws.send(
-                    json.dumps(
-                        {
-                            "type": "mergeAction",
-                            "action": "reject",
-                            "tabId": tab_id,
-                        }
-                    )
-                )
-
-            events = await self._collect_until(ws, "merge_ended", timeout=5)
-            ended = [e for e in events if e.get("type") == "merge_ended"]
-            self.assertTrue(len(ended) > 0)
-
-            with open(self._test_file) as f:
-                content = f.read()
-            self.assertEqual(content, "line1\nline2\nline3\n")
-
-    async def test_reject_all_restores_deleted_tracked_file(self) -> None:
-        """Reproduces the reported bug: when the agent deletes a tracked
-        file with content, rejecting all hunks must restore the file
-        on disk — previously the file remained deleted because the
-        reject only wrote to the ``.deleted`` placeholder used for
-        display.
-        """
-        os.unlink(self._test_file)
-        self.assertFalse(Path(self._test_file).exists())
-
-        tab_id = "reject-all-deleted-tab"
-        async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
-        ) as ws:
-            await self._auth(ws)
-            await self._trigger_merge(tab_id)
-            await self._collect_until(ws, "merge_started")
-
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "mergeAction",
-                        "action": "reject-all",
-                        "tabId": tab_id,
-                    }
-                )
-            )
-            events = await self._collect_until(ws, "merge_ended", timeout=5)
-            ended = [e for e in events if e.get("type") == "merge_ended"]
-            self.assertTrue(len(ended) > 0)
-
-            self.assertTrue(
-                Path(self._test_file).is_file(),
-                "Rejecting all hunks on a deleted tracked file must "
-                "restore the file at its workspace location",
-            )
-            with open(self._test_file) as f:
-                self.assertEqual(f.read(), "line1\nline2\nline3\n")
-
-    async def test_reject_file_restores_deleted_tracked_file(self) -> None:
-        """The ``reject-file`` action on a deleted tracked file must
-        also restore the file on disk.
-        """
-        os.unlink(self._test_file)
-        self.assertFalse(Path(self._test_file).exists())
-
-        tab_id = "reject-file-deleted-tab"
-        async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
-        ) as ws:
-            await self._auth(ws)
-            await self._trigger_merge(tab_id)
-            await self._collect_until(ws, "merge_started")
-
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "mergeAction",
-                        "action": "reject-file",
-                        "tabId": tab_id,
-                    }
-                )
-            )
-            await self._collect_until(ws, "merge_ended", timeout=5)
-            self.assertTrue(
-                Path(self._test_file).is_file(),
-                "reject-file on a deleted tracked file must restore it",
-            )
-            with open(self._test_file) as f:
-                self.assertEqual(f.read(), "line1\nline2\nline3\n")
-
-
 class TestGenerateSelfSignedCert(unittest.TestCase):
     """Test self-signed certificate generation."""
 
@@ -2152,6 +1712,7 @@ class TestTunnelWatchdog(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
 
@@ -2339,6 +1900,7 @@ class TestStartQuickTunnelUrlParsing(IsolatedAsyncioTestCase):
             port=self.port,
             use_tunnel=True,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
 
     async def asyncTearDown(self) -> None:
@@ -2645,376 +2207,6 @@ class TestDiscoverTunnelUrlFromMetricsFiltersApi(unittest.TestCase):
             httpd.shutdown()
 
 
-class TestWebMergeStateEdgeCases(unittest.TestCase):
-    """Test _WebMergeState edge cases for full branch coverage."""
-
-    def test_empty_merge_data_current_returns_none(self) -> None:
-        """current() returns None when there are no hunks."""
-        state = _WebMergeState({"files": []})
-        self.assertIsNone(state.current())
-        self.assertEqual(state.total_hunks, 0)
-        self.assertEqual(state.remaining, 0)
-
-    def test_current_clamps_pos_when_past_end(self) -> None:
-        """current() clamps _pos to last hunk when pos >= len."""
-        state = _WebMergeState(
-            {
-                "files": [{"name": "a.py", "hunks": [{"cs": 0, "cc": 1, "bs": 0, "bc": 1}]}],
-            }
-        )
-        state._pos = 999
-        cur = state.current()
-        self.assertEqual(cur, (0, 0))
-        self.assertEqual(state._pos, 0)
-
-    def test_advance_noop_when_all_resolved(self) -> None:
-        """advance() is a no-op when all hunks are resolved."""
-        state = _WebMergeState(
-            {
-                "files": [{"name": "a.py", "hunks": [{"cs": 0, "cc": 1, "bs": 0, "bc": 1}]}],
-            }
-        )
-        state.mark_resolved(0, 0)
-        old_pos = state._pos
-        state.advance()
-        self.assertEqual(state._pos, old_pos)
-
-    def test_go_prev_noop_when_all_resolved(self) -> None:
-        """go_prev() is a no-op when all hunks are resolved."""
-        state = _WebMergeState(
-            {
-                "files": [{"name": "a.py", "hunks": [{"cs": 0, "cc": 1, "bs": 0, "bc": 1}]}],
-            }
-        )
-        state.mark_resolved(0, 0)
-        old_pos = state._pos
-        state.go_prev()
-        self.assertEqual(state._pos, old_pos)
-
-    def test_advance_wraps_around(self) -> None:
-        """advance() wraps from last hunk to first unresolved."""
-        state = _WebMergeState(
-            {
-                "files": [
-                    {
-                        "name": "a.py",
-                        "hunks": [
-                            {"cs": 0, "cc": 1, "bs": 0, "bc": 1},
-                            {"cs": 1, "cc": 1, "bs": 1, "bc": 1},
-                            {"cs": 2, "cc": 1, "bs": 2, "bc": 1},
-                        ],
-                    }
-                ],
-            }
-        )
-        state.mark_resolved(0, 1)
-        state._pos = 2
-        state.advance()
-        self.assertEqual(state._all_hunks[state._pos], (0, 0))
-
-    def test_go_prev_wraps_around(self) -> None:
-        """go_prev() wraps from first hunk to last unresolved."""
-        state = _WebMergeState(
-            {
-                "files": [
-                    {
-                        "name": "a.py",
-                        "hunks": [
-                            {"cs": 0, "cc": 1, "bs": 0, "bc": 1},
-                            {"cs": 1, "cc": 1, "bs": 1, "bc": 1},
-                        ],
-                    }
-                ],
-            }
-        )
-        state._pos = 0
-        state.go_prev()
-        self.assertEqual(state._all_hunks[state._pos], (0, 1))
-
-    def test_unresolved_in_file(self) -> None:
-        """unresolved_in_file returns correct hunk indices."""
-        state = _WebMergeState(
-            {
-                "files": [
-                    {
-                        "name": "a.py",
-                        "hunks": [
-                            {"cs": 0, "cc": 1, "bs": 0, "bc": 1},
-                            {"cs": 1, "cc": 1, "bs": 1, "bc": 1},
-                        ],
-                    }
-                ],
-            }
-        )
-        state.mark_resolved(0, 0)
-        self.assertEqual(state.unresolved_in_file(0), [1])
-
-    def test_all_unresolved(self) -> None:
-        """all_unresolved returns all unresolved (fi, hi) pairs."""
-        state = _WebMergeState(
-            {
-                "files": [
-                    {
-                        "name": "a.py",
-                        "hunks": [
-                            {"cs": 0, "cc": 1, "bs": 0, "bc": 1},
-                            {"cs": 1, "cc": 1, "bs": 1, "bc": 1},
-                        ],
-                    }
-                ],
-            }
-        )
-        state.mark_resolved(0, 0)
-        self.assertEqual(state.all_unresolved(), [(0, 1)])
-
-
-class TestRejectHunkInFile(unittest.TestCase):
-    """Test _reject_hunk_in_file with real files."""
-
-    def test_rejects_hunk_replacing_lines(self) -> None:
-        """Rejecting a hunk replaces current lines with base lines."""
-        with tempfile.TemporaryDirectory() as td:
-            cur_path = os.path.join(td, "current.py")
-            base_path = os.path.join(td, "base.py")
-            Path(cur_path).write_text("a\nMODIFIED\nc\n")
-            Path(base_path).write_text("a\nb\nc\n")
-            hunk = {"cs": 1, "cc": 1, "bs": 1, "bc": 1}
-            _reject_hunk_in_file(cur_path, base_path, hunk)
-            self.assertEqual(Path(cur_path).read_text(), "a\nb\nc\n")
-
-    def test_missing_current_file(self) -> None:
-        """When current file is missing, writes base lines."""
-        with tempfile.TemporaryDirectory() as td:
-            cur_path = os.path.join(td, "current.py")
-            base_path = os.path.join(td, "base.py")
-            Path(base_path).write_text("hello\n")
-            hunk = {"cs": 0, "cc": 0, "bs": 0, "bc": 1}
-            _reject_hunk_in_file(cur_path, base_path, hunk)
-            self.assertEqual(Path(cur_path).read_text(), "hello\n")
-
-    def test_missing_base_file(self) -> None:
-        """When base file is missing, base_lines is empty."""
-        with tempfile.TemporaryDirectory() as td:
-            cur_path = os.path.join(td, "current.py")
-            base_path = os.path.join(td, "base.py")
-            Path(cur_path).write_text("a\nb\nc\n")
-            hunk = {"cs": 1, "cc": 1, "bs": 0, "bc": 0}
-            _reject_hunk_in_file(cur_path, base_path, hunk)
-            self.assertEqual(Path(cur_path).read_text(), "a\nc\n")
-
-
-class TestRejectAllHunksInFile(unittest.TestCase):
-    """Test _reject_all_hunks_in_file."""
-
-    def test_copies_base_over_current(self) -> None:
-        """Rejecting all hunks restores the base content in current."""
-        with tempfile.TemporaryDirectory() as td:
-            cur_path = os.path.join(td, "current.py")
-            base_path = os.path.join(td, "base.py")
-            Path(cur_path).write_text("modified\n")
-            Path(base_path).write_text("original\n")
-            _reject_all_hunks_in_file({
-                "current": cur_path,
-                "base": base_path,
-                "hunks": [{"cs": 0, "cc": 1, "bs": 0, "bc": 1}],
-            })
-            self.assertEqual(Path(cur_path).read_text(), "original\n")
-
-    def test_reverts_only_listed_hunks(self) -> None:
-        """Only the hunk indices passed in are reverted; an accepted
-        hunk's content stays on disk (F2 lost-update fix)."""
-        with tempfile.TemporaryDirectory() as td:
-            cur_path = os.path.join(td, "current.py")
-            base_path = os.path.join(td, "base.py")
-            Path(cur_path).write_text("l1\nNEW2\nl3\nNEW4\nl5\n")
-            Path(base_path).write_text("l1\nold2\nl3\nold4\nl5\n")
-            _reject_all_hunks_in_file(
-                {
-                    "current": cur_path,
-                    "base": base_path,
-                    "hunks": [
-                        {"cs": 1, "cc": 1, "bs": 1, "bc": 1},
-                        {"cs": 3, "cc": 1, "bs": 3, "bc": 1},
-                    ],
-                },
-                [1],
-            )
-            self.assertEqual(
-                Path(cur_path).read_text(), "l1\nNEW2\nl3\nold4\nl5\n",
-            )
-
-    def test_missing_base_is_noop(self) -> None:
-        """When base file doesn't exist, current file is unchanged."""
-        with tempfile.TemporaryDirectory() as td:
-            cur_path = os.path.join(td, "current.py")
-            base_path = os.path.join(td, "base.py")
-            Path(cur_path).write_text("modified\n")
-            _reject_all_hunks_in_file({"current": cur_path, "base": base_path})
-            self.assertEqual(Path(cur_path).read_text(), "modified\n")
-
-    def test_writes_to_target_when_current_is_placeholder(self) -> None:
-        """When ``target`` differs from ``current`` (deleted-file case),
-        rejecting all hunks must restore the file at the workspace
-        target path, not at the display placeholder.
-        """
-        with tempfile.TemporaryDirectory() as td:
-            placeholder = os.path.join(td, ".deleted", "foo.py")
-            Path(placeholder).parent.mkdir(parents=True)
-            Path(placeholder).write_text("")
-            base_path = os.path.join(td, "base", "foo.py")
-            Path(base_path).parent.mkdir(parents=True)
-            Path(base_path).write_text("original line 1\noriginal line 2\n")
-            target = os.path.join(td, "work", "foo.py")
-            self.assertFalse(Path(target).exists())
-            _reject_all_hunks_in_file({
-                "current": placeholder,
-                "base": base_path,
-                "target": target,
-                "hunks": [{"cs": 0, "cc": 0, "bs": 0, "bc": 2}],
-            })
-            self.assertTrue(Path(target).is_file())
-            self.assertEqual(
-                Path(target).read_text(),
-                "original line 1\noriginal line 2\n",
-            )
-
-    def test_reject_hunk_writes_to_target(self) -> None:
-        """``_reject_hunk_in_file`` must restore content at the target
-        path when the visible "current" is a placeholder.
-        """
-        with tempfile.TemporaryDirectory() as td:
-            placeholder = os.path.join(td, ".deleted", "foo.py")
-            Path(placeholder).parent.mkdir(parents=True)
-            Path(placeholder).write_text("")
-            base_path = os.path.join(td, "base", "foo.py")
-            Path(base_path).parent.mkdir(parents=True)
-            Path(base_path).write_text("a\nb\nc\n")
-            target = os.path.join(td, "work", "foo.py")
-            hunk = {"cs": 0, "cc": 0, "bs": 0, "bc": 3}
-            _reject_hunk_in_file(placeholder, base_path, hunk, target)
-            self.assertTrue(Path(target).is_file())
-            self.assertEqual(Path(target).read_text(), "a\nb\nc\n")
-
-
-class TestAugmentMergeData(unittest.TestCase):
-    """Test _augment_merge_data file content augmentation."""
-
-    def test_adds_file_contents(self) -> None:
-        """Augments merge_data with base_text and current_text."""
-        with tempfile.TemporaryDirectory() as td:
-            base_path = os.path.join(td, "base.py")
-            cur_path = os.path.join(td, "current.py")
-            Path(base_path).write_text("base content")
-            Path(cur_path).write_text("current content")
-            event = {
-                "type": "merge_data",
-                "data": {"files": [{"base": base_path, "current": cur_path}]},
-            }
-            result = _augment_merge_data(event)
-            f = result["data"]["files"][0]
-            self.assertEqual(f["base_text"], "base content")
-            self.assertEqual(f["current_text"], "current content")
-
-    def test_missing_base_returns_empty_text(self) -> None:
-        """When base file doesn't exist, base_text is empty string."""
-        with tempfile.TemporaryDirectory() as td:
-            cur_path = os.path.join(td, "current.py")
-            Path(cur_path).write_text("current")
-            event = {
-                "type": "merge_data",
-                "data": {
-                    "files": [
-                        {
-                            "base": os.path.join(td, "nonexistent.py"),
-                            "current": cur_path,
-                        }
-                    ]
-                },
-            }
-            result = _augment_merge_data(event)
-            self.assertEqual(result["data"]["files"][0]["base_text"], "")
-
-    def test_missing_current_returns_empty_text(self) -> None:
-        """When current file doesn't exist, current_text is empty string."""
-        with tempfile.TemporaryDirectory() as td:
-            base_path = os.path.join(td, "base.py")
-            Path(base_path).write_text("base")
-            event = {
-                "type": "merge_data",
-                "data": {
-                    "files": [
-                        {
-                            "base": base_path,
-                            "current": os.path.join(td, "nonexistent.py"),
-                        }
-                    ]
-                },
-            }
-            result = _augment_merge_data(event)
-            self.assertEqual(result["data"]["files"][0]["current_text"], "")
-
-    def test_missing_key_returns_empty_text(self) -> None:
-        """When file dict has no 'base' or 'current' key, texts are empty."""
-        event = {
-            "type": "merge_data",
-            "data": {"files": [{}]},
-        }
-        result = _augment_merge_data(event)
-        self.assertEqual(result["data"]["files"][0]["base_text"], "")
-        self.assertEqual(result["data"]["files"][0]["current_text"], "")
-
-    def test_binary_file_does_not_raise(self) -> None:
-        """Binary files (e.g. generated PDFs) must not crash augmentation.
-
-        Regression: ``Path.read_text()`` raises ``UnicodeDecodeError``
-        on binary content, which is a ``ValueError`` — NOT an
-        ``OSError`` — so the previous ``except (OSError, KeyError)``
-        let the exception bubble up through the broadcast path and
-        the merge UI never opened for binary-only changes.
-        """
-        with tempfile.TemporaryDirectory() as td:
-            base_path = os.path.join(td, "old.pdf")
-            cur_path = os.path.join(td, "new.pdf")
-            Path(base_path).write_bytes(b"%PDF-1.4\n\x00\x01\xff\xfe")
-            Path(cur_path).write_bytes(b"%PDF-1.7\n\x00\x02\xff\xfe")
-            event = {
-                "type": "merge_data",
-                "data": {
-                    "files": [
-                        {
-                            "base": base_path,
-                            "current": cur_path,
-                            "binary": True,
-                        }
-                    ]
-                },
-            }
-            result = _augment_merge_data(event)
-            f = result["data"]["files"][0]
-            self.assertEqual(f["base_text"], "")
-            self.assertEqual(f["current_text"], "")
-            json.dumps(result)
-
-    def test_binary_file_without_flag_does_not_raise(self) -> None:
-        """Even without an explicit binary flag, undecodable bytes
-        must not break the broadcast path."""
-        with tempfile.TemporaryDirectory() as td:
-            base_path = os.path.join(td, "a.bin")
-            cur_path = os.path.join(td, "b.bin")
-            Path(base_path).write_bytes(b"\x00\xff\xfe\x80")
-            Path(cur_path).write_bytes(b"\x00\xff\xfe\x81")
-            event = {
-                "type": "merge_data",
-                "data": {
-                    "files": [{"base": base_path, "current": cur_path}]
-                },
-            }
-            result = _augment_merge_data(event)
-            f = result["data"]["files"][0]
-            self.assertEqual(f["base_text"], "")
-            self.assertEqual(f["current_text"], "")
-
-
 class TestReadVersion(unittest.TestCase):
     """Test _read_version helper."""
 
@@ -3068,36 +2260,6 @@ class TestWebPrinterBroadcastEdgeCases(IsolatedAsyncioTestCase):
                 CONFIG_PATH.write_text(orig_config)
             elif CONFIG_PATH.exists():
                 CONFIG_PATH.unlink()
-
-    async def test_broadcast_merge_data_triggers_callback(self) -> None:
-        """broadcast() augments merge_data and calls merge_state_callback."""
-        with tempfile.TemporaryDirectory() as td:
-            base_path = os.path.join(td, "base.py")
-            cur_path = os.path.join(td, "current.py")
-            Path(base_path).write_text("base")
-            Path(cur_path).write_text("current")
-
-            printer = WebPrinter()
-            printer._thread_local.task_id = "t1"
-            callback_calls: list[tuple[str, dict]] = []
-
-            def _cb(tab_id: str, merge_data: dict[str, Any]) -> None:
-                callback_calls.append((tab_id, merge_data))
-
-            printer._merge_state_callback = _cb
-            printer.start_recording()
-            printer.broadcast(
-                {
-                    "type": "merge_data",
-                    "tabId": "tab-1",
-                    "data": {
-                        "files": [{"base": base_path, "current": cur_path, "hunks": []}],
-                    },
-                }
-            )
-            self.assertEqual(len(callback_calls), 1)
-            self.assertEqual(callback_calls[0][0], "tab-1")
-
 
 class TestAuthenticationEdgeCases(IsolatedAsyncioTestCase):
     """Test WebSocket authentication edge cases."""
@@ -3160,224 +2322,6 @@ class TestAuthenticationEdgeCases(IsolatedAsyncioTestCase):
             await ws.send(json.dumps({"type": "getModels"}))
             with self.assertRaises(Exception):
                 await asyncio.wait_for(ws.recv(), timeout=3)
-
-
-class TestMergeActionsDetailed(IsolatedAsyncioTestCase):
-    """Test individual merge actions: prev, next, accept-file, reject-file."""
-
-    async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
-        self._orig_config = None
-        if CONFIG_PATH.exists():
-            self._orig_config = CONFIG_PATH.read_text()
-        save_config({"remote_password": ""})
-
-        self._tmpdir = tempfile.mkdtemp()
-        subprocess.run(
-            ["git", "init", self._tmpdir],
-            capture_output=True,
-            check=True,
-        )
-        subprocess.run(
-            ["git", "-C", self._tmpdir, "config", "user.email", "t@t.com"],
-            capture_output=True,
-            check=True,
-        )
-        subprocess.run(
-            ["git", "-C", self._tmpdir, "config", "user.name", "T"],
-            capture_output=True,
-            check=True,
-        )
-        self._test_file = os.path.join(self._tmpdir, "test.py")
-        with open(self._test_file, "w") as f:
-            f.write("line1\nline2\nline3\n")
-        subprocess.run(
-            ["git", "-C", self._tmpdir, "add", "-A"],
-            capture_output=True,
-            check=True,
-        )
-        subprocess.run(
-            ["git", "-C", self._tmpdir, "commit", "-m", "initial"],
-            capture_output=True,
-            check=True,
-        )
-        with open(self._test_file, "w") as f:
-            f.write("line1\nmodified_line2\nline3\nnew_line4\n")
-
-        self.server = RemoteAccessServer(
-            host="127.0.0.1",
-            port=self.port,
-            work_dir=self._tmpdir,
-        )
-        await self.server.start_async()
-
-    async def asyncTearDown(self) -> None:
-        await self.server.stop_async()
-        if self._orig_config is not None:
-            CONFIG_PATH.write_text(self._orig_config)
-        elif CONFIG_PATH.exists():
-            CONFIG_PATH.unlink()
-
-    async def _auth(self, ws: Any) -> None:
-        await ws.send(json.dumps({"type": "auth", "password": ""}))
-        resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
-        assert resp["type"] == "auth_ok"
-
-    async def _trigger_merge(self, tab_id: str) -> None:
-        loop = asyncio.get_event_loop()
-        started = await loop.run_in_executor(
-            None,
-            lambda: self.server._vscode_server._prepare_and_start_merge(
-                self._tmpdir,
-                tab_id=tab_id,
-            ),
-        )
-        assert started
-
-    async def _collect_until(
-        self,
-        ws: Any,
-        target_type: str,
-        timeout: float = 5,
-    ) -> list[dict[str, Any]]:
-        events: list[dict[str, Any]] = []
-        deadline = asyncio.get_event_loop().time() + timeout
-        while asyncio.get_event_loop().time() < deadline:
-            try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=2)
-                ev = json.loads(raw)
-                events.append(ev)
-                if ev.get("type") == target_type:
-                    break
-            except TimeoutError:
-                break
-        return events
-
-    async def test_merge_nav_prev_next(self) -> None:
-        """prev and next navigate through hunks without resolving."""
-        tab_id = "merge-nav-tab"
-        async with connect(
-            f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
-        ) as ws:
-            await self._auth(ws)
-            await self._trigger_merge(tab_id)
-            events = await self._collect_until(ws, "merge_started")
-            md_events = [e for e in events if e.get("type") == "merge_data"]
-            total_hunks = md_events[0]["hunk_count"]
-
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "mergeAction",
-                        "action": "prev",
-                        "tabId": tab_id,
-                    }
-                )
-            )
-            events = await self._collect_until(ws, "merge_nav")
-            nav_events = [e for e in events if e.get("type") == "merge_nav"]
-            self.assertTrue(len(nav_events) > 0)
-            self.assertEqual(nav_events[0]["remaining"], total_hunks)
-
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "mergeAction",
-                        "action": "next",
-                        "tabId": tab_id,
-                    }
-                )
-            )
-            events = await self._collect_until(ws, "merge_nav")
-            nav_events = [e for e in events if e.get("type") == "merge_nav"]
-            self.assertTrue(len(nav_events) > 0)
-            self.assertEqual(nav_events[0]["remaining"], total_hunks)
-
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "mergeAction",
-                        "action": "accept-all",
-                        "tabId": tab_id,
-                    }
-                )
-            )
-            await self._collect_until(ws, "merge_ended", timeout=5)
-
-    async def test_merge_accept_file(self) -> None:
-        """accept-file accepts all hunks in the current file."""
-        tab_id = "merge-accept-file-tab"
-        async with connect(
-            f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
-        ) as ws:
-            await self._auth(ws)
-            await self._trigger_merge(tab_id)
-            await self._collect_until(ws, "merge_started")
-
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "mergeAction",
-                        "action": "accept-file",
-                        "tabId": tab_id,
-                    }
-                )
-            )
-            events = await self._collect_until(ws, "merge_ended", timeout=5)
-            ended = [e for e in events if e.get("type") == "merge_ended"]
-            self.assertTrue(len(ended) > 0)
-            with open(self._test_file) as f:
-                content = f.read()
-            self.assertEqual(content, "line1\nmodified_line2\nline3\nnew_line4\n")
-
-    async def test_merge_reject_file(self) -> None:
-        """reject-file reverts all hunks in the current file."""
-        tab_id = "merge-reject-file-tab"
-        async with connect(
-            f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
-        ) as ws:
-            await self._auth(ws)
-            await self._trigger_merge(tab_id)
-            await self._collect_until(ws, "merge_started")
-
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "mergeAction",
-                        "action": "reject-file",
-                        "tabId": tab_id,
-                    }
-                )
-            )
-            events = await self._collect_until(ws, "merge_ended", timeout=5)
-            ended = [e for e in events if e.get("type") == "merge_ended"]
-            self.assertTrue(len(ended) > 0)
-            with open(self._test_file) as f:
-                content = f.read()
-            self.assertEqual(content, "line1\nline2\nline3\n")
-
-    async def test_merge_action_no_state(self) -> None:
-        """mergeAction with unknown tabId is a no-op (state is None)."""
-        async with connect(
-            f"wss://127.0.0.1:{self.port}/ws",
-            ssl=_no_verify_ssl(),
-        ) as ws:
-            await self._auth(ws)
-            await ws.send(
-                json.dumps(
-                    {
-                        "type": "mergeAction",
-                        "action": "accept",
-                        "tabId": "nonexistent",
-                    }
-                )
-            )
-            await ws.send(json.dumps({"type": "getModels"}))
-            resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
-            self.assertEqual(resp["type"], "models")
 
 
 class TestHandleReadyRestoredTabs(IsolatedAsyncioTestCase):
@@ -3553,6 +2497,23 @@ class TestHandleReadyRestoredTabs(IsolatedAsyncioTestCase):
             self.assertIn("models", types)
 
 
+class _ForeignMetricsHandler(BaseHTTPRequestHandler):
+    """Stand-in for a FOREIGN cloudflared's ``/quicktunnel`` endpoint."""
+
+    def do_GET(self) -> None:  # noqa: N802 (http.server API)
+        body = json.dumps(
+            {"hostname": "foreign-daemon.trycloudflare.com"},
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
 class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
     """Test _send_welcome_info URL fallback paths."""
 
@@ -3571,6 +2532,7 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
 
@@ -3617,9 +2579,34 @@ class TestSendWelcomeInfoFallbacks(IsolatedAsyncioTestCase):
 
         The frontend uses ``tunnelActive: False`` to hide the
         welcome-page remote-password panel when there is no tunnel.
+
+        A tunnel-DISABLED server must not fall back to
+        ``_discover_tunnel_url_from_metrics``: the machine-wide scan
+        can adopt a FOREIGN daemon's tunnel URL that does not route
+        to this server.  A stand-in "foreign cloudflared" metrics
+        endpoint is bound inside the hardcoded 20240-20259 scan range
+        so the leak reproduces deterministically — pre-fix this test
+        broadcast ``https://foreign-daemon.trycloudflare.com`` (or,
+        on this dev machine, the production daemon's real tunnel URL)
+        instead of ``""``.
         """
         self.server._active_url = None
         _URL_FILE.unlink(missing_ok=True)
+
+        foreign = None
+        for scan_port in range(20240, 20260):
+            try:
+                foreign = HTTPServer(
+                    ("127.0.0.1", scan_port), _ForeignMetricsHandler,
+                )
+                break
+            except OSError:
+                continue
+        if foreign is not None:
+            threading.Thread(
+                target=foreign.serve_forever, daemon=True,
+            ).start()
+            self.addCleanup(foreign.shutdown)
 
         async with connect(
             f"wss://127.0.0.1:{self.port}/ws",
@@ -3731,6 +2718,7 @@ class TestNamedTunnel(IsolatedAsyncioTestCase):
             use_tunnel=False,
             tunnel_token="fake-token",
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         script = (
             "import sys, time\n"
@@ -3843,6 +2831,7 @@ class TestWatchdogBranches(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
 
@@ -3946,6 +2935,7 @@ class TestCheckAndRestartTunnel(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
 
@@ -4575,6 +3565,7 @@ class TestCheckAndRestartTunnelFailedRestart(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
 
@@ -4618,6 +3609,7 @@ class TestWatchdogWSPingException(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
 
@@ -4799,102 +3791,6 @@ class TestReadVersionException(unittest.TestCase):
                 ws_mod._INSTALLED_EXTENSIONS_ROOT = saved_root
                 vfile.with_suffix(".py.bak").rename(vfile)
                 vfile.write_text(backup)
-
-
-class TestMergeActionCurNone(IsolatedAsyncioTestCase):
-    """Test merge actions when current hunk is None (branch 1382/1386/1405)."""
-
-    async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
-        self._orig_config = None
-        if CONFIG_PATH.exists():
-            self._orig_config = CONFIG_PATH.read_text()
-        save_config({"remote_password": ""})
-
-        self._backup_url: bytes | None = None
-        if _URL_FILE.is_file():
-            self._backup_url = _URL_FILE.read_bytes()
-
-        self._tmpdir = tempfile.mkdtemp()
-        self.server = RemoteAccessServer(
-            host="127.0.0.1",
-            port=self.port,
-            use_tunnel=False,
-            work_dir=self._tmpdir,
-        )
-        await self.server.start_async()
-
-    async def asyncTearDown(self) -> None:
-        await self.server.stop_async()
-        if self._orig_config is not None:
-            CONFIG_PATH.write_text(self._orig_config)
-        elif CONFIG_PATH.exists():
-            CONFIG_PATH.unlink()
-        if self._backup_url is not None:
-            _URL_FILE.write_bytes(self._backup_url)
-        else:
-            _URL_FILE.unlink(missing_ok=True)
-
-    async def test_accept_when_cur_is_none(self) -> None:
-        """accept action when cur is None (no hunks) is a no-op."""
-        tab_id = "tab-cur-none"
-        merge_data = {"files": [{"base": "/dev/null", "current": "/dev/null", "hunks": []}]}
-        state = _WebMergeState(merge_data)
-        self.server._merge_states[tab_id] = state
-
-        async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
-        ) as ws:
-            await ws.send(json.dumps({"type": "auth", "password": ""}))
-            await asyncio.wait_for(ws.recv(), timeout=5)
-
-            await ws.send(json.dumps({
-                "type": "mergeAction", "action": "accept", "tabId": tab_id,
-            }))
-            msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
-            self.assertEqual(msg["type"], "merge_nav")
-            self.assertEqual(msg["remaining"], 0)
-
-    async def test_reject_when_cur_is_none(self) -> None:
-        """reject action when cur is None (no hunks) is a no-op."""
-        tab_id = "tab-cur-none-rej"
-        merge_data = {"files": [{"base": "/dev/null", "current": "/dev/null", "hunks": []}]}
-        state = _WebMergeState(merge_data)
-        self.server._merge_states[tab_id] = state
-
-        async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
-        ) as ws:
-            await ws.send(json.dumps({"type": "auth", "password": ""}))
-            await asyncio.wait_for(ws.recv(), timeout=5)
-
-            await ws.send(json.dumps({
-                "type": "mergeAction", "action": "reject", "tabId": tab_id,
-            }))
-            msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
-            self.assertEqual(msg["type"], "merge_nav")
-            self.assertEqual(msg["remaining"], 0)
-
-    async def test_accept_file_when_cur_is_none(self) -> None:
-        """accept-file action when cur is None (no hunks) is a no-op."""
-        tab_id = "tab-cur-none-af"
-        merge_data = {"files": [{"base": "/dev/null", "current": "/dev/null", "hunks": []}]}
-        state = _WebMergeState(merge_data)
-        self.server._merge_states[tab_id] = state
-
-        async with connect(
-            f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl(),
-        ) as ws:
-            await ws.send(json.dumps({"type": "auth", "password": ""}))
-            await asyncio.wait_for(ws.recv(), timeout=5)
-
-            await ws.send(json.dumps({
-                "type": "mergeAction", "action": "accept-file",
-                "tabId": tab_id,
-            }))
-            msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
-            self.assertEqual(msg["type"], "merge_nav")
-            self.assertEqual(msg["remaining"], 0)
 
 
 class TestReadyRestoredTabEmptyChatId(IsolatedAsyncioTestCase):
@@ -5218,6 +4114,7 @@ class TestServeAsyncBranches(IsolatedAsyncioTestCase):
             port=self.port,
             use_tunnel=False,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await server._setup_server()
 
@@ -5258,6 +4155,7 @@ class TestServeAsyncBranches(IsolatedAsyncioTestCase):
             port=self.port,
             use_tunnel=False,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await server._setup_server()
 
@@ -5577,35 +4475,6 @@ class TestReadVersionNoMatch(unittest.TestCase):
                 vfile.write_text(original)
 
 
-class TestBroadcastMergeDataNoTabId(IsolatedAsyncioTestCase):
-    """Test broadcast with merge_data event missing tabId."""
-
-    async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
-        save_config({"remote_password": ""})
-        self.server = RemoteAccessServer(
-            host="127.0.0.1",
-            port=self.port,
-            use_tunnel=False,
-        )
-        await self.server.start_async()
-
-    async def asyncTearDown(self) -> None:
-        await self.server.stop_async()
-
-    async def test_merge_data_without_tab_id(self) -> None:
-        """broadcast merge_data event without tabId doesn't crash."""
-        ctx = _no_verify_ssl()
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=ctx) as ws:
-            await ws.send(json.dumps({"type": "auth", "password": ""}))
-            _ = await asyncio.wait_for(ws.recv(), timeout=5)
-            self.server._printer.broadcast({
-                "type": "merge_data",
-                "data": {"files": []},
-            })
-            await asyncio.sleep(0.1)
-
-
 class TestBroadcastLoopNone(unittest.TestCase):
     """Test broadcast when _loop is None."""
 
@@ -5614,99 +4483,6 @@ class TestBroadcastLoopNone(unittest.TestCase):
         printer = WebPrinter()
         printer._loop = None
         printer.broadcast({"type": "test_event"})
-
-
-class TestRejectLastHunk(IsolatedAsyncioTestCase):
-    """Test rejecting the last hunk in a file (delta loop not entered)."""
-
-    async def asyncSetUp(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-        self.port = _find_free_port()
-        save_config({"remote_password": ""})
-        self.server = RemoteAccessServer(
-            host="127.0.0.1",
-            port=self.port,
-            use_tunnel=False,
-            work_dir=self.tmpdir,
-        )
-        await self.server.start_async()
-
-    async def asyncTearDown(self) -> None:
-        await self.server.stop_async()
-        import shutil
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    async def test_reject_last_hunk_no_delta_loop(self) -> None:
-        """Rejecting the last hunk doesn't iterate delta loop (1396->1395)."""
-        base_path = os.path.join(self.tmpdir, "base.txt")
-        current_path = os.path.join(self.tmpdir, "current.txt")
-        with open(base_path, "w") as f:
-            f.write("line1\nline2\nline3\n")
-        with open(current_path, "w") as f:
-            f.write("line1\nchanged\nline3\n")
-
-        merge_data = {
-            "files": [{
-                "name": "test.txt",
-                "base": base_path,
-                "current": current_path,
-                "hunks": [{"cs": 1, "cc": 1, "bs": 1, "bc": 1}],
-            }],
-        }
-        state = _WebMergeState(merge_data)
-        tab_id = "test-tab-reject-last"
-        self.server._merge_states[tab_id] = state
-
-        ctx = _no_verify_ssl()
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=ctx) as ws:
-            await ws.send(json.dumps({"type": "auth", "password": ""}))
-            _ = await asyncio.wait_for(ws.recv(), timeout=5)
-            await ws.send(json.dumps({
-                "type": "mergeAction",
-                "action": "reject",
-                "tabId": tab_id,
-            }))
-            msg = await asyncio.wait_for(ws.recv(), timeout=5)
-            data = json.loads(msg)
-            self.assertEqual(data["type"], "merge_nav")
-            self.assertEqual(data["remaining"], 0)
-
-
-class TestRejectAllEmpty(IsolatedAsyncioTestCase):
-    """Test reject-all when all hunks already resolved."""
-
-    async def asyncSetUp(self) -> None:
-        self.port = _find_free_port()
-        save_config({"remote_password": ""})
-        self.server = RemoteAccessServer(
-            host="127.0.0.1",
-            port=self.port,
-            use_tunnel=False,
-        )
-        await self.server.start_async()
-
-    async def asyncTearDown(self) -> None:
-        await self.server.stop_async()
-
-    async def test_reject_all_no_unresolved(self) -> None:
-        """reject-all with no unresolved hunks goes to line 1431."""
-        merge_data = {"files": [{"name": "f.txt", "hunks": []}]}
-        state = _WebMergeState(merge_data)
-        tab_id = "test-tab-reject-all-empty"
-        self.server._merge_states[tab_id] = state
-
-        ctx = _no_verify_ssl()
-        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=ctx) as ws:
-            await ws.send(json.dumps({"type": "auth", "password": ""}))
-            _ = await asyncio.wait_for(ws.recv(), timeout=5)
-            await ws.send(json.dumps({
-                "type": "mergeAction",
-                "action": "reject-all",
-                "tabId": tab_id,
-            }))
-            msg = await asyncio.wait_for(ws.recv(), timeout=5)
-            data = json.loads(msg)
-            self.assertEqual(data["type"], "merge_nav")
 
 
 class TestStartTunnelGenericException(IsolatedAsyncioTestCase):
@@ -5844,6 +4620,7 @@ class TestCheckAndRestartTunnelSuccess(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             use_tunnel=False,
+            ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
         self._old_path = os.environ.get("PATH", "")
@@ -5914,24 +4691,6 @@ class TestWatchdogExceptionPaths(IsolatedAsyncioTestCase):
                 raise RuntimeError("close failed too")
 
         await self.server._ping_one_ws(_FakeWS())
-
-
-class TestSeekExhaustsAllHunks(unittest.TestCase):
-    """Test _seek when all hunks resolved after calling advance()."""
-
-    def test_seek_all_resolved(self) -> None:
-        """Seek iterates all positions when all are resolved (201->exit)."""
-        merge_data = {
-            "files": [{
-                "name": "f.txt",
-                "hunks": [{"cs": 0, "cc": 1, "bs": 0, "bc": 1}],
-            }],
-        }
-        state = _WebMergeState(merge_data)
-        state.mark_resolved(0, 0)
-        state.advance()
-        state.go_prev()
-        self.assertEqual(state.remaining, 0)
 
 
 class TestHeadTransportNone(IsolatedAsyncioTestCase):
@@ -6066,6 +4825,7 @@ class TestStartWithTunnel(unittest.TestCase):
                 host="127.0.0.1",
                 port=port,
                 use_tunnel=True,
+                ntfy_base_url=unroutable_base_url(),
             )
 
             started = threading.Event()
@@ -6118,6 +4878,7 @@ class TestStartWithTunnel(unittest.TestCase):
                 host="127.0.0.1",
                 port=port,
                 use_tunnel=True,
+                ntfy_base_url=unroutable_base_url(),
             )
 
             started = threading.Event()
@@ -6509,6 +5270,7 @@ class TestWatchdogEdgeDeregistration(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
         self.server.use_tunnel = True
@@ -6602,6 +5364,7 @@ class TestDeadProcessClearsMetricsState(IsolatedAsyncioTestCase):
             host="127.0.0.1",
             port=self.port,
             work_dir=tempfile.mkdtemp(),
+            ntfy_base_url=unroutable_base_url(),
         )
         await self.server.start_async()
 

@@ -35,7 +35,6 @@ from pathlib import Path
 import kiss.agents.sorcar.persistence as th
 from kiss.agents.sorcar.persistence import (
     _add_task,
-    _list_recent_chats,
     _load_history,
     _save_task_extra,
     _set_task_favorite,
@@ -171,30 +170,6 @@ class TestSubagentNanExtraConsistency(_TempDbTestBase):
         assert "fanned-out subtask" not in tasks
         assert "parent task" in tasks
 
-    def test_subagent_only_chat_with_nan_cost_does_not_eat_limit_slot(
-        self,
-    ) -> None:
-        base = time.time()
-        b_id, chat_b = _add_task("real task B")
-        self._set_timestamp(b_id, base - 30)
-        a_id, chat_a = _add_task("real task A")
-        self._set_timestamp(a_id, base - 20)
-        x_id, _chat_x = _add_task(
-            "orphaned subagent task",
-            extra={
-                "subagent": {
-                    "parent_task_id":
-                        "ffffffffffffffffffffffffffffffff"
-                },
-                "cost": float("nan"),
-            },
-        )
-        self._set_timestamp(x_id, base - 10)
-
-        chats = _list_recent_chats(limit=2)
-        chat_ids = [c["chat_id"] for c in chats]
-        assert chat_ids == [chat_a, chat_b]
-
     def test_sql_classify_subagent_via_parent_task_id_column(
         self,
     ) -> None:
@@ -224,6 +199,6 @@ class TestSubagentNanExtraConsistency(_TempDbTestBase):
         assert parent_row["not_sub"] == 1
         assert not parent_row["parent_task_id"]
 
-        chats = _list_recent_chats(limit=10)
-        chat_ids = [c["chat_id"] for c in chats]
-        assert chat in chat_ids
+        history_tasks = [e["task"] for e in _load_history()]
+        assert "parent task" in history_tasks
+        assert "subagent row" not in history_tasks

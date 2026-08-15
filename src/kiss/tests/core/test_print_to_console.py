@@ -85,8 +85,10 @@ class TestBashStreamInResultPanel(unittest.TestCase):
     Reproduces the bug where ``bash_stream`` events were written
     directly before the ``tool_result`` event opened the ``RESULT``
     rule, leaving the result panel body empty and the streamed bash
-    output stranded above the opening rule (visually "above the
-    Result panel" in the sorcar CLI interactive terminal).
+    output stranded above the opening rule — visually "above the
+    Result panel" in any :class:`ConsolePrinter` terminal (the
+    default printer of every agent run without an explicit one, e.g.
+    a programmatic Python-API run).
     """
 
     def test_bash_output_appears_between_result_rules(self) -> None:

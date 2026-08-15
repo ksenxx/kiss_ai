@@ -193,6 +193,57 @@ class TestIRCBugs:
             backend.send_message("#ch", "hi")
 
 
+class TestIRCFreshDaemonTools:
+    """A fresh daemon-side agent's IRC tools must really reach the server.
+
+    The ``kiss.server.sorcar.run`` tools-file contract builds a FRESH
+    ``IRCAgent`` inside the daemon via this module's ``get_tools()``.
+    That backend starts disconnected, so its messaging tools must
+    connect on demand from the persisted config instead of silently
+    reporting success while sending nothing.
+    """
+
+    def setup_method(self) -> None:
+        self._backup = _backup_config(_irc_config.path)
+        self.server = _FakeIRCServer()
+
+    def teardown_method(self) -> None:
+        self.server.close()
+        _restore_config(_irc_config.path, self._backup)
+
+    def test_get_tools_post_message_connects_on_demand(self) -> None:
+        """get_tools()' fresh backend lazily connects and really sends."""
+        from kiss.agents.third_party_agents import irc_agent
+
+        _irc_config.save(
+            {
+                "server": "127.0.0.1",
+                "nick": "kissbot",
+                "port": str(self.server.port),
+                "password": "",
+                "use_tls": "false",
+            }
+        )
+        tools = {t.__name__: t for t in irc_agent.get_tools()}
+        assert "post_message" in tools, "authenticated backend tools expected"
+        try:
+            result = json.loads(tools["post_message"]("#chan", "from daemon"))
+            assert result["ok"] is True, result
+            assert self.server.wait_received("PRIVMSG #chan :from daemon"), (
+                "the lazily-connected backend must really send the line"
+            )
+        finally:
+            tools["clear_irc_auth"]()
+
+    def test_fresh_backend_post_message_fails_loudly_without_config(self) -> None:
+        """No config: the tool must report an error, never a false ok."""
+        backend = IRCChannelBackend()
+        backend._nick = "kissbot"
+        result = json.loads(backend.post_message("#chan", "hi"))
+        assert result["ok"] is False
+        assert "Not connected to IRC" in result["error"]
+
+
 class _JSONResponder(BaseHTTPRequestHandler):
     body: bytes = b"{}"
 

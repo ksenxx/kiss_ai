@@ -223,7 +223,15 @@ def test_printer_truncate_result_masks_base64_payload(temp_dir):
 
 
 def test_default_tool_result_strips_base64_to_avoid_context_bloat(temp_dir):
-    """For non-image-capable model backends the base64 payload is dropped."""
+    """The tool message never carries base64, but the bytes are not lost.
+
+    The base64 payload must stay out of the ``tool`` message text: it would
+    be re-sent as context on every later step.  It used to be dropped
+    entirely, which made an image a tool returned invisible to any
+    transport relying on the base implementation.  The bytes now travel as
+    a structured attachment on a following message instead, so the text
+    stays small and the model still sees the image.
+    """
     from kiss.core.models.model import Model
 
     class _StubModel(Model):
@@ -265,12 +273,26 @@ def test_default_tool_result_strips_base64_to_avoid_context_bloat(temp_dir):
         [("Read", {"result": read_output})]
     )
 
-    appended = m.conversation[-1]
-    assert appended["role"] == "tool"
+    tool_messages = [msg for msg in m.conversation if msg["role"] == "tool"]
+    assert len(tool_messages) == 1
+    appended = tool_messages[0]
     assert appended["tool_call_id"] == "call_1"
     assert expected_b64 not in appended["content"]
     assert "<<KISS_BINARY_ATTACHMENT" not in appended["content"]
     assert "[attached image/png," in appended["content"]
+
+    # No message may smuggle the payload back in as text.
+    assert not any(
+        expected_b64 in str(msg.get("content", "")) for msg in m.conversation
+    )
+
+    # The bytes survive as an attachment the adapters turn into an image part.
+    carried = [
+        att
+        for msg in m.conversation
+        for att in msg.get("attachments", [])
+    ]
+    assert [(a.mime_type, a.data) for a in carried] == [("image/png", _PNG_1x1)]
 
 
 def test_read_audio_file_encodes_as_attachment(temp_dir):

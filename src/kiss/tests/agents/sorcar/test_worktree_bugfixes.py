@@ -7,7 +7,8 @@
 BUG 1: _check_merge_conflict false positives with baseline
 BUG 2: copy_dirty_state doesn't delete old file on rename
 BUG 3: stash pop failure silently loses user's dirty edits
-BUG 4: merge review skips committed agent changes
+BUG 4 (obsolete): covered _parse_diff_hunks/_prepare_merge_view of the
+    interactive merge review, removed with the diff/merge workflow
 BUG 5: _release_worktree returns misleading branch on checkout failure
 """
 
@@ -27,7 +28,9 @@ from kiss.agents.sorcar.git_worktree import (
 def _make_repo(path: Path) -> Path:
     """Create a git repo with one initial commit at *path*."""
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", str(path)], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "init", "-b", "main", str(path)], capture_output=True, check=True
+    )
     subprocess.run(
         ["git", "-C", str(path), "config", "user.email", "t@t.com"],
         capture_output=True, check=True,
@@ -424,90 +427,3 @@ class TestBug1ConflictDetectionBaseline:
             assert "README.md" in wt_files
 
             assert orig_files & wt_files
-
-
-class TestBug4ParseDiffHunksBaseRef:
-    """_parse_diff_hunks with custom base_ref includes committed changes."""
-
-    def test_default_head_misses_committed_changes(self) -> None:
-        """Diffing against HEAD misses committed agent changes."""
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = _make_repo(Path(tmp) / "repo")
-            branch = "kiss/wt-diff-1"
-            wt_dir = _create_worktree(repo, branch)
-
-            (wt_dir / "agent.py").write_text("# agent code\n")
-            GitWorktreeOps.commit_all(wt_dir, "agent work")
-
-            from kiss.server.diff_merge import _parse_diff_hunks
-
-            hunks = _parse_diff_hunks(str(wt_dir))
-            assert "agent.py" not in hunks
-
-    def test_baseline_ref_includes_committed_changes(self) -> None:
-        """Diffing against baseline includes committed agent changes."""
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = _make_repo(Path(tmp) / "repo")
-
-            (repo / "README.md").write_text("# Dirty\n")
-
-            branch = "kiss/wt-diff-2"
-            wt_dir = _create_worktree(repo, branch)
-            baseline = _setup_baseline(repo, wt_dir, branch)
-
-            (wt_dir / "agent.py").write_text("# agent code\n")
-            GitWorktreeOps.commit_all(wt_dir, "agent work")
-
-            from kiss.server.diff_merge import _parse_diff_hunks
-
-            hunks = _parse_diff_hunks(str(wt_dir), base_ref=baseline)
-            assert "agent.py" in hunks
-            assert "README.md" not in hunks
-
-    def test_baseline_ref_includes_uncommitted_changes(self) -> None:
-        """Baseline ref catches both committed and uncommitted agent work."""
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = _make_repo(Path(tmp) / "repo")
-            branch = "kiss/wt-diff-3"
-            wt_dir = _create_worktree(repo, branch)
-            baseline = GitWorktreeOps.head_sha(wt_dir)
-            assert baseline is not None
-
-            (wt_dir / "committed.py").write_text("# committed\n")
-            GitWorktreeOps.commit_all(wt_dir, "committed work")
-
-            (wt_dir / "README.md").write_text("# uncommitted edit\n")
-
-            from kiss.server.diff_merge import _parse_diff_hunks
-
-            hunks = _parse_diff_hunks(str(wt_dir), base_ref=baseline)
-            assert "committed.py" in hunks
-            assert "README.md" in hunks
-
-    def test_prepare_merge_view_with_base_ref(self) -> None:
-        """_prepare_merge_view uses base_ref for both diff and base content."""
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = _make_repo(Path(tmp) / "repo")
-            branch = "kiss/wt-merge-view"
-            wt_dir = _create_worktree(repo, branch)
-            baseline = GitWorktreeOps.head_sha(wt_dir)
-            assert baseline is not None
-
-            (wt_dir / "README.md").write_text("# Agent version\n")
-            GitWorktreeOps.commit_all(wt_dir, "agent: update readme")
-
-            from kiss.server.diff_merge import _prepare_merge_view
-
-            data_dir = str(Path(tmp) / "merge-data")
-            Path(data_dir).mkdir()
-
-            result_default = _prepare_merge_view(
-                str(wt_dir), data_dir, {}, set(),
-            )
-            assert result_default.get("error") == "No changes"
-
-            result_baseline = _prepare_merge_view(
-                str(wt_dir), data_dir, {}, set(), base_ref=baseline,
-            )
-            assert result_baseline.get("status") == "opened"
-            assert result_baseline.get("count", 0) >= 1

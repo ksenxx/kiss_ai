@@ -2,24 +2,30 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for the chat-viewer live-stream invariant.
+"""Integration tests for the chat live-stream + one-tab-per-chat rules.
 
-Invariant
----------
-When a task is running in a tab, then ANY tab — in any remote browser
-window or VS Code window — that has opened the chat id of that task
-must see the events streaming from the running task.
+Invariants
+----------
+For a given chat id, AT MOST ONE tab is open (tabs are mirrored from
+the daemon's canonical registry, so this holds on every client):
+opening a chat in another tab MOVES the chat there — the previously
+bound tab is displaced (closed everywhere).  And when a task is
+running in a chat, the ONE tab currently showing that chat must see
+the events streaming from the running task.
 
 Tabs that open the chat WHILE the task is already running are covered
 by ``_replay_session`` → ``_reattach_running_chat`` (tested in
-``test_detach_tab_and_reattach.py``).  These tests cover the tabs that
+``test_detach_tab_and_reattach.py``).  These tests cover tabs that
 opened the chat BEFORE the task started:
 
-1. A viewer tab that resumed the chat from history while it was idle
-   must receive the live stream of a follow-up task launched from a
-   different tab (``clear`` + ``status running`` + every task event).
-2. The same must hold for a viewer tab that has NO
-   ``_RunningAgentState`` registry entry (e.g. a tab restored by
+1. A tab that resumed the chat from history while it was idle takes
+   the chat over (the launcher tab is displaced) and must receive the
+   live stream of a follow-up task launched from it (``clear`` +
+   ``status running`` + every task event); the displaced tab must
+   NOT receive that stream, and a later run from the displaced tab
+   starts a NEW chat.
+2. The same must hold for a takeover tab that has NO
+   ``kiss.server.agent_state`` registry entry (e.g. a tab restored by
    ``ready``/``resumeSession`` after a daemon restart, where
    ``_replay_session`` deliberately does not create registry state).
 3. A tab displaying a SUB-AGENT row of the chat must NOT be subscribed
@@ -50,9 +56,9 @@ from typing import Any, cast
 import yaml
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.agents.sorcar.sorcar_agent import SorcarAgent
 from kiss.core.models.model_info import get_available_models
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 _LIVE_TEXT = "live-follow-up-delta"
@@ -164,15 +170,21 @@ class TestChatViewerLiveStream(unittest.TestCase):
 
     def tearDown(self) -> None:
         _unpatch_grandparent_run(self.original_run)
+        agent_state.agent_states.clear()
         _restore_db(self.saved)
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _tab_state(self, tab_id: str) -> agent_state.AgentState:
+        state = agent_state.find_by_tab(tab_id)
+        assert state is not None, f"no agent state registered for tab {tab_id}"
+        return state
 
     def _run_and_wait(self, tab_id: str, prompt: str) -> None:
         self.server._handle_command({
             "type": "run", "prompt": prompt, "model": self.model,
             "workDir": self.tmpdir, "tabId": tab_id, "autoCommit": True,
         })
-        t = self.server._get_tab(tab_id).task_thread
+        t = self._tab_state(tab_id).task_thread
         assert t is not None
         t.join(timeout=60)
         assert not t.is_alive()
@@ -197,62 +209,99 @@ class TestChatViewerLiveStream(unittest.TestCase):
             "type": "resumeSession", "chatId": chat_id, "tabId": tab_id,
         })
 
-    def test_viewer_tab_streams_followup_task_from_other_tab(self) -> None:
-        """Core invariant: a viewer that opened the chat while idle sees
-        the live stream of a follow-up task launched in another tab."""
+    def test_takeover_tab_owns_chat_and_streams_followup(self) -> None:
+        """Core invariant: opening a chat in another tab MOVES the chat
+        there (one tab per chat).  The takeover tab receives follow-up
+        streams; the displaced tab does not, and a later run from it
+        starts a NEW chat."""
         tab_a, tab_b = "tab-A", "tab-B"
         self._run_and_wait(tab_a, "first task")
-        chat_id = self.server._get_tab(tab_a).chat_id
+        chat_id = self._tab_state(tab_a).chat_id
         assert chat_id
 
         self._open_chat_in_tab(tab_b, chat_id)
         replays = [e for e in self._events_since(0)
                    if e.get("type") == "task_events"
                    and e.get("tabId") == tab_b]
-        assert replays, "viewer tab should have received the replay"
+        assert replays, "takeover tab should have received the replay"
+        # The chat now lives in tab-B only: the registry never binds
+        # one chat to two tabs.
+        bound = [t["tabId"] for t in self.server.tab_registry.snapshot()
+                 if t["chatId"] == chat_id]
+        assert bound == [tab_b], (
+            f"one chat must be bound to exactly one tab, got {bound}"
+        )
 
         mark = len(self.events)
-        self._run_and_wait(tab_a, "follow-up task")
+        self._run_and_wait(tab_b, "follow-up task")
 
         post = self._events_since(mark)
         delta_tabs = self._live_delta_tab_ids(mark)
-        assert tab_a in delta_tabs, (
-            f"launcher tab lost its own live stream: {post}"
-        )
         assert tab_b in delta_tabs, (
-            "viewer tab that opened the chat BEFORE the task started "
-            f"did not receive the live stream: {post}"
+            f"the tab owning the chat lost the live stream: {post}"
+        )
+        assert tab_a not in delta_tabs, (
+            "the displaced tab must not keep streaming the chat it no "
+            f"longer shows: {post}"
+        )
+        assert self._tab_state(tab_b).chat_id == chat_id, (
+            "the follow-up run must continue the moved chat"
         )
         clears_b = [e for e in post if e.get("type") == "clear"
                     and e.get("tabId") == tab_b]
         assert clears_b and clears_b[0].get("chat_id") == chat_id, (
-            f"viewer tab missing 'clear' for the new task: {post}"
+            f"takeover tab missing 'clear' for the new task: {post}"
         )
         running_b = [e for e in post if e.get("type") == "status"
                      and e.get("running") is True and e.get("tabId") == tab_b]
-        assert running_b, f"viewer tab missing status running=True: {post}"
+        assert len(running_b) == 1, f"owner status duplicated: {running_b}"
         assert int(running_b[0].get("startTs") or 0) > 0
-        running_a = [e for e in post if e.get("type") == "status"
-                     and e.get("running") is True and e.get("tabId") == tab_a]
-        assert len(running_a) == 1, f"launcher status duplicated: {running_a}"
 
-    def test_viewer_without_registry_entry_still_streams(self) -> None:
+        # A run from the DISPLACED tab starts a fresh chat — it never
+        # rebinds (and never duplicates) the moved chat.
+        mark = len(self.events)
+        self._run_and_wait(tab_a, "unrelated task")
+        new_chat = self._tab_state(tab_a).chat_id
+        assert new_chat and new_chat != chat_id, (
+            "a displaced tab must start a NEW chat, not re-enter the "
+            "moved one"
+        )
+        chats = [t["chatId"] for t in self.server.tab_registry.snapshot()
+                 if t["chatId"]]
+        assert len(chats) == len(set(chats)), (
+            f"registry bound one chat to two tabs: {chats}"
+        )
+
+    def test_takeover_without_registry_entry_still_streams(self) -> None:
         """A restored tab (resumeSession only, no newChat, no registry
-        entry — the post-daemon-restart shape) must also be subscribed."""
+        entry — the post-daemon-restart shape) also takes the chat over
+        and is subscribed to its follow-up streams."""
         tab_a, tab_c = "tab-A", "tab-C"
         self._run_and_wait(tab_a, "first task")
-        chat_id = self.server._get_tab(tab_a).chat_id
+        chat_id = self._tab_state(tab_a).chat_id
 
         self._open_chat_in_tab(tab_c, chat_id, with_new_chat=False)
-        state = _RunningAgentState.running_agent_states.get(tab_c)
+        state = agent_state.find_by_tab(tab_c)
         assert state is None or state.chat_id == "", (
-            "precondition: viewer tab's registry entry must be chat-less"
+            "precondition: takeover tab's registry entry must be chat-less"
+        )
+        bound = [t["tabId"] for t in self.server.tab_registry.snapshot()
+                 if t["chatId"] == chat_id]
+        assert bound == [tab_c], (
+            f"one chat must be bound to exactly one tab, got {bound}"
         )
 
         mark = len(self.events)
-        self._run_and_wait(tab_a, "follow-up task")
-        assert tab_c in self._live_delta_tab_ids(mark), (
-            "registry-less viewer tab did not receive the live stream"
+        self._run_and_wait(tab_c, "follow-up task")
+        delta_tabs = self._live_delta_tab_ids(mark)
+        assert tab_c in delta_tabs, (
+            "registry-less takeover tab did not receive the live stream"
+        )
+        assert tab_a not in delta_tabs, (
+            "the displaced tab must not receive the moved chat's stream"
+        )
+        assert self._tab_state(tab_c).chat_id == chat_id, (
+            "the follow-up run must continue the moved chat"
         )
 
     def test_subagent_row_viewer_not_subscribed_to_parent_stream(self) -> None:
@@ -260,8 +309,8 @@ class TestChatViewerLiveStream(unittest.TestCase):
         parent chat's follow-up stream."""
         tab_a, tab_d = "tab-A", "tab-D"
         self._run_and_wait(tab_a, "first task")
-        chat_id = self.server._get_tab(tab_a).chat_id
-        parent_task_id = self.server._get_tab(tab_a).last_task_id
+        chat_id = self._tab_state(tab_a).chat_id
+        parent_task_id = self._tab_state(tab_a).task_id
 
         sub_task_id, _ = th._add_task(
             "sub task", chat_id=chat_id,
@@ -284,7 +333,7 @@ class TestChatViewerLiveStream(unittest.TestCase):
         """Navigating away (newChat) or closing the tab stops the feed."""
         tab_a, tab_b, tab_c = "tab-A", "tab-B", "tab-C"
         self._run_and_wait(tab_a, "first task")
-        chat_id = self.server._get_tab(tab_a).chat_id
+        chat_id = self._tab_state(tab_a).chat_id
 
         self._open_chat_in_tab(tab_b, chat_id)
         self._open_chat_in_tab(tab_c, chat_id)

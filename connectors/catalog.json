@@ -1,0 +1,347 @@
+{
+  "fetch": {
+    "description": "Web page fetching as Markdown (official MCP reference server).",
+    "auth": "none",
+    "default": true,
+    "prereqs": [
+      "uvx"
+    ],
+    "required_env": [],
+    "config": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--with",
+        "mcp<2",
+        "mcp-server-fetch==2026.7.10"
+      ]
+    },
+    "notes": "The `--with mcp<2` pin works around the McpError->MCPError rename in mcp SDK 2.x, which breaks the published reference servers. Version pinned; bump deliberately after review."
+  },
+  "time": {
+    "description": "Current time and timezone conversion (official MCP reference server).",
+    "auth": "none",
+    "default": true,
+    "prereqs": [
+      "uvx"
+    ],
+    "required_env": [],
+    "config": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--with",
+        "mcp<2",
+        "mcp-server-time==2026.7.10"
+      ]
+    },
+    "notes": "Same mcp<2 pin as the fetch server. Version pinned; bump deliberately after review."
+  },
+  "memory": {
+    "description": "Persistent knowledge-graph memory across agent runs (official MCP reference server).",
+    "auth": "none",
+    "default": true,
+    "prereqs": [
+      "npx"
+    ],
+    "required_env": [],
+    "config": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-memory@2026.7.4"
+      ]
+    },
+    "notes": "Graph is stored locally next to the npx package; nothing leaves the machine. Version pinned; bump deliberately after review."
+  },
+  "sequential-thinking": {
+    "description": "Structured step-by-step reasoning scratchpad (official MCP reference server).",
+    "auth": "none",
+    "default": true,
+    "prereqs": [
+      "npx"
+    ],
+    "required_env": [],
+    "config": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking@2026.7.4"
+      ]
+    },
+    "notes": "Purely local; no network access. Version pinned; bump deliberately after review."
+  },
+  "deepwiki": {
+    "description": "Ask questions about any public GitHub repository (DeepWiki by Cognition; remote, no account).",
+    "auth": "none",
+    "default": true,
+    "prereqs": [],
+    "required_env": [],
+    "config": {
+      "type": "http",
+      "url": "https://mcp.deepwiki.com/mcp"
+    },
+    "notes": "Remote no-auth connector: the operator (Cognition) sees the questions and repo names you send it \u2014 nothing else. Disable it if that matters: `uv run python connectors/enable.py disable deepwiki`."
+  },
+  "context7": {
+    "description": "Up-to-date, version-specific library documentation for coding (Context7 by Upstash).",
+    "auth": "none",
+    "default": true,
+    "prereqs": [],
+    "required_env": [],
+    "config": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp"
+    },
+    "notes": "Remote no-auth connector: the operator (Upstash) sees the library names and doc queries you send it \u2014 nothing else. An optional CONTEXT7_API_KEY only raises rate limits. Disable: `uv run python connectors/enable.py disable context7`."
+  },
+  "github": {
+    "description": "GitHub's official MCP server (repos, issues, PRs, actions, code search) run locally.",
+    "auth": "gh-cli",
+    "default": true,
+    "prereqs": [
+      "gh",
+      "github-mcp-server"
+    ],
+    "required_env": [],
+    "config": {
+      "type": "stdio",
+      "command": "bash",
+      "args": [
+        "-c",
+        "GITHUB_PERSONAL_ACCESS_TOKEN=$(gh auth token) exec github-mcp-server stdio --read-only"
+      ]
+    },
+    "notes": "Install: `brew install gh github-mcp-server` and `gh auth login`. The token is minted from the gh keyring at launch and never written to disk. Runs with --read-only (server-side enforcement); drop that flag in mcp.json if you want the agent to file issues/PRs, and rely on the mcp_permissions deny rules instead."
+  },
+  "google": {
+    "description": "Google Workspace: Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Contacts, Chat (taylorwilsdon/google_workspace_mcp, run locally).",
+    "auth": "env",
+    "default": false,
+    "prereqs": [
+      "uvx"
+    ],
+    "required_env": [
+      "GOOGLE_OAUTH_CLIENT_ID",
+      "GOOGLE_OAUTH_CLIENT_SECRET"
+    ],
+    "config": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "workspace-mcp==1.24.1",
+        "--tool-tier",
+        "core"
+      ]
+    },
+    "setup": [
+      "Create your own OAuth client: https://console.cloud.google.com -> APIs & Services -> Credentials -> Create OAuth client ID (Desktop app), and enable the Gmail/Calendar/Drive/Docs/Sheets APIs you want.",
+      "export GOOGLE_OAUTH_CLIENT_ID=... and GOOGLE_OAUTH_CLIENT_SECRET=... in your shell profile.",
+      "First tool use opens a Google consent page; tokens are cached locally by the server.",
+      "Optional hardening: add --read-only, or --tool-tier complete for all 120+ tools."
+    ],
+    "notes": "Credentials go only to Google. No third party in the path. Version pinned; bump deliberately after review."
+  },
+  "slack": {
+    "description": "Slack workspace: search/read channels, threads, users; posting disabled by default (korotovsky/slack-mcp-server, run locally).",
+    "auth": "env",
+    "default": false,
+    "prereqs": [
+      "npx"
+    ],
+    "required_env": [
+      "SLACK_MCP_XOXP_TOKEN"
+    ],
+    "config": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "slack-mcp-server@1.3.0",
+        "--transport",
+        "stdio"
+      ]
+    },
+    "setup": [
+      "Create a Slack app with a user token (xoxp-...) at https://api.slack.com/apps, or use browser session tokens (SLACK_MCP_XOXC_TOKEN + SLACK_MCP_XOXD_TOKEN) for zero app install.",
+      "export SLACK_MCP_XOXP_TOKEN=xoxp-... in your shell profile.",
+      "Message posting stays off unless you export SLACK_MCP_ADD_MESSAGE_TOOL=<channel-ids>."
+    ],
+    "notes": "Token talks only to slack.com. Slack's first-party remote server (https://mcp.slack.com/mcp) is an alternative if your workspace has a registered app. Version pinned; bump deliberately after review."
+  },
+  "twilio-sms": {
+    "description": "Send SMS through your own Twilio account (official twilio-labs MCP server, run locally).",
+    "auth": "env",
+    "default": false,
+    "prereqs": [
+      "npx"
+    ],
+    "required_env": [
+      "TWILIO_ACCOUNT_SID",
+      "TWILIO_API_KEY",
+      "TWILIO_API_SECRET"
+    ],
+    "config": {
+      "type": "stdio",
+      "command": "bash",
+      "args": [
+        "-c",
+        "exec npx -y @twilio-alpha/mcp@0.7.0 \"$TWILIO_ACCOUNT_SID/$TWILIO_API_KEY:$TWILIO_API_SECRET\" --services twilio_api_v2010 --tags Api20100401Message"
+      ]
+    },
+    "setup": [
+      "Create an API key at https://console.twilio.com -> Account -> API keys & tokens.",
+      "export TWILIO_ACCOUNT_SID=AC..., TWILIO_API_KEY=SK..., TWILIO_API_SECRET=... in your shell profile."
+    ],
+    "notes": "The bash wrapper expands the env vars at launch so the credentials never appear in this file or in mcp.json. SMS endpoints live in the core twilio_api_v2010 service, narrowed to Message endpoints via --tags to fit LLM context. Twilio advises not running community MCP servers alongside theirs; keep this connector in its own project scope if you enable third-party servers too. Version pinned."
+  },
+  "whatsapp": {
+    "description": "Personal WhatsApp: search/read/send messages via the WhatsApp Web multidevice protocol (lharries/whatsapp-mcp, fully local).",
+    "auth": "pairing",
+    "default": false,
+    "prereqs": [
+      "uv",
+      "go"
+    ],
+    "required_env": [],
+    "clone": {
+      "repo": "https://github.com/lharries/whatsapp-mcp",
+      "dest": "~/.kiss/connectors/whatsapp-mcp"
+    },
+    "config": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "--directory",
+        "~/.kiss/connectors/whatsapp-mcp/whatsapp-mcp-server",
+        "run",
+        "main.py"
+      ]
+    },
+    "setup": [
+      "Install Go if missing: brew install go.",
+      "Start the bridge once in a separate terminal: cd ~/.kiss/connectors/whatsapp-mcp/whatsapp-bridge && go run main.go \u2014 then scan the QR code with WhatsApp on your phone (Settings -> Linked Devices).",
+      "Keep the bridge running while the connector is in use; re-pair roughly every 20 days.",
+      "All message history lives in a local SQLite DB inside the clone."
+    ],
+    "notes": "Unofficial API (ToS gray area). No third party sees anything: traffic is the normal end-to-end-encrypted WhatsApp protocol. Version pinned; bump deliberately after review."
+  },
+  "brave-search": {
+    "description": "Brave web/news/image/video search (official Brave MCP server, run locally).",
+    "auth": "env",
+    "default": false,
+    "prereqs": [
+      "npx"
+    ],
+    "required_env": [
+      "BRAVE_API_KEY"
+    ],
+    "config": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@brave/brave-search-mcp-server@2.1.0",
+        "--transport",
+        "stdio"
+      ]
+    },
+    "setup": [
+      "Get a free API key at https://brave.com/search/api/ and export BRAVE_API_KEY=... in your shell profile."
+    ],
+    "notes": "Queries go only to Brave. Version pinned; bump deliberately after review."
+  },
+  "notion": {
+    "description": "Notion pages and databases (official @notionhq/notion-mcp-server, run locally with an internal integration token).",
+    "auth": "env",
+    "default": false,
+    "prereqs": [
+      "npx"
+    ],
+    "required_env": [
+      "NOTION_TOKEN"
+    ],
+    "config": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@notionhq/notion-mcp-server@2.5.1"
+      ]
+    },
+    "setup": [
+      "Create an internal integration at https://www.notion.so/profile/integrations, share the target pages with it, and export NOTION_TOKEN=ntn_... in your shell profile."
+    ],
+    "notes": "Token talks only to notion.com. Notion's hosted server (https://mcp.notion.com/mcp) needs interactive OAuth, which Sorcar deliberately does not do mid-run. Version pinned; bump deliberately after review."
+  },
+  "postgres": {
+    "description": "PostgreSQL access with health checks and safe restricted mode (crystaldba/postgres-mcp, run locally).",
+    "auth": "env",
+    "default": false,
+    "prereqs": [
+      "uvx"
+    ],
+    "required_env": [
+      "DATABASE_URI"
+    ],
+    "config": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--python",
+        "3.13",
+        "--with",
+        "mcp<2",
+        "postgres-mcp==0.3.0",
+        "--access-mode=restricted"
+      ]
+    },
+    "setup": [
+      "export DATABASE_URI=postgresql://user:pass@host:5432/db in your shell profile.",
+      "Keep --access-mode=restricted (read-only-ish) unless you really need writes."
+    ],
+    "notes": "Connects only to your own database. The --python 3.13 and mcp<2 pins are required: pglast does not build on Python 3.14 and postgres-mcp 0.3.0 needs the mcp 1.x SDK. Version pinned."
+  },
+  "firecrawl": {
+    "description": "Web scraping, crawling, and site-to-markdown extraction (official Firecrawl MCP server).",
+    "auth": "env",
+    "default": false,
+    "prereqs": [
+      "npx"
+    ],
+    "required_env": [
+      "FIRECRAWL_API_KEY"
+    ],
+    "config": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "firecrawl-mcp@3.24.0"
+      ]
+    },
+    "setup": [
+      "Get an API key at https://firecrawl.dev and export FIRECRAWL_API_KEY=fc-... in your shell profile."
+    ],
+    "notes": "Pages you scrape are fetched through Firecrawl's cloud. Version pinned; bump deliberately after review."
+  },
+  "playwright": {
+    "description": "Browser automation via accessibility snapshots (official Microsoft Playwright MCP).",
+    "auth": "none",
+    "default": false,
+    "prereqs": [
+      "npx"
+    ],
+    "required_env": [],
+    "config": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@0.0.79"
+      ]
+    },
+    "notes": "Disabled by default because Sorcar already has native browser tools (go_to_url/click/type_text); enable only if you want a second, isolated browser. Version pinned; bump deliberately after review."
+  }
+}

@@ -13,8 +13,9 @@ Contract locked in here:
 
 * The HTML served by ``web_server._build_html()`` contains a single
   ``#tips-btn`` button inside the settings panel's
-  ``.config-update-row``, placed immediately to the LEFT of the
-  "Git Commit" button (``#autocommit-btn``).
+  ``.config-update-row``, placed immediately to the left of the
+  Git Commit button (``#autocommit-btn``), which in turn precedes the
+  Update button (``#cfg-update-btn``).
 * The button carries a lightbulb SVG icon, a visible "Tips" label, a
   tooltip and accessible label mentioning tips, and it precedes the
   ``tips.js`` script that wires its click handler, so the handler
@@ -37,15 +38,23 @@ class TestTipsSettingsButtonRemoteHtml(unittest.TestCase):
 
     def test_tips_button_directly_left_of_git_commit(self) -> None:
         """``#tips-btn`` sits immediately before ``#autocommit-btn``
+        (the Git Commit button), which precedes ``#cfg-update-btn``,
         inside the settings ``.config-update-row``."""
         i_row = self.html.find('class="config-update-row"')
         i_tips = self.html.find('id="tips-btn"')
         i_commit = self.html.find('id="autocommit-btn"')
+        i_update = self.html.find('id="cfg-update-btn"')
         self.assertGreater(i_row, -1, "settings button row must exist")
         self.assertGreater(i_tips, -1, "Tips button must exist")
         self.assertGreater(i_commit, -1, "Git Commit button must exist")
+        self.assertGreater(i_update, -1, "Update button must exist")
         self.assertLess(i_row, i_tips, "Tips button must be in the row")
-        self.assertLess(i_tips, i_commit, "Tips must come before Git Commit")
+        self.assertLess(
+            i_tips, i_commit, "Tips must come before Git Commit",
+        )
+        self.assertLess(
+            i_commit, i_update, "Git Commit must come before Update",
+        )
         i_commit_open = self.html.rfind("<button", 0, i_commit)
         between = self.html[i_tips:i_commit_open]
         self.assertEqual(

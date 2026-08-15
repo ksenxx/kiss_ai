@@ -5,16 +5,18 @@
 """Integration tests locking the channel-agent / chat-session contract.
 
 Verifies the contract enforced by the
-"third-party agents use SorcarAgent" cleanup:
+"third-party agents do not inherit SorcarAgent" cleanup:
 
-1. Every channel agent class is a subclass of :class:`SorcarAgent` but
-   NOT of :class:`ChatSorcarAgent` — i.e. third-party agents do not
-   inherit chat-session persistence.
+1. No channel agent class is a subclass of :class:`SorcarAgent` (nor of
+   :class:`ChatSorcarAgent`) — third-party agents are plain
+   :class:`BaseChannelAgent` carriers whose tasks always execute on the
+   kiss-web daemon through :func:`kiss.server.sorcar.run`.
 2. ``channel_main()``'s parser rejects every chat-session CLI flag
    (``-n/--new``, ``-c/--chat-id``, ``-l/--list-chat-id``) — they no
    longer exist anywhere in the project's CLI surface.
-3. The ``_apply_chat_args`` helper has been removed from
-   ``kiss.agents.sorcar.cli_helpers``.
+3. The ``_apply_chat_args`` helper has been removed from the
+   channel-agent CLI helpers
+   (``kiss.agents.third_party_agents._channel_cli``).
 """
 
 from __future__ import annotations
@@ -70,12 +72,20 @@ def _get_agent_class(class_name: str, module_path: str) -> type:
     ALL_CHANNEL_AGENTS,
     ids=[a[0] for a in ALL_CHANNEL_AGENTS],
 )
-def test_channel_agent_subclasses_sorcar_agent(
+def test_channel_agent_does_not_subclass_sorcar_agent(
     class_name: str, module_path: str,
 ) -> None:
-    """Every channel agent class inherits from ``SorcarAgent``."""
+    """No channel agent class inherits from ``SorcarAgent``.
+
+    Channel agents are plain :class:`BaseChannelAgent` carriers; every
+    task they run is submitted to the kiss-web daemon through
+    :func:`kiss.server.sorcar.run`, so the local instance needs none of
+    the ``SorcarAgent`` execution machinery.
+    """
     cls = _get_agent_class(class_name, module_path)
-    assert issubclass(cls, SorcarAgent)
+    assert not issubclass(cls, SorcarAgent), (
+        f"{class_name} still inherits SorcarAgent"
+    )
     assert issubclass(cls, BaseChannelAgent)
 
 
@@ -93,8 +103,8 @@ def test_channel_agent_does_not_subclass_chat_sorcar_agent(
     :class:`ChatSorcarAgent`, which silently added a ``chat_id``,
     ``new_chat()``, ``resume_chat()`` etc. surface to every channel
     agent (and to the on-disk ``sorcar.db`` ``task_history`` rows
-    they produced).  After the cleanup they inherit plain
-    :class:`SorcarAgent` and have none of that surface.
+    they produced).  After the cleanup they are plain
+    :class:`BaseChannelAgent` carriers and have none of that surface.
     """
     cls = _get_agent_class(class_name, module_path)
     assert not issubclass(cls, ChatSorcarAgent), (
@@ -123,7 +133,7 @@ def test_channel_main_rejects_chat_session_flag(
     are asserted so the contract is locked end-to-end.
     """
 
-    class _FakeAgent(BaseChannelAgent, SorcarAgent):
+    class _FakeAgent(BaseChannelAgent):
         def _is_authenticated(self) -> bool:
             return False
 
@@ -143,13 +153,13 @@ def test_channel_main_rejects_chat_session_flag(
 
 
 def test_apply_chat_args_helper_removed() -> None:
-    """``_apply_chat_args`` no longer exists in ``cli_helpers``.
+    """``_apply_chat_args`` no longer exists in the CLI helpers.
 
     Its only consumer was the channel-agent CLI, which is now a
     plain :class:`SorcarAgent` and has no use for chat-session
     routing.  The helper itself is removed so the chat-session
     surface really is gone from the project.
     """
-    from kiss.agents.sorcar import cli_helpers
+    from kiss.agents.third_party_agents import _channel_cli
 
-    assert not hasattr(cli_helpers, "_apply_chat_args")
+    assert not hasattr(_channel_cli, "_apply_chat_args")

@@ -26,8 +26,8 @@ What these tests do
 Each test extracts the step [5/5] block verbatim from ``install.sh``
 (between ``# BEGIN: kiss-step-5-5-terminal-freeze`` and the matching END
 marker), wraps it in a harness that reproduces install.sh's real
-``exec > >(tee -a "$LOG_FILE") 2>&1`` redirection, and runs it attached to
-a REAL PTY with:
+``exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1`` redirection,
+and runs it attached to a REAL PTY with:
 
 * a stub ``CODE_CLI`` that behaves like ``code --install-extension``,
 * a real dummy "kiss-web daemon" process (a ``sleep``) plus a stub
@@ -183,7 +183,7 @@ def _build_sandbox(tmp_path: Path) -> tuple[Path, Path]:
             # Same stdout/stderr plumbing as install.sh: everything the
             # block prints goes through tee to BOTH the terminal (the
             # test's PTY) and the log file.
-            exec > >(tee -a "$LOG_FILE") 2>&1
+            exec > >(trap '' INT TERM; exec tee -a "$LOG_FILE") 2>&1
             {{
             """
         )

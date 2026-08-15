@@ -22,7 +22,6 @@ from the wrong workspace.
 
 from __future__ import annotations
 
-import os
 import threading
 import time
 import unittest
@@ -30,8 +29,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
-from kiss.server.task_runner import _RunningAgentState
 
 
 class _AutocompleteHarness(unittest.TestCase):
@@ -45,7 +44,7 @@ class _AutocompleteHarness(unittest.TestCase):
         self.server.printer.broadcast = self.events.append  # type: ignore[assignment]
 
     def tearDown(self) -> None:
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         self._tmp.cleanup()
 
 
@@ -94,34 +93,37 @@ class TestStaleCompleteDropped(_AutocompleteHarness):
     def test_superseded_request_emits_nothing(self) -> None:
         """Freshness is re-checked after the slow computation.
 
-        The active-file read is blocked deterministically with a FIFO:
-        the request thread blocks opening it for read until this test
-        (after superseding the request) attaches a writer.
+        The computation is kept in flight with a multi-megabyte live
+        buffer snapshot: the identifier harvest regex-scans and sorts
+        the whole buffer (roughly a second), leaving a wide window in
+        which the request is superseded before its post-computation
+        check runs.  A FIFO can no longer serve as the blocker — the
+        disk fallback now rejects non-regular files precisely so a
+        pathological ``activeFile`` path can never block the shared
+        autocomplete worker.
         """
-        fifo = str(self.root / "blocked.py")
-        os.mkfifo(fifo)
+        huge = "".join(f"staleIdent_{i:07d} = 1\n" for i in range(600_000))
         conn_id = "conn-A"
         with self.server._state_lock:
             self.server._complete_seq_latest[conn_id] = 1
 
         worker = threading.Thread(
             target=self.server._complete,
-            args=("stale", 1, fifo, None, "", conn_id),
+            args=("stale", 1, "", huge, "", conn_id),
             daemon=True,
         )
         worker.start()
-        # Let the request pass its entry freshness check and block on
-        # the FIFO open inside the identifier harvest.
-        time.sleep(0.3)
-        self.assertTrue(worker.is_alive(), "request should be blocked on the FIFO")
+        # Let the request pass its entry freshness check and enter the
+        # long identifier harvest.
+        time.sleep(0.1)
+        self.assertTrue(
+            worker.is_alive(),
+            "request finished before it could be superseded",
+        )
         # A newer request arrives on the same connection.
         with self.server._state_lock:
             self.server._complete_seq_latest[conn_id] = 2
-        # Unblock the old request's file read.
-        fd = os.open(fifo, os.O_WRONLY)
-        os.write(fd, b"staleIdentifier = 1\n")
-        os.close(fd)
-        worker.join(timeout=10)
+        worker.join(timeout=30)
         self.assertFalse(worker.is_alive())
         emitted_types = [e.get("type") for e in self.events]
         self.assertNotIn(
