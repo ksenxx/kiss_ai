@@ -1215,6 +1215,75 @@ class TestRemoteAccessServerWS(IsolatedAsyncioTestCase):
                 "a finished worktree_result must drop the fallback",
             )
 
+    async def test_ws_close_tab_drops_worktree_fallback(self) -> None:
+        """Closing a tab releases its pending-worktree fallback entry.
+
+        A tab closed without merging never receives a successful
+        ``worktree_result``, so ``WebPrinter.cleanup_tab`` must drop the
+        recorded worktree dir instead of leaking it for the daemon
+        lifetime — and instead of serving it as a stale fallback to a
+        later client that reuses the tab id.
+        """
+        work_dir = self.server.work_dir
+        wt_dir = Path(work_dir) / ".kiss-worktrees" / "kiss_wt-close"
+        (wt_dir / "reports").mkdir(parents=True)
+        (wt_dir / "reports" / "closed.html").write_text("<h1>x</h1>\n")
+
+        self.server._printer.broadcast(
+            {
+                "type": "worktree_done",
+                "branch": "kiss/wt-close",
+                "worktreeDir": str(wt_dir),
+                "tabId": "close-tab",
+            }
+        )
+        self.assertEqual(
+            self.server._printer.worktree_dir_for_tab("close-tab"),
+            str(wt_dir),
+        )
+
+        async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
+            await ws.send(json.dumps({"type": "auth", "password": ""}))
+            await asyncio.wait_for(ws.recv(), timeout=5)
+
+            await ws.send(json.dumps({"type": "closeTab", "tabId": "close-tab"}))
+            deadline = asyncio.get_event_loop().time() + 5
+            while (
+                self.server._printer.worktree_dir_for_tab("close-tab")
+                and asyncio.get_event_loop().time() < deadline
+            ):
+                await asyncio.sleep(0.05)
+            self.assertEqual(
+                self.server._printer.worktree_dir_for_tab("close-tab"),
+                "",
+                "closing the tab must drop its worktree fallback entry",
+            )
+
+            # A later tab reusing the id must not inherit the fallback.
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "checkPaths",
+                        "paths": ["reports/closed.html"],
+                        "workDir": work_dir,
+                        "tabId": "close-tab",
+                    }
+                )
+            )
+            deadline = asyncio.get_event_loop().time() + 5
+            while asyncio.get_event_loop().time() < deadline:
+                raw = await asyncio.wait_for(ws.recv(), timeout=5)
+                ev: dict[str, Any] = json.loads(raw)
+                if ev.get("type") == "pathsExist":
+                    break
+            else:
+                raise AssertionError("no pathsExist reply received")
+            self.assertEqual(
+                ev["results"],
+                {"reports/closed.html": False},
+                "a reused tab id must not see the closed tab's worktree",
+            )
+
     async def test_ws_generate_commit_message(self) -> None:
         """generateCommitMessage command does not produce Unknown command error."""
         async with connect(f"wss://127.0.0.1:{self.port}/ws", ssl=_no_verify_ssl()) as ws:
