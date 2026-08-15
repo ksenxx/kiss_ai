@@ -235,5 +235,40 @@ class TestWorktreeBranchCreatedNoAutocommit(_WorktreeNoAutocommitBase):
         )
 
 
+class TestWorktreeNestedWorkDirEvents(_WorktreeNoAutocommitBase):
+    """Worktree events publish the task's cwd inside the worktree."""
+
+    def test_worktree_events_publish_nested_work_dir(self) -> None:
+        """A task launched from a repo subdirectory publishes
+        ``worktreeWorkDir`` pointing at the same offset inside the
+        worktree on both ``worktree_created`` and ``worktree_done``.
+
+        File-link resolution falls back to that directory: relative
+        artifact paths printed by the task are relative to its cwd
+        (``<worktree>/<offset>``), not the worktree root, so publishing
+        only the root leaves nested-project links dead.
+        """
+        nested = Path(self.repo) / "packages" / "app"
+        nested.mkdir(parents=True)
+        self._original_run = _patch_parent_run_create_file("agent_out.txt")
+        self.server._run_task_inner({
+            "prompt": "task from nested dir",
+            "workDir": str(nested),
+            "tabId": "0",
+            "useWorktree": True,
+            "autoCommit": False,
+            "model": "",
+        })
+
+        wt_created = [e for e in self.events if e["type"] == "worktree_created"]
+        assert len(wt_created) == 1, self._types()
+        expected = str(Path(wt_created[0]["worktreeDir"]) / "packages" / "app")
+        assert wt_created[0]["worktreeWorkDir"] == expected, wt_created[0]
+
+        wt_done = [e for e in self.events if e["type"] == "worktree_done"]
+        assert len(wt_done) == 1, self._types()
+        assert wt_done[0]["worktreeWorkDir"] == expected, wt_done[0]
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
