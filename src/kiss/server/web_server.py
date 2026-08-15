@@ -1805,6 +1805,29 @@ class WebPrinter(JsonPrinter):
         """
         return self._tab_worktree_dirs.get(tab_id, "")
 
+    def cleanup_tab(self, tab_id: str) -> None:
+        """Drop *tab_id*'s per-tab state, including its worktree dir.
+
+        A tab closed without merging (no successful ``worktree_result``
+        ever arrives for it) would otherwise leave its
+        ``_tab_worktree_dirs`` entry behind for the daemon lifetime —
+        one dead key per closed pending-worktree tab, and a stale
+        resolution fallback should a later client reuse the tab id.
+
+        Also runs when a live tab merely re-subscribes (session
+        replay, new chat).  That is safe: after rebinding a chat the
+        server re-presents a still-pending worktree
+        (``_emit_pending_worktree`` broadcasts ``worktree_done``),
+        which re-records the entry via
+        :meth:`_track_worktree_event` before any file link is checked.
+
+        Args:
+            tab_id: The frontend tab identifier to drop.
+        """
+        if tab_id:
+            self._tab_worktree_dirs.pop(tab_id, None)
+        super().cleanup_tab(tab_id)
+
     def broadcast(self, event: dict[str, Any]) -> None:
         """Send *event* to every connected WebSocket client.
 

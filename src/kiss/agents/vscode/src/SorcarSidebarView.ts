@@ -176,6 +176,13 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   public readonly onCommitMessage = this._onCommitMessage.event;
   private _commitPendingTabs: Set<string> = new Set();
   private _worktreeDirs: Map<string, string> = new Map();
+  // Tab ids listed by the daemon's last canonical `tabs_state`
+  // snapshot. A tab that drops out of the snapshot was closed by
+  // another client — that close never echoes back through this
+  // webview as a `closeTab` message, so it is detected here and the
+  // host releases the tab's resources (worktree fallback dir,
+  // running/commit flags) instead of holding them forever.
+  private _registryTabs: Set<string> = new Set();
   private _worktreeActionResolves: Map<string, () => void> = new Map();
   private _worktreeProgresses: Map<
     string,
@@ -394,12 +401,42 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       if (msg.type === 'worktree_created' || msg.type === 'worktree_done') {
         const dir = msg.worktreeDir;
         const wtTabId = msg.tabId;
+        if (dir && wtTabId !== undefined) {
+          // Not gated on _isOwnTab: a canonical tab created by another
+          // client is adopted by this webview from `tabs_state` without
+          // ever sending a message that would register it in _ownTabs,
+          // yet its transcript (mirrored here) still needs the
+          // pending-worktree fallback for _resolveTabFile(). Recording
+          // a directory is side-effect free; only the SCM view below
+          // stays scoped to tabs this window interacted with.
+          this._worktreeDirs.set(wtTabId, dir);
+        }
         if (dir && this._isOwnTab(wtTabId)) {
-          if (wtTabId !== undefined) {
-            this._worktreeDirs.set(wtTabId, dir);
-          }
           void this._openWorktreeInScm(dir);
         }
+      }
+      if (msg.type === 'tabs_state' && Array.isArray(msg.tabs)) {
+        // The snapshot is canonical and complete: a tab it no longer
+        // lists was closed — possibly by another client, whose close
+        // never reaches this host as a `closeTab` webview message. The
+        // webview drops such tabs in reconcileTabs(); the host must
+        // release its per-tab resources too, or a dead tab's worktree
+        // fallback dir / running flags would linger for the session
+        // (and could leak onto a later tab reusing the same id).
+        // Sub-agent and other client-local tabs never appear in
+        // snapshots, so only ids seen in a previous snapshot are
+        // eligible for pruning.
+        const listed = new Set<string>();
+        for (const t of msg.tabs) {
+          if (t && t.tabId) listed.add(t.tabId);
+        }
+        for (const staleId of this._registryTabs) {
+          if (!listed.has(staleId)) {
+            this._ownTabs.delete(staleId);
+            this._cleanupTabResources(staleId);
+          }
+        }
+        this._registryTabs = listed;
       }
       if (msg.type === 'worktree_progress') {
         const wpTabId = msg.tabId;
@@ -409,6 +446,21 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             : this._worktreeProgresses.values().next().value;
         if (progress) {
           progress.report({message: msg.message});
+        }
+      }
+      if (msg.type === 'worktree_result' && msg.success) {
+        // Mirrors the unconditional recording above: a merge/discard
+        // finished by any client retires the worktree directory, so the
+        // fallback entry must go even when this window never claimed
+        // the tab. git.close on a repository that was never opened is
+        // a harmless no-op.
+        const doneTabId = msg.tabId;
+        if (doneTabId !== undefined) {
+          const doneDir = this._worktreeDirs.get(doneTabId);
+          if (doneDir) {
+            void this._closeWorktreeInScm(doneDir);
+            this._worktreeDirs.delete(doneTabId);
+          }
         }
       }
       if (msg.type === 'worktree_result' && this._isOwnTab(msg.tabId)) {
@@ -431,13 +483,6 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
           }
         } else {
           showErrorNotification(msg.message || 'Worktree action failed.');
-        }
-        if (msg.success && wrTabId !== undefined) {
-          const wtDir = this._worktreeDirs.get(wrTabId);
-          if (wtDir) {
-            void this._closeWorktreeInScm(wtDir);
-            this._worktreeDirs.delete(wrTabId);
-          }
         }
       }
       if (
