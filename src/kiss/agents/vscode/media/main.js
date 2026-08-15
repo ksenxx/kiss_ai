@@ -2947,11 +2947,28 @@
     return m ? m[1] : p;
   }
 
+  // A verdict is not terminal: a resolved span keeps its
+  // data-path-wd / data-path-tab stamps and stores its path in the
+  // state attribute it lands on (data-path when the file exists,
+  // data-path-missing when it does not), so recheckFileLinksForTab()
+  // can find it in the transcript and ask for a fresh verdict after
+  // the tab's worktree branch is merged or discarded.  The registry
+  // still drains: promote/demote drop the span, and only an explicit
+  // recheck re-registers it.
+
+  function _fileLinkPath(span) {
+    return (
+      span.getAttribute('data-path-candidate') ||
+      span.getAttribute('data-path') ||
+      span.getAttribute('data-path-missing') ||
+      ''
+    );
+  }
+
   function promoteFileLink(span) {
-    const raw = span.getAttribute('data-path-candidate');
+    const raw = _fileLinkPath(span);
     span.removeAttribute('data-path-candidate');
-    span.removeAttribute('data-path-wd');
-    span.removeAttribute('data-path-tab');
+    span.removeAttribute('data-path-missing');
     span.setAttribute('data-path', raw);
     span.classList.add('kiss-filelink');
     span.title = 'Open ' + raw;
@@ -2959,10 +2976,11 @@
   }
 
   function demoteFileLink(span) {
+    const raw = _fileLinkPath(span);
     span.removeAttribute('data-path-candidate');
-    span.removeAttribute('data-path-wd');
-    span.removeAttribute('data-path-tab');
-    span.setAttribute('data-path-missing', '1');
+    span.removeAttribute('data-path');
+    span.removeAttribute('title');
+    span.setAttribute('data-path-missing', raw);
     span.classList.remove('kiss-filelink');
     _pendingFileLinkSpans.delete(span);
   }
@@ -3023,9 +3041,10 @@
       }
       // tableak-coverage:end
       if ((span.getAttribute('data-path-wd') || '') !== workDir) continue;
-      const p = _stripLineSuffix(
-        span.getAttribute('data-path-candidate') || '',
-      );
+      // A span re-registered by recheckFileLinksForTab() carries
+      // data-path or data-path-missing instead of data-path-candidate;
+      // _fileLinkPath() reads whichever state attribute holds the path.
+      const p = _stripLineSuffix(_fileLinkPath(span));
       if (Object.prototype.hasOwnProperty.call(results, p)) {
         if (results[p]) promoteFileLink(span);
         else demoteFileLink(span);
@@ -3105,6 +3124,54 @@
         groups.set(groupKey, group);
       }
       group.paths.push(p);
+    }
+    for (const group of groups.values()) api.send(group);
+  }
+
+  /**
+   * Re-ask the host about every file-link span in *tabId*'s transcript.
+   *
+   * Called when the tab's worktree branch is merged or discarded
+   * (worktree_result): a merge copies the task's committed files into
+   * the original checkout — paths demoted as missing while they lived
+   * only on the branch now exist — and a discard deletes the worktree
+   * copy that the host's pending-worktree fallback resolved, so
+   * promoted links may now point at nothing.  Resolved spans are no
+   * longer in the registry, so they are collected from the transcript
+   * DOM instead (#output for the visible tab, the saved fragment for a
+   * background one), re-registered so the reply can flip them, and
+   * re-checked under the workDir stamped on each span.
+   *
+   * @param {string|undefined} tabId The tab whose worktree changed.
+   */
+  function recheckFileLinksForTab(tabId) {
+    const id = tabId === undefined ? activeTabId : tabId;
+    const owner = String(id);
+    const roots = [];
+    if (id === activeTabId) roots.push(O);
+    const tab = getTab(id);
+    if (tab && tab.outputFragment) roots.push(tab.outputFragment);
+    const groups = new Map();
+    for (const root of roots) {
+      if (!root || !root.querySelectorAll) continue;
+      const spans = root.querySelectorAll(
+        '[data-path], [data-path-candidate], [data-path-missing]',
+      );
+      for (const span of spans) {
+        if ((span.getAttribute('data-path-tab') || '') !== owner) continue;
+        const raw = _fileLinkPath(span);
+        if (!raw) continue;
+        const wd = span.getAttribute('data-path-wd') || '';
+        const p = _stripLineSuffix(raw);
+        _pendingFileLinkSpans.add(span);
+        _pendingPathChecks.add(_fileLinkCacheKey(owner, wd, p));
+        let group = groups.get(wd);
+        if (!group) {
+          group = {type: 'checkPaths', paths: [], workDir: wd, tabId: id};
+          groups.set(wd, group);
+        }
+        if (group.paths.indexOf(p) < 0) group.paths.push(p);
+      }
     }
     for (const group of groups.values()) api.send(group);
   }
@@ -6189,6 +6256,11 @@
         showWorktreeActions(ev);
         break;
       case 'worktree_result':
+        // A merge just copied the task's committed files into the
+        // original checkout; a discard just deleted the worktree copy.
+        // Either way the tab's file links may have flipped existence,
+        // so re-verify them (foreground and background tabs alike).
+        if (ev.success) recheckFileLinksForTab(ev.tabId);
         if (ev.tabId !== undefined && ev.tabId !== activeTabId) {
           const bgWrTab = getTab(ev.tabId);
           if (bgWrTab) {

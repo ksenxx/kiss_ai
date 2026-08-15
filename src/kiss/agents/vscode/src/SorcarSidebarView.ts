@@ -576,6 +576,34 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     return process.cwd();
   }
 
+  /**
+   * Resolve *p* for a tab: against *wd* first, then against the tab's
+   * pending worktree directory.
+   *
+   * A worktree task's committed artifacts live only on its un-merged
+   * `kiss/wt-*` branch until the user merges (or the next run
+   * auto-retires it), so a path printed in its result panel does not
+   * exist under the workspace root yet and a plain
+   * `resolveWorkspaceFile(p, wd)` reports it missing — leaving the
+   * link permanently grey.  Falling back to the worktree dir recorded
+   * for the tab (`worktree_created` / `worktree_done`) makes the path
+   * resolvable the moment the result renders; after a merge or discard
+   * the `worktree_result` handler drops the entry and the workspace
+   * copy (or genuine absence) wins again.
+   */
+  private _resolveTabFile(
+    p: string,
+    wd: string,
+    tabId: string | undefined,
+  ): string | null {
+    const resolved = resolveWorkspaceFile(p, wd);
+    if (resolved) return resolved;
+    const wtDir =
+      tabId !== undefined ? this._worktreeDirs.get(tabId) : undefined;
+    if (wtDir && wtDir !== wd) return resolveWorkspaceFile(p, wtDir);
+    return null;
+  }
+
   private _sendToWebview(message: ToWebviewMessage): void {
     if (!this._disposed && this._view) {
       this._view.webview.postMessage(message);
@@ -856,7 +884,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       case 'openFile':
         if (message.path) {
           const wd = message.workDir || this._getWorkDir();
-          const filePath = resolveWorkspaceFile(message.path, wd);
+          const filePath = this._resolveTabFile(
+            message.path,
+            wd,
+            message.tabId,
+          );
           if (!filePath) {
             console.warn(
               '[SorcarSidebarView] refusing to open file outside workspace:',
@@ -895,7 +927,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         const paths = Array.isArray(message.paths) ? message.paths : [];
         for (const p of paths) {
           if (typeof p !== 'string' || !p) continue;
-          results[p] = resolveWorkspaceFile(p, wd) !== null;
+          results[p] = this._resolveTabFile(p, wd, message.tabId) !== null;
         }
         this._sendToWebview({
           type: 'pathsExist',

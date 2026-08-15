@@ -1762,6 +1762,48 @@ class WebPrinter(JsonPrinter):
         self.work_dir: str = ""
         self._pending_sends: dict[Any, set[ConcurrentFuture[None]]] = {}
         self._send_locks: dict[Any, asyncio.Lock] = {}
+        # tabId -> pending worktree dir of that tab's finished (or
+        # running) worktree task; see _track_worktree_event().
+        self._tab_worktree_dirs: dict[str, str] = {}
+
+    def _track_worktree_event(
+        self, event: dict[str, Any], tab_id: Any,
+    ) -> None:
+        """Track *tab_id*'s pending worktree directory from *event*.
+
+        A worktree task's committed artifacts live only in its worktree
+        until the branch is merged, so ``checkPaths``/``openFile``
+        requests from remote clients need the tab's worktree dir as a
+        resolution fallback (:meth:`RemoteAccessServer._resolve_tab_file`).
+        ``worktree_created`` / ``worktree_done`` record the directory;
+        a successful ``worktree_result`` (merge or discard finished)
+        drops it, so the main checkout wins again.
+
+        Args:
+            event: The event being broadcast.
+            tab_id: The tab the event copy is addressed to.
+        """
+        etype = event.get("type")
+        if not isinstance(tab_id, str) or not tab_id:
+            return
+        if etype in ("worktree_created", "worktree_done"):
+            wt_dir = event.get("worktreeDir")
+            if isinstance(wt_dir, str) and wt_dir:
+                self._tab_worktree_dirs[tab_id] = wt_dir
+        elif etype == "worktree_result" and event.get("success"):
+            self._tab_worktree_dirs.pop(tab_id, None)
+
+    def worktree_dir_for_tab(self, tab_id: str) -> str:
+        """Return the pending worktree dir recorded for *tab_id*.
+
+        Args:
+            tab_id: The requesting client's tab id.
+
+        Returns:
+            The worktree directory path, or ``""`` when the tab has no
+            pending worktree.
+        """
+        return self._tab_worktree_dirs.get(tab_id, "")
 
     def broadcast(self, event: dict[str, Any]) -> None:
         """Send *event* to every connected WebSocket client.
@@ -1819,6 +1861,7 @@ class WebPrinter(JsonPrinter):
             return
 
         if "tabId" in event:
+            self._track_worktree_event(event, event.get("tabId"))
             if event.get("type") in ("prompt", "result") and event.get("taskId"):
                 record = {k: v for k, v in event.items() if k != "tabId"}
                 with self._lock:
@@ -1881,6 +1924,7 @@ class WebPrinter(JsonPrinter):
             return
         base = json.dumps(event)[:-1]
         for tab_id in targets:
+            self._track_worktree_event(event, tab_id)
             self._send_to_ws_clients(
                 f'{base}, "tabId": {json.dumps(tab_id)}}}'
             )
@@ -4122,6 +4166,50 @@ class RemoteAccessServer:
         """
         await self._voice_wake.stop(conn_id)
 
+    def _resolve_tab_file(
+        self, raw_path: str, work_dir: str, tab_id: str,
+    ) -> Path | None:
+        """Resolve *raw_path* for a tab, trying its pending worktree too.
+
+        Mirrors the VS Code extension host's resolution
+        (``SorcarSidebarView._resolveTabFile``): the path is resolved
+        against *work_dir* first; when that names no file and the tab
+        has a pending worktree (a finished worktree task whose branch is
+        not merged yet), the same relative path is tried inside the
+        worktree directory — that is where the task's committed
+        artifacts live until the merge.
+
+        Args:
+            raw_path: The path as printed in the transcript (may be
+                relative, absolute, or ``~``-prefixed).
+            work_dir: The tab's working directory.
+            tab_id: The requesting client's tab id (may be ``""``).
+
+        Returns:
+            The resolved path when it names an existing regular file,
+            otherwise ``None``.
+        """
+        try:
+            path = Path(os.path.expanduser(raw_path))
+            if path.is_absolute() or not work_dir:
+                candidates = [path]
+            else:
+                candidates = [Path(work_dir) / path]
+                wt_dir = (
+                    self._printer.worktree_dir_for_tab(tab_id)
+                    if tab_id
+                    else ""
+                )
+                if wt_dir and wt_dir != work_dir:
+                    candidates.append(Path(wt_dir) / path)
+            for candidate in candidates:
+                resolved = candidate.resolve()
+                if resolved.is_file():
+                    return resolved
+        except OSError:
+            return None
+        return None
+
     async def _handle_open_file(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None:
@@ -4171,11 +4259,8 @@ class RemoteAccessServer:
                 "tabId": tab_id,
             }
             try:
-                path = Path(os.path.expanduser(raw_path))
-                if not path.is_absolute() and work_dir:
-                    path = Path(work_dir) / path
-                path = path.resolve()
-                if not path.is_file():
+                path = self._resolve_tab_file(raw_path, work_dir, tab_id)
+                if path is None:
                     reply["error"] = f"File not found: {raw_path}"
                     return reply
                 if path.stat().st_size > _OPEN_FILE_MAX_BYTES:
@@ -4241,13 +4326,10 @@ class RemoteAccessServer:
             for raw_path in raw_paths:
                 if not isinstance(raw_path, str) or not raw_path:
                     continue
-                try:
-                    path = Path(os.path.expanduser(raw_path))
-                    if not path.is_absolute() and work_dir:
-                        path = Path(work_dir) / path
-                    results[raw_path] = path.resolve().is_file()
-                except OSError:
-                    results[raw_path] = False
+                results[raw_path] = (
+                    self._resolve_tab_file(raw_path, work_dir, tab_id)
+                    is not None
+                )
             return results
 
         results = await asyncio.to_thread(_check_paths)
