@@ -3105,11 +3105,19 @@
    * are skipped, and a reconnect with nothing outstanding sends
    * nothing: every open window reconnects at once after a daemon
    * restart.
+   *
+   * A pending span is not always a fresh candidate: a resolved span
+   * re-registered by recheckFileLinksForTab() carries data-path or
+   * data-path-missing instead of data-path-candidate, and losing its
+   * post-worktree verdict to the outage would strand it in its
+   * pre-merge (or pre-discard) state forever. _fileLinkPath() reads
+   * whichever state attribute holds the path, so those spans are
+   * reissued too.
    */
   function reissueFileLinkChecks() {
     const groups = new Map();
     for (const span of _pendingFileLinkSpans) {
-      const raw = span.getAttribute('data-path-candidate');
+      const raw = _fileLinkPath(span);
       if (!raw) continue;
       const owner = span.getAttribute('data-path-tab') || '';
       const wd = span.getAttribute('data-path-wd') || '';
