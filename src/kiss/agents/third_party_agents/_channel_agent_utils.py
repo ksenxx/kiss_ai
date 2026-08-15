@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 import time as _time
 from collections.abc import Callable
@@ -21,6 +22,33 @@ from kiss.core.config import kiss_home
 logger = logging.getLogger(__name__)
 
 _DEFAULT_KISS_DIR = Path.home() / ".kiss"
+
+SILENCE_TOKENS = frozenset({"[SILENT]", "NO_REPLY"})
+
+
+def summary_for_reply(result: str) -> str | None:
+    """Extract the automatic reply text from a task-result YAML string.
+
+    Implements Hermes-style silence tokens: when the agent's summary is
+    exactly ``[SILENT]`` or ``NO_REPLY`` (optionally wrapped in HTML
+    tags by the daemon's HTML conversion), the automatic reply is
+    suppressed.
+
+    Args:
+        result: YAML string with 'success' and 'summary' keys, as
+            returned by ``run_agent_via_kiss_web``.
+
+    Returns:
+        The reply text, or ``None`` when the summary is a silence token.
+    """
+    try:
+        result_yaml = yaml.safe_load(result)
+    except yaml.YAMLError:
+        result_yaml = None
+    summary = (result_yaml.get("summary", "") if isinstance(result_yaml, dict) else "") or result
+    if re.sub(r"<[^>]+>", "", summary).strip() in SILENCE_TOKENS:
+        return None
+    return summary
 
 _NON_TOOL_METHODS = frozenset(
     {
@@ -569,6 +597,10 @@ class ChannelRunner:
                     "automatically when you finish, so do not post "
                     "one yourself.]"
                 )
+            context += (
+                " [If no reply is warranted, finish with a summary of "
+                "exactly [SILENT] and no reply is sent.]"
+            )
             prompt += context
 
         Path(self._work_dir).mkdir(parents=True, exist_ok=True)
@@ -582,9 +614,11 @@ class ChannelRunner:
                 tools=self._tools_file or None,
             )
             if not self._bot_replied_in_thread(channel_id, msg):
-                result_yaml = yaml.safe_load(result)
-                summary = (result_yaml.get("summary", "") if result_yaml else "") or result
-                self._send_reply(channel_id, summary, thread_ts)
+                summary = summary_for_reply(result)
+                if summary is None:
+                    logger.info("Silence token; no reply sent for %s", session_key)
+                else:
+                    self._send_reply(channel_id, summary, thread_ts)
         except Exception as e:
             logger.error("Agent error for %s: %s", session_key, e, exc_info=True)
             self._send_reply(channel_id, f"Error processing your message: {e}", thread_ts)
