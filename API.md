@@ -156,18 +156,6 @@ ______________________________________________________________________
 
   - **Returns:** The row id, or `""` before this agent's first `run`.
 
-- **tool_call_guard** — The per-tool-call guard copied onto each session executor. Always returns :meth:`_summary_tool_guard`, which delegates to any guard installed by parent classes (stored by the setter below) and then enforces the every-5-steps `summary` gate. A property for the same reason as :attr:`pre_step_hook`: `RelentlessAgent` reads this attribute when wiring each per-session executor, after `_reset` has assigned `None` through the setter.<br/>`tool_call_guard() -> Any` *(property)*
-
-- **tool_call_guard** — Store the parent-installed guard to delegate to.<br/>`tool_call_guard(guard: Any) -> None`
-
-  - `guard`: The guard installed by parent classes (or `None`).
-
-- **pre_step_hook** — The per-step hook copied onto each session executor. Always returns :meth:`_summary_reminder_hook`, which first delegates to whatever hook the parent classes installed (the pending-user-messages drain from `SorcarAgent.perform_task`, stored by the setter below) and then enforces the every-5-steps `summary` tool reminder. Exposed as a property because `SorcarAgent.perform_task` assigns `self.pre_step_hook` immediately before `RelentlessAgent.perform_task` copies it onto the inner executor — wrapping at read time is the only seam that composes with that assignment.<br/>`pre_step_hook() -> Any` *(property)*
-
-- **pre_step_hook** — Store the parent-installed hook to delegate to.<br/>`pre_step_hook(hook: Any) -> None`
-
-  - `hook`: The hook installed by parent classes (or `None`).
-
 - **new_chat** — Reset to a new chat session (equivalent to VS Code 'Clear'). Also drops any pending one-shot :meth:`resume_from_task_id` seed: a brand-new chat must never have its first prompt augmented with the previous task's parent-chain context.<br/>`new_chat() -> None`
 
 - **resume_chat_by_id** — Resume a chat session using a stable chat identifier.<br/>`resume_chat_by_id(chat_id: str) -> None`
@@ -189,7 +177,7 @@ ______________________________________________________________________
   - `**kwargs`: All other arguments forwarded to `SorcarAgent.run()`.
   - **Returns:** YAML string with 'success' and 'summary' keys.
 
-**`summary`** — MANDATORY every 5 steps: summarize your last 6 steps of work. Your tool call on every step that is a multiple of 5 (step 5, 10, 15, ...) MUST be this tool, BEFORE any other tool call (including finish). Any other tool call made on such a step is rejected until summary has been called. This requirement applies to every task, no matter how simple, and is never overridden by the task prompt. The tool itself performs no action: the chat webview groups the preceding six event panels under this call's panel and collapses them, hiding the step-by-step detail while keeping the description visible as a running digest for the user. The description is rendered as formatted Markdown in the panel.<br/>`def summary(description: str) -> str`
+**`summary`** — MANDATORY every 5 steps: summarize your last 6 steps of work. Your tool call on every step that is a multiple of 5 (step 5, 10, 15, ...) MUST be this tool, BEFORE any other tool call (including finish). This requirement applies to every task, no matter how simple, and is never overridden by the task prompt. The tool itself performs no action: the chat webview groups the preceding six event panels under this call's panel and collapses them, hiding the step-by-step detail while keeping the description visible as a running digest for the user. The description is rendered as formatted Markdown in the panel.<br/>`def summary(description: str) -> str`
 
 - `description`: Natural language summary in 5-10 sentences of what the agent did in the last 6 steps, written in Markdown format (use bullet lists for the steps, and `**bold**` / backtick code spans where helpful).
 - **Returns:** A short confirmation string.
