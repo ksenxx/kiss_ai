@@ -1819,8 +1819,59 @@
     if (e.key === 'Escape') closeTabContextMenu();
   });
 
-  function createBackgroundSubagentTab(parentId) {
+  /**
+   * The deterministic tab id every client mints for sub-agent task
+   * *taskId* spawned under parent tab *parentTabId*.
+   *
+   * Tab ids are global across clients (the shared tab registry mirrors
+   * one tab to every window), so all clients MUST agree on the id of a
+   * sub-agent's tab.  When each client minted its own random id for
+   * the same sub-agent, the daemon ended up with one viewer
+   * subscription per client and each client then "deduped" the other
+   * clients' announcements via retagSubagentTab -> api.closeTab, which
+   * unsubscribed EVERY tab id from the sub-agent's event stream — the
+   * tabs froze on the head of the transcript.  One shared,
+   * deterministic id means no retag, no closeTab, one subscription.
+   *
+   * The format matches the daemon's own convention for replayed
+   * sub-agent tabs (``f"{parent_tab_id}__sub_{sub_task_id}"`` in
+   * ``_open_persisted_subagent_tabs``), which
+   * ``_resolve_parent_tab_id_for_sub`` parses with
+   * ``rsplit("__sub_", 1)`` — nesting is safe.
+   *
+   * @param {string} parentTabId The parent's tab id ('' when unknown).
+   * @param {*} taskId The sub-agent's task id.
+   * @returns {string} The deterministic sub-agent tab id.
+   */
+  function subagentTabIdFor(parentTabId, taskId) {
+    return (parentTabId || 'task') + '__sub_' + String(taskId);
+  }
+
+  /**
+   * Open a background (non-activated) tab for a freshly spawned
+   * sub-agent.
+   *
+   * @param {string} parentId The parent's tab id ('' for none).
+   * @param {string} tabId Deterministic id for the new tab; '' keeps
+   *     the random id makeTab minted (legacy callers/tests).
+   * @returns {object} The new tab object.
+   */
+  function createBackgroundSubagentTab(parentId, tabId) {
+    if (tabId) {
+      // One id, one tab: the deterministic id may already be open
+      // (e.g. the daemon's openSubagentTab announcement landed before
+      // this spawn was processed).  Reuse it instead of stacking a
+      // second tab under the same id.
+      const existing = getTab(tabId);
+      if (existing) {
+        existing.isSubagentTab = true;
+        if (parentId && parentId !== existing.id)
+          existing.parentTabId = parentId;
+        return existing;
+      }
+    }
     const subTab = makeTab('new chat');
+    if (tabId) subTab.id = tabId;
     if (parentId) subTab.parentTabId = parentId;
     subTab.isSubagentTab = true;
     placeSubagentTabAfterParent(subTab, parentId);
@@ -3703,7 +3754,10 @@
             _rpTabPanel.set(existing.id, panelEl);
             continue;
           }
-          const subTab = createBackgroundSubagentTab(panelEl._rpParentTabId);
+          const subTab = createBackgroundSubagentTab(
+            panelEl._rpParentTabId,
+            subagentTabIdFor(panelEl._rpParentTabId, en.taskId),
+          );
           subTab.currentTaskId = en.taskId;
           en.tabId = subTab.id;
           _rpTabPanel.set(subTab.id, panelEl);
@@ -6052,26 +6106,45 @@
           const teVisibleTab = activeTabId;
           currentTaskMetrics = {tokens: '', budget: '', steps: ''};
           // visibletask-coverage:end
+          // The borrowed row starts empty, exactly like the active
+          // tab's replayTaskEvents() starts with clearUsageMetrics():
+          // this replay REPLACES the tab's transcript, so a transcript
+          // that carries no usage event must leave the tab with no
+          // numbers — not with the visible tab's (or the hidden tab's
+          // own stale) ones.
+          if (statusTokens) statusTokens.textContent = '';
+          if (statusBudget) statusBudget.textContent = '';
+          if (statusSteps) statusSteps.textContent = '';
           let bgSteps = 0;
           try {
             bgSteps = replayEventsInto(frag, ev.events || [], {
               ownerTabId: teTabId,
+              // The replayed usage_info / result events painted this
+              // hidden tab's tokens and cost onto the borrowed status
+              // row; keep them on the tab (exactly like the live
+              // processOutputEventForBgTab does) — otherwise a switch
+              // to this tab shows only "Steps: N". A transcript that
+              // painted nothing keeps the tab's previous numbers (the
+              // row was cleared above, so what it holds here is the
+              // replay's own, never another tab's). The capture runs
+              // through this callback, BEFORE the replay's collapse
+              // pass: collapsing a finished run_parallel panel can
+              // close the tab on screen, and the tab-switch that
+              // follows repaints the row before the replay returns.
+              onEventsRendered: function () {
+                if (statusTokens && statusTokens.textContent)
+                  teTab.statusTokensText = statusTokens.textContent;
+                if (statusBudget && statusBudget.textContent)
+                  teTab.statusBudgetText = statusBudget.textContent;
+                if (statusSteps && statusSteps.textContent)
+                  teTab.statusStepsText = statusSteps.textContent;
+              },
               onFollowupClick: function (text) {
                 inp.value = text;
                 syncClearBtn();
                 inp.focus();
               },
             });
-            // The replayed usage_info / result events painted this
-            // hidden tab's tokens and cost onto the borrowed status
-            // row; keep them on the tab (exactly like the live
-            // processOutputEventForBgTab does) before the visible
-            // tab's own numbers are put back below — otherwise a
-            // switch to this tab shows only "Steps: N".
-            if (statusTokens && statusTokens.textContent)
-              teTab.statusTokensText = statusTokens.textContent;
-            if (statusBudget && statusBudget.textContent)
-              teTab.statusBudgetText = statusBudget.textContent;
           } catch (e) {
             teTab.outputFragment = teOldFrag;
             throw e;
@@ -6426,7 +6499,10 @@
             rpRegisterSubagent(rpPanel, parentTabBeforeNew, ev.task_id, '');
             break;
           }
-          const subTab = createBackgroundSubagentTab(parentTabBeforeNew);
+          const subTab = createBackgroundSubagentTab(
+            parentTabBeforeNew,
+            subagentTabIdFor(parentTabBeforeNew, ev.task_id),
+          );
           subTab.currentTaskId = ev.task_id;
           subAgentTabId = subTab.id;
           if (rpPanel) {
@@ -6438,7 +6514,10 @@
             );
           }
         } else {
-          subAgentTabId = createBackgroundSubagentTab('').id;
+          subAgentTabId = createBackgroundSubagentTab(
+            '',
+            subagentTabIdFor('', ev.task_id),
+          ).id;
         }
         api.resumeSession({taskId: ev.task_id, tabId: subAgentTabId});
         break;
@@ -7031,6 +7110,12 @@
     } finally {
       _deferHighlight = prevDefer;
     }
+    // Runs after every event has rendered but BEFORE the collapse pass
+    // below: collapsing a finished run_parallel panel closes its
+    // sub-agent tabs, and if one of those is the tab on screen the
+    // switch that follows repaints the shared status row — a caller
+    // that wants the numbers this replay painted must read them now.
+    if (opts && opts.onEventsRendered) opts.onEventsRendered();
     collapseAllExceptResult(container, ownerTabId);
     if (typeof hljs !== 'undefined') {
       container.querySelectorAll('code.needs-hl').forEach(bl => {
