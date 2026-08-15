@@ -116,9 +116,12 @@ class IRCChannelBackend(ToolMethodBackend):
     def _read_loop(self) -> None:
         """Background thread reading IRC data."""
         buf = ""
-        while self._sock is not None:  # pragma: no branch
+        while True:
+            sock = self._sock
+            if sock is None:
+                break
             try:
-                data = self._sock.recv(4096)
+                data = sock.recv(4096)
                 if not data:  # pragma: no branch
                     break
                 buf += data.decode("utf-8", errors="replace")

@@ -351,15 +351,9 @@ export interface AgentCommand {
     | 'setWorkDir'
     | 'getConfig'
     | 'saveConfig'
-    | 'getDefaultModel'
-    | 'readKissConfig'
-    | 'writeKissConfig'
-    | 'voiceWakeStart'
-    | 'voiceWakeStop'
     | 'serverReset';
   prompt?: string;
   model?: string;
-  sensitivity?: number;
   workDir?: string;
   activeFile?: string;
   attachments?: Attachment[];

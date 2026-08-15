@@ -65,26 +65,6 @@ export class SorcarApi {
     this._post({type: 'getConfig'});
   }
 
-  getDefaultModel(): void {
-    this._post({type: 'getDefaultModel'});
-  }
-
-  readKissConfig(): void {
-    this._post({type: 'readKissConfig'});
-  }
-
-  writeKissConfig(config: Record<string, unknown>): void {
-    this._post({type: 'writeKissConfig', config});
-  }
-
-  voiceWakeStart(sensitivity?: number): void {
-    this._post({type: 'voiceWakeStart', sensitivity});
-  }
-
-  voiceWakeStop(): void {
-    this._post({type: 'voiceWakeStop'});
-  }
-
   complete(fields: {
     query: string;
     tabId?: string;

@@ -182,6 +182,15 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     vscode.Progress<{message?: string}>
   > = new Map();
   private _disposed: boolean = false;
+  // Set once by dispose() and never cleared: unlike _disposed (which tracks
+  // the current webview's lifecycle and is reset by resolveWebviewView),
+  // this flag marks terminal teardown of the whole provider.  After it is
+  // set, nothing may reconnect a client or register new listeners.
+  private _terminated: boolean = false;
+  // The current webview's event registrations, retained so dispose() can
+  // detach them; otherwise a late queued webview message could reach
+  // _handleMessage() after terminal teardown.
+  private _viewSubs: vscode.Disposable[] = [];
   private _lastSentUrl: string = '';
   private _lastSeenRemotePassword: string | undefined;
   private _configFileWatchTimer?: ReturnType<typeof setInterval>;
@@ -263,13 +272,24 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   private _getApi(): SorcarApi {
-    if (!this._api) this._api = new SorcarApi(this._getClient());
-    return this._api;
+    if (this._api) return this._api;
+    const api = new SorcarApi(this._getClient());
+    // After terminal dispose() the wrapper must not be re-cached: it wraps
+    // an inert client and caching it would partially resurrect the view.
+    if (!this._terminated) this._api = api;
+    return api;
   }
 
   private _getClient(): AgentClient {
     if (this._client) return this._client;
     const client = new AgentClient();
+    if (this._terminated) {
+      // dispose() already ran.  Hand back an inert (disposed) client whose
+      // connect() is a no-op so a stray late caller cannot resurrect the
+      // daemon connection or register new listeners after teardown.
+      client.dispose();
+      return client;
+    }
     this._client = client;
     this._installClientListener(client);
     client.on('connect', () => {
@@ -468,6 +488,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     _context: vscode.WebviewViewResolveContext,
     _token: vscode.CancellationToken,
   ): void {
+    if (this._terminated) return;
+    for (const sub of this._viewSubs) sub.dispose();
+    this._viewSubs = [];
     this._view = webviewView;
     this._webviewReady = false;
     setWebviewNotificationPoster(message =>
@@ -490,11 +513,18 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       this._selectedModel,
     );
 
-    webviewView.webview.onDidReceiveMessage((message: FromWebviewMessage) =>
-      this._handleMessage(message),
+    this._viewSubs.push(
+      webviewView.webview.onDidReceiveMessage((message: FromWebviewMessage) => {
+        // _handleMessage is async and can reject (e.g. openTextDocument on
+        // a binary or oversized file); an unhandled rejection here would
+        // otherwise escape into the extension host.
+        this._handleMessage(message).catch(err =>
+          console.error('[SorcarSidebarView] message handling failed:', err),
+        );
+      }),
     );
 
-    webviewView.onDidChangeVisibility(() => {
+    const visibilitySub = webviewView.onDidChangeVisibility(() => {
       if (this._view !== webviewView) return;
       if (webviewView.visible) {
         this._getApi().getInputHistory();
@@ -507,18 +537,21 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
         this._voiceWake.stop();
       }
     });
+    this._viewSubs.push(visibilitySub);
 
-    webviewView.onDidDispose(() => {
-      if (this._view === webviewView) {
-        this._view = undefined;
-        this._disposed = true;
-        this._webviewReady = false;
-        setWebviewNotificationPoster(undefined);
-        this._voiceWakeSuspendedByHide = false;
-        this._voiceWake?.stop();
-      }
-      this._resolveAllWorktreeActions();
-    });
+    this._viewSubs.push(
+      webviewView.onDidDispose(() => {
+        if (this._view === webviewView) {
+          this._view = undefined;
+          this._disposed = true;
+          this._webviewReady = false;
+          setWebviewNotificationPoster(undefined);
+          this._voiceWakeSuspendedByHide = false;
+          this._voiceWake?.stop();
+        }
+        this._resolveAllWorktreeActions();
+      }),
+    );
 
     if (this._onFirstResolve) {
       const cb = this._onFirstResolve;
@@ -697,6 +730,9 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   private async _handleMessage(message: FromWebviewMessage): Promise<void> {
+    // A message already queued when dispose() ran must be dropped: handling
+    // it could rebuild the daemon client and its listeners after teardown.
+    if (this._terminated) return;
     const msgTabId = (message as {tabId?: string}).tabId;
     if (msgTabId) {
       if (message.type === 'closeTab') this._ownTabs.delete(msgTabId);
@@ -1253,7 +1289,14 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   }
 
   public dispose(): void {
+    // Terminal: set first so any concurrently queued webview message or
+    // late _getClient()/_getApi() call becomes a no-op and cannot
+    // resurrect the daemon client or its listeners.
+    this._terminated = true;
     this._disposed = true;
+    for (const sub of this._viewSubs) sub.dispose();
+    this._viewSubs = [];
+    this._view = undefined;
     setWebviewNotificationPoster(undefined);
     this._voiceWakeSuspendedByHide = false;
     this._voiceWake?.dispose();
@@ -1275,6 +1318,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
       this._client.dispose();
       this._client = null;
     }
+    // The API wrapper caches the client it was built around; keeping it
+    // would hand out an object bound to the disposed client if the view
+    // were ever used again, while a fresh _getClient() built a new one.
+    this._api = null;
     this._onCommitMessage.dispose();
   }
 }

@@ -36,6 +36,15 @@ MAX_OUTPUT_CHARS = 50000
 #: ``/proc/<pid>/environ`` inside the container's own pid namespace.
 _EXEC_TOKEN_VAR = "KISS_EXEC_TOKEN"
 
+#: Poll cadence of the reaper that waits for a timed-out exec whose start
+#: the docker daemon has delayed.  The reaper runs on a daemon thread and
+#: never gives up while the container lives (giving up would leave a
+#: sufficiently delayed command running for the rest of the container's
+#: life); instead the interval backs off exponentially to this cap so an
+#: indefinitely delayed start costs one inspect every few seconds.
+_REAP_POLL_INTERVAL_S = 0.2
+_REAP_POLL_MAX_INTERVAL_S = 5.0
+
 
 def _new_utf8_decoder() -> Any:
     """Return an incremental UTF-8 decoder that never raises.
@@ -211,17 +220,44 @@ class DockerManager:
         result_holder: dict[str, Any] = {}
         error_holder: dict[str, BaseException] = {}
 
-        container = self.container
-        assert container is not None
+        # The exec is tagged with a unique environment token — exactly
+        # like the streaming path — so a timed-out command can be
+        # killed inside the container instead of running (and consuming
+        # container resources) for the rest of the container's life.
+        #
+        # Timeout and exec startup are coordinated through *state*: a
+        # single kill scan at the deadline is not enough, because the
+        # daemon may delay ``exec_create``/``exec_start`` past the
+        # deadline, in which case the scan sees no tagged process and
+        # the command starts — and runs forever — *after* Bash has
+        # returned the timeout error.  The worker therefore commits to
+        # starting only while not cancelled (checked under the lock
+        # after ``exec_create``); a timed-out caller sets ``cancelled``
+        # under the same lock, so either the worker never calls
+        # ``exec_start`` at all, or the caller sees the commitment and
+        # hands the exec to a reaper that kills it once it has started.
+        token = uuid.uuid4().hex
+        container_id = self.container.id
+        state_lock = threading.Lock()
+        state = {"cancelled": False, "start_committed": False}
 
         def run_exec() -> None:
             try:
-                result_holder["result"] = container.exec_run(
+                resp = self.client.api.exec_create(
+                    container_id,
                     f"/bin/bash -c {shlex.quote(command)}",
                     stdout=True,
                     stderr=True,
-                    demux=True,
                     workdir=self.workdir,
+                    environment={_EXEC_TOKEN_VAR: token},
+                )
+                result_holder["exec_id"] = resp["Id"]
+                with state_lock:
+                    if state["cancelled"]:
+                        return
+                    state["start_committed"] = True
+                result_holder["output"] = self.client.api.exec_start(
+                    resp["Id"], demux=True,
                 )
             except BaseException as exc:
                 error_holder["error"] = exc
@@ -229,13 +265,19 @@ class DockerManager:
         thread = threading.Thread(target=run_exec, daemon=True)
         thread.start()
         thread.join(timeout_seconds)
-        if thread.is_alive():  # pragma: no branch
+        if thread.is_alive():
+            with state_lock:
+                state["cancelled"] = True
+                committed = state["start_committed"]
+            if committed:
+                # ``exec_id`` is guaranteed set: the worker stores it
+                # before committing, and the shared lock publishes it.
+                self._reap_timed_out_exec(result_holder["exec_id"], token)
             return f"Error: command timed out after {timeout_seconds}s"
         if error_holder:  # pragma: no branch
             raise error_holder["error"]
 
-        exec_result = result_holder["result"]
-        output_payload = exec_result.output
+        output_payload = result_holder["output"]
         if output_payload:  # pragma: no branch
             stdout_bytes, stderr_bytes = output_payload
         else:
@@ -244,8 +286,11 @@ class DockerManager:
         stderr = stderr_bytes.decode("utf-8", errors="replace") if stderr_bytes else ""
         output_parts = [part for part in (stdout, stderr) if part]
         output = "\n".join(output_parts)
+        exit_code = self.client.api.exec_inspect(
+            result_holder["exec_id"],
+        ).get("ExitCode", 0)
         return _truncate_output(
-            _with_exit_code(output, exec_result.exit_code), max_output_chars,
+            _with_exit_code(output, exit_code), max_output_chars,
         )
 
     def _bash_streaming(
@@ -310,6 +355,48 @@ class DockerManager:
             part for part in ("".join(stdout_parts), "".join(stderr_parts)) if part
         )
         return _truncate_output(_with_exit_code(output, exit_code), max_output_chars)
+
+    def _reap_timed_out_exec(self, exec_id: str, token: str) -> None:
+        """Guarantee a timed-out exec dies even if it has not started yet.
+
+        By the time the caller notices the timeout, the worker has
+        committed to ``exec_start`` but the daemon may not have started
+        the container-side process, so an immediate kill scan would find
+        nothing and the command would run forever once it starts.  A
+        daemon reaper thread polls ``exec_inspect`` instead: while the
+        exec is running it kills the token-tagged process tree, and it
+        stops once the exec has finished (``Pid`` is non-zero only after
+        the process has started).  A never-started exec is watched for
+        as long as the container lives — a fixed window would let a
+        start delayed past it run forever, the exact bug this reaper
+        exists to prevent.  The poll interval backs off so an
+        indefinitely delayed start costs one inspect every few seconds,
+        and the thread exits when the container is closed or the exec
+        vanishes.
+
+        Args:
+            exec_id: The docker exec to watch.
+            token: The unique tag given to the exec's environment.
+        """
+
+        def reap() -> None:
+            interval = _REAP_POLL_INTERVAL_S
+            while True:
+                if self.container is None:  # container closed: nothing to kill
+                    return
+                try:
+                    info = self.client.api.exec_inspect(exec_id)
+                except Exception:  # container/exec already gone
+                    logger.debug("could not inspect timed-out exec", exc_info=True)
+                    return
+                if info.get("Running"):
+                    self._kill_exec(token)
+                elif info.get("Pid"):
+                    return  # started and already finished (killed or done)
+                time.sleep(interval)
+                interval = min(interval * 2, _REAP_POLL_MAX_INTERVAL_S)
+
+        threading.Thread(target=reap, daemon=True).start()
 
     def _kill_exec(self, token: str) -> None:
         """Kill the container-side processes of a timed-out exec.

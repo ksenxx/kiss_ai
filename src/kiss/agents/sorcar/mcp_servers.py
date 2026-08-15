@@ -895,6 +895,35 @@ class MCPManager:
             except ValueError:
                 pass
 
+    def _lease(self, server: str) -> tuple[_Connection | None, Any]:
+        """Atomically look up *server*'s connection and lease it.
+
+        The lookup and the ``in_flight`` increment happen under one
+        acquisition of the manager lock: incrementing after releasing
+        the lookup's lock left a window in which a concurrent
+        :meth:`connect`'s :meth:`_evict_surplus` saw ``in_flight == 0``,
+        evicted the connection, and tore down the session underneath
+        the call about to run on it.  The session is captured under the
+        same lock so the caller always uses exactly the session it
+        leased.
+
+        Args:
+            server: A connection key, or a bare server name when it is
+                unambiguous.
+
+        Returns:
+            ``(conn, session)`` — *session* is non-``None`` only when
+            the connection is live and was leased (the caller must
+            release the lease by decrementing ``in_flight``).
+        """
+        with self._lock:
+            conn = _pick(self._connections, server)
+            session = conn.session if conn is not None else None
+            if conn is not None and session is not None:
+                conn.in_flight += 1
+                conn.last_used = time.monotonic()
+            return conn, session
+
     def call_tool(self, server: str, tool: str, arguments: dict[str, Any]) -> str:
         """Call *tool* on *server* and return the textual result.
 
@@ -918,20 +947,17 @@ class MCPManager:
                     f"Error: MCP server {display!r} is not connected "
                     f"(manager shut down)"
                 )
-            conn = _pick(self._connections, server)
-        if conn is None or conn.session is None:
+        conn, session = self._lease(server)
+        if session is None:
             # Evicted from the pool, or the server died mid-task: rebuild
             # it rather than failing every remaining call of the run.
-            conn = self._reconnect(server) or conn
-        session = conn.session if conn is not None else None
+            fresh = self._reconnect(server)
+            if fresh is not None:
+                leased, session = self._lease(server)
+                conn = leased or fresh
         if conn is None or session is None:
-            why = conn.error if conn else "never connected"
+            why = (conn.error if conn is not None else "") or "never connected"
             return f"Error: MCP server {display!r} is not connected ({why})"
-        conn.last_used = time.monotonic()
-        # Lease the connection for the whole call so the pool cannot
-        # evict the session this call is running on.
-        with self._lock:
-            conn.in_flight += 1
         future = asyncio.run_coroutine_threadsafe(
             session.call_tool(
                 tool, arguments,

@@ -19,7 +19,6 @@ import re
 import shlex
 import shutil
 import subprocess
-import tempfile
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -252,19 +251,11 @@ def save_config(data: dict[str, Any]) -> None:
                     existing[k] = v
             for k in RETIRED_KEYS:
                 existing.pop(k, None)
-            serialized = json.dumps(existing, indent=2)
-            fd, tmp = tempfile.mkstemp(
-                prefix=".kiss-config-", dir=str(cfg_dir),
-            )
-            try:
-                try:
-                    os.write(fd, serialized.encode("utf-8"))
-                finally:
-                    os.close(fd)
-                os.replace(tmp, cfg_path)
-            except BaseException:
-                Path(tmp).unlink(missing_ok=True)
-                raise
+            # atomic_write_text stages the payload in a sibling temp file
+            # through a buffered file object (a bare ``os.write`` may
+            # legally write fewer bytes than asked and the truncated file
+            # would be published) and ``os.replace``-s it into position.
+            atomic_write_text(cfg_path, json.dumps(existing, indent=2))
         finally:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
 

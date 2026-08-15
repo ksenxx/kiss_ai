@@ -121,12 +121,16 @@ class FeishuChannelBackend(ToolMethodBackend):
         body = (
             CreateMessageRequestBody.builder()
             .receive_id(channel_id)
-            .receive_id_type("chat_id")
             .msg_type("text")
             .content(json.dumps({"text": text}))
             .build()
         )
-        req = CreateMessageRequest.builder().request_body(body).build()
+        req = (
+            CreateMessageRequest.builder()
+            .receive_id_type("chat_id")
+            .request_body(body)
+            .build()
+        )
         resp = self._client.im.v1.message.create(req)
         if not resp.success():
             raise RuntimeError(resp.msg)
@@ -152,12 +156,16 @@ class FeishuChannelBackend(ToolMethodBackend):
             body = (
                 CreateMessageRequestBody.builder()
                 .receive_id(receive_id)
-                .receive_id_type(receive_id_type)
                 .msg_type("text")
                 .content(json.dumps({"text": text}))
                 .build()
             )
-            req = CreateMessageRequest.builder().request_body(body).build()
+            req = (
+                CreateMessageRequest.builder()
+                .receive_id_type(receive_id_type)
+                .request_body(body)
+                .build()
+            )
             resp = self._client.im.v1.message.create(req)
             if not resp.success():  # pragma: no branch
                 return json.dumps({"ok": False, "error": resp.msg})

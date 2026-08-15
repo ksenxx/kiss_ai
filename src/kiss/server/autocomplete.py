@@ -11,8 +11,10 @@ autocomplete feature.  Split out of ``server.py`` for organisation.
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import re
+import stat
 import threading
 from typing import TYPE_CHECKING, Any
 
@@ -71,14 +73,37 @@ def read_active_file_head(path: str) -> str:
     Unreadable or non-UTF-8 files yield ``""`` (best effort — the
     active file is only a suggestion source).
 
+    ``path`` is client-supplied and this function runs on the single
+    autocomplete worker shared by every connection, so it must never
+    block: the file is opened with ``O_NONBLOCK`` (a plain ``open``
+    of a writer-less FIFO blocks forever) and anything that is not a
+    regular file — FIFOs, device nodes, sockets — is rejected via
+    ``fstat`` before any read.  For regular files ``O_NONBLOCK`` is a
+    no-op, so normal behaviour is unchanged.  Windows has no
+    ``O_NONBLOCK`` (and no FIFO open-blocking hazard); the flag
+    degrades to 0 there instead of raising ``AttributeError``.
+
     Args:
         path: Path of the active editor file.
 
     Returns:
-        The capped file content, or ``""`` on any read failure.
+        The capped file content, or ``""`` on any read failure or when
+        *path* is not a regular file.
     """
     try:
-        with open(path, encoding="utf-8") as f:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return ""
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            return ""
+        f = os.fdopen(fd, encoding="utf-8")
+    except OSError:
+        os.close(fd)
+        return ""
+    try:
+        with f:
             return f.read(_ACTIVE_FILE_READ_CAP)
     except (OSError, UnicodeDecodeError):
         return ""
@@ -187,7 +212,8 @@ class _AutocompleteMixin:
         work_dir: str
         _state_lock: threading.RLock
         _complete_queue: (
-            queue.Queue[tuple[str, int, str, str, str, str, str]] | None
+            queue.Queue[tuple[str, int, str, str | None, str, str, str]]
+            | None
         )
         _complete_worker: threading.Thread | None
         _complete_seq_latest: dict[str, int]
@@ -316,12 +342,22 @@ class _AutocompleteMixin:
         # now would overwrite the newer request's result with a stale
         # one (the frontend only compares the echoed query text, which
         # can be identical across the two requests).
+        fast = _ghost_suffix(query, completions)
+        fast = clip_autocomplete_suggestion(query, fast)
         if seq >= 0:
+            # Publish while still holding the lock: invalidators
+            # (``setWorkDir``, disconnect) also take ``_state_lock``,
+            # so once they return no stale event can be broadcast —
+            # a check-then-emit outside the lock would leave a window
+            # in which an already-checked stale result still escapes.
+            # Nothing in the broadcast path acquires ``_state_lock``
+            # (an RLock in any case), so this cannot deadlock.
             with self._state_lock:
                 if seq != self._complete_seq_latest.get(conn_id, -1):
                     return
-        fast = _ghost_suffix(query, completions)
-        fast = clip_autocomplete_suggestion(query, fast)
+                self._emit_ghost(fast, query, conn_id, tab_id)
+                self._emit_completions(completions, query, conn_id, tab_id)
+            return
         self._emit_ghost(fast, query, conn_id, tab_id)
         self._emit_completions(completions, query, conn_id, tab_id)
 

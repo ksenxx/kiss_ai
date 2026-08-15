@@ -296,7 +296,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status and message_id.
         """
-        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
         try:
             result = _api_request(
                 "POST",
@@ -340,7 +340,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status and message_id.
         """
-        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
         try:
             template: dict[str, Any] = {
                 "name": template_name,
@@ -392,7 +392,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status and message_id.
         """
-        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
         try:
             media_obj: dict[str, Any] = {}
             if media_id:
@@ -433,7 +433,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status and message_id.
         """
-        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
         try:
             result = _api_request(
                 "POST",
@@ -474,7 +474,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status and message_id.
         """
-        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
         try:
             location: dict[str, Any] = {
                 "latitude": latitude,
@@ -513,7 +513,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status and message_id.
         """
-        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
         try:
             result = _api_request(
                 "POST",
@@ -544,7 +544,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status and message_id.
         """
-        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
         try:
             result = _api_request(
                 "POST",
@@ -574,7 +574,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status.
         """
-        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/messages"
+        url = f"{self._graph_api_base}/{self._phone_number_id}/messages"
         try:
             result = _api_request(
                 "POST",
@@ -602,7 +602,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             description, email, websites, profile_picture_url).
         """
         url = (
-            f"{_GRAPH_API_BASE}/{self._phone_number_id}/whatsapp_business_profile"
+            f"{self._graph_api_base}/{self._phone_number_id}/whatsapp_business_profile"
             "?fields=about,address,description,email,websites,profile_picture_url,vertical"
         )
         try:
@@ -637,7 +637,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status.
         """
-        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/whatsapp_business_profile"
+        url = f"{self._graph_api_base}/{self._phone_number_id}/whatsapp_business_profile"
         try:
             body: dict[str, Any] = {"messaging_product": "whatsapp"}
             if about:
@@ -673,7 +673,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
             JSON string with ok status and media_id (use in
             send_media_message).
         """
-        url = f"{_GRAPH_API_BASE}/{self._phone_number_id}/media"
+        url = f"{self._graph_api_base}/{self._phone_number_id}/media"
         try:
             with open(file_path, "rb") as f:
                 result = _api_request(
@@ -702,7 +702,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status, url, mime_type, and file_size.
         """
-        url = f"{_GRAPH_API_BASE}/{media_id}"
+        url = f"{self._graph_api_base}/{media_id}"
         try:
             result = _api_request("GET", url, self._access_token)
             if "error" in result:
@@ -727,7 +727,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         Returns:
             JSON string with ok status.
         """
-        url = f"{_GRAPH_API_BASE}/{media_id}"
+        url = f"{self._graph_api_base}/{media_id}"
         try:
             result = _api_request("DELETE", url, self._access_token)
             if "error" in result:
@@ -762,7 +762,7 @@ class WhatsAppChannelBackend(ToolMethodBackend):
         params = f"?limit={limit}"
         if status:
             params += f"&status={status}"
-        url = f"{_GRAPH_API_BASE}/{self._waba_id}/message_templates{params}"
+        url = f"{self._graph_api_base}/{self._waba_id}/message_templates{params}"
         try:
             result = _api_request("GET", url, self._access_token)
             if "error" in result:
@@ -843,7 +843,7 @@ class WhatsAppAgent(BaseChannelAgent):
                     "phone_number_id='...')"
                 )
             url = (
-                f"{_GRAPH_API_BASE}/{agent._backend._phone_number_id}"
+                f"{agent._backend._graph_api_base}/{agent._backend._phone_number_id}"
                 "?fields=verified_name,display_phone_number"
             )
             result = _api_request("GET", url, agent._backend._access_token)
@@ -884,7 +884,10 @@ class WhatsAppAgent(BaseChannelAgent):
             phone_number_id = phone_number_id.strip()
             if not access_token or not phone_number_id:
                 return "Both access_token and phone_number_id are required."
-            url = f"{_GRAPH_API_BASE}/{phone_number_id}?fields=verified_name,display_phone_number"
+            url = (
+                f"{agent._backend._graph_api_base}/{phone_number_id}"
+                "?fields=verified_name,display_phone_number"
+            )
             result = _api_request("GET", url, access_token)
             if "error" in result:
                 return json.dumps(

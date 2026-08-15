@@ -2143,7 +2143,6 @@
   const modelSearch = document.getElementById('model-search');
   const modelList = document.getElementById('model-list');
   const modelName = document.getElementById('model-name');
-  if (modelName && modelName.textContent) selectedModel = modelName.textContent;
   const fileChips = document.getElementById('file-chips');
 
   const statusText = document.getElementById('status-text');
@@ -9061,7 +9060,11 @@
     const existing = document.getElementById('kiss-datepicker-pop');
     if (existing) {
       const sameInput = existing._kissInput === input;
-      existing.remove();
+      // Close through the picker's own teardown so the document-level
+      // mousedown/keydown/resize listeners it registered are removed too;
+      // a bare remove() would leave them behind on every toggle.
+      if (typeof existing._kissClose === 'function') existing._kissClose();
+      else existing.remove();
       if (sameInput) return;
     }
     const MONTHS = [
@@ -9170,12 +9173,16 @@
       closePicker();
     }
 
+    let pickerClosed = false;
+
     function closePicker() {
+      pickerClosed = true;
       document.removeEventListener('mousedown', onDocClick, true);
       document.removeEventListener('keydown', onKey, true);
       window.removeEventListener('resize', position);
       if (pop.parentNode) pop.parentNode.removeChild(pop);
     }
+    pop._kissClose = closePicker;
 
     function onDocClick(e) {
       if (pop.contains(e.target)) return;
@@ -9226,6 +9233,7 @@
     document.body.appendChild(pop);
     position();
     setTimeout(() => {
+      if (pickerClosed) return;
       document.addEventListener('mousedown', onDocClick, true);
       document.addEventListener('keydown', onKey, true);
       window.addEventListener('resize', position);

@@ -54,7 +54,7 @@ class TestSaveConfigConcurrencyNoLostUpdate(unittest.TestCase):
     def setUp(self) -> None:
         self._orig_dir = vc.CONFIG_DIR
         self._orig_path = vc.CONFIG_PATH
-        self._orig_mkstemp = vc.tempfile.mkstemp
+        self._orig_mkstemp = tempfile.mkstemp
         self._tmpdir = tempfile.mkdtemp()
         vc.CONFIG_DIR = Path(self._tmpdir)
         vc.CONFIG_PATH = Path(self._tmpdir) / "config.json"
@@ -62,17 +62,19 @@ class TestSaveConfigConcurrencyNoLostUpdate(unittest.TestCase):
     def tearDown(self) -> None:
         vc.CONFIG_DIR = self._orig_dir
         vc.CONFIG_PATH = self._orig_path
-        vc.tempfile.mkstemp = self._orig_mkstemp
+        tempfile.mkstemp = self._orig_mkstemp
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _install_slow_mkstemp(self) -> None:
         """Widen the read-modify-write window.
 
-        ``mkstemp`` is called AFTER ``save_config`` has read the old
-        file and built its merged dict, but BEFORE ``os.replace``.
-        Sleeping here lets every concurrent thread read the same old
-        file before any of them publishes, maximising the lost-update
-        window so the race reproduces deterministically.
+        ``mkstemp`` (called by ``atomic_write_text``, which
+        ``save_config`` stages its write through) runs AFTER
+        ``save_config`` has read the old file and built its merged
+        dict, but BEFORE ``os.replace``.  Sleeping here lets every
+        concurrent thread read the same old file before any of them
+        publishes, maximising the lost-update window so the race
+        reproduces deterministically.
         """
         orig = self._orig_mkstemp
 
@@ -80,7 +82,7 @@ class TestSaveConfigConcurrencyNoLostUpdate(unittest.TestCase):
             time.sleep(0.05)
             return orig(*args, **kwargs)
 
-        vc.tempfile.mkstemp = slow_mkstemp
+        tempfile.mkstemp = slow_mkstemp
 
     def test_concurrent_writes_all_survive(self) -> None:
         vc.save_config({"max_budget": 100})
