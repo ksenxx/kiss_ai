@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Telegram Agent — SorcarAgent extension with Telegram Bot API tools.
+"""Telegram Agent — channel agent with Telegram Bot API tools.
 
 Provides authenticated access to Telegram via a bot token from @BotFather.
 Stores the token securely in ``~/.kiss/third_party_agents/telegram/config.json`` and
@@ -21,8 +21,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -100,24 +98,6 @@ class TelegramChannelBackend(ToolMethodBackend):
         if thread_ts:  # pragma: no branch
             kwargs["reply_to_message_id"] = int(thread_ts)
         self._bot.send_message(**kwargs)
-
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Poll for a reply from a specific user."""
-        assert self._bot is not None
-        return wait_for_matching_message(
-            poll=lambda: self.poll_messages(channel_id, "")[0],
-            matches=lambda msg: msg.get("user") == user_id,
-            extract_text=lambda msg: str(msg.get("text", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=2.0,
-        )
-
 
     def send_text(self, chat_id: str, text: str, reply_to_message_id: str = "") -> str:
         """Send a text message to a Telegram chat.
@@ -461,8 +441,8 @@ class TelegramChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class TelegramAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with Telegram Bot API tools.
+class TelegramAgent(BaseChannelAgent):
+    """Channel agent with Telegram Bot API tools.
 
     Example::
 
@@ -579,6 +559,17 @@ def main() -> None:
         channel_name="Telegram",
         make_backend=_make_backend,
     )
+
+
+def get_tools() -> list:
+    """Return the Telegram channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return TelegramAgent()._get_tools()
 
 
 if __name__ == "__main__":

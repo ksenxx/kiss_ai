@@ -6,25 +6,33 @@
 """Abstract base class for LLM provider model implementations.
 
 Also contains shared text-based tool calling helpers used by models that
-lack native function calling support (e.g. DeepSeek R1, Claude Code CLI).
+lack native function calling support (e.g. DeepSeek R1, Claude Code CLI),
+and — beside :class:`CLITextModel`, the base class of both CLI-backed
+transports — the subprocess supervision those two share:
+:class:`_CLIProcess` and :class:`_ToolCallFilteredStream`.
 """
 
 import base64
+import contextlib
 import dataclasses
 import inspect
 import json
 import logging
 import mimetypes
 import os
+import queue
 import re
+import subprocess
+import threading
 import time
 import types as types_module
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Iterator
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin
 
+from kiss.core import stop_signal
 from kiss.core.kiss_error import KISSError
 from kiss.core.models.heif import (
     HEIF_MIME_TYPES,
@@ -519,6 +527,47 @@ def flatten_content_to_text(content: Any) -> str:
     return "\n".join(p for p in parts if p)
 
 
+# model_config keys the framework itself consumes: they configure this
+# framework's behaviour (routing, watchdogs, caching policy, the system
+# prompt) and are never request parameters of any provider, so every
+# adapter strips them before shaping a request.
+# The text of the follow-up user message that carries attachments a tool
+# returned, so the model knows where the bytes came from.
+TOOL_RESULT_ATTACHMENT_NOTE = "[attachments from previous tool result(s)]"
+
+FRAMEWORK_ONLY_CONFIG_KEYS = frozenset(
+    {
+        "system_instruction",
+        "use_responses_api",
+        "stream_stall_timeout",
+        "enable_cache",
+        # Whether a turn streams follows from whether a token callback is
+        # attached, so every adapter sets this itself.
+        "stream",
+    }
+)
+
+
+def accepted_request_params(method: Any) -> frozenset[str]:
+    """Return the keyword parameter names an SDK request method declares.
+
+    The provider SDKs are generated from the vendors' OpenAPI specs and
+    declare every request parameter explicitly with **no** ``**kwargs``,
+    so their signatures are the authoritative list of what a request may
+    carry — and stay correct across SDK upgrades, unlike a hand-written
+    table.
+
+    Args:
+        method: The unbound request function of an SDK resource class
+            (e.g. ``openai.resources.responses.Responses.create``), so the
+            answer does not depend on a client having been built yet.
+
+    Returns:
+        The declared parameter names, without ``self``.
+    """
+    return frozenset(inspect.signature(method).parameters) - {"self"}
+
+
 class Model(ABC):
     """Abstract base class for LLM provider implementations."""
 
@@ -549,6 +598,52 @@ class Model(ABC):
         # Whether a thinking block is currently open, so an aborted
         # stream can close it (see _close_thinking_if_open).
         self._thinking_open = False
+        # model_config keys already reported as unsupported, so a long run
+        # is told once rather than on every step.
+        self._reported_unsupported_config_keys: set[str] = set()
+
+    def _keep_supported_request_params(
+        self,
+        params: dict[str, Any],
+        supported: Collection[str],
+        provider: str,
+    ) -> dict[str, Any]:
+        """Return the ``model_config`` params *provider* accepts, reporting the rest.
+
+        The one policy every adapter applies to the public
+        :attr:`model_config` dict: keys the framework consumes are popped
+        by the adapter, portable keys are translated to the provider's own
+        spelling, and whatever is left is forwarded *iff* the provider
+        declares it.  A key the provider does not declare is dropped with
+        a warning naming both — never forwarded into a keyword-only SDK
+        call (a ``TypeError`` that is neither retryable nor actionable),
+        and never discarded in silence.
+
+        The warning is emitted once per key per model instance.
+
+        Args:
+            params: The candidate request parameters, already translated.
+            supported: The parameter names the provider accepts, taken
+                from the SDK itself (see :func:`accepted_request_params`).
+            provider: Human-readable transport name used in the warning.
+
+        Returns:
+            The subset of *params* the provider accepts.
+        """
+        kept = {key: value for key, value in params.items() if key in supported}
+        dropped = sorted(
+            key
+            for key in params
+            if key not in kept and key not in self._reported_unsupported_config_keys
+        )
+        if dropped:
+            self._reported_unsupported_config_keys.update(dropped)
+            logger.warning(
+                "%s does not support model_config key(s) %s; ignoring them.",
+                provider,
+                ", ".join(dropped),
+            )
+        return kept
 
     def _invoke_token_callback(self, token: str) -> None:
         """Invoke the token callback synchronously."""
@@ -579,11 +674,44 @@ class Model(ABC):
     def reset_conversation(self) -> None:
         """Reset conversation state for reuse across sub-sessions.
 
-        Clears the conversation history and usage info while keeping the
-        HTTP client and model configuration intact.
+        Clears the conversation history, the usage info and the thinking
+        bracket, while keeping the HTTP client and model configuration
+        intact.
+
+        The bracket has to go with them: ``KISSAgent._reset`` reuses the
+        same adapter instance across runs and binds a *new* printer to
+        it, so a block left open by a stream that was aborted
+        mid-thinking would make the next task's first thought skip its
+        opening ``thinking_callback(True)`` — rendering reasoning as
+        ordinary assistant text — or emit a spurious closing ``False``
+        into a printer that never opened one.
         """
         self.conversation = []
         self.usage_info_for_messages = ""
+        self._thinking_open = False
+
+    def rebind_callbacks(
+        self,
+        token_callback: TokenCallback | None,
+        thinking_callback: ThinkingCallback | None,
+    ) -> None:
+        """Point this model's streaming callbacks at a new printer.
+
+        The hook ``KISSAgent._reset`` calls when it reuses an existing
+        adapter instance for a new run.  Assigning the two attributes
+        from outside reaches only the attributes themselves, which
+        silently misses any sub-model or per-turn state a subclass owns:
+        a transport that delegates a turn to a cached sub-model must
+        override this and re-bind that delegate too, or the delegated
+        turn keeps streaming into the *previous* run's printer.
+
+        Args:
+            token_callback: The new printer's token callback, or ``None``.
+            thinking_callback: The new printer's thinking callback, or
+                ``None``.
+        """
+        self.token_callback = token_callback
+        self.thinking_callback = thinking_callback
 
     def _replace_last_assistant_with_tool_calls(
         self, content: str, function_calls: list[dict[str, Any]]
@@ -711,36 +839,124 @@ class Model(ABC):
                 break
         return list(reversed(native))
 
+    def tool_result_text_and_attachments(
+        self, result_dict: dict[str, Any]
+    ) -> tuple[str, list[Attachment]]:
+        """Split one tool result into provider-safe text and its attachments.
+
+        The three steps every adapter needs, in the one order that works:
+        JSON-encode a structured result (a regex cannot be run over a dict),
+        lift any binary payload out of the sentinel the tool embedded it in,
+        and append the usage line the framework shows the model.
+
+        Args:
+            result_dict: One tool's result payload, as passed to
+                :meth:`add_function_results_to_conversation_and_return`.
+
+        Returns:
+            The text to put in the tool message, and the attachments the
+            tool produced (empty when it produced none).
+        """
+        text, attachments = parse_binary_attachments(
+            _tool_result_to_string(result_dict)
+        )
+        if self.usage_info_for_messages:
+            text = f"{text}\n\n{self.usage_info_for_messages}"
+        return text, attachments
+
+    @staticmethod
+    def tool_result_call_id(
+        result_dict: dict[str, Any],
+        index: int,
+        tool_calls: list[tuple[str, str]],
+        func_name: str,
+        prefix: str = "call",
+    ) -> str:
+        """Return the id of the tool call one result answers.
+
+        An explicit ``tool_use_id`` in the result wins — it is part of the
+        public signature of
+        :meth:`add_function_results_to_conversation_and_return`, so it is
+        honoured by every adapter rather than by one.  Otherwise results are
+        matched to the last assistant message's tool calls by position, and
+        an id is synthesised when there is nothing to match.
+
+        Args:
+            result_dict: One tool's result payload.
+            index: Its position in the result list.
+            tool_calls: ``(name, id)`` pairs of the calls being answered.
+            func_name: The tool's name, used in a synthesised id.
+            prefix: Prefix of a synthesised id (Anthropic uses ``toolu``).
+
+        Returns:
+            The tool-call id to answer.
+        """
+        explicit = result_dict.get("tool_use_id")
+        if explicit:
+            return str(explicit)
+        if index < len(tool_calls):
+            return tool_calls[index][1]
+        return f"{prefix}_{func_name}_{index}"
+
+    def _deliver_tool_result_attachments(
+        self, attachments: list[Attachment]
+    ) -> None:
+        """Make bytes a tool returned visible to the model.
+
+        A tool result is a string, so an image or audio clip a tool produced
+        cannot live inside the tool message on most transports.  The default
+        is to append a follow-up ``user`` message carrying the attachments,
+        which every adapter that renders an ``attachments`` key turns into
+        real image / file / audio content parts.
+
+        A transport that cannot carry bytes at all must override this and
+        *say so* — to the log and to the model — instead of dropping them.
+
+        Args:
+            attachments: The attachments lifted out of the tool results.
+        """
+        self.conversation.append(
+            {
+                "role": "user",
+                "content": TOOL_RESULT_ATTACHMENT_NOTE,
+                "attachments": list(attachments),
+            }
+        )
+
     def add_function_results_to_conversation_and_return(
         self, function_results: list[tuple[str, dict[str, Any]]]
     ) -> None:
         """Adds function results to the conversation state.
 
-        Matches results to tool calls by index from the last assistant message.
+        Each result becomes one ``tool`` message, answering the tool call
+        named by its ``tool_use_id`` or matched by position against the last
+        assistant message.  Binary payloads are lifted out of the text and
+        handed to :meth:`_deliver_tool_result_attachments`, so what a tool
+        returned actually reaches the model.
 
         Args:
             function_results: List of tuples containing (function_name, result_dict).
         """
         tool_calls = self._find_tool_call_ids_from_last_assistant()
+        pending: list[Attachment] = []
 
         for i, (func_name, result_dict) in enumerate(function_results):
-            result_content = _tool_result_to_string(result_dict)
-            result_content, _ = parse_binary_attachments(result_content)
-            if self.usage_info_for_messages:
-                result_content = f"{result_content}\n\n{self.usage_info_for_messages}"
-
-            if i < len(tool_calls):
-                tool_call_id = tool_calls[i][1]
-            else:
-                tool_call_id = f"call_{func_name}_{i}"
-
+            result_content, attachments = self.tool_result_text_and_attachments(
+                result_dict
+            )
             self.conversation.append(
                 {
                     "role": "tool",
-                    "tool_call_id": tool_call_id,
+                    "tool_call_id": self.tool_result_call_id(
+                        result_dict, i, tool_calls, func_name
+                    ),
                     "content": result_content,
                 }
             )
+            pending.extend(attachments)
+
+        if pending:
+            self._deliver_tool_result_attachments(pending)
 
     def add_message_to_conversation(self, role: str, content: str) -> None:
         """Adds a message to the conversation state.
@@ -967,6 +1183,11 @@ class CLITextModel(Model):
     _cli_model_name = "CLITextModel"
     _cli_logger = logger
 
+    # Set for the duration of a tool-bearing turn by
+    # :class:`_ToolCallFilteredStream`; adapters that can end such a turn
+    # early at the first complete ``tool_calls`` block consult it.
+    _tool_bearing_turn = False
+
     def initialize(self, prompt: str, attachments: list[Attachment] | None = None) -> None:
         """Initialize the conversation with an initial user prompt.
 
@@ -980,6 +1201,39 @@ class CLITextModel(Model):
                 "they will be ignored."
             )
         self.conversation = [{"role": "user", "content": prompt}]
+
+    def _deliver_tool_result_attachments(
+        self, attachments: list[Attachment]
+    ) -> None:
+        """State that this transport cannot show the bytes a tool returned.
+
+        The CLI is driven by a single text prompt and has no content-part
+        shape, so a screenshot or audio clip a tool produced cannot be
+        handed to the model.  Saying so — in the log and in the prompt
+        itself — is what keeps the model from reasoning about a picture it
+        never received, which is what silently dropping the bytes did.
+
+        Args:
+            attachments: The attachments lifted out of the tool results.
+        """
+        described = ", ".join(
+            f"{att.mime_type} ({len(att.data)} bytes)" for att in attachments
+        )
+        self._cli_logger.warning(
+            "%s cannot show attachments to the model; %s from the tool "
+            "result were not sent.",
+            self._cli_model_name,
+            described,
+        )
+        self.conversation.append(
+            {
+                "role": "user",
+                "content": (
+                    f"[{len(attachments)} attachment(s) in the previous tool "
+                    f"result could not be shown to this model: {described}]"
+                ),
+            }
+        )
 
     def _conversation_as_dialogue(self) -> str:
         """Render the conversation as a ``[User]/[Assistant]/[Tool Result]`` transcript.
@@ -1037,6 +1291,525 @@ class CLITextModel(Model):
             KISSError: Always.
         """
         raise KISSError(f"{self._cli_model_name} does not support embeddings.")
+
+
+# Seconds a drained pipe or a signalled child is given to finish before
+# the supervisor gives up on it and moves on.
+_REAP_GRACE_SECONDS = 2.0
+# Longest wait for a child that already closed stdout to exit on its own.
+# Bounded by the run's own deadline, so a short timeout stays short.
+_EXIT_GRACE_SECONDS = 10.0
+# How often a blocked reader re-checks the thread's stop signal.
+_STOP_POLL_SECONDS = 0.1
+
+
+def _cli_stall_error(label: str, timeout: float) -> TimeoutError:
+    """Build the retryable stall error for a CLI that stopped producing output.
+
+    ``KISSAgent._run_agentic_loop`` re-raises every :class:`KISSError`
+    immediately and retries everything else, so a transient stall must
+    NOT be a ``KISSError``: that would abort the whole task where the
+    equivalent Anthropic condition (``AnthropicModel._stall_error``) is
+    simply retried.
+
+    Args:
+        label: Human-readable CLI name for the message.
+        timeout: The deadline, in seconds, that the run overran.
+
+    Returns:
+        The ``TimeoutError`` for the caller to raise.
+    """
+    return TimeoutError(
+        f"{label} timed out after {timeout}s without finishing its turn; "
+        f"the process was killed and the step will be retried."
+    )
+
+
+class _StreamReadTimeoutError(Exception):
+    """Internal sentinel: the CLI stdout stream stalled past the deadline."""
+
+
+class _CLIProcess:
+    """A CLI child process whose whole lifetime is bounded by a ``with`` block.
+
+    Shared by both CLI-backed adapters, because both need four
+    guarantees that :class:`subprocess.Popen` does not give for free:
+
+    * **stderr is drained continuously.**  A CLI that fills the 64 KiB
+      stderr pipe with progress or deprecation noise otherwise blocks in
+      ``write(2)`` and stops writing stdout too, which is indistinguishable
+      from a model stall and costs the entire timeout.
+    * **writing the prompt cannot kill the caller.**  Agentic prompts are
+      the whole flattened dialogue and routinely exceed the pipe buffer,
+      so a child that rejects its arguments and exits breaks the pipe
+      mid-write.  The useful diagnosis is the child's exit status and
+      stderr, not ``BrokenPipeError``.
+    * **stdout is read with a deadline and a stop signal.**  A parked
+      reader cannot be rescued cooperatively, so the reader polls and
+      raises instead of blocking forever (see :mod:`kiss.core.stop_signal`).
+    * **the child is always reaped and its pipes released.**  Leaving
+      that to ``Popen.__del__`` leaks a zombie and three descriptors per
+      timed-out call, which a long-running daemon eventually pays for
+      with ``OSError: [Errno 24] Too many open files``.
+
+    The reader threads deliberately do nothing but move bytes: parsing
+    (and therefore every token/thinking callback) happens on the calling
+    thread, so an abandoned reader can never emit a dead run's output
+    into the next run's printer.
+    """
+
+    def __init__(self, args: list[str], label: str, timeout: float) -> None:
+        """Start *args* and begin draining both of its output pipes.
+
+        Args:
+            args: The command line to run.
+            label: Human-readable CLI name used in error messages.
+            timeout: Seconds the whole turn may take, counted from now.
+
+        Raises:
+            KISSError: If the executable could not be started.
+        """
+        self._label = label
+        self._deadline = time.monotonic() + timeout
+        try:
+            self._proc = subprocess.Popen(
+                args,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+            )
+        except OSError as e:
+            raise KISSError(f"Failed to start {label}: {e}") from e
+        self._stdout_lines: queue.Queue[str | None] = queue.Queue()
+        self._stderr_chunks: list[str] = []
+        self._readers = (
+            self._start_reader(self._drain_stdout, "stdout"),
+            self._start_reader(self._drain_stderr, "stderr"),
+        )
+
+    def __enter__(self) -> "_CLIProcess":
+        """Return the running process supervisor."""
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        """End the child's lifetime, however the ``with`` block finished."""
+        self.close()
+
+    def _start_reader(self, target: Callable[[], None], suffix: str) -> threading.Thread:
+        """Start a daemon thread draining one of the child's pipes."""
+        thread = threading.Thread(
+            target=target, daemon=True, name=f"cli-{suffix}-drain"
+        )
+        thread.start()
+        return thread
+
+    def _drain_stdout(self) -> None:
+        """Move every stdout line into the queue, then post the EOF sentinel."""
+        try:
+            for line in self._proc.stdout:  # type: ignore[union-attr]
+                self._stdout_lines.put(line)
+        except (OSError, ValueError):  # pragma: no cover – pipe closed under us
+            logger.debug("%s stdout closed while being read", self._label)
+        finally:
+            self._stdout_lines.put(None)
+
+    def _drain_stderr(self) -> None:
+        """Keep the stderr pipe empty so the child never blocks writing to it."""
+        try:
+            for line in self._proc.stderr:  # type: ignore[union-attr]
+                self._stderr_chunks.append(line)
+        except (OSError, ValueError):  # pragma: no cover – pipe closed under us
+            logger.debug("%s stderr closed while being read", self._label)
+
+    def send_prompt(self, prompt: str) -> None:
+        """Write *prompt* to the child's stdin and close it.
+
+        A flattened agent conversation dwarfs the pipe buffer, so the
+        write only completes as fast as the child drains it.  Doing it
+        inline would park the agent thread inside ``write(2)`` — deaf to
+        both the turn deadline and Stop, which are polled only while
+        reading the child's *output* — for as long as a CLI stuck in
+        start-up, auth or plugin loading leaves stdin unread.  The write
+        therefore runs on its own thread and is bounded by exactly the
+        same two conditions :meth:`lines` obeys.
+
+        A child that exits before reading breaks the pipe mid-write.
+        That is swallowed: the caller reports the child's exit status
+        and stderr, which is the failure the user can act on.
+
+        Args:
+            prompt: The complete prompt text.
+
+        Raises:
+            KeyboardInterrupt: The user pressed Stop.
+            _StreamReadTimeoutError: The turn outlived its deadline
+                before the child accepted the whole prompt.
+        """
+        writer = threading.Thread(
+            target=self._write_prompt,
+            args=(prompt,),
+            daemon=True,
+            name="cli-stdin-write",
+        )
+        writer.start()
+        while True:
+            remaining = self._deadline - time.monotonic()
+            if remaining <= 0:
+                raise _StreamReadTimeoutError()
+            if stop_signal.stop_requested():
+                raise KeyboardInterrupt("Agent stop requested")
+            writer.join(timeout=min(remaining, _STOP_POLL_SECONDS))
+            if not writer.is_alive():
+                return
+
+    def _write_prompt(self, prompt: str) -> None:
+        """Push the whole prompt into the child's stdin, then close it.
+
+        Runs on the writer thread, where nothing can be reported: a
+        broken or already-closed pipe means the child died or
+        :meth:`close` tore the turn down, and both are diagnosed by the
+        caller from the child's exit status.
+        """
+        stdin = self._proc.stdin
+        assert stdin is not None
+        try:
+            stdin.write(prompt)
+            stdin.close()
+        except (OSError, ValueError):
+            logger.debug("%s exited before reading its prompt", self._label)
+
+    def lines(self) -> Iterator[str]:
+        """Yield the child's stdout lines until EOF.
+
+        Yields:
+            One line of stdout at a time.
+
+        Raises:
+            KeyboardInterrupt: The user pressed Stop.
+            _StreamReadTimeoutError: The turn outlived its deadline.
+        """
+        while True:
+            remaining = self._deadline - time.monotonic()
+            if remaining <= 0:
+                raise _StreamReadTimeoutError()
+            if stop_signal.stop_requested():
+                raise KeyboardInterrupt("Agent stop requested")
+            try:
+                line = self._stdout_lines.get(
+                    timeout=min(remaining, _STOP_POLL_SECONDS)
+                )
+            except queue.Empty:
+                continue
+            if line is None:
+                return
+            yield line
+
+    def _reap(self, grace: float) -> int | None:
+        """Wait up to *grace* seconds for the child to exit, never raising.
+
+        Args:
+            grace: Seconds to wait.
+
+        Returns:
+            The exit status, or ``None`` when the child is still running.
+        """
+        try:
+            return self._proc.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            return None
+
+    def wait_for_exit(self) -> int | None:
+        """Return the child's exit status, or ``None`` if it is still running.
+
+        Never raises: a CLI that lingers after closing stdout (flushing
+        telemetry, waiting on its own children) must not turn a complete
+        turn into an unclassified ``subprocess.TimeoutExpired``.  The
+        wait is bounded by whatever is left of the run's deadline, so a
+        short configured timeout stays short.
+
+        Returns:
+            The exit status, or ``None`` when the child outlived the wait.
+        """
+        remaining = max(self._deadline - time.monotonic(), 0.0)
+        return self._reap(min(remaining, _EXIT_GRACE_SECONDS))
+
+    def stderr_text(self) -> str:
+        """Return everything the child wrote to stderr.
+
+        Returns:
+            The accumulated stderr text, after giving its reader a
+            moment to finish.
+        """
+        self._readers[1].join(timeout=_REAP_GRACE_SECONDS)
+        return "".join(self._stderr_chunks)
+
+    def close(self) -> None:
+        """Terminate the child, reap it, and release its pipes."""
+        proc = self._proc
+        if proc.poll() is None:
+            proc.terminate()
+            if self._reap(_REAP_GRACE_SECONDS) is None:
+                proc.kill()
+                self._reap(_REAP_GRACE_SECONDS)
+        for reader in self._readers:
+            reader.join(timeout=_REAP_GRACE_SECONDS)
+        if any(reader.is_alive() for reader in self._readers):
+            # A grandchild inherited the pipe, so a reader is still
+            # parked inside read(2) holding the buffer's lock: closing
+            # the pipe here would block this thread forever.
+            logger.warning("%s left a reader attached to its output pipes", self._label)
+            return
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            if pipe is not None:
+                with contextlib.suppress(OSError):
+                    pipe.close()
+
+
+# A complete markdown fence opener (``` plus an optional language tag,
+# which may be preceded by spaces) separated from the opening brace by
+# nothing but whitespace — blank lines and CRLF endings included.  That
+# is the shape a model uses to wrap its tool-call JSON in a code block,
+# and it matches the whitespace tolerance of the batch stripper this
+# streaming filter replaced.
+_FENCE_OPENER_RE = re.compile(
+    r"`{3}[ \t]*[A-Za-z0-9_+~.-]{0,20}[ \t\r\n]*\Z"
+)
+# A trailing run that could still grow into a fence opener followed by a
+# brace once the next streaming chunk arrives.
+_FENCE_PREFIX_RE = re.compile(
+    r"(?:`{1,2}|`{3}[ \t]*[A-Za-z0-9_+~.-]{0,20}[ \t\r\n]*)\Z"
+)
+
+
+class _ToolCallFilteredStream:
+    """Stream a turn to the UI with its tool-call JSON held back.
+
+    Text-based tool calling makes the assistant's *visible* text carry
+    the ``{"tool_calls": [...]}`` block the framework parses out of it,
+    and rendering that blob in the chat panel is noise the user cannot
+    act on.  Both CLI adapters therefore install this filter around the
+    turn, which keeps streaming text as it arrives — the panel must
+    update incrementally, not in one dump when the turn ends — but
+    buffers each top-level JSON object until it closes, then drops it if
+    it is a tool-call block and emits it otherwise.
+
+    A markdown code fence wrapping a suppressed tool call is suppressed
+    with it: a fence opener immediately preceding a ``{`` is held back
+    until the object resolves, and the matching closing fence is consumed
+    after a suppressed call, so the panel never shows the empty wrapper.
+    A fence around anything that is *not* a validated tool call streams
+    untouched.
+
+    Thinking tokens are never filtered: they are already displayed apart
+    from the answer, and a tool call quoted inside reasoning is content.
+    """
+
+    def __init__(self, model: CLITextModel) -> None:
+        """Capture *model*'s callbacks so they can be wrapped and restored.
+
+        Args:
+            model: The adapter whose stream is being filtered.
+        """
+        self._model = model
+        self._token_callback = model.token_callback
+        self._thinking_callback = model.thinking_callback
+        self._in_thinking = False
+        self._pending = ""
+        self._depth = 0
+        self._in_string = False
+        self._escaped = False
+        self._held_prefix = ""
+        self._fence_open = ""
+        self._eat_close = False
+        self._close_buf = ""
+
+    def __enter__(self) -> "_ToolCallFilteredStream":
+        """Mark the turn as tool-bearing and install the filtering callbacks.
+
+        The mark is what lets an adapter end the turn at the first complete
+        ``tool_calls`` block, so that capability is reachable through the
+        plain ``generate()`` contract instead of a widened signature only
+        one adapter has.  It is set even when nobody is streaming, because
+        the early stop matters regardless of who is watching.
+        """
+        self._model._tool_bearing_turn = True
+        if self._token_callback is not None:
+            self._model.token_callback = self._on_token
+            self._model.thinking_callback = self._on_thinking
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        """Release buffered text, restore the callbacks and clear the mark."""
+        self._flush()
+        self._model.token_callback = self._token_callback
+        self._model.thinking_callback = self._thinking_callback
+        self._model._tool_bearing_turn = False
+
+    def _emit(self, text: str) -> None:
+        """Send *text* onward, if there is any and anyone is listening."""
+        if text and self._token_callback is not None:
+            self._token_callback(text)
+
+    def _on_thinking(self, is_start: bool) -> None:
+        """Track and forward the thinking bracket."""
+        self._in_thinking = is_start
+        if self._thinking_callback is not None:
+            self._thinking_callback(is_start)
+
+    def _on_token(self, token: str) -> None:
+        """Forward a thinking token as-is, or filter a text token."""
+        if self._in_thinking:
+            self._emit(token)
+        else:
+            self._feed(token)
+
+    def _feed(self, text: str) -> None:
+        """Emit the plain text of *text*, buffering any JSON object in it."""
+        if self._eat_close:
+            text = self._eat_closing_fence(text)
+            if not text:
+                return
+        start = 0
+        for index, char in enumerate(text):
+            if self._depth == 0:
+                if char == "{":
+                    self._begin_object(text[start:index])
+                    start = index
+                    self._depth = 1
+                continue
+            self._track_json_char(char)
+            if self._depth == 0:
+                self._pending += text[start : index + 1]
+                self._release_pending()
+                if self._eat_close:
+                    self._feed(text[index + 1 :])
+                    return
+                start = index + 1
+        if self._depth == 0:
+            self._hold_tail(text[start:])
+        else:
+            self._pending += text[start:]
+
+    def _begin_object(self, before: str) -> None:
+        """Emit the text preceding a ``{``, holding back its fence opener.
+
+        A fence opener directly against the brace may be the wrapper of a
+        tool call, so it is parked in ``_fence_open`` until the object
+        resolves; everything else streams immediately.
+
+        Args:
+            before: The depth-0 text between the previous emission point
+                and the opening brace.
+        """
+        combined = self._held_prefix + before
+        self._held_prefix = ""
+        match = _FENCE_OPENER_RE.search(combined)
+        if match:
+            self._fence_open = match.group(0)
+            combined = combined[: match.start()]
+        else:
+            self._fence_open = ""
+        self._emit(combined)
+
+    def _hold_tail(self, tail: str) -> None:
+        """Emit depth-0 text, holding back a possible partial fence opener.
+
+        The next chunk may complete the opener and its ``{``, so a
+        trailing run that could still become a fence opener waits in
+        ``_held_prefix`` instead of streaming; it is released the moment
+        anything breaks the pattern, or by :meth:`_flush`.
+
+        Args:
+            tail: The depth-0 text ending the current chunk.
+        """
+        combined = self._held_prefix + tail
+        match = _FENCE_PREFIX_RE.search(combined)
+        self._held_prefix = match.group(0) if match else ""
+        self._emit(combined[: len(combined) - len(self._held_prefix)])
+
+    def _eat_closing_fence(self, text: str) -> str:
+        """Consume the closing fence of a suppressed fenced tool call.
+
+        Args:
+            text: The next chunk of depth-0 text.
+
+        Returns:
+            The text left over after the fence — empty while the fence is
+            still being consumed, or everything buffered plus the rest of
+            *text* when it turns out not to be a closing fence.
+        """
+        for index, char in enumerate(text):
+            ticks = self._close_buf.count("`")
+            if ticks == 3:
+                if char in " \t\r":
+                    self._close_buf += char
+                    continue
+                self._eat_close = False
+                self._close_buf = ""
+                return text[index + 1 :] if char == "\n" else text[index:]
+            if char == "`":
+                self._close_buf += char
+            elif ticks == 0 and char in " \t\r\n":
+                self._close_buf += char
+            else:
+                leftover = self._close_buf + text[index:]
+                self._eat_close = False
+                self._close_buf = ""
+                return leftover
+        return ""
+
+    def _track_json_char(self, char: str) -> None:
+        """Advance the brace/string state machine by one character."""
+        if self._escaped:
+            self._escaped = False
+        elif char == "\\":
+            self._escaped = True
+        elif self._in_string:
+            self._in_string = char != '"'
+        elif char == '"':
+            self._in_string = True
+        elif char == "{":
+            self._depth += 1
+        elif char == "}":
+            self._depth -= 1
+
+    def _release_pending(self) -> None:
+        """Emit the completed JSON object unless it is a tool call.
+
+        A suppressed tool call takes its held fence opener with it and
+        arms the closing-fence eater; anything else streams together with
+        the opener that was held for it.
+        """
+        block, self._pending = self._pending, ""
+        fence, self._fence_open = self._fence_open, ""
+        if _parse_text_based_tool_calls(block):
+            self._eat_close = bool(fence)
+        else:
+            self._emit(fence + block)
+
+    def _flush(self) -> None:
+        """Release text the turn ended in the middle of.
+
+        A pending block is dropped only when it parse-validates as a tool
+        call — the early-stop path cuts the stream off exactly there.
+        Malformed JSON and ordinary text that merely contains the
+        substring ``tool_calls`` are emitted, so no ordinary text is ever
+        swallowed.  A partially consumed closing fence belongs to the
+        already-suppressed wrapper and is discarded with it.
+        """
+        held, self._held_prefix = self._held_prefix, ""
+        fence, self._fence_open = self._fence_open, ""
+        block, self._pending = self._pending, ""
+        self._eat_close = False
+        self._close_buf = ""
+        self._depth = 0
+        self._in_string = False
+        self._escaped = False
+        if block and _parse_text_based_tool_calls(block):
+            return
+        self._emit(held + fence + block)
 
 
 def _build_text_based_tools_prompt(function_map: dict[str, Callable[..., Any]]) -> str:
@@ -1234,38 +2007,3 @@ def _parse_text_based_tool_calls(content: str) -> list[dict[str, Any]]:
                 )
 
     return function_calls
-
-
-_EMPTY_FENCE_PATTERN = re.compile(r"```(?:json)?\s*```", re.DOTALL)
-
-
-def _strip_text_based_tool_calls(content: str) -> str:
-    """Remove tool_calls JSON blocks from *content*, keeping surrounding text.
-
-    Uses :func:`_iter_balanced_json_objects` to find every balanced JSON
-    object and strips those that contain a ``tool_calls`` list.  Empty
-    fenced code blocks left behind (e.g. ``"```json\\n\\n```"``) are also
-    cleaned up so the visible Thoughts panel does not show stray fences.
-
-    Args:
-        content: The full model response text.
-
-    Returns:
-        The text with tool_calls JSON removed, stripped of leading/trailing
-        whitespace.  Returns ``""`` if the entire content was a tool_calls
-        wrapper.
-    """
-    spans = [
-        (start, end)
-        for start, end, parsed in _iter_balanced_json_objects(content)
-        if _iter_tool_calls_lists(parsed)
-    ]
-    if not spans:
-        return content.strip()
-    parts: list[str] = []
-    cursor = 0
-    for start, end in spans:
-        parts.append(content[cursor:start])
-        cursor = end
-    parts.append(content[cursor:])
-    return _EMPTY_FENCE_PATTERN.sub("", "".join(parts)).strip()

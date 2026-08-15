@@ -4,12 +4,6 @@
 # add your name here
 """Audit 11: Integration tests for bugs in worktree and non-worktree workflows.
 
-BUG-55: ``is_running_non_wt`` flag is set AFTER ``_capture_pre_snapshot``
-    in ``_run_task_inner``.  A concurrent worktree merge can slip between
-    the snapshot and the flag set, modifying the main tree.  The snapshot
-    becomes stale and the merge view shows the other tab's merge changes
-    as if they were the agent's changes.
-
 BUG-56: ``_check_merge_conflict`` uses ``baseline^`` / ``baseline``
     without validating the baseline SHA exists (unlike ``_resolve_base_ref``
     which has the BUG-51 ``git cat-file -t`` check).  An invalid baseline
@@ -17,30 +11,36 @@ BUG-56: ``_check_merge_conflict`` uses ``baseline^`` / ``baseline``
     causing the method to return ``False`` even when a real conflict
     exists.
 
-BUG-57: ``_file_changed`` in ``_prepare_merge_view`` returns ``False``
-    when ``read_bytes()`` raises ``OSError`` on a deleted file.  Deleted
-    files are excluded from the non-worktree merge review.  The manifest
-    building loop also skips files where ``current_path.is_file()`` is
-    False.  The user cannot see or reject file deletions.
-
+(BUG-55 and BUG-57 covered the pre-task snapshot and the interactive
+merge-review view, both removed together with the diff/merge review
+workflow; ``_check_merge_conflict`` is kept and still guards the direct
+worktree merge action.)
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 import subprocess
 from pathlib import Path
 
 from kiss.agents.sorcar.git_worktree import GitWorktree, GitWorktreeOps
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-from kiss.server.diff_merge import (
-    _capture_untracked,
-    _parse_diff_hunks,
-    _prepare_merge_view,
-    _snapshot_files,
-)
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
+
+
+def _register_wt_state(
+    tab_id: str, agent: WorktreeSorcarAgent,
+) -> agent_state.AgentState:
+    """Register a worktree-task agent state for *tab_id*."""
+    state = agent_state.AgentState(
+        f"task-{tab_id}",
+        agent=agent,
+        tab_id=tab_id,
+        server_owned=True,
+    )
+    state.use_worktree = True
+    agent_state.register(state)
+    return state
 
 
 def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
@@ -60,6 +60,10 @@ def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
     subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
     subprocess.run(
         ["git", "commit", "-m", "init"],
+        cwd=repo, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "branch", "-M", "main"],
         cwd=repo, capture_output=True,
     )
     return repo
@@ -144,22 +148,24 @@ class TestBug56ConflictCheckBaselineValidation:
 
         server = VSCodeServer()
         server.work_dir = str(repo)
-        tab = server._get_tab("bug56a-tab")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        tab.agent._wt = GitWorktree(
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch="main",
             wt_dir=wt_dir,
             baseline_commit=bogus,
         )
+        state = _register_wt_state("bug56a-tab", agent)
 
-        has_conflict = server._check_merge_conflict("bug56a-tab")
-        assert has_conflict is True, (
-            "BUG-56: _check_merge_conflict returned False with invalid "
-            "baseline despite a real conflict — both sides edited init.txt"
-        )
+        try:
+            has_conflict = server._check_merge_conflict("bug56a-tab")
+            assert has_conflict is True, (
+                "BUG-56: _check_merge_conflict returned False with invalid "
+                "baseline despite a real conflict — both sides edited init.txt"
+            )
+        finally:
+            agent_state.unregister(state.task_id, state)
 
         _cleanup(repo, branch, wt_dir)
 
@@ -186,21 +192,23 @@ class TestBug56ConflictCheckBaselineValidation:
 
         server = VSCodeServer()
         server.work_dir = str(repo)
-        tab = server._get_tab("bug56b-tab")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        tab.agent._wt = GitWorktree(
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch="main",
             wt_dir=wt_dir,
             baseline_commit=baseline,
         )
+        state = _register_wt_state("bug56b-tab", agent)
 
-        has_conflict = server._check_merge_conflict("bug56b-tab")
-        assert has_conflict is True, (
-            "Regression: valid baseline should still detect conflicts"
-        )
+        try:
+            has_conflict = server._check_merge_conflict("bug56b-tab")
+            assert has_conflict is True, (
+                "Regression: valid baseline should still detect conflicts"
+            )
+        finally:
+            agent_state.unregister(state.task_id, state)
 
         _cleanup(repo, branch, wt_dir)
 
@@ -214,180 +222,20 @@ class TestBug56ConflictCheckBaselineValidation:
 
         server = VSCodeServer()
         server.work_dir = str(repo)
-        tab = server._get_tab("bug56c-tab")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        tab.agent._wt = GitWorktree(
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        agent._wt = GitWorktree(
             repo_root=repo,
             branch=branch,
             original_branch="main",
             wt_dir=wt_dir,
             baseline_commit=baseline,
         )
+        state = _register_wt_state("bug56c-tab", agent)
 
-        has_conflict = server._check_merge_conflict("bug56c-tab")
-        assert has_conflict is False
+        try:
+            has_conflict = server._check_merge_conflict("bug56c-tab")
+            assert has_conflict is False
+        finally:
+            agent_state.unregister(state.task_id, state)
 
         _cleanup(repo, branch, wt_dir)
-
-
-class TestBug57DeletedFilesInMergeView:
-    """BUG-57: ``_file_changed`` returns ``False`` when ``read_bytes()``
-    raises ``OSError`` on a deleted file, and ``current_path.is_file()``
-    also skips deleted files in the manifest building.  Agent-deleted
-    files are invisible in the non-worktree merge review.
-
-    FIX: ``_file_changed`` returns ``True`` when the file existed in
-    ``pre_file_hashes`` but can't be read (deleted).  Manifest building
-    creates an empty placeholder "current" file for deleted entries so
-    the merge view can display the deletion.
-    """
-
-    def test_deleted_tracked_file_in_merge_view(
-        self, tmp_path: Path,
-    ) -> None:
-        """A tracked file deleted by the agent must appear in the merge view."""
-        repo = _make_repo(tmp_path)
-
-        (repo / "deleteme.txt").write_text("I will be deleted\nline2\n")
-        subprocess.run(["git", "add", "."], cwd=repo, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "-m", "add deleteme"],
-            cwd=repo, capture_output=True,
-        )
-
-        work_dir = str(repo)
-        data_dir = str(tmp_path / "merge-data")
-
-        pre_hunks = _parse_diff_hunks(work_dir)
-        pre_untracked = _capture_untracked(work_dir)
-        pre_hashes = _snapshot_files(
-            work_dir, set(pre_hunks.keys()) | pre_untracked,
-        )
-        deleteme_path = repo / "deleteme.txt"
-        pre_hashes["deleteme.txt"] = hashlib.md5(
-            deleteme_path.read_bytes(),
-        ).hexdigest()
-
-        subprocess.run(
-            ["git", "rm", "deleteme.txt"], cwd=repo, capture_output=True,
-        )
-
-        result = _prepare_merge_view(
-            work_dir, data_dir, pre_hunks, pre_untracked, pre_hashes,
-        )
-
-        assert result.get("status") == "opened", (
-            "BUG-57: deleted file not detected — merge view shows 'No changes'"
-        )
-        manifest_path = Path(data_dir) / "pending-merge.json"
-        manifest = json.loads(manifest_path.read_text())
-        names = [f["name"] for f in manifest["files"]]
-        assert "deleteme.txt" in names, (
-            "BUG-57: deleted file 'deleteme.txt' missing from merge manifest"
-        )
-
-        for f in manifest["files"]:
-            if f["name"] == "deleteme.txt":
-                current = Path(f["current"])
-                assert current.exists(), (
-                    "BUG-57: current placeholder for deleted file must exist"
-                )
-                assert current.read_text() == "", (
-                    "BUG-57: deleted file's current placeholder should be empty"
-                )
-                base = Path(f["base"])
-                assert "I will be deleted" in base.read_text(), (
-                    "BUG-57: base copy should contain original content"
-                )
-                break
-
-    def test_deleted_untracked_file_in_merge_view(
-        self, tmp_path: Path,
-    ) -> None:
-        """A pre-existing untracked file deleted by the agent must appear."""
-        import shutil as _shutil
-
-        repo = _make_repo(tmp_path)
-        work_dir = str(repo)
-        data_dir = str(tmp_path / "merge-data")
-
-        (repo / "untracked.txt").write_text("untracked content\nline2\n")
-
-        pre_hunks = _parse_diff_hunks(work_dir)
-        pre_untracked = _capture_untracked(work_dir)
-        assert "untracked.txt" in pre_untracked
-        pre_hashes = _snapshot_files(
-            work_dir, set(pre_hunks.keys()) | pre_untracked,
-        )
-        ub_dir = Path(data_dir) / "untracked-base"
-        for fname in pre_untracked:
-            src = Path(work_dir) / fname
-            if src.is_file():
-                dst = ub_dir / fname
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                _shutil.copy2(str(src), str(dst))
-
-        (repo / "untracked.txt").unlink()
-
-        result = _prepare_merge_view(
-            work_dir, data_dir, pre_hunks, pre_untracked, pre_hashes,
-        )
-
-        assert result.get("status") == "opened", (
-            "BUG-57: deleted untracked file not detected"
-        )
-        manifest_path = Path(data_dir) / "pending-merge.json"
-        manifest = json.loads(manifest_path.read_text())
-        names = [f["name"] for f in manifest["files"]]
-        assert "untracked.txt" in names, (
-            "BUG-57: deleted untracked file missing from merge manifest"
-        )
-
-    def test_existing_file_still_shown(self, tmp_path: Path) -> None:
-        """Regression: a modified (not deleted) file must still appear."""
-        repo = _make_repo(tmp_path)
-        work_dir = str(repo)
-        data_dir = str(tmp_path / "merge-data")
-
-        pre_hunks = _parse_diff_hunks(work_dir)
-        pre_untracked = _capture_untracked(work_dir)
-        pre_hashes = _snapshot_files(
-            work_dir, set(pre_hunks.keys()) | pre_untracked,
-        )
-        pre_hashes["init.txt"] = hashlib.md5(
-            (repo / "init.txt").read_bytes(),
-        ).hexdigest()
-
-        (repo / "init.txt").write_text("modified by agent\n")
-
-        result = _prepare_merge_view(
-            work_dir, data_dir, pre_hunks, pre_untracked, pre_hashes,
-        )
-        assert result.get("status") == "opened"
-        manifest_path = Path(data_dir) / "pending-merge.json"
-        manifest = json.loads(manifest_path.read_text())
-        names = [f["name"] for f in manifest["files"]]
-        assert "init.txt" in names
-
-    def test_no_changes_still_returns_no_changes(
-        self, tmp_path: Path,
-    ) -> None:
-        """When nothing changed, merge view returns 'No changes'."""
-        repo = _make_repo(tmp_path)
-        work_dir = str(repo)
-        data_dir = str(tmp_path / "merge-data")
-
-        pre_hunks = _parse_diff_hunks(work_dir)
-        pre_untracked = _capture_untracked(work_dir)
-        pre_hashes = _snapshot_files(
-            work_dir, set(pre_hunks.keys()) | pre_untracked,
-        )
-
-        result = _prepare_merge_view(
-            work_dir, data_dir, pre_hunks, pre_untracked, pre_hashes,
-        )
-        assert result.get("error") == "No changes"
-
-
-

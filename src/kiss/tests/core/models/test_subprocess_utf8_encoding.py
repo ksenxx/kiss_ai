@@ -11,126 +11,103 @@ non-ASCII text (accents, emoji) to such a pipe can raise
 Passing ``encoding="utf-8"`` alongside ``text=True`` makes the prompt
 encode identically on every platform.
 
-These tests mock ``subprocess.Popen`` so they never invoke the real
-``codex`` / ``claude`` CLIs, feed a prompt with ``café`` and an emoji,
-and assert that ``encoding="utf-8"`` is forwarded to ``Popen``.
+The tests run a REAL stand-in ``claude`` / ``codex`` executable that
+reads its stdin as UTF-8 and echoes back what it decoded, so the
+round-trip is proven end to end rather than by inspecting the arguments
+handed to ``subprocess.Popen``.
 """
 
 from __future__ import annotations
 
-import subprocess
-from typing import Any
+from pathlib import Path
 
 import pytest
 
 from kiss.core.models.claude_code_model import ClaudeCodeModel
 from kiss.core.models.codex_model import CodexModel
+from kiss.tests.core.models.test_cli_subprocess_lifecycle import install_cli
 
 _NON_ASCII_PROMPT = "Please review the café résumé ☕😀 and reply 'ok'."
 
+_CODEX_ECHOES_ITS_PROMPT = """
+    import json
+    import sys
 
-class _FakeStdin:
-    """Captures everything written to the subprocess stdin pipe."""
+    received = sys.stdin.buffer.read().decode("utf-8")
+    print(json.dumps({"type": "item.completed",
+                      "item": {"type": "agent_message", "text": received}}),
+          flush=True)
+    print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
+"""
 
-    def __init__(self) -> None:
-        self.written = ""
+_CLAUDE_ECHOES_ITS_PROMPT = """
+    import json
+    import sys
 
-    def write(self, data: str) -> None:
-        self.written += data
-
-    def close(self) -> None:
-        pass
-
-
-class _FakeStderr:
-    def read(self) -> str:
-        return ""
-
-
-class _FakeProc:
-    """Minimal ``subprocess.Popen`` stand-in driven by canned stdout lines."""
-
-    def __init__(self, lines: list[str]) -> None:
-        self.stdin = _FakeStdin()
-        self.stdout = iter(lines)
-        self.stderr = _FakeStderr()
-        self.returncode = 0
-
-    def wait(self, timeout: float | None = None) -> int:
-        return 0
-
-    def poll(self) -> int:
-        return 0
-
-    def kill(self) -> None:
-        pass
-
-    def terminate(self) -> None:
-        pass
+    received = sys.stdin.buffer.read().decode("utf-8")
+    print(json.dumps({"type": "assistant",
+                      "message": {"id": "m1",
+                                  "content": [{"type": "text",
+                                               "text": received}]}}), flush=True)
+    print(json.dumps({"type": "result", "result": received, "usage": {}}),
+          flush=True)
+"""
 
 
-def _install_fake_popen(
-    monkeypatch: pytest.MonkeyPatch, lines: list[str]
-) -> dict[str, Any]:
-    """Patch ``subprocess.Popen`` with a fake and capture its kwargs.
+_CLAUDE_REPLIES_FROM_A_FILE = """
+    import json
+    import sys
 
-    Args:
-        monkeypatch: Pytest fixture used to install the patch.
-        lines: Canned stdout lines the fake process emits.
-
-    Returns:
-        A dict that is populated with ``args``/``kwargs``/``proc`` when
-        the patched ``Popen`` is invoked.
-    """
-    captured: dict[str, Any] = {}
-
-    def fake_popen(*args: Any, **kwargs: Any) -> _FakeProc:
-        proc = _FakeProc(lines)
-        captured["args"] = args
-        captured["kwargs"] = kwargs
-        captured["proc"] = proc
-        return proc
-
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
-    return captured
+    sys.stdin.read()
+    with open(sys.argv[0] + ".reply", encoding="utf-8") as handle:
+        reply = handle.read()
+    event = {"type": "assistant",
+             "message": {"id": "m1",
+                         "content": [{"type": "text", "text": reply}]}}
+    # ensure_ascii=False puts real UTF-8 bytes on the pipe, so the
+    # adapter's own decoding is what the test exercises.
+    sys.stdout.buffer.write(
+        (json.dumps(event, ensure_ascii=False) + chr(10)).encode("utf-8"))
+    sys.stdout.buffer.flush()
+"""
 
 
-def test_codex_generate_passes_utf8_encoding(monkeypatch: pytest.MonkeyPatch) -> None:
-    lines = [
-        '{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}',
-        '{"type":"turn.completed","usage":{}}',
-    ]
-    captured = _install_fake_popen(monkeypatch, lines)
+def test_codex_prompt_survives_the_pipe_as_utf8(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Accents and emoji must reach the codex CLI byte-for-byte."""
+    install_cli(tmp_path, monkeypatch, "codex", _CODEX_ECHOES_ITS_PROMPT)
+    model = CodexModel("codex/default", model_config={"timeout": 20})
+    model.initialize(_NON_ASCII_PROMPT)
 
-    m = CodexModel("codex/default")
-    m._build_cli_args = lambda: ["codex-dummy", "exec"]  # type: ignore[method-assign]
-    m.initialize(_NON_ASCII_PROMPT)
+    content, _response = model.generate()
 
-    content, _response = m.generate()
-
-    assert content == "ok"
-    assert captured["kwargs"].get("text") is True
-    assert captured["kwargs"].get("encoding") == "utf-8"
-    assert "café" in captured["proc"].stdin.written
-    assert "😀" in captured["proc"].stdin.written
+    assert content == _NON_ASCII_PROMPT
 
 
-def test_claude_generate_passes_utf8_encoding(monkeypatch: pytest.MonkeyPatch) -> None:
-    lines = [
-        '{"type":"assistant","message":{"id":"m1","content":'
-        '[{"type":"text","text":"ok"}]}}',
-        '{"type":"result","result":"ok","usage":{}}',
-    ]
-    captured = _install_fake_popen(monkeypatch, lines)
+def test_claude_prompt_survives_the_pipe_as_utf8(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Accents and emoji must reach the claude CLI byte-for-byte."""
+    install_cli(tmp_path, monkeypatch, "claude", _CLAUDE_ECHOES_ITS_PROMPT)
+    model = ClaudeCodeModel("cc/opus", model_config={"timeout": 20})
+    model.initialize(_NON_ASCII_PROMPT)
 
-    m = ClaudeCodeModel("cc/opus")
-    m._build_cli_args = lambda: ["claude-dummy", "--print"]  # type: ignore[method-assign]
-    m.initialize(_NON_ASCII_PROMPT)
+    content, _response = model.generate()
 
-    content, _response = m.generate()
+    assert content == _NON_ASCII_PROMPT
 
-    assert content == "ok"
-    assert captured["kwargs"].get("text") is True
-    assert captured["kwargs"].get("encoding") == "utf-8"
-    assert "café" in captured["proc"].stdin.written
-    assert "😀" in captured["proc"].stdin.written
+
+def test_non_ascii_stdout_is_decoded_as_utf8(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI's own non-ASCII output must decode without mangling."""
+    reply = "Voilà — 完了 ✅"
+    (tmp_path / "claude.reply").write_text(reply, encoding="utf-8")
+    install_cli(tmp_path, monkeypatch, "claude", _CLAUDE_REPLIES_FROM_A_FILE)
+    model = ClaudeCodeModel("cc/opus", model_config={"timeout": 20})
+    model.initialize("hi")
+
+    content, _response = model.generate()
+
+    assert content == reply

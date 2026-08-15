@@ -53,7 +53,10 @@ def _restore_db(saved: tuple) -> None:
 
 def _make_repo(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "init", str(path)], capture_output=True, check=True)
+    subprocess.run(
+        ["git", "init", "-b", "main", str(path)],
+        capture_output=True, check=True,
+    )
     subprocess.run(
         ["git", "-C", str(path), "config", "user.email", "test@test.com"],
         capture_output=True, check=True,

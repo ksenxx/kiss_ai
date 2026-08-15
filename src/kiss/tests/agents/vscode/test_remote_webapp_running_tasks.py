@@ -2,20 +2,20 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""End-to-end tests: a remote webapp page load opens all running tasks.
+"""End-to-end tests: a webapp page load reconstructs all shared tabs.
 
-When a remote (WSS) client connects and sends ``ready``, the web
-server's ``_handle_ready`` must report every task currently running in
-the backend with a targeted ``openRunningTasks`` message so the page
-can open one chat tab per running task.  Those tabs are opened in the
-background: a task that is still running never takes the user off the
-tab they are on.  The message lists one entry per running top-level
-chat — ``{chatId, taskId, title, startTs}`` — sorted by ``startTs``
-ascending (oldest first), so restored tabs appear in start order.
+Every running (or finished-but-open) task lives in a tab of the
+daemon's shared tab registry — ``_cmd_run`` registers the tab
+synchronously before its worker starts.  When a remote (WSS) client
+connects and sends ``ready``, the server broadcasts the canonical
+``tabs_state`` snapshot and replays every chat-bound registry tab, so
+the page reconstructs the same tabs and transcripts every other
+client shows.  Sub-agent tabs are derived state and are never listed
+in the registry snapshot.
 
 These tests drive the real ``RemoteAccessServer`` over a real WebSocket
-connection, with real ``_RunningAgentState`` registry entries and real
-``task_history`` rows in a test-owned sqlite database — no mocks.
+connection, with real ``kiss.server.agent_state`` registry entries and
+real ``task_history`` rows in a test-owned sqlite database — no mocks.
 """
 
 from __future__ import annotations
@@ -31,8 +31,8 @@ from unittest import IsolatedAsyncioTestCase
 
 from websockets.asyncio.client import connect
 
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
 from kiss.core.vscode_config import CONFIG_PATH, save_config
+from kiss.server import agent_state
 from kiss.server.web_server import RemoteAccessServer
 
 
@@ -50,7 +50,7 @@ def _no_verify_ssl() -> ssl.SSLContext:
 
 
 class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
-    """``ready`` from a WSS client reports running tasks to open."""
+    """``ready`` from a WSS client reconstructs the shared tab set."""
 
     async def asyncSetUp(self) -> None:
         import kiss.agents.sorcar.persistence as _persistence
@@ -73,11 +73,9 @@ class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
             self._orig_config = CONFIG_PATH.read_text()
         save_config({"remote_password": ""})
 
-        with _RunningAgentState._registry_lock:
-            self._saved_registry = dict(
-                _RunningAgentState.running_agent_states,
-            )
-            _RunningAgentState.running_agent_states.clear()
+        with agent_state.STATE_LOCK:
+            self._saved_registry = dict(agent_state.agent_states)
+            agent_state.agent_states.clear()
 
         self.server = RemoteAccessServer(
             host="127.0.0.1",
@@ -88,11 +86,9 @@ class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         await self.server.stop_async()
-        with _RunningAgentState._registry_lock:
-            _RunningAgentState.running_agent_states.clear()
-            _RunningAgentState.running_agent_states.update(
-                self._saved_registry,
-            )
+        with agent_state.STATE_LOCK:
+            agent_state.agent_states.clear()
+            agent_state.agent_states.update(self._saved_registry)
         if self._orig_config is not None:
             CONFIG_PATH.write_text(self._orig_config)
         elif CONFIG_PATH.exists():
@@ -129,19 +125,25 @@ class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
         """
         import kiss.agents.sorcar.persistence as _persistence
 
+        extra: dict[str, object] = {"startTs": start_ts}
+        if is_subagent:
+            # A real sub-agent row carries its parent's task id (a
+            # 32-hex task_history id — anything else is coerced away),
+            # which is what the chat-id-only replay lookup filters on.
+            extra["parent_task_id"] = "a" * 32
         task_id, chat_id = _persistence._add_task(
-            prompt, chat_id=chat_id, extra={"startTs": start_ts},
+            prompt, chat_id=chat_id, extra=extra,
         )
-        state = _RunningAgentState(
-            tab_id,
-            "test-model",
+        state = agent_state.AgentState(
+            str(task_id),
             chat_id=chat_id,
-            is_subagent=is_subagent,
+            tab_id=tab_id,
+            parent_task_id="parent-task" if is_subagent else None,
+            server_owned=True,
             is_task_active=is_task_active,
         )
-        state.task_history_id = task_id
         state.last_user_prompt = prompt
-        _RunningAgentState.register(tab_id, state)
+        agent_state.register(state)
         return task_id, chat_id
 
     async def _ready_replies(
@@ -164,41 +166,61 @@ class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
                     break
             return events
 
+    def _register_tab(self, tab_id: str, chat_id: str, title: str) -> None:
+        """Register a tab exactly like ``_cmd_run`` does."""
+        self.server._vscode_server._registry_update_tab(
+            tab_id, chat_id=chat_id, title=title, create=True,
+        )
+
     async def test_ready_reports_running_tasks_latest_last(self) -> None:
-        """All running tasks are reported, sorted oldest -> latest."""
+        """The snapshot lists every registered tab, in registry order."""
         newest_task, newest_chat = self._register_running_task(
             "tab-new", "newest running task", 2_000,
         )
         oldest_task, oldest_chat = self._register_running_task(
             "tab-old", "oldest running task", 1_000,
         )
+        self._register_tab("tab-new", newest_chat, "newest running task")
+        self._register_tab("tab-old", oldest_chat, "oldest running task")
 
         events = await self._ready_replies({"type": "ready", "tabId": "t1"})
-        opens = [e for e in events if e.get("type") == "openRunningTasks"]
-        self.assertEqual(len(opens), 1)
-        tasks = opens[0]["tasks"]
+        snaps = [e for e in events if e.get("type") == "tabs_state"]
+        self.assertTrue(snaps, "ready must deliver a tabs_state snapshot")
+        tabs = snaps[-1]["tabs"]
         self.assertEqual(
-            [t["chatId"] for t in tasks], [oldest_chat, newest_chat],
+            [t["tabId"] for t in tabs], ["tab-new", "tab-old"],
         )
         self.assertEqual(
-            [t["taskId"] for t in tasks], [oldest_task, newest_task],
+            [t["chatId"] for t in tabs], [newest_chat, oldest_chat],
         )
         self.assertEqual(
-            [t["title"] for t in tasks],
-            ["oldest running task", "newest running task"],
+            [t["title"] for t in tabs],
+            ["newest running task", "oldest running task"],
         )
-        self.assertEqual([t["startTs"] for t in tasks], [1_000, 2_000])
+        replay_tabs = {
+            e.get("tabId")
+            for e in events
+            if e.get("type") == "task_events"
+        }
+        self.assertLessEqual(
+            {"tab-new", "tab-old"}, replay_tabs,
+            "every chat-bound registry tab must be replayed so the "
+            f"connecting client gets its transcript; got {replay_tabs}",
+        )
 
     async def test_ready_without_running_tasks_sends_nothing(self) -> None:
-        """No running tasks -> no ``openRunningTasks`` message at all."""
+        """No registered tabs -> an empty snapshot, no replays."""
         events = await self._ready_replies({"type": "ready", "tabId": "t1"})
         types = [e.get("type") for e in events]
-        self.assertNotIn("openRunningTasks", types)
+        snaps = [e for e in events if e.get("type") == "tabs_state"]
+        self.assertTrue(snaps)
+        self.assertEqual(snaps[-1]["tabs"], [])
+        self.assertNotIn("task_events", types)
         self.assertIn("models", types)
         self.assertIn("focusInput", types)
 
     async def test_ready_filters_subagents_inactive_and_dupes(self) -> None:
-        """Sub-agents, idle states and duplicate chats are excluded."""
+        """Sub-agent states never appear in the registry snapshot."""
         task_id, chat_id = self._register_running_task(
             "tab-main", "parent task", 1_500,
         )
@@ -206,21 +228,12 @@ class TestReadyOpensRunningTasks(IsolatedAsyncioTestCase):
             "tab-sub", "sub-agent task", 1_600,
             is_subagent=True, chat_id=chat_id,
         )
-        self._register_running_task(
-            "tab-idle", "finished task", 1_700, is_task_active=False,
-        )
-        dup = _RunningAgentState(
-            "tab-dup", "test-model", chat_id=chat_id, is_task_active=True,
-        )
-        dup.task_history_id = task_id
-        dup.last_user_prompt = "parent task"
-        _RunningAgentState.register("tab-dup", dup)
+        self._register_tab("tab-main", chat_id, "parent task")
 
         events = await self._ready_replies({"type": "ready", "tabId": "t1"})
-        opens = [e for e in events if e.get("type") == "openRunningTasks"]
-        self.assertEqual(len(opens), 1)
-        tasks = opens[0]["tasks"]
-        self.assertEqual(len(tasks), 1)
-        self.assertEqual(tasks[0]["chatId"], chat_id)
-        self.assertEqual(tasks[0]["taskId"], task_id)
-        self.assertEqual(tasks[0]["startTs"], 1_500)
+        snaps = [e for e in events if e.get("type") == "tabs_state"]
+        self.assertTrue(snaps)
+        tabs = snaps[-1]["tabs"]
+        self.assertEqual([t["tabId"] for t in tabs], ["tab-main"])
+        self.assertEqual(tabs[0]["chatId"], chat_id)
+        self.assertEqual(tabs[0]["title"], "parent task")

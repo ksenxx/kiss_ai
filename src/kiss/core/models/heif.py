@@ -104,6 +104,12 @@ def heif_to_jpeg(data: bytes) -> bytes | None:
             argv = [exe] + [
                 a.format(src=str(src), dst=str(dst)) for a in template
             ]
+            # Every candidate writes to the same path, and a converter that is
+            # killed by the timeout or exits non-zero can leave a truncated
+            # JPEG behind (ffmpeg and ImageMagick both encode incrementally).
+            # Clearing the path first keeps the success check below about the
+            # output of *this* converter only.
+            dst.unlink(missing_ok=True)
             try:
                 subprocess.run(
                     argv,
@@ -117,7 +123,6 @@ def heif_to_jpeg(data: bytes) -> bytes | None:
             if dst.exists() and dst.stat().st_size > 0:
                 return dst.read_bytes()
             logger.warning("HEIF conversion via %s produced no output", tool)
-            dst.unlink(missing_ok=True)
     logger.warning(
         "No working HEIF decoder found; tried %s",
         ", ".join(tool for tool, _ in _CONVERTERS),

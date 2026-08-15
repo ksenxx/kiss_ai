@@ -5,20 +5,11 @@
 """Integration tests for the "Auto commit" toggle checkbox.
 
 Validates:
-- The toggle exists as ``id="cfg-auto-commit"`` in the Settings panel
-  in both ``SorcarTab.ts`` (extension webview) and the standalone
-  remote-access ``web_server.py`` HTML template, positioned right
-  after ``cfg-use-parallel`` and defaulting to ``checked``.
-- ``main.js`` references the checkbox and forwards its state as
-  ``autoCommit`` on submit/run messages.
-- ``_RunningAgentState`` carries an ``auto_commit_mode`` field that
-  defaults to ``False``.
-- When ``auto_commit_mode`` is ON the task lifecycle skips the
-  interactive merge/diff workflow and auto-commits agent changes
-  directly (non-worktree branch).
-- When ``auto_commit_mode`` is ON and worktree mode is also ON the
-  worktree branch is auto-merged into the original branch instead of
-  surfacing a merge review.
+- ``AgentState`` carries an ``auto_commit_mode`` field defaulting to
+  ``True`` (the run command overwrites it per task from the frontend
+  toggle).
+- ``_autocommit_changes`` commits agent changes on the main tree
+  directly (non-worktree branch), with no interactive review.
 """
 
 from __future__ import annotations
@@ -31,14 +22,8 @@ import unittest
 from pathlib import Path
 
 import kiss.server.merge_flow as _merge_flow_module
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server.agent_state import AgentState
 from kiss.server.server import VSCodeServer
-
-_VSCODE_DIR = Path(__file__).resolve().parents[3] / "agents" / "vscode"
-
-
-def _read(name: str) -> str:
-    return (_VSCODE_DIR / name).read_text()
 
 
 def _git(cwd: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -73,21 +58,17 @@ def _make_server(work_dir: str) -> tuple[VSCodeServer, list[dict]]:
     return server, events
 
 
-
-
-
-
-class TestRunningAgentStateField(unittest.TestCase):
-    """``_RunningAgentState`` carries the per-tab toggle state."""
+class TestAgentStateField(unittest.TestCase):
+    """``AgentState`` carries the per-task auto-commit toggle state."""
 
     def test_default_true(self) -> None:
-        tab = _RunningAgentState("tab-x", "gemini")
-        assert tab.auto_commit_mode is True
+        state = AgentState("task-x")
+        assert state.auto_commit_mode is True
 
     def test_settable(self) -> None:
-        tab = _RunningAgentState("tab-y", "gemini")
-        tab.auto_commit_mode = False
-        assert tab.auto_commit_mode is False
+        state = AgentState("task-y")
+        state.auto_commit_mode = False
+        assert state.auto_commit_mode is False
 
 
 class _AutocommitTaskHarness(unittest.TestCase):
@@ -113,20 +94,17 @@ class _AutocommitTaskHarness(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
 
-class TestAutocommitModeSkipsMergeReview(_AutocommitTaskHarness):
-    """With ``auto_commit_mode=True`` the merge review is skipped."""
+class TestAutocommitCommitsDirectly(_AutocommitTaskHarness):
+    """Post-task autocommit commits directly, with no review events."""
 
     def test_autocommit_commits_directly(self) -> None:
         tab_id = "test-tab-ac-on"
-        tab = self.server._get_tab(tab_id)
-        tab.use_worktree = False
-        tab.auto_commit_mode = True
 
         Path(self.tmpdir, "README.md").write_text(
             "# Hello\n\nAgent-edited content\n",
         )
 
-        self.server._handle_autocommit_action("commit", tab_id)
+        self.server._autocommit_changes(tab_id)
 
         types = [e["type"] for e in self.events]
         assert "merge_started" not in types

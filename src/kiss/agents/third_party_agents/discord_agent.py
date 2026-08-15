@@ -2,7 +2,7 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Discord Agent — SorcarAgent extension with Discord REST API tools.
+"""Discord Agent — channel agent with Discord REST API tools.
 
 Provides authenticated access to Discord via a bot token. Uses the Discord
 REST API v10 directly via requests (no discord.py needed). Stores the token
@@ -25,8 +25,6 @@ from typing import Any
 
 import requests
 
-from kiss.agents.sorcar.sorcar_agent import SorcarAgent
-from kiss.agents.third_party_agents._backend_utils import wait_for_matching_message
 from kiss.agents.third_party_agents._channel_agent_utils import (
     BaseChannelAgent,
     ChannelConfig,
@@ -187,33 +185,9 @@ class DiscordChannelBackend(ToolMethodBackend):
         """
         return bool(self._bot_user_id) and msg.get("user") == self._bot_user_id
 
-    def wait_for_reply(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        user_id: str,
-        timeout_seconds: float = 300.0,
-    ) -> str | None:
-        """Poll for a reply from a specific user."""
-        oldest = self._last_message_id
-
-        def poll() -> list[dict[str, Any]]:
-            nonlocal oldest
-            msgs, oldest = self.poll_messages(channel_id, oldest)
-            return msgs
-
-        return wait_for_matching_message(
-            poll=poll,
-            matches=lambda msg: msg.get("user") == user_id,
-            extract_text=lambda msg: str(msg.get("text", "")),
-            timeout_seconds=timeout_seconds,
-            poll_interval=2.0,
-        )
-
     def disconnect(self) -> None:
         """Release Discord backend state before stop or reconnect."""
         self._last_message_id = ""
-
 
     def list_guilds(self, limit: int = 100) -> str:
         """List guilds (servers) the bot is a member of.
@@ -498,8 +472,8 @@ class DiscordChannelBackend(ToolMethodBackend):
             return json.dumps({"ok": False, "error": str(e)})
 
 
-class DiscordAgent(BaseChannelAgent, SorcarAgent):
-    """SorcarAgent extended with Discord REST API tools.
+class DiscordAgent(BaseChannelAgent):
+    """Channel agent with Discord REST API tools.
 
     Example::
 
@@ -623,14 +597,15 @@ class DiscordAgent(BaseChannelAgent, SorcarAgent):
             Use ask_user_question() if you need user help with login screens.
 
             Returns:
-                Page content of the Discord Developer Portal to begin navigation.
+                Instructions for navigating the Discord Developer Portal.
             """
-            if agent.web_use_tool is None:  # pragma: no branch
-                return (
-                    "Browser not available. Use authenticate_discord(bot_token=...) "
-                    "with a token from https://discord.com/developers/applications."
-                )
-            return agent.web_use_tool.go_to_url("https://discord.com/developers/applications")
+            return (
+                "Open https://discord.com/developers/applications with your "
+                "go_to_url browser tool and complete the bot creation steps "
+                "described above. If browser tools are unavailable, use "
+                "authenticate_discord(bot_token=...) with a token from "
+                "https://discord.com/developers/applications."
+            )
 
         return [
             check_discord_auth,
@@ -659,6 +634,17 @@ def main() -> None:
         channel_name="Discord",
         make_backend=_make_backend,
     )
+
+
+def get_tools() -> list:
+    """Return the Discord channel tools (``kiss.server.sorcar.run`` tools-file contract).
+
+    Called by the kiss-web daemon when this module's path is passed as
+    the API's ``tools=`` argument: builds a fresh agent from the
+    credentials persisted under ``~/.kiss`` and returns its
+    authentication and backend tools.
+    """
+    return DiscordAgent()._get_tools()
 
 
 if __name__ == "__main__":

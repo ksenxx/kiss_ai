@@ -197,34 +197,51 @@ class TestFuzzGitCwdNoInjection(unittest.TestCase):
                 marker.unlink()
 
     def test_fuzz_args_are_passed_verbatim(self) -> None:
-        """A fuzzed ``*args`` value must arrive at git unmangled (no
-        shell expansion)."""
+        """A fuzzed ``*args`` value must arrive at git unmangled.
+
+        Observed at the real exec boundary rather than by spying on
+        ``subprocess.run``: a stub ``git`` first on ``PATH`` records
+        its own NUL-separated argv, so the property holds whatever
+        subprocess primitive the helper uses internally.
+        """
         from kiss.server import diff_merge as dm
 
-        captured: list[list[str]] = []
-        real_run = subprocess.run
-
-        def spy_run(cmd: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
-            captured.append(list(cmd))
-            return real_run(["true"], capture_output=True, text=True)
+        tmpdir = Path(tempfile.mkdtemp(prefix="kiss-git-argv-"))
+        argv_file = tmpdir / "argv"
+        bin_dir = tmpdir / "stub-bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "git"
+        stub.write_text(
+            "#!/bin/sh\n"
+            ': > "$KISS_ARGV_OUT"\n'
+            'for a in "$@"; do printf \'%s\\0\' "$a" '
+            '>> "$KISS_ARGV_OUT"; done\n',
+            encoding="utf-8",
+        )
+        stub.chmod(
+            stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH,
+        )
 
         rng = random.Random(0x914)
-        with mock.patch.object(subprocess, "run", spy_run):
+        saved_path = os.environ["PATH"]
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{saved_path}"
+        os.environ["KISS_ARGV_OUT"] = str(argv_file)
+        try:
             for _ in range(20):
                 arg = _rng_payload(rng, forbid="\0")
-                dm._git("/tmp", "log", arg, "--oneline")
-                self.assertEqual(captured[-1][0], "git")
-                self.assertIn(arg, captured[-1],
+                dm._git(str(tmpdir), "log", arg, "--oneline")
+                argv = argv_file.read_text().split("\0")[:-1]
+                self.assertIn("log", argv)
+                self.assertIn("--oneline", argv)
+                self.assertIn(arg, argv,
                               f"arg {arg!r} not passed verbatim "
-                              f"to git: {captured[-1]}")
+                              f"to git: {argv}")
+        finally:
+            os.environ["PATH"] = saved_path
+            os.environ.pop("KISS_ARGV_OUT", None)
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-
-
-
-
-@unittest.skipIf(sys.platform == "win32",
-                 "POSIX shells required for source-RC fuzzing")
 class TestFuzzSourceShellEnvPaths(unittest.TestCase):
     """``source_shell_env`` shell-quotes the RC path so a HOME containing
     metacharacters cannot inject commands into the sourced shell."""

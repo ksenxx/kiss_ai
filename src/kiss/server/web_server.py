@@ -48,6 +48,7 @@ import hashlib
 import ipaddress
 import json
 import logging
+import math
 import mimetypes
 import os
 import platform
@@ -78,9 +79,14 @@ from websockets.http11 import Request, Response
 
 from kiss.core.config import get_jobs_root as get_jobs_root
 from kiss.core.config import kiss_home
-from kiss.core.vscode_config import load_config, source_shell_env
+from kiss.core.models.model_info import get_default_model
+from kiss.core.vscode_config import (
+    apply_config_to_env,
+    load_config,
+    save_config,
+    source_shell_env,
+)
 from kiss.server import sorcar as sorcar_api
-from kiss.server.diff_merge import _read_lines_preserved as _read_lines_preserved
 from kiss.server.json_printer import JsonPrinter, stamp_event_ts
 from kiss.server.server import VSCodeServer, broadcast_to_conn
 from kiss.server.tips import read_tips
@@ -91,16 +97,7 @@ from kiss.server.voice_wake import (
     default_models_dir,
     transcribe_pcm,
 )
-from kiss.server.web_merge import (
-    _apply_exec_bit,  # noqa: F401  (re-exported for external tests)
-    _exec_flag,
-    _hunk_unresolved,
-    _record_hunk_rejected,
-    _reject_all_hunks_in_file,
-    _reject_hunk_in_file,
-    _restore_base_bytes,  # noqa: F401  (re-exported for external tests)
-    _WebMergeState,
-)
+from kiss.server.voice_wake_control import VoiceWakeController
 from kiss.viz_trajectory.server import find_job_dir as find_job_dir
 from kiss.viz_trajectory.server import list_jobs as list_jobs
 from kiss.viz_trajectory.server import (
@@ -347,8 +344,6 @@ _MAX_LINE_BYTES = 64 * 1024 * 1024
 _OPEN_TIMEOUT_SECONDS = 300.0
 
 _MAX_VOICE_AUDIO_B64 = 4 * 1024 * 1024
-
-_TAB_CLOSE_GRACE = 10.0
 
 _KISS_HOME: Path | None = None
 _TLS_DIR: Path | None = None
@@ -1267,7 +1262,12 @@ def _get_machine_topic() -> str:
 
     Combines the hostname and MAC address into a SHA-256 hash so the
     topic stays the same across process restarts on the same machine
-    but is not guessable by outsiders.
+    but is not guessable by outsiders.  When ``KISS_HOME`` is not the
+    default ``~/.kiss``, the home path is mixed into the hash as well:
+    processes running against an isolated home (tests, secondary smoke
+    servers) can then never compute — and thus never pollute — the
+    production daemon's discovery topic, while every existing
+    default-home install keeps its topic byte-identical.
 
     The stored topic is read directly (an ``OSError`` — e.g. the file
     vanishing between an existence check and the read — falls through
@@ -1280,14 +1280,19 @@ def _get_machine_topic() -> str:
     Returns:
         A hex string suitable for use as an ntfy.sh topic name.
     """
-    topic_file = _kiss_home_dir() / "ntfy_topic"
+    kiss_home_path = _kiss_home_dir()
+    topic_file = kiss_home_path / "ntfy_topic"
     try:
         stored = topic_file.read_text(encoding="utf-8").strip()
     except OSError:
         stored = ""
     if stored:
         return stored
-    identity = f"{platform.node()}:{uuid.getnode()}"
+    default_home = Path.home() / ".kiss"
+    if kiss_home_path.expanduser().resolve() == default_home.resolve():
+        identity = f"{platform.node()}:{uuid.getnode()}"
+    else:
+        identity = f"{platform.node()}:{uuid.getnode()}:{kiss_home_path}"
     topic = "kiss-" + hashlib.sha256(identity.encode()).hexdigest()[:32]
     try:
         _atomic_write_text(topic_file, topic + "\n")
@@ -1472,112 +1477,47 @@ def _print_url() -> None:
 
 
 def _snapshot_active_tabs() -> list[str]:
-    """Return ``"<tabId>(task=<task_id>)"`` strings for active tabs.
+    """Return ``"<tabId>(task=<task_id>)"`` strings for active tasks.
 
-    Snapshots the running-agent registry under its lock before
-    iterating so a concurrent worker thread mutating
-    ``running_agent_states`` (registering a fresh tab, disposing a
-    finished one) cannot race the iterator and raise ``RuntimeError:
-    dictionary changed size during iteration``.  ``_registry_lock`` is
-    a :class:`threading.RLock`, so re-entry from the same thread is
-    safe even when called from a signal handler that interrupted a
-    lock holder.  Falls back to a best-effort unlocked snapshot if the
-    lock itself is unusable (e.g. during interpreter shutdown), and
-    skips malformed tab entries rather than propagating, so callers —
-    the shutdown-signal logger and the ``activeTasksQuery`` handler —
-    always get a usable (possibly partial) report.
+    Snapshots the agent-state registry under its lock before iterating
+    so a concurrent worker thread mutating it cannot race the iterator.
+    The lock is a :class:`threading.RLock`, so re-entry from the same
+    thread is safe even when called from a signal handler that
+    interrupted a lock holder.  Falls back to a best-effort unlocked
+    snapshot if the lock itself is unusable (e.g. during interpreter
+    shutdown), and skips malformed entries rather than propagating, so
+    callers — the shutdown-signal logger and the ``activeTasksQuery``
+    handler — always get a usable (possibly partial) report.
+
+    Liveness is :meth:`AgentState.busy`, not ``is_task_active`` alone:
+    a worker that ``_cmd_run`` has started but that has not yet raised
+    the flag owns a real task, and answering ``count: 0`` for it lets
+    the extension's dependency installer SIGTERM the daemon on top of
+    a just-launched run (F08-2).
     """
-    from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+    from kiss.server import agent_state
 
     try:
-        with _RunningAgentState._registry_lock:
-            items = list(_RunningAgentState.running_agent_states.items())
+        states = agent_state.snapshot()
     except Exception:
         try:
-            items = list(_RunningAgentState.running_agent_states.items())
-        except Exception:
-            logger.debug(
-                "unlocked registry snapshot failed", exc_info=True,
-            )
-            items = []
-    active_tabs: list[str] = []
-    for tab_id, tab in items:
-        try:
-            if tab.is_task_active:
-                task_id = tab.task_history_id or tab.last_task_id
-                active_tabs.append(f"{tab_id}(task={task_id})")
-        except Exception:
-            logger.debug(
-                "skipping malformed tab entry in active-task snapshot",
-                exc_info=True,
-            )
-    return active_tabs
-
-
-def _snapshot_running_task_rows() -> list[dict[str, Any]]:
-    """Return one ``{chatId, taskId, title, startTs}`` dict per running chat.
-
-    Snapshots :attr:`_RunningAgentState.running_agent_states` (under its
-    registry lock — same discipline as :func:`_snapshot_active_tabs`)
-    and keeps only top-level running tasks:
-
-    * ``is_task_active`` must be true (a task is actually in flight);
-    * sub-agent states are skipped — their chats are reopened by the
-      parent tab's own ``resumeSession`` replay
-      (``_open_persisted_subagent_tabs``), so listing them here would
-      duplicate tabs on the client;
-    * states without a ``chat_id`` are skipped — there is nothing a
-      client-side ``resumeSession`` could resume yet;
-    * duplicate ``chat_id`` values are collapsed to one row (several
-      viewer tabs may share one live chat).
-
-    ``startTs`` is the ``task_history.start_ts`` of the in-flight task
-    (``0`` when the row is missing) and the result is sorted by it
-    ascending, so a client opening one tab per row in order lays the
-    restored tabs out oldest-first.  Those tabs open in the background:
-    a task that is still running never steals the user's focus.
-    ``title`` is the
-    task's user prompt for an immediate tab label; the follow-up
-    ``resumeSession`` replay repaints the tab with the real events.
-    """
-    from kiss.agents.sorcar.persistence import _get_task_start_ts
-    from kiss.agents.sorcar.running_agent_state import _RunningAgentState
-
-    try:
-        with _RunningAgentState._registry_lock:
-            states = list(_RunningAgentState.running_agent_states.values())
-    except Exception:
-        try:
-            states = list(_RunningAgentState.running_agent_states.values())
+            states = list(agent_state.agent_states.values())
         except Exception:
             logger.debug(
                 "unlocked registry snapshot failed", exc_info=True,
             )
             states = []
-    rows: list[dict[str, Any]] = []
-    seen_chats: set[str] = set()
+    active_tabs: list[str] = []
     for state in states:
         try:
-            if not state.is_task_active or state.is_subagent:
-                continue
-            chat_id = state.chat_id
-            if not chat_id or chat_id in seen_chats:
-                continue
-            task_id = str(state.task_history_id or state.last_task_id or "")
-            rows.append({
-                "chatId": chat_id,
-                "taskId": task_id,
-                "title": state.last_user_prompt or "",
-                "startTs": _get_task_start_ts(task_id),
-            })
-            seen_chats.add(chat_id)
+            if state.busy():
+                active_tabs.append(f"{state.tab_id}(task={state.task_id})")
         except Exception:
             logger.debug(
-                "skipping malformed state in running-task snapshot",
+                "skipping malformed entry in active-task snapshot",
                 exc_info=True,
             )
-    rows.sort(key=lambda r: r["startTs"])
-    return rows
+    return active_tabs
 
 
 def _rss_mb() -> float:
@@ -1815,13 +1755,10 @@ class WebPrinter(JsonPrinter):
         self._ws_clients: set[ServerConnection] = set()
         self._uds_writers: set[asyncio.StreamWriter] = set()
         self._local_uds_tab_counts: dict[str, int] = {}
-        self._cli_tab_counts: dict[str, int] = {}
+        self._uds_local_tab_sets: dict[str, set[str]] = {}
         self._conn_endpoints: dict[str, Any] = {}
         self._ws_lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._merge_state_callback: (
-            Callable[[str, dict[str, Any]], None] | None
-        ) = None
         self.work_dir: str = ""
         self._pending_sends: dict[Any, set[ConcurrentFuture[None]]] = {}
         self._send_locks: dict[Any, asyncio.Lock] = {}
@@ -1832,7 +1769,7 @@ class WebPrinter(JsonPrinter):
         Two code paths:
 
         * Events that already carry an explicit ``tabId`` (status,
-          askUser, commitMessage, merge_data, etc.) are treated as
+          askUser, commitMessage, etc.) are treated as
           targeted "system" events: sent verbatim to all connected
           clients (which filter by ``tabId``), but **not** recorded
           or persisted — except ``prompt`` echoes that ALSO carry a
@@ -1881,20 +1818,6 @@ class WebPrinter(JsonPrinter):
             self._send_to_conn(conn_id, json.dumps(event))
             return
 
-        if event.get("type") == "merge_data":
-            event = _augment_merge_data(event)
-            evt_tab = event.get("tabId", "")
-            # Copies mirrored onto other clients' tabs (see
-            # JsonPrinter.broadcast_tab_ui) describe the SAME review:
-            # registering a hunk cursor per copy would give each client
-            # its own cursor and fire one "all-done" per client.
-            if (
-                evt_tab
-                and not event.get("mirrorOf")
-                and self._merge_state_callback is not None
-            ):
-                self._merge_state_callback(evt_tab, event.get("data", {}))
-
         if "tabId" in event:
             if event.get("type") in ("prompt", "result") and event.get("taskId"):
                 record = {k: v for k, v in event.items() if k != "tabId"}
@@ -1916,6 +1839,11 @@ class WebPrinter(JsonPrinter):
 
         with self._lock:
             self._record_event(event)
+            # Mirror JsonPrinter.broadcast: record the file paths of
+            # mutating tool calls so the end-of-task cross-repo
+            # auto-commit (_autocommit_changed_repos) also sees tasks
+            # run through the web printer.
+            self._track_changed_path(event)
 
         self._persist_event(event)
 
@@ -1938,11 +1866,10 @@ class WebPrinter(JsonPrinter):
 
         Any ``tabId`` already present on *event* is stripped first:
         events can reach this fan-out still carrying a stale stamp
-        (e.g. ``_relay_cli_event`` forwarding the CLI bridge's
-        ``subagentDone`` with its ``tabId: ""`` marker), and splicing
-        a second ``"tabId"`` member would produce ambiguous JSON with
-        duplicate keys — routed correctly today only because parsers
-        happen to keep the last member.
+        (e.g. a ``subagentDone`` broadcast with its ``tabId: ""``
+        marker), and splicing a second ``"tabId"`` member would
+        produce ambiguous JSON with duplicate keys — routed correctly
+        today only because parsers happen to keep the last member.
         """
         targets = self._fanout_targets(event.get("taskId"))
         if not targets:
@@ -1974,43 +1901,81 @@ class WebPrinter(JsonPrinter):
         else:
             counts[key] = count - 1
 
-    def register_local_uds_tab(self, tab_id: str) -> None:
-        """Mark *tab_id* as currently connected over local UDS.
+    def register_local_uds_tab(
+        self, conn_id: str, tab_id: str, local_tabs: set[str]
+    ) -> None:
+        """Mark *tab_id* as shown by the local UDS connection *conn_id*.
 
         Args:
+            conn_id: The UDS connection's id.
             tab_id: The frontend tab id seen on a UDS command.
+            local_tabs: The connection's mutable local-tab set (lives
+                in its ``conn_state``).  Membership is checked and
+                updated under the printer lock, so a concurrent
+                canonical-close prune cannot race the registration.
         """
         with self._ws_lock:
+            self._uds_local_tab_sets[conn_id] = local_tabs
+            if tab_id in local_tabs:
+                return
+            local_tabs.add(tab_id)
             self._increment_count(self._local_uds_tab_counts, tab_id)
 
-    def unregister_local_uds_tabs(self, tab_ids: set[str]) -> None:
-        """Drop this connection's local-UDS tab registrations."""
-        with self._ws_lock:
-            for tab_id in tab_ids:
-                self._decrement_count(self._local_uds_tab_counts, tab_id)
+    def sync_local_uds_tabs(
+        self, conn_id: str, tab_ids: set[str], local_tabs: set[str]
+    ) -> None:
+        """Reconcile *conn_id*'s local-tab membership to exactly *tab_ids*.
 
-    def register_cli_tab(self, tab_id: str) -> None:
-        """Mark *tab_id* as a CLI terminal player for talk arbitration.
-
-        Called when a sorcar CLI REPL announces itself with the
-        ``cliTabHello`` command.  :meth:`_fanout_talk` mutes talk
-        copies stamped for CLI tabs whenever a LOCAL webview tab is
-        also subscribed to the task, so the utterance is not played by
-        the terminal AND a webview on the same machine at once.  A WSS
-        browser tab is a different device and does not suppress the
-        local CLI.
+        The ``ready``-time sync: missing ids are added and stale ones
+        dropped (with matching reference-count updates), so a repeated
+        ``ready`` self-heals bookkeeping left over from canonical tabs
+        that were closed while this connection was attached.
 
         Args:
-            tab_id: The CLI client's frontend tab id.
+            conn_id: The UDS connection's id.
+            tab_ids: The tab ids the connection currently shows.
+            local_tabs: The connection's mutable local-tab set.
         """
         with self._ws_lock:
-            self._increment_count(self._cli_tab_counts, tab_id)
+            self._uds_local_tab_sets[conn_id] = local_tabs
+            for tab_id in tab_ids - local_tabs:
+                self._increment_count(self._local_uds_tab_counts, tab_id)
+            for tab_id in local_tabs - tab_ids:
+                self._decrement_count(self._local_uds_tab_counts, tab_id)
+            local_tabs.clear()
+            local_tabs.update(tab_ids)
 
-    def unregister_cli_tabs(self, tab_ids: set[str]) -> None:
-        """Drop this connection's CLI-terminal tab registrations."""
+    def prune_local_uds_tab(self, tab_id: str) -> None:
+        """Drop *tab_id* from every UDS connection's local-tab bookkeeping.
+
+        Called when a tab is removed from the canonical tab registry
+        (explicit close or one-tab-per-chat displacement): the
+        ``tabs_state`` broadcast removes the tab from every client UI,
+        so no local webview shows it anymore — a still-running task's
+        talk for the id must no longer trigger daemon-native playback.
+
+        Args:
+            tab_id: The registry-removed frontend tab id.
+        """
         with self._ws_lock:
+            for local_tabs in self._uds_local_tab_sets.values():
+                if tab_id in local_tabs:
+                    local_tabs.discard(tab_id)
+                    self._decrement_count(self._local_uds_tab_counts, tab_id)
+
+    def unregister_local_uds_tabs(
+        self, conn_id: str, tab_ids: set[str]
+    ) -> None:
+        """Drop a disconnected UDS connection's local-tab registrations.
+
+        Args:
+            conn_id: The UDS connection's id.
+            tab_ids: The connection's remaining local-tab ids.
+        """
+        with self._ws_lock:
+            self._uds_local_tab_sets.pop(conn_id, None)
             for tab_id in tab_ids:
-                self._decrement_count(self._cli_tab_counts, tab_id)
+                self._decrement_count(self._local_uds_tab_counts, tab_id)
 
     def _fanout_talk(self, event: dict[str, Any], targets: list[str]) -> None:
         """Fan out one ``talk`` event with per-device playback arbitration.
@@ -2024,66 +1989,50 @@ class WebPrinter(JsonPrinter):
         robotic Web Speech fallback is gone).  When the event carries
         a synthesized clip and a local webview tab is subscribed, the
         DAEMON therefore plays the clip natively on this machine's
-        speakers (:mod:`kiss.ui.cli.cli_talk`, ``afplay`` on
-        macOS) and stamps every same-machine copy (local UDS webviews
-        AND CLI tabs) ``muted``.
+        speakers (:mod:`kiss.server.talk_player`, ``afplay`` on
+        macOS) and stamps every local UDS webview copy ``muted``.
 
-        Otherwise the previous arbitration applies: webview subscriber
-        tabs receive the playable copy (each webview plays on its own
-        device; ``talkId`` dedupe and the talk queue keep intra-webview
-        duplicates silent); CLI REPL tabs (:meth:`register_cli_tab`)
-        play on THIS machine's speakers, which a local UDS webview
-        shares — so every CLI tab's copy is stamped ``muted`` when at
-        least one local webview tab is subscribed.  WSS web tabs are
-        treated as remote devices and do not suppress the local CLI;
-        when only CLI tabs (and/or remote web tabs) are subscribed,
-        exactly one CLI tab (the lexicographically first) plays.
-        Without this, a REPL user with the same task open in a local
-        chat webview heard every utterance twice, slightly offset —
-        distorted, overlapping speech.
+        Muting is per-ENDPOINT, not per-serialization: the canonical
+        tab registry mirrors the same tab ids to every client, so a
+        remote WSS browser shows the very tab the local webview does.
+        The browser is a different device with its own speakers, so
+        when the daemon owns the utterance only the same-machine UDS
+        copies are muted while every WSS copy stays playable.
+
+        Otherwise webview subscriber tabs receive the playable copy
+        (each webview plays on its own device; ``talkId`` dedupe and
+        the talk queue keep intra-webview duplicates silent).
 
         Args:
             event: The ``talk`` event (no ``tabId`` stamp yet).
             targets: Subscriber tab ids for the event's task.
         """
         with self._ws_lock:
-            cli_tabs = set(self._cli_tab_counts)
             local_uds_tabs = set(self._local_uds_tab_counts)
-        cli_targets = sorted(t for t in targets if t in cli_tabs)
-        web_targets = [t for t in targets if t not in cli_tabs]
-        local_web_targets = [t for t in web_targets if t in local_uds_tabs]
+        local_web_targets = [t for t in targets if t in local_uds_tabs]
         daemon_plays = bool(local_web_targets) and self._play_talk_clip_locally(
             event
         )
-        playing_cli_tab = (
-            cli_targets[0]
-            if cli_targets and not local_web_targets and not daemon_plays
-            else None
-        )
         base = json.dumps(event)[:-1]
         muted_base = json.dumps({**event, "muted": True})[:-1]
-        for tab_id in web_targets:
-            local_copy_muted = daemon_plays and tab_id in local_uds_tabs
-            prefix = muted_base if local_copy_muted else base
-            self._send_to_ws_clients(
-                f'{prefix}, "tabId": {json.dumps(tab_id)}}}'
-            )
-        for tab_id in cli_targets:
-            prefix = base if tab_id == playing_cli_tab else muted_base
-            self._send_to_ws_clients(
-                f'{prefix}, "tabId": {json.dumps(tab_id)}}}'
-            )
+        for tab_id in targets:
+            tab_suffix = f', "tabId": {json.dumps(tab_id)}}}'
+            if daemon_plays and tab_id in local_uds_tabs:
+                self._send_to_wss_clients(base + tab_suffix)
+                self._send_to_uds_writers(muted_base + tab_suffix)
+            else:
+                self._send_to_ws_clients(base + tab_suffix)
 
     @staticmethod
     def _play_talk_clip_locally(event: dict[str, Any]) -> bool:
         """Play a talk event's synthesized clip on this machine's speakers.
 
-        Uses the sorcar CLI's :class:`~kiss.ui.cli.cli_talk.
-        TalkPlayer` singleton — a real audio-player child process
+        Uses the :class:`~kiss.server.talk_player.TalkPlayer`
+        singleton — a real audio-player child process
         (``afplay`` / ``mpg123`` / ``ffplay`` / ``mpv``, overridable
         via ``KISS_SORCAR_PLAY_CMD``) fed from a serialising queue
         with ``talkId`` dedupe, so playback never blocks the event
-        loop and never overlaps a CLI-origin playback of the same
+        loop and never overlaps another playback of the same
         utterance.
 
         Args:
@@ -2098,44 +2047,15 @@ class WebPrinter(JsonPrinter):
         if not event.get("audioB64"):
             return False
         try:
-            from kiss.ui.cli import cli_talk
+            from kiss.server import talk_player
 
-            if cli_talk.player_command() is None:
+            if talk_player.player_command() is None:
                 return False
-            cli_talk.shared_player().play(dict(event))
+            talk_player.shared_player().play(dict(event))
             return True
         except Exception:
             logger.exception("daemon-side talk clip playback failed")
             return False
-
-    def _fanout_talk_cli_origin(self, event: dict[str, Any]) -> None:
-        """Fan out a CLI-forwarded ``talk`` event already played locally.
-
-        The sorcar CLI's :class:`RecordingConsolePrinter` plays every
-        talk event on the terminal machine's speakers BEFORE
-        forwarding it here, and every UDS peer of this daemon (VS Code
-        webviews, CLI REPL clients) lives on that same machine — so
-        their copies are stamped ``muted`` and only WSS peers (remote
-        browsers, i.e. other devices) receive the playable copy.
-        Without this, launching a task with ``sorcar`` while the same
-        task was open in a local chat webview played every clip twice,
-        slightly offset — the distorted, overlapping speech this
-        arbitration exists to prevent.
-
-        Args:
-            event: The CLI-originated ``talk`` event.
-        """
-        targets = self._fanout_targets(event.get("taskId"))
-        if not targets:
-            return
-        if "tabId" in event:
-            event = {k: v for k, v in event.items() if k != "tabId"}
-        base = json.dumps(event)[:-1]
-        muted_base = json.dumps({**event, "muted": True})[:-1]
-        for tab_id in targets:
-            stamp = f', "tabId": {json.dumps(tab_id)}}}'
-            self._send_to_wss_clients(base + stamp)
-            self._send_to_uds_writers(muted_base + stamp)
 
     def _send_to_wss_clients(self, data: str) -> None:
         """Send a pre-serialised JSON payload to WSS clients only.
@@ -2155,7 +2075,7 @@ class WebPrinter(JsonPrinter):
     def _send_to_uds_writers(self, data: str) -> None:
         """Send a pre-serialised JSON payload to local UDS peers only.
 
-        UDS peers (VS Code extension webviews, CLI REPL clients) are
+        UDS peers (VS Code extension webviews, Python clients) are
         always on the daemon's machine; talk arbitration sends them
         muted copies when a local player already owns the utterance.
 
@@ -2224,39 +2144,6 @@ class WebPrinter(JsonPrinter):
                 if endpoint in self._pending_sends:
                     self._send_locks[endpoint] = lock
             return lock
-
-    async def flush_pending_sends(self, endpoint: Any) -> None:
-        """Await every send already scheduled to *endpoint*.
-
-        :meth:`_schedule_send` registers each outbound payload's
-        ``run_coroutine_threadsafe`` future in ``_pending_sends`` the
-        instant it is scheduled — synchronously, in the calling thread,
-        BEFORE the ``_locked_send`` coroutine's first step runs.
-        Awaiting a snapshot of those futures therefore guarantees every
-        payload queued *before* this call has actually reached the wire.
-
-        :meth:`RemoteAccessServer._handle_ready` uses this to replay an
-        in-flight ``merge_data`` strictly AFTER the ``task_events`` that
-        ``resumeSession`` scheduled from its executor thread.  The
-        per-endpoint :meth:`send_lock` alone is insufficient: it only
-        orders senders that have already reached ``async with
-        send_lock``, so under scheduler pressure the directly-awaited
-        ``merge_data`` send can grab the lock before the
-        ``run_coroutine_threadsafe``-scheduled ``task_events`` send has
-        even started — inverting wire order and erasing the recovered
-        merge panel on refresh.  Draining the pending futures first
-        closes that window deterministically.
-
-        Args:
-            endpoint: The client connection whose queued sends to await.
-        """
-        with self._ws_lock:
-            pending = list(self._pending_sends.get(endpoint, ()))
-        for fut in pending:
-            try:
-                await asyncio.wrap_future(fut)
-            except Exception:
-                logger.debug("flush_pending_sends await failed", exc_info=True)
 
     async def _locked_send(self, endpoint: Any, data: str) -> None:
         """Send one payload to one endpoint under its FIFO send lock.
@@ -2476,25 +2363,14 @@ def _build_html() -> str:
         "      --vscode-editor-background: #1e1e1e;\n"
         "      --vscode-editor-foreground: #cccccc;\n"
         "      --vscode-input-background: #3c3c3c;\n"
-        "      --vscode-input-foreground: #cccccc;\n"
-        "      --vscode-input-border: #3c3c3c;\n"
-        "      --vscode-focusBorder: #007acc;\n"
-        "      --vscode-button-background: #0e639c;\n"
         "      --vscode-button-foreground: #ffffff;\n"
-        "      --vscode-button-hoverBackground: #1177bb;\n"
         "      --vscode-sideBar-background: #252526;\n"
-        "      --vscode-list-hoverBackground: #2a2d2e;\n"
-        "      --vscode-badge-background: #4d4d4d;\n"
-        "      --vscode-badge-foreground: #ffffff;\n"
         "      --vscode-textLink-foreground: #3794ff;\n"
         "      --vscode-descriptionForeground: #8b8b8b;\n"
-        "      --vscode-editorWidget-background: #252526;\n"
-        "      --vscode-editorWidget-border: #454545;\n"
         "      --vscode-panel-border: #80808059;\n"
         "      --vscode-terminal-ansiRed: #f44747;\n"
         "      --vscode-terminal-ansiGreen: #6a9955;\n"
         "      --vscode-terminal-ansiYellow: #d7ba7d;\n"
-        "      --vscode-terminal-ansiBlue: #569cd6;\n"
         "      --vscode-terminal-ansiMagenta: #c586c0;\n"
         "      --vscode-terminal-ansiCyan: #4ec9b0;\n"
         "    }\n"
@@ -2756,8 +2632,8 @@ _WS_SHIM_JS = r"""
   // after an ``onclose`` (i.e. a server restart or network blip)
   // means the page state is stale relative to the freshly booted
   // backend and we must reload the page so the normal load
-  // pipeline replays history, restored tabs, in-flight merges,
-  // etc.  Without this the page only re-binds the socket and the
+  // pipeline replays history, restored tabs, etc.  Without
+  // this the page only re-binds the socket and the
   // user is left staring at the "KISS Sorcar Server is starting
   // ..." overlay (or stale UI) until they manually refresh.
   var _hadAuthThenClosed = false;
@@ -2970,8 +2846,8 @@ _WS_SHIM_JS = r"""
         // already authenticated at least once and the WS later
         // closed, the page JS state is stale relative to the
         // freshly booted backend.  Reload so the normal page-load
-        // pipeline (history replay, restored tabs, in-flight
-        // merge replay, ...) runs against the new server state.
+        // pipeline (history replay, restored tabs, ...) runs
+        // against the new server state.
         // The reload is gated by ``_hadAuthThenClosed`` so the
         // very first authentication on a fresh page load does NOT
         // reload (otherwise we would loop forever).
@@ -3268,45 +3144,6 @@ def _read_media_file(filepath: Path) -> bytes | None:
     return None
 
 
-def _augment_merge_data(event: dict[str, Any]) -> dict[str, Any]:
-    """Add ``base_text`` and ``current_text`` to each file in a ``merge_data`` event.
-
-    The browser needs file contents to render diffs.  In VS Code, the
-    ``MergeManager`` reads files through the editor API; in the web
-    server we read them from disk and include the text in the event.
-
-    Args:
-        event: A ``merge_data`` event dict.
-
-    Returns:
-        A copy of the event with file contents added.
-    """
-    event = {**event}
-    data = {**event.get("data", {})}
-    files = []
-    for f in data.get("files", []):
-        f = {**f}
-        if f.get("binary"):
-            f["base_text"] = ""
-            f["current_text"] = ""
-            files.append(f)
-            continue
-        try:
-            with open(f["base"], encoding="utf-8", newline="") as bfh:
-                f["base_text"] = bfh.read()
-        except (OSError, KeyError, UnicodeDecodeError):
-            f["base_text"] = ""
-        try:
-            with open(f["current"], encoding="utf-8", newline="") as cfh:
-                f["current_text"] = cfh.read()
-        except (OSError, KeyError, UnicodeDecodeError):
-            f["current_text"] = ""
-        files.append(f)
-    data["files"] = files
-    event["data"] = data
-    return event
-
-
 _translate_webview_command = sorcar_api.translate_webview_command
 
 
@@ -3361,6 +3198,10 @@ class RemoteAccessServer:
         work_dir: Working directory for the agent (default cwd).
         certfile: Path to a PEM certificate file for TLS.
         keyfile: Path to a PEM private key file for TLS.
+        ntfy_base_url: Base URL of the ntfy server the active tunnel
+            URL is posted to (default the real ``https://ntfy.sh``).
+            Tests inject a local emulator here so they never post to
+            the production discovery topic.
     """
 
     def __init__(
@@ -3375,8 +3216,15 @@ class RemoteAccessServer:
         keyfile: str | None = None,
         url_file: str | Path | None = None,
         uds_path: str | Path | None = None,
+        ntfy_base_url: str = _NTFY_BASE_URL,
     ) -> None:
         source_shell_env()
+        # ``saveConfig`` was the only caller of apply_config_to_env, so
+        # a freshly started daemon kept the DECLARED default budget
+        # until the user happened to open and close the settings panel.
+        # Applying the persisted config here makes every process start
+        # in the state the user last saved.
+        apply_config_to_env(load_config())
 
         self.host = host
         self.port = port
@@ -3402,6 +3250,7 @@ class RemoteAccessServer:
         if self.work_dir:
             self._vscode_server.work_dir = self.work_dir
         self._server_api = sorcar_api.ServerApi(self)
+        self._voice_wake = VoiceWakeController()
 
         self._html_bytes = _build_html().encode("utf-8")
         self._tunnel_proc: subprocess.Popen[str] | None = None
@@ -3414,6 +3263,7 @@ class RemoteAccessServer:
         self._tunnel_rate_limited = False
         self._tunnel_force_restart_count = 0
         self._tunnel_force_restart_next_allowed = 0.0
+        self._ntfy_base_url = ntfy_base_url
         self._last_posted_url: str | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws_server: Any = None
@@ -3427,14 +3277,7 @@ class RemoteAccessServer:
         self._shutdown_initiated = False
         self._shutdown_future: asyncio.Future[None] | None = None
         self._local_url = f"https://localhost:{self.port}"
-        self._merge_states: dict[str, _WebMergeState] = {}
-        self._merge_states_lock = threading.Lock()
-        self._merge_action_locks: dict[str, asyncio.Lock] = {}
-        self._pending_tab_closes: dict[str, asyncio.TimerHandle] = {}
-        self._pending_tab_closes_lock = threading.Lock()
-        self._pending_close_tasks: set[asyncio.Task[None]] = set()
         self._uds_handler_tasks: set[asyncio.Task[None]] = set()
-        self._printer._merge_state_callback = self._register_merge_state
         self._active_url: str | None = None
         self._last_ips: frozenset[str] = frozenset()
         self._pending_ip_change: frozenset[str] | None = None
@@ -3444,157 +3287,8 @@ class RemoteAccessServer:
         self._update_log_path: Path = _kiss_home_dir() / "update.log"
         self._update_proc: subprocess.Popen[bytes] | None = None
         self._update_starting = False
-        # tab_id -> conn_id of the most recent live connection that
-        # used the tab.  Guarded by _pending_tab_closes_lock.  A stale
-        # connection's disconnect sweep must not arm a close timer for
-        # a tab that a replacement connection has claimed (F4-01).
-        self._tab_conn_owners: dict[str, str] = {}
-        # task_id -> number of live connections that announced it.
-        self._cli_running_tasks: dict[str, int] = {}
-        self._cli_running_lock = threading.Lock()
         self._lifecycle_lock = asyncio.Lock()
         self._uds_inode: int | None = None
-        self._vscode_server.set_cli_running_lookup(self._is_cli_task_running)
-        self._vscode_server.set_cli_running_task_ids_lookup(
-            self._snapshot_cli_running_task_ids,
-        )
-
-    def _snapshot_cli_running_task_ids(self) -> set[str]:
-        """Return a thread-safe copy of the CLI-running task id set.
-
-        Returned set is a fresh copy so callers can iterate / mutate
-        without taking ``_cli_running_lock`` (or racing the UDS
-        handler that mutates the underlying set).
-        """
-        with self._cli_running_lock:
-            return set(self._cli_running_tasks)
-
-    def _is_cli_task_running(self, task_id: str) -> bool:
-        """Return ``True`` when *task_id* is being run by the CLI.
-
-        Used by :meth:`VSCodeServer._replay_session` to decide whether
-        to subscribe a freshly opened webview tab to a CLI-launched
-        task's live event stream and broadcast a ``status:running``
-        event so the tab title shows the blinking-green-circle
-        indicator.
-        """
-        with self._cli_running_lock:
-            return task_id in self._cli_running_tasks
-
-    def _handle_cli_task_start(self, task_id: str, conn_state: dict[str, Any]) -> None:
-        """Record *task_id* as a CLI-launched running task.
-
-        Also stamps the task id into the UDS connection's per-conn
-        ``cli_tasks`` set so :meth:`_uds_handler` can clean it up if
-        the CLI process disconnects without sending a matching
-        ``cliTaskEnd`` (Ctrl+C, crash, abrupt termination).
-
-        :attr:`_cli_running_tasks` is a per-task-id refcount of live
-        announcing connections (F4-12): during a reconnect overlap the
-        old and the replacement connection both own the task id, and
-        the old connection's end/disconnect must not clear the global
-        running state out from under the live owner.
-        """
-        cli_tasks = conn_state.setdefault("cli_tasks", set())
-        if task_id in cli_tasks:
-            return
-        cli_tasks.add(task_id)
-        with self._cli_running_lock:
-            self._cli_running_tasks[task_id] = (
-                self._cli_running_tasks.get(task_id, 0) + 1
-            )
-
-    def _handle_cli_task_end(self, task_id: str, conn_state: dict[str, Any]) -> None:
-        """Mark one connection's claim on *task_id* as ended.
-
-        Decrements the task's refcount in :attr:`_cli_running_tasks`
-        when this connection had announced it; only when the count
-        reaches zero (no other live connection still owns the task)
-        is the task dropped and a ``status:running=false`` event
-        broadcast to subscribed webview tabs (F4-12).  An end from a
-        connection that never announced the task (e.g. a reconnected
-        CLI finishing a task it announced on a previous connection)
-        authoritatively clears the task.
-        """
-        cli_tasks = conn_state.get("cli_tasks")
-        owned = isinstance(cli_tasks, set) and task_id in cli_tasks
-        if owned:
-            assert isinstance(cli_tasks, set)
-            cli_tasks.discard(task_id)
-        still_running = False
-        with self._cli_running_lock:
-            if owned:
-                count = self._cli_running_tasks.get(task_id, 0) - 1
-                if count > 0:
-                    self._cli_running_tasks[task_id] = count
-                    still_running = True
-                else:
-                    self._cli_running_tasks.pop(task_id, None)
-            else:
-                self._cli_running_tasks.pop(task_id, None)
-        if not still_running:
-            self._fanout_cli_status(task_id, running=False)
-
-    def _sweep_stale_cli_tasks(self, conn_state: dict[str, Any]) -> None:
-        """End every CLI task still registered on a dropped connection.
-
-        Shared by the ``finally`` blocks of :meth:`_ws_handler` and
-        :meth:`_uds_handler` — ``cliTaskStart`` is accepted from both
-        transports, so both must sweep task ids their peer announced
-        but never closed with a matching ``cliTaskEnd`` (crash,
-        Ctrl+C, dropped browser).  Without the sweep the ids stay in
-        :attr:`_cli_running_tasks` for the daemon's lifetime and every
-        subscribed webview keeps showing the blinking-green-circle
-        "running" indicator for a task no longer running anywhere.
-
-        Args:
-            conn_state: The dropped connection's per-conn state dict,
-                whose ``cli_tasks`` set holds the announced task ids.
-        """
-        stale_cli_tasks = conn_state.get("cli_tasks")
-        if isinstance(stale_cli_tasks, set):
-            for task_id in list(stale_cli_tasks):
-                if isinstance(task_id, str) and task_id:
-                    self._handle_cli_task_end(task_id, conn_state)
-
-    @staticmethod
-    def _validated_cli_task_id(cmd: dict[str, Any]) -> str:
-        """Extract and validate the ``taskId`` of a CLI task command.
-
-        Shared by the ``cliTaskStart`` / ``cliTaskEnd`` handlers of
-        the server API (:meth:`kiss.server.sorcar.ServerApi`), which
-        require a non-empty string task id.
-
-        Args:
-            cmd: The parsed ``cliTaskStart`` / ``cliTaskEnd`` command.
-
-        Returns:
-            The task id, or ``""`` (after a debug log) when the field
-            is missing, empty, or not a string.
-        """
-        raw_id = cmd.get("taskId")
-        if isinstance(raw_id, str) and raw_id:
-            return raw_id
-        logger.debug("%s with bad taskId %r", cmd.get("type"), raw_id)
-        return ""
-
-    def _fanout_cli_status(self, task_id: str, *, running: bool) -> None:
-        """Send ``status:running`` to every tab subscribed to *task_id*.
-
-        Delegates to :meth:`WebPrinter._fanout_stamped`, which looks up
-        the viewer tabs currently subscribed to the task id and writes
-        one copy of the ``status`` event per tab with that tab's
-        ``tabId`` spliced in.  The event carries ``taskId`` like every
-        other task-scoped status broadcast (task_runner, cli_client)
-        so clients can filter on it.  Used when a CLI task ends so the
-        blinking-green-circle indicator clears on every webview that
-        was watching it.
-        """
-        self._printer._fanout_stamped({
-            "type": "status",
-            "running": running,
-            "taskId": task_id,
-        })
 
     async def _process_request(
         self, _connection: ServerConnection, request: Request
@@ -3770,212 +3464,6 @@ class RemoteAccessServer:
             None, self._vscode_server._handle_command, cmd,
         )
 
-    def _claim_tab(self, tab_id: str, conn_id: str) -> None:
-        """Record *conn_id* as the current live owner of *tab_id*.
-
-        Called on every dispatched command that names a tab, and on
-        the ``ready`` claim path.  Ownership decides whether a
-        dropping connection may arm the deferred ``closeTab`` timer
-        for the tab (F4-01): a stale connection that lost the tab to
-        a live replacement must not tear the tab's backend state
-        down.
-        """
-        if not tab_id or not conn_id:
-            return
-        with self._pending_tab_closes_lock:
-            prev_owner = self._tab_conn_owners.get(tab_id)
-            self._tab_conn_owners[tab_id] = conn_id
-            if prev_owner == conn_id:
-                return
-            # Ownership moved to a new live connection: atomically
-            # cancel any close timer armed by the previous owner's
-            # disconnect (same lock as the arm path, so a stale
-            # disconnect cannot re-arm in between).
-            handle = self._pending_tab_closes.pop(tab_id, None)
-        if handle is not None:
-            try:
-                handle.cancel()
-            except Exception:
-                logger.debug(
-                    "Cancel of pending close on tab reclaim failed",
-                    exc_info=True,
-                )
-
-    def _schedule_owned_tab_closes(
-        self, tabs_seen: set[str], conn_state: dict[str, Any],
-    ) -> None:
-        """Arm deferred closes for the dropped connection's own tabs.
-
-        Shared by the ``finally`` blocks of :meth:`_ws_handler` and
-        :meth:`_uds_handler`.  Skips any tab a live replacement
-        connection has since claimed (F4-01) — the replacement's own
-        disconnect will arm the timer when it really drops.
-        """
-        if self._shutdown_initiated:
-            return
-        conn_id = str(conn_state.get("conn_id", ""))
-        for tab in tabs_seen:
-            self._schedule_tab_close(tab, owner_conn_id=conn_id)
-
-    def _schedule_tab_close(
-        self, tab_id: str, owner_conn_id: str | None = None,
-    ) -> None:
-        """Schedule a deferred ``closeTab`` for *tab_id* after a grace period.
-
-        Called from :meth:`_ws_handler`'s ``finally`` block whenever a
-        WebSocket connection drops, for every tab id that was seen on
-        that connection.  Because browsers cannot reliably emit a
-        ``closeTab`` before the WSS shuts down (``beforeunload`` /
-        ``pagehide`` WebSocket writes are commonly buffered then
-        dropped), the grace timer is the canonical way to detect that
-        the frontend tab is truly gone — a reload / transient
-        reconnect that re-claims the same tab id within
-        :data:`_TAB_CLOSE_GRACE` seconds calls
-        :meth:`_cancel_pending_tab_close` to abort the disposal.
-
-        If a previous timer was already armed for *tab_id*, it is
-        cancelled and replaced (extending the grace window each time
-        the same tab id appears on a new dropped connection).
-
-        Args:
-            tab_id: The frontend tab identifier whose backend state
-                should be torn down once the grace period elapses,
-                unless cancelled by a reconnect.
-        """
-        if not tab_id:
-            return
-        loop = self._loop
-        if loop is None or not loop.is_running():
-            return
-        with self._pending_tab_closes_lock:
-            if owner_conn_id is not None and (
-                self._tab_conn_owners.get(tab_id, owner_conn_id)
-                != owner_conn_id
-            ):
-                # Ownership check and timer arming under ONE lock
-                # acquisition (F4-01): a replacement connection that
-                # claimed the tab must not have its tab torn down by
-                # this stale disconnect.
-                return
-            existing = self._pending_tab_closes.pop(tab_id, None)
-            if existing is not None:
-                try:
-                    existing.cancel()
-                except Exception:
-                    logger.debug(
-                        "Cancel of stale pending close failed",
-                        exc_info=True,
-                    )
-            handle = loop.call_later(
-                _TAB_CLOSE_GRACE,
-                self._fire_pending_tab_close,
-                tab_id,
-            )
-            self._pending_tab_closes[tab_id] = handle
-
-    def _cancel_pending_tab_close(self, tab_id: str) -> None:
-        """Cancel a pending deferred ``closeTab`` for *tab_id*.
-
-        Called from :meth:`_handle_ready` when a fresh WebSocket
-        connection re-claims a tab id (either as the current
-        ``tabId`` or as an entry in ``restoredTabs``).  Idempotent and
-        safe for unknown tab ids — if no timer was armed for *tab_id*
-        the call is a no-op.
-
-        Args:
-            tab_id: The frontend tab identifier being re-claimed.
-        """
-        if not tab_id:
-            return
-        with self._pending_tab_closes_lock:
-            handle = self._pending_tab_closes.pop(tab_id, None)
-        if handle is not None:
-            try:
-                handle.cancel()
-            except Exception:
-                logger.debug(
-                    "Cancel of pending tab close failed", exc_info=True,
-                )
-
-    def _fire_pending_tab_close(self, tab_id: str) -> None:
-        """Execute the deferred ``closeTab`` for *tab_id*.
-
-        Runs on the asyncio event loop after :data:`_TAB_CLOSE_GRACE`
-        seconds elapse without a reconnect cancelling the timer.
-        Pops the merge state (if any) for *tab_id* and dispatches the
-        ``closeTab`` command through :meth:`_run_cmd`, which routes
-        through :class:`VSCodeServer._close_tab`.  When the tab is
-        idle, ``_close_tab`` disposes the ``_RunningAgentState`` immediately;
-        when a task or merge review is still in flight, it flips
-        ``frontend_closed=True`` and lets the existing deferred-
-        disposal hook (:meth:`VSCodeServer._dispose_if_closed`) tear
-        down the state once the lifecycle ends — never interrupting
-        the running agent.
-
-        Args:
-            tab_id: The frontend tab identifier whose grace window
-                has elapsed.
-        """
-        with self._pending_tab_closes_lock:
-            self._pending_tab_closes.pop(tab_id, None)
-            self._tab_conn_owners.pop(tab_id, None)
-        if self._loop is None or not self._loop.is_running():
-            return
-        task = asyncio.ensure_future(
-            self._finish_merge_and_close_tab(tab_id),
-            loop=self._loop,
-        )
-        self._pending_close_tasks.add(task)
-        task.add_done_callback(self._pending_close_tasks.discard)
-
-    async def _finish_merge_and_close_tab(
-        self, tab_id: str, merge_state: _WebMergeState | None = None,
-    ) -> None:
-        """End an in-flight merge review (if any) and close *tab_id*.
-
-        Companion of :meth:`_fire_pending_tab_close`.  When the close
-        grace elapsed while a merge review was still in flight, the
-        popped :class:`_WebMergeState` is the ONLY thing that could
-        ever drive the review to ``all-done`` — the backend
-        ``_close_tab`` sees ``is_merging=True`` (a busy lifecycle
-        flag), merely flips ``frontend_closed=True`` and waits for
-        the merge to end, which would now never happen.  Dispatching
-        ``all-done`` here treats the close as "accept the remaining
-        hunks" (no disk writes — the workspace already holds the
-        agent's content): ``_finish_merge`` clears ``is_merging``,
-        cleans the per-tab merge artifacts, presents any pending
-        worktree, and the subsequent ``closeTab`` disposes the
-        backend tab instead of leaking it forever.
-
-        The merge state is popped UNDER the tab's merge-action lock
-        (F4-07): an in-flight reject holds that lock across
-        executor-backed file rewrites, and removing the state (and the
-        lock-map entry) without waiting would let the reject resume
-        against detached state while the merge artifacts are being
-        cleaned up.
-
-        Args:
-            tab_id: The frontend tab identifier being closed.
-            merge_state: A merge state the caller already popped
-                (``ServerApi.close_tab``), or ``None`` to pop it here
-                under the action lock.
-        """
-        if merge_state is None:
-            lock = await self._acquire_merge_action_lock(tab_id)
-            if lock is not None:
-                try:
-                    merge_state = self._pop_merge_state(tab_id)
-                finally:
-                    lock.release()
-        if merge_state is not None:
-            await self._run_cmd({
-                "type": "mergeAction",
-                "action": "all-done",
-                "tabId": tab_id,
-                "workDir": merge_state.work_dir,
-            })
-        await self._run_cmd({"type": "closeTab", "tabId": tab_id})
-
     async def _ws_handler(self, websocket: ServerConnection) -> None:
         """Handle a WebSocket client connection.
 
@@ -3989,7 +3477,6 @@ class RemoteAccessServer:
             return
 
         self._printer.add_client(websocket)
-        tabs_seen: set[str] = set()
         conn_state: dict[str, Any] = {
             "work_dir": "", "conn_id": uuid.uuid4().hex,
         }
@@ -4004,7 +3491,7 @@ class RemoteAccessServer:
                     continue
                 try:
                     await self._dispatch_client_command(
-                        cmd, websocket, tabs_seen, conn_state,
+                        cmd, websocket, conn_state,
                     )
                 except websockets.exceptions.ConnectionClosed:
                     raise
@@ -4019,8 +3506,6 @@ class RemoteAccessServer:
         except Exception:
             logger.debug("WS handler error", exc_info=True)
         finally:
-            self._schedule_owned_tab_closes(tabs_seen, conn_state)
-            self._sweep_stale_cli_tasks(conn_state)
             self._vscode_server.drop_connection_state(conn_state["conn_id"])
             self._printer.unbind_conn(conn_state["conn_id"])
             self._printer.remove_client(websocket)
@@ -4056,7 +3541,6 @@ class RemoteAccessServer:
             self._uds_handler_tasks.add(task)
             task.add_done_callback(self._uds_handler_tasks.discard)
         self._printer.add_uds_writer(writer)
-        tabs_seen: set[str] = set()
         conn_state: dict[str, Any] = {
             "work_dir": "", "conn_id": uuid.uuid4().hex,
         }
@@ -4074,7 +3558,7 @@ class RemoteAccessServer:
                     continue
                 try:
                     await self._dispatch_client_command(
-                        cmd, writer, tabs_seen, conn_state,
+                        cmd, writer, conn_state,
                     )
                 except (ConnectionError, asyncio.IncompleteReadError):
                     raise
@@ -4086,14 +3570,20 @@ class RemoteAccessServer:
         except Exception:
             logger.debug("UDS handler error", exc_info=True)
         finally:
-            self._schedule_owned_tab_closes(tabs_seen, conn_state)
+            # A daemon-hosted wake-word listener is owned by exactly
+            # this connection: reap it here so a closed VS Code window
+            # can never leak a mic-holding child process.
+            try:
+                await self._voice_wake.stop(conn_state["conn_id"])
+            except Exception:
+                logger.debug(
+                    "voice-wake stop on disconnect failed", exc_info=True,
+                )
             local_tabs = conn_state.get("local_tabs")
-            if isinstance(local_tabs, set):
-                self._printer.unregister_local_uds_tabs(local_tabs)
-            cli_tabs = conn_state.get("cli_tabs")
-            if isinstance(cli_tabs, set):
-                self._printer.unregister_cli_tabs(cli_tabs)
-            self._sweep_stale_cli_tasks(conn_state)
+            self._printer.unregister_local_uds_tabs(
+                conn_state["conn_id"],
+                local_tabs if isinstance(local_tabs, set) else set(),
+            )
             self._vscode_server.drop_connection_state(conn_state["conn_id"])
             self._printer.unbind_conn(conn_state["conn_id"])
             self._printer.remove_uds_writer(writer)
@@ -4103,40 +3593,10 @@ class RemoteAccessServer:
                 logger.debug("UDS writer close failed", exc_info=True)
 
 
-    def _relay_cli_event(self, ev: dict[str, Any]) -> None:
-        """Fan a CLI-originated event out to subscribed webview tabs.
-
-        The ``sorcar`` CLI's :class:`RecordingConsolePrinter` ships
-        every display event over the daemon's UDS endpoint wrapped in
-        a ``cliEvent`` envelope (see
-        :mod:`kiss.ui.cli.cli_daemon_bridge`).  The CLI process
-        has ALREADY recorded the event into its per-task recording
-        and persisted it to the chat DB via
-        :meth:`JsonPrinter.broadcast`, so this method must NOT call
-        ``_record_event`` or ``_persist_event`` again — doing so would
-        produce duplicate rows in the ``events`` table.  It only
-        mirrors the tail of :meth:`WebPrinter.broadcast`: look up the
-        viewer tabs currently subscribed to the event's task id and
-        splice each ``tabId`` into the pre-serialised JSON, then push
-        to every WSS / UDS client in lockstep.  Any chat webview
-        that opened the task's chat id therefore receives the event
-        live, without waiting for a page reload to replay it from
-        the database.
-
-        Args:
-            ev: The event dictionary the CLI emitted; expected to
-                carry at least ``type`` and ``taskId``.
-        """
-        if ev.get("type") == "talk":
-            self._printer._fanout_talk_cli_origin(ev)
-            return
-        self._printer._fanout_stamped(ev)
-
     async def _dispatch_client_command(
         self,
         cmd: dict[str, Any],
         endpoint: Any,
-        tabs_seen: set[str],
         conn_state: dict[str, Any],
     ) -> None:
         """Hand one parsed client command to the server's code API.
@@ -4159,9 +3619,6 @@ class RemoteAccessServer:
                 :class:`ServerConnection` (WSS) or an
                 :class:`asyncio.StreamWriter` (UDS).  Used for direct
                 replies.
-            tabs_seen: Per-connection set of tab ids, mutated in place
-                (used by the callers' ``finally`` blocks to arm
-                deferred ``closeTab`` timers).
             conn_state: Per-connection mutable state holding the
                 connection's own ``work_dir`` and unique ``conn_id``.
                 Each VS Code window owns exactly one connection, and
@@ -4169,12 +3626,8 @@ class RemoteAccessServer:
                 guarantees the per-window work_dir and autocomplete
                 isolation invariants.
         """
-        cmd_tab_id = cmd.get("tabId")
-        if isinstance(cmd_tab_id, str) and cmd_tab_id:
-            self._claim_tab(cmd_tab_id, str(conn_state.get("conn_id", "")))
         ctx = sorcar_api.ApiContext(
             endpoint=endpoint,
-            tabs_seen=tabs_seen,
             conn_state=conn_state,
             is_uds=isinstance(endpoint, asyncio.StreamWriter),
         )
@@ -4527,6 +3980,148 @@ class RemoteAccessServer:
             ),
         )
 
+    async def _handle_get_default_model(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Reply with the key-derived default model name.
+
+        Services the ``getDefaultModel`` command (routed by
+        :meth:`kiss.server.sorcar.ServerApi.get_default_model`): the
+        VS Code extension host historically shelled out to ``uv run
+        python -c ...`` for this value; over the socket the daemon
+        answers from its own environment instead.  The reply is a
+        single direct ``{"type": "defaultModel", "model": <name>}``
+        event to the requesting *endpoint* — never broadcast.
+
+        Args:
+            cmd: The parsed ``getDefaultModel`` command (unused).
+            endpoint: The client connection to reply to.
+        """
+        model = await asyncio.to_thread(get_default_model)
+        await self._endpoint_send(
+            endpoint,
+            json.dumps({"type": "defaultModel", "model": model}),
+        )
+
+    async def _handle_read_kiss_config(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Reply with the raw merged ``~/.kiss/config.json`` contents.
+
+        Services the ``readKissConfig`` command (routed — and gated to
+        local UDS clients — by
+        :meth:`kiss.server.sorcar.ServerApi.read_kiss_config`).  The
+        reply is a single direct ``{"type": "kissConfig", "config":
+        {...}}`` event to the requesting *endpoint* — never broadcast
+        — carrying :func:`kiss.core.vscode_config.load_config`'s
+        sanitized, defaults-merged view of the file, i.e. exactly
+        what the daemon itself acts on.
+
+        Args:
+            cmd: The parsed ``readKissConfig`` command (unused).
+            endpoint: The client connection to reply to.
+        """
+        cfg = await asyncio.to_thread(load_config)
+        await self._endpoint_send(
+            endpoint,
+            json.dumps({"type": "kissConfig", "config": cfg}),
+        )
+
+    async def _handle_write_kiss_config(
+        self, cmd: dict[str, Any], endpoint: Any,
+    ) -> None:
+        """Merge the command's ``config`` keys into ``config.json``.
+
+        Services the ``writeKissConfig`` command (routed — and gated
+        to local UDS clients — by
+        :meth:`kiss.server.sorcar.ServerApi.write_kiss_config`).
+        Delegates to :func:`kiss.core.vscode_config.save_config`, so
+        the write shares the daemon's atomic, lock-guarded merge path
+        (existing keys are preserved, API keys are never written) and
+        the freshly saved state is re-applied to the daemon's
+        environment exactly like a settings-panel ``saveConfig``.
+        The reply is a single direct ``{"type": "kissConfigSaved",
+        "ok": <bool>[, "error": <msg>]}`` acknowledgement to the
+        requesting *endpoint* — never broadcast.
+
+        Args:
+            cmd: The parsed ``writeKissConfig`` command whose
+                ``config`` field must be a JSON object.
+            endpoint: The client connection to reply to.
+        """
+        data = cmd.get("config")
+        if not isinstance(data, dict):
+            await self._endpoint_send(endpoint, json.dumps({
+                "type": "kissConfigSaved",
+                "ok": False,
+                "error": "config must be a JSON object",
+            }))
+            return
+        try:
+            await asyncio.to_thread(save_config, data)
+            await asyncio.to_thread(
+                lambda: apply_config_to_env(load_config())
+            )
+        except OSError as err:
+            await self._endpoint_send(endpoint, json.dumps({
+                "type": "kissConfigSaved",
+                "ok": False,
+                "error": f"failed to save config: {err}",
+            }))
+            return
+        await self._endpoint_send(
+            endpoint, json.dumps({"type": "kissConfigSaved", "ok": True}),
+        )
+
+    async def _handle_voice_wake_start(
+        self, cmd: dict[str, Any], endpoint: Any, conn_id: str,
+    ) -> None:
+        """Start a daemon-hosted wake-word listener for one connection.
+
+        Services the ``voiceWakeStart`` command (routed — and gated to
+        local UDS clients — by
+        :meth:`kiss.server.sorcar.ServerApi.voice_wake_start`).  The
+        listener child process is owned by *conn_id*: its protocol
+        lines stream back to the requesting *endpoint* as
+        ``voiceWakeEvent`` / ``voiceWakeState`` events (see
+        :mod:`kiss.server.voice_wake_control`), and the
+        :meth:`_uds_handler` disconnect cleanup stops it when the
+        connection goes away.
+
+        Args:
+            cmd: The parsed ``voiceWakeStart`` command; its optional
+                ``sensitivity`` field (0..100) tunes wake eagerness.
+            endpoint: The client connection to stream events to.
+            conn_id: The owning connection's id.
+        """
+        raw = cmd.get("sensitivity")
+        sensitivity = (
+            round(raw)
+            if isinstance(raw, (int, float))
+            and not isinstance(raw, bool)
+            and math.isfinite(raw)
+            else None
+        )
+
+        async def _send(event: dict[str, Any]) -> None:
+            await self._endpoint_send(endpoint, json.dumps(event))
+
+        await self._voice_wake.start(conn_id, sensitivity, _send)
+
+    async def _handle_voice_wake_stop(self, conn_id: str) -> None:
+        """Stop *conn_id*'s daemon-hosted wake-word listener, if any.
+
+        Services the ``voiceWakeStop`` command (routed — and gated to
+        local UDS clients — by
+        :meth:`kiss.server.sorcar.ServerApi.voice_wake_stop`); also
+        called by the UDS disconnect cleanup, so it is a no-op when
+        the connection owns no listener.
+
+        Args:
+            conn_id: The owning connection's id.
+        """
+        await self._voice_wake.stop(conn_id)
+
     async def _handle_open_file(
         self, cmd: dict[str, Any], endpoint: Any,
     ) -> None:
@@ -4756,7 +4351,7 @@ class RemoteAccessServer:
         if self.use_tunnel and url is not None and url != self._last_posted_url:
             assert self._loop is not None
             await self._loop.run_in_executor(
-                None, _post_url_to_message_board, url,
+                None, _post_url_to_message_board, url, self._ntfy_base_url,
             )
             self._last_posted_url = url
 
@@ -4764,8 +4359,8 @@ class RemoteAccessServer:
         """Broadcast the active remote URL to all connected clients.
 
         Broadcasts the ``remote_url`` event using the in-memory URL,
-        the URL file, or the ``cloudflared`` metrics API as successive
-        fallbacks.
+        the URL file, or — for tunnel-enabled servers only — the
+        ``cloudflared`` metrics API as successive fallbacks.
 
         Historically this method also broadcast a
         ``welcome_suggestions`` event with an empty list because the
@@ -4795,7 +4390,14 @@ class RemoteAccessServer:
             url = await loop.run_in_executor(
                 None, _read_url_from_file, self._url_file,
             )
-        if not url:
+        if not url and self.use_tunnel:
+            # Only a tunnel-enabled server may adopt a discovered
+            # cloudflared URL: the machine-wide scan can find a
+            # FOREIGN process's tunnel (another daemon on this host,
+            # e.g. the production kiss-web next to a test server)
+            # whose URL routes to that other server, not to this one.
+            # A tunnel-less server must never advertise — let alone
+            # persist to its URL file — a URL it does not own.
             discovered = await loop.run_in_executor(
                 None, _discover_tunnel_url_from_metrics,
             )
@@ -4826,8 +4428,8 @@ class RemoteAccessServer:
         backpressure BEFORE queuing the frame, so without the lock a
         suspended earlier sender (e.g. the ``task_events`` replay
         scheduled by ``resumeSession``) could hit the wire AFTER a
-        later direct send (e.g. the ``merge_data`` replay), erasing
-        the recovered merge UI on refresh.
+        later direct send, inverting the wire order the client
+        depends on.
 
         Args:
             endpoint: The connection to send to.
@@ -4856,8 +4458,6 @@ class RemoteAccessServer:
           would propagate out of the command dispatch and tear
           down the whole authenticated connection over one bad field;
         * blanks non-str ``tabId`` / ``chatId`` values — a non-str
-          ``tabId`` (e.g. a list) would raise ``TypeError`` in
-          ``_cancel_pending_tab_close``'s dict lookup, and a non-str
           ``chatId`` would flow into backend handlers that assume
           strings.
 
@@ -4898,44 +4498,44 @@ class RemoteAccessServer:
                     "ignoring non-str restoredTabs chatId: %r", chat_id,
                 )
                 chat_id = ""
-            cleaned.append({"tabId": rt_id, "chatId": chat_id})
+            title = rt.get("title", "")
+            if not isinstance(title, str):
+                title = ""
+            work_dir = rt.get("workDir", "")
+            if not isinstance(work_dir, str):
+                work_dir = ""
+            cleaned.append({
+                "tabId": rt_id, "chatId": chat_id,
+                "title": title, "workDir": work_dir,
+            })
         return cleaned
 
     async def _handle_ready(
-        self, cmd: dict[str, Any], websocket: Any, *, is_uds: bool = False,
-    ) -> None:
-        """Translate the webview ``ready`` command into backend commands.
+        self, cmd: dict[str, Any], websocket: Any) -> None:
+        """Initialize a (re)connecting client from canonical state.
 
-        The VS Code TypeScript extension intercepts ``ready`` and fans
-        it out into ``getModels``, ``getInputHistory``, ``getConfig``,
-        plus session replay for restored tabs.  The web server must do
-        the same translation since there is no TypeScript middleman.
-
-        The three fanned-out init commands carry the ``ready``
-        sender's ``connId`` so their replies (``models``,
-        ``inputHistory``, ``configData``) reach ONLY the window that
-        just (re)connected.  Without the stamp the replies would be
-        broadcast to every connected client — opening or reloading
-        one browser window would repaint every sibling window's model
-        picker (resetting its selected model to the default), clobber
-        any open settings form, and reset its input-history cache.
+        Fans the ``ready`` out into ``getModels`` / ``getInputHistory``
+        / ``getConfig`` (each stamped with the sender's ``connId`` so
+        the replies reach ONLY the window that just (re)connected),
+        then synchronizes the client with the shared tab registry:
+        the client's legacy ``restoredTabs`` are adopted only into an
+        EMPTY registry (one-time migration), a canonical ``tabs_state``
+        snapshot is broadcast, and every chat-bound registry tab is
+        replayed so all connected clients converge on identical
+        transcripts.  Tab state is server-canonical — clients never
+        keep a tab set of their own — so the same path serves VS Code
+        webviews (UDS) and remote web apps (WSS) alike.
 
         Args:
-            cmd: The ``ready`` message from the browser (already
+            cmd: The ``ready`` message from the client (already
                 stamped with the connection's ``connId`` by
                 :meth:`kiss.server.sorcar.ServerApi.dispatch`).
             websocket: The client connection (for direct replies).
-            is_uds: True when the ``ready`` arrived over the local UDS
-                (VS Code extension host / CLI) transport.  Only
-                remote-web (WSS) clients get the ``openRunningTasks``
-                push at the end — VS Code windows manage their own tab
-                restoration in the extension host.
         """
         tab_id = cmd.get("tabId", "")
         if not isinstance(tab_id, str):
             tab_id = ""
         conn_id = cmd.get("connId", "")
-        self._cancel_pending_tab_close(tab_id)
         work_dir = cmd.get("workDir", "")
         for init_cmd in ("getModels", "getInputHistory", "getConfig"):
             init: dict[str, Any] = {"type": init_cmd, "connId": conn_id}
@@ -4956,129 +4556,25 @@ class RemoteAccessServer:
             )
         except Exception:
             pass
-        merge_tabs_to_replay: list[str] = []
-        seen_merge_tabs: set[str] = set()
-        if tab_id:
-            merge_tabs_to_replay.append(tab_id)
-            seen_merge_tabs.add(tab_id)
-        for rt in self._sanitized_restored_tabs(cmd):
-            rt_id = rt["tabId"]
-            if rt_id:
-                self._cancel_pending_tab_close(rt_id)
-                if isinstance(conn_id, str):
-                    self._claim_tab(rt_id, conn_id)
-            chat_id = rt["chatId"]
-            if chat_id:
-                await self._run_cmd(
-                    {"type": "resumeSession", "chatId": chat_id,
-                     "tabId": rt_id},
-                )
-            if rt_id and rt_id not in seen_merge_tabs:
-                merge_tabs_to_replay.append(rt_id)
-                seen_merge_tabs.add(rt_id)
-        if merge_tabs_to_replay:
-            await self._printer.flush_pending_sends(websocket)
-        for merge_tab_id in merge_tabs_to_replay:
-            await self._replay_merge_review(merge_tab_id, websocket)
-        if not is_uds:
-            try:
-                running_rows = await asyncio.to_thread(
-                    _snapshot_running_task_rows,
-                )
-            except Exception:
-                logger.debug(
-                    "running-task snapshot for ready failed", exc_info=True,
-                )
-                running_rows = []
-            if running_rows:
-                try:
-                    await self._endpoint_send(
-                        websocket,
-                        json.dumps({
-                            "type": "openRunningTasks",
-                            "tasks": running_rows,
-                        }),
-                    )
-                except Exception:
-                    logger.debug(
-                        "ready openRunningTasks send failed", exc_info=True,
-                    )
-
-    async def _replay_merge_review(self, tab_id: str, websocket: Any) -> None:
-        """Re-send an in-flight merge review to a reconnecting client.
-
-        ``merge_data`` events are tab-stamped, so ``WebPrinter.broadcast``
-        forwards them to currently-connected clients only — they are
-        never recorded or persisted.  A browser that reloads mid-review
-        would therefore never see the merge UI again even though the
-        server still holds the unresolved :class:`_WebMergeState` (and
-        the backend tab stays ``is_merging``).  The VS Code extension's
-        ``MergeManager`` survives webview reloads in the extension
-        host; for the web client the server is the only source of
-        truth, so it replays ``merge_data`` + ``merge_started`` +
-        ``merge_nav`` (resolutions included) to the reconnecting
-        endpoint.  Sends are targeted at *websocket* only — sibling
-        windows already received the original broadcast.
-
-        A tab that only MIRRORS someone else's review (this client
-        joined a chat another client is reviewing) has no state of its
-        own, so the owner's review is replayed to it — stamped with
-        this tab's id, exactly as ``broadcast_tab_ui`` stamps the live
-        events.
-
-        Args:
-            tab_id: The tab the connection (re-)claimed.
-            websocket: The reconnecting client connection.
-        """
-        if not tab_id:
-            return
-        owner_tab_id = self._printer.ui_mirror_owner(tab_id, "merge_data")
-        lock = await self._acquire_merge_action_lock(owner_tab_id)
-        if lock is None:
-            return
+        restored = self._sanitized_restored_tabs(cmd)
         try:
-            with self._merge_states_lock:
-                state = self._merge_states.get(owner_tab_id)
-            if state is None or not state.remaining:
-                return
-            assert self._loop is not None
-            event = await self._loop.run_in_executor(
-                None,
-                _augment_merge_data,
-                {
-                    "type": "merge_data",
-                    "tabId": tab_id,
-                    "data": state.data,
-                    "hunk_count": state.total_hunks,
-                },
+            bound = await asyncio.to_thread(
+                self._vscode_server.ready_tab_sync, restored,
             )
-            cur = state.current()
-            nav = {
-                "type": "merge_nav",
-                "tabId": tab_id,
-                "remaining": state.remaining,
-                "total": state.total_hunks,
-                "cur": (
-                    {"fi": cur[0], "hi": cur[1]}
-                    if cur is not None
-                    else None
-                ),
-                "resolved": state.resolutions(),
+        except Exception:
+            logger.exception("ready tab-registry sync failed")
+            bound = []
+        for rt_id, rt_chat, rt_task in bound:
+            resume: dict[str, Any] = {
+                "type": "resumeSession", "chatId": rt_chat,
+                "tabId": rt_id,
             }
-            if owner_tab_id != tab_id:
-                event["mirrorOf"] = owner_tab_id
-                nav["mirrorOf"] = owner_tab_id
-            try:
-                await self._endpoint_send(websocket, json.dumps(event))
-                await self._endpoint_send(
-                    websocket,
-                    json.dumps({"type": "merge_started", "tabId": tab_id}),
-                )
-                await self._endpoint_send(websocket, json.dumps(nav))
-            except Exception:
-                logger.debug("Merge review replay failed", exc_info=True)
-        finally:
-            lock.release()
+            # A tab pinned to a specific historical task replays THAT
+            # task; without the taskId the replay would silently
+            # switch every client's tab to the chat's latest task.
+            if rt_task:
+                resume["taskId"] = rt_task
+            await self._run_cmd(resume)
 
     async def _handle_submit(self, cmd: dict[str, Any]) -> None:
         """Translate the webview ``submit`` command into a backend ``run``.
@@ -5121,7 +4617,8 @@ class RemoteAccessServer:
                 len(attachments), _MAX_ATTACHMENTS,
             )
             attachments = attachments[:_MAX_ATTACHMENTS]
-        self._printer.broadcast({"type": "setTaskText", "text": prompt, "tabId": tab_id})
+        # NOTE: no setTaskText here — the common run path (_cmd_run)
+        # broadcasts it for every origin, VS Code and remote alike.
         self._printer.broadcast({"type": "status", "running": True, "tabId": tab_id})
         run_cmd: dict[str, Any] = {
             "type": "run",
@@ -5130,293 +4627,17 @@ class RemoteAccessServer:
             "workDir": cmd.get("workDir") or self._vscode_server.work_dir,
             "tabId": tab_id,
             "attachments": attachments,
-            "useWorktree": cmd.get("useWorktree", False),
-            "useParallel": cmd.get("useParallel", False),
-            "autoCommit": cmd.get("autoCommit", False),
+            "useWorktree": cmd.get("useWorktree", True),
+            "useParallel": cmd.get("useParallel", True),
+            "autoCommit": cmd.get("autoCommit", True),
+            # Carried over from the ``submit`` this run was built from:
+            # ``_run_cmd`` bypasses the dispatcher that stamps it, so
+            # without this a browser-launched task would record an
+            # empty owning connection while the identical VS Code
+            # ``run`` records the real one (F08-7).
+            "connId": cmd.get("connId", ""),
         }
         await self._run_cmd(run_cmd)
-
-    def _register_merge_state(
-        self, tab_id: str, merge_data: dict[str, Any],
-    ) -> None:
-        """Register a merge state when a merge_data event is broadcast.
-
-        Called from ``WebPrinter.broadcast()`` so the web server can
-        track active merge sessions and handle ``mergeAction`` commands.
-
-        M6: takes :attr:`_merge_states_lock` because this runs on the
-        agent task-runner thread while ``_handle_web_merge_action``
-        and the ``_ws_handler`` cleanup mutate the same dict on the
-        asyncio thread.
-
-        Args:
-            tab_id: The tab that started the merge.
-            merge_data: The ``data`` field from the ``merge_data`` event.
-        """
-        with self._merge_states_lock:
-            self._merge_states[tab_id] = _WebMergeState(merge_data)
-
-    def _pop_merge_state(self, tab_id: str) -> _WebMergeState | None:
-        """Atomically drop *tab_id*'s merge state and per-tab action lock.
-
-        Every cleanup site (deferred tab close, the client ``all-done``
-        and web ``closeTab`` handlers of the server API
-        (``sorcar.ServerApi.merge_action`` / ``close_tab``),
-        and the completion branch of ``_apply_web_merge_action``) must
-        drop BOTH entries together, or one of them leaks for the
-        daemon's lifetime (tab ids are fresh UUIDs, never reused).
-        Returns the popped state, or ``None`` when none was registered.
-        """
-        with self._merge_states_lock:
-            self._merge_action_locks.pop(tab_id, None)
-            return self._merge_states.pop(tab_id, None)
-
-
-    def _merge_action_lock(self, tab_id: str) -> asyncio.Lock:
-        """Return the per-tab :class:`asyncio.Lock` serialising merge actions.
-
-        Lazily creates a lock for *tab_id* on first use.  Creation is
-        guarded by :attr:`_merge_states_lock` (a threading lock) so two
-        coroutines that request the lock for the same tab in the same
-        event-loop tick still share one lock instance.
-
-        Args:
-            tab_id: The frontend tab id whose merge review is acted on.
-
-        Returns:
-            The shared :class:`asyncio.Lock` for *tab_id*.
-        """
-        with self._merge_states_lock:
-            lock = self._merge_action_locks.get(tab_id)
-            if lock is None:
-                lock = asyncio.Lock()
-                self._merge_action_locks[tab_id] = lock
-            return lock
-
-    async def _acquire_merge_action_lock(
-        self, tab_id: str,
-    ) -> asyncio.Lock | None:
-        """Acquire the tab's CURRENT merge-action lock, retrying rotations.
-
-        Owns the acquire-with-rotation-retry invariant shared by
-        :meth:`_handle_web_merge_action` and
-        :meth:`_replay_merge_review`: after acquiring, the lock must be
-        re-verified as still being the tab's registered one.  A holder
-        completing the review pops both the state and the lock entry
-        (``_pop_merge_state``) while still holding its lock object; if
-        a NEW review for the same tab is registered in that window, a
-        waiter that acted under the stale object would mutate the new
-        :class:`_WebMergeState` concurrently with actions holding the
-        freshly-minted lock — so on rotation the stale lock is released
-        and the acquire retried with the current one.
-
-        The lock is only minted when a merge review actually exists for
-        *tab_id*.  Without the membership check, an
-        authenticated-but-buggy (or malicious) client spamming merge
-        commands with random tab ids would grow
-        ``_merge_action_locks`` without bound, one permanent
-        :class:`asyncio.Lock` per never-seen tab id.
-
-        Args:
-            tab_id: The frontend tab id whose merge review is acted on.
-
-        Returns:
-            The HELD current lock (the caller MUST release it), or
-            ``None`` when no merge review exists for *tab_id*.
-        """
-        while True:
-            with self._merge_states_lock:
-                if tab_id not in self._merge_states:
-                    return None
-            lock = self._merge_action_lock(tab_id)
-            await lock.acquire()
-            with self._merge_states_lock:
-                if self._merge_action_locks.get(tab_id) is lock:
-                    return lock
-            lock.release()
-
-    def _broadcast_reject_failure(
-        self, tab_id: str, file_data: dict[str, Any], exc: OSError,
-    ) -> None:
-        """Report a failed hunk-rejection write to every client.
-
-        Called from the reject branches of
-        :meth:`_apply_web_merge_action` when restoring a file's base
-        content fails on disk (canonical trigger: the agent deleted a
-        tracked file and created a directory at the same path, so the
-        restore write raises ``IsADirectoryError``).  The hunks of the
-        affected file remain unresolved, the review stays open, and
-        the user sees an ``error`` chat event instead of a silently
-        dropped (or connection-killing) rejection.
-
-        Args:
-            tab_id: The tab whose merge review the action targeted.
-            file_data: The merge-data file entry whose restore failed.
-            exc: The ``OSError`` raised by the restore write.
-        """
-        fname = file_data.get("name") or file_data.get("target") or "file"
-        logger.warning("Merge reject failed for %s: %s", fname, exc)
-        self._printer.broadcast_tab_ui({
-            "type": "error",
-            "text": f"Failed to reject changes in {fname}: {exc}",
-            "tabId": tab_id,
-        })
-
-    async def _handle_web_merge_action(self, cmd: dict[str, Any]) -> None:
-        """Handle merge toolbar actions (accept/reject/navigate) server-side.
-
-        In VS Code, the TypeScript ``MergeManager`` processes these
-        actions.  In the standalone web server, this method provides
-        equivalent functionality by tracking hunk state and modifying
-        files on disk.
-
-        Serialised per tab via :meth:`_acquire_merge_action_lock` so
-        two clients (the local UDS VS Code extension and a remote
-        WebSocket browser) acting on the *same* tab's merge review
-        cannot interleave at the ``run_in_executor`` await inside the
-        reject branches and drop a hunk resolution.
-
-        Args:
-            cmd: The ``mergeAction`` command from the browser, with
-                ``action`` and ``tabId`` fields.
-        """
-        tab_id = self._printer.ui_mirror_owner(
-            cmd.get("tabId", ""), "merge_data",
-        )
-        lock = await self._acquire_merge_action_lock(tab_id)
-        if lock is None:
-            return
-        try:
-            await self._apply_web_merge_action({**cmd, "tabId": tab_id})
-        finally:
-            lock.release()
-
-    async def _apply_web_merge_action(self, cmd: dict[str, Any]) -> None:
-        """Apply a single merge action while holding the per-tab lock.
-
-        Performs the read-modify-write on the per-tab
-        :class:`_WebMergeState`.  Must be called by
-        :meth:`_handle_web_merge_action` with the tab's
-        :meth:`_merge_action_lock` held so the whole sequence (including
-        the ``run_in_executor`` file rewrites) is atomic per tab.
-
-        Args:
-            cmd: The ``mergeAction`` command, with ``action`` and
-                ``tabId`` fields.
-        """
-        action = cmd.get("action", "")
-        tab_id = cmd.get("tabId", "")
-        with self._merge_states_lock:
-            state = self._merge_states.get(tab_id)
-        if state is None:
-            with self._merge_states_lock:
-                if tab_id not in self._merge_states:
-                    self._merge_action_locks.pop(tab_id, None)
-            return
-
-        assert self._loop is not None
-        cur = state.current()
-        if action == "accept":
-            if cur is not None:
-                state.mark_resolved(*cur, "accepted")
-                state.advance()
-        elif action == "reject":
-            if cur is not None:
-                fi, hi = cur
-                fd = state.files[fi]
-                hunk = fd["hunks"][hi]
-                try:
-                    await self._loop.run_in_executor(
-                        None,
-                        partial(
-                            _reject_hunk_in_file,
-                            fd["current"],
-                            fd["base"],
-                            hunk,
-                            fd.get("target"),
-                            binary=bool(fd.get("binary")),
-                            link_target=fd.get("link_target"),
-                            make_executable=_exec_flag(fd),
-                            base_missing=bool(fd.get("created")),
-                        ),
-                    )
-                except OSError as exc:
-                    self._broadcast_reject_failure(tab_id, fd, exc)
-                else:
-                    _record_hunk_rejected(
-                        fd["hunks"], hi, partial(_hunk_unresolved, state, fi),
-                    )
-                    state.mark_resolved(fi, hi, "rejected")
-                    state.advance()
-        elif action == "prev":
-            state.go_prev()
-        elif action == "next":
-            state.advance()
-        elif action in ("accept-file", "reject-file"):
-            if cur is not None:
-                fi = cur[0]
-                fd = state.files[fi]
-                resolve_file = True
-                if action == "reject-file":
-                    try:
-                        await self._loop.run_in_executor(
-                            None, _reject_all_hunks_in_file, fd,
-                            state.unresolved_in_file(fi),
-                        )
-                    except OSError as exc:
-                        self._broadcast_reject_failure(tab_id, fd, exc)
-                        resolve_file = False
-                if resolve_file:
-                    file_status = (
-                        "rejected" if action == "reject-file" else "accepted"
-                    )
-                    for hi in state.unresolved_in_file(fi):
-                        state.mark_resolved(fi, hi, file_status)
-                    state.advance()
-        elif action == "accept-all":
-            for fi, hi in state.all_unresolved():
-                state.mark_resolved(fi, hi, "accepted")
-        elif action == "reject-all":
-            unresolved_by_file: dict[int, list[int]] = {}
-            for fi, hi in state.all_unresolved():
-                unresolved_by_file.setdefault(fi, []).append(hi)
-            for fi, his in unresolved_by_file.items():
-                fd = state.files[fi]
-                try:
-                    await self._loop.run_in_executor(
-                        None, _reject_all_hunks_in_file, fd, his,
-                    )
-                except OSError as exc:
-                    self._broadcast_reject_failure(tab_id, fd, exc)
-                    continue
-                for hi in his:
-                    state.mark_resolved(fi, hi, "rejected")
-
-        cur_after = state.current()
-        self._printer.broadcast_tab_ui({
-            "type": "merge_nav",
-            "tabId": tab_id,
-            "remaining": state.remaining,
-            "total": state.total_hunks,
-            "cur": (
-                {"fi": cur_after[0], "hi": cur_after[1]}
-                if cur_after is not None
-                else None
-            ),
-            "resolved": state.resolutions(),
-        })
-
-        if not state.remaining:
-            self._pop_merge_state(tab_id)
-            await self._run_cmd(
-                {
-                    "type": "mergeAction",
-                    "action": "all-done",
-                    "tabId": tab_id,
-                    "workDir": state.work_dir,
-                },
-            )
-
 
     def _spawn_cloudflared(self, args: list[str], retries: int = 3) -> None:
         """Spawn ``cloudflared`` with *args* and a free ``--metrics`` port.
@@ -6525,6 +5746,8 @@ class RemoteAccessServer:
             logger.exception(
                 "SIGTERM shutdown: stopping in-flight agent tasks failed",
             )
+        self._await_active_merges()
+        self._disconnect_mcp_servers()
         loop = self._loop
         if loop is not None and loop.is_running():
             try:
@@ -6547,6 +5770,81 @@ class RemoteAccessServer:
         self._detach_tunnel()
         logging.shutdown()
         os._exit(0)
+
+    def _disconnect_mcp_servers(self) -> None:
+        """Reap the MCP server children agents left behind.
+
+        :class:`~kiss.agents.sorcar.mcp_servers.MCPManager` keeps one
+        long-lived connection per configured MCP server, and a stdio
+        server is a **child process** of this daemon.  The manager only
+        tears those children down from an ``atexit`` hook, which does
+        not run when the daemon is killed, and the daemon itself never
+        referenced MCP at all — so every shutdown that was not a clean
+        interpreter exit orphaned them.
+
+        Called from every shutdown path (SIGTERM, the blocking
+        ``start()`` cleanup, and the embedder/test ``stop_async()``)
+        right after the in-flight agent tasks have been joined, so no
+        agent can open a fresh connection afterwards.
+        ``disconnect_all`` is idempotent, so the repeated calls a
+        single shutdown makes are harmless no-ops, and it leaves the
+        manager usable for an embedder that starts another server in
+        the same process.
+        """
+        try:
+            from kiss.agents.sorcar.mcp_servers import MCPManager
+
+            MCPManager.instance().disconnect_all()
+        except Exception:  # noqa: BLE001 — shutdown must proceed regardless
+            logger.debug("MCP server disconnect failed", exc_info=True)
+
+    def _await_active_merges(self, timeout: float = 30.0) -> None:
+        """Wait for interactive merge/discard work to finish.
+
+        The "Auto-commit and merge" / "Discard" action arrives as a
+        forwarded command and therefore runs in the event loop's
+        default executor.  By then the task that produced the worktree
+        has ended, so ``AgentState.task_thread`` is ``None`` and
+        :meth:`_stop_active_agent_tasks` — which requires a thread —
+        skips the state even though ``busy()`` is true.  Cancelling the
+        asyncio handler does not help either: cancelling a future that
+        awaits ``run_in_executor`` never stops the running function.
+
+        Unlike an agent task, a merge must not be *stopped*: it stashes,
+        commits, checks out and merges, and interrupting it half way
+        leaves the user's repository in a state they did not ask for.
+        Shutdown therefore *waits* for it, bounded by *timeout* so a
+        wedged git invocation cannot hang the process forever.
+
+        Args:
+            timeout: Maximum wall-clock seconds to wait, in aggregate,
+                for all in-flight merges.
+        """
+        from kiss.server import agent_state
+
+        with agent_state.STATE_LOCK:
+            threads = [
+                state.merge_thread
+                for state in agent_state.agent_states.values()
+                if state.merge_thread is not None
+                and state.merge_thread.is_alive()
+            ]
+        if not threads:
+            return
+        logger.warning(
+            "Shutdown: waiting up to %.0fs for %d interactive merge(s) "
+            "to finish rewriting the repository",
+            timeout, len(threads),
+        )
+        deadline = time.monotonic() + timeout
+        for thread in threads:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            if thread.is_alive():
+                logger.error(
+                    "Shutdown: merge thread %s did not finish within the "
+                    "grace period; proceeding without it",
+                    thread.name,
+                )
 
     def _stop_active_agent_tasks(self, timeout: float = 12.0) -> None:
         """Stop in-flight agent worker threads so they unwind cleanly.
@@ -6584,21 +5882,23 @@ class RemoteAccessServer:
             ctypes.py_object,
         ]
 
-        from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+        from kiss.server import agent_state
 
         active: list[tuple[str, threading.Event | None, threading.Thread]] = []
         active_task_history_ids: set[str] = set()
-        with _RunningAgentState._registry_lock:
-            for tab_id, tab in _RunningAgentState.running_agent_states.items():
-                thread = tab.task_thread
-                if tab.is_task_active and thread is not None and thread.is_alive():
-                    tab.interrupted_by_shutdown = True
-                    active.append((tab_id, tab.stop_event, thread))
-                    th_id = tab.task_history_id
-                    if th_id is None and tab.agent is not None:
-                        th_id = getattr(tab.agent, "_last_task_id", None)
-                    if th_id:
-                        active_task_history_ids.add(str(th_id))
+        with agent_state.STATE_LOCK:
+            for task_id, state in agent_state.agent_states.items():
+                thread = state.task_thread
+                # Liveness is AgentState.busy(), not is_task_active
+                # alone: the worker raises that flag only after
+                # _cmd_run has started it, and a task swept in that
+                # window is abandoned outright — no stop event, no
+                # join, no cleanup finally — leaving its history row
+                # stranded at the abrupt-failure sentinel (F08-2).
+                if thread is not None and state.busy():
+                    state.interrupted_by_shutdown = True
+                    active.append((task_id, state.stop_event, thread))
+                    active_task_history_ids.add(task_id)
 
         if not active:
             return
@@ -6695,6 +5995,12 @@ class RemoteAccessServer:
         finally:
             self._shutdown_initiated = True
             self._stop_active_agent_tasks()
+            self._await_active_merges()
+            self._disconnect_mcp_servers()
+            # Re-persist tab-registry mutations whose save failed
+            # (e.g. a briefly unwritable KISS dir); no-op when the
+            # last save succeeded.
+            self._vscode_server.tab_registry.flush()
             logger.info("Server stopped: pid=%d", pid)
             self._detach_tunnel()
 
@@ -6773,18 +6079,6 @@ class RemoteAccessServer:
             self._watchdog_task = None
             await _cancel_task(self._version_check_task)
             self._version_check_task = None
-            with self._pending_tab_closes_lock:
-                handles = list(self._pending_tab_closes.values())
-                self._pending_tab_closes.clear()
-                self._tab_conn_owners.clear()
-            for handle in handles:
-                try:
-                    handle.cancel()
-                except Exception:
-                    logger.debug(
-                        "Cancel of pending tab close on shutdown failed",
-                        exc_info=True,
-                    )
             if self._ws_server is not None:
                 self._ws_server.close()
                 try:
@@ -6814,16 +6108,27 @@ class RemoteAccessServer:
                         "UDS client close on shutdown failed",
                         exc_info=True,
                     )
-            # DRAIN in-flight UDS handlers and deferred tab-close
-            # tasks: closing writers merely unblocks readline(); the
-            # handler coroutines (and their cleanup `finally`
-            # blocks) plus any fired deferred-close tasks may still
-            # be running.  Join them so no coroutine touches server
-            # state after stop_async returns; cancel stragglers.
-            await self._drain_tasks(
-                self._uds_handler_tasks | self._pending_close_tasks,
-            )
+            # DRAIN in-flight UDS handlers: closing writers merely
+            # unblocks readline(); the handler coroutines (and their
+            # cleanup `finally` blocks) may still be running.  Join
+            # them so no coroutine touches server state after
+            # stop_async returns; cancel stragglers.
+            await self._drain_tasks(set(self._uds_handler_tasks))
+            # Reap daemon-hosted wake-word listeners: their owning
+            # connections are gone (or going), and a leaked child
+            # would keep the microphone open past shutdown.
+            await self._voice_wake.stop_all()
+            # An interactive merge/discard runs in the default executor,
+            # not on a task thread: WAIT for it before anything else is
+            # torn down, or the repository keeps being rewritten after
+            # this method promised the server was down.
+            await asyncio.to_thread(self._await_active_merges)
             await asyncio.to_thread(self._stop_active_agent_tasks)
+            await asyncio.to_thread(self._disconnect_mcp_servers)
+            # Re-persist tab-registry mutations whose save failed
+            # (e.g. a briefly unwritable KISS dir) so they survive
+            # the restart; a no-op when the last save succeeded.
+            await asyncio.to_thread(self._vscode_server.tab_registry.flush)
             self._stop_tunnel()
             _remove_url_file(self._url_file)
 

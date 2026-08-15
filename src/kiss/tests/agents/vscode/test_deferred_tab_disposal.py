@@ -2,27 +2,26 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Integration tests for deferred ``_RunningAgentState`` disposal.
+"""Integration tests for deferred agent-state disposal on ``closeTab``.
 
 When the frontend issues ``closeTab`` for a tab whose backend agent
-is still running a task (or whose merge view is open), the tab state
-must be kept alive so the in-flight work can finish.  Once the last
-lifecycle flag (``is_task_active`` / ``is_merging`` /
+is still running a task (or whose merge view is open), the agent
+state must be kept alive so the in-flight work can finish.  Once the
+last lifecycle flag (``is_task_active`` / ``is_merging`` /
 ``task_thread.is_alive()``) drops to false, the state must be
 disposed automatically — the frontend does not (and cannot) issue a
 second ``closeTab``.
 
 This contract is exercised by the tests below:
 
-1. ``closeTab`` during a running task marks the tab
-   ``frontend_closed=True`` but does NOT pop ``_running_agent_states``.
-2. When the task ends (``_run_task`` finally), ``_dispose_if_closed``
-   pops the tab AND ``printer.cleanup_tab`` is called (so per-tab
-   printer state is torn down too).
+1. ``closeTab`` during a running task marks the state
+   ``frontend_closed=True`` but does NOT pop the registry entry.
+2. When the task ends, ``_dispose_if_closed`` pops the state AND
+   ``printer.cleanup_tab`` is called (so per-tab printer state is
+   torn down too).
 3. ``closeTab`` during an open merge view defers in the same way and
-   ``_finish_merge`` triggers the disposal.
-4. ``closeTab`` on an idle tab still disposes immediately (the legacy
-   path is preserved).
+   clearing ``is_merging`` triggers the disposal.
+4. ``closeTab`` on an idle tab still disposes immediately.
 5. ``_dispose_if_closed`` is a no-op when the frontend has not yet
    closed the tab, even if all lifecycle flags are clear.
 """
@@ -35,7 +34,7 @@ import threading
 from pathlib import Path
 
 import kiss.agents.sorcar.persistence as th
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 
@@ -58,12 +57,29 @@ def _silent_server() -> VSCodeServer:
     """``VSCodeServer`` whose printer.broadcast is a no-op (for tests).
 
     Avoids polluting test stdout with JSON event lines while still
-    exercising the real ``_running_agent_states`` / ``_subscribers`` /
-    ``cleanup_tab`` machinery.
+    exercising the real registry / ``_subscribers`` / ``cleanup_tab``
+    machinery.
     """
     server = VSCodeServer()
     server.printer.broadcast = lambda event: None  # type: ignore[assignment]
     return server
+
+
+def _register(
+    task_id: str,
+    tab_id: str,
+    *,
+    is_task_active: bool = False,
+) -> agent_state.AgentState:
+    """Register a server-owned state the way a UI-launched run leaves it."""
+    state = agent_state.AgentState(
+        task_id,
+        tab_id=tab_id,
+        server_owned=True,
+        is_task_active=is_task_active,
+    )
+    agent_state.register(state)
+    return state
 
 
 class TestDeferredDisposal:
@@ -74,6 +90,7 @@ class TestDeferredDisposal:
         self.saved = _redirect(self.tmpdir)
 
     def teardown_method(self) -> None:
+        agent_state.agent_states.clear()
         if th._db_conn is not None:
             th._db_conn.close()
             th._db_conn = None
@@ -84,70 +101,66 @@ class TestDeferredDisposal:
         server = _silent_server()
         tab_id = "tab-defer"
         task_id = "task-defer"
-        tab = server._get_tab(tab_id)
+        state = _register(task_id, tab_id, is_task_active=True)
         server.printer.subscribe_tab(task_id, tab_id)
         release = threading.Event()
-        tab.is_task_active = True
 
         def fake() -> None:
             release.wait(timeout=5)
 
         thr = threading.Thread(target=fake, daemon=True)
-        tab.task_thread = thr
+        state.task_thread = thr
         thr.start()
-
-        server.printer._persist_agents[task_id] = tab.agent  # type: ignore[assignment]
 
         server._close_tab(tab_id)
 
-        assert tab_id in _RunningAgentState.running_agent_states
-        assert tab.frontend_closed is True
-        assert task_id in server.printer._persist_agents
+        assert agent_state.get(task_id) is state
+        assert state.frontend_closed is True
 
         server._dispose_if_closed(tab_id)
-        assert tab_id in _RunningAgentState.running_agent_states
+        assert agent_state.get(task_id) is state
 
         release.set()
         thr.join(timeout=5)
         with server._state_lock:
-            tab.task_thread = None
-            tab.is_task_active = False
+            state.task_thread = None
+            state.is_task_active = False
         server.printer.cleanup_task(task_id)
         server._dispose_if_closed(tab_id)
 
-        assert tab_id not in _RunningAgentState.running_agent_states
-        assert task_id not in server.printer._persist_agents
+        assert agent_state.get(task_id) is None
 
     def test_close_tab_during_merge_defers(self) -> None:
         server = _silent_server()
         tab_id = "tab-merge-defer"
-        tab = server._get_tab(tab_id)
-        tab.is_merging = True
+        task_id = "task-merge-defer"
+        state = _register(task_id, tab_id)
+        state.is_merging = True
 
         server._close_tab(tab_id)
-        assert tab_id in _RunningAgentState.running_agent_states
-        assert tab.frontend_closed is True
+        assert agent_state.get(task_id) is state
+        assert state.frontend_closed is True
 
         with server._state_lock:
-            tab.is_merging = False
+            state.is_merging = False
         server._dispose_if_closed(tab_id)
-        assert tab_id not in _RunningAgentState.running_agent_states
+        assert agent_state.get(task_id) is None
 
     def test_close_tab_idle_disposes_immediately(self) -> None:
         server = _silent_server()
         tab_id = "tab-idle"
-        server._get_tab(tab_id)
+        _register("task-idle", tab_id)
         server._close_tab(tab_id)
-        assert tab_id not in _RunningAgentState.running_agent_states
+        assert agent_state.get("task-idle") is None
 
     def test_dispose_if_closed_noop_when_not_flagged(self) -> None:
         server = _silent_server()
         tab_id = "tab-still-open"
-        tab = server._get_tab(tab_id)
-        assert tab.frontend_closed is False
+        state = _register("task-still-open", tab_id)
+        assert state.frontend_closed is False
 
         server._dispose_if_closed(tab_id)
-        assert tab_id in _RunningAgentState.running_agent_states
+        assert agent_state.get("task-still-open") is state
 
     def test_dispose_if_closed_idempotent_and_unknown_tab_safe(self) -> None:
         server = _silent_server()
@@ -155,11 +168,11 @@ class TestDeferredDisposal:
         server._dispose_if_closed("")
 
         tab_id = "tab-X"
-        server._get_tab(tab_id)
+        _register("task-X", tab_id)
         server._close_tab(tab_id)
-        assert tab_id not in _RunningAgentState.running_agent_states
+        assert agent_state.get("task-X") is None
         server._dispose_if_closed(tab_id)
-        assert tab_id not in _RunningAgentState.running_agent_states
+        assert agent_state.get("task-X") is None
 
     def test_subscribers_pruned_on_deferred_disposal(self) -> None:
         """When the source tab is closed, ``cleanup_tab`` removes it
@@ -168,21 +181,19 @@ class TestDeferredDisposal:
         source = "tab-src"
         viewer = "tab-viewer"
         task_id = "task-src"
-        src_tab = server._get_tab(source)
-        server._get_tab(viewer)
+        src_state = _register(task_id, source, is_task_active=True)
         server.printer.subscribe_tab(task_id, source)
         server.printer.subscribe_tab(task_id, viewer)
         assert source in server.printer._subscribers.get(task_id, set())
         assert viewer in server.printer._subscribers.get(task_id, set())
 
-        src_tab.is_task_active = True
         server._close_tab(source)
-        assert source in _RunningAgentState.running_agent_states
+        assert agent_state.get(task_id) is src_state
 
         with server._state_lock:
-            src_tab.is_task_active = False
+            src_state.is_task_active = False
         server._dispose_if_closed(source)
 
-        assert source not in _RunningAgentState.running_agent_states
+        assert agent_state.get(task_id) is None
         assert source not in server.printer._subscribers.get(task_id, set())
         assert viewer in server.printer._subscribers.get(task_id, set())

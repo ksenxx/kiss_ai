@@ -21,8 +21,38 @@ import pytest
 
 from kiss.agents.sorcar.git_worktree import GitWorktree
 from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
+from kiss.server import agent_state
+from kiss.server.agent_state import AgentState
 from kiss.server.helpers import model_vendor
 from kiss.server.server import VSCodeServer
+
+
+@pytest.fixture(autouse=True)
+def _clean_registry():
+    """Keep the process-global agent-state registry clean per test."""
+    agent_state.agent_states.clear()
+    yield
+    agent_state.agent_states.clear()
+
+
+def _register_wt_state(
+    tab_id: str,
+    *,
+    agent: WorktreeSorcarAgent | None = None,
+    use_worktree: bool = True,
+    is_merging: bool = False,
+) -> AgentState:
+    """Register a server-owned AgentState for *tab_id* and return it."""
+    state = AgentState(
+        f"task-{tab_id}",
+        agent=agent,
+        tab_id=tab_id,
+        server_owned=True,
+    )
+    state.use_worktree = use_worktree
+    state.is_merging = is_merging
+    agent_state.register(state)
+    return state
 
 
 def _set_agent_wt(agent: object, repo: Path, branch: str, original: str) -> None:
@@ -351,7 +381,7 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp()
         self.repo = Path(self.tmpdir) / "repo"
         self.repo.mkdir()
-        self._git("init")
+        self._git("init", "-b", "main")
         self._git("config", "user.email", "test@test.com")
         self._git("config", "user.name", "Test")
         (self.repo / "file.txt").write_text("hello")
@@ -378,15 +408,15 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("commit", "-m", "add merged")
         self._git("checkout", "main")
 
-        tab = self.server._get_tab("0")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        _set_agent_wt(tab.agent, self.repo, "kiss/merge-test", "main")
+        state = _register_wt_state(
+            "0", agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        )
+        _set_agent_wt(state.agent, self.repo, "kiss/merge-test", "main")
 
         result = self.server._handle_worktree_action("merge", "0")
         assert result["success"] is True
         assert "Successfully merged" in result["message"]
-        after_agent = self.server._get_tab("0").agent
+        after_agent = state.agent
         assert after_agent is not None
         assert after_agent._wt_branch is None
 
@@ -395,15 +425,15 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("checkout", "-b", "kiss/discard-test")
         self._git("checkout", "main")
 
-        tab = self.server._get_tab("0")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        _set_agent_wt(tab.agent, self.repo, "kiss/discard-test", "main")
+        state = _register_wt_state(
+            "0", agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        )
+        _set_agent_wt(state.agent, self.repo, "kiss/discard-test", "main")
 
         result = self.server._handle_worktree_action("discard", "0")
         assert result["success"] is True
         assert "Discarded" in result["message"]
-        after_agent = self.server._get_tab("0").agent
+        after_agent = state.agent
         assert after_agent is not None
         assert after_agent._wt_branch is None
 
@@ -415,9 +445,10 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("commit", "-m", "add route")
         self._git("checkout", "main")
 
-        self.server._get_tab("0").use_worktree = True
-        wt_agent = self.server._get_tab("0").agent
-        _set_agent_wt(wt_agent, self.repo, "kiss/route-test", "main")
+        state = _register_wt_state(
+            "0", agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        )
+        _set_agent_wt(state.agent, self.repo, "kiss/route-test", "main")
 
         self.server._handle_command({"type": "worktreeAction", "action": "merge", "tabId": "0"})
         wt_events = [e for e in self.events if e["type"] == "worktree_result"]
@@ -432,10 +463,10 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("commit", "-m", "add progress")
         self._git("checkout", "main")
 
-        tab = self.server._get_tab("0")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        _set_agent_wt(tab.agent, self.repo, "kiss/progress-test", "main")
+        state = _register_wt_state(
+            "0", agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        )
+        _set_agent_wt(state.agent, self.repo, "kiss/progress-test", "main")
 
         self.server._handle_command({"type": "worktreeAction", "action": "merge", "tabId": "0"})
         progress_events = [e for e in self.events if e["type"] == "worktree_progress"]
@@ -450,10 +481,10 @@ class TestWorktreeServerIntegration(unittest.TestCase):
         self._git("checkout", "-b", "kiss/no-progress-test")
         self._git("checkout", "main")
 
-        tab = self.server._get_tab("0")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        tab.use_worktree = True
-        _set_agent_wt(tab.agent, self.repo, "kiss/no-progress-test", "main")
+        state = _register_wt_state(
+            "0", agent=WorktreeSorcarAgent("Sorcar VS Code"),
+        )
+        _set_agent_wt(state.agent, self.repo, "kiss/no-progress-test", "main")
 
         self.server._handle_command({"type": "worktreeAction", "action": "discard", "tabId": "0"})
         progress_events = [e for e in self.events if e["type"] == "worktree_progress"]
@@ -479,30 +510,6 @@ class TestAgentToggle(unittest.TestCase):
         cls._js = cls._JS_PATH.read_text()
         cls._ts = cls._TS_PATH.read_text()
 
-    def test_server_agent_is_worktree_sorcar_agent(self) -> None:
-        """Server agent is a single WorktreeSorcarAgent regardless of toggle.
-
-        ``WorktreeSorcarAgent`` subclasses ``ChatSorcarAgent`` and
-        internally falls back to the stateful code path when
-        ``use_worktree=False`` is passed to ``run()``.  One instance
-        per tab is therefore sufficient.
-        """
-        from kiss.agents.sorcar.chat_sorcar_agent import ChatSorcarAgent
-        from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
-
-        server = VSCodeServer()
-        tab = server._get_tab("0")
-        tab.agent = WorktreeSorcarAgent("Sorcar VS Code")
-        assert tab.use_worktree is False
-        assert isinstance(tab.agent, WorktreeSorcarAgent)
-        assert isinstance(tab.agent, ChatSorcarAgent)
-        original = tab.agent
-        tab.use_worktree = True
-        assert tab.agent is original
-
-
-
-
     def test_worktree_action_rejected_when_not_enabled(self) -> None:
         """Worktree action fails gracefully when worktree mode is off."""
         server = VSCodeServer()
@@ -521,25 +528,11 @@ class TestAgentToggle(unittest.TestCase):
 
 
 
-class TestServerParallelToggle(unittest.TestCase):
-    """Tests for parallel toggle in VSCodeServer."""
-
-    def test_server_defaults_parallel_on(self) -> None:
-        """use_parallel is True by default on new tab state."""
-        server = VSCodeServer()
-        assert server._get_tab("0").use_parallel is True
-
-
-
-
-class TestMergeSession(unittest.TestCase):
-    """Tests for _start_merge_session, _finish_merge,
-    and _restore_pending_merge."""
+class TestMergeGuard(unittest.TestCase):
+    """The per-tab ``is_merging`` flag guards task starts on that tab."""
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.mkdtemp()
-        self.merge_dir = Path(self.tmpdir) / "merge_dir"
-        self.merge_dir.mkdir()
         self.server = VSCodeServer()
         self.server.work_dir = self.tmpdir
         self.events: list[dict] = []
@@ -552,278 +545,23 @@ class TestMergeSession(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    def _write_merge_json(self, files: list[dict] | None = None) -> str:
-        """Write a pending-merge.json and return its path."""
-        import json as _json
-
-        if files is None:
-            base = self.merge_dir / "merge-temp" / "a.txt"
-            base.parent.mkdir(parents=True, exist_ok=True)
-            base.write_text("old line\n")
-            current = Path(self.tmpdir) / "a.txt"
-            current.write_text("new line\n")
-            files = [{
-                "name": "a.txt",
-                "base": str(base),
-                "current": str(current),
-                "hunks": [{"bs": 0, "bc": 1, "cs": 0, "cc": 1}],
-            }]
-        merge_json = self.merge_dir / "pending-merge.json"
-        merge_json.write_text(_json.dumps({"branch": "HEAD", "files": files}))
-        return str(merge_json)
-
-    def test_start_merge_session_broadcasts_merge_data_and_started(self) -> None:
-        """_start_merge_session broadcasts merge_data and merge_started events."""
-        path = self._write_merge_json()
-        result = self.server._start_merge_session(path)
-        assert result is True
-        types = [e["type"] for e in self.events]
-        assert "merge_data" in types
-        assert "merge_started" in types
-        assert types.index("merge_data") < types.index("merge_started")
-
-    def test_start_merge_session_includes_hunk_count(self) -> None:
-        """merge_data event includes correct hunk_count."""
-        path = self._write_merge_json()
-        self.server._start_merge_session(path)
-        md = [e for e in self.events if e["type"] == "merge_data"][0]
-        assert md["hunk_count"] == 1
-
-    def test_start_merge_session_returns_false_for_empty_files(self) -> None:
-        """Returns False when merge JSON has no files."""
-        path = self._write_merge_json(files=[])
-        result = self.server._start_merge_session(path)
-        assert result is False
-
-    def test_start_merge_session_returns_false_for_zero_hunks(self) -> None:
-        """Returns False when all files have zero hunks."""
-        current = Path(self.tmpdir) / "b.txt"
-        current.write_text("content\n")
-        path = self._write_merge_json(files=[{
-            "name": "b.txt",
-            "base": str(current),
-            "current": str(current),
-            "hunks": [],
-        }])
-        result = self.server._start_merge_session(path)
-        assert result is False
-
-    def test_start_merge_session_returns_false_for_missing_file(self) -> None:
-        """Returns False when merge JSON file doesn't exist."""
-        result = self.server._start_merge_session("/nonexistent/merge.json")
-        assert result is False
-
-    def test_start_merge_session_returns_false_for_invalid_json(self) -> None:
-        """Returns False when merge JSON is malformed."""
-        bad = self.merge_dir / "bad.json"
-        bad.write_text("not json")
-        result = self.server._start_merge_session(str(bad))
-        assert result is False
-
-    def test_merge_action_all_done_finishes_merge(self) -> None:
-        """mergeAction all-done routed via _cmd_merge_action calls _finish_merge."""
-        path = self._write_merge_json()
-        self.server._start_merge_session(path, tab_id="m-tab")
-        self.events.clear()
-
-        self.server._handle_command({"type": "mergeAction", "action": "all-done", "tabId": "m-tab"})
-        types = [e["type"] for e in self.events]
-        assert "merge_ended" in types
-
-    def test_merge_action_unknown_is_noop(self) -> None:
-        """Non-'all-done' actions are no-ops on the Python side."""
-        self.server._get_tab("0").is_merging = True
-        self.server._handle_command({"type": "mergeAction", "action": "accept", "tabId": "0"})
-        assert self.server._get_tab("0").is_merging is True
-
-    def test_finish_merge_cleans_up_data_dir(self) -> None:
-        """_finish_merge removes the merge data directory for the tab."""
-        import kiss.server.diff_merge as dm
-        import kiss.server.merge_flow as mf
-
-        orig_dm = dm._merge_data_dir
-        orig_mf = mf._merge_data_dir
-        dm._merge_data_dir = lambda tab_id="": self.merge_dir  # type: ignore[assignment]
-        mf._merge_data_dir = lambda tab_id="": self.merge_dir  # type: ignore[assignment]
-        try:
-            path = self._write_merge_json()
-            self.server._start_merge_session(path, tab_id="fm-tab")
-            assert self.merge_dir.exists()
-            self.server._finish_merge("fm-tab")
-            assert not self.merge_dir.exists()
-        finally:
-            dm._merge_data_dir = orig_dm  # type: ignore[assignment]
-            mf._merge_data_dir = orig_mf  # type: ignore[assignment]
-
     def test_merging_blocks_same_tab(self) -> None:
         """Cannot start a task on the same tab that has a merge in progress."""
-        self.server._get_tab("5").is_merging = True
+        _register_wt_state("5", use_worktree=False, is_merging=True)
         self.server._run_task_inner({"prompt": "test", "model": "", "tabId": "5"})
         errors = [e for e in self.events if e["type"] == "error"]
-        assert any("merge review" in e["text"] for e in errors)
+        assert any("merge is in progress" in e["text"] for e in errors)
 
     @pytest.mark.slow
     def test_merging_does_not_block_other_tabs(self) -> None:
         """A merge on one tab does not block tasks on other tabs."""
-        self.server._get_tab("5").is_merging = True
+        _register_wt_state("5", use_worktree=False, is_merging=True)
         self.events.clear()
         self.server._run_task_inner({"prompt": "test", "model": "", "tabId": "99"})
         errors = [e for e in self.events if e["type"] == "error"]
-        assert not any("merge review" in e.get("text", "") for e in errors)
-
-
-    def test_merge_command_routing(self) -> None:
-        """mergeAction command is routed through _handle_command."""
-        path = self._write_merge_json()
-        self.server._start_merge_session(path, tab_id="mr-tab")
-        self.events.clear()
-
-        import kiss.server.diff_merge as dm
-        import kiss.server.merge_flow as mf
-
-        orig = dm._merge_data_dir
-        dm._merge_data_dir = lambda tab_id="": self.merge_dir  # type: ignore[assignment]
-        orig_mf = mf._merge_data_dir
-        mf._merge_data_dir = lambda tab_id="": self.merge_dir  # type: ignore[assignment]
-        try:
-            self.server._handle_command({
-                "type": "mergeAction", "action": "all-done", "tabId": "mr-tab",
-            })
-        finally:
-            dm._merge_data_dir = orig  # type: ignore[assignment]
-            mf._merge_data_dir = orig_mf  # type: ignore[assignment]
-        types = [e["type"] for e in self.events]
-        assert "merge_ended" in types
-
-
-
-
-
-
-
-
-
-
-
-
-
-class TestDiffFilesDeletionAtStart(unittest.TestCase):
-    """Regression: _diff_files must produce correct hunk positions for
-    pure deletions at the beginning of a file.
-
-    Root cause: _diff_files returned new_start=1 (instead of 0) when
-    lines were deleted at the very start and the current file was non-empty.
-    This caused _hunk_to_dict to produce cs=1, so the MergeManager
-    inserted old (red) lines at position 1 instead of 0 — the deleted
-    lines appeared AFTER the first surviving line instead of BEFORE it.
-    """
-
-    def setUp(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
-
-    def tearDown(self) -> None:
-        shutil.rmtree(self.tmpdir, ignore_errors=True)
-
-    def _write(self, name: str, text: str) -> str:
-        p = Path(self.tmpdir) / name
-        p.write_text(text)
-        return str(p)
-
-    def test_start_deletion_cs_is_zero(self) -> None:
-        """Deleting lines at the start must produce cs=0."""
-        from kiss.server.diff_merge import _diff_files, _hunk_to_dict
-
-        base = self._write("base.txt", "A\nB\nC\nD\n")
-        current = self._write("current.txt", "C\nD\n")
-        hunks = _diff_files(base, current)
-        dicts = [_hunk_to_dict(*h) for h in hunks]
-        assert len(dicts) == 1
-        assert dicts[0]["cs"] == 0, f"Expected cs=0, got cs={dicts[0]['cs']}"
-        assert dicts[0]["bs"] == 0
-        assert dicts[0]["bc"] == 2
-        assert dicts[0]["cc"] == 0
-
-    def test_middle_deletion_cs_correct(self) -> None:
-        """Deleting lines in the middle must produce correct cs."""
-        from kiss.server.diff_merge import _diff_files, _hunk_to_dict
-
-        base = self._write("base.txt", "A\nB\nC\nD\n")
-        current = self._write("current.txt", "A\nD\n")
-        hunks = _diff_files(base, current)
-        dicts = [_hunk_to_dict(*h) for h in hunks]
-        assert len(dicts) == 1
-        assert dicts[0]["cs"] == 1
-
-    def test_delete_all_cs_is_zero(self) -> None:
-        """Deleting all lines must produce cs=0."""
-        from kiss.server.diff_merge import _diff_files, _hunk_to_dict
-
-        base = self._write("base.txt", "A\nB\n")
-        current = self._write("current.txt", "")
-        hunks = _diff_files(base, current)
-        dicts = [_hunk_to_dict(*h) for h in hunks]
-        assert len(dicts) == 1
-        assert dicts[0]["cs"] == 0
-
-    def test_start_deletion_single_line(self) -> None:
-        """Deleting a single line at the start produces cs=0."""
-        from kiss.server.diff_merge import _diff_files, _hunk_to_dict
-
-        base = self._write("base.txt", "A\nB\nC\n")
-        current = self._write("current.txt", "B\nC\n")
-        hunks = _diff_files(base, current)
-        dicts = [_hunk_to_dict(*h) for h in hunks]
-        assert len(dicts) == 1
-        assert dicts[0]["cs"] == 0
-        assert dicts[0]["bc"] == 1
-
-    def test_end_deletion_cs_correct(self) -> None:
-        """Deleting lines at the end produces correct cs."""
-        from kiss.server.diff_merge import _diff_files, _hunk_to_dict
-
-        base = self._write("base.txt", "A\nB\nC\n")
-        current = self._write("current.txt", "A\n")
-        hunks = _diff_files(base, current)
-        dicts = [_hunk_to_dict(*h) for h in hunks]
-        assert len(dicts) == 1
-        assert dicts[0]["cs"] == 1
-
-    def test_multiple_hunks_including_start(self) -> None:
-        """Multiple deletions including at the start all have correct cs."""
-        from kiss.server.diff_merge import _diff_files, _hunk_to_dict
-
-        base = self._write("base.txt", "A\nB\nC\nD\nE\n")
-        current = self._write("current.txt", "C\n")
-        hunks = _diff_files(base, current)
-        dicts = [_hunk_to_dict(*h) for h in hunks]
-        assert dicts[0]["cs"] == 0
-        assert dicts[0]["bc"] == 2
-
-    def test_start_insertion_cs_correct(self) -> None:
-        """Inserting lines at the start produces cs=0."""
-        from kiss.server.diff_merge import _diff_files, _hunk_to_dict
-
-        base = self._write("base.txt", "B\nC\n")
-        current = self._write("current.txt", "A\nB\nC\n")
-        hunks = _diff_files(base, current)
-        dicts = [_hunk_to_dict(*h) for h in hunks]
-        assert len(dicts) == 1
-        assert dicts[0]["cs"] == 0
-        assert dicts[0]["cc"] == 1
-        assert dicts[0]["bc"] == 0
-
-    def test_replacement_at_start(self) -> None:
-        """Replacing lines at the start produces cs=0."""
-        from kiss.server.diff_merge import _diff_files, _hunk_to_dict
-
-        base = self._write("base.txt", "A\nB\nC\n")
-        current = self._write("current.txt", "X\nY\nC\n")
-        hunks = _diff_files(base, current)
-        dicts = [_hunk_to_dict(*h) for h in hunks]
-        assert len(dicts) == 1
-        assert dicts[0]["cs"] == 0
-        assert dicts[0]["cc"] == 2
-        assert dicts[0]["bc"] == 2
+        assert not any(
+            "merge is in progress" in e.get("text", "") for e in errors
+        )
 
 
 class TestWorktreeActionExceptionHandling(unittest.TestCase):
@@ -841,7 +579,7 @@ class TestWorktreeActionExceptionHandling(unittest.TestCase):
         self.repo = Path(self.tmpdir) / "repo"
         self.repo.mkdir()
         subprocess.run(
-            ["git", "init"], cwd=self.repo, capture_output=True,
+            ["git", "init", "-b", "main"], cwd=self.repo, capture_output=True,
         )
         subprocess.run(
             ["git", "config", "user.email", "test@test.com"],
@@ -874,7 +612,7 @@ class TestWorktreeActionExceptionHandling(unittest.TestCase):
 
     def test_merge_exception_still_broadcasts_result(self) -> None:
         """worktree_result is broadcast even when merge raises RuntimeError."""
-        self.server._get_tab("0").use_worktree = True
+        _register_wt_state("0", agent=WorktreeSorcarAgent("Sorcar VS Code"))
         self.server._handle_command({"type": "worktreeAction", "action": "merge", "tabId": "0"})
         results = [e for e in self.events if e["type"] == "worktree_result"]
         assert len(results) == 1
@@ -883,7 +621,7 @@ class TestWorktreeActionExceptionHandling(unittest.TestCase):
 
     def test_discard_exception_still_broadcasts_result(self) -> None:
         """worktree_result is broadcast even when discard raises RuntimeError."""
-        self.server._get_tab("0").use_worktree = True
+        _register_wt_state("0", agent=WorktreeSorcarAgent("Sorcar VS Code"))
         self.server._handle_command({"type": "worktreeAction", "action": "discard", "tabId": "0"})
         results = [e for e in self.events if e["type"] == "worktree_result"]
         assert len(results) == 1
@@ -908,11 +646,10 @@ class TestWorktreeActionExceptionHandling(unittest.TestCase):
             cwd=self.repo, capture_output=True,
         )
 
-        self.server._get_tab("0").use_worktree = True
-        _set_agent_wt(
-            self.server._get_tab("0").agent,
-            self.repo, "kiss/exc-test", "main",
+        state = _register_wt_state(
+            "0", agent=WorktreeSorcarAgent("Sorcar VS Code"),
         )
+        _set_agent_wt(state.agent, self.repo, "kiss/exc-test", "main")
 
         self.server._handle_command({"type": "worktreeAction", "action": "merge", "tabId": "0"})
         results = [e for e in self.events if e["type"] == "worktree_result"]

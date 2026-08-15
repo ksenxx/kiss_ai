@@ -2,10 +2,10 @@
 # Contributors:
 # Koushik Sen (ksen@berkeley.edu)
 # add your name here
-"""Render HTML summaries as styled terminal text for the CLI.
+"""Render HTML summaries as styled terminal text.
 
 The ``finish`` tool guarantees the result summary is HTML
-(:func:`kiss.core.utils.ensure_html`), so terminal interfaces need an
+(:func:`kiss.core.utils.ensure_html`), so console output needs an
 HTML renderer.  This module converts an HTML fragment to a
 :class:`rich.text.Text` using the stdlib :class:`html.parser.HTMLParser`:
 headings/bold render bold, emphasis renders italic, code renders in a
@@ -172,15 +172,3 @@ def html_to_rich(html: str) -> Text:
     rendered = parser.text
     rendered.rstrip()
     return rendered
-
-
-def html_to_text(html: str) -> str:
-    """Convert an HTML fragment to plain terminal text (no styling).
-
-    Args:
-        html: The HTML string to render.
-
-    Returns:
-        The plain-text rendering of *html*.
-    """
-    return html_to_rich(html).plain

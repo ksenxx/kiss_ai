@@ -11,10 +11,9 @@ is 0 — RelentlessAgent-derived agents accumulate completed steps into
 ``total_steps`` and leave ``step_count`` at 0, while plain agents do
 the opposite.  The PERSISTED metrics paths (the task-level cleanup
 ``finally`` in ``_run_task_inner`` and ``_persist_subtask_row``)
-duplicated the same delta arithmetic inline but WITHOUT the
-``step_count`` fallback, so a failed task run by a plain agent showed
-the correct step count in the failure banner while its
-``task_history`` row recorded 0 steps.
+must use the same fallback, so a failed task run by a plain agent
+records the same step count in its ``task_history`` row as the
+failure banner shows.
 
 This test drives the real ``VSCodeServer._run_task`` end-to-end with a
 real agent whose ``run`` bumps only ``step_count`` (leaving
@@ -33,8 +32,9 @@ from typing import Any
 
 import kiss.server.server as _server_module
 from kiss.agents.sorcar.persistence import _add_task, _load_history
-from kiss.agents.sorcar.running_agent_state import _RunningAgentState
+from kiss.agents.sorcar.worktree_sorcar_agent import WorktreeSorcarAgent
 from kiss.core.models.model_info import get_available_models
+from kiss.server import agent_state
 from kiss.server.server import VSCodeServer
 
 _TASK_PROMPT = "steps-fallback persisted metrics task"
@@ -62,7 +62,7 @@ class TestPersistedStepsFallback(unittest.TestCase):
 
     def tearDown(self) -> None:
         _server_module.generate_followup_text = self._orig_followup
-        _RunningAgentState.running_agent_states.clear()
+        agent_state.agent_states.clear()
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_history_row_steps_match_failure_banner(self) -> None:
@@ -72,16 +72,21 @@ class TestPersistedStepsFallback(unittest.TestCase):
         work_dir = str(Path(self.tmpdir) / "plain")
         Path(work_dir).mkdir()
 
-        tab = self.server._get_tab("steps-fallback-tab")
-        agent = tab.agent
-        assert agent is not None
+        agent = WorktreeSorcarAgent("Sorcar VS Code")
+        state = agent_state.AgentState(
+            "steps-fallback-state",
+            agent=agent,
+            tab_id="steps-fallback-tab",
+            server_owned=True,
+        )
+        agent_state.register(state)
 
         def failing_run(**kwargs: object) -> str:
             task_id, chat_id = _add_task(_TASK_PROMPT)
+            agent._last_task_id = task_id
             callback = kwargs.get("_on_task_id_allocated")
             assert callable(callback)
             callback(task_id, chat_id)
-            assert agent is not None
             agent.step_count = 3
             raise RuntimeError("boom-steps-fallback")
 

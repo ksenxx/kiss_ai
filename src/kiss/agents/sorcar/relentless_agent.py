@@ -252,7 +252,6 @@ class RelentlessAgent(Base):
         all_tools: list[Callable[..., Any]] = [finish, *tools]
 
         progress_section = ""
-        summary = ""
         summaries: list[str] = []
         current_pid = str(os.getpid())
         important_instructions = IMPORTANT_INSTRUCTIONS.format(
@@ -337,7 +336,13 @@ class RelentlessAgent(Base):
                     tmp_dir.mkdir(parents=True, exist_ok=True)
                     trajectory_path = tmp_dir / f"trajectory_{session}.json"
                     trajectory_path.write_text(executor.get_trajectory(), encoding="utf-8")
-                    _stop_ev = getattr(self.printer, "stop_event", None) if self.printer else None
+                    # The stop event lives on the printer's THREAD-LOCAL
+                    # (``_PrinterThreadLocal.stop_event``), not on the
+                    # printer: reading it off the printer always yields
+                    # None, which leaves the summarizer's shell command
+                    # unkillable by Stop.
+                    _tl = getattr(self.printer, "_thread_local", None) if self.printer else None
+                    _stop_ev = getattr(_tl, "stop_event", None) if _tl else None
                     from kiss.agents.sorcar.useful_tools import UsefulTools
 
                     shell_tools = UsefulTools(stop_event=_stop_ev)

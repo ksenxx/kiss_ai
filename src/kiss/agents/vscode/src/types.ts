@@ -3,8 +3,6 @@
 // Koushik Sen (ksen@berkeley.edu)
 // add your name here
 
-import {MergeData} from './MergeManager';
-
 export interface Attachment {
   name: string;
   mimeType: string;
@@ -53,8 +51,14 @@ export type FromWebviewMessage =
   | {
       type: 'ready';
       tabId?: string;
-      restoredTabs?: Array<{tabId: string; chatId: string}>;
+      restoredTabs?: Array<{
+        tabId: string;
+        chatId: string;
+        title?: string;
+        workDir?: string;
+      }>;
     }
+  | {type: 'openTab'; tabId: string; title?: string; workDir?: string}
   | {
       type: 'resumeSession';
       chatId?: string;
@@ -64,18 +68,12 @@ export type FromWebviewMessage =
     }
   | {type: 'getWelcomeSuggestions'}
   | {type: 'complete'; query: string; tabId?: string}
-  | {type: 'mergeAction'; action: string; tabId?: string; workDir?: string}
   | {type: 'newChat'; tabId?: string}
   | {type: 'focusEditor'}
   | {type: 'closeTab'; tabId: string}
   | {type: 'getInputHistory'}
   | {type: 'worktreeAction'; action: 'merge' | 'discard'; tabId?: string}
-  | {
-      type: 'autocommitAction';
-      action: 'commit' | 'skip';
-      tabId?: string;
-      workDir?: string;
-    }
+  | {type: 'autocommitAction'; tabId?: string; workDir?: string}
   | {type: 'resolveDroppedPaths'; uris: string[]; workDir?: string}
   | {type: 'webviewFocusChanged'; focused: boolean}
   | {type: 'activeTabChanged'; tabId: string}
@@ -117,6 +115,17 @@ type ToWebviewMessageBody =
       language?: string;
     }
   | {type: 'voiceState'; listening: boolean; error?: string}
+  | {type: 'defaultModel'; model: string}
+  | {type: 'kissConfig'; config: Record<string, unknown>}
+  | {type: 'kissConfigSaved'; ok: boolean; error?: string}
+  | {
+      type: 'voiceWakeEvent';
+      event: 'ready' | 'wake' | 'transcribing' | 'no_speech' | 'speech';
+      text?: string;
+      speaker?: number | null;
+      language?: string | null;
+    }
+  | {type: 'voiceWakeState'; listening: boolean; error?: string}
   | {type: 'thinking_start'}
   | {type: 'thinking_delta'; text: string}
   | {type: 'thinking_end'}
@@ -226,10 +235,6 @@ type ToWebviewMessageBody =
   | {type: 'remote_url'; url: string; ntfyUrl?: string; tunnelActive?: boolean}
   | {type: 'task_events'; events: unknown[]; task?: string; chat_id?: number}
   | {type: 'ghost'; suggestion: string; query: string}
-  | {type: 'merge_data'; data: MergeData; hunk_count: number}
-  | {type: 'merge_nav'; remaining: number; total: number}
-  | {type: 'merge_started'}
-  | {type: 'merge_ended'}
   | {type: 'commitMessage'; message: string; error?: string}
   | {type: 'inputHistory'; tasks: string[]}
   | {
@@ -252,7 +257,6 @@ type ToWebviewMessageBody =
   | {type: 'worktree_progress'; message: string}
   | {type: 'worktree_result'; success: boolean; message: string}
   | {type: 'warning'; message: string; tabId?: string}
-  | {type: 'autocommit_prompt'; changedFiles: string[]; tabId?: string}
   | {type: 'autocommit_progress'; message: string; tabId?: string}
   | {
       type: 'autocommit_done';
@@ -261,6 +265,7 @@ type ToWebviewMessageBody =
       message: string;
       commitMessage?: string;
       tabId?: string;
+      manual?: boolean;
     }
   | {type: 'droppedPaths'; paths: string[]}
   | {
@@ -273,6 +278,17 @@ type ToWebviewMessageBody =
   | {type: 'triggerStop'}
   | {type: 'measureSize'}
   | {type: 'daemonStatus'; connected: boolean}
+  | {
+      // Canonical shared-tab snapshot broadcast by the daemon after
+      // every tab-registry mutation; clients reconcile against it.
+      type: 'tabs_state';
+      tabs: Array<{
+        tabId: string;
+        chatId: string;
+        title: string;
+        workDir: string;
+      }>;
+    }
   | {
       type: 'openSubagentTab';
       tab_id?: string;
@@ -323,13 +339,14 @@ export interface AgentCommand {
     | 'recordFileUsage'
     | 'resumeSession'
     | 'complete'
-    | 'mergeAction'
     | 'newChat'
+    | 'openTab'
     | 'closeTab'
+    | 'ready'
     | 'generateCommitMessage'
+    | 'autocommitAction'
     | 'getInputHistory'
     | 'worktreeAction'
-    | 'autocommitAction'
     | 'getAdjacentTask'
     | 'setWorkDir'
     | 'getConfig'
@@ -350,7 +367,7 @@ export interface AgentCommand {
   chatId?: number | string;
   taskId?: string | number | null;
   activeFileContent?: string;
-  action?: 'merge' | 'discard' | 'all-done' | 'commit' | 'skip';
+  action?: 'merge' | 'discard';
   useWorktree?: boolean;
   useParallel?: boolean;
   autoCommit?: boolean;
@@ -360,4 +377,11 @@ export interface AgentCommand {
   config?: Record<string, unknown>;
   apiKeys?: Record<string, string>;
   isFavorite?: boolean;
+  title?: string;
+  restoredTabs?: Array<{
+    tabId: string;
+    chatId: string;
+    title?: string;
+    workDir?: string;
+  }>;
 }
