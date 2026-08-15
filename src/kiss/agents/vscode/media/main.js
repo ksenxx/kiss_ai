@@ -6062,6 +6062,16 @@
                 inp.focus();
               },
             });
+            // The replayed usage_info / result events painted this
+            // hidden tab's tokens and cost onto the borrowed status
+            // row; keep them on the tab (exactly like the live
+            // processOutputEventForBgTab does) before the visible
+            // tab's own numbers are put back below — otherwise a
+            // switch to this tab shows only "Steps: N".
+            if (statusTokens && statusTokens.textContent)
+              teTab.statusTokensText = statusTokens.textContent;
+            if (statusBudget && statusBudget.textContent)
+              teTab.statusBudgetText = statusBudget.textContent;
           } catch (e) {
             teTab.outputFragment = teOldFrag;
             throw e;

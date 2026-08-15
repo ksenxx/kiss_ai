@@ -109,6 +109,60 @@ function isTextLikeExtension(filePath: string): boolean {
   if (!ext) return true;
   return !NATIVE_VIEWER_EXTENSIONS.has(ext);
 }
+
+/**
+ * Whether clicking a link to *filePath* should render the file in a
+ * webview tab instead of opening its source in a text editor — the VS
+ * Code counterpart of the remote web app, which renders .html/.htm
+ * files in an in-app tab (see renderContentView in media/main.js).
+ */
+function isRenderableHtmlExtension(filePath: string): boolean {
+  const ext = path.extname(filePath).toLowerCase();
+  return ext === '.html' || ext === '.htm';
+}
+
+function escapeHtmlAttr(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
+
+/**
+ * Return *html* with a `<base>` tag pointing at *dirUri* injected, so
+ * relative asset references in the document resolve through the
+ * webview's resource scheme instead of the unreachable file scheme.
+ *
+ * Insertion point, in order of preference: right after the opening
+ * `<head>` tag (located on a copy with comments blanked to the same
+ * length, so a `<head>` inside a comment is never chosen, and scanned
+ * to its closing `>` with quote awareness so a `>` inside an attribute
+ * value does not end the tag early); otherwise right after the doctype,
+ * so the injection never demotes the document to quirks mode; otherwise
+ * at the very start.
+ */
+function injectHtmlBase(html: string, dirUri: string): string {
+  const base = `<base href="${escapeHtmlAttr(dirUri)}/">`;
+  const search = html.replace(/<!--[\s\S]*?-->/g, m => ' '.repeat(m.length));
+  const head = /<head(?=[\s/>])/i.exec(search);
+  if (head) {
+    let i = head.index + head[0].length;
+    let quote = '';
+    for (; i < search.length; i++) {
+      const ch = search[i];
+      if (quote) {
+        if (ch === quote) quote = '';
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+      } else if (ch === '>') {
+        return html.slice(0, i + 1) + base + html.slice(i + 1);
+      }
+    }
+  }
+  const doctype = /<!doctype[^>]*>/i.exec(search);
+  if (doctype) {
+    const at = doctype.index + doctype[0].length;
+    return html.slice(0, at) + base + html.slice(at);
+  }
+  return base + html;
+}
 import {AgentClient, DroppedCommandReason} from './AgentClient';
 import {SorcarApi} from './SorcarApi';
 import {getGitApi} from './gitApi';
@@ -205,6 +259,10 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
   private _sizeReportResolver:
     ((s: {inner: number; screen: number}) => void) | undefined;
   private _workspaceFoldersSub: vscode.Disposable | undefined;
+  // One rendered-HTML tab per file path, mirroring the remote web app's
+  // content tabs: a second click on the same link reveals (and
+  // refreshes) the existing tab instead of stacking duplicates.
+  private _htmlPreviewPanels: Map<string, vscode.WebviewPanel> = new Map();
 
   private _showActionProgress(
     title: string,
@@ -920,12 +978,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             tabId,
           );
           if (resolved) {
-            const uri = vscode.Uri.file(resolved);
-            const doc = await vscode.workspace.openTextDocument(uri);
-            await vscode.window.showTextDocument(doc, {
-              preview: false,
-              viewColumn: vscode.ViewColumn.One,
-            });
+            await this._openResolvedFile(resolved);
             return;
           }
         }
@@ -993,24 +1046,7 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
             );
             break;
           }
-          const uri = vscode.Uri.file(filePath);
-          if (isTextLikeExtension(filePath)) {
-            const doc = await vscode.workspace.openTextDocument(uri);
-            const editor = await vscode.window.showTextDocument(doc, {
-              preview: false,
-              viewColumn: vscode.ViewColumn.One,
-            });
-            if (message.line !== undefined && message.line > 0) {
-              const pos = new vscode.Position(message.line - 1, 0);
-              editor.selection = new vscode.Selection(pos, pos);
-              editor.revealRange(
-                new vscode.Range(pos, pos),
-                vscode.TextEditorRevealType.InCenter,
-              );
-            }
-          } else {
-            await vscode.commands.executeCommand('vscode.open', uri);
-          }
+          await this._openResolvedFile(filePath, message.line);
         }
         break;
 
@@ -1417,6 +1453,88 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     });
   }
 
+  /**
+   * Open an already-resolved, existing file the way a clicked file link
+   * opens it: .html/.htm rendered in a webview tab, text-like files in
+   * the text editor (optionally revealing 1-indexed *line*), and
+   * everything else (images, pdf, ...) in VS Code's native viewer.
+   * Both the 'openFile' message (a clicked link) and the path-only
+   * 'submit' shortcut route through here so the two behave identically.
+   */
+  private async _openResolvedFile(
+    filePath: string,
+    line?: number,
+  ): Promise<void> {
+    if (isRenderableHtmlExtension(filePath)) {
+      // Render the page in a webview tab — like the remote web app
+      // does — instead of showing its source in the editor.
+      this._openHtmlPreviewTab(filePath);
+      return;
+    }
+    const uri = vscode.Uri.file(filePath);
+    if (!isTextLikeExtension(filePath)) {
+      await vscode.commands.executeCommand('vscode.open', uri);
+      return;
+    }
+    const doc = await vscode.workspace.openTextDocument(uri);
+    const editor = await vscode.window.showTextDocument(doc, {
+      preview: false,
+      viewColumn: vscode.ViewColumn.One,
+    });
+    if (line !== undefined && line > 0) {
+      const pos = new vscode.Position(line - 1, 0);
+      editor.selection = new vscode.Selection(pos, pos);
+      editor.revealRange(
+        new vscode.Range(pos, pos),
+        vscode.TextEditorRevealType.InCenter,
+      );
+    }
+  }
+
+  /**
+   * Open *filePath* (a resolved, existing .html/.htm file) rendered in a
+   * webview editor tab, the way the remote web app renders HTML files in
+   * an in-app tab. One tab is kept per path: clicking the same link
+   * again reveals the existing tab and re-reads the file so edits made
+   * since the last click show up. Relative asset references work via an
+   * injected <base> pointing at the file's directory (see
+   * injectHtmlBase), with the file's directory and the workspace
+   * folders allowed as local resource roots.
+   */
+  private _openHtmlPreviewTab(filePath: string): void {
+    let html: string;
+    try {
+      html = fs.readFileSync(filePath, 'utf8');
+    } catch (err) {
+      showErrorNotification(`Failed to read ${filePath}: ${String(err)}`);
+      return;
+    }
+    const dir = path.dirname(filePath);
+    let panel = this._htmlPreviewPanels.get(filePath);
+    if (!panel) {
+      panel = vscode.window.createWebviewPanel(
+        'kissSorcarHtmlPreview',
+        path.basename(filePath),
+        vscode.ViewColumn.One,
+        {
+          enableScripts: true,
+          localResourceRoots: [
+            vscode.Uri.file(dir),
+            ...(vscode.workspace.workspaceFolders ?? []).map(f => f.uri),
+          ],
+        },
+      );
+      this._htmlPreviewPanels.set(filePath, panel);
+      panel.onDidDispose(() => {
+        this._htmlPreviewPanels.delete(filePath);
+      });
+    } else {
+      panel.reveal(vscode.ViewColumn.One);
+    }
+    const dirUri = panel.webview.asWebviewUri(vscode.Uri.file(dir));
+    panel.webview.html = injectHtmlBase(html, dirUri.toString());
+  }
+
   public dispose(): void {
     // Terminal: set first so any concurrently queued webview message or
     // late _getClient()/_getApi() call becomes a no-op and cannot
@@ -1452,5 +1570,11 @@ export class SorcarSidebarView implements vscode.WebviewViewProvider {
     // were ever used again, while a fresh _getClient() built a new one.
     this._api = null;
     this._onCommitMessage.dispose();
+    // Each panel's onDidDispose deletes its own map entry, so iterate a
+    // snapshot and clear at the end.
+    for (const panel of [...this._htmlPreviewPanels.values()]) {
+      panel.dispose();
+    }
+    this._htmlPreviewPanels.clear();
   }
 }
